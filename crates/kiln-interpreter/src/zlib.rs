@@ -35,12 +35,13 @@ pub(crate) fn zlib_buffer_arg(value: Option<&Value>) -> Result<Vec<u8>, Executio
     match value {
         Some(Value::TypedArray(view)) => Ok(view.bytes()),
         Some(Value::ArrayBuffer(ab)) => Ok(ab.bytes.borrow().clone()),
-        Some(Value::String(s)) => s
-            .to_scalar_string()
-            .map(|text| text.into_bytes())
-            .map_err(|_| ExecutionError::TypeErrorMessage {
-                message: "zlib string input contains a lone surrogate".to_owned(),
-            }),
+        Some(Value::String(s)) => {
+            s.to_scalar_string()
+                .map(|text| text.into_bytes())
+                .map_err(|_| ExecutionError::TypeErrorMessage {
+                    message: "zlib string input contains a lone surrogate".to_owned(),
+                })
+        }
         _ => Ok(Vec::new()),
     }
 }

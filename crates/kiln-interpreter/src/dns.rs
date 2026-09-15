@@ -34,7 +34,10 @@ pub(crate) fn prepare_lookup(
     let addresses = match host.as_str() {
         "localhost" => vec![
             ordinary_object([
-                ("address".to_owned(), Value::String("127.0.0.1".to_owned().into())),
+                (
+                    "address".to_owned(),
+                    Value::String("127.0.0.1".to_owned().into()),
+                ),
                 ("family".to_owned(), Value::Number(4.0)),
             ]),
             ordinary_object([

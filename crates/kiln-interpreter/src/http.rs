@@ -7,7 +7,7 @@ use std::rc::{Rc, Weak};
 
 use crate::net::{NetSocketState, NodeServerState};
 use crate::{
-    is_callable, ExecutionError, Native, NodeObject, ObjectData, Property, RealmId, Value,
+    ExecutionError, Native, NodeObject, ObjectData, Property, RealmId, Value, is_callable,
 };
 
 #[derive(Debug)]

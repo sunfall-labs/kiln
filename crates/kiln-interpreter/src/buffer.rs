@@ -7,8 +7,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::{
-    bounded_buffer, ordinary_object, BufferData, ExecutionError, Native, ObjectData, RealmId,
-    TypedArrayData, TypedKind, Value,
+    BufferData, ExecutionError, Native, ObjectData, RealmId, TypedArrayData, TypedKind, Value,
+    bounded_buffer, ordinary_object,
 };
 
 /// Constructs a `Buffer` (`Uint8Array` of `TypedKind::Uint8`) from a raw byte vector.

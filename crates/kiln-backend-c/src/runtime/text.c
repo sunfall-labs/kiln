@@ -71,7 +71,26 @@ static double kiln_c99_as_number(kiln_value value) {
         {
             size_t length = 0;
             const char *bytes = kiln_c99_string_ascii_bytes(value, &length);
-            return bytes == NULL ? NAN : kiln_string_to_number(bytes, length);
+            if (bytes != NULL) {
+                int is_ascii = 1;
+                for (size_t i = 0; i < length; ++i) {
+                    if ((unsigned char)bytes[i] >= 0x80) {
+                        is_ascii = 0;
+                        break;
+                    }
+                }
+                if (is_ascii) {
+                    return kiln_string_to_number(bytes, length);
+                }
+            }
+            uint8_t *utf8 = NULL;
+            size_t utf8_len = 0;
+            if (kiln_c99_string_to_utf8_lossy(value, &utf8, &utf8_len) == KILN_C99_OK) {
+                double result = kiln_string_to_number((const char *)utf8, utf8_len);
+                free(utf8);
+                return result;
+            }
+            return NAN;
         }
     /* `end - start` on two dates is the difference in milliseconds, which is the whole reason
      * `valueOf` on a Date is its instant. */

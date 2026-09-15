@@ -1782,14 +1782,14 @@ fn native_scalar_value_summary(value: kiln_native::HostValue) -> ScalarValueSumm
         kiln_native::HostValue::Null => ScalarValueSummary::Null,
         kiln_native::HostValue::Boolean(value) => ScalarValueSummary::Boolean(value),
         kiln_native::HostValue::Number(bits) => ScalarValueSummary::Number(bits),
-        kiln_native::HostValue::String(value) => ScalarValueSummary::String(
-            value.to_scalar_string().unwrap_or_else(|_| {
+        kiln_native::HostValue::String(value) => {
+            ScalarValueSummary::String(value.to_scalar_string().unwrap_or_else(|_| {
                 value
                     .units()
                     .map(|unit| format!("\\u{{{unit:04X}}}"))
                     .collect()
-            }),
-        ),
+            }))
+        }
     }
 }
 

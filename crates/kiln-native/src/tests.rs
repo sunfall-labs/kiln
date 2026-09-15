@@ -1084,7 +1084,7 @@ fn owned_result_wrapper_source_is_deterministic_and_has_no_static_result_state()
         "kiln_v2_scalar_kiln_probe_dispose",
         "failure_status",
         "*out = NULL",
-        "memcpy(copy, value.ptr, value.len)",
+        "memcpy((void *)copy->data, src_str->data, unit_bytes)",
     ] {
         assert!(
             source.contains(fragment),
@@ -3573,7 +3573,7 @@ fn realm_scheduling_graph(project: &Path) -> ModuleGraph {
             local_count: 0,
             functions: vec![
                 FunctionProto {
-        inferred_name: None,
+                    inferred_name: None,
                     span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
@@ -3598,7 +3598,7 @@ fn realm_scheduling_graph(project: &Path) -> ModuleGraph {
                     type_annotations: None,
                 },
                 FunctionProto {
-        inferred_name: None,
+                    inferred_name: None,
                     span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
@@ -3635,10 +3635,7 @@ fn realm_scheduling_graph(project: &Path) -> ModuleGraph {
         program: Program {
             source: "".into(),
             version: BYTECODE_VERSION,
-            constants: vec![
-                Constant::String("entry body".into()),
-                Constant::Undefined,
-            ],
+            constants: vec![Constant::String("entry body".into()), Constant::Undefined],
             code: vec![
                 Instruction::Const(0),
                 Instruction::HostCall {
@@ -3875,8 +3872,11 @@ static int write_host_call(void *context, uint16_t operation, uint16_t argc,
     if (operation != KILN_HOST_OP_WRITE_STDOUT || argc != 1 || arguments == NULL ||
         result == NULL || arguments[0].tag != KILN_VALUE_STRING ||
         (arguments[0].len != 0 && arguments[0].ptr == NULL)) return KILN_C99_HOST_ERROR;
-    if (fwrite(arguments[0].ptr, 1, arguments[0].len, stdout) != arguments[0].len ||
-        fputc('\n', stdout) == EOF) return KILN_C99_HOST_ERROR;
+    const kiln_string *str = (const kiln_string *)arguments[0].ptr;
+    for (size_t i = 0; i < arguments[0].len; ++i) {{
+        if (fputc((int)kiln_string_unit_at(str, i), stdout) == EOF) return KILN_C99_HOST_ERROR;
+    }}
+    if (fputc('\n', stdout) == EOF) return KILN_C99_HOST_ERROR;
     *result = (kiln_value){{ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }};
     return KILN_C99_OK;
 }}
@@ -3981,8 +3981,11 @@ static int host_call(void *context, uint16_t operation, uint16_t argc,
     if (operation != KILN_HOST_OP_WRITE_STDOUT || argc != 1 || arguments == NULL ||
         result == NULL || arguments[0].tag != KILN_VALUE_STRING) return KILN_C99_HOST_ERROR;
     if (arguments[0].len != 0 && arguments[0].ptr == NULL) return KILN_C99_HOST_ERROR;
-    if (fwrite(arguments[0].ptr, 1, arguments[0].len, stdout) != arguments[0].len ||
-        fputc('\n', stdout) == EOF) return KILN_C99_HOST_ERROR;
+    const kiln_string *str = (const kiln_string *)arguments[0].ptr;
+    for (size_t i = 0; i < arguments[0].len; ++i) {{
+        if (fputc((int)kiln_string_unit_at(str, i), stdout) == EOF) return KILN_C99_HOST_ERROR;
+    }}
+    if (fputc('\n', stdout) == EOF) return KILN_C99_HOST_ERROR;
     *result = (kiln_value){{ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }};
     return KILN_C99_OK;
 }}
@@ -4097,8 +4100,11 @@ static int host_call(void *context, uint16_t operation, uint16_t argc,
     if (operation != KILN_HOST_OP_WRITE_STDOUT || argc != 1 || arguments == NULL ||
         result == NULL || arguments[0].tag != KILN_VALUE_STRING ||
         (arguments[0].len != 0 && arguments[0].ptr == NULL)) return KILN_C99_HOST_ERROR;
-    if (fwrite(arguments[0].ptr, 1, arguments[0].len, stdout) != arguments[0].len ||
-        fputc('\n', stdout) == EOF) return KILN_C99_HOST_ERROR;
+    const kiln_string *str = (const kiln_string *)arguments[0].ptr;
+    for (size_t i = 0; i < arguments[0].len; ++i) {{
+        if (fputc((int)kiln_string_unit_at(str, i), stdout) == EOF) return KILN_C99_HOST_ERROR;
+    }}
+    if (fputc('\n', stdout) == EOF) return KILN_C99_HOST_ERROR;
     *result = (kiln_value){{ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }};
     return KILN_C99_OK;
 }}
@@ -6426,7 +6432,10 @@ struct capture {
         || arguments[0].ptr == NULL || arguments[0].len >= sizeof(capture->bytes)) {
         return KILN_C99_HOST_ERROR;
     }
-    memcpy(capture->bytes, arguments[0].ptr, arguments[0].len);
+    const kiln_string *str = (const kiln_string *)arguments[0].ptr;
+    for (size_t i = 0; i < arguments[0].len; ++i) {
+        capture->bytes[i] = (char)kiln_string_unit_at(str, i);
+    }
     capture->length = arguments[0].len;
     capture->bytes[capture->length++] = '\n';
     capture->calls += 1;
@@ -6547,14 +6556,16 @@ int main(void) {{
     if (api == NULL || api->abi_version != KILN_MODULE_API_VERSION ||
         api->struct_size < sizeof(*api) || api->run == NULL || api->read == NULL ||
         api->dispose == NULL) return 1;
-    if ({module_symbol}(NULL, &legacy) != KILN_C99_OK ||
-        legacy.tag != KILN_VALUE_STRING || legacy.flags != KILN_VALUE_FLAG_OWNED_STRING || legacy.len != 10 ||
-        memcmp(legacy.ptr, "left\0right", 10) != 0) return 2;
+    if ({module_symbol}(NULL, &legacy) != KILN_C99_OK) return 21;
+    if (legacy.tag != KILN_VALUE_STRING) return 22;
+    if (legacy.flags != 0) return 23;
+    if (legacy.len != 10) return 24;
+    if (!kiln_string_equals_ascii((const kiln_string *)legacy.ptr, "left\0right", 10)) return 25;
     for (index = 0; index < 64; ++index) {{
         if (api->run(NULL, &owned) != KILN_C99_OK || owned == NULL) return 3;
         if (api->read(owned, &value) != KILN_C99_OK || value.tag != KILN_VALUE_STRING ||
             value.flags != 0 ||
-            value.len != 10 || value.ptr == NULL || memcmp(value.ptr, "left\0right", 10) != 0)
+            value.len != 10 || value.ptr == NULL || !kiln_string_equals_ascii((const kiln_string *)value.ptr, "left\0right", 10))
             return 4;
         api->dispose(&owned);
         if (owned != NULL) return 5;
@@ -6590,7 +6601,8 @@ int main(void) {{
     let output = command.output().expect("run owned-result host");
     assert!(
         output.status.success(),
-        "owned-result host failed: {}",
+        "owned-result host failed with {:?}: {}",
+        output.status.code(),
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -6789,7 +6801,7 @@ int main(void) {{
     status = api->run(NULL, &owned);
     if (status != KILN_C99_THROWN || owned == NULL) return 2;
     if (api->read(owned, &value) != KILN_C99_OK || value.tag != KILN_VALUE_STRING ||
-        value.len < 12 || value.ptr == NULL || memcmp(value.ptr, "thrown\0value", 12) != 0)
+        value.len < 12 || value.ptr == NULL || !kiln_string_equals_ascii((const kiln_string *)value.ptr, "thrown\0value", 12))
         return 3;
     api->dispose(&owned);
     if (owned != NULL) return 4;
@@ -7749,6 +7761,7 @@ fn shared_graph_proxy_preserves_host_strings_across_module_boundaries() {
 typedef struct host_context {{
     int mode;
     char storage[4];
+    kiln_string string;
 }} host_context;
 
 static int host_call(void *opaque, uint16_t operation, uint16_t argc,
@@ -7767,8 +7780,11 @@ static int host_call(void *opaque, uint16_t operation, uint16_t argc,
             return KILN_C99_OK;
         }}
         memcpy(context->storage, "dep", 3);
+        context->string.unit_len = 3;
+        context->string.flags = KILN_STRING_LATIN1;
+        context->string.data = context->storage;
         *result = (kiln_value){{ .tag = KILN_VALUE_STRING, .flags = KILN_VALUE_FLAG_OWNED_STRING, .len = 3, .bits = 0 }};
-        result->ptr = context->storage;
+        result->ptr = &context->string;
         return KILN_C99_OK;
     }}
     if (argc != 1 || arguments == NULL || arguments[0].tag != KILN_VALUE_STRING)
@@ -7777,13 +7793,13 @@ static int host_call(void *opaque, uint16_t operation, uint16_t argc,
         if (arguments[0].flags != 0 || arguments[0].len != 0 || arguments[0].ptr == NULL)
             return KILN_C99_HOST_ERROR;
     }} else if (arguments[0].flags != 0 || arguments[0].len != 3 || arguments[0].ptr == NULL ||
-               arguments[0].ptr == context->storage ||
-               memcmp(arguments[0].ptr, "dep", 3) != 0) {{
+               arguments[0].ptr == &context->string ||
+               !kiln_string_equals_ascii((const kiln_string *)arguments[0].ptr, "dep", 3)) {{
         return KILN_C99_HOST_ERROR;
     }}
     if (context->mode == 0) {{
         *result = (kiln_value){{ .tag = KILN_VALUE_STRING, .flags = KILN_VALUE_FLAG_OWNED_STRING, .len = 3, .bits = 0 }};
-        result->ptr = context->storage;
+        result->ptr = &context->string;
     }} else {{
         *result = (kiln_value){{ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }};
     }}
@@ -7791,7 +7807,7 @@ static int host_call(void *opaque, uint16_t operation, uint16_t argc,
 }}
 
 int main(void) {{
-    host_context context = {{0, {{0}}}};
+    host_context context = {{0, {{0}}, {{0, 0, NULL}}}};
     kiln_host host = {{host_call, &context}};
     kiln_value result;
     int index;
@@ -7813,7 +7829,7 @@ int main(void) {{
         for (index = 0; index < 64; ++index) {{
             if (api->run(&host, &owned) != KILN_C99_OK || owned == NULL) return 8;
             if (api->read(owned, &result) != KILN_C99_OK || result.tag != KILN_VALUE_STRING ||
-                result.len != 3 || result.ptr == NULL || memcmp(result.ptr, "dep", 3) != 0)
+                result.len != 3 || result.ptr == NULL || !kiln_string_equals_ascii((const kiln_string *)result.ptr, "dep", 3))
                 return 9;
             api->dispose(&owned);
             if (owned != NULL) return 10;
@@ -10111,8 +10127,11 @@ static int host_call(void *context, uint16_t operation, uint16_t argc,
         if (fputs(arguments[0].bits ? "true" : "false", stdout) == EOF) return KILN_C99_HOST_ERROR;
     }} else if (arguments[0].tag != KILN_VALUE_STRING) return KILN_C99_HOST_ERROR;
     if (arguments[0].len != 0 && arguments[0].ptr == NULL) return KILN_C99_HOST_ERROR;
-    if (fwrite(arguments[0].ptr, 1, arguments[0].len, stdout) != arguments[0].len ||
-        fputc('\n', stdout) == EOF) return KILN_C99_HOST_ERROR;
+    const kiln_string *str = (const kiln_string *)arguments[0].ptr;
+    for (size_t i = 0; i < arguments[0].len; ++i) {{
+        if (fputc((int)kiln_string_unit_at(str, i), stdout) == EOF) return KILN_C99_HOST_ERROR;
+    }}
+    if (fputc('\n', stdout) == EOF) return KILN_C99_HOST_ERROR;
     *result = (kiln_value){{ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }};
     return KILN_C99_OK;
 }}

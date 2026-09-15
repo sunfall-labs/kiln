@@ -3292,10 +3292,40 @@ fn emit_native_graph_module_with_policy(
             // of boundary `kiln_value`, which is three times the size. Writing the answer
             // straight into the slot left the tag and length of the export unwritten, and the
             // module then handed out an object tag over a null pointer.
+            let units: Vec<u16> = kiln_ir::StringUnits::from(source).units().collect();
+            let latin1 = units.iter().all(|unit| *unit <= 0xff);
+            let (flags, payload, type_name) = if latin1 {
+                let payload = if units.is_empty() {
+                    "0".to_owned()
+                } else {
+                    units
+                        .iter()
+                        .map(|unit| unit.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                ("KILN_STRING_LATIN1", payload, "uint8_t")
+            } else {
+                let payload = if units.is_empty() {
+                    "0".to_owned()
+                } else {
+                    units
+                        .iter()
+                        .map(|unit| format!("UINT16_C({unit})"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                ("KILN_STRING_UTF16", payload, "uint16_t")
+            };
             let body = format!(
-                "kiln_val parsed;\nint status = kiln_c99_json_document({}, (size_t){}, &parsed);\nif (status != KILN_C99_OK) return status;\nexports[0] = kiln_val_to_boundary(parsed);",
-                native_c_string(source),
-                source.len()
+                "static const {type_name} json_source_data[{}] = {{ {payload} }};\n\
+                 static const kiln_string json_source = {{ {}, {flags}, json_source_data }};\n\
+                 kiln_val parsed;\n\
+                 int status = kiln_c99_json_document(&json_source, &parsed);\n\
+                 if (status != KILN_C99_OK) return status;\n\
+                 exports[0] = kiln_val_to_boundary(parsed);",
+                units.len().max(1),
+                units.len()
             );
             Ok(emit_runtime_module_with_logical_path_and_policy(
                 &node.program,
@@ -4315,8 +4345,7 @@ fn write_dynamic_failure_dispatch(
         let c_message = native_c_string(message);
         writeln!(
             output,
-            "{indent}if (importer != NULL && strcmp(importer, {importer}) == 0 && specifier.tag == KILN_VALUE_STRING && specifier.len == (size_t){} && memcmp(specifier.ptr, {c_spec}, (size_t){}) == 0) {{ kiln_value err = kiln_c99_undefined(); (void)kiln_c99_new_type_error(&err, {c_message}); return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown); }}",
-            specifier.len(),
+            "{indent}if (importer != NULL && strcmp(importer, {importer}) == 0 && kiln_c99_string_equals_ascii(specifier, {c_spec}, (size_t){})) {{ kiln_value err = kiln_c99_undefined(); (void)kiln_c99_new_type_error(&err, {c_message}); return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown); }}",
             specifier.len()
         )
         .unwrap();
@@ -4366,7 +4395,7 @@ int kiln_graph_dynamic_import(kiln_host *host, const char *importer, kiln_value 
       }
     }
 import_attributes_valid:
-    if (specifier.len >= 14 && memcmp(specifier.ptr, "@opentui/core-", 14) == 0) {
+    if (kiln_c99_string_starts_ascii(specifier, "@opentui/core-", 14)) {
         if (kiln_opentui_namespace.tag != KILN_VALUE_UNDEFINED) {
             return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_RESOLVE, kiln_c99_undefined(), &kiln_opentui_namespace, 1, depth, thrown);
         }
@@ -4415,8 +4444,8 @@ import_attributes_valid:
         kiln_opentui_namespace = ns_obj;
         return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_RESOLVE, kiln_c99_undefined(), &kiln_opentui_namespace, 1, depth, thrown);
     }
-    if ((specifier.len == 8 && memcmp(specifier.ptr, "node:ffi", 8) == 0) ||
-        (specifier.len == 3 && memcmp(specifier.ptr, "ffi", 3) == 0)) {
+    if (kiln_c99_string_equals_ascii(specifier, "node:ffi", 8) ||
+        kiln_c99_string_equals_ascii(specifier, "ffi", 3)) {
         if (kiln_node_ffi_namespace.tag != KILN_VALUE_UNDEFINED) {
             return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_RESOLVE, kiln_c99_undefined(), &kiln_node_ffi_namespace, 1, depth, thrown);
         }
@@ -4486,7 +4515,7 @@ import_attributes_valid:
             };
             writeln!(
                 output,
-                "    if (importer != NULL && strcmp(importer, {importer}) == 0{attribute_guard} && specifier.len == (size_t){len} && memcmp(specifier.ptr, {c_spec}, (size_t){len}) == 0) {{"
+                "    if (importer != NULL && strcmp(importer, {importer}) == 0{attribute_guard} && kiln_c99_string_equals_ascii(specifier, {c_spec}, (size_t){len})) {{"
             )
             .unwrap();
             writeln!(
@@ -4559,7 +4588,7 @@ import_attributes_valid:
         (void)kiln_c99_new_type_error(&err, "invalid import specifier");
         return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
     }
-    if (specifier.len >= 14 && memcmp(specifier.ptr, "@opentui/core-", 14) == 0) {
+    if (kiln_c99_string_starts_ascii(specifier, "@opentui/core-", 14)) {
         if (kiln_shared_opentui_namespace.tag != KILN_VALUE_UNDEFINED) {
             return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_RESOLVE, kiln_c99_undefined(), &kiln_shared_opentui_namespace, 1, depth, thrown);
         }
@@ -4603,8 +4632,8 @@ import_attributes_valid:
         kiln_shared_opentui_namespace = ns_obj;
         return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_RESOLVE, kiln_c99_undefined(), &kiln_shared_opentui_namespace, 1, depth, thrown);
     }
-    if ((specifier.len == 8 && memcmp(specifier.ptr, "node:ffi", 8) == 0) ||
-        (specifier.len == 3 && memcmp(specifier.ptr, "ffi", 3) == 0)) {
+    if (kiln_c99_string_equals_ascii(specifier, "node:ffi", 8) ||
+        kiln_c99_string_equals_ascii(specifier, "ffi", 3)) {
         if (kiln_shared_node_ffi_namespace.tag != KILN_VALUE_UNDEFINED) {
             return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_RESOLVE, kiln_c99_undefined(), &kiln_shared_node_ffi_namespace, 1, depth, thrown);
         }
@@ -4675,7 +4704,7 @@ import_attributes_valid:
             };
             writeln!(
                 output,
-                "        if (importer != NULL && strcmp(importer, {importer}) == 0{attribute_guard} && specifier.len == (size_t){len} && memcmp(specifier.ptr, {c_spec}, (size_t){len}) == 0) {{"
+                "        if (importer != NULL && strcmp(importer, {importer}) == 0{attribute_guard} && kiln_c99_string_equals_ascii(specifier, {c_spec}, (size_t){len})) {{"
             )
             .unwrap();
             if modules[index].0.source == ModuleSource::CommonJs {
@@ -4981,6 +5010,16 @@ static kiln_value kiln_graph_diagnostic(const char *phase, const char *module) {
     return value;
 }
 
+static inline int kiln_c99_string_equals_ascii(kiln_value value, const char *ascii, size_t length) {
+    if (value.tag != KILN_VALUE_STRING || value.ptr == NULL) return 0;
+    return kiln_string_equals_ascii((const kiln_string *)value.ptr, ascii, length);
+}
+
+static inline int kiln_c99_string_starts_ascii(kiln_value value, const char *ascii, size_t length) {
+    if (value.tag != KILN_VALUE_STRING || value.ptr == NULL) return 0;
+    return kiln_string_starts_ascii((const kiln_string *)value.ptr, ascii, length);
+}
+
 typedef int (*kiln_host_call_fn)(void *context, uint16_t operation, uint16_t argc,
                                  const kiln_value *arguments, kiln_value *result);
 typedef struct kiln_host {
@@ -4990,9 +5029,17 @@ typedef struct kiln_host {
 
 static int kiln_c99_filename_matches(kiln_value value, const char *path, size_t path_len) {
     if (path == NULL || value.tag != KILN_VALUE_STRING || (value.len != 0 && value.ptr == NULL)) return 0;
-    if (value.len == path_len && (path_len == 0 || memcmp(value.ptr, path, path_len) == 0)) return 1;
-    return value.len >= 7 && memcmp(value.ptr, "file://", 7) == 0 && value.len - 7 == path_len &&
-           (path_len == 0 || memcmp(value.ptr + 7, path, path_len) == 0);
+    const kiln_string *s = (const kiln_string *)value.ptr;
+    if (s == NULL) return 0;
+    if (s->unit_len == path_len && (path_len == 0 || kiln_string_equals_ascii(s, path, path_len))) return 1;
+    if (s->unit_len >= 7 && kiln_string_starts_ascii(s, "file://", 7) && s->unit_len - 7 == path_len) {
+        if (path_len == 0) return 1;
+        for (size_t i = 0; i < path_len; ++i) {
+            if (kiln_string_unit_at(s, i + 7) != (uint8_t)path[i]) return 0;
+        }
+        return 1;
+    }
+    return 0;
 }
 
 typedef int (*kiln_graph_module_fn)(kiln_host *host, kiln_value *result,
@@ -5237,7 +5284,7 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
             if modules[provider_index].0.source == ModuleSource::CommonJs {
                 writeln!(
                     output,
-                    "    if (specifier.len == (size_t){specifier_len} && memcmp(specifier.ptr, {specifier}, (size_t){specifier_len}) == 0) return kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, thrown);"
+                    "    if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) return kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, thrown);"
                 )
                 .unwrap();
             } else {
@@ -5248,7 +5295,7 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
                 };
                 writeln!(
                     output,
-                    "    if (specifier.len == (size_t){specifier_len} && memcmp(specifier.ptr, {specifier}, (size_t){specifier_len}) == 0) {{ *result = kiln_exports_{provider_index}[{commonjs_export}]; return 0; }}"
+                    "    if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ *result = kiln_exports_{provider_index}[{commonjs_export}]; return 0; }}"
                 )
                 .unwrap();
             }
@@ -5340,11 +5387,11 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
                 let specifier = native_c_string(&dependency.specifier);
                 let specifier_len = dependency.specifier.len();
                 if modules[provider_index].0.source == ModuleSource::CommonJs {
-                    writeln!(output, "            if (specifier.len == (size_t){specifier_len} && memcmp(specifier.ptr, {specifier}, (size_t){specifier_len}) == 0) return kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, thrown);").unwrap();
+                    writeln!(output, "            if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) return kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, thrown);").unwrap();
                 } else if let Some(projection) =
                     native_commonjs_projection_index(modules[provider_index].0)
                 {
-                    writeln!(output, "            if (specifier.len == (size_t){specifier_len} && memcmp(specifier.ptr, {specifier}, (size_t){specifier_len}) == 0) {{ int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->module_states[{provider_index}].result; return status; }} *result = kiln_exports_{provider_index}[{projection}]; return KILN_C99_OK; }}").unwrap();
+                    writeln!(output, "            if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->module_states[{provider_index}].result; return status; }} *result = kiln_exports_{provider_index}[{projection}]; return KILN_C99_OK; }}").unwrap();
                 }
             }
         }
@@ -5357,8 +5404,7 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
                 }
                 writeln!(
                     output,
-                    "            if (specifier.len == (size_t){} && memcmp(specifier.ptr, {}, (size_t){}) == 0) {{ kiln_value error = kiln_c99_undefined(); (void)kiln_c99_new_type_error(&error, {}); if (thrown != NULL) *thrown = error; return KILN_C99_THROWN; }}",
-                    failure_specifier.len(),
+                    "            if (kiln_c99_string_equals_ascii(specifier, {}, (size_t){})) {{ kiln_value error = kiln_c99_undefined(); (void)kiln_c99_new_type_error(&error, {}); if (thrown != NULL) *thrown = error; return KILN_C99_THROWN; }}",
                     native_c_string(failure_specifier),
                     failure_specifier.len(),
                     native_c_string(message),
@@ -5372,8 +5418,7 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
                     }
                     writeln!(
                         output,
-                        "            if (specifier.len == (size_t){} && memcmp(specifier.ptr, {}, (size_t){}) == 0) {{ kiln_value error = kiln_c99_undefined(); (void)kiln_c99_new_type_error(&error, {}); if (thrown != NULL) *thrown = error; return KILN_C99_THROWN; }}",
-                        failure_specifier.len(),
+                        "            if (kiln_c99_string_equals_ascii(specifier, {}, (size_t){})) {{ kiln_value error = kiln_c99_undefined(); (void)kiln_c99_new_type_error(&error, {}); if (thrown != NULL) *thrown = error; return KILN_C99_THROWN; }}",
                         native_c_string(failure_specifier),
                         failure_specifier.len(),
                         native_c_string(message),
@@ -5398,8 +5443,8 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
         let specifier = builtin.specifier();
         writeln!(
             output,
-            "    if (specifier.len == (size_t){} && memcmp(specifier.ptr, {}, (size_t){}) == 0) {{ int status = kiln_graph_ensure_module(graph, (size_t){}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->module_states[{}].result; return status; }} *result = kiln_exports_{}[{}]; return KILN_C99_OK; }}",
-            specifier.len(), native_c_string(specifier), specifier.len(), index, index, index, projection
+            "    if (kiln_c99_string_equals_ascii(specifier, {}, (size_t){})) {{ int status = kiln_graph_ensure_module(graph, (size_t){}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->module_states[{}].result; return status; }} *result = kiln_exports_{}[{}]; return KILN_C99_OK; }}",
+            native_c_string(specifier), specifier.len(), index, index, index, projection
         )
         .unwrap();
     }
@@ -6040,7 +6085,8 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
     }
     if (status != 0) kiln_cli_report_failure_in(status, graph.result, phase);
     if (writes_result && status == 0 && kiln_cli_write_result(graph.entry_result) != 0) {
-        kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 17, .ptr = "filesystem access" }, "result write");
+        static const kiln_string refusal_str = { 17, 0, "filesystem access" };
+        kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 17, .ptr = &refusal_str }, "result write");
         status = 1;
     }
     destroy_status = kiln_realm_destroy(realm);
@@ -6247,7 +6293,7 @@ static int {stem}_proxy_call(void *context, uint16_t operation, uint16_t argc,
                              const kiln_value *arguments, kiln_value *result) {{
     {proxy} *proxy = ({proxy} *)context;
     kiln_host *upstream;
-    char *copy;
+    kiln_string *copy;
     kiln_value normalized_small[16];
     kiln_value *normalized = NULL;
     int status;
@@ -6275,22 +6321,38 @@ static int {stem}_proxy_call(void *context, uint16_t operation, uint16_t argc,
         proxy->failure_status = KILN_C99_INVALID_ARGUMENT;
         return KILN_C99_INVALID_ARGUMENT;
     }}
-    copy = (char *)malloc(result->len + 1);
-    if (copy == NULL) {{
-        proxy->failure_status = KILN_C99_HOST_ERROR;
-        return KILN_C99_HOST_ERROR;
+    {{
+        const kiln_string *src_str = (const kiln_string *)result->ptr;
+        size_t storage_size = 0;
+        uint32_t flags = src_str != NULL ? src_str->flags : KILN_STRING_LATIN1;
+        uint32_t unit_len = (uint32_t)result->len;
+        if (!kiln_string_storage_size(unit_len, flags, &storage_size)) {{
+            proxy->failure_status = KILN_C99_INVALID_ARGUMENT;
+            return KILN_C99_INVALID_ARGUMENT;
+        }}
+        copy = (kiln_string *)malloc(storage_size);
+        if (copy == NULL) {{
+            proxy->failure_status = KILN_C99_HOST_ERROR;
+            return KILN_C99_HOST_ERROR;
+        }}
+        copy->unit_len = unit_len;
+        copy->flags = flags;
+        copy->data = (const void *)(copy + 1);
+        size_t unit_bytes = (size_t)unit_len * (flags == KILN_STRING_UTF16 ? sizeof(uint16_t) : sizeof(uint8_t));
+        if (unit_bytes != 0 && src_str != NULL && src_str->data != NULL) {{
+            memcpy((void *)copy->data, src_str->data, unit_bytes);
+        }}
+        status = {arena}_track(proxy->arena, copy);
+        if (status != KILN_C99_OK) {{
+            free(copy);
+            proxy->failure_status = KILN_C99_HOST_ERROR;
+            return KILN_C99_HOST_ERROR;
+        }}
+        result->ptr = copy;
+        result->flags = 0;
+        result->len = unit_len;
+        return KILN_C99_OK;
     }}
-    if (result->len != 0) memcpy(copy, result->ptr, result->len);
-    copy[result->len] = '\0';
-    status = {arena}_track(proxy->arena, copy);
-    if (status != KILN_C99_OK) {{
-        free(copy);
-        proxy->failure_status = KILN_C99_HOST_ERROR;
-        return KILN_C99_HOST_ERROR;
-    }}
-    result->ptr = copy;
-    result->flags = 0;
-    return KILN_C99_OK;
 }}
 
 static int {run}(kiln_host *host, kiln_result_v2 **out) {{
@@ -6299,7 +6361,7 @@ static int {run}(kiln_host *host, kiln_result_v2 **out) {{
     kiln_host proxy_host = {{ {stem}_proxy_call, &proxy }};
     kiln_value value = {{ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }};
     kiln_result_v2 *owned = NULL;
-    char *copy = NULL;
+    kiln_string *copy = NULL;
     int status;
     if (out == NULL) return KILN_C99_INVALID_ARGUMENT;
     *out = NULL;
@@ -6322,15 +6384,29 @@ static int {run}(kiln_host *host, kiln_result_v2 **out) {{
     }}
     owned->value = value;
     if (value.tag == KILN_VALUE_STRING) {{
-        copy = (char *)malloc(value.len + 1);
+        const kiln_string *src_str = (const kiln_string *)value.ptr;
+        size_t storage_size = 0;
+        uint32_t flags = src_str != NULL ? src_str->flags : KILN_STRING_LATIN1;
+        uint32_t unit_len = (uint32_t)value.len;
+        if (!kiln_string_storage_size(unit_len, flags, &storage_size)) {{
+            status = KILN_C99_INVALID_ARGUMENT;
+            goto cleanup;
+        }}
+        copy = (kiln_string *)malloc(storage_size);
         if (copy == NULL) {{
             status = KILN_C99_HOST_ERROR;
             goto cleanup;
         }}
-        if (value.len != 0) memcpy(copy, value.ptr, value.len);
-        copy[value.len] = '\0';
+        copy->unit_len = unit_len;
+        copy->flags = flags;
+        copy->data = (const void *)(copy + 1);
+        size_t unit_bytes = (size_t)unit_len * (flags == KILN_STRING_UTF16 ? sizeof(uint16_t) : sizeof(uint8_t));
+        if (unit_bytes != 0 && src_str != NULL && src_str->data != NULL) {{
+            memcpy((void *)copy->data, src_str->data, unit_bytes);
+        }}
         owned->value.ptr = copy;
         owned->value.flags = 0;
+        owned->value.len = unit_len;
         copy = NULL;
     }} else {{
         /* `ptr` shares the payload word with `bits`, so clearing it here would erase the number
@@ -6509,7 +6585,9 @@ fn graph_shared_wrapper_source_with_failures(
     output.push_str(embedding_header());
     output.push('\n');
     output.push_str(
-        "static int kiln_c99_filename_matches(kiln_value value, const char *path, size_t path_len) { if (path == NULL || value.tag != KILN_VALUE_STRING || (value.len != 0 && value.ptr == NULL)) return 0; if (value.len == path_len && (path_len == 0 || memcmp(value.ptr, path, path_len) == 0)) return 1; return value.len >= 7 && memcmp(value.ptr, \"file://\", 7) == 0 && value.len - 7 == path_len && (path_len == 0 || memcmp(value.ptr + 7, path, path_len) == 0); }\n",
+        "static inline int kiln_c99_string_equals_ascii(kiln_value value, const char *ascii, size_t length) { if (value.tag != KILN_VALUE_STRING || value.ptr == NULL) return 0; return kiln_string_equals_ascii((const kiln_string *)value.ptr, ascii, length); }\n\
+         static inline int kiln_c99_string_starts_ascii(kiln_value value, const char *ascii, size_t length) { if (value.tag != KILN_VALUE_STRING || value.ptr == NULL) return 0; return kiln_string_starts_ascii((const kiln_string *)value.ptr, ascii, length); }\n\
+         static int kiln_c99_filename_matches(kiln_value value, const char *path, size_t path_len) { if (path == NULL || value.tag != KILN_VALUE_STRING || (value.len != 0 && value.ptr == NULL)) return 0; const kiln_string *s = (const kiln_string *)value.ptr; if (s == NULL) return 0; if (s->unit_len == path_len && (path_len == 0 || kiln_string_equals_ascii(s, path, path_len))) return 1; if (s->unit_len >= 7 && kiln_string_starts_ascii(s, \"file://\", 7) && s->unit_len - 7 == path_len) { if (path_len == 0) return 1; for (size_t i = 0; i < path_len; ++i) { if (kiln_string_unit_at(s, i + 7) != (uint8_t)path[i]) return 0; } return 1; } return 0; }\n",
     );
     output.push_str(
         r#"typedef int (*kiln_realm_entry_fn)(void *context);
@@ -6706,7 +6784,7 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
     kiln_proxy_host *proxy = (kiln_proxy_host *)context;
     kiln_host *upstream;
     kiln_proxy_arena *arena;
-    char *copy;
+    kiln_string *copy;
     kiln_value normalized_small[16];
     kiln_value *normalized_arguments = NULL;
     int status;
@@ -6739,22 +6817,38 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
         proxy->failure_status = KILN_C99_INVALID_ARGUMENT;
         return KILN_C99_INVALID_ARGUMENT;
     }
-    copy = (char *)malloc(result->len + 1);
-    if (copy == NULL) {
-        proxy->failure_status = KILN_C99_HOST_ERROR;
-        return KILN_C99_HOST_ERROR;
+    {
+        const kiln_string *src_str = (const kiln_string *)result->ptr;
+        size_t storage_size = 0;
+        uint32_t flags = src_str != NULL ? src_str->flags : KILN_STRING_LATIN1;
+        uint32_t unit_len = (uint32_t)result->len;
+        if (!kiln_string_storage_size(unit_len, flags, &storage_size)) {
+            proxy->failure_status = KILN_C99_INVALID_ARGUMENT;
+            return KILN_C99_INVALID_ARGUMENT;
+        }
+        copy = (kiln_string *)malloc(storage_size);
+        if (copy == NULL) {
+            proxy->failure_status = KILN_C99_HOST_ERROR;
+            return KILN_C99_HOST_ERROR;
+        }
+        copy->unit_len = unit_len;
+        copy->flags = flags;
+        copy->data = (const void *)(copy + 1);
+        size_t unit_bytes = (size_t)unit_len * (flags == KILN_STRING_UTF16 ? sizeof(uint16_t) : sizeof(uint8_t));
+        if (unit_bytes != 0 && src_str != NULL && src_str->data != NULL) {
+            memcpy((void *)copy->data, src_str->data, unit_bytes);
+        }
+        status = kiln_proxy_arena_track(arena, copy);
+        if (status != KILN_C99_OK) {
+            free(copy);
+            proxy->failure_status = KILN_C99_HOST_ERROR;
+            return KILN_C99_HOST_ERROR;
+        }
+        result->ptr = copy;
+        result->flags = 0;
+        result->len = unit_len;
+        return KILN_C99_OK;
     }
-    if (result->len != 0) memcpy(copy, result->ptr, result->len);
-    copy[result->len] = '\0';
-    status = kiln_proxy_arena_track(arena, copy);
-    if (status != KILN_C99_OK) {
-        free(copy);
-        proxy->failure_status = KILN_C99_HOST_ERROR;
-        return KILN_C99_HOST_ERROR;
-    }
-    result->ptr = copy;
-    result->flags = 0;
-    return KILN_C99_OK;
 }
 
 /* Shared graph callbacks receive the wrapper host.  These accessors are deliberately tiny and
@@ -6786,7 +6880,7 @@ static kiln_commonjs_graph_context *kiln_graph_context_from_host(kiln_host *host
             if modules[provider_index].0.source == ModuleSource::CommonJs {
                 writeln!(
                     output,
-                    "    if (specifier.len == (size_t){specifier_len} && memcmp(specifier.ptr, {specifier}, (size_t){specifier_len}) == 0) return kiln_graph_load_commonjs(&graph->modules[{provider_index}], result, thrown);"
+                    "    if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) return kiln_graph_load_commonjs(&graph->modules[{provider_index}], result, thrown);"
                 )
                 .unwrap();
             } else {
@@ -6797,7 +6891,7 @@ static kiln_commonjs_graph_context *kiln_graph_context_from_host(kiln_host *host
                 };
                 writeln!(
                     output,
-                    "    if (specifier.len == (size_t){specifier_len} && memcmp(specifier.ptr, {specifier}, (size_t){specifier_len}) == 0) {{ *result = graph->exports[{provider_index}][{commonjs_export}]; return KILN_C99_OK; }}"
+                    "    if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ *result = graph->exports[{provider_index}][{commonjs_export}]; return KILN_C99_OK; }}"
                 )
                 .unwrap();
             }
@@ -6815,7 +6909,7 @@ static kiln_commonjs_graph_context *kiln_graph_context_from_host(kiln_host *host
             continue;
         };
         let specifier = builtin.specifier();
-        writeln!(output, "    if (specifier.len == (size_t){} && memcmp(specifier.ptr, {}, (size_t){}) == 0) {{ *result = graph->exports[{}][{}]; return KILN_C99_OK; }}", specifier.len(), native_c_string(specifier), specifier.len(), index, projection).unwrap();
+        writeln!(output, "    if (kiln_c99_string_equals_ascii(specifier, {}, (size_t){})) {{ *result = graph->exports[{}][{}]; return KILN_C99_OK; }}", native_c_string(specifier), specifier.len(), index, projection).unwrap();
     }
     output.push_str("    return kiln_c99_default_require(NULL, host, specifier, result, thrown);\n}\n\nstatic int kiln_shared_runtime_require(void *opaque, kiln_host *host, kiln_value specifier, kiln_value *result, kiln_value *thrown) {\n    kiln_shared_require_context *context = (kiln_shared_require_context *)opaque;\n    kiln_commonjs_graph_context *graph;\n    if (context == NULL || (graph = context->graph) == NULL || result == NULL || specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) return KILN_C99_INVALID_ARGUMENT;\n    (void)host;\n    switch (context->base_index) {\n");
     for (base_index, importer) in runtime_importers.keys().enumerate() {
@@ -6831,11 +6925,11 @@ static kiln_commonjs_graph_context *kiln_graph_context_from_host(kiln_host *host
                 let specifier = native_c_string(&dependency.specifier);
                 let specifier_len = dependency.specifier.len();
                 if modules[provider_index].0.source == ModuleSource::CommonJs {
-                    writeln!(output, "            if (specifier.len == (size_t){specifier_len} && memcmp(specifier.ptr, {specifier}, (size_t){specifier_len}) == 0) return kiln_shared_ensure_target(graph, (size_t){provider_index}, result, thrown);").unwrap();
+                    writeln!(output, "            if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) return kiln_shared_ensure_target(graph, (size_t){provider_index}, result, thrown);").unwrap();
                 } else if let Some(projection) =
                     native_commonjs_projection_index(modules[provider_index].0)
                 {
-                    writeln!(output, "            if (specifier.len == (size_t){specifier_len} && memcmp(specifier.ptr, {specifier}, (size_t){specifier_len}) == 0) {{ *result = graph->exports[{provider_index}][{projection}]; return KILN_C99_OK; }}").unwrap();
+                    writeln!(output, "            if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ *result = graph->exports[{provider_index}][{projection}]; return KILN_C99_OK; }}").unwrap();
                 }
             }
         }
@@ -6846,7 +6940,7 @@ static kiln_commonjs_graph_context *kiln_graph_context_from_host(kiln_host *host
                 if failure_importer != importer {
                     continue;
                 }
-                writeln!(output, "            if (specifier.len == (size_t){} && memcmp(specifier.ptr, {}, (size_t){}) == 0) {{ kiln_value error = kiln_c99_undefined(); (void)kiln_c99_new_type_error(&error, {}); if (thrown != NULL) *thrown = error; return KILN_C99_THROWN; }}", failure_specifier.len(), native_c_string(failure_specifier), failure_specifier.len(), native_c_string(message)).unwrap();
+                writeln!(output, "            if (kiln_c99_string_equals_ascii(specifier, {}, (size_t){})) {{ kiln_value error = kiln_c99_undefined(); (void)kiln_c99_new_type_error(&error, {}); if (thrown != NULL) *thrown = error; return KILN_C99_THROWN; }}", native_c_string(failure_specifier), failure_specifier.len(), native_c_string(message)).unwrap();
             }
         }
         for ((owner, failure_importer, failure_specifier), message) in native_runtime_failures {
@@ -6856,7 +6950,7 @@ static kiln_commonjs_graph_context *kiln_graph_context_from_host(kiln_host *host
             if !modules.iter().any(|(node, _)| node.path == *owner) {
                 continue;
             }
-            writeln!(output, "            if (specifier.len == (size_t){} && memcmp(specifier.ptr, {}, (size_t){}) == 0) {{ kiln_value error = kiln_c99_undefined(); (void)kiln_c99_new_type_error(&error, {}); if (thrown != NULL) *thrown = error; return KILN_C99_THROWN; }}", failure_specifier.len(), native_c_string(failure_specifier), failure_specifier.len(), native_c_string(message)).unwrap();
+            writeln!(output, "            if (kiln_c99_string_equals_ascii(specifier, {}, (size_t){})) {{ kiln_value error = kiln_c99_undefined(); (void)kiln_c99_new_type_error(&error, {}); if (thrown != NULL) *thrown = error; return KILN_C99_THROWN; }}", native_c_string(failure_specifier), failure_specifier.len(), native_c_string(message)).unwrap();
         }
         output.push_str("            break;\n");
     }
@@ -7090,7 +7184,7 @@ static int {wrapper_symbol}_realm_entry(void *opaque) {{
 static int {impl_symbol}(kiln_host *host, kiln_value *result, int preserve_result) {{
     {wrapper_symbol}_realm_context context;
     uint64_t realm = 0;
-    char *preserved = NULL;
+    kiln_string *preserved = NULL;
     int status;
     int destroy_status;
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
@@ -7110,13 +7204,27 @@ static int {impl_symbol}(kiln_host *host, kiln_value *result, int preserve_resul
             *result = (kiln_value){{ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }};
             status = KILN_C99_INVALID_ARGUMENT;
         }} else {{
-            preserved = (char *)malloc(result->len + 1);
-            if (preserved == NULL) {{
+            const kiln_string *src_str = (const kiln_string *)result->ptr;
+            size_t storage_size = 0;
+            uint32_t flags = src_str != NULL ? src_str->flags : KILN_STRING_LATIN1;
+            uint32_t unit_len = (uint32_t)result->len;
+            if (!kiln_string_storage_size(unit_len, flags, &storage_size)) {{
                 *result = (kiln_value){{ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }};
-                status = KILN_C99_HOST_ERROR;
+                status = KILN_C99_INVALID_ARGUMENT;
             }} else {{
-                if (result->len != 0) memcpy(preserved, result->ptr, result->len);
-                preserved[result->len] = '\0';
+                preserved = (kiln_string *)malloc(storage_size);
+                if (preserved == NULL) {{
+                    *result = (kiln_value){{ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }};
+                    status = KILN_C99_HOST_ERROR;
+                }} else {{
+                    preserved->unit_len = unit_len;
+                    preserved->flags = flags;
+                    preserved->data = (const void *)(preserved + 1);
+                    size_t unit_bytes = (size_t)unit_len * (flags == KILN_STRING_UTF16 ? sizeof(uint16_t) : sizeof(uint8_t));
+                    if (unit_bytes != 0 && src_str != NULL && src_str->data != NULL) {{
+                        memcpy((void *)preserved->data, src_str->data, unit_bytes);
+                    }}
+                }}
             }}
         }}
     }}

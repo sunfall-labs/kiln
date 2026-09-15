@@ -342,7 +342,7 @@ mod tests {
         code: Vec<Instruction>,
     ) -> FunctionProto {
         FunctionProto {
-        inferred_name: None,
+            inferred_name: None,
             asynchronous: false,
             name: Some(name.to_string()),
             arrow: false,
@@ -408,7 +408,9 @@ mod tests {
     #[test]
     fn throwing_function_marked_can_throw() {
         let mut program = empty_program();
-        program.constants.push(Constant::String("err".to_string().into()));
+        program
+            .constants
+            .push(Constant::String("err".to_string().into()));
 
         let proto = test_proto(
             "fail",

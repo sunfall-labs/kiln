@@ -14,7 +14,8 @@ fn string_units_builder_enforces_width_aware_storage_budget() {
     );
 
     let mut wide = StringUnitsBuilder::with_limit(4);
-    wide.push_utf16(&[0x100, 0x101]).expect("two UTF-16 units fit");
+    wide.push_utf16(&[0x100, 0x101])
+        .expect("two UTF-16 units fit");
     assert_eq!(
         wide.push_utf16(&[0x102]),
         Err(ExecutionError::StringTooLong { bytes: 6 })
@@ -6946,4 +6947,63 @@ fn generator_and_async_generator_prototype_and_constructor_hierarchy() {
             "(async function* anonymous(x\n) {\nyield x;\n})"
         );
     });
+}
+
+#[test]
+fn decode_uri_preserves_lone_surrogates() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let lone = Value::String(StringUnits::from_units(&[0xD800]));
+    let decoded = vm
+        .dispatch_native(Native::DecodeUri, &Value::Undefined, &[lone.clone()], 0)
+        .expect("decodeURI succeeds on lone surrogate");
+    assert_eq!(decoded, lone);
+
+    let decoded_comp = vm
+        .dispatch_native(
+            Native::DecodeUriComponent,
+            &Value::Undefined,
+            &[lone.clone()],
+            0,
+        )
+        .expect("decodeURIComponent succeeds on lone surrogate");
+    assert_eq!(decoded_comp, lone);
+
+    // %ED%A0%80 is UTF-8 for surrogate U+D800, which must throw URIError
+    let surrogate_pct = Value::String("a%ED%A0%80b".into());
+    let err = vm
+        .dispatch_native(Native::DecodeUri, &Value::Undefined, &[surrogate_pct], 0)
+        .unwrap_err();
+    assert!(matches!(err, ExecutionError::MalformedUri));
+}
+
+#[test]
+fn to_property_key_coerces_regexp_and_other_objects_without_recursion() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let target = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    let regexp = build_regexp(&StringUnits::from("abc"), "").expect("pattern compiles");
+    let desc = vm
+        .dispatch_native(
+            Native::ObjectGetOwnPropertyDescriptor,
+            &Value::Undefined,
+            &[target, regexp],
+            0,
+        )
+        .expect("Object.getOwnPropertyDescriptor with RegExp key succeeds");
+    assert_eq!(desc, Value::Undefined);
 }

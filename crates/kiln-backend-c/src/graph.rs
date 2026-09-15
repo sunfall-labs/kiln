@@ -3934,7 +3934,8 @@ fn escape_analysis_with(
                             let defined =
                                 if let Some(GraphOp::NewObject { pairs, .. }) = defs.get(&root) {
                                     pairs.iter().any(|(k, _)| {
-                                        resolve_const_string(*k, &defs, program) == Some(prop_name.clone())
+                                        resolve_const_string(*k, &defs, program)
+                                            == Some(prop_name.clone())
                                     })
                                 } else {
                                     false
@@ -3981,7 +3982,8 @@ fn escape_analysis_with(
                                     defs.get(&root)
                                 {
                                     pairs.iter().any(|(k, _)| {
-                                        resolve_const_string(*k, &defs, program) == Some(prop_name.clone())
+                                        resolve_const_string(*k, &defs, program)
+                                            == Some(prop_name.clone())
                                     })
                                 } else {
                                     false
@@ -4313,7 +4315,7 @@ mod dead_phi_tests {
         // while block 8 is both the ordinary done path and the delegate-completion path. Both
         // targets must have complete phis before C emission is allowed to run.
         let proto = FunctionProto {
-        inferred_name: None,
+            inferred_name: None,
             span: Span::default(),
             prologue_end: 0,
             asynchronous: false,

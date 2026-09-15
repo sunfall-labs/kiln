@@ -117,7 +117,7 @@ pub fn parallel_safe(graph: &FunctionGraph, proto: &FunctionProto, program: &Pro
                         && match program.constants.get(*name as usize) {
                             Some(Constant::String(key)) => PARALLEL_MATH
                                 .iter()
-                        .any(|(k, n)| key == *k && *n == args.len()),
+                                .any(|(k, n)| key == *k && *n == args.len()),
                             _ => false,
                         }
                 } else {
@@ -139,7 +139,7 @@ mod tests {
 
     fn proto(code: Vec<Instruction>, parameter_count: u32) -> FunctionProto {
         FunctionProto {
-        inferred_name: None,
+            inferred_name: None,
             span: kiln_ir::Span::default(),
             prologue_end: 0,
             declared_length: parameter_count,

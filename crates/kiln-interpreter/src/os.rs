@@ -98,7 +98,10 @@ pub(crate) fn os_fact(fact: OsFact) -> Value {
 
 pub(crate) fn network_interfaces() -> Value {
     let loopback = Value::Array(ArrayData::new(vec![ordinary_object([
-        ("address".to_owned(), Value::String("127.0.0.1".to_owned().into())),
+        (
+            "address".to_owned(),
+            Value::String("127.0.0.1".to_owned().into()),
+        ),
         ("family".to_owned(), Value::String("IPv4".to_owned().into())),
         ("internal".to_owned(), Value::Boolean(true)),
     ])]));

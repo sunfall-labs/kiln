@@ -1906,7 +1906,10 @@ impl Lowerer<'_> {
                             | HirAssignmentOperator::Nullish
                     )
                 {
-                    name_anonymous_function(&mut value, &StringUnits::from(identifier.name.as_str()));
+                    name_anonymous_function(
+                        &mut value,
+                        &StringUnits::from(identifier.name.as_str()),
+                    );
                 }
                 return self.assign_to(&expression.left, operator, value, expression_span);
             }
@@ -2718,7 +2721,10 @@ impl Lowerer<'_> {
                                 name_anonymous_function(value, name);
                             }
                             kiln_hir::ObjectKey::Private(name) => {
-                                name_anonymous_function(value, &StringUnits::from(format!("#{name}")));
+                                name_anonymous_function(
+                                    value,
+                                    &StringUnits::from(format!("#{name}")),
+                                );
                             }
                             kiln_hir::ObjectKey::Computed(_) => {}
                         }
@@ -2784,7 +2790,8 @@ impl Lowerer<'_> {
                     // is not an identifier character, so this can never collide with a `#x` the
                     // class declares, and nothing can reach the storage except the two
                     // functions below.
-                    let storage = format!("%accessor:{}:{}", accessor.span.start, accessor.span.end);
+                    let storage =
+                        format!("%accessor:{}:{}", accessor.span.start, accessor.span.end);
                     let member_span = span(accessor.span);
                     let this = || HirExpression {
                         kind: HirExpressionKind::This,
@@ -4188,12 +4195,14 @@ mod tests {
     fn defaulted_function_name(pattern: &kiln_hir::Pattern) -> Option<Option<String>> {
         match pattern {
             kiln_hir::Pattern::WithDefault { default, .. } => match &default.kind {
-                HirExpressionKind::Function(function) => Some(
-                    function
-                        .name
-                        .clone()
-                        .or_else(|| function.inferred_name.as_ref().map(StringUnits::to_lossy_string)),
-                ),
+                HirExpressionKind::Function(function) => {
+                    Some(function.name.clone().or_else(|| {
+                        function
+                            .inferred_name
+                            .as_ref()
+                            .map(StringUnits::to_lossy_string)
+                    }))
+                }
                 _ => None,
             },
             kiln_hir::Pattern::Array { elements, .. } => {
@@ -4299,10 +4308,12 @@ mod tests {
             let HirExpressionKind::Function(function) = &value.kind else {
                 panic!("{source}: expected a function on the right");
             };
-            let display_name = function
-                .name
-                .clone()
-                .or_else(|| function.inferred_name.as_ref().map(StringUnits::to_lossy_string));
+            let display_name = function.name.clone().or_else(|| {
+                function
+                    .inferred_name
+                    .as_ref()
+                    .map(StringUnits::to_lossy_string)
+            });
             assert_eq!(display_name.as_deref(), expected, "{source}");
         }
     }

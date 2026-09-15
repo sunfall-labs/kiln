@@ -38,6 +38,20 @@
 #
 # Bundles small enough to read are committed; the large ones are gitignored, and this skips them
 # with a note rather than failing, because a checkout that has not run build.sh is not broken.
+# `wait -n` and `BASHPID` need bash 4.3 or newer. macOS ships 3.2 as /bin/bash, and under it this
+# script's cleanup trap deletes the shared results directory instead of its own while the script
+# still exits 0. Re-exec once under a bash that has them, the way scripts/gate.sh does.
+if [[ ${BASH_VERSINFO[0]} -lt 4 ]]; then
+	for candidate in /opt/homebrew/bin/bash /usr/local/bin/bash "$(command -v bash)"; do
+		# shellcheck disable=SC2016
+		if [[ -x $candidate ]] && [[ $("$candidate" -c 'echo ${BASH_VERSINFO[0]}') -ge 4 ]]; then
+			exec "$candidate" "${BASH_SOURCE[0]}" "$@"
+		fi
+	done
+	echo "thirdparty.sh: needs bash 4 or newer; install one (brew install bash)" >&2
+	exit 1
+fi
+
 set -euo pipefail
 
 # shellcheck source-path=SCRIPTDIR
