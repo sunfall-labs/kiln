@@ -240,6 +240,18 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
                 }
                 KILN_C99_ABSENT("a reserved slot nobody set on this array", out);
             }
+            /* A negative number is not an element: it names a property ("-2")
+             * the array does not have, which reads as undefined rather than
+             * failing argument validation. */
+            if (key.tag == KILN_VALUE_NUMBER) {
+                kiln_value text = kiln_c99_property_key(key);
+                if (text.tag != KILN_VALUE_STRING) {
+                    KILN_C99_REFUSE("a computed property key that is neither a string nor a named symbol "
+                                    "slot");
+                }
+                return kiln_c99_get_key(host, target, (const kiln_string *)text.ptr, NULL,
+                                        out, depth, thrown);
+            }
             return key.tag == KILN_VALUE_STRING
                        ? kiln_c99_get_key(host, target, (const kiln_string *)key.ptr, NULL, out,
                                           depth, thrown)

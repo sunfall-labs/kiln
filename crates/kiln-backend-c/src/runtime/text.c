@@ -506,8 +506,14 @@ static int kiln_c99_text_append_c(kiln_text *text, const char *literal) {
  * once per string rather than once per append. The builder is emptied as well, so an error path
  * further down that still calls `free(text.bytes)` frees nothing rather than freeing a block. */
 static kiln_value kiln_c99_text_value(kiln_text *text) {
-    kiln_value result = text->len == 0 ? kiln_c99_value(KILN_VALUE_STRING, 0, NULL, 0)
-                                       : kiln_c99_copy_text(text->bytes, text->len);
+    /* An empty build answers the shared empty header like every other
+     * constructor (`static_text`, `copy_text`, `val_from_text`): a NULL
+     * pointer is not a string here, and `concat` and `strict_equal`
+     * answer `undefined` and `false` for one. */
+    kiln_value result = text->len == 0
+                            ? kiln_c99_value(KILN_VALUE_STRING, 0,
+                                             (const char *)&kiln_c99_empty_string, 0)
+                            : kiln_c99_copy_text(text->bytes, text->len);
     if (!text->borrowed) free(text->bytes);
     text->borrowed = 0;
     text->bytes = NULL;

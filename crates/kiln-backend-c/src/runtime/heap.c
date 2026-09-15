@@ -3214,9 +3214,10 @@ static char *kiln_c99_gc_alloc_text_tenured(size_t len) {
  * part's header is complete and its `len` body bytes are the caller's to fill immediately, which
  * is `kiln_c99_gc_alloc_text`'s contract unchanged.
  *
- * The parts are marked known-ASCII because the only caller splits a string whose code units are
- * already its bytes, which is what spares the next reader of a part the scan in
- * `kiln_c99_string_is_ascii`. */
+ * The parts are left without an ASCII verdict like every other fresh string: the caller
+ * splits units that are bytes, but bytes are not ASCII -- a Latin1 part would otherwise
+ * read as ASCII from the block cache and serialize its raw units as UTF-8. The first
+ * asker scans once and caches the true answer. */
 static size_t kiln_c99_gc_alloc_text_run(size_t count, const size_t *lens, char **out) {
     kiln_gc_heap *heap = kiln_c99_gc_heap();
     kiln_gc_nursery *nursery;
@@ -3255,8 +3256,7 @@ static size_t kiln_c99_gc_alloc_text_run(size_t count, const size_t *lens, char 
         kiln_string *header;
         char *bytes;
         nursery->bitmap[bit_idx >> 6] |= ((uint64_t)1 << (bit_idx & 63));
-        block->kind = KILN_GC_STRING | KILN_GC_FLAG_NURSERY | KILN_GC_FLAG_ASCII_KNOWN |
-                      KILN_GC_FLAG_ASCII;
+        block->kind = KILN_GC_STRING | KILN_GC_FLAG_NURSERY;
         block->mark = 0;
         block->size = payload;
         block->prev = NULL;

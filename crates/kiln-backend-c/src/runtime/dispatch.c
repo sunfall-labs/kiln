@@ -4447,8 +4447,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 }
             }
             if (custom.tag == KILN_VALUE_STRING) {
+                /* The tag is a string *value*, whose pointer names the header:
+                 * appending its bytes would serialize the header's metadata. */
                 if (kiln_c99_text_append_c(&built, "[object ") != KILN_C99_OK ||
-                    kiln_c99_text_append(&built, custom.ptr, custom.len) != KILN_C99_OK ||
+                    kiln_c99_text_append_string(&built, custom) != KILN_C99_OK ||
                     kiln_c99_text_append_c(&built, "]") != KILN_C99_OK) {
                     free(built.bytes);
                     return KILN_C99_OUT_OF_MEMORY;
@@ -4757,12 +4759,12 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 status = kiln_c99_new_array(&snapshot);
                 for (index = 0; index < (size_t)count && status == KILN_C99_OK; ++index) {
                     kiln_value element;
-                    kiln_value key = kiln_c99_property_key(kiln_c99_number((double)index));
-                    if (key.tag != KILN_VALUE_STRING) {
-                        return KILN_C99_OUT_OF_MEMORY;
-                    }
-                    status = kiln_c99_get(host, receiver, key.ptr, key.len, &element, depth,
-                                          thrown);
+                    /* The index as a value, not as bytes: a boundary string's
+                     * pointer names its header, and reading the header as key
+                     * bytes misses every element. */
+                    status = kiln_c99_get_computed(host, receiver,
+                                                   kiln_c99_number((double)index),
+                                                   &element, depth, thrown);
                     if (status != KILN_C99_OK) {
                         return status;
                     }
