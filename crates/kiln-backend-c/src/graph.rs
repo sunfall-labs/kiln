@@ -2884,7 +2884,9 @@ pub fn build_function_graph(
 
     graph.blocks = basic_blocks;
     eliminate_dead_code(&mut graph);
+    canonicalize_loop_preheaders(&mut graph);
     hoist_loop_invariants(&mut graph);
+    eliminate_common_subexpressions(&mut graph);
     simplify_trivial_phis(&mut graph);
     eliminate_dead_code(&mut graph);
     compact_value_ids(&mut graph);
@@ -2990,22 +2992,16 @@ pub fn eliminate_dead_code(graph: &mut FunctionGraph) {
     }
 }
 
-/// Hoist loop-invariant pure operations out of loops into preheaders (LICM, ADR 0061).
+/// Compute the dominator set for each basic block in `graph`.
 ///
-/// An operation can be hoisted if:
-/// 1. Its effects are `Effects::PURE` (cannot throw, allocate, call user code, or touch heap/host).
-/// 2. It is not a Phi, StoreLocal, or generator/handler special op.
-/// 3. All of its operands are loop-invariant (defined outside the loop or already hoisted).
-/// 4. The loop has a well-defined single preheader block that dominates the loop header.
-pub fn hoist_loop_invariants(graph: &mut FunctionGraph) {
-    if graph.blocks.len() < 2 {
-        return;
-    }
-    let proven_numbers = proven_numbers(graph);
-
-    // Step 1: Compute dominators for all blocks.
-    let all_blocks: HashSet<BlockId> = graph.blocks.iter().map(|b| b.id).collect();
+/// A block `D` dominates `B` if every control-flow path from `graph.entry_block` to `B`
+/// must pass through `D`.
+pub fn compute_dominators(graph: &FunctionGraph) -> HashMap<BlockId, HashSet<BlockId>> {
     let mut dominators: HashMap<BlockId, HashSet<BlockId>> = HashMap::new();
+    if graph.blocks.is_empty() {
+        return dominators;
+    }
+    let all_blocks: HashSet<BlockId> = graph.blocks.iter().map(|b| b.id).collect();
 
     let mut entry_dom = HashSet::new();
     entry_dom.insert(graph.entry_block);
@@ -3038,9 +3034,16 @@ pub fn hoist_loop_invariants(graph: &mut FunctionGraph) {
             }
         }
     }
+    dominators
+}
 
-    // Step 2: Find back-edges and natural loops.
-    // A back-edge is an edge B -> H where H dominates B.
+/// Find all natural loops in `graph` given precomputed `dominators`.
+///
+/// Returns a map from loop header `BlockId` to the set of `BlockId`s belonging to the loop.
+pub fn find_natural_loops(
+    graph: &FunctionGraph,
+    dominators: &HashMap<BlockId, HashSet<BlockId>>,
+) -> HashMap<BlockId, HashSet<BlockId>> {
     let mut loops: HashMap<BlockId, HashSet<BlockId>> = HashMap::new();
     for block in &graph.blocks {
         let b_id = block.id;
@@ -3071,6 +3074,183 @@ pub fn hoist_loop_invariants(graph: &mut FunctionGraph) {
             }
         }
     }
+    loops
+}
+
+/// Ensure every natural loop has a dedicated, single preheader block that jumps directly to the header.
+///
+/// If a loop header has multiple outside predecessors (e.g. entered from an if-else) or if its outside
+/// predecessor does not end in a simple Jump to the header, a synthetic preheader trampoline is created.
+/// Outside edges are retargeted to the preheader, and any phis in the header are appropriately split.
+pub fn canonicalize_loop_preheaders(graph: &mut FunctionGraph) {
+    if graph.blocks.len() < 2 {
+        return;
+    }
+    for _ in 0..=graph.blocks.len() {
+        let dominators = compute_dominators(graph);
+        let loops = find_natural_loops(graph, &dominators);
+        let mut synthesized = false;
+
+        let mut header_ids: Vec<BlockId> = loops.keys().copied().collect();
+        header_ids.sort_by_key(|b| b.0);
+
+        for header_id in header_ids {
+            let loop_blocks = &loops[&header_id];
+            let header_idx = match graph.blocks.iter().position(|b| b.id == header_id) {
+                Some(idx) => idx,
+                None => continue,
+            };
+
+            // If any block in the loop can suspend, skip
+            if loop_blocks.iter().any(|&b_id| {
+                graph
+                    .blocks
+                    .iter()
+                    .find(|b| b.id == b_id)
+                    .is_some_and(|b| matches!(b.terminator, Terminator::Suspend { .. }))
+            }) {
+                continue;
+            }
+
+            let outside_preds: Vec<BlockId> = graph.blocks[header_idx]
+                .predecessors
+                .iter()
+                .filter(|p| !loop_blocks.contains(p))
+                .copied()
+                .collect();
+
+            if outside_preds.is_empty() {
+                continue;
+            }
+
+            // Check if already canonical: single outside predecessor that jumps directly to header
+            if outside_preds.len() == 1 {
+                let pred_id = outside_preds[0];
+                if let Some(pred_block) = graph.blocks.iter().find(|b| b.id == pred_id)
+                    && matches!(pred_block.terminator, Terminator::Jump(target) if target == header_id)
+                    && pred_block.successors.len() == 1
+                {
+                    continue;
+                }
+            }
+
+            // We need a synthetic preheader.
+            synthesized = true;
+            let new_bid = BlockId(graph.blocks.iter().map(|b| b.id.0).max().unwrap_or(0) + 1);
+
+            // Rewrite outside predecessors to jump to new_bid instead of header_id
+            for &pred_id in &outside_preds {
+                if let Some(pred_block) = graph.blocks.iter_mut().find(|b| b.id == pred_id) {
+                    match &mut pred_block.terminator {
+                        Terminator::Jump(target) if *target == header_id => {
+                            *target = new_bid;
+                        }
+                        Terminator::Branch {
+                            true_block,
+                            false_block,
+                            ..
+                        }
+                        | Terminator::BranchNotNullish {
+                            true_block,
+                            false_block,
+                            ..
+                        } => {
+                            if *true_block == header_id {
+                                *true_block = new_bid;
+                            }
+                            if *false_block == header_id {
+                                *false_block = new_bid;
+                            }
+                        }
+                        _ => {}
+                    }
+                    for succ in &mut pred_block.successors {
+                        if *succ == header_id {
+                            *succ = new_bid;
+                        }
+                    }
+                }
+            }
+
+            // Build phis for the new preheader and rewrite header phis
+            let mut preheader_ops: Vec<(ValueId, GraphOp)> = Vec::new();
+            let mut next_vid = graph.next_value_id;
+            let header_block = &mut graph.blocks[header_idx];
+
+            header_block
+                .predecessors
+                .retain(|p| loop_blocks.contains(p));
+            header_block.predecessors.push(new_bid);
+
+            for (_, op) in &mut header_block.operations {
+                if let GraphOp::Phi { inputs } = op {
+                    let mut outside_inputs: Vec<(BlockId, ValueId)> = Vec::new();
+                    let mut loop_inputs: Vec<(BlockId, ValueId)> = Vec::new();
+
+                    for (pred_b, in_vid) in inputs.drain(..) {
+                        if outside_preds.contains(&pred_b) {
+                            outside_inputs.push((pred_b, in_vid));
+                        } else {
+                            loop_inputs.push((pred_b, in_vid));
+                        }
+                    }
+
+                    if outside_inputs.len() == 1 {
+                        loop_inputs.push((new_bid, outside_inputs[0].1));
+                        *inputs = loop_inputs;
+                    } else if outside_inputs.len() > 1 {
+                        let preheader_phi_vid = ValueId(next_vid);
+                        next_vid += 1;
+                        preheader_ops.push((
+                            preheader_phi_vid,
+                            GraphOp::Phi {
+                                inputs: outside_inputs,
+                            },
+                        ));
+                        loop_inputs.push((new_bid, preheader_phi_vid));
+                        *inputs = loop_inputs;
+                    }
+                }
+            }
+            graph.next_value_id = next_vid;
+
+            let is_entry = header_id == graph.entry_block;
+            let preheader_block = BasicBlock {
+                id: new_bid,
+                operations: preheader_ops,
+                terminator: Terminator::Jump(header_id),
+                predecessors: outside_preds,
+                successors: vec![header_id],
+                exception_handler: None,
+            };
+
+            graph.blocks.push(preheader_block);
+            if is_entry {
+                graph.entry_block = new_bid;
+            }
+            break;
+        }
+
+        if !synthesized {
+            break;
+        }
+    }
+}
+
+/// Hoist loop-invariant pure operations out of loops into preheaders (LICM, ADR 0061).
+///
+/// An operation can be hoisted if:
+/// 1. Its effects are `Effects::PURE` (cannot throw, allocate, call user code, or touch heap/host).
+/// 2. It is not a Phi, StoreLocal, or generator/handler special op.
+/// 3. All of its operands are loop-invariant (defined outside the loop or already hoisted).
+/// 4. The loop has a well-defined single preheader block that dominates the loop header.
+pub fn hoist_loop_invariants(graph: &mut FunctionGraph) {
+    if graph.blocks.len() < 2 {
+        return;
+    }
+    let proven_numbers = proven_numbers(graph);
+    let dominators = compute_dominators(graph);
+    let loops = find_natural_loops(graph, &dominators);
 
     if loops.is_empty() {
         return;
@@ -3206,6 +3386,223 @@ pub fn hoist_loop_invariants(graph: &mut FunctionGraph) {
                 graph.blocks[preheader_idx].operations.push((vid, op));
             }
         }
+    }
+}
+
+/// Expression key for Dominator-Based Global Common Subexpression Elimination (CSE).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum CseKey {
+    Const(Constant),
+    Unary(UnaryOp, ValueId),
+    Binary(BinaryOp, ValueId, ValueId),
+    LoadBuiltin(kiln_ir::Builtin),
+    LoadThis,
+    LoadNewTarget,
+    IsReturnSignal(ValueId),
+}
+
+/// Compute the immediate dominator tree: maps each block to the children it immediately dominates.
+pub fn compute_dominator_tree(
+    graph: &FunctionGraph,
+    dominators: &HashMap<BlockId, HashSet<BlockId>>,
+) -> HashMap<BlockId, Vec<BlockId>> {
+    let mut dom_children: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
+    for block in &graph.blocks {
+        if block.id == graph.entry_block {
+            continue;
+        }
+        if let Some(doms) = dominators.get(&block.id) {
+            let mut best_idom: Option<(BlockId, usize)> = None;
+            for &d in doms {
+                if d != block.id {
+                    let d_size = dominators.get(&d).map_or(0, |s| s.len());
+                    if best_idom.is_none() || d_size > best_idom.unwrap().1 {
+                        best_idom = Some((d, d_size));
+                    }
+                }
+            }
+            if let Some((idom, _)) = best_idom {
+                dom_children.entry(idom).or_default().push(block.id);
+            }
+        }
+    }
+    for children in dom_children.values_mut() {
+        children.sort_by_key(|b| b.0);
+    }
+    dom_children
+}
+
+fn remap_graph_operands(graph: &mut FunctionGraph, map: impl Fn(ValueId) -> ValueId) {
+    for block in &mut graph.blocks {
+        for (_, op) in &mut block.operations {
+            op.map_operands(&map);
+        }
+        match &mut block.terminator {
+            Terminator::Return(Some(value))
+            | Terminator::Throw(value)
+            | Terminator::Branch {
+                condition: value, ..
+            }
+            | Terminator::BranchNotNullish {
+                condition: value, ..
+            } => *value = map(*value),
+            Terminator::Suspend {
+                value,
+                spilled,
+                delegate,
+                ..
+            } => {
+                *value = map(*value);
+                if let Some((iter, _, _)) = delegate {
+                    *iter = map(*iter);
+                }
+                for value in spilled {
+                    *value = map(*value);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Deduplicate identical pure expressions across dominating basic blocks (Global CSE).
+pub fn eliminate_common_subexpressions(graph: &mut FunctionGraph) {
+    if graph.blocks.len() < 2 {
+        return;
+    }
+    let dominators = compute_dominators(graph);
+    let dom_tree = compute_dominator_tree(graph, &dominators);
+    let proven_numbers = proven_numbers(graph);
+
+    let mut available: HashMap<CseKey, ValueId> = HashMap::new();
+    let mut history: Vec<(CseKey, Option<ValueId>)> = Vec::new();
+    let mut replacements: HashMap<ValueId, ValueId> = HashMap::new();
+    let mut ops_to_remove: HashSet<ValueId> = HashSet::new();
+
+    fn resolve_alias(replacements: &HashMap<ValueId, ValueId>, mut v: ValueId) -> ValueId {
+        while let Some(&next) = replacements.get(&v) {
+            v = next;
+        }
+        v
+    }
+
+    fn to_cse_key(
+        op: &GraphOp,
+        proven_numbers: &HashSet<ValueId>,
+        replacements: &HashMap<ValueId, ValueId>,
+    ) -> Option<CseKey> {
+        if op.effects_with_proven_numbers(proven_numbers) != Effects::PURE {
+            return None;
+        }
+        match op {
+            GraphOp::Const { constant, .. } => Some(CseKey::Const(constant.clone())),
+            GraphOp::Unary { op, value } => {
+                let v = resolve_alias(replacements, *value);
+                Some(CseKey::Unary(*op, v))
+            }
+            GraphOp::Binary { op, left, right } => {
+                let mut l = resolve_alias(replacements, *left);
+                let mut r = resolve_alias(replacements, *right);
+                if matches!(
+                    op,
+                    BinaryOp::Add
+                        | BinaryOp::Multiply
+                        | BinaryOp::BitwiseAnd
+                        | BinaryOp::BitwiseOr
+                        | BinaryOp::BitwiseXor
+                        | BinaryOp::StrictEqual
+                        | BinaryOp::StrictNotEqual
+                ) && l.0 > r.0
+                {
+                    std::mem::swap(&mut l, &mut r);
+                }
+                Some(CseKey::Binary(*op, l, r))
+            }
+            GraphOp::LoadBuiltin(b) => Some(CseKey::LoadBuiltin(*b)),
+            GraphOp::LoadThis => Some(CseKey::LoadThis),
+            GraphOp::LoadNewTarget => Some(CseKey::LoadNewTarget),
+            GraphOp::IsReturnSignal(v) => {
+                Some(CseKey::IsReturnSignal(resolve_alias(replacements, *v)))
+            }
+            _ => None,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn traverse(
+        block_id: BlockId,
+        graph: &FunctionGraph,
+        dom_tree: &HashMap<BlockId, Vec<BlockId>>,
+        proven_numbers: &HashSet<ValueId>,
+        available: &mut HashMap<CseKey, ValueId>,
+        history: &mut Vec<(CseKey, Option<ValueId>)>,
+        replacements: &mut HashMap<ValueId, ValueId>,
+        ops_to_remove: &mut HashSet<ValueId>,
+    ) {
+        let checkpoint = history.len();
+        if let Some(block) = graph.block(block_id) {
+            for (vid, op) in &block.operations {
+                if let Some(key) = to_cse_key(op, proven_numbers, replacements) {
+                    if let Some(&existing_vid) = available.get(&key) {
+                        replacements.insert(*vid, existing_vid);
+                        ops_to_remove.insert(*vid);
+                    } else {
+                        let old = available.insert(key.clone(), *vid);
+                        history.push((key, old));
+                    }
+                }
+            }
+        }
+
+        if let Some(children) = dom_tree.get(&block_id) {
+            for &child in children {
+                traverse(
+                    child,
+                    graph,
+                    dom_tree,
+                    proven_numbers,
+                    available,
+                    history,
+                    replacements,
+                    ops_to_remove,
+                );
+            }
+        }
+
+        while history.len() > checkpoint {
+            let (key, old) = history.pop().unwrap();
+            match old {
+                Some(val) => {
+                    available.insert(key, val);
+                }
+                None => {
+                    available.remove(&key);
+                }
+            }
+        }
+    }
+
+    traverse(
+        graph.entry_block,
+        graph,
+        &dom_tree,
+        &proven_numbers,
+        &mut available,
+        &mut history,
+        &mut replacements,
+        &mut ops_to_remove,
+    );
+
+    if !replacements.is_empty() {
+        for block in &mut graph.blocks {
+            block
+                .operations
+                .retain(|(vid, _)| !ops_to_remove.contains(vid));
+        }
+        let resolve = |v: ValueId| resolve_alias(&replacements, v);
+        remap_graph_operands(graph, resolve);
+        simplify_trivial_phis(graph);
+        eliminate_dead_code(graph);
     }
 }
 
@@ -4905,5 +5302,317 @@ mod dead_phi_tests {
             body_ops.contains(&ValueId(4)),
             "invariant op must remain in loop body"
         );
+    }
+
+    #[test]
+    fn canonicalize_loop_preheaders_synthesizes_trampoline_for_multi_pred_loop() {
+        let mut graph = FunctionGraph::new(None, 0, 0);
+        graph.next_value_id = 10;
+        graph.blocks = vec![
+            // Block 0: outside pred 1
+            BasicBlock {
+                id: BlockId(0),
+                operations: vec![(
+                    ValueId(0),
+                    GraphOp::Const {
+                        index: 0,
+                        constant: Constant::Number(1),
+                    },
+                )],
+                terminator: Terminator::Branch {
+                    condition: ValueId(0),
+                    true_block: BlockId(1),
+                    false_block: BlockId(2),
+                },
+                predecessors: vec![],
+                successors: vec![BlockId(1), BlockId(2)],
+                exception_handler: None,
+            },
+            // Block 1: outside pred 2
+            BasicBlock {
+                id: BlockId(1),
+                operations: vec![(
+                    ValueId(1),
+                    GraphOp::Const {
+                        index: 1,
+                        constant: Constant::Number(2),
+                    },
+                )],
+                terminator: Terminator::Jump(BlockId(2)),
+                predecessors: vec![BlockId(0)],
+                successors: vec![BlockId(2)],
+                exception_handler: None,
+            },
+            // Block 2: Loop Header (has 2 outside preds: 0 and 1, plus back edge from 3)
+            BasicBlock {
+                id: BlockId(2),
+                operations: vec![(
+                    ValueId(2),
+                    GraphOp::Phi {
+                        inputs: vec![
+                            (BlockId(0), ValueId(0)),
+                            (BlockId(1), ValueId(1)),
+                            (BlockId(3), ValueId(5)),
+                        ],
+                    },
+                )],
+                terminator: Terminator::Branch {
+                    condition: ValueId(2),
+                    true_block: BlockId(3),
+                    false_block: BlockId(4),
+                },
+                predecessors: vec![BlockId(0), BlockId(1), BlockId(3)],
+                successors: vec![BlockId(3), BlockId(4)],
+                exception_handler: None,
+            },
+            // Block 3: Loop Body (back edge to 2)
+            BasicBlock {
+                id: BlockId(3),
+                operations: vec![(
+                    ValueId(5),
+                    GraphOp::Binary {
+                        op: BinaryOp::Add,
+                        left: ValueId(2),
+                        right: ValueId(0),
+                    },
+                )],
+                terminator: Terminator::Jump(BlockId(2)),
+                predecessors: vec![BlockId(2)],
+                successors: vec![BlockId(2)],
+                exception_handler: None,
+            },
+            // Block 4: Exit
+            BasicBlock {
+                id: BlockId(4),
+                operations: vec![],
+                terminator: Terminator::Return(Some(ValueId(2))),
+                predecessors: vec![BlockId(2)],
+                successors: vec![],
+                exception_handler: None,
+            },
+        ];
+
+        canonicalize_loop_preheaders(&mut graph);
+
+        // A new preheader should have been synthesized
+        assert_eq!(graph.blocks.len(), 6);
+        let header = graph.block(BlockId(2)).unwrap();
+        // The header must now have exactly 2 predecessors: the synthesized preheader and back-edge Block 3
+        assert_eq!(header.predecessors.len(), 2);
+        assert!(header.predecessors.contains(&BlockId(3)));
+        let preheader_id = header
+            .predecessors
+            .iter()
+            .copied()
+            .find(|&p| p != BlockId(3))
+            .unwrap();
+
+        let preheader = graph.block(preheader_id).unwrap();
+        assert_eq!(preheader.terminator, Terminator::Jump(BlockId(2)));
+        assert_eq!(preheader.successors, vec![BlockId(2)]);
+        assert!(preheader.predecessors.contains(&BlockId(0)));
+        assert!(preheader.predecessors.contains(&BlockId(1)));
+
+        // Verify that outside predecessors now jump/branch to preheader_id instead of Block 2
+        let block0 = graph.block(BlockId(0)).unwrap();
+        assert_eq!(
+            block0.terminator,
+            Terminator::Branch {
+                condition: ValueId(0),
+                true_block: BlockId(1),
+                false_block: preheader_id,
+            }
+        );
+        let block1 = graph.block(BlockId(1)).unwrap();
+        assert_eq!(block1.terminator, Terminator::Jump(preheader_id));
+
+        // Header phi inputs should now come from preheader_id and Block 3
+        let (_, header_phi) = &header.operations[0];
+        if let GraphOp::Phi { inputs } = header_phi {
+            assert_eq!(inputs.len(), 2);
+            assert!(inputs.iter().any(|(b, _)| *b == preheader_id));
+            assert!(
+                inputs
+                    .iter()
+                    .any(|(b, v)| *b == BlockId(3) && *v == ValueId(5))
+            );
+        } else {
+            panic!("expected Phi operation in header");
+        }
+    }
+
+    #[test]
+    fn eliminate_common_subexpressions_deduplicates_pure_ops_and_canonicalizes_commutative() {
+        let mut graph = FunctionGraph::new(None, 0, 0);
+        graph.next_value_id = 20;
+        graph.blocks = vec![
+            // Block 0: defines constants and binary expression v2 = v0 + v1
+            BasicBlock {
+                id: BlockId(0),
+                operations: vec![
+                    (
+                        ValueId(0),
+                        GraphOp::Const {
+                            index: 0,
+                            constant: Constant::Number(42),
+                        },
+                    ),
+                    (
+                        ValueId(1),
+                        GraphOp::Const {
+                            index: 1,
+                            constant: Constant::Number(100),
+                        },
+                    ),
+                    (
+                        ValueId(2),
+                        GraphOp::Binary {
+                            op: BinaryOp::Add,
+                            left: ValueId(0),
+                            right: ValueId(1),
+                        },
+                    ),
+                ],
+                terminator: Terminator::Jump(BlockId(1)),
+                predecessors: vec![],
+                successors: vec![BlockId(1)],
+                exception_handler: None,
+            },
+            // Block 1 (dominated by Block 0): defines v3 = v1 + v0 (commutative duplicate of v2!)
+            // and v4 = v3 + v2 (which should become v2 + v2)
+            BasicBlock {
+                id: BlockId(1),
+                operations: vec![
+                    (
+                        ValueId(3),
+                        GraphOp::Binary {
+                            op: BinaryOp::Add,
+                            left: ValueId(1),
+                            right: ValueId(0),
+                        },
+                    ),
+                    (
+                        ValueId(4),
+                        GraphOp::Binary {
+                            op: BinaryOp::Add,
+                            left: ValueId(3),
+                            right: ValueId(2),
+                        },
+                    ),
+                ],
+                terminator: Terminator::Return(Some(ValueId(4))),
+                predecessors: vec![BlockId(0)],
+                successors: vec![],
+                exception_handler: None,
+            },
+        ];
+
+        eliminate_common_subexpressions(&mut graph);
+
+        let block1 = graph.block(BlockId(1)).unwrap();
+        // v3 must have been eliminated
+        assert!(
+            !block1.operations.iter().any(|(v, _)| *v == ValueId(3)),
+            "v3 should have been eliminated by CSE"
+        );
+        // v4 must now reference v2 instead of v3
+        let v4_op = block1
+            .operations
+            .iter()
+            .find(|(v, _)| *v == ValueId(4))
+            .map(|(_, op)| op)
+            .unwrap();
+        assert_eq!(
+            v4_op,
+            &GraphOp::Binary {
+                op: BinaryOp::Add,
+                left: ValueId(2),
+                right: ValueId(2),
+            }
+        );
+    }
+
+    #[test]
+    fn eliminate_common_subexpressions_does_not_dedup_across_disjoint_branches() {
+        let mut graph = FunctionGraph::new(None, 0, 0);
+        graph.next_value_id = 20;
+        graph.blocks = vec![
+            BasicBlock {
+                id: BlockId(0),
+                operations: vec![
+                    (
+                        ValueId(0),
+                        GraphOp::Const {
+                            index: 0,
+                            constant: Constant::Number(1),
+                        },
+                    ),
+                    (
+                        ValueId(1),
+                        GraphOp::Const {
+                            index: 1,
+                            constant: Constant::Number(2),
+                        },
+                    ),
+                ],
+                terminator: Terminator::Branch {
+                    condition: ValueId(0),
+                    true_block: BlockId(1),
+                    false_block: BlockId(2),
+                },
+                predecessors: vec![],
+                successors: vec![BlockId(1), BlockId(2)],
+                exception_handler: None,
+            },
+            // Block 1 (left branch)
+            BasicBlock {
+                id: BlockId(1),
+                operations: vec![(
+                    ValueId(2),
+                    GraphOp::Binary {
+                        op: BinaryOp::Add,
+                        left: ValueId(0),
+                        right: ValueId(1),
+                    },
+                )],
+                terminator: Terminator::Jump(BlockId(3)),
+                predecessors: vec![BlockId(0)],
+                successors: vec![BlockId(3)],
+                exception_handler: None,
+            },
+            // Block 2 (right branch - does NOT dominate and is NOT dominated by Block 1)
+            BasicBlock {
+                id: BlockId(2),
+                operations: vec![(
+                    ValueId(3),
+                    GraphOp::Binary {
+                        op: BinaryOp::Add,
+                        left: ValueId(0),
+                        right: ValueId(1),
+                    },
+                )],
+                terminator: Terminator::Jump(BlockId(3)),
+                predecessors: vec![BlockId(0)],
+                successors: vec![BlockId(3)],
+                exception_handler: None,
+            },
+            // Block 3 (merge)
+            BasicBlock {
+                id: BlockId(3),
+                operations: vec![],
+                terminator: Terminator::Return(None),
+                predecessors: vec![BlockId(1), BlockId(2)],
+                successors: vec![],
+                exception_handler: None,
+            },
+        ];
+
+        eliminate_common_subexpressions(&mut graph);
+
+        // Neither v2 nor v3 should be eliminated because neither block dominates the other
+        let block1 = graph.block(BlockId(1)).unwrap();
+        assert!(block1.operations.iter().any(|(v, _)| *v == ValueId(2)));
+        let block2 = graph.block(BlockId(2)).unwrap();
+        assert!(block2.operations.iter().any(|(v, _)| *v == ValueId(3)));
     }
 }
