@@ -98,6 +98,13 @@ fn oxc_static_key_units(key: &oxc_ast::ast::PropertyKey<'_>) -> Option<StringUni
                     quasi.lone_surrogates,
                 ));
             }
+            // A numeric literal key is `ToString` of its value, not its source
+            // spelling: `0.0000001` and `1e-7` name the same property.
+            Expression::NumericLiteral(literal) => {
+                return Some(StringUnits::from(
+                    kiln_host_abi::number_to_js_string(literal.value).as_str(),
+                ));
+            }
             _ => {}
         }
     }

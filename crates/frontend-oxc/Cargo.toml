@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 kiln-hir = { workspace = true }
+kiln-host-abi = { workspace = true }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 # `regular_expression` turns on the pattern parser behind `ParseOptions::parse_regular_expression`.
