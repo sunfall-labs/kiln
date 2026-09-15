@@ -149,6 +149,7 @@ fn oracle_frontend(_path: &str, text: &str) -> Module {
                             binds_own_name: false,
                             asynchronous: stripped.starts_with("async "),
                             name: Some(name),
+                            inferred_name: None,
                             arrow: false,
                             generator: false,
                             parameters: Vec::new(),
