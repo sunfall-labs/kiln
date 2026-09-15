@@ -341,13 +341,12 @@ pub(crate) fn emit_tail_instruction(
             .unwrap();
         }
         Instruction::DeletePropertyStrict { name, strict } => {
-            let Constant::String(text) = &constants[*name as usize] else {
+            let Constant::String(_) = &constants[*name as usize] else {
                 unreachable!("verification rejects a non-string property name before emission")
             };
             writeln!(
                 output,
-                "    {{ int answer; int status = kiln_c99_delete_or_throw(host, kiln_val_to_boundary(stack[sp - 1]), {symbol}_key_{name}, {}, {}, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = answer ? KILN_VAL_TRUE : KILN_VAL_FALSE; }}",
-                text.len(),
+                "    {{ int answer; int status = kiln_c99_delete_or_throw_key(host, kiln_val_to_boundary(stack[sp - 1]), {symbol}_key_{name}, {}, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = answer ? KILN_VAL_TRUE : KILN_VAL_FALSE; }}",
                 i32::from(*strict)
             )
             .unwrap();

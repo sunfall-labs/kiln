@@ -632,6 +632,12 @@ static int kiln_c99_throw_module_namespace_delete(kiln_value *thrown, const char
                                             key_len);
 }
 
+static int kiln_c99_throw_module_namespace_delete_key(kiln_value *thrown,
+                                                      const kiln_string *key) {
+    return kiln_c99_throw_named_key_text(
+        thrown, "Cannot delete module namespace property '", key, "'");
+}
+
 static int kiln_c99_throw_module_namespace_define(kiln_value *thrown, const char *key,
                                                   size_t key_len) {
     return kiln_c99_throw_module_namespace(thrown,
@@ -664,6 +670,11 @@ static int kiln_c99_throw_cannot_delete(kiln_value *thrown, const char *key, siz
     status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, built.bytes);
     free(built.bytes);
     return status;
+}
+
+static int kiln_c99_throw_cannot_delete_key(kiln_value *thrown, const kiln_string *key) {
+    return kiln_c99_throw_named_key_text(
+        thrown, "Cannot delete property '", key, "' of an object");
 }
 
 static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message) {
