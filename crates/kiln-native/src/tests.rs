@@ -3215,7 +3215,7 @@ fn successful_private_runs_require_one_well_formed_scalar_result() {
         Err(NativeError::RunResult { .. })
     ));
 
-    let expected = HostValue::String("line one\nline two\0".to_owned());
+    let expected = HostValue::String("line one\nline two\0".into());
     fs::write(
         &result_path,
         kiln_native_runtime::encode_native_result(&expected),
@@ -3552,8 +3552,8 @@ fn realm_scheduling_graph(project: &Path) -> ModuleGraph {
             source: "".into(),
             version: BYTECODE_VERSION,
             constants: vec![
-                Constant::String("dependency microtask".to_owned()),
-                Constant::String("dependency timer".to_owned()),
+                Constant::String("dependency microtask".into()),
+                Constant::String("dependency timer".into()),
                 Constant::Number(0.0_f64.to_bits()),
                 Constant::Undefined,
             ],
@@ -3636,7 +3636,7 @@ fn realm_scheduling_graph(project: &Path) -> ModuleGraph {
             source: "".into(),
             version: BYTECODE_VERSION,
             constants: vec![
-                Constant::String("entry body".to_owned()),
+                Constant::String("entry body".into()),
                 Constant::Undefined,
             ],
             code: vec![
@@ -6190,7 +6190,7 @@ fn a_second_build_reuses_every_material_artifact_and_runs() {
         source: "".into(),
         version: BYTECODE_VERSION,
         constants: vec![
-            Constant::String("native".to_owned()),
+            Constant::String("native".into()),
             Constant::Number(42.0_f64.to_bits()),
         ],
         code: vec![
@@ -6272,7 +6272,7 @@ fn embedded_shared_library_calls_host_without_cli_runtime_and_reuses_cache() {
         source: "".into(),
         version: BYTECODE_VERSION,
         constants: vec![
-            Constant::String("embedded\0tail=".to_owned()),
+            Constant::String("embedded\0tail=".into()),
             Constant::Number(0.1_f64.to_bits()),
         ],
         code: vec![
@@ -6503,7 +6503,7 @@ fn owned_result_scalar_api_copies_strings_and_is_idempotent() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
-        constants: vec![Constant::String("left\0right".to_owned())],
+        constants: vec![Constant::String("left\0right".into())],
         code: vec![Instruction::Const(0), Instruction::Return],
         local_count: 0,
         functions: Vec::new(),
@@ -6740,7 +6740,7 @@ fn owned_result_graph_api_preserves_uncaught_thrown_scalars() {
         program: Program {
             source: "".into(),
             version: BYTECODE_VERSION,
-            constants: vec![Constant::String("thrown\0value".to_owned())],
+            constants: vec![Constant::String("thrown\0value".into())],
             code: vec![Instruction::Const(0), Instruction::Throw],
             local_count: 0,
             functions: Vec::new(),
@@ -8223,7 +8223,7 @@ fn stdout_program(text: &str, result: f64) -> Program {
         source: "".into(),
         version: BYTECODE_VERSION,
         constants: vec![
-            Constant::String(text.to_owned()),
+            Constant::String(text.into()),
             Constant::Number(result.to_bits()),
         ],
         code: vec![
@@ -8253,7 +8253,7 @@ fn native_host_clock_is_explicit_while_default_date_stays_at_epoch() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
-        constants: vec![Constant::String("now".to_owned())],
+        constants: vec![Constant::String("now".into())],
         code: vec![
             Instruction::LoadBuiltin(kiln_ir::Builtin::Date),
             Instruction::CallMethod { name: 0, argc: 0 },
@@ -8371,7 +8371,7 @@ fn native_entropy_policy_is_reproducible_or_explicitly_host_backed() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
-        constants: vec![Constant::String("random".to_owned())],
+        constants: vec![Constant::String("random".into())],
         code: vec![
             Instruction::LoadBuiltin(kiln_ir::Builtin::Math),
             Instruction::CallMethod { name: 0, argc: 0 },
@@ -8546,7 +8546,7 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
         version: BYTECODE_VERSION,
         constants: string_numeric_inputs
             .into_iter()
-            .map(|value| Constant::String(value.to_owned()))
+            .map(|value| Constant::String(value.into()))
             .collect(),
         code: string_numeric_code,
         local_count: 0,
@@ -8563,7 +8563,7 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
         Constant::Null,
         Constant::Boolean(true),
         number(1.0),
-        Constant::String("x".to_owned()),
+        Constant::String("x".into()),
     ] {
         push_unary_result(
             &mut operator_constants,
@@ -8594,12 +8594,12 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
         ),
         (
             kiln_ir::BinaryOp::LooseEqual,
-            Constant::String("42".to_owned()),
+            Constant::String("42".into()),
             number(42.0),
         ),
         (
             kiln_ir::BinaryOp::LooseEqual,
-            Constant::String(String::new()),
+            Constant::String(String::new().into()),
             number(0.0),
         ),
         (kiln_ir::BinaryOp::LooseEqual, Constant::Null, number(0.0)),
@@ -8667,7 +8667,7 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
                     Constant::Number(0.0_f64.to_bits()),
                     Constant::Number(3.0_f64.to_bits()),
                     Constant::Number(1.0_f64.to_bits()),
-                    Constant::String("loop".to_owned()),
+                    Constant::String("loop".into()),
                 ],
                 code: vec![
                     Instruction::Const(0),
@@ -8700,7 +8700,7 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
                 source: "".into(),
                 version: BYTECODE_VERSION,
                 constants: vec![
-                    Constant::String("value=".to_owned()),
+                    Constant::String("value=".into()),
                     Constant::Number(40.0_f64.to_bits()),
                     Constant::Number(2.0_f64.to_bits()),
                 ],
@@ -8727,7 +8727,7 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
                 source: "".into(),
                 version: BYTECODE_VERSION,
                 constants: vec![
-                    Constant::String("v=".to_owned()),
+                    Constant::String("v=".into()),
                     Constant::Number(0.1_f64.to_bits()),
                     Constant::Number((1.0_f64 / 3.0).to_bits()),
                     Constant::Number((-0.0_f64).to_bits()),
@@ -8817,8 +8817,8 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
                 source: "".into(),
                 version: BYTECODE_VERSION,
                 constants: vec![
-                    Constant::String("😀".to_owned()),
-                    Constant::String("\u{e000}".to_owned()),
+                    Constant::String("😀".into()),
+                    Constant::String("\u{e000}".into()),
                 ],
                 code: vec![
                     Instruction::Const(0),

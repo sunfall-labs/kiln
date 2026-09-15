@@ -115,7 +115,12 @@ static int kiln_c99_get_with_receiver(kiln_host *host, kiln_value target, kiln_v
             current = object->prototype;
         }
     }
-    if (name.tag == KILN_VALUE_STRING) {
+    /* The keyed fast path is for ordinary objects: elemented targets
+     * (arrays above all) read through `get_computed`, which is also what
+     * this function did for every target before the headed-key migration
+     * added the fast path. Routing an array here skips its elements, so a
+     * proxy over one reads every index as undefined. */
+    if (name.tag == KILN_VALUE_STRING && target.tag == KILN_VALUE_OBJECT) {
         /* `ikey` is the canonical pointer or NULL (ADR 0047): a computed key is a
          * boundary string the realm may never have stored, and the shaped-slot
          * scan below compares pointers. NULL canonicalizes once for the whole
