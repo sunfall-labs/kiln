@@ -14,7 +14,7 @@ pub use kiln_string::StringUnits;
 pub const BYTECODE_VERSION: u16 = 6;
 
 /// A constant embedded in a [`Program`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Constant {
     Undefined,
     Null,
