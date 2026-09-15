@@ -5253,7 +5253,10 @@ impl Compiler {
         // a named evaluation supplied -- `var C = class {}` is `"C"` -- and the empty string only
         // when nothing named it.
         let (written_name, inferred_name) = if name.starts_with('%') {
-            (None, class.inferred_name.clone())
+            // Scaffolding is never the name: an anonymous class reads back "" unless a
+            // named evaluation inferred one. `Some("")`, not `None`, so the constructor
+            // carries the empty spelling rather than no spelling.
+            (Some(String::new()), class.inferred_name.clone())
         } else {
             (Some(name.clone()), None)
         };
