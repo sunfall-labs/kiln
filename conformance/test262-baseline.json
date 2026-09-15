@@ -1,8 +1,8 @@
 {
   "chunks": {
     "annexB/built-ins": {
-      "failed": 130,
-      "passed": 352
+      "failed": 128,
+      "passed": 354
     },
     "annexB/language": {
       "failed": 51,
@@ -17,8 +17,8 @@
       "passed": 40
     },
     "built-ins/Array": {
-      "failed": 215,
-      "passed": 5902
+      "failed": 227,
+      "passed": 5890
     },
     "built-ins/ArrayBuffer": {
       "failed": 26,
@@ -101,16 +101,16 @@
       "passed": 10
     },
     "built-ins/Iterator": {
-      "failed": 82,
-      "passed": 1226
+      "failed": 88,
+      "passed": 1220
     },
     "built-ins/JSON": {
-      "failed": 54,
-      "passed": 276
+      "failed": 52,
+      "passed": 278
     },
     "built-ins/Map": {
-      "failed": 16,
-      "passed": 389
+      "failed": 14,
+      "passed": 391
     },
     "built-ins/MapIteratorPrototype": {
       "failed": 4,
@@ -133,24 +133,24 @@
       "passed": 671
     },
     "built-ins/Object": {
-      "failed": 171,
-      "passed": 6631
+      "failed": 195,
+      "passed": 6607
     },
     "built-ins/Promise": {
       "failed": 130,
       "passed": 1328
     },
     "built-ins/Proxy": {
-      "failed": 51,
-      "passed": 556
+      "failed": 52,
+      "passed": 555
     },
     "built-ins/Reflect": {
       "failed": 4,
       "passed": 302
     },
     "built-ins/RegExp": {
-      "failed": 176,
-      "passed": 3580
+      "failed": 152,
+      "passed": 3604
     },
     "built-ins/RegExpStringIteratorPrototype": {
       "failed": 14,
@@ -173,24 +173,24 @@
       "passed": 202
     },
     "built-ins/String": {
-      "failed": 180,
-      "passed": 2263
+      "failed": 170,
+      "passed": 2273
     },
     "built-ins/StringIteratorPrototype": {
-      "failed": 4,
-      "passed": 10
+      "failed": 2,
+      "passed": 12
     },
     "built-ins/SuppressedError": {
       "failed": 10,
       "passed": 34
     },
     "built-ins/Symbol": {
-      "failed": 20,
-      "passed": 172
+      "failed": 10,
+      "passed": 182
     },
     "built-ins/Temporal": {
-      "failed": 526,
-      "passed": 8680
+      "failed": 524,
+      "passed": 8682
     },
     "built-ins/ThrowTypeError": {
       "failed": 10,
@@ -209,8 +209,8 @@
       "passed": 136
     },
     "built-ins/WeakMap": {
-      "failed": 12,
-      "passed": 269
+      "failed": 10,
+      "passed": 271
     },
     "built-ins/WeakRef": {
       "failed": 0,
@@ -221,12 +221,12 @@
       "passed": 160
     },
     "built-ins/decodeURI": {
-      "failed": 8,
-      "passed": 102
+      "failed": 6,
+      "passed": 104
     },
     "built-ins/decodeURIComponent": {
-      "failed": 8,
-      "passed": 104
+      "failed": 6,
+      "passed": 106
     },
     "built-ins/encodeURI": {
       "failed": 14,
@@ -325,8 +325,8 @@
       "passed": 154
     },
     "intl402/Segmenter": {
-      "failed": 14,
-      "passed": 144
+      "failed": 16,
+      "passed": 142
     },
     "intl402/String": {
       "failed": 14,
@@ -353,8 +353,8 @@
       "passed": 287
     },
     "language/comments": {
-      "failed": 2,
-      "passed": 79
+      "failed": 6,
+      "passed": 75
     },
     "language/computed-property-names": {
       "failed": 10,
@@ -377,8 +377,8 @@
       "passed": 3
     },
     "language/expressions": {
-      "failed": 330,
-      "passed": 20640
+      "failed": 336,
+      "passed": 20634
     },
     "language/function-code": {
       "failed": 4,
@@ -441,8 +441,8 @@
       "passed": 160
     },
     "language/statements": {
-      "failed": 309,
-      "passed": 17693
+      "failed": 304,
+      "passed": 17698
     },
     "language/types": {
       "failed": 6,
@@ -477,8 +477,8 @@
       "passed": 6
     },
     "staging/sm": {
-      "failed": 649,
-      "passed": 1947
+      "failed": 626,
+      "passed": 1970
     },
     "staging/source-phase-imports": {
       "failed": 0,

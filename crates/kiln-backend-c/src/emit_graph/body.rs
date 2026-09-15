@@ -2335,7 +2335,7 @@ fn emit_phi_assignments(
     booleans: &HashSet<ValueId>,
     indexed_values: bool,
     used: &HashSet<ValueId>,
-    boxed: Option<&HashSet<ValueId>>,
+    _boxed: Option<&HashSet<ValueId>>,
 ) {
     // A parallel move: every input is read before any phi is written, so two phis that swap
     // values (`[a, b] = [b, a]` across a back edge) do not clobber each other.
@@ -2429,13 +2429,7 @@ fn emit_phi_assignments(
     }
     output.push_str("        {");
     for (i, &(phi_v, from_v)) in moves.iter().enumerate() {
-        let has_twin = numbers.contains(&ValueId(phi_v))
-            || ints.contains(&ValueId(phi_v))
-            || booleans.contains(&ValueId(phi_v));
-        let needs_box = !has_twin || boxed.is_none_or(|b| b.contains(&ValueId(phi_v)));
-        if needs_box {
-            write!(output, " kiln_val phi_t{i} = v{from_v};").unwrap();
-        }
+        write!(output, " kiln_val phi_t{i} = v{from_v};").unwrap();
         if numbers.contains(&ValueId(phi_v)) {
             write!(output, " double phi_td{i} = d{from_v};").unwrap();
         }
@@ -2447,13 +2441,7 @@ fn emit_phi_assignments(
         }
     }
     for (i, &(phi_v, _)) in moves.iter().enumerate() {
-        let has_twin = numbers.contains(&ValueId(phi_v))
-            || ints.contains(&ValueId(phi_v))
-            || booleans.contains(&ValueId(phi_v));
-        let needs_box = !has_twin || boxed.is_none_or(|b| b.contains(&ValueId(phi_v)));
-        if needs_box {
-            write!(output, " v{phi_v} = phi_t{i};").unwrap();
-        }
+        write!(output, " v{phi_v} = phi_t{i};").unwrap();
         if numbers.contains(&ValueId(phi_v)) {
             write!(output, " d{phi_v} = phi_td{i};").unwrap();
         }
