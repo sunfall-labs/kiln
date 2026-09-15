@@ -1,0 +1,29 @@
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+    Checking kiln-string v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-string)
+   Compiling kiln-backend-c v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-backend-c)
+    Checking kiln-host-abi v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-host-abi)
+    Checking kiln-hir v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-hir)
+    Checking kiln-json v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-json)
+    Checking kiln-runtime v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-runtime)
+    Checking kiln-native-runtime v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-native-runtime)
+    Checking kiln-ir v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-ir)
+    Checking frontend-oxc v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/frontend-oxc)
+    Checking kiln-interpreter v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-interpreter)
+    Checking kiln-native-number-ffi v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-native-number-ffi)
+    Checking kiln-module-graph v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-module-graph)
+    Checking kiln-conformance v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-conformance)
+    Checking kiln-liveness v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-liveness)
+    Checking kiln-db v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-db)
+    Checking kiln-native v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-native)
+    Checking kiln-daemon v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-daemon)
+    Checking kiln-cli v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-cli)
+    Checking kiln-bench v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/bench)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 11.45s
+mbx[cache]: 0 hits, 13 misses, 8 not looked up; 0 B downloaded, 0 B uploaded, 14.7 MiB stored locally
+mbx[savings]: 163.8 GiB logical of old build output has been shown the door.

@@ -1,0 +1,22 @@
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+   Compiling kiln-interpreter v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-interpreter)
+   Compiling kiln-auto-harness v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/.scratch/sota/dynamic-source)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.94s
+     Running `mbx-launch .scratch/sota/dynamic-source/target/debug/dynamic-main`
+mbx[cache]: 0 hits, 2 misses; 0 B downloaded, 0 B uploaded, 135.7 MiB stored locally
+raw-quoted-stdout=""
+raw-quoted-error=EvalUnsupported { message: "dynamic source contains unpaired UTF-16 surrogate code units" }
+compiler-source=34,92,117,68,56,48,48,34
+escaped-quoted-stdout=""
+escaped-quoted-result=Undefined
+raw-outside-literal-stdout=""
+raw-outside-literal-error=EvalUnsupported { message: "dynamic source contains unpaired UTF-16 surrogate code units" }
+auto-accessor-stdout="11 22\n101 202\n"
+auto-accessor-result=Undefined
+mbx[savings]: 32775 cache hits and counting. rustc thinks it has been busy.

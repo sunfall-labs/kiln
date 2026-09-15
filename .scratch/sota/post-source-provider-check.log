@@ -1,0 +1,13 @@
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+    Checking kiln-native-number-ffi v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-native-number-ffi)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.12s
+mbx[cache]: 0 hits, 0 misses, 1 bypassed; 0 B downloaded, 0 B uploaded, 0 B stored locally
+mbx[gc]: removed 1 target directories (12.5 GiB logical, 0 abandoned and 1 live); 81.1 GiB logical remain
+mbx[gc]: evicted 0 objects and 0 action results (1.9 MiB logical); 37.3 GiB logical remain
+mbx[savings]: 32826 compilations served. ask rustc how many it remembers doing.

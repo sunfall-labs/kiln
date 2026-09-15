@@ -1,0 +1,18 @@
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+    Checking kiln-string v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-string)
+    Checking kiln-host-abi v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-host-abi)
+    Checking kiln-hir v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-hir)
+    Checking kiln-json v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-json)
+    Checking kiln-runtime v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-runtime)
+    Checking kiln-native-runtime v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-native-runtime)
+    Checking kiln-ir v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-ir)
+    Checking kiln-interpreter v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-interpreter)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.91s
+mbx[cache]: 0 hits, 1 misses; 0 B downloaded, 0 B uploaded, 0 B stored locally
+mbx[savings]: 32374 compilations served. ask rustc how many it remembers doing.

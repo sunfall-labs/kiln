@@ -1,0 +1,120 @@
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+   Compiling memchr v2.8.3
+   Compiling hashbrown v0.17.1
+   Compiling num-traits v0.2.19
+   Compiling zerofrom v0.1.8
+   Compiling tracing v0.1.44
+   Compiling kiln-string v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-string)
+   Compiling crossbeam-epoch v0.9.20
+   Compiling libffi-sys v4.2.2
+   Compiling hashbrown v0.16.1
+   Compiling combine v4.6.8
+   Compiling indexmap v2.14.1
+   Compiling regress v0.12.0
+   Compiling crossbeam-deque v0.8.7
+   Compiling rayon-core v1.13.0
+   Compiling rayon v1.12.0
+   Compiling libffi v5.2.0
+   Compiling yoke v0.8.3
+   Compiling kiln-host-abi v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-host-abi)
+   Compiling kiln-json v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-json)
+   Compiling zerovec v0.11.8
+   Compiling zerotrie v0.2.5
+   Compiling num-integer v0.1.47
+   Compiling h2 v0.4.19
+   Compiling num-bigint v0.4.8
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling icu_pattern v0.5.0
+   Compiling icu_collections v2.3.0
+   Compiling icu_locale_core v2.3.0
+   Compiling num-rational v0.4.2
+   Compiling tzif v0.4.1
+   Compiling icu_provider v2.3.1
+   Compiling hyper v1.11.1
+   Compiling icu_locale_fallback v2.3.0
+   Compiling icu_properties v2.3.0
+   Compiling icu_normalizer v2.3.0
+   Compiling icu_calendar v2.3.0
+   Compiling icu_plurals v2.3.0
+   Compiling icu_list v2.3.0
+   Compiling icu_locale v2.3.1
+   Compiling icu_segmenter v2.3.0
+   Compiling icu_decimal v2.3.0
+   Compiling icu_casemap v2.3.0
+   Compiling icu_collator v2.3.1
+   Compiling hyper-util v0.1.20
+   Compiling kiln-runtime v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-runtime)
+   Compiling icu_time v2.3.0
+   Compiling icu_experimental v0.6.0
+   Compiling icu_datetime v2.3.0
+   Compiling timezone_provider v0.2.6
+   Compiling kiln-intl v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-intl)
+   Compiling temporal_rs v0.2.6
+   Compiling kiln-temporal v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-temporal)
+   Compiling kiln-native-number-ffi v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-native-number-ffi)
+mbx[progress]: 15s elapsed; 7 hits, 1 misses, 4 bypassed, 41 not looked up; ~3.1s compiler work saved
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.72s
+     Running unittests src/lib.rs (target/debug/deps/kiln_native_number_ffi-3c8f87c605391036)
+
+running 43 tests
+test parallel::tests::a_null_worker_is_an_invalid_argument ... ok
+test ffi::tests::prepared_cif_preserves_integer_and_float_arguments ... ok
+test json::tests::refusals_and_bad_arguments_are_told_apart ... ok
+test json::tests::a_document_crosses_as_a_tape_into_this_threads_scratch ... ok
+test ffi::tests::bool_has_a_distinct_value_kind ... ok
+test ffi::tests::prepared_cif_preserves_signed_i64_bits ... ok
+test intl::tests::reports_utf16_grapheme_boundaries ... ok
+test ffi::tests::callback_closure_round_trips_and_refuses_self_unregistration ... ok
+test ffi::tests::library_handles_resolve_call_and_invalidate_strlen ... ok
+test realm::tests::null_slots_and_callbacks_fail_closed ... ok
+test realm::tests::missing_http_registration_never_falls_back_to_raw_close ... ok
+test realm::tests::a_park_is_capped_only_for_an_armed_wall_clock_realm ... ok
+test realm::tests::diagnostics_are_owned_and_rendered_by_the_active_realm ... ok
+test realm::tests::opaque_handle_enters_tokio_and_rejects_stale_or_cross_thread_use ... ok
+test realm::tests::opaque_work_uses_realm_ordering_and_drops_every_payload_once ... ok
+test realm::tests::deterministic_entropy_is_one_realm_stream_and_rejects_policy_drift ... ok
+test realm::tests::opaque_value_slots_are_stable_distinct_and_realm_owned ... ok
+test realm::tests::http_client_request_ids_are_monotonic_and_realm_scoped ... ok
+test realm::tests::realm_argv_is_copied_from_the_launcher_and_read_back_in_order ... ok
+test realm::tests::realm_clock_is_visible_only_while_entered ... ok
+test realm::tests::active_host_op_submission_needs_no_provider_handle ... ok
+test realm::tests::native_http_agent_abi_maps_runtime_decisions_without_rust_layout ... ok
+test realm::tests::registered_http_connection_rejects_raw_hostops_close ... ok
+test realm::tests::async_read_delivers_structured_error_and_drops_continuation ... ok
+test realm::tests::registered_symbols_are_realm_owned_and_stable ... ok
+test realm::tests::registered_symbols_preserve_units_and_compare_widths_by_value ... ok
+test realm::tests::runtime_callable_stores_are_stable_distinct_and_realm_owned ... ok
+test realm::tests::async_read_returns_identity_and_resumes_only_during_drive ... ok
+test realm::tests::the_collector_seam_marks_registered_roots_and_tears_down_once ... ok
+test realm::tests::async_read_cancellation_prevents_resume_and_releases_continuation ... ok
+test realm::tests::native_timer_is_not_starved_by_pending_async_io ... ok
+test realm::tests::rust_panics_become_runtime_errors_before_reaching_c ... ok
+test realm::tests::the_turn_boundary_offers_the_dump_and_the_report_reads_the_runtime ... ok
+test realm::tests::async_request_rejects_cross_realm_and_stale_cancellation ... ok
+test realm::tests::generic_native_host_ops_exchange_live_tcp_bytes_and_resources ... ok
+test realm::tests::thrown_next_tick_drops_its_payload_before_drive_returns ... ok
+test parallel::tests::every_element_is_visited_exactly_once_below_and_above_the_floor ... ok
+test string_view_tests::validates_flags_nulls_and_utf16_alignment ... ok
+test tests::formatter_translates_capacity_and_nul_contracts_without_partial_writes ... ok
+test tests::parser_maps_null_empty_and_bounded_bytes_to_the_existing_contract ... ok
+test realm::tests::async_reads_use_submission_order_when_ready_together ... ok
+test realm::tests::realm_destruction_releases_pending_async_continuations ... ok
+test realm::tests::wall_clock_realm_reads_the_host_and_fires_timers_on_it ... ok
+
+test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+   Doc-tests kiln_native_number_ffi
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+mbx[cache]: 7 hits, 1 misses, 41 not looked up, 5 bypassed; 0 B downloaded, 0 B uploaded, 167.9 MiB stored locally
+mbx[savings]: the running total stands at 6h 43m across 1821 builds. nobody is counting except the box.

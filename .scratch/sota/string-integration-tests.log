@@ -1,0 +1,29 @@
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+   Compiling kiln-string v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-string)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.34s
+     Running unittests src/lib.rs (target/debug/deps/kiln_string-888abf10be6e42f6)
+
+running 6 tests
+test tests::latin1_index ... ok
+test tests::borrowed_view_keeps_representation_and_units ... ok
+test tests::lone_surrogate_is_lossless ... ok
+test tests::scalar_conversion_uses_existing_storage ... ok
+test tests::scalar_cow_borrows_ascii_and_rejects_lone_surrogates ... ok
+test tests::utf8_decodes_pairs ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests kiln_string
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+mbx[cache]: 0 hits, 2 misses, 1 bypassed; 0 B downloaded, 0 B uploaded, 1.1 MiB stored locally
+mbx[savings]: 82.4 GiB on loan to every checkout simultaneously. the paperwork is an inode.

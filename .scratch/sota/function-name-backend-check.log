@@ -1,0 +1,15 @@
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+    Checking kiln-ir v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-ir)
+   Compiling kiln-backend-c v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-backend-c)
+    Checking kiln-interpreter v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-interpreter)
+    Checking kiln-module-graph v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-module-graph)
+mbx[warning]: incremental state was not reused: compiler environment input changed: KILN_C_EMITTER_BUILD_ID
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.19s
+mbx[cache]: 0 hits, 3 misses; 0 B downloaded, 0 B uploaded, 13.1 KiB stored locally
+mbx[savings]: escorted 163.5 GiB logical of ownerless outputs off the premises.

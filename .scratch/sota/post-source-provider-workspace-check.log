@@ -1,0 +1,138 @@
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+    Checking kiln-string v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-string)
+   Compiling ahash v0.8.11
+    Checking kiln-native-number-abi v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-native-number-abi)
+    Checking kiln-native-number v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-native-number)
+    Checking kiln-data-formats v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-data-formats)
+   Compiling kiln-digest v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-digest)
+   Compiling crossbeam-epoch v0.9.20
+   Compiling crossbeam-deque v0.8.7
+   Compiling rayon-core v1.13.0
+    Checking parking_lot v0.12.1
+   Compiling getrandom v0.3.4
+    Checking kiln-test262 v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-test262)
+    Checking kiln-native-toolchain v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-native-toolchain)
+    Checking kiln-proto v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-proto)
+    Checking kiln-test-selector v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-test-selector)
+    Checking same-file v1.0.6
+    Checking fsevent-sys v4.1.0
+    Checking notify-types v2.1.0
+    Checking log v0.4.34
+    Checking kiln-native-provider-contract v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-native-provider-contract)
+    Checking file-id v0.2.3
+    Checking anstyle v1.0.14
+   Compiling kiln-backend-c v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-backend-c)
+   Compiling zerocopy v0.8.56
+    Checking fastrand v2.5.0
+    Checking walkdir v2.5.0
+    Checking similar v2.7.0
+    Checking unarray v0.1.4
+    Checking kiln-intl v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-intl)
+    Checking kiln-temporal v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-temporal)
+    Checking annotate-snippets v0.12.16
+    Checking kiln-host-abi v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-host-abi)
+    Checking kiln-hir v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-hir)
+    Checking kiln-json v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-json)
+    Checking notify v8.2.0
+    Checking notify-debouncer-full v0.7.0
+    Checking kiln-runtime v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-runtime)
+    Checking kiln-native-runtime v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-native-runtime)
+    Checking hashbrown v0.14.5
+    Checking kiln-ir v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-ir)
+    Checking dashmap v6.2.1
+    Checking lasso v0.7.3
+    Checking frontend-oxc v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/frontend-oxc)
+    Checking oxc_resolver v11.24.3
+    Checking kiln-module-resolver v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-module-resolver)
+    Checking kiln-builtins v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-builtins)
+    Checking kiln-artifact-cache v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-artifact-cache)
+    Checking kiln-number-core v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-number-core)
+    Checking kiln-builtin-surface v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-builtin-surface)
+    Checking kiln-node-path v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-node-path)
+    Checking rand_core v0.9.5
+    Checking tempfile v3.27.0
+    Checking rand_xorshift v0.4.0
+    Checking rand v0.9.5
+    Checking insta v1.48.0
+    Checking kiln-interpreter v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-interpreter)
+    Checking kiln-native-number-ffi v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-native-number-ffi)
+    Checking rayon v1.12.0
+    Checking ppv-lite86 v0.2.21
+    Checking rand_chacha v0.9.0
+    Checking proptest v1.11.0
+    Checking kiln-module-graph v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-module-graph)
+    Checking kiln-conformance v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-conformance)
+error[E0061]: this function takes 7 arguments but 6 arguments were supplied
+    --> crates/kiln-backend-c/src/lib.rs:1607:18
+     |
+1607 |       let direct = direct::DirectPlan::plan(
+     |  __________________^^^^^^^^^^^^^^^^^^^^^^^^-
+1608 | |         program,
+1609 | |         &graphs,
+1610 | |         &entry_graph,
+...    |
+1613 | |         generic_only,
+1614 | |     );
+     | |_____- argument #7 of type `std::option::Option<bool>` is missing
+     |
+note: associated function defined here
+    --> crates/kiln-backend-c/src/direct.rs:136:12
+     |
+ 136 |     pub fn plan(
+     |            ^^^^
+...
+ 143 |         speculate: Option<bool>,
+     |         -----------------------
+help: provide the argument
+     |
+1607 |     let direct = direct::DirectPlan::plan(
+ ...
+1613 |         generic_only,
+1614 ~         /* std::option::Option<bool> */,
+1615 ~     );
+     |
+
+For more information about this error, try `rustc --explain E0061`.
+error: could not compile `kiln-backend-c` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error[E0560]: struct `EmissionPolicy` has no field named `speculate`
+  --> crates/kiln-backend-c/src/tests.rs:23:13
+   |
+23 |             speculate: Some(true),
+   |             ^^^^^^^^^ `EmissionPolicy` does not have this field
+   |
+   = note: available fields are: `host_clock`, `entropy`, `timezone`, `locale`, `decoupled_prelude` ... and 5 others
+
+error[E0560]: struct `EmissionPolicy` has no field named `speculate`
+  --> crates/kiln-backend-c/src/tests.rs:31:13
+   |
+31 |             speculate: Some(false),
+   |             ^^^^^^^^^ `EmissionPolicy` does not have this field
+   |
+   = note: available fields are: `host_clock`, `entropy`, `timezone`, `locale`, `decoupled_prelude` ... and 5 others
+
+error[E0560]: struct `EmissionPolicy` has no field named `speculate`
+    --> crates/kiln-backend-c/src/tests.rs:5343:13
+     |
+5343 |             speculate: Some(false),
+     |             ^^^^^^^^^ `EmissionPolicy` does not have this field
+     |
+     = note: available fields are: `host_clock`, `entropy`, `timezone`, `locale`, `decoupled_prelude` ... and 5 others
+
+error[E0063]: missing field `inferred_name` in initializer of `kiln_ir::FunctionProto`
+    --> crates/kiln-backend-c/src/tests.rs:6474:46
+     |
+6474 |     let make_proto = |declared_length, code| FunctionProto {
+     |                                              ^^^^^^^^^^^^^ missing `inferred_name`
+
+Some errors have detailed explanations: E0061, E0063, E0560.
+For more information about an error, try `rustc --explain E0061`.
+error: could not compile `kiln-backend-c` (lib test) due to 5 previous errors
+mbx[cache]: 45 hits, 1 misses, 56 not looked up; 0 B downloaded, 0 B uploaded, 20.1 MiB stored locally
+mbx[savings]: 6h 43m of compiling skipped across 1818 builds. rustc suspects nothing.

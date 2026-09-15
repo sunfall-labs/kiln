@@ -1,0 +1,25 @@
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling kiln-string v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-string)
+   Compiling kiln-host-abi v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-host-abi)
+   Compiling kiln-hir v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-hir)
+   Compiling kiln-ir v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-ir)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.19s
+     Running unittests src/lib.rs (target/debug/deps/kiln_ir-99d72a140bf143aa)
+
+running 1 test
+test tests::compile_carries_lossless_inferred_function_name_into_proto ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 65 filtered out; finished in 0.00s
+
+mbx[cache]: 0 hits, 2 misses, 2 not looked up; 0 B downloaded, 0 B uploaded, 5.2 MiB stored locally
+mbx[savings]: 83.6 GiB of outputs exist once and appear everywhere. do not tell the checkouts.

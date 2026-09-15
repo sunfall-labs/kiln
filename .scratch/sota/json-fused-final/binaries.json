@@ -1,0 +1,10 @@
+{
+  "baseline": {
+    "path": "/Users/alee/Developer/Personal/kiln-json-baseline/target/release/deps/matched_timing-1dc06dc969ffc946",
+    "sha256": "56220229f944794ba43c55094a7ef4a57c17959acb4a8fbb91571c1a484efcba"
+  },
+  "candidate": {
+    "path": "/Users/alee/Developer/Personal/kiln-string-json/target/release/deps/matched_timing-4ef85e16328094f3",
+    "sha256": "da1ebe6b0a717dda9b08d432fc9c6c4418cb798eb86df93579edd0d15d92796a"
+  }
+}

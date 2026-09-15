@@ -1,0 +1,12 @@
+
+running 1 test
+short-ascii        0.0138 us/parse checksum=4 parses=50787000
+long-ascii         1.4218 us/parse checksum=1 parses=493000
+escaped            0.0213 us/parse checksum=2 parses=32790000
+unicode            0.0833 us/parse checksum=2 parses=8404000
+number-heavy       1.2655 us/parse checksum=201 parses=554000
+existing-units     0.0169 us/parse checksum=2 parses=41473000
+test matched ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.20s
+

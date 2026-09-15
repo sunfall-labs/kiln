@@ -1,0 +1,17 @@
+{
+  "baseline": {
+    "short-ascii": 0.0166,
+    "long-ascii": 1.403,
+    "escaped": 0.0223,
+    "unicode": 0.0197,
+    "number-heavy": 1.3018
+  },
+  "candidate": {
+    "short-ascii": 0.0172,
+    "long-ascii": 1.4277,
+    "escaped": 0.0273,
+    "unicode": 0.0433,
+    "number-heavy": 1.2671,
+    "existing-units": 0.0224
+  }
+}

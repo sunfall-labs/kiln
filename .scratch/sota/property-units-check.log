@@ -1,0 +1,19 @@
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+    Checking kiln-interpreter v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-interpreter)
+warning: function `array_index` is never used
+     --> crates/kiln-interpreter/src/lib.rs:40531:4
+      |
+40531 | fn array_index(key: &Value) -> Option<usize> {
+      |    ^^^^^^^^^^^
+      |
+      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `kiln-interpreter` (lib) generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.67s
+mbx[savings]: 6h 43m saved across 1793 builds. put it toward something with a progress bar.

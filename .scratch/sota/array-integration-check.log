@@ -1,0 +1,280 @@
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling serde_core v1.0.229
+   Compiling serde v1.0.229
+   Compiling libc v0.2.189
+   Compiling allocator-api2 v0.2.21
+   Compiling either v1.18.0
+   Compiling cfg-if v1.0.4
+   Compiling memchr v2.8.3
+   Compiling itoa v1.0.18
+   Compiling stable_deref_trait v1.2.1
+   Compiling rustversion v1.0.23
+   Compiling autocfg v1.5.1
+   Compiling zmij v1.0.23
+   Compiling litemap v0.8.3
+   Compiling bitflags v2.13.1
+   Compiling rustc-hash v2.1.3
+   Compiling siphasher v1.0.3
+   Compiling static_assertions v1.1.0
+   Compiling dragonbox_ecma v0.1.12
+   Compiling writeable v0.6.4
+   Compiling str_indices v0.4.4
+   Compiling num-traits v0.2.19
+   Compiling once_cell v1.21.4
+   Compiling version_check v0.9.5
+   Compiling hashbrown v0.17.1
+   Compiling phf_shared v0.14.0
+   Compiling percent-encoding v2.3.2
+   Compiling thiserror v2.0.20
+   Compiling bytes v1.12.1
+   Compiling icu_locale_fallback_data v2.3.0
+   Compiling equivalent v1.0.2
+   Compiling oxc_estree v0.147.0
+   Compiling phf v0.14.0
+   Compiling fastrand v2.5.0
+   Compiling pin-project-lite v0.2.17
+   Compiling cow-utils v0.1.3
+   Compiling unicode-id-start v1.4.0
+   Compiling unicode-linebreak v0.1.5
+   Compiling unicode-width v0.2.2
+   Compiling phf_generator v0.14.0
+   Compiling utf8_iter v1.0.4
+   Compiling smawk v0.3.3
+   Compiling simd-adler32 v0.3.10
+   Compiling adler2 v2.0.1
+   Compiling nonmax v0.5.5
+   Compiling regex-syntax v0.8.11
+   Compiling libm v0.2.16
+   Compiling bytecount v0.6.9
+   Compiling miniz_oxide v0.9.1
+   Compiling textwrap v0.16.2
+   Compiling unicode-segmentation v1.13.3
+   Compiling owo-colors v4.4.0
+   Compiling icu_properties_data v2.3.0
+   Compiling futures-core v0.3.34
+   Compiling rustix v1.1.4
+   Compiling self_cell v1.3.0
+   Compiling icu_normalizer_data v2.3.0
+   Compiling ahash v0.8.11
+   Compiling generic-array v0.14.7
+   Compiling tracing-core v0.1.36
+   Compiling aho-corasick v1.1.5
+   Compiling serde_json v1.0.151
+   Compiling icu_calendar_data v2.3.0
+   Compiling regex-automata v0.4.18
+   Compiling typenum v1.20.1
+   Compiling futures-task v0.3.34
+   Compiling slab v0.4.12
+   Compiling write16 v1.0.0
+   Compiling zerocopy v0.7.35
+   Compiling utf16_iter v1.0.5
+   Compiling foldhash v0.2.0
+   Compiling icu_plurals_data v2.3.0
+   Compiling http v1.5.0
+   Compiling indexmap v2.14.1
+   Compiling parking_lot_core v0.9.12
+   Compiling icu_decimal_data v2.3.0
+   Compiling syn v3.0.4
+   Compiling syn v2.0.119
+   Compiling castaway v0.2.4
+   Compiling errno v0.3.14
+   Compiling num-integer v0.1.47
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.2
+   Compiling core_maths v0.1.1
+   Compiling hashbrown v0.16.1
+   Compiling crossbeam-utils v0.8.22
+   Compiling scopeguard v1.2.0
+   Compiling compact_str v0.10.0
+   Compiling signal-hook-registry v1.4.8
+   Compiling num-bigint v0.5.1
+   Compiling synstructure v0.13.2
+   Compiling float-cmp v0.10.0
+   Compiling halfbrown v0.4.0
+   Compiling serde_derive v1.0.229
+   Compiling displaydoc v0.2.7
+   Compiling zerovec-derive v0.11.6
+   Compiling thiserror-impl v2.0.20
+   Compiling oxc_ast_macros v0.147.0
+   Compiling phf_macros v0.14.0
+   Compiling tracing-attributes v0.1.31
+   Compiling tokio-macros v2.7.2
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling futures-macro v0.3.34
+   Compiling itertools v0.15.0
+   Compiling hashbrown v0.15.5
+   Compiling calendrical_calculations v0.2.4
+   Compiling icu_time_data v2.3.0
+   Compiling icu_locale_data v2.3.0
+   Compiling tokio v1.53.1
+   Compiling tracing v0.1.44
+   Compiling ryu v1.0.23
+   Compiling futures-util v0.3.34
+   Compiling zerofrom v0.1.8
+   Compiling simdutf8 v0.1.5
+   Compiling icu_casemap_data v2.3.0
+   Compiling icu_list_data v2.3.0
+   Compiling httparse v1.10.1
+   Compiling cobs v0.3.0
+   Compiling io-lifetimes v2.0.4
+   Compiling smallvec v1.15.2
+   Compiling oxc_index v5.0.0
+   Compiling hashbrown v0.14.5
+   Compiling yoke v0.8.3
+   Compiling futures-sink v0.3.34
+   Compiling io-lifetimes v3.0.1
+   Compiling value-trait v0.12.2
+   Compiling postcard v1.1.3
+   Compiling zerovec v0.11.8
+   Compiling zerotrie v0.2.5
+   Compiling ropey v1.6.1
+   Compiling fixed_decimal v0.7.2
+   Compiling tokio-util v0.7.19
+   Compiling oxc-browserslist v5.0.1
+   Compiling oxc_data_structures v0.147.0
+   Compiling lock_api v0.4.14
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling icu_pattern v0.5.0
+   Compiling num-bigint v0.4.8
+   Compiling http-body v1.1.0
+   Compiling icu_locale_core v2.3.0
+   Compiling oxc_allocator v0.147.0
+   Compiling icu_collections v2.3.0
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling kiln-number-core v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-number-core)
+   Compiling combine v4.6.8
+   Compiling oxc_str v0.147.0
+   Compiling fnv v1.0.7
+   Compiling icu_experimental_data v0.6.0
+   Compiling icu_provider v2.3.1
+   Compiling icu_collator_data v2.3.0
+   Compiling atomic-waker v1.1.2
+   Compiling io-extras v0.19.0
+   Compiling kiln-digest v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-digest)
+   Compiling oxc_span v0.147.0
+   Compiling arrayvec v0.7.8
+   Compiling icu_segmenter_data v2.3.0
+   Compiling icu_locale_fallback v2.3.0
+   Compiling icu_properties v2.3.0
+   Compiling icu_normalizer v2.3.0
+   Compiling icu_datetime_data v2.3.0
+   Compiling try-lock v0.2.5
+   Compiling oxc_syntax v0.147.0
+   Compiling oxc_diagnostics v0.147.0
+   Compiling icu_calendar v2.3.0
+   Compiling icu_plurals v2.3.0
+   Compiling want v0.3.1
+   Compiling fast-glob v1.1.0
+   Compiling oxc_compat v0.147.0
+   Compiling oxc_regular_expression v0.147.0
+   Compiling h2 v0.4.19
+   Compiling tzif v0.4.1
+   Compiling oxc_ast v0.147.0
+   Compiling kiln-host-abi v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-host-abi)
+   Compiling digest v0.10.7
+   Compiling oxc_ecmascript v0.147.0
+   Compiling oxc_ast_visit v0.147.0
+   Compiling regex v1.13.1
+   Compiling simd-json v0.18.1
+   Compiling futures-channel v0.3.34
+   Compiling json-strip-comments v3.1.2
+   Compiling oxc_semantic v0.147.0
+   Compiling cap-primitives v4.0.3
+   Compiling httpdate v1.0.3
+   Compiling nodejs-built-in-modules v1.0.0
+   Compiling jiff-tzdb v0.1.8
+   Compiling crc32fast v1.5.1
+   Compiling oxc_traverse v0.147.0
+   Compiling timezone_provider v0.2.6
+   Compiling lazy-regex-proc_macros v3.6.1
+   Compiling idna_adapter v1.2.2
+   Compiling num-rational v0.4.2
+   Compiling tokio-stream v0.1.19
+   Compiling icu_decimal v2.3.0
+   Compiling cpufeatures v0.2.17
+   Compiling encoding_rs v0.8.41
+   Compiling cap-std v4.0.3
+   Compiling maybe-owned v0.3.4
+   Compiling ambient-authority v0.0.2
+   Compiling seq-macro v0.3.6
+   Compiling getrandom v0.3.4
+   Compiling kiln-hir v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-hir)
+   Compiling ipnet v2.12.2
+   Compiling ixdtf v0.6.6
+   Compiling oxc_parser v0.147.0
+   Compiling temporal_rs v0.2.6
+   Compiling lazy-regex v3.6.1
+   Compiling dashmap v6.2.1
+   Compiling oxc_resolver v11.24.3
+   Compiling kiln-module-resolver v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-module-resolver)
+   Compiling tokio-metrics v0.5.2
+   Compiling idna v1.1.0
+   Compiling oxc_mangler v0.147.0
+   Compiling kiln-artifact-cache v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-artifact-cache)
+   Compiling http-body-util v0.1.5
+   Compiling form_urlencoded v1.2.2
+   Compiling icu_casemap v2.3.0
+   Compiling hmac-sha1-compact v1.1.7
+   Compiling base64 v0.23.1
+   Compiling multiversion_no_op v1.0.0
+   Compiling oxc_transformer v0.147.0
+   Compiling url v2.5.8
+   Compiling oxc_minifier v0.147.0
+   Compiling kiln-builtins v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-builtins)
+   Compiling kiln-temporal v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-temporal)
+   Compiling kiln-ir v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-ir)
+   Compiling sha2 v0.10.9
+   Compiling sha1 v0.10.7
+   Compiling icu_list v2.3.0
+   Compiling md-5 v0.10.6
+   Compiling lasso v0.7.3
+   Compiling regress v0.12.0
+   Compiling kiln-json v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-json)
+   Compiling kiln-builtin-surface v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-builtin-surface)
+   Compiling kiln-node-path v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-node-path)
+   Compiling frontend-oxc v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/frontend-oxc)
+   Compiling kiln-backend-c v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-backend-c)
+   Compiling kiln-data-formats v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-data-formats)
+   Compiling similar v2.7.0
+   Compiling kiln-native-runtime v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-native-runtime)
+   Compiling kiln-native-number v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-native-number)
+   Compiling kiln-native-number-abi v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-native-number-abi)
+   Compiling hyper v1.11.1
+   Compiling hyper-util v0.1.20
+   Compiling kiln-runtime v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-runtime)
+   Compiling fs-set-times v0.20.3
+   Compiling icu_locale v2.3.1
+   Compiling icu_time v2.3.0
+   Compiling icu_segmenter v2.3.0
+   Compiling icu_datetime v2.3.0
+   Compiling icu_collator v2.3.1
+   Compiling icu_experimental v0.6.0
+   Compiling kiln-intl v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-intl)
+   Compiling flate2 v1.1.10
+   Compiling tempfile v3.27.0
+   Compiling insta v1.48.0
+   Compiling kiln-interpreter v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-interpreter)
+   Compiling kiln-module-graph v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-module-graph)
+mbx[progress]: 15s elapsed; 347 hits, 3 misses, 0 bypassed, 0 not looked up; ~275.2s compiler work saved
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 23.70s
+     Running unittests src/lib.rs (target/debug/deps/kiln_backend_c-f939c34caabb89d3)
+
+running 1 test
+test tests::object_profile_selects_only_simple_array_parameter_receivers ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 145 filtered out; finished in 0.02s
+
+mbx[cache]: 347 hits, 3 misses; 0 B downloaded, 0 B uploaded, 59.8 MiB stored locally
+mbx[savings]: 80.3 GiB of target/ is an elaborate illusion. the disk is in on it.

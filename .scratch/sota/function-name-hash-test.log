@@ -1,0 +1,26 @@
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+   Compiling kiln-ir v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-ir)
+   Compiling kiln-backend-c v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-backend-c)
+   Compiling kiln-interpreter v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-interpreter)
+   Compiling kiln-module-graph v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-module-graph)
+mbx[warning]: incremental state was not reused: compiler environment input changed: KILN_C_EMITTER_BUILD_ID
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.77s
+     Running unittests src/lib.rs (target/debug/deps/kiln_backend_c-ae9698d0aec5febe)
+
+running 1 test
+test tests::program_hash_covers_function_table_and_proto_contents ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 146 filtered out; finished in 0.00s
+
+mbx[cache]: 0 hits, 2 misses; 0 B downloaded, 0 B uploaded, 16.7 KiB stored locally
+mbx[savings]: disposed of 163.8 GiB logical without being asked. that is rather the point.

@@ -1,0 +1,19 @@
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+    Checking kiln-interpreter v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-interpreter)
+    Checking kiln-module-graph v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-module-graph)
+    Checking kiln-backend-c v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-backend-c)
+    Checking kiln-conformance v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-conformance)
+    Checking kiln-liveness v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-liveness)
+    Checking kiln-db v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-db)
+    Checking kiln-native v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-native)
+    Checking kiln-daemon v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-daemon)
+    Checking kiln-bench v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/bench)
+    Checking kiln-cli v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.32s
+mbx[savings]: 163.5 GiB logical of outputs had survived their checkouts. an unnatural state, now corrected.

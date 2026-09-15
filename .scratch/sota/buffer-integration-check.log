@@ -1,0 +1,78 @@
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+   Compiling either v1.18.0
+   Compiling smallvec v1.15.2
+   Compiling serde_core v1.0.229
+   Compiling num-traits v0.2.19
+   Compiling allocator-api2 v0.2.21
+   Compiling hashbrown v0.17.1
+   Compiling writeable v0.6.4
+   Compiling dragonbox_ecma v0.1.12
+   Compiling serde v1.0.229
+   Compiling hashbrown v0.16.1
+   Compiling hashbrown v0.14.5
+   Compiling parking_lot_core v0.9.12
+   Compiling icu_locale_core v2.3.0
+   Compiling potential_utf v0.1.6
+   Compiling fixed_decimal v0.7.2
+   Compiling icu_pattern v0.5.0
+   Compiling regex-automata v0.4.18
+   Compiling lasso v0.7.3
+   Compiling halfbrown v0.4.0
+   Compiling dashmap v6.2.1
+   Compiling icu_collections v2.3.0
+   Compiling icu_provider v2.3.1
+   Compiling icu_locale_fallback v2.3.0
+   Compiling icu_properties v2.3.0
+   Compiling icu_normalizer v2.3.0
+   Compiling icu_calendar v2.3.0
+   Compiling icu_plurals v2.3.0
+   Compiling icu_list v2.3.0
+   Compiling icu_locale v2.3.1
+   Compiling icu_segmenter v2.3.0
+   Compiling icu_casemap v2.3.0
+   Compiling idna_adapter v1.2.2
+   Compiling icu_collator v2.3.1
+   Compiling icu_decimal v2.3.0
+   Compiling icu_time v2.3.0
+   Compiling idna v1.1.0
+   Compiling url v2.5.8
+   Compiling icu_datetime v2.3.0
+   Compiling indexmap v2.14.1
+   Compiling serde_json v1.0.151
+   Compiling h2 v0.4.19
+   Compiling hyper v1.11.1
+   Compiling hyper-util v0.1.20
+   Compiling float-cmp v0.10.0
+   Compiling num-integer v0.1.47
+   Compiling temporal_rs v0.2.6
+   Compiling num-bigint v0.4.8
+   Compiling value-trait v0.12.2
+   Compiling kiln-temporal v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-temporal)
+   Compiling simd-json v0.18.1
+   Compiling num-rational v0.4.2
+   Compiling icu_experimental v0.6.0
+   Compiling kiln-intl v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-intl)
+   Compiling kiln-number-core v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-number-core)
+   Compiling kiln-host-abi v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-host-abi)
+   Compiling kiln-ir v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-ir)
+   Compiling kiln-runtime v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-runtime)
+   Compiling oxc_resolver v11.24.3
+   Compiling kiln-module-resolver v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-module-resolver)
+   Compiling kiln-builtins v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-builtins)
+   Compiling kiln-interpreter v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-interpreter)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.92s
+     Running unittests src/lib.rs (target/debug/deps/kiln_interpreter-847e8dceb4cb92d3)
+
+running 1 test
+test tests::node_bytes_value_adopts_owned_vec_and_keeps_buffer_mutable ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 171 filtered out; finished in 0.00s
+
+mbx[cache]: 68 hits, 1 misses; 0 B downloaded, 0 B uploaded, 43.0 MiB stored locally
+mbx[savings]: 80.8 GiB of outputs materialized by reflink. the copy machine stays off.

@@ -1,0 +1,209 @@
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+   Compiling kiln-string v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-string)
+   Compiling kiln-host-abi v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-host-abi)
+   Compiling kiln-hir v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-hir)
+   Compiling kiln-json v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-json)
+   Compiling kiln-runtime v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-runtime)
+   Compiling kiln-ir v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-ir)
+   Compiling kiln-interpreter v0.0.0 (/Users/alee/Developer/Personal/kiln-sota-integrate/crates/kiln-interpreter)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.31s
+     Running unittests src/lib.rs (target/debug/deps/kiln_interpreter-f258d30c4a64ac53)
+
+running 180 tests
+test intrinsic_members::tests::named_members_reject_reserved_spellings ... ok
+test intrinsic_members::tests::every_listed_accessor_resolves ... ok
+test intrinsic_members::tests::accessor_rows_are_unique ... ok
+test tests::a_key_is_bare_only_when_it_is_a_plain_identifier ... ok
+test tests::a_data_view_defaults_to_the_opposite_order_from_the_platform ... ok
+test tests::a_big_element_round_trips_without_rounding ... ok
+test tests::a_missing_property_reads_as_undefined ... ok
+test tests::a_negative_slice_bound_counts_from_the_end ... ok
+test agent::tests::the_clock_does_not_move_while_an_agent_can_still_run ... ok
+test tests::a_number_in_another_base_expands_its_fraction ... ok
+test agent::tests::the_clock_moves_under_a_spinner_after_bounded_patience ... ok
+test agent::tests::notify_takes_the_oldest_waiters_and_answers_how_many ... ok
+test agent::tests::starting_more_agents_than_the_cap_is_refused_by_name ... ok
+test tests::a_cycle_prints_once_rather_than_forever ... ok
+test agent::tests::an_async_wait_settles_on_its_deadline_and_moves_the_clock_to_it ... ok
+test agent::tests::a_wait_nothing_can_end_is_released_rather_than_held ... ok
+test tests::a_symbol_key_is_not_its_display_string ... ok
+test tests::a_symbol_shows_its_description_rather_than_its_reserved_key ... ok
+test tests::a_symbols_key_is_reserved_so_a_string_cannot_spell_it ... ok
+test tests::a_console_shows_contents_where_string_shows_a_tag ... ok
+test tests::a_thrown_value_is_described_by_what_it_is ... ok
+test tests::a_top_level_string_is_bare_and_a_nested_one_is_quoted ... ok
+test tests::a_write_does_not_reach_through_the_prototype ... ok
+test tests::an_element_refuses_the_other_numeric_tower ... ok
+test tests::a_parsed_object_keeps_the_last_value_for_a_duplicate_key ... ok
+test tests::an_array_and_a_string_spread_as_their_indices ... ok
+test tests::an_index_key_enumerates_before_every_string_key ... ok
+test tests::an_element_key_is_wider_than_an_index ... ok
+test tests::an_error_instance_has_no_own_name ... ok
+test tests::an_empty_message_produces_a_bare_stack_header ... ok
+test tests::a_use_strict_directive_is_recognised_only_when_it_is_written_literally ... ok
+test tests::arithmetic_and_concat_are_scalar_operations ... ok
+test tests::array_buffer_transfer_moves_bytes_and_detaches_the_source ... ok
+test tests::array_buffer_transfer_preserves_or_drops_resizability_and_checks_constraints ... ok
+test tests::bitwise_operands_truncate_to_thirty_two_bits ... ok
+test tests::arrays_expose_the_same_properties_to_reads_and_to_in ... ok
+test tests::attributes_are_never_reported_for_an_absent_member ... ok
+test tests::builtin_bindings_are_present_on_the_realm_global_and_share_values_with_load_builtin ... ok
+test tests::calling_a_non_function_is_an_error_rather_than_a_coercion ... ok
+test tests::a_symbol_numeric_error_precedes_the_right_value_of_call ... ok
+test tests::an_uncaught_throw_names_what_was_thrown ... ok
+test tests::capturing_a_slot_that_was_never_boxed_is_rejected ... ok
+test tests::a_captured_dead_zone_read_names_its_source_binding ... ok
+test tests::closures_from_separate_calls_capture_separate_cells ... ok
+test tests::a_marked_local_read_throws_a_reference_error ... ok
+test tests::an_unknown_function_index_is_rejected_rather_than_indexed ... ok
+test tests::a_call_leaves_only_its_result_on_the_caller_stack ... ok
+test tests::a_captured_cell_outlives_the_frame_that_created_it ... ok
+test tests::array_species_definition_writes_typed_array_elements ... ok
+test tests::a_direct_eval_writes_through_to_the_callers_binding ... ok
+test tests::a_call_binds_arguments_to_parameters_in_order ... ok
+test tests::collections_key_on_same_value_zero ... ok
+test tests::commonjs_require_reads_replacements_through_the_shared_cache_cell ... ok
+test tests::array_species_definition_observes_a_proxy_define_property_trap ... ok
+test tests::computed_lone_surrogate_reads_share_ordinary_and_proxy_paths ... ok
+test tests::date_methods_stay_on_the_machine_dispatch_path ... ok
+test tests::a_program_is_not_finished_while_it_still_has_work_scheduled ... ok
+test tests::deleting_leaves_a_hole_rather_than_compacting ... ok
+test tests::a_generator_body_sees_the_receiver_the_call_named ... ok
+test tests::an_async_arrow_captures_its_defining_receiver ... ok
+test tests::a_timers_delay_costs_nothing_to_wait_for ... ok
+test tests::conditional_jumps_consume_conditions ... ok
+test tests::empty_containers_and_nesting_read_the_way_node_writes_them ... ok
+test tests::error_brand_is_not_the_reserved_trace_property ... ok
+test tests::error_cause_is_installed_by_presence_not_by_value ... ok
+test tests::engine_and_commonjs_values_are_reflexive_identity_objects ... ok
+test tests::error_cause_keeps_the_identity_of_the_value_given ... ok
+test tests::error_is_error_inherits_through_native_error_constructors ... ok
+test tests::error_to_string_is_keyed_on_the_inherited_method ... ok
+test tests::dynamic_import_without_module_loader_rejects_with_type_error ... ok
+test tests::dynamic_import_with_unsupported_loader_rejects_with_type_error ... ok
+test tests::error_to_string_omits_an_empty_message ... ok
+test tests::event_names_and_late_readable_listener_reflect_buffered_state ... ok
+test tests::dynamic_source_boundary_rejects_raw_units_and_keeps_parser_errors_distinct ... ok
+test tests::in_tests_presence_rather_than_value ... ok
+test tests::host_clock_is_explicit_and_does_not_replace_the_monotonic_clock ... ok
+test tests::host_entropy_is_one_explicit_word_per_draw ... ok
+test tests::instanceof_walks_the_chain_by_identity ... ok
+test tests::executes_arithmetic_and_reports_instruction_count ... ok
+test tests::join_renders_nullish_elements_as_empty ... ok
+test tests::json_allows_the_same_value_twice_in_different_places ... ok
+test tests::json_drops_unrepresentable_properties_but_nulls_unrepresentable_elements ... ok
+test tests::every_published_callable_is_named_and_measured ... ok
+test tests::json_escapes_strings ... ok
+test tests::json_empty_containers_stay_on_one_line_when_indented ... ok
+test tests::json_indent_argument_is_capped ... ok
+test tests::host_calls_preserve_argument_order_and_round_trip_values ... ok
+test tests::json_indents_nested_containers ... ok
+test tests::json_omits_what_it_cannot_spell ... ok
+test tests::inferred_closure_name_property_preserves_utf16_units ... ok
+test tests::json_parses_each_kind_of_value ... ok
+test tests::generator_and_async_generator_prototype_and_constructor_hierarchy ... ok
+test tests::json_parses_escapes_including_surrogates ... ok
+test tests::json_rejects_a_value_that_contains_itself ... ok
+test tests::json_rejects_what_is_not_json ... ok
+test tests::json_scalars_serialise_as_themselves ... ok
+test tests::intrinsic_store_readd_keeps_order_and_retags_cross_realm_markers ... ok
+test tests::json_skips_internal_properties ... ok
+test tests::json_writes_non_finite_numbers_as_null ... ok
+test tests::loose_equality_is_not_strict_equality_with_a_conversion ... ok
+test tests::map_keys_are_matched_by_identity ... ok
+test tests::every_surface_member_is_named_for_its_key ... ok
+test tests::math_round_goes_toward_positive_infinity ... ok
+test tests::named_timezone_and_locale_never_call_the_host ... ok
+test tests::module_execution_initializes_import_slots_and_publishes_exports ... ok
+test tests::nesting_past_the_depth_limit_becomes_a_placeholder ... ok
+test tests::materialized_branded_accessors_ignore_receiver_shadow_properties ... ok
+test tests::no_listed_member_is_a_symbol_spelling ... ok
+test tests::node_buffer_statics_are_enumerable_own_properties ... ok
+test tests::materializing_string_prototype_preserves_its_exotic_length ... ok
+test tests::native_spread_uses_materialized_enumerability_and_honors_deletion ... ok
+test tests::node_bytes_value_adopts_owned_vec_and_keeps_buffer_mutable ... ok
+test tests::node_builtin_own_keys_follow_the_authoritative_ts_exports ... ok
+test tests::node_crypto_hashes_with_rustcrypto_and_node_encodings ... ok
+test tests::node_event_emitter_stores_listeners_and_methods_are_chainable ... ok
+test tests::new_on_a_non_constructor_is_rejected ... ok
+test tests::node_event_new_listener_runs_before_registration ... ok
+test tests::module_slots_are_shared_across_frames ... ok
+test tests::node_events_builtin_exposes_event_emitter ... ok
+test tests::node_http_exports_a_server_constructor_with_coded_option_errors ... ok
+test tests::node_event_once_is_removed_before_reentrant_emit ... ok
+test tests::node_string_decoder_preserves_split_utf8_sequences ... ok
+test tests::materialized_intrinsic_store_makes_absence_and_symbol_order_authoritative ... ok
+test tests::node_writable_owns_lifecycle_without_owning_a_transport ... ok
+test tests::node_console_exports_and_methods ... ok
+test tests::node_readable_is_a_transport_independent_buffered_event_source ... ok
+test tests::object_data_property_keys_preserve_lone_surrogates ... ok
+test tests::object_equality_is_identity_not_structure ... ok
+test tests::only_a_canonical_index_counts_as_one ... ok
+test tests::only_integer_like_keys_are_array_indices ... ok
+test tests::missing_arguments_are_undefined_and_extra_ones_are_discarded ... ok
+test tests::parse_int_reads_as_far_as_it_can ... ok
+test tests::node_next_tick_runs_before_promise_reactions ... ok
+test tests::node_crypto_random_bytes_fill_hashes_and_hmac ... ok
+test tests::nullish_jump_keeps_non_nullish_left_operand ... ok
+test tests::reading_an_array_method_twice_yields_the_same_function ... ok
+test tests::readable_call_initializes_an_existing_subclass_without_replacing_its_prototype ... ok
+test tests::proxy_own_key_invariant_source_includes_exotic_and_native_keys ... ok
+test tests::reads_follow_the_prototype_chain_and_own_reads_do_not ... ok
+test tests::process_private_native_modules_are_separate_from_public_ts_projection ... ok
+test tests::realm_timezone_and_locale_are_resolved_once_at_entry ... ok
+test tests::reassigning_a_key_does_not_move_it ... ok
+test tests::property_key_units_cover_mutation_descriptors_inherited_accessors_and_proxy_invariants ... ok
+test tests::reassigning_a_property_keeps_its_position ... ok
+test tests::regexp_escape_appears_in_constructor_own_property_names ... ok
+test tests::report_name_key_mismatches ... ignored, diagnostic: prints where a published name differs from its key
+test tests::removing_a_property_keeps_the_order_of_the_rest ... ok
+test tests::return_signal_rejected_promise_does_not_surface_as_unhandled_rejection ... ok
+test tests::node_zlib_streaming_and_sync_compression_and_decompression ... ok
+test tests::process_object_is_event_emitter ... ok
+test tests::scalar_coercions_match_the_execution_slice ... ok
+test tests::seeded_entropy_reproduces_without_calling_the_host ... ok
+test tests::spread_reads_every_own_property_including_symbol_keyed_ones ... ok
+test tests::regexp_patterns_keep_lone_units_and_utf16_offsets ... ok
+test tests::reflection_materialization_preserves_special_native_property_rows ... ok
+test tests::spreading_something_without_own_properties_contributes_nothing ... ok
+test tests::string_index_of_counts_utf16_units_and_honors_start ... ok
+test tests::string_index_of_empty_needle_uses_the_clamped_start ... ok
+test tests::string_index_of_nan_and_infinity_start_follow_to_integer_or_length ... ok
+test tests::runaway_recursion_is_bounded_by_call_depth ... ok
+test tests::the_quote_character_is_whichever_the_string_lacks ... ok
+test tests::setting_a_property_on_a_primitive_is_rejected ... ok
+test tests::step_limit_stops_an_infinite_program ... ok
+test tests::two_symbols_with_one_description_key_different_properties ... ok
+test tests::text_decoder_and_buffer_support_whatwg_encodings ... ok
+test tests::typeof_reports_the_language_tags_including_the_null_one ... ok
+test tests::typed_array_indices_fail_before_casting_or_allocating ... ok
+test tests::symbol_registry_and_symbol_key_names_preserve_units ... ok
+test tests::views_observe_array_buffer_detachment ... ok
+test tests::virtual_clock_never_calls_the_host ... ok
+test tests::wide_backed_ascii_intrinsic_keys_follow_narrow_lookup ... ok
+test tests::source_compiler_authority_is_scoped_to_one_execution ... ok
+test tests::unwinding_restores_the_stack_the_handler_expected ... ok
+test tests::timers_due_together_run_in_the_order_they_were_scheduled ... ok
+test tests::whatwg_url_and_search_params_support ... ok
+test tests::symbol_addition_and_relational_comparison_reduce_the_right_value_first ... ok
+test tests::template_object_is_cached_by_site_and_frozen ... ok
+test tests::listing_and_describing_agree ... ok
+test tests::every_machine_dispatched_native_has_a_route ... ok
+test tests::every_internal_slot_is_reserved ... ok
+
+test result: ok. 179 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+   Doc-tests kiln_interpreter
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+mbx[cache]: 0 hits, 1 misses, 1 bypassed; 0 B downloaded, 0 B uploaded, 0 B stored locally
+mbx[savings]: 32374 compilations old. not one compiled twice.
