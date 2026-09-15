@@ -1085,6 +1085,31 @@ static int kiln_c99_define_private(kiln_value target, const char *key, size_t ke
     return KILN_C99_OK;
 }
 
+/* The headed form, routing each kind through the keyed definition its byte form
+ * reaches for. */
+static int kiln_c99_define_private_key(kiln_value target, const kiln_string *key,
+                                       kiln_value function, int kind) {
+    if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
+    kiln_property *slot;
+    int status;
+    if (kind != 0) {
+        return kiln_c99_define_accessor_key(target, key,
+                                            kind == 1 ? function : kiln_c99_undefined(),
+                                            kind == 2 ? function : kiln_c99_undefined(), 0);
+    }
+    status = kiln_c99_define_method_key(target, key, function);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    slot = kiln_c99_own_private_key(target, key);
+    if (slot == NULL) {
+        KILN_C99_REFUSE("a private definition that left no property slot");
+    }
+    slot->writable = 0;
+    kiln_c99_object_of(target)->read_only_seen = 1;
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_define_method_key(kiln_value target, const kiln_string *key,
                                       kiln_value method) {
     if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));

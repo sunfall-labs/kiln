@@ -296,11 +296,10 @@ pub(super) fn emit_graph_op(
                 )
                 .unwrap();
             }
-            Constant::BigInt(digits) => {
+            Constant::BigInt(_) => {
                 writeln!(
                     output,
-                    "    {{ kiln_value tmp; int status = kiln_c99_bigint_constant(&{symbol}_bigint_{index}, {symbol}_constant_{index}, {}, &tmp); if (status != KILN_C99_OK) return status; v{v} = kiln_val_from_boundary(tmp); }}",
-                    digits.len()
+                    "    {{ kiln_value tmp; int status = kiln_c99_bigint_constant_key(&{symbol}_bigint_{index}, {symbol}_constant_{index}, &tmp); if (status != KILN_C99_OK) return status; v{v} = kiln_val_from_boundary(tmp); }}",
                 )
                 .unwrap();
             }

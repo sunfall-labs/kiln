@@ -567,6 +567,32 @@ static int kiln_c99_global_binding(kiln_value *out, const char *name, size_t nam
     return KILN_C99_OK;
 }
 
+/* The headed form: global names compare as units, so a non-ASCII binding resolves the
+ * way the interpreter resolves it rather than missing every name the ASCII-only
+ * comparison cannot spell. */
+static int kiln_c99_global_binding_key(kiln_value *out, const kiln_string *name, int *found) {
+    kiln_value globals;
+    kiln_object *object;
+    size_t slot;
+    int status = kiln_c99_global_object(&globals);
+    *found = 0;
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    object = kiln_c99_object_of(globals);
+    if (object->shape != NULL) {
+        kiln_c99_ensure_dictionary(object);
+    }
+    for (slot = 0; slot < object->count; ++slot) {
+        if (kiln_string_equal(object->properties[slot].key, name)) {
+            *out = object->properties[slot].value;
+            *found = 1;
+            return KILN_C99_OK;
+        }
+    }
+    return KILN_C99_OK;
+}
+
 /* `CreateGlobalVarBinding` / `CreateGlobalFunctionBinding`: declare a name on the global object,
  * leaving an existing property alone.
  *
@@ -588,6 +614,33 @@ static int kiln_c99_declare_global(const char *name, size_t name_len, int config
         return status;
     }
     status = kiln_c99_own_slot(globals, name, name_len, &slot);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    slot->accessor = 0;
+    slot->value = kiln_c99_undefined();
+    slot->enumerable = 1;
+    slot->writable = 1;
+    slot->configurable = configurable;
+    return KILN_C99_OK;
+}
+
+/* The headed form, owning the same create-if-absent contract through the keyed lookup
+ * and slot primitives. */
+static int kiln_c99_declare_global_key(const kiln_string *name, int configurable) {
+    kiln_value globals;
+    kiln_value existing;
+    kiln_property *slot;
+    int found = 0;
+    int status = kiln_c99_global_binding_key(&existing, name, &found);
+    if (status != KILN_C99_OK || found) {
+        return status;
+    }
+    status = kiln_c99_global_object(&globals);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    status = kiln_c99_own_slot_key(globals, name, NULL, &slot);
     if (status != KILN_C99_OK) {
         return status;
     }
