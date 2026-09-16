@@ -130,8 +130,10 @@ fn emit_map_typed(
                          int status = kiln_c99_new_array_with_capacity(&built_val, count0, 1); \
                          if (status != KILN_C99_OK) return status; \
                          kiln_array *built_arr = kiln_c99_array_of(built_val); \
+                         const kiln_val * restrict in_elems = (const kiln_val * restrict)arr->elements; \
+                         kiln_val * restrict out_elems = (kiln_val * restrict)built_arr->elements; \
                          for (size_t idx = 0; idx < count0; ++idx) {{ \
-                             double d_elem; memcpy(&d_elem, &arr->elements[idx], sizeof(d_elem)); \
+                             double d_elem; memcpy(&d_elem, &in_elems[idx], sizeof(d_elem)); \
                              {result} \
                          }} \
                          built_arr->count = count0; \
@@ -1032,8 +1034,8 @@ pub(super) fn emit_call_method(
                              if (status != KILN_C99_OK) return status; \
                              kiln_typed_array *built_view = kiln_c99_typed_array_of(built_val); \
                              int pmap_failed = 0; \
-                             const void *src_bytes = (const void *)(view->buffer->bytes + view->byte_offset); \
-                             void *dst_bytes = (void *)(built_view->buffer->bytes + built_view->byte_offset); \
+                             const void * restrict src_bytes = (const void * restrict)(view->buffer->bytes + view->byte_offset); \
+                             void * restrict dst_bytes = (void * restrict)(built_view->buffer->bytes + built_view->byte_offset); \
                              kiln_parallel_chunk_fn chunk_fn = NULL; \
                              switch (view->kind) {{ \
                              case KILN_TYPED_FLOAT64: chunk_fn = {symbol}_pmap_f64_{target}; break; \
