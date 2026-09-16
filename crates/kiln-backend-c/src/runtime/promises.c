@@ -12,30 +12,36 @@
  * promise jobs belong: after `process.nextTick`, before the next host completion. The lanes the
  * runtime still owns -- next tick, timers, completions -- are unchanged, because ordering
  * between lanes is the realm's to decide and only the promise lane's *contents* moved. */
-/* Room for one more job: the live span slides down to the front when there is space in front of
- * it, and the array doubles when there is not. It never shrinks, so a realm that once fanned out
- * a hundred thousand jobs keeps that array until it dies -- a few megabytes at the sizes we have
- * measured, held against the burst happening again, and never a leak that grows with time. */
+/* Room for one more job: when the ring is full, its capacity doubles and its elements are
+ * linearized into the new buffer. The capacity is always a power of two. The ring never shrinks,
+ * so a realm that once fanned out a hundred thousand jobs keeps that array until it dies -- a few
+ * megabytes at the sizes we have measured, held against the burst happening again, and never a
+ * leak that grows with time. */
 static int kiln_c99_jobs_grow(kiln_gc_heap *heap) {
-    size_t capacity;
+    size_t capacity = heap->job_capacity == 0 ? 64 : heap->job_capacity * 2;
     kiln_microtask *grown;
-    if (heap->job_head != 0) {
-        /* A drain that keeps enqueueing walks the head forward and leaves the space behind it
-         * empty; sliding into that space is what keeps one turn's ring at one turn's size. */
-        size_t live = heap->job_tail - heap->job_head;
-        if (live != 0) memmove(heap->jobs, heap->jobs + heap->job_head, live * sizeof *heap->jobs);
-        heap->job_head = 0;
-        heap->job_tail = live;
-        if (live < heap->job_capacity) return KILN_C99_OK;
-    }
-    capacity = heap->job_capacity == 0 ? 16 : heap->job_capacity * 2;
+    size_t live = heap->job_tail - heap->job_head;
     if (capacity <= heap->job_capacity || capacity > ((size_t)-1) / sizeof *grown) {
         return KILN_C99_OUT_OF_MEMORY;
     }
-    grown = (kiln_microtask *)realloc(heap->jobs, capacity * sizeof *grown);
+    grown = (kiln_microtask *)malloc(capacity * sizeof *grown);
     if (grown == NULL) return KILN_C99_OUT_OF_MEMORY;
+    if (live != 0) {
+        size_t head_idx = heap->job_head & heap->job_mask;
+        if (head_idx + live <= heap->job_capacity) {
+            memcpy(grown, heap->jobs + head_idx, live * sizeof *grown);
+        } else {
+            size_t first_part = heap->job_capacity - head_idx;
+            memcpy(grown, heap->jobs + head_idx, first_part * sizeof *grown);
+            memcpy(grown + first_part, heap->jobs, (live - first_part) * sizeof *grown);
+        }
+    }
+    free(heap->jobs);
     heap->jobs = grown;
+    heap->job_head = 0;
+    heap->job_tail = live;
     heap->job_capacity = capacity;
+    heap->job_mask = capacity - 1;
     return KILN_C99_OK;
 }
 
@@ -51,11 +57,11 @@ static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value 
     if (KILN_UNLIKELY(heap->fallback)) {
         KILN_C99_REFUSE("a promise job queued outside any realm, where nothing would run it");
     }
-    if (KILN_UNLIKELY(heap->job_tail == heap->job_capacity)) {
+    if (KILN_UNLIKELY(heap->job_tail - heap->job_head == heap->job_capacity)) {
         int status = kiln_c99_jobs_grow(heap);
         if (status != KILN_C99_OK) return status;
     }
-    job = &heap->jobs[heap->job_tail++];
+    job = &heap->jobs[heap->job_tail++ & heap->job_mask];
     job->handler = handler;
     job->argument = argument;
     job->derived = derived;
@@ -440,7 +446,7 @@ static int kiln_c99_run_promise_jobs(void *context, void *host_pointer, void *th
     kiln_value *thrown = (kiln_value *)thrown_pointer;
     if (heap == NULL || thrown == NULL) return KILN_C99_INVALID_ARGUMENT;
     while (heap->job_head < heap->job_tail) {
-        kiln_microtask job = heap->jobs[heap->job_head++];
+        kiln_microtask job = heap->jobs[heap->job_head++ & heap->job_mask];
         int status;
         /* An emptied ring starts again at zero, so a program that never has two jobs waiting at
          * once never grows the array past its first block. */
