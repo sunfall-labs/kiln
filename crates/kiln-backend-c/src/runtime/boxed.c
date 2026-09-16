@@ -397,8 +397,8 @@ static inline uint64_t kiln_c99_val_collection_hash(kiln_val key) {
 static inline int kiln_c99_val_collection_eq(kiln_value a, kiln_val b) {
     if (KILN_LIKELY(a.tag == KILN_VALUE_NUMBER && KILN_VAL_IS_NUMBER(b))) {
         if (a.bits == (uint64_t)b) return 1;
-        double da = kiln_c99_as_number(a);
-        double db;
+        double da, db;
+        memcpy(&da, &a.bits, sizeof(da));
         memcpy(&db, &b, sizeof(db));
         if (KILN_UNLIKELY(isnan(da) && isnan(db))) return 1;
         return da == db;

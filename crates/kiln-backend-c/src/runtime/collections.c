@@ -71,15 +71,15 @@ static uint64_t kiln_c99_collection_string_hash(const kiln_string *string) {
 
 static uint64_t kiln_c99_value_hash(kiln_value v) {
     if (v.tag == KILN_VALUE_NUMBER) {
-        double d = kiln_c99_as_number(v);
-        uint64_t bits;
+        uint64_t bits = (uint64_t)v.bits;
+        double d;
+        memcpy(&d, &bits, sizeof bits);
         if (isnan(d)) {
             return UINT64_C(0x7ff8000000000000);
         }
         if (d == 0.0) {
-            d = 0.0;
+            bits = 0;
         }
-        memcpy(&bits, &d, sizeof bits);
         bits ^= bits >> 32;
         bits *= UINT64_C(0xff51afd7ed558ccd);
         return bits ^ (bits >> 29);
@@ -196,9 +196,14 @@ static double kiln_c99_collection_find(kiln_collection *collection, kiln_value k
         size_t at = (size_t)kiln_c99_value_hash(key) & mask;
         while (collection->hash_table[at] != 0) {
             uint32_t idx = collection->hash_table[at] - 1;
-            if (!collection->entries[idx].dead &&
-                kiln_c99_same_value_zero(collection->entries[idx].key, key)) {
-                return (double)idx;
+            if (!collection->entries[idx].dead) {
+                kiln_value k = collection->entries[idx].key;
+                if (k.bits == key.bits && k.tag == key.tag) {
+                    return (double)idx;
+                }
+                if (kiln_c99_same_value_zero(k, key)) {
+                    return (double)idx;
+                }
             }
             at = (at + 1) & mask;
         }
@@ -208,7 +213,11 @@ static double kiln_c99_collection_find(kiln_collection *collection, kiln_value k
         if (collection->entries[index].dead) {
             continue;
         }
-        if (kiln_c99_same_value_zero(collection->entries[index].key, key)) {
+        kiln_value k = collection->entries[index].key;
+        if (k.bits == key.bits && k.tag == key.tag) {
+            return (double)index;
+        }
+        if (kiln_c99_same_value_zero(k, key)) {
             return (double)index;
         }
     }
@@ -217,14 +226,35 @@ static double kiln_c99_collection_find(kiln_collection *collection, kiln_value k
 
 static int kiln_c99_collection_put(kiln_value target, kiln_value key, kiln_value value) {
     kiln_collection *collection = kiln_c99_collection_of(target);
-    double at = kiln_c99_collection_find(collection, key);
     int status;
     size_t new_idx;
-    if (at >= 0.0) {
-        /* Re-setting a key keeps its position: insertion order is the order of *first*
-         * appearance, which is what iteration reports. */
-        collection->entries[(size_t)at].value = value;
-        return KILN_C99_OK;
+    size_t empty_slot = 0;
+    int has_empty_slot = 0;
+    if (collection->count > 0 && collection->hash_table != NULL && collection->hash_capacity > 0) {
+        size_t mask = collection->hash_capacity - 1;
+        size_t at = (size_t)kiln_c99_value_hash(key) & mask;
+        while (collection->hash_table[at] != 0) {
+            uint32_t idx = collection->hash_table[at] - 1;
+            if (!collection->entries[idx].dead) {
+                kiln_value k = collection->entries[idx].key;
+                if ((k.bits == key.bits && k.tag == key.tag) || kiln_c99_same_value_zero(k, key)) {
+                    collection->entries[idx].value = value;
+                    return KILN_C99_OK;
+                }
+            }
+            at = (at + 1) & mask;
+        }
+        empty_slot = at;
+        has_empty_slot = 1;
+    } else if (collection->count > 0 && collection->hash_table == NULL) {
+        for (size_t index = 0; index < collection->count; ++index) {
+            if (collection->entries[index].dead) continue;
+            kiln_value k = collection->entries[index].key;
+            if ((k.bits == key.bits && k.tag == key.tag) || kiln_c99_same_value_zero(k, key)) {
+                collection->entries[index].value = value;
+                return KILN_C99_OK;
+            }
+        }
     }
     status = kiln_c99_reserve((void **)&collection->entries, &collection->capacity,
                               collection->count + 1, sizeof *collection->entries);
@@ -251,6 +281,8 @@ static int kiln_c99_collection_put(kiln_value target, kiln_value key, kiln_value
             if (status != KILN_C99_OK) {
                 return status;
             }
+        } else if (has_empty_slot) {
+            collection->hash_table[empty_slot] = (uint32_t)(new_idx + 1);
         } else {
             size_t mask = collection->hash_capacity - 1;
             size_t h_at = (size_t)kiln_c99_value_hash(key) & mask;
