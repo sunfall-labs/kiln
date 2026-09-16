@@ -1907,7 +1907,8 @@ static kiln_string *kiln_c99_gc_alloc_key_copy(const kiln_string *view) {
     size_t storage;
     size_t total;
     kiln_string *copy;
-    if (view == NULL || !kiln_string_storage_size(view->unit_len, view->flags, &storage) ||
+    uint32_t enc = view != NULL ? (view->flags & (KILN_STRING_LATIN1 | KILN_STRING_UTF16)) : 0;
+    if (view == NULL || !kiln_string_storage_size(view->unit_len, enc, &storage) ||
         storage > SIZE_MAX - sizeof *copy) {
         return NULL;
     }
@@ -1915,7 +1916,7 @@ static kiln_string *kiln_c99_gc_alloc_key_copy(const kiln_string *view) {
     copy = (kiln_string *)kiln_c99_gc_alloc_tenured(KILN_GC_STRING, total);
     if (copy == NULL) return NULL;
     copy->unit_len = view->unit_len;
-    copy->flags = view->flags;
+    copy->flags = enc;
     copy->data = (const void *)(copy + 1);
     if (storage > sizeof *copy) {
         memcpy((void *)copy->data, view->data, storage - sizeof *copy);

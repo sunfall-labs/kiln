@@ -298,7 +298,7 @@ static inline int kiln_string_starts_ascii(const kiln_string *string, const char
 }
 static inline int kiln_string_equal(const kiln_string *left, const kiln_string *right) {
     if (left == NULL || right == NULL || left->unit_len != right->unit_len) return 0;
-    if (left->flags == right->flags && left->unit_len != 0)
+    if ((left->flags & (KILN_STRING_LATIN1 | KILN_STRING_UTF16)) == (right->flags & (KILN_STRING_LATIN1 | KILN_STRING_UTF16)) && left->unit_len != 0)
         return memcmp(left->data, right->data,
                       (size_t)left->unit_len * (kiln_string_is_utf16(left) ? sizeof(uint16_t) : sizeof(uint8_t))) == 0;
     for (size_t index = 0; index < left->unit_len; ++index)
@@ -322,8 +322,9 @@ static inline size_t kiln_string_unit_width(const kiln_string *string) {
 }
 static inline int kiln_string_storage_size(uint32_t unit_len, uint32_t flags, size_t *out) {
     size_t width;
-    if (flags != KILN_STRING_LATIN1 && flags != KILN_STRING_UTF16) return 0;
-    width = flags == KILN_STRING_UTF16 ? sizeof(uint16_t) : sizeof(uint8_t);
+    uint32_t enc = flags & (KILN_STRING_LATIN1 | KILN_STRING_UTF16);
+    if ((flags & ~(KILN_STRING_LATIN1 | KILN_STRING_UTF16 | KILN_STRING_SLICED)) != 0) return 0;
+    width = enc == KILN_STRING_UTF16 ? sizeof(uint16_t) : sizeof(uint8_t);
     size_t units = (size_t)unit_len;
     if (units > (SIZE_MAX - sizeof(kiln_string)) / width) return 0;
     *out = sizeof(kiln_string) + units * width;
@@ -650,14 +651,12 @@ static int kiln_cli_write_result_u64(FILE *file, uint64_t value) {
 
 static int kiln_cli_validate_result_string(const kiln_string *string, int *utf16) {
     if (string == NULL || utf16 == NULL) return KILN_C99_INVALID_ARGUMENT;
-    /* Only the two canonical encodings are valid at this boundary.  In particular, do not
-     * treat an unknown flag as UTF-16 before checking it: that would dereference a wrongly
-     * typed payload while trying to serialize a malformed value. */
-    if (string->flags != KILN_STRING_LATIN1 && string->flags != KILN_STRING_UTF16) {
+    /* Only the canonical encodings are valid at this boundary. */
+    if ((string->flags & ~(KILN_STRING_LATIN1 | KILN_STRING_UTF16 | KILN_STRING_SLICED)) != 0) {
         return KILN_C99_INVALID_ARGUMENT;
     }
     if (string->unit_len != 0 && string->data == NULL) return KILN_C99_INVALID_ARGUMENT;
-    *utf16 = string->flags == KILN_STRING_UTF16;
+    *utf16 = kiln_string_is_utf16(string);
     return KILN_C99_OK;
 }
 

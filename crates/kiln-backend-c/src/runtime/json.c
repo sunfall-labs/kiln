@@ -1034,9 +1034,9 @@ static void kiln_c99_json_build_release(kiln_json_build_stack *stack) {
 static int kiln_c99_json_text_view(const kiln_string *text, size_t start, size_t len,
                                    kiln_string *out) {
     if (text == NULL || out == NULL ||
-        (text->flags != KILN_STRING_LATIN1 && text->flags != KILN_STRING_UTF16) ||
+        ((text->flags & ~(KILN_STRING_LATIN1 | KILN_STRING_UTF16 | KILN_STRING_SLICED)) != 0) ||
         (text->unit_len != 0 && text->data == NULL) ||
-        (text->flags == KILN_STRING_UTF16 && text->data != NULL &&
+        (kiln_string_is_utf16(text) && text->data != NULL &&
          ((uintptr_t)text->data & (sizeof(uint16_t) - 1)) != 0) ||
         start > text->unit_len || len > text->unit_len - start || text->unit_len > UINT32_MAX ||
         len > UINT32_MAX) {

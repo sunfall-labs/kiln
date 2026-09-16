@@ -94,9 +94,9 @@ static int kiln_c99_json_indent_string(kiln_value value, kiln_text *out) {
         return KILN_C99_INVALID_ARGUMENT;
     }
     source = (const kiln_string *)value.ptr;
-    if ((source->flags != KILN_STRING_LATIN1 && source->flags != KILN_STRING_UTF16) ||
+    if (((source->flags & ~(KILN_STRING_LATIN1 | KILN_STRING_UTF16 | KILN_STRING_SLICED)) != 0) ||
         (source->unit_len != 0 && source->data == NULL) ||
-        (source->flags == KILN_STRING_UTF16 && source->data != NULL &&
+        (kiln_string_is_utf16(source) && source->data != NULL &&
          ((uintptr_t)source->data & (sizeof(uint16_t) - 1)) != 0)) {
         return KILN_C99_INVALID_ARGUMENT;
     }
