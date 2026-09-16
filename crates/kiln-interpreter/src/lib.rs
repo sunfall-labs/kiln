@@ -31091,13 +31091,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     (true, true) => PrototypeTable::WeakMap,
                     (false, true) => PrototypeTable::WeakSet,
                 };
-                match table_step(
-                    &self.intrinsics,
-                    table,
-                    name,
-                    collection_property(is_map, weak, name),
-                    value_realm(target),
-                ) {
+                let fallback = match (is_map, weak) {
+                    (true, false) => tabulated_map_property(name),
+                    (false, false) => tabulated_set_property(name),
+                    (true, true) => tabulated_weak_map_property(name),
+                    (false, true) => tabulated_weak_set_property(name),
+                };
+                match table_step(&self.intrinsics, table, name, fallback, value_realm(target)) {
                     Value::Undefined => object.borrow().get(name).unwrap_or_else(|| {
                         inherited_object_property(&self.intrinsics, name, value_realm(target))
                     }),
@@ -40010,99 +40010,6 @@ fn string_property(name: &str) -> Value {
     }
 }
 
-/// The methods a Set or Map instance exposes, shared by property reads and `in`.
-/// The methods a Set or Map instance exposes, shared by property reads and `in`.
-///
-/// A weak collection exposes only the four that take a key: it has no size and cannot be walked,
-/// because with no way to observe collection there would be nothing to stop a program depending
-/// on entries a real engine would already have dropped.
-fn collection_property(is_map: bool, weak: bool, name: &str) -> Value {
-    // `clear` is in this list because a weak collection cannot have one: it would have to
-    // enumerate the entries to drop them, which is the very thing a weak collection refuses to
-    // let a program observe. It was answered anyway, so `WeakMap.prototype.clear` existed here
-    // and nowhere else, and `hasOwnProperty` said so while `getOwnPropertyNames` did not.
-    if weak && matches!(name, "values" | "keys" | "entries" | "forEach" | "clear") {
-        return Value::Undefined;
-    }
-    if weak && name == WellKnown::Iterator.property_key() {
-        return Value::Undefined;
-    }
-    match (is_map, name) {
-        (false, "add") if weak => Value::Native(Native::WeakSetAdd, RealmId::PRIMARY),
-        (false, "has") if weak => Value::Native(Native::WeakSetHas, RealmId::PRIMARY),
-        (false, "delete") if weak => Value::Native(Native::WeakSetDelete, RealmId::PRIMARY),
-        (true, "set") if weak => Value::Native(Native::WeakMapSet, RealmId::PRIMARY),
-        (true, "get") if weak => Value::Native(Native::WeakMapGet, RealmId::PRIMARY),
-        (true, "has") if weak => Value::Native(Native::WeakMapHas, RealmId::PRIMARY),
-        (true, "delete") if weak => Value::Native(Native::WeakMapDelete, RealmId::PRIMARY),
-        (false, "add") => Value::Native(Native::SetAdd, RealmId::PRIMARY),
-        (false, "has") => Value::Native(Native::SetHas, RealmId::PRIMARY),
-        (false, "delete") => Value::Native(Native::SetDelete, RealmId::PRIMARY),
-        // The seven operations, on `Set` alone: a Map has keys and values and no answer to what
-        // its union with something would contain.
-        (false, name) if !weak && SetOperation::named(name).is_some() => Value::Native(
-            Native::SetOperation(
-                SetOperation::named(name)
-                    .unwrap_or_else(|| unreachable!("the guard just found it")),
-            ),
-            RealmId::PRIMARY,
-        ),
-        (true, "getOrInsert") => Value::Native(
-            Native::CollectionGetOrInsert {
-                weak,
-                computed: false,
-            },
-            RealmId::PRIMARY,
-        ),
-        (true, "getOrInsertComputed") => Value::Native(
-            Native::CollectionGetOrInsert {
-                weak,
-                computed: true,
-            },
-            RealmId::PRIMARY,
-        ),
-        (true, "set") => Value::Native(Native::MapSet, RealmId::PRIMARY),
-        (true, "get") => Value::Native(Native::MapGet, RealmId::PRIMARY),
-        (true, "has") => Value::Native(Native::MapHas, RealmId::PRIMARY),
-        (true, "delete") => Value::Native(Native::MapDelete, RealmId::PRIMARY),
-        // A Map stores `[key, value]` pairs, so `keys` and `values` project out of them where
-        // `entries` hands the pair over whole. A Set stores bare values, and its `entries` pairs
-        // each one with itself -- which is the specification's way of giving the two collections
-        // one iteration protocol.
-        (_, "clear") => Value::Native(Native::CollectionClear(is_map), RealmId::PRIMARY),
-        (_, "forEach") => Value::Native(Native::CollectionForEach(is_map), RealmId::PRIMARY),
-        (_, "values") => Value::Native(Native::CollectionValues(is_map), RealmId::PRIMARY),
-        // A Set's keys *are* its values, and the specification says so by giving the two names
-        // one function: `Set.prototype.keys === Set.prototype.values` is true, and two markers
-        // would make it false.
-        (false, "keys") => Value::Native(Native::CollectionValues(false), RealmId::PRIMARY),
-        (_, "keys") => Value::Native(Native::CollectionKeys(is_map), RealmId::PRIMARY),
-        (_, "entries") => Value::Native(Native::CollectionEntries(is_map), RealmId::PRIMARY),
-        // The default iteration of a Map is its entries and of a Set is its values.
-        (is_map, key) if key == WellKnown::Iterator.property_key() => Value::Native(
-            if is_map {
-                Native::CollectionEntries(true)
-            } else {
-                Native::CollectionValues(false)
-            },
-            RealmId::PRIMARY,
-        ),
-        // The tag `Object.prototype.toString` reads: it is what makes a `Map` print as
-        // `[object Map]` rather than the bare `[object Object]` every object would give.
-        (_, key) if key == WellKnown::ToStringTag.property_key() => Value::String(
-            match (is_map, weak) {
-                (true, false) => "Map",
-                (false, false) => "Set",
-                (true, true) => "WeakMap",
-                (false, true) => "WeakSet",
-            }
-            .to_owned()
-            .into(),
-        ),
-        _ => Value::Undefined,
-    }
-}
-
 /// `JSON.rawJSON(text)`: an object carrying JSON text the serialiser will emit unchanged.
 ///
 /// Only a *primitive* text is accepted. An object or an array would have to be re-serialised
@@ -40503,16 +40410,6 @@ pub enum SetOperation {
 }
 
 impl SetOperation {
-    const ALL: [Self; 7] = [
-        Self::Union,
-        Self::Intersection,
-        Self::Difference,
-        Self::SymmetricDifference,
-        Self::IsSubsetOf,
-        Self::IsSupersetOf,
-        Self::IsDisjointFrom,
-    ];
-
     const fn property_key(self) -> &'static str {
         match self {
             Self::Union => "union",
@@ -40523,12 +40420,6 @@ impl SetOperation {
             Self::IsSupersetOf => "isSupersetOf",
             Self::IsDisjointFrom => "isDisjointFrom",
         }
-    }
-
-    fn named(key: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|found| found.property_key() == key)
     }
 }
 
@@ -45093,6 +44984,206 @@ fn tabulated_function_property(name: &str) -> Value {
     }
 }
 
+fn map_method_value(method: kiln_builtin_surface::MapMethod, realm: RealmId) -> Value {
+    match method {
+        kiln_builtin_surface::MapMethod::Clear => {
+            Value::Native(Native::CollectionClear(true), realm)
+        }
+        kiln_builtin_surface::MapMethod::Delete => Value::Native(Native::MapDelete, realm),
+        kiln_builtin_surface::MapMethod::Entries => {
+            Value::Native(Native::CollectionEntries(true), realm)
+        }
+        kiln_builtin_surface::MapMethod::ForEach => {
+            Value::Native(Native::CollectionForEach(true), realm)
+        }
+        kiln_builtin_surface::MapMethod::Get => Value::Native(Native::MapGet, realm),
+        kiln_builtin_surface::MapMethod::GetOrInsert => Value::Native(
+            Native::CollectionGetOrInsert {
+                weak: false,
+                computed: false,
+            },
+            realm,
+        ),
+        kiln_builtin_surface::MapMethod::GetOrInsertComputed => Value::Native(
+            Native::CollectionGetOrInsert {
+                weak: false,
+                computed: true,
+            },
+            realm,
+        ),
+        kiln_builtin_surface::MapMethod::Has => Value::Native(Native::MapHas, realm),
+        kiln_builtin_surface::MapMethod::Keys => Value::Native(Native::CollectionKeys(true), realm),
+        kiln_builtin_surface::MapMethod::Set => Value::Native(Native::MapSet, realm),
+        kiln_builtin_surface::MapMethod::Values => {
+            Value::Native(Native::CollectionValues(true), realm)
+        }
+    }
+}
+
+fn tabulated_map_property(name: &str) -> Value {
+    let Some(member) =
+        kiln_builtin_surface::find_prototype_member(kiln_builtin_surface::PrototypeId::Map, name)
+    else {
+        return Value::Undefined;
+    };
+    match member.binding {
+        kiln_builtin_surface::SemanticBinding::Constructor => {
+            Value::Native(Native::MapConstructor, RealmId::PRIMARY)
+        }
+        kiln_builtin_surface::SemanticBinding::MapMethod(method) => {
+            map_method_value(method, RealmId::PRIMARY)
+        }
+        kiln_builtin_surface::SemanticBinding::CollectionIterator(true) => {
+            Value::Native(Native::CollectionEntries(true), RealmId::PRIMARY)
+        }
+        kiln_builtin_surface::SemanticBinding::StringTag(tag) => {
+            Value::String(tag.to_owned().into())
+        }
+        _ => Value::Undefined,
+    }
+}
+
+fn set_method_value(method: kiln_builtin_surface::SetMethod, realm: RealmId) -> Value {
+    match method {
+        kiln_builtin_surface::SetMethod::Add => Value::Native(Native::SetAdd, realm),
+        kiln_builtin_surface::SetMethod::Clear => {
+            Value::Native(Native::CollectionClear(false), realm)
+        }
+        kiln_builtin_surface::SetMethod::Delete => Value::Native(Native::SetDelete, realm),
+        kiln_builtin_surface::SetMethod::Difference => {
+            Value::Native(Native::SetOperation(SetOperation::Difference), realm)
+        }
+        kiln_builtin_surface::SetMethod::Entries => {
+            Value::Native(Native::CollectionEntries(false), realm)
+        }
+        kiln_builtin_surface::SetMethod::ForEach => {
+            Value::Native(Native::CollectionForEach(false), realm)
+        }
+        kiln_builtin_surface::SetMethod::Has => Value::Native(Native::SetHas, realm),
+        kiln_builtin_surface::SetMethod::Intersection => {
+            Value::Native(Native::SetOperation(SetOperation::Intersection), realm)
+        }
+        kiln_builtin_surface::SetMethod::IsDisjointFrom => {
+            Value::Native(Native::SetOperation(SetOperation::IsDisjointFrom), realm)
+        }
+        kiln_builtin_surface::SetMethod::IsSubsetOf => {
+            Value::Native(Native::SetOperation(SetOperation::IsSubsetOf), realm)
+        }
+        kiln_builtin_surface::SetMethod::IsSupersetOf => {
+            Value::Native(Native::SetOperation(SetOperation::IsSupersetOf), realm)
+        }
+        kiln_builtin_surface::SetMethod::Keys => {
+            Value::Native(Native::CollectionValues(false), realm)
+        }
+        kiln_builtin_surface::SetMethod::SymmetricDifference => Value::Native(
+            Native::SetOperation(SetOperation::SymmetricDifference),
+            realm,
+        ),
+        kiln_builtin_surface::SetMethod::Union => {
+            Value::Native(Native::SetOperation(SetOperation::Union), realm)
+        }
+        kiln_builtin_surface::SetMethod::Values => {
+            Value::Native(Native::CollectionValues(false), realm)
+        }
+    }
+}
+
+fn tabulated_set_property(name: &str) -> Value {
+    let Some(member) =
+        kiln_builtin_surface::find_prototype_member(kiln_builtin_surface::PrototypeId::Set, name)
+    else {
+        return Value::Undefined;
+    };
+    match member.binding {
+        kiln_builtin_surface::SemanticBinding::Constructor => {
+            Value::Native(Native::SetConstructor, RealmId::PRIMARY)
+        }
+        kiln_builtin_surface::SemanticBinding::SetMethod(method) => {
+            set_method_value(method, RealmId::PRIMARY)
+        }
+        kiln_builtin_surface::SemanticBinding::CollectionIterator(false) => {
+            Value::Native(Native::CollectionValues(false), RealmId::PRIMARY)
+        }
+        kiln_builtin_surface::SemanticBinding::StringTag(tag) => {
+            Value::String(tag.to_owned().into())
+        }
+        _ => Value::Undefined,
+    }
+}
+
+fn weak_map_method_value(method: kiln_builtin_surface::WeakMapMethod, realm: RealmId) -> Value {
+    match method {
+        kiln_builtin_surface::WeakMapMethod::Delete => Value::Native(Native::WeakMapDelete, realm),
+        kiln_builtin_surface::WeakMapMethod::Get => Value::Native(Native::WeakMapGet, realm),
+        kiln_builtin_surface::WeakMapMethod::GetOrInsert => Value::Native(
+            Native::CollectionGetOrInsert {
+                weak: true,
+                computed: false,
+            },
+            realm,
+        ),
+        kiln_builtin_surface::WeakMapMethod::GetOrInsertComputed => Value::Native(
+            Native::CollectionGetOrInsert {
+                weak: true,
+                computed: true,
+            },
+            realm,
+        ),
+        kiln_builtin_surface::WeakMapMethod::Has => Value::Native(Native::WeakMapHas, realm),
+        kiln_builtin_surface::WeakMapMethod::Set => Value::Native(Native::WeakMapSet, realm),
+    }
+}
+
+fn tabulated_weak_map_property(name: &str) -> Value {
+    let Some(member) = kiln_builtin_surface::find_prototype_member(
+        kiln_builtin_surface::PrototypeId::WeakMap,
+        name,
+    ) else {
+        return Value::Undefined;
+    };
+    match member.binding {
+        kiln_builtin_surface::SemanticBinding::Constructor => {
+            Value::Native(Native::WeakMapConstructor, RealmId::PRIMARY)
+        }
+        kiln_builtin_surface::SemanticBinding::WeakMapMethod(method) => {
+            weak_map_method_value(method, RealmId::PRIMARY)
+        }
+        kiln_builtin_surface::SemanticBinding::StringTag(tag) => {
+            Value::String(tag.to_owned().into())
+        }
+        _ => Value::Undefined,
+    }
+}
+
+fn weak_set_method_value(method: kiln_builtin_surface::WeakSetMethod, realm: RealmId) -> Value {
+    match method {
+        kiln_builtin_surface::WeakSetMethod::Add => Value::Native(Native::WeakSetAdd, realm),
+        kiln_builtin_surface::WeakSetMethod::Delete => Value::Native(Native::WeakSetDelete, realm),
+        kiln_builtin_surface::WeakSetMethod::Has => Value::Native(Native::WeakSetHas, realm),
+    }
+}
+
+fn tabulated_weak_set_property(name: &str) -> Value {
+    let Some(member) = kiln_builtin_surface::find_prototype_member(
+        kiln_builtin_surface::PrototypeId::WeakSet,
+        name,
+    ) else {
+        return Value::Undefined;
+    };
+    match member.binding {
+        kiln_builtin_surface::SemanticBinding::Constructor => {
+            Value::Native(Native::WeakSetConstructor, RealmId::PRIMARY)
+        }
+        kiln_builtin_surface::SemanticBinding::WeakSetMethod(method) => {
+            weak_set_method_value(method, RealmId::PRIMARY)
+        }
+        kiln_builtin_surface::SemanticBinding::StringTag(tag) => {
+            Value::String(tag.to_owned().into())
+        }
+        _ => Value::Undefined,
+    }
+}
+
 /// The number a `Number.prototype` method is running on, or the `TypeError` it owes.
 ///
 /// Not `as_number`: these three are the specification's `ThisNumberValue`, which accepts a number
@@ -46160,6 +46251,10 @@ impl Intrinsics {
                         | PrototypeTable::Promise
                         | PrototypeTable::Object
                         | PrototypeTable::Function
+                        | PrototypeTable::Map
+                        | PrototypeTable::Set
+                        | PrototypeTable::WeakMap
+                        | PrototypeTable::WeakSet
                 ),
                 _
             )
@@ -46337,7 +46432,11 @@ impl Intrinsics {
                 | PrototypeTable::BigInt
                 | PrototypeTable::Promise
                 | PrototypeTable::Object
-                | PrototypeTable::Function),
+                | PrototypeTable::Function
+                | PrototypeTable::Map
+                | PrototypeTable::Set
+                | PrototypeTable::WeakMap
+                | PrototypeTable::WeakSet),
             ),
             _,
         ) = target
@@ -46351,6 +46450,10 @@ impl Intrinsics {
                 PrototypeTable::Promise => kiln_builtin_surface::PrototypeId::Promise,
                 PrototypeTable::Object => kiln_builtin_surface::PrototypeId::Object,
                 PrototypeTable::Function => kiln_builtin_surface::PrototypeId::Function,
+                PrototypeTable::Map => kiln_builtin_surface::PrototypeId::Map,
+                PrototypeTable::Set => kiln_builtin_surface::PrototypeId::Set,
+                PrototypeTable::WeakMap => kiln_builtin_surface::PrototypeId::WeakMap,
+                PrototypeTable::WeakSet => kiln_builtin_surface::PrototypeId::WeakSet,
                 _ => unreachable!(),
             };
             let mut data = ObjectData::default();
@@ -46391,6 +46494,10 @@ impl Intrinsics {
                             PrototypeTable::Promise => Native::PromiseConstructor,
                             PrototypeTable::Object => Native::ObjectConstructor,
                             PrototypeTable::Function => Native::FunctionConstructor,
+                            PrototypeTable::Map => Native::MapConstructor,
+                            PrototypeTable::Set => Native::SetConstructor,
+                            PrototypeTable::WeakMap => Native::WeakMapConstructor,
+                            PrototypeTable::WeakSet => Native::WeakSetConstructor,
                             _ => unreachable!(),
                         };
                         Property::Value(Value::Native(ctor, realm))
@@ -46448,6 +46555,37 @@ impl Intrinsics {
                             get: Some(Value::Native(Native::ThrowTypeError, realm)),
                             set: Some(Value::Native(Native::ThrowTypeError, realm)),
                         }
+                    }
+                    kiln_builtin_surface::SemanticBinding::MapMethod(method) => {
+                        Property::Value(map_method_value(method, realm))
+                    }
+                    kiln_builtin_surface::SemanticBinding::SetMethod(method) => {
+                        Property::Value(set_method_value(method, realm))
+                    }
+                    kiln_builtin_surface::SemanticBinding::WeakMapMethod(method) => {
+                        Property::Value(weak_map_method_value(method, realm))
+                    }
+                    kiln_builtin_surface::SemanticBinding::WeakSetMethod(method) => {
+                        Property::Value(weak_set_method_value(method, realm))
+                    }
+                    kiln_builtin_surface::SemanticBinding::CollectionSize(is_map) => {
+                        Property::Accessor {
+                            get: Some(Value::Native(
+                                Native::BuiltinAccessor(BuiltinAccessor::CollectionSize(is_map)),
+                                realm,
+                            )),
+                            set: None,
+                        }
+                    }
+                    kiln_builtin_surface::SemanticBinding::CollectionIterator(is_map) => {
+                        Property::Value(Value::Native(
+                            if is_map {
+                                Native::CollectionEntries(true)
+                            } else {
+                                Native::CollectionValues(false)
+                            },
+                            realm,
+                        ))
                     }
                 };
                 let attrs = Attributes {
@@ -46815,46 +46953,6 @@ const ITERATOR_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::Nam
     "map", "filter", "take", "drop", "flatMap", "reduce", "toArray", "forEach", "some", "every",
     "find", "includes", "join", "chunks", "windows",
 ]);
-const MAP_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
-    "get",
-    "getOrInsert",
-    "getOrInsertComputed",
-    "set",
-    "has",
-    "delete",
-    "clear",
-    "forEach",
-    "values",
-    "keys",
-    "entries",
-]);
-const SET_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
-    "add",
-    "has",
-    "delete",
-    "clear",
-    "forEach",
-    "values",
-    "keys",
-    "entries",
-    "union",
-    "intersection",
-    "difference",
-    "symmetricDifference",
-    "isSubsetOf",
-    "isSupersetOf",
-    "isDisjointFrom",
-]);
-const WEAK_MAP_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
-    "get",
-    "getOrInsert",
-    "getOrInsertComputed",
-    "set",
-    "has",
-    "delete",
-]);
-const WEAK_SET_MEMBERS: intrinsic_members::NamedMembers =
-    intrinsic_members::NamedMembers::new(&["add", "has", "delete"]);
 const WEAK_REF_MEMBERS: intrinsic_members::NamedMembers =
     intrinsic_members::NamedMembers::new(&["deref"]);
 const SHADOW_REALM_MEMBERS: intrinsic_members::NamedMembers =
@@ -46937,7 +47035,11 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
         | PrototypeTable::Boolean
         | PrototypeTable::BigInt
         | PrototypeTable::Promise
-        | PrototypeTable::Symbol => &[],
+        | PrototypeTable::Symbol
+        | PrototypeTable::Map
+        | PrototypeTable::Set
+        | PrototypeTable::WeakMap
+        | PrototypeTable::WeakSet => &[],
         PrototypeTable::RegExp => REG_EXP_MEMBERS.names(),
         PrototypeTable::Date => DATE_MEMBERS.names(),
         PrototypeTable::ArrayBuffer => ARRAY_BUFFER_MEMBERS.names(),
@@ -46946,10 +47048,6 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
         PrototypeTable::Iterator => ITERATOR_MEMBERS.names(),
         PrototypeTable::Generator | PrototypeTable::AsyncGenerator => GENERATOR_MEMBERS.names(),
         PrototypeTable::IteratorFor(_) => BUILT_IN_ITERATOR_MEMBERS.names(),
-        PrototypeTable::Map => MAP_MEMBERS.names(),
-        PrototypeTable::Set => SET_MEMBERS.names(),
-        PrototypeTable::WeakMap => WEAK_MAP_MEMBERS.names(),
-        PrototypeTable::WeakSet => WEAK_SET_MEMBERS.names(),
         PrototypeTable::WeakRef => WEAK_REF_MEMBERS.names(),
         PrototypeTable::ShadowRealm => SHADOW_REALM_MEMBERS.names(),
         PrototypeTable::DisposableStack => DISPOSABLE_STACK_MEMBERS.names(),
@@ -46973,6 +47071,10 @@ fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String, Property)>
         PrototypeTable::Promise => Some(kiln_builtin_surface::PrototypeId::Promise),
         PrototypeTable::Object => Some(kiln_builtin_surface::PrototypeId::Object),
         PrototypeTable::Function => Some(kiln_builtin_surface::PrototypeId::Function),
+        PrototypeTable::Map => Some(kiln_builtin_surface::PrototypeId::Map),
+        PrototypeTable::Set => Some(kiln_builtin_surface::PrototypeId::Set),
+        PrototypeTable::WeakMap => Some(kiln_builtin_surface::PrototypeId::WeakMap),
+        PrototypeTable::WeakSet => Some(kiln_builtin_surface::PrototypeId::WeakSet),
         _ => None,
     } {
         return kiln_builtin_surface::prototype_members(proto_id)
@@ -47007,6 +47109,10 @@ fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String, Property)>
                             PrototypeTable::Promise => Native::PromiseConstructor,
                             PrototypeTable::Object => Native::ObjectConstructor,
                             PrototypeTable::Function => Native::FunctionConstructor,
+                            PrototypeTable::Map => Native::MapConstructor,
+                            PrototypeTable::Set => Native::SetConstructor,
+                            PrototypeTable::WeakMap => Native::WeakMapConstructor,
+                            PrototypeTable::WeakSet => Native::WeakSetConstructor,
                             _ => unreachable!(),
                         };
                         Property::Value(Value::Native(ctor, RealmId::PRIMARY))
@@ -47057,6 +47163,27 @@ fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String, Property)>
                         Property::Accessor {
                             get: Some(Value::Native(Native::ThrowTypeError, RealmId::PRIMARY)),
                             set: Some(Value::Native(Native::ThrowTypeError, RealmId::PRIMARY)),
+                        }
+                    }
+                    kiln_builtin_surface::SemanticBinding::MapMethod(method) => {
+                        Property::Value(map_method_value(method, RealmId::PRIMARY))
+                    }
+                    kiln_builtin_surface::SemanticBinding::SetMethod(method) => {
+                        Property::Value(set_method_value(method, RealmId::PRIMARY))
+                    }
+                    kiln_builtin_surface::SemanticBinding::WeakMapMethod(method) => {
+                        Property::Value(weak_map_method_value(method, RealmId::PRIMARY))
+                    }
+                    kiln_builtin_surface::SemanticBinding::WeakSetMethod(method) => {
+                        Property::Value(weak_set_method_value(method, RealmId::PRIMARY))
+                    }
+                    kiln_builtin_surface::SemanticBinding::CollectionSize(is_map) => {
+                        Property::Accessor {
+                            get: Some(Value::Native(
+                                Native::BuiltinAccessor(BuiltinAccessor::CollectionSize(is_map)),
+                                RealmId::PRIMARY,
+                            )),
+                            set: None,
                         }
                     }
                     _ => return None,
@@ -47866,7 +47993,11 @@ fn intrinsic_own_attributes(target: &Value, key: &str) -> Option<Attributes> {
         | PrototypeTable::BigInt
         | PrototypeTable::Promise
         | PrototypeTable::Object
-        | PrototypeTable::Function),
+        | PrototypeTable::Function
+        | PrototypeTable::Map
+        | PrototypeTable::Set
+        | PrototypeTable::WeakMap
+        | PrototypeTable::WeakSet),
     ) = native
     {
         let proto_id = match table {
@@ -47878,6 +48009,10 @@ fn intrinsic_own_attributes(target: &Value, key: &str) -> Option<Attributes> {
             PrototypeTable::Promise => kiln_builtin_surface::PrototypeId::Promise,
             PrototypeTable::Object => kiln_builtin_surface::PrototypeId::Object,
             PrototypeTable::Function => kiln_builtin_surface::PrototypeId::Function,
+            PrototypeTable::Map => kiln_builtin_surface::PrototypeId::Map,
+            PrototypeTable::Set => kiln_builtin_surface::PrototypeId::Set,
+            PrototypeTable::WeakMap => kiln_builtin_surface::PrototypeId::WeakMap,
+            PrototypeTable::WeakSet => kiln_builtin_surface::PrototypeId::WeakSet,
             _ => unreachable!(),
         };
         return kiln_builtin_surface::find_prototype_member(proto_id, key).map(|member| {
