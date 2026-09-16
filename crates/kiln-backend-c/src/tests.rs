@@ -7487,3 +7487,100 @@ fn executable_cached_shape_object_literal_executes_correctly() {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+#[test]
+fn executable_math_and_array_push_optimizations_execute_correctly() {
+    // Array push, Math.imul, and String.prototype.charCodeAt
+    // const arr = [];
+    // arr.push(10);
+    // arr.push(20);
+    // const m = Math.imul(6, 7); // 42
+    // const c = "abc".charCodeAt(1); // 98
+    // return (arr[0] + arr[1] + m + c) === (10 + 20 + 42 + 98) === 170
+    let constants = vec![
+        Constant::String("push".into()),       // 0
+        Constant::Number(10.0f64.to_bits()),   // 1
+        Constant::Number(20.0f64.to_bits()),   // 2
+        Constant::String("imul".into()),       // 3
+        Constant::Number(6.0f64.to_bits()),    // 4
+        Constant::Number(7.0f64.to_bits()),    // 5
+        Constant::String("abc".into()),        // 6
+        Constant::String("charCodeAt".into()), // 7
+        Constant::Number(1.0f64.to_bits()),    // 8
+        Constant::Number(0.0f64.to_bits()),    // 9
+        Constant::Number(170.0f64.to_bits()),  // 10
+    ];
+
+    let code = vec![
+        // arr = []
+        Instruction::NewArray { count: 0 },
+        Instruction::StoreLocal(0), // arr
+        // arr.push(10)
+        Instruction::LoadLocal(0),
+        Instruction::Const(1), // 10
+        Instruction::CallMethod { name: 0, argc: 1 },
+        Instruction::Pop,
+        // arr.push(20)
+        Instruction::LoadLocal(0),
+        Instruction::Const(2), // 20
+        Instruction::CallMethod { name: 0, argc: 1 },
+        Instruction::Pop,
+        // m = Math.imul(6, 7)
+        Instruction::LoadBuiltin(kiln_ir::Builtin::Math),
+        Instruction::Const(4), // 6
+        Instruction::Const(5), // 7
+        Instruction::CallMethod { name: 3, argc: 2 },
+        Instruction::StoreLocal(1), // m
+        // c = "abc".charCodeAt(1)
+        Instruction::Const(6), // "abc"
+        Instruction::Const(8), // 1
+        Instruction::CallMethod { name: 7, argc: 1 },
+        Instruction::StoreLocal(2), // c
+        // sum = arr[0] + arr[1] + m + c
+        Instruction::LoadLocal(0),
+        Instruction::Const(9), // 0
+        Instruction::GetComputed,
+        Instruction::LoadLocal(0),
+        Instruction::Const(8), // 1
+        Instruction::GetComputed,
+        Instruction::Binary(BinaryOp::Add),
+        Instruction::LoadLocal(1),
+        Instruction::Binary(BinaryOp::Add),
+        Instruction::LoadLocal(2),
+        Instruction::Binary(BinaryOp::Add),
+        Instruction::Const(10), // 170
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::Return,
+    ];
+
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants,
+        code,
+        local_count: 3,
+        functions: Vec::new(),
+        template_sites: Vec::new(),
+    };
+
+    let generated = emit(&program).expect("program emits");
+    assert!(
+        generated
+            .source
+            .contains("arr->count < arr->capacity"),
+        "expected inline push fast path in generated source:\n{}",
+        generated.source
+    );
+    let wrapper = format!(
+        "int main(void) {{ kiln_value result; int status = {}(NULL, &result); if (status != 0) return 2; return (result.tag == KILN_VALUE_BOOLEAN && result.bits == 1) ? 0 : 3; }}\n",
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "math-and-push-optimizations");
+    assert!(
+        run.status.success(),
+        "math and push optimizations execution failed ({:?}):\nstdout: {}\nstderr: {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
