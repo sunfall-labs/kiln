@@ -7290,3 +7290,200 @@ int main(void) {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+#[test]
+fn emitted_static_object_literal_uses_cached_shape_and_inline_slots() {
+    // 1. All numbers: no dynamic mask
+    let prog_numbers = program(
+        vec![
+            Constant::String("x".into()),
+            Constant::Number(10.0f64.to_bits()),
+            Constant::String("y".into()),
+            Constant::Number(20.0f64.to_bits()),
+        ],
+        vec![
+            Instruction::Const(0),
+            Instruction::Const(1),
+            Instruction::Const(2),
+            Instruction::Const(3),
+            Instruction::NewObject { count: 2 },
+            Instruction::Return,
+        ],
+        0,
+    );
+    let gen_numbers = emit(&prog_numbers).expect("program emits").source;
+    assert!(
+        gen_numbers.contains("static const kiln_shape *lit_shape = NULL;"),
+        "expected cached shape in emitted source:\n{gen_numbers}"
+    );
+    assert!(
+        gen_numbers.contains("obj->inline_slots[0] ="),
+        "expected inline slot 0 store in emitted source:\n{gen_numbers}"
+    );
+    assert!(
+        gen_numbers.contains("obj->inline_slots[1] ="),
+        "expected inline slot 1 store in emitted source:\n{gen_numbers}"
+    );
+    assert!(
+        gen_numbers.contains("obj->shape = (kiln_shape *)lit_shape;"),
+        "expected shape assignment in emitted source:\n{gen_numbers}"
+    );
+    assert!(
+        !gen_numbers.contains("uint32_t mask ="),
+        "all-number object literal should not generate dynamic mask:\n{gen_numbers}"
+    );
+
+    // 2. Mixed types (string value): dynamic mask
+    let prog_mixed = program(
+        vec![
+            Constant::String("x".into()),
+            Constant::Number(10.0f64.to_bits()),
+            Constant::String("name".into()),
+            Constant::String("test".into()),
+        ],
+        vec![
+            Instruction::Const(0),
+            Instruction::Const(1),
+            Instruction::Const(2),
+            Instruction::Const(3),
+            Instruction::NewObject { count: 2 },
+            Instruction::Return,
+        ],
+        0,
+    );
+    let gen_mixed = emit(&prog_mixed).expect("program emits").source;
+    assert!(
+        gen_mixed.contains("static const kiln_shape *lit_shape = NULL;"),
+        "expected cached shape in emitted source:\n{gen_mixed}"
+    );
+    assert!(
+        gen_mixed.contains("uint32_t mask ="),
+        "mixed-type object literal should generate dynamic mask:\n{gen_mixed}"
+    );
+    assert!(
+        gen_mixed.contains("lit_shape->double_slots_mask == mask"),
+        "mixed-type object literal should guard on mask:\n{gen_mixed}"
+    );
+
+    // 3. Dynamic key or >8 keys or __proto__: fallback to new_object_with_capacity
+    let prog_proto = program(
+        vec![
+            Constant::String("__proto__".into()),
+            Constant::Number(10.0f64.to_bits()),
+        ],
+        vec![
+            Instruction::Const(0),
+            Instruction::Const(1),
+            Instruction::NewObject { count: 1 },
+            Instruction::Return,
+        ],
+        0,
+    );
+    let gen_proto = emit(&prog_proto).expect("program emits").source;
+    assert!(
+        !gen_proto.contains("static const kiln_shape *lit_shape = NULL;"),
+        "__proto__ key must not use cached shape:\n{gen_proto}"
+    );
+    assert!(
+        gen_proto.contains("kiln_c99_new_object_with_capacity"),
+        "fallback must use new_object_with_capacity:\n{gen_proto}"
+    );
+}
+
+#[test]
+fn executable_cached_shape_object_literal_executes_correctly() {
+    // Function 0 (maker): takes 2 arguments, returns { x: arg0, y: arg1 }
+    let maker = FunctionProto {
+        inferred_name: None,
+        prologue_end: 0,
+        code: vec![
+            Instruction::Const(0),     // "x"
+            Instruction::LoadLocal(0), // arg0
+            Instruction::Const(1),     // "y"
+            Instruction::LoadLocal(1), // arg1
+            Instruction::NewObject { count: 2 },
+            Instruction::Return,
+        ],
+        parameter_count: 2,
+        local_count: 2,
+        ..function(Vec::new())
+    };
+
+    // Main body:
+    // make = MakeFunction(0)
+    // obj1 = make(10, 20)
+    // obj2 = make(30, 40)
+    // return (obj1.x + obj1.y + obj2.x + obj2.y) === 100
+    let constants = vec![
+        Constant::String("x".into()),         // 0
+        Constant::String("y".into()),         // 1
+        Constant::Number(10.0f64.to_bits()),  // 2
+        Constant::Number(20.0f64.to_bits()),  // 3
+        Constant::Number(30.0f64.to_bits()),  // 4
+        Constant::Number(40.0f64.to_bits()),  // 5
+        Constant::Number(100.0f64.to_bits()), // 6
+    ];
+
+    let code = vec![
+        Instruction::MakeFunction(0),
+        Instruction::StoreLocal(0), // make fn
+        // obj1 = make(10, 20)
+        Instruction::LoadLocal(0),
+        Instruction::Const(2),
+        Instruction::Const(3),
+        Instruction::Call { argc: 2 },
+        Instruction::StoreLocal(1), // obj1
+        // obj2 = make(30, 40)
+        Instruction::LoadLocal(0),
+        Instruction::Const(4),
+        Instruction::Const(5),
+        Instruction::Call { argc: 2 },
+        Instruction::StoreLocal(2), // obj2
+        // sum = obj1.x + obj1.y + obj2.x + obj2.y
+        Instruction::LoadLocal(1),
+        Instruction::GetProperty(0),
+        Instruction::LoadLocal(1),
+        Instruction::GetProperty(1),
+        Instruction::Binary(BinaryOp::Add),
+        Instruction::LoadLocal(2),
+        Instruction::GetProperty(0),
+        Instruction::Binary(BinaryOp::Add),
+        Instruction::LoadLocal(2),
+        Instruction::GetProperty(1),
+        Instruction::Binary(BinaryOp::Add),
+        Instruction::Const(6), // 100
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::Return,
+    ];
+
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants,
+        code,
+        local_count: 3,
+        functions: vec![maker],
+        template_sites: Vec::new(),
+    };
+
+    let generated = emit(&program).expect("program emits");
+    assert!(
+        generated
+            .source
+            .contains("static const kiln_shape *lit_shape = NULL;"),
+        "expected lit_shape optimization in generated source:\n{}",
+        generated.source
+    );
+    let wrapper = format!(
+        "int main(void) {{ kiln_value result; int status = {}(NULL, &result); if (status != 0) return 2; return (result.tag == KILN_VALUE_BOOLEAN && result.bits == 1) ? 0 : 3; }}\n",
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "cached-shape-object-literal");
+    assert!(
+        run.status.success(),
+        "cached shape object literal execution failed ({:?}):\nstdout: {}\nstderr: {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
