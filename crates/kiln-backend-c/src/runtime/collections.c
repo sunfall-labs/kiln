@@ -121,7 +121,24 @@ static int kiln_c99_collection_rehash(kiln_collection *collection, size_t new_ca
     mask = new_cap - 1;
     for (i = 0; i < collection->count; ++i) {
         if (!collection->entries[i].dead) {
-            size_t at = (size_t)kiln_c99_value_hash(collection->entries[i].key) & mask;
+            kiln_value k = collection->entries[i].key;
+            uint64_t hash;
+            if (KILN_LIKELY(k.tag == KILN_VALUE_NUMBER)) {
+                uint64_t bits = (uint64_t)k.bits;
+                double d;
+                memcpy(&d, &bits, sizeof(d));
+                if (KILN_UNLIKELY(isnan(d))) {
+                    hash = UINT64_C(0x7ff8000000000000);
+                } else {
+                    if (d == 0.0) bits = 0;
+                    bits ^= bits >> 32;
+                    bits *= UINT64_C(0xff51afd7ed558ccd);
+                    hash = bits ^ (bits >> 29);
+                }
+            } else {
+                hash = kiln_c99_value_hash(k);
+            }
+            size_t at = (size_t)hash & mask;
             while (new_table[at] != 0) {
                 at = (at + 1) & mask;
             }

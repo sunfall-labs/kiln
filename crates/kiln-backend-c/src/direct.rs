@@ -74,6 +74,8 @@ pub struct TypedNeeds {
 pub struct CallPlan {
     /// Use terse generated operations and declarations.
     pub compact: bool,
+    /// Whether to compile static regex literals into direct C matchers.
+    pub compile_regex: bool,
     /// Emit only the generic body; native-dev uses this to keep the edit/run loop proportional
     /// to the program instead of multiplying it by speculative clones.
     pub generic_only: bool,
@@ -139,6 +141,7 @@ impl DirectPlan {
         entry: &FunctionGraph,
         publishes_frame: &[bool],
         compact: bool,
+        compile_regex: bool,
         generic_only: bool,
         speculate: Option<bool>,
     ) -> Self {
@@ -150,6 +153,7 @@ impl DirectPlan {
             let function_count = graphs.len();
             let plan = || CallPlan {
                 compact,
+                compile_regex,
                 generic_only: true,
                 speculate,
                 typed_returns: vec![false; function_count],
@@ -313,6 +317,7 @@ impl DirectPlan {
             );
             CallPlan {
                 compact,
+                compile_regex,
                 generic_only,
                 speculate,
                 known: if generic_only {

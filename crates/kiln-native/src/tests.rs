@@ -7784,7 +7784,7 @@ static int host_call(void *opaque, uint16_t operation, uint16_t argc,
         context->string.flags = KILN_STRING_LATIN1;
         context->string.data = context->storage;
         *result = (kiln_value){{ .tag = KILN_VALUE_STRING, .flags = KILN_VALUE_FLAG_OWNED_STRING, .len = 3, .bits = 0 }};
-        result->ptr = &context->string;
+        result->ptr = (const char *)&context->string;
         return KILN_C99_OK;
     }}
     if (argc != 1 || arguments == NULL || arguments[0].tag != KILN_VALUE_STRING)
@@ -7793,13 +7793,13 @@ static int host_call(void *opaque, uint16_t operation, uint16_t argc,
         if (arguments[0].flags != 0 || arguments[0].len != 0 || arguments[0].ptr == NULL)
             return KILN_C99_HOST_ERROR;
     }} else if (arguments[0].flags != 0 || arguments[0].len != 3 || arguments[0].ptr == NULL ||
-               arguments[0].ptr == &context->string ||
+               arguments[0].ptr == (const char *)&context->string ||
                !kiln_string_equals_ascii((const kiln_string *)arguments[0].ptr, "dep", 3)) {{
         return KILN_C99_HOST_ERROR;
     }}
     if (context->mode == 0) {{
         *result = (kiln_value){{ .tag = KILN_VALUE_STRING, .flags = KILN_VALUE_FLAG_OWNED_STRING, .len = 3, .bits = 0 }};
-        result->ptr = &context->string;
+        result->ptr = (const char *)&context->string;
     }} else {{
         *result = (kiln_value){{ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }};
     }}

@@ -25,6 +25,8 @@ pub(crate) struct TailContext<'a> {
     pub(crate) callables: bool,
     /// Prefer the provider-backed matcher over emitting one C function per regex state.
     pub(crate) compact: bool,
+    /// Whether to compile static regex literals into direct C matchers.
+    pub(crate) compile_regex: bool,
 }
 
 pub(crate) fn emit_tail_instruction(
@@ -40,6 +42,7 @@ pub(crate) fn emit_tail_instruction(
         diagnostic_site,
         callables,
         compact,
+        compile_regex,
     } = context;
     let index = pc as usize;
     let before = output.len();
@@ -61,7 +64,7 @@ pub(crate) fn emit_tail_instruction(
             // A fresh object every time the literal is evaluated, because `lastIndex` is mutable
             // and program-visible: two evaluations of one literal must not share a cursor.
             // The constants are pointers to headed strings now, so no byte lengths travel.
-            if !compact
+            if *compile_regex
                 && let (Ok(source), Ok(letters)) =
                     (source.to_scalar_string(), letters.to_scalar_string())
                 && crate::regex::try_compile_regex(&source, &letters).is_some()
@@ -289,7 +292,7 @@ pub(crate) fn emit_tail_instruction(
             };
             writeln!(
                 output,
-                "    {{ kiln_value function = kiln_val_to_boundary(stack[--sp]); kiln_value key = kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_constant_{name}, {len}); if (kiln_c99_set_function_name(function, key, {prefix}) != KILN_C99_OK) {{ {direct_refusal} }} if (kiln_c99_define_private_key(kiln_val_to_boundary(stack[sp - 1]), {symbol}_constant_{name}, function, {tag}) != KILN_C99_OK) {{ {direct_refusal} }} }}",
+                "    {{ kiln_value function = kiln_val_to_boundary(stack[--sp]); kiln_value key = kiln_c99_value(KILN_VALUE_STRING, 0, (const char *){symbol}_constant_{name}, {len}); if (kiln_c99_set_function_name(function, key, {prefix}) != KILN_C99_OK) {{ {direct_refusal} }} if (kiln_c99_define_private_key(kiln_val_to_boundary(stack[sp - 1]), {symbol}_constant_{name}, function, {tag}) != KILN_C99_OK) {{ {direct_refusal} }} }}",
                 len = text.len()
             )
             .unwrap();
@@ -467,7 +470,7 @@ pub(crate) fn emit_tail_instruction(
             };
             writeln!(
                 output,
-                "    {{ kiln_value read; int status = kiln_c99_get_with_receiver(host, kiln_val_to_boundary(stack[sp - 1]), kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_key_{name}, {}), kiln_val_to_boundary(receiver), &read, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(read); }}",
+                "    {{ kiln_value read; int status = kiln_c99_get_with_receiver(host, kiln_val_to_boundary(stack[sp - 1]), kiln_c99_value(KILN_VALUE_STRING, 0, (const char *){symbol}_key_{name}, {}), kiln_val_to_boundary(receiver), &read, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(read); }}",
                 text.len()
             )
             .unwrap();
@@ -488,7 +491,7 @@ pub(crate) fn emit_tail_instruction(
             let strict_num = if *strict { 1 } else { 0 };
             writeln!(
                 output,
-                "    {{ kiln_value proto = kiln_val_to_boundary(stack[sp - 2]); kiln_value val = kiln_val_to_boundary(stack[sp - 1]); int status = kiln_c99_set_with_receiver(host, proto, kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_key_{name}, {}), val, kiln_val_to_boundary(receiver), {strict_num}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 2] = stack[sp - 1]; sp--; }}",
+                "    {{ kiln_value proto = kiln_val_to_boundary(stack[sp - 2]); kiln_value val = kiln_val_to_boundary(stack[sp - 1]); int status = kiln_c99_set_with_receiver(host, proto, kiln_c99_value(KILN_VALUE_STRING, 0, (const char *){symbol}_key_{name}, {}), val, kiln_val_to_boundary(receiver), {strict_num}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 2] = stack[sp - 1]; sp--; }}",
                 text.len()
             )
             .unwrap();

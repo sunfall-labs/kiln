@@ -1549,6 +1549,7 @@ fn compact_stack_tail_operations_use_shared_operation_helpers() {
             },
             callables: true,
             compact,
+            compile_regex: !compact,
         };
         let mut output = String::new();
         for (pc, instruction) in instructions.iter().enumerate() {

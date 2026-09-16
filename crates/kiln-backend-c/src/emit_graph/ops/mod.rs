@@ -513,6 +513,7 @@ pub(super) fn emit_graph_op(
                     diagnostic_site,
                     callables: !scalar_proto,
                     compact: plan.compact,
+                    compile_regex: plan.compile_regex,
                 },
                 unwind,
             );

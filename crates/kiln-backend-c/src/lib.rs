@@ -92,6 +92,14 @@ pub struct EmissionPolicy {
     /// Module slots whose exported values can be observed by this closed-world executable.
     /// `None` preserves the public module emitter's complete export surface.
     pub live_module_slots: Option<Arc<BTreeSet<u32>>>,
+    /// Explicit regex matcher compilation setting. If `None`, defaults to `!compact`.
+    pub compile_regex: Option<bool>,
+}
+
+impl EmissionPolicy {
+    pub fn should_compile_regex(&self) -> bool {
+        self.compile_regex.unwrap_or(!self.compact)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1576,6 +1584,7 @@ fn plan_unit(
     program: &Program,
     diagnostic_site: &str,
     compact: bool,
+    compile_regex: bool,
     generic_only: bool,
     speculate: Option<bool>,
     extra_entry_slots: Option<&HashSet<u32>>,
@@ -1613,6 +1622,7 @@ fn plan_unit(
         &entry_graph,
         &publishes_frame,
         compact,
+        compile_regex,
         generic_only,
         speculate,
     );
@@ -2641,7 +2651,7 @@ fn render(
     )
     .unwrap();
     render_constant_declarations(&mut output, program, symbol);
-    if !policy.compact {
+    if policy.should_compile_regex() {
         render_regex_matchers(&mut output, program, symbol);
     }
     let keys = property_key_constants(program);
@@ -2672,6 +2682,7 @@ fn render(
         program,
         symbol,
         policy.compact,
+        policy.should_compile_regex(),
         policy.generic_only,
         policy.speculate,
         extra_entry_slots.as_ref(),
@@ -3296,7 +3307,7 @@ fn render_module(
         diagnostic_site
     };
     render_constant_declarations(&mut output, program, unit_symbol);
-    if !policy.compact {
+    if policy.should_compile_regex() {
         render_regex_matchers(&mut output, program, unit_symbol);
     }
     let keys = property_key_constants(program);
@@ -3367,6 +3378,7 @@ fn render_module(
         emitted_program,
         diagnostic_site,
         policy.compact,
+        policy.should_compile_regex(),
         policy.generic_only,
         policy.speculate,
         Some(&extra_entry_slots),

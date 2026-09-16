@@ -866,6 +866,12 @@ impl NativeBuilder {
         let emit_started = Instant::now();
         let mut emission = options.realm.emission_executable();
         emission.compact = options.profile != NativeProfile::Profile;
+        if emission.compile_regex.is_none() {
+            emission.compile_regex = Some(matches!(
+                options.profile,
+                NativeProfile::Release | NativeProfile::Profile
+            ));
+        }
         emission.generic_only =
             matches!(options.profile, NativeProfile::Dev | NativeProfile::Check);
         if options.profile == NativeProfile::Profile {
@@ -1218,6 +1224,12 @@ impl NativeBuilder {
         let emit_started = Instant::now();
         let mut emission = options.realm.emission();
         emission.compact = options.profile != NativeProfile::Profile;
+        if emission.compile_regex.is_none() {
+            emission.compile_regex = Some(matches!(
+                options.profile,
+                NativeProfile::Release | NativeProfile::Profile
+            ));
+        }
         emission.generic_only =
             matches!(options.profile, NativeProfile::Dev | NativeProfile::Check);
         let module = emit_with_policy(program, emission.clone())?;
@@ -1548,6 +1560,12 @@ impl NativeBuilder {
         let graph = &reduced;
         let mut emission = options.realm.emission();
         emission.compact = options.profile != NativeProfile::Profile;
+        if emission.compile_regex.is_none() {
+            emission.compile_regex = Some(matches!(
+                options.profile,
+                NativeProfile::Release | NativeProfile::Profile
+            ));
+        }
         emission.generic_only =
             matches!(options.profile, NativeProfile::Dev | NativeProfile::Check);
         // Shared graph modules link against one prelude object; keep runtime definitions out of
@@ -2066,6 +2084,12 @@ impl NativeBuilder {
         let emit_started = Instant::now();
         let mut emission = options.realm.emission_executable();
         emission.compact = options.profile != NativeProfile::Profile;
+        if emission.compile_regex.is_none() {
+            emission.compile_regex = Some(matches!(
+                options.profile,
+                NativeProfile::Release | NativeProfile::Profile
+            ));
+        }
         emission.generic_only =
             matches!(options.profile, NativeProfile::Dev | NativeProfile::Check);
         if options.profile == NativeProfile::Profile {
@@ -6317,7 +6341,7 @@ static int {stem}_proxy_call(void *context, uint16_t operation, uint16_t argc,
         return KILN_C99_INVALID_ARGUMENT;
     }}
     if (result->tag != KILN_VALUE_STRING) return KILN_C99_OK;
-    if (result->len == (size_t)-1 || (result->len != 0 && result->ptr == NULL)) {{
+    if (result->len == (uint32_t)-1 || (result->len != 0 && result->ptr == NULL)) {{
         proxy->failure_status = KILN_C99_INVALID_ARGUMENT;
         return KILN_C99_INVALID_ARGUMENT;
     }}
@@ -6348,7 +6372,7 @@ static int {stem}_proxy_call(void *context, uint16_t operation, uint16_t argc,
             proxy->failure_status = KILN_C99_HOST_ERROR;
             return KILN_C99_HOST_ERROR;
         }}
-        result->ptr = copy;
+        result->ptr = (const char *)copy;
         result->flags = 0;
         result->len = unit_len;
         return KILN_C99_OK;
@@ -6373,7 +6397,7 @@ static int {run}(kiln_host *host, kiln_result_v2 **out) {{
         goto cleanup;
     }}
     if (value.tag == KILN_VALUE_STRING &&
-        (value.len == (size_t)-1 || (value.len != 0 && value.ptr == NULL))) {{
+        (value.len == (uint32_t)-1 || (value.len != 0 && value.ptr == NULL))) {{
         status = KILN_C99_INVALID_ARGUMENT;
         goto cleanup;
     }}
@@ -6404,7 +6428,7 @@ static int {run}(kiln_host *host, kiln_result_v2 **out) {{
         if (unit_bytes != 0 && src_str != NULL && src_str->data != NULL) {{
             memcpy((void *)copy->data, src_str->data, unit_bytes);
         }}
-        owned->value.ptr = copy;
+        owned->value.ptr = (const char *)copy;
         owned->value.flags = 0;
         owned->value.len = unit_len;
         copy = NULL;
@@ -6813,7 +6837,7 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
     result->flags = 0;
     if (status != KILN_C99_OK) return status;
     if (result->tag != KILN_VALUE_STRING) return KILN_C99_OK;
-    if (result->len == (size_t)-1 || (result->len != 0 && result->ptr == NULL)) {
+    if (result->len == (uint32_t)-1 || (result->len != 0 && result->ptr == NULL)) {
         proxy->failure_status = KILN_C99_INVALID_ARGUMENT;
         return KILN_C99_INVALID_ARGUMENT;
     }
@@ -6844,7 +6868,7 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
             proxy->failure_status = KILN_C99_HOST_ERROR;
             return KILN_C99_HOST_ERROR;
         }
-        result->ptr = copy;
+        result->ptr = (const char *)copy;
         result->flags = 0;
         result->len = unit_len;
         return KILN_C99_OK;
@@ -7200,7 +7224,7 @@ static int {impl_symbol}(kiln_host *host, kiln_value *result, int preserve_resul
         status = kiln_realm_drive(realm, &context.proxy_host, result);
     /* Public v1 results remain borrowed; private v2 calls preserve strings across cleanup. */
     if (preserve_result != 0 && result->tag == KILN_VALUE_STRING) {{
-        if (result->len == (size_t)-1 || (result->len != 0 && result->ptr == NULL)) {{
+        if (result->len == (uint32_t)-1 || (result->len != 0 && result->ptr == NULL)) {{
             *result = (kiln_value){{ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }};
             status = KILN_C99_INVALID_ARGUMENT;
         }} else {{
@@ -7243,7 +7267,7 @@ static int {impl_symbol}(kiln_host *host, kiln_value *result, int preserve_resul
     free(context.shared_namespaces);
     free(context.shared_commonjs_modules);
     kiln_proxy_arena_clear(&context.arena);
-    if (preserved != NULL) result->ptr = preserved;
+    if (preserved != NULL) result->ptr = (const char *)preserved;
     result->flags = 0;
     return status;
 }}
