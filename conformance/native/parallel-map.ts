@@ -52,9 +52,33 @@ const u8Src = new Uint8Array([10, 20, 30]);
 const u8Out = (u8Src as any).parallelMap((x: number) => x * 2);
 console.log("typed u8", u8Out instanceof Uint8Array, u8Out[0], u8Out[1], u8Out[2]);
 
+const i8Src = new Int8Array([-10, 20, -30]);
+const i8Out = (i8Src as any).parallelMap((x: number) => x * 2);
+console.log("typed i8", i8Out instanceof Int8Array, i8Out[0], i8Out[1], i8Out[2]);
+
+const u8cSrc = new Uint8ClampedArray([200, 250, 10]);
+const u8cOut = (u8cSrc as any).parallelMap((x: number) => x + 20.5);
+console.log("typed u8c", u8cOut instanceof Uint8ClampedArray, u8cOut[0], u8cOut[1], u8cOut[2]);
+
+const i16Src = new Int16Array([-1000, 2000, -3000]);
+const i16Out = (i16Src as any).parallelMap((x: number) => x * 2);
+console.log("typed i16", i16Out instanceof Int16Array, i16Out[0], i16Out[1], i16Out[2]);
+
+const u16Src = new Uint16Array([1000, 2000, 3000]);
+const u16Out = (u16Src as any).parallelMap((x: number) => x * 2);
+console.log("typed u16", u16Out instanceof Uint16Array, u16Out[0], u16Out[1], u16Out[2]);
+
 const i32Src = new Int32Array([-1000, 2000, 3000]);
 const i32Out = (i32Src as any).parallelMap((x: number, i: number) => x + i);
 console.log("typed i32", i32Out instanceof Int32Array, i32Out[0], i32Out[1], i32Out[2]);
+
+const u32Src = new Uint32Array([100000, 200000, 300000]);
+const u32Out = (u32Src as any).parallelMap((x: number) => x * 2);
+console.log("typed u32", u32Out instanceof Uint32Array, u32Out[0], u32Out[1], u32Out[2]);
+
+const f32Src = new Float32Array([1.5, 2.5, 3.5]);
+const f32Out = (f32Src as any).parallelMap((x: number) => x * 2.0);
+console.log("typed f32", f32Out instanceof Float32Array, Math.round(f32Out[0]), Math.round(f32Out[1]), Math.round(f32Out[2]));
 
 const f64Src = new Float64Array(10000);
 for (let i = 0; i < f64Src.length; i++) f64Src[i] = i * 0.5;

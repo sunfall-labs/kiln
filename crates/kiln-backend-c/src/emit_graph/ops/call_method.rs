@@ -1032,10 +1032,23 @@ pub(super) fn emit_call_method(
                              if (status != KILN_C99_OK) return status; \
                              kiln_typed_array *built_view = kiln_c99_typed_array_of(built_val); \
                              int pmap_failed = 0; \
-                             if (view->kind == KILN_TYPED_FLOAT64) {{ \
-                                 const double *src = (const double *)(view->buffer->bytes + view->byte_offset); \
-                                 double *dst = (double *)(built_view->buffer->bytes + built_view->byte_offset); \
-                                 if (kiln_parallel_map(src, count0, dst, {symbol}_pmap_f64_{target}, &pmap_failed) == 0 && !pmap_failed) {{ \
+                             const void *src_bytes = (const void *)(view->buffer->bytes + view->byte_offset); \
+                             void *dst_bytes = (void *)(built_view->buffer->bytes + built_view->byte_offset); \
+                             kiln_parallel_chunk_fn chunk_fn = NULL; \
+                             switch (view->kind) {{ \
+                             case KILN_TYPED_FLOAT64: chunk_fn = {symbol}_pmap_f64_{target}; break; \
+                             case KILN_TYPED_FLOAT32: chunk_fn = {symbol}_pmap_f32_{target}; break; \
+                             case KILN_TYPED_INT32:   chunk_fn = {symbol}_pmap_i32_{target}; break; \
+                             case KILN_TYPED_UINT32:  chunk_fn = {symbol}_pmap_u32_{target}; break; \
+                             case KILN_TYPED_INT16:   chunk_fn = {symbol}_pmap_i16_{target}; break; \
+                             case KILN_TYPED_UINT16:  chunk_fn = {symbol}_pmap_u16_{target}; break; \
+                             case KILN_TYPED_INT8:    chunk_fn = {symbol}_pmap_i8_{target}; break; \
+                             case KILN_TYPED_UINT8:   chunk_fn = {symbol}_pmap_u8_{target}; break; \
+                             case KILN_TYPED_UINT8_CLAMPED: chunk_fn = {symbol}_pmap_u8c_{target}; break; \
+                             default: break; \
+                             }} \
+                             if (chunk_fn) {{ \
+                                 if (kiln_parallel_map(src_bytes, count0, dst_bytes, chunk_fn, &pmap_failed) == 0 && !pmap_failed) {{ \
                                      v{v} = kiln_val_from_boundary(built_val); \
                                      handled = 1; \
                                  }} \
