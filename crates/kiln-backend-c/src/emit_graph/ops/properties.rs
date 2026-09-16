@@ -237,21 +237,26 @@ pub(super) fn emit_get_property(
         (Some(i), Some(_)) => {
             let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
             if is_typed_entry && typed {
-                let box_stmt = if need_box {
+                let box_stmt_inline = if need_box {
+                    format!(" v{v} = recv_obj->inline_slots[recv_row[{i}]];")
+                } else {
+                    String::new()
+                };
+                let box_stmt_heap = if need_box {
                     format!(" v{v} = recv_obj->slots[recv_row[{i}]];")
                 } else {
                     String::new()
                 };
                 (
                     format!(
-                        "if (recv_row != NULL) {{ memcpy(&d{v}, &recv_obj->slots[recv_row[{i}]], sizeof(double));{box_stmt} handled = 1; }} "
+                        "if (recv_row != NULL) {{ if (recv_row[{i}] < KILN_C99_INLINE_SLOTS) {{ memcpy(&d{v}, &recv_obj->inline_slots[recv_row[{i}]], sizeof(double));{box_stmt_inline} }} else {{ memcpy(&d{v}, &recv_obj->slots[recv_row[{i}]], sizeof(double));{box_stmt_heap} }} handled = 1; }} "
                     ),
                     String::new(),
                 )
             } else {
                 (
                     format!(
-                        "if (recv_row != NULL) {{ v{v} = recv_obj->slots[recv_row[{i}]]; handled = 1; }} "
+                        "if (recv_row != NULL) {{ v{v} = recv_row[{i}] < KILN_C99_INLINE_SLOTS ? recv_obj->inline_slots[recv_row[{i}]] : recv_obj->slots[recv_row[{i}]]; handled = 1; }} "
                     ),
                     String::new(),
                 )
@@ -281,21 +286,26 @@ pub(super) fn emit_get_property(
                 }
             }
             (Some(col_idx), None) => {
-                let box_stmt = if need_box {
-                    format!(" v{v} = recv_obj->slots[recv_row[{col_idx}]];")
-                } else {
-                    String::new()
-                };
                 if typed {
+                    let box_stmt_inline = if need_box {
+                        format!(" v{v} = recv_obj->inline_slots[recv_row[{col_idx}]];")
+                    } else {
+                        String::new()
+                    };
+                    let box_stmt_heap = if need_box {
+                        format!(" v{v} = recv_obj->slots[recv_row[{col_idx}]];")
+                    } else {
+                        String::new()
+                    };
                     writeln!(
                         output,
-                        "    memcpy(&d{v}, &recv_obj->slots[recv_row[{col_idx}]], sizeof(double));{box_stmt}{int_sync}"
+                        "    if (recv_row[{col_idx}] < KILN_C99_INLINE_SLOTS) {{ memcpy(&d{v}, &recv_obj->inline_slots[recv_row[{col_idx}]], sizeof(double));{box_stmt_inline} }} else {{ memcpy(&d{v}, &recv_obj->slots[recv_row[{col_idx}]], sizeof(double));{box_stmt_heap} }}{int_sync}"
                     )
                     .unwrap();
                 } else {
                     writeln!(
                         output,
-                        "    v{v} = recv_obj->slots[recv_row[{col_idx}]];{int_sync}"
+                        "    v{v} = recv_row[{col_idx}] < KILN_C99_INLINE_SLOTS ? recv_obj->inline_slots[recv_row[{col_idx}]] : recv_obj->slots[recv_row[{col_idx}]];{int_sync}"
                     )
                     .unwrap();
                 }
@@ -311,16 +321,24 @@ pub(super) fn emit_get_property(
                 if (!handled && KILN_VAL_IS_OBJECT(v{o})) {{ \
                     const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); \
                     const kiln_shape *shape = obj->shape; \
-                    uint32_t slot = UINT32_MAX; \
-                    if (KILN_LIKELY(shape != NULL)) {{ \
-                        if (shape == site.entries[0].shape) slot = site.entries[0].slot; \
-                        else if (shape == site.entries[1].shape) slot = site.entries[1].slot; \
+                    if (KILN_LIKELY(shape != NULL && shape == site.entries[0].shape)) {{ \
+                        uint32_t s0 = site.entries[0].slot; \
+                        if (KILN_LIKELY(s0 < KILN_C99_INLINE_SLOTS)) {{ \
+                            v{v} = obj->inline_slots[s0]; \
+                            handled = 1; \
+                        }} else if (KILN_LIKELY(s0 < obj->slot_capacity)) {{ \
+                            v{v} = obj->slots[s0]; \
+                            handled = 1; \
+                        }} \
+                    }} else if (shape != NULL) {{ \
+                        uint32_t slot = UINT32_MAX; \
+                        if (shape == site.entries[1].shape) slot = site.entries[1].slot; \
                         else if (shape == site.entries[2].shape) slot = site.entries[2].slot; \
                         else if (shape == site.entries[3].shape) slot = site.entries[3].slot; \
-                    }} \
-                    if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity)) {{ \
-                        v{v} = obj->slots[slot]; \
-                        handled = 1; \
+                        if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity)) {{ \
+                            v{v} = slot < KILN_C99_INLINE_SLOTS ? obj->inline_slots[slot] : obj->slots[slot]; \
+                            handled = 1; \
+                        }} \
                     }} \
                 }} \
                 if (!handled) {{ \
@@ -470,17 +488,29 @@ pub(super) fn emit_set_property(
                 if (KILN_VAL_IS_OBJECT(v{o})) {{ \
                     kiln_object *obj = (kiln_object *)KILN_VAL_PTR(v{o}); \
                     const kiln_shape *shape = obj->shape; \
-                    uint32_t slot = UINT32_MAX; \
-                    if (KILN_LIKELY(shape != NULL)) {{ \
-                        if (shape == site.entries[0].shape && site.entries[0].transition_to == NULL) slot = site.entries[0].slot; \
-                        else if (shape == site.entries[1].shape && site.entries[1].transition_to == NULL) slot = site.entries[1].slot; \
+                    if (KILN_LIKELY(shape != NULL && shape == site.entries[0].shape && site.entries[0].transition_to == NULL)) {{ \
+                        uint32_t s0 = site.entries[0].slot; \
+                        if (KILN_LIKELY(s0 < KILN_C99_INLINE_SLOTS && !obj->frozen)) {{ \
+                            kiln_c99_prototype_touched(obj); obj->inline_slots[s0] = v{val}; \
+                            v{v} = v{val}; \
+                            handled = 1; \
+                        }} else if (KILN_LIKELY(s0 < obj->slot_capacity && !obj->frozen)) {{ \
+                            kiln_c99_prototype_touched(obj); obj->slots[s0] = v{val}; \
+                            v{v} = v{val}; \
+                            handled = 1; \
+                        }} \
+                    }} else if (shape != NULL) {{ \
+                        uint32_t slot = UINT32_MAX; \
+                        if (shape == site.entries[1].shape && site.entries[1].transition_to == NULL) slot = site.entries[1].slot; \
                         else if (shape == site.entries[2].shape && site.entries[2].transition_to == NULL) slot = site.entries[2].slot; \
                         else if (shape == site.entries[3].shape && site.entries[3].transition_to == NULL) slot = site.entries[3].slot; \
-                    }} \
-                    if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity && !obj->frozen)) {{ \
-                        kiln_c99_prototype_touched(obj); obj->slots[slot] = v{val}; \
-                        v{v} = v{val}; \
-                        handled = 1; \
+                        if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity && !obj->frozen)) {{ \
+                            kiln_c99_prototype_touched(obj); \
+                            if (slot < KILN_C99_INLINE_SLOTS) obj->inline_slots[slot] = v{val}; \
+                            else obj->slots[slot] = v{val}; \
+                            v{v} = v{val}; \
+                            handled = 1; \
+                        }} \
                     }} \
                 }} \
                 if (!handled) {{ \
