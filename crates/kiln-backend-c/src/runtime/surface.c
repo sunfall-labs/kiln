@@ -15,6 +15,8 @@ static const char *kiln_c99_builtin_owner_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_ARRAY_PROTOTYPE: return "Array.prototype";
     case KILN_C99_BUILTIN_NUMBER_PROTOTYPE: return "Number.prototype";
     case KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE: return "Boolean.prototype";
+    case KILN_C99_BUILTIN_BIGINT_PROTOTYPE: return "BigInt.prototype";
+    case KILN_C99_BUILTIN_PROMISE_PROTOTYPE: return "Promise.prototype";
     default: return kiln_c99_builtin_name(builtin);
     }
 }
@@ -333,10 +335,7 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
                                       KILN_C99_METHOD_DATE_TO_STRING);
     case KILN_C99_BUILTIN_FUNCTION_PROTOTYPE:
         return kiln_c99_callable_method(key, key_len);
-    case KILN_C99_BUILTIN_PROMISE_PROTOTYPE:
-        if (kiln_c99_same_name(key, key_len, "constructor")) return 0;
-        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_THEN,
-                                      KILN_C99_METHOD_FINALLY);
+
     case KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE:
         /* The same range an instance read uses, so `DataView.prototype.getUint8` and
          * `view.getUint8` are the same function -- which is what `===` between them asks, and

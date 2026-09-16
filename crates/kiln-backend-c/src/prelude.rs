@@ -1548,6 +1548,18 @@ builtin_surface! {
     (KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE, "Boolean.prototype", "constructor", ctor(KILN_C99_BUILTIN_BOOLEAN)),
     (KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE, "Boolean.prototype", "toString", code(KILN_C99_METHOD_PRIMITIVE_TO_STRING)),
     (KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE, "Boolean.prototype", "valueOf", code(KILN_C99_METHOD_OBJECT_VALUE_OF)),
+
+    (KILN_C99_BUILTIN_BIGINT_PROTOTYPE, "BigInt.prototype", "constructor", ctor(KILN_C99_BUILTIN_BIGINT)),
+    (KILN_C99_BUILTIN_BIGINT_PROTOTYPE, "BigInt.prototype", "toString", code(KILN_C99_METHOD_NUMBER_TO_STRING)),
+    (KILN_C99_BUILTIN_BIGINT_PROTOTYPE, "BigInt.prototype", "toLocaleString", code(KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING)),
+    (KILN_C99_BUILTIN_BIGINT_PROTOTYPE, "BigInt.prototype", "valueOf", code(KILN_C99_METHOD_NUMBER_VALUE_OF)),
+    (KILN_C99_BUILTIN_BIGINT_PROTOTYPE, "BigInt.prototype", "@@toStringTag", text("BigInt")),
+
+    (KILN_C99_BUILTIN_PROMISE_PROTOTYPE, "Promise.prototype", "constructor", ctor(KILN_C99_BUILTIN_PROMISE)),
+    (KILN_C99_BUILTIN_PROMISE_PROTOTYPE, "Promise.prototype", "then", code(KILN_C99_METHOD_THEN)),
+    (KILN_C99_BUILTIN_PROMISE_PROTOTYPE, "Promise.prototype", "catch", code(KILN_C99_METHOD_CATCH)),
+    (KILN_C99_BUILTIN_PROMISE_PROTOTYPE, "Promise.prototype", "finally", code(KILN_C99_METHOD_FINALLY)),
+    (KILN_C99_BUILTIN_PROMISE_PROTOTYPE, "Promise.prototype", "@@toStringTag", text("Promise")),
 }
 
 /// A member the shared surface declares and this backend does not answer, with the reason.
@@ -2995,6 +3007,7 @@ enum kiln_value_tag {
 #define KILN_C99_BUILTIN_SYMBOL_PROTOTYPE 96
 #define KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE 97
 #define KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE 98
+#define KILN_C99_BUILTIN_BIGINT_PROTOTYPE 99
 
 /* Array methods, part two.
  *

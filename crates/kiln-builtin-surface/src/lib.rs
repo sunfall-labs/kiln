@@ -694,6 +694,8 @@ pub enum PrototypeId {
     Array,
     Number,
     Boolean,
+    BigInt,
+    Promise,
 }
 
 impl PrototypeId {
@@ -703,6 +705,8 @@ impl PrototypeId {
             Self::Array => "Array.prototype",
             Self::Number => "Number.prototype",
             Self::Boolean => "Boolean.prototype",
+            Self::BigInt => "BigInt.prototype",
+            Self::Promise => "Promise.prototype",
         }
     }
 
@@ -715,6 +719,10 @@ impl PrototypeId {
             Some(Self::Number)
         } else if same(name, "Boolean.prototype") {
             Some(Self::Boolean)
+        } else if same(name, "BigInt.prototype") {
+            Some(Self::BigInt)
+        } else if same(name, "Promise.prototype") {
+            Some(Self::Promise)
         } else {
             None
         }
@@ -783,6 +791,22 @@ pub enum BooleanMethod {
     ValueOf,
 }
 
+/// Built-in methods of `BigInt.prototype`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BigIntMethod {
+    ToLocaleString,
+    ToString,
+    ValueOf,
+}
+
+/// Built-in methods of `Promise.prototype`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PromiseMethod {
+    Then,
+    Catch,
+    Finally,
+}
+
 /// Authoritative semantic operation binding across both engines (ADR 0059, ADR 0060).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SemanticBinding {
@@ -797,6 +821,8 @@ pub enum SemanticBinding {
     ArrayMethod(ArrayMethod),
     NumberMethod(NumberMethod),
     BooleanMethod(BooleanMethod),
+    BigIntMethod(BigIntMethod),
+    PromiseMethod(PromiseMethod),
 }
 
 /// One declarative row describing a prototype member.
@@ -1227,6 +1253,78 @@ pub const PROTOTYPE_SURFACE: &[PrototypeMember] = &[
         attributes: DescriptorAttributes::METHOD,
         binding: SemanticBinding::BooleanMethod(BooleanMethod::ValueOf),
     },
+    // BigInt.prototype (ECMAScript §21.2.3)
+    PrototypeMember {
+        prototype: PrototypeId::BigInt,
+        key: MemberKey::Named("constructor"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::Constructor,
+    },
+    PrototypeMember {
+        prototype: PrototypeId::BigInt,
+        key: MemberKey::Named("toLocaleString"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::BigIntMethod(BigIntMethod::ToLocaleString),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::BigInt,
+        key: MemberKey::Named("toString"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::BigIntMethod(BigIntMethod::ToString),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::BigInt,
+        key: MemberKey::Named("valueOf"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::BigIntMethod(BigIntMethod::ValueOf),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::BigInt,
+        key: MemberKey::Symbol(WellKnownSymbol::ToStringTag),
+        kind: MemberKind::Data,
+        attributes: DescriptorAttributes::READONLY,
+        binding: SemanticBinding::StringTag("BigInt"),
+    },
+    // Promise.prototype (ECMAScript §27.2.5)
+    PrototypeMember {
+        prototype: PrototypeId::Promise,
+        key: MemberKey::Named("constructor"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::Constructor,
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Promise,
+        key: MemberKey::Named("then"),
+        kind: MemberKind::Method { length: 2 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::PromiseMethod(PromiseMethod::Then),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Promise,
+        key: MemberKey::Named("catch"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::PromiseMethod(PromiseMethod::Catch),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Promise,
+        key: MemberKey::Named("finally"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::PromiseMethod(PromiseMethod::Finally),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Promise,
+        key: MemberKey::Symbol(WellKnownSymbol::ToStringTag),
+        kind: MemberKind::Data,
+        attributes: DescriptorAttributes::READONLY,
+        binding: SemanticBinding::StringTag("Promise"),
+    },
 ];
 
 const fn validate_prototype_surface(surface: &[PrototypeMember]) {
@@ -1348,5 +1446,29 @@ mod tests {
         assert!(prototype_has(PrototypeId::Boolean, "toString"));
         assert!(prototype_has(PrototypeId::Boolean, "valueOf"));
         assert!(!prototype_has(PrototypeId::Boolean, "nonexistent"));
+    }
+
+    #[test]
+    fn bigint_prototype_members_are_complete() {
+        let members: Vec<_> = prototype_members(PrototypeId::BigInt).collect();
+        assert_eq!(members.len(), 5);
+        assert!(prototype_has(PrototypeId::BigInt, "constructor"));
+        assert!(prototype_has(PrototypeId::BigInt, "toLocaleString"));
+        assert!(prototype_has(PrototypeId::BigInt, "toString"));
+        assert!(prototype_has(PrototypeId::BigInt, "valueOf"));
+        assert!(prototype_has(PrototypeId::BigInt, "@@toStringTag"));
+        assert!(!prototype_has(PrototypeId::BigInt, "nonexistent"));
+    }
+
+    #[test]
+    fn promise_prototype_members_are_complete() {
+        let members: Vec<_> = prototype_members(PrototypeId::Promise).collect();
+        assert_eq!(members.len(), 5);
+        assert!(prototype_has(PrototypeId::Promise, "constructor"));
+        assert!(prototype_has(PrototypeId::Promise, "then"));
+        assert!(prototype_has(PrototypeId::Promise, "catch"));
+        assert!(prototype_has(PrototypeId::Promise, "finally"));
+        assert!(prototype_has(PrototypeId::Promise, "@@toStringTag"));
+        assert!(!prototype_has(PrototypeId::Promise, "nonexistent"));
     }
 }

@@ -80,6 +80,8 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_DATE_PROTOTYPE: return "Date";
     case KILN_C99_BUILTIN_NUMBER_PROTOTYPE: return "Number";
     case KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE: return "Boolean";
+    case KILN_C99_BUILTIN_BIGINT_PROTOTYPE: return "BigInt";
+    case KILN_C99_BUILTIN_PROMISE_PROTOTYPE: return "Promise";
     case KILN_C99_BUILTIN_FUNCTION_PROTOTYPE: return "Function";
     case KILN_C99_BUILTIN_FUNCTION: return "Function";
     case KILN_C99_BUILTIN_ARRAY_BUFFER: return "ArrayBuffer";
