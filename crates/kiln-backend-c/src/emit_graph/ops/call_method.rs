@@ -1022,6 +1022,30 @@ pub(super) fn emit_call_method(
                                  handled = 1; \
                              }} \
                          }} \
+                     }} else if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY) {{ \
+                         kiln_typed_array *view = (kiln_typed_array *)ptr; \
+                         kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
+                         if (kiln_c99_builtin_store_epoch == 0 && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
+                             size_t count0 = view->length; \
+                             kiln_value built_val; \
+                             int status = kiln_c99_typed_alloc_ex(&built_val, view->kind, count0, 0); \
+                             if (status != KILN_C99_OK) return status; \
+                             kiln_typed_array *built_view = kiln_c99_typed_array_of(built_val); \
+                             int pmap_failed = 0; \
+                             if (view->kind == KILN_TYPED_FLOAT64) {{ \
+                                 const double *src = (const double *)(view->buffer->bytes + view->byte_offset); \
+                                 double *dst = (double *)(built_view->buffer->bytes + built_view->byte_offset); \
+                                 if (kiln_parallel_map(src, count0, dst, {symbol}_pmap_f64_{target}, &pmap_failed) == 0 && !pmap_failed) {{ \
+                                     v{v} = kiln_val_from_boundary(built_val); \
+                                     handled = 1; \
+                                 }} \
+                             }} else {{ \
+                                 if (kiln_parallel_map(view, count0, built_view, {symbol}_pmap_typed_{target}, &pmap_failed) == 0 && !pmap_failed) {{ \
+                                     v{v} = kiln_val_from_boundary(built_val); \
+                                     handled = 1; \
+                                 }} \
+                             }} \
+                         }} \
                      }} \
                  }}",
                 o = object.0,
@@ -1063,6 +1087,36 @@ pub(super) fn emit_call_method(
                                          built_arr->is_numeric = 0; \
                                      }} \
                                      built_arr->elements[idx] = prod; \
+                                 }} \
+                                 v{v} = kiln_val_from_boundary(built_val); \
+                                 handled = 1; \
+                             }} \
+                         }} else if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY) {{ \
+                             kiln_typed_array *view = (kiln_typed_array *)ptr; \
+                             kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
+                             if (!plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                                 kiln_value built_val; \
+                                 int status = kiln_c99_typed_alloc(&built_val, view->kind, view->length); \
+                                 if (status != KILN_C99_OK) return status; \
+                                 kiln_typed_array *built_view = kiln_c99_typed_array_of(built_val); \
+                                 kiln_val vrecv = plain->arrow ? plain->captured_this : v{o}; \
+                                 if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
+                                 for (size_t idx = 0; idx < view->length; ++idx) {{ \
+                                     kiln_val vargs[3] = {{ kiln_c99_val_from_double(kiln_c99_typed_get(view, idx)), kiln_c99_val_from_double((double)idx), v{o} }}; \
+                                     kiln_val prod = KILN_VAL_UNDEFINED; \
+                                     int status; \
+                                     if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
+                                     else status = kiln_c99_invoke_closure(host, &prod, plain, vrecv, vargs, (size_t)3, depth, thrown, NULL, 0); \
+                                     if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ \
+                                         {check} \
+                                     }} \
+                                     double num_val = 0.0; \
+                                     if (KILN_VAL_IS_NUMBER(prod)) {{ memcpy(&num_val, &prod, sizeof(num_val)); }} \
+                                     else {{ \
+                                         status = kiln_c99_to_number_checked(host, kiln_val_to_boundary(prod), &num_val, depth, thrown); \
+                                         if (status != KILN_C99_OK) return status; \
+                                     }} \
+                                     kiln_c99_typed_set(built_view, idx, num_val); \
                                  }} \
                                  v{v} = kiln_val_from_boundary(built_val); \
                                  handled = 1; \

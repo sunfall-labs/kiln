@@ -232,6 +232,27 @@ pub fn emit_parallel_chunk(output: &mut String, symbol: &str, index: usize, para
         if (KILN_UNLIKELY(kiln_c99_typed_failed(r))) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
         dst[i] = kiln_c99_val_from_double(r);\n\
     }}\n\
+}}\n\
+static void __attribute__((unused)) {symbol}_pmap_f64_{index}(const void *in, void *out, size_t start, size_t end, void *ctx) {{\n\
+    const double *src = (const double *)in;\n\
+    double *dst = (double *)out;\n\
+    for (size_t i = start; i < end; ++i) {{\n\
+        if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+        double r = {symbol}_fn_{index}_p(1, src[i]{index_arg});\n\
+        if (KILN_UNLIKELY(kiln_c99_typed_failed(r))) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
+        dst[i] = r;\n\
+    }}\n\
+}}\n\
+static void __attribute__((unused)) {symbol}_pmap_typed_{index}(const void *in, void *out, size_t start, size_t end, void *ctx) {{\n\
+    kiln_typed_array *src = (kiln_typed_array *)in;\n\
+    kiln_typed_array *dst = (kiln_typed_array *)out;\n\
+    for (size_t i = start; i < end; ++i) {{\n\
+        if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+        double d = kiln_c99_typed_get(src, i);\n\
+        double r = {symbol}_fn_{index}_p(1, d{index_arg});\n\
+        if (KILN_UNLIKELY(kiln_c99_typed_failed(r))) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
+        kiln_c99_typed_set(dst, i, r);\n\
+    }}\n\
 }}"
     )
     .unwrap();

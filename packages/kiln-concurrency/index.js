@@ -51,3 +51,14 @@ if (typeof Array.prototype.parallelMap !== "function") {
     configurable: true,
   });
 }
+
+const TypedArrayProto = typeof Uint8Array === "function" ? Object.getPrototypeOf(Uint8Array.prototype) : null;
+if (TypedArrayProto && typeof TypedArrayProto.parallelMap !== "function") {
+  Object.defineProperty(TypedArrayProto, "parallelMap", {
+    value: function (fn) {
+      return this.map(fn);
+    },
+    writable: true,
+    configurable: true,
+  });
+}

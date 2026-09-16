@@ -110,8 +110,8 @@ lends a per-thread tape, and walks it. Both the C recursive-descent reader and t
   sequential lowering, which already agrees with the interpreter; nothing is refused, because the
   sequential answer is the right answer and a refusal would turn a valid program into a stop.
 * **ABI.** One export, `kiln_parallel_map(in, count, out, chunk, ctx)`, where `in` and `out` are
-  the program's own NaN-boxed element arrays as opaque pointers -- the provider never reads an
-  element, so nothing is unboxed or copied -- and `chunk` is an emitted static C worker over a
+  the program's own NaN-boxed element arrays or typed array memory as opaque pointers -- the provider
+  never reads an element, so nothing is unboxed or copied -- and `chunk` is an emitted static C worker over a
   `[start, end)` range that calls the parallel clone per element. Rust owns a private
   `rayon::ThreadPool`, the chunk size (1,024) and the sequential floor (16,384 elements, measured
   and recorded in the constant's doc comment), and `catch_unwind` turns a panic into -2, on which
@@ -119,6 +119,13 @@ lends a per-thread tape, and walks it. Both the C recursive-descent reader and t
   on every element loop to immediately cancel all concurrent workers if any chunk fails typing.
   The site checks `kiln_c99_builtin_store_epoch == 0` on the realm thread first, so an overridden
   `Math.sqrt` never reaches the bare call.
+* **TypedArrays.** `parallelMap` is supported across all 9 numeric TypedArrays (`Float64Array`,
+  `Float32Array`, `Int32Array`, `Uint32Array`, `Int16Array`, `Uint16Array`, `Int8Array`, `Uint8Array`,
+  `Uint8ClampedArray`) returning a typed view of the receiver's kind. `Float64Array` lowers to
+  `{symbol}_pmap_f64_{index}` operating directly on contiguous unboxed `double *` arrays without
+  NaN-boxing overhead. Other typed arrays lower to `{symbol}_pmap_typed_{index}` reading and writing
+  disjoint byte ranges via `kiln_c99_typed_get` and `kiln_c99_typed_set`. Non-pool-safe or allocating
+  callbacks take the sequential typed lowering, preserving full language semantics.
 * **Pool.** Sized from `available_parallelism`, overridable with `KILN_PARALLELISM`; `1` runs
   every such map inline in the same binary, which is how the sequential number is measured.
 * **Measured** (`bench/non-io/parallel-map-large.mjs`, 2e6 elements, `sqrt`, `pow`, `%` and

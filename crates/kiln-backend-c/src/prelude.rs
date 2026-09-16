@@ -4051,6 +4051,7 @@ static uint64_t kiln_c99_typed_prototype_method(const char *key, size_t key_len)
     if (kiln_c99_same_name(key, key_len, "reduce")) return KILN_C99_METHOD_REDUCE;
     if (kiln_c99_same_name(key, key_len, "reduceRight")) return KILN_C99_METHOD_ARRAY_REDUCE_RIGHT;
     if (kiln_c99_same_name(key, key_len, "map")) return KILN_C99_METHOD_MAP;
+    if (kiln_c99_same_name(key, key_len, "parallelMap")) return KILN_C99_METHOD_ARRAY_PARALLEL_MAP;
     if (kiln_c99_same_name(key, key_len, "filter")) return KILN_C99_METHOD_FILTER;
     if (kiln_c99_same_name(key, key_len, "sort")) return KILN_C99_METHOD_ARRAY_SORT;
     if (kiln_c99_same_name(key, key_len, "reverse")) return KILN_C99_METHOD_ARRAY_REVERSE;
