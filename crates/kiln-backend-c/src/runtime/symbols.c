@@ -362,6 +362,7 @@ static int kiln_c99_is_namespace(uint64_t builtin) {
            builtin == KILN_C99_BUILTIN_REGEXP_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_DATE_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_NUMBER_PROTOTYPE ||
+           builtin == KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_FUNCTION_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_PROMISE_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE ||

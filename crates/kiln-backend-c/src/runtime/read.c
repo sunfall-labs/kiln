@@ -747,20 +747,24 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         }
         KILN_C99_REFUSE("an Array.prototype member this backend has not implemented");
     }
-    case KILN_VALUE_BOOLEAN:
+    case KILN_VALUE_BOOLEAN: {
+        (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
+                                            &intrinsic_len);
+        uint64_t code = kiln_c99_namespace_method(KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE, intrinsic_key,
+                                                  intrinsic_len);
+        if (code != 0) {
+            *out = kiln_c99_method(code);
+            return KILN_C99_OK;
+        }
         if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_BOOLEAN);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name_key(key, "toString") ||
-            kiln_c99_same_name_key(key, "toLocaleString")) {
+        if (kiln_c99_same_name_key(key, "toLocaleString")) {
             *out = kiln_c99_method(KILN_C99_METHOD_PRIMITIVE_TO_STRING);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name_key(key, "valueOf")) {
-            *out = kiln_c99_method(KILN_C99_METHOD_OBJECT_VALUE_OF);
-            return KILN_C99_OK;
-        }
+    }
         /* `GetV` boxes a primitive and then performs an ordinary prototype lookup. A name the
          * wrapper prototype does not contain is absent, not a backend refusal. Keeping that
          * distinction here makes named and computed access share one semantic seam and lets
@@ -1339,6 +1343,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                           {KILN_C99_BUILTIN_REGEXP_PROTOTYPE, KILN_C99_BUILTIN_REGEXP},
                           {KILN_C99_BUILTIN_DATE_PROTOTYPE, KILN_C99_BUILTIN_DATE},
                           {KILN_C99_BUILTIN_NUMBER_PROTOTYPE, KILN_C99_BUILTIN_NUMBER},
+                          {KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE, KILN_C99_BUILTIN_BOOLEAN},
                           {KILN_C99_BUILTIN_FUNCTION_PROTOTYPE, KILN_C99_BUILTIN_FUNCTION},
                           {KILN_C99_BUILTIN_PROMISE_PROTOTYPE, KILN_C99_BUILTIN_PROMISE},
                           {KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE, KILN_C99_BUILTIN_DATA_VIEW},
@@ -1428,6 +1433,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 {KILN_C99_BUILTIN_REGEXP, KILN_C99_BUILTIN_REGEXP_PROTOTYPE},
                 {KILN_C99_BUILTIN_DATE, KILN_C99_BUILTIN_DATE_PROTOTYPE},
                 {KILN_C99_BUILTIN_NUMBER, KILN_C99_BUILTIN_NUMBER_PROTOTYPE},
+                {KILN_C99_BUILTIN_BOOLEAN, KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE},
                 {KILN_C99_BUILTIN_FUNCTION, KILN_C99_BUILTIN_FUNCTION_PROTOTYPE},
                 {KILN_C99_BUILTIN_PROMISE, KILN_C99_BUILTIN_PROMISE_PROTOTYPE},
                 {KILN_C99_BUILTIN_DATA_VIEW, KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE},
@@ -1595,32 +1601,21 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             return KILN_C99_OK;
         }
         KILN_C99_ABSENT("not a member of BigInt.prototype", out);
-    case KILN_VALUE_NUMBER:
+    case KILN_VALUE_NUMBER: {
+        (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
+                                            &intrinsic_len);
+        uint64_t code = kiln_c99_namespace_method(KILN_C99_BUILTIN_NUMBER_PROTOTYPE, intrinsic_key,
+                                                  intrinsic_len);
+        if (code != 0) {
+            *out = kiln_c99_method(code);
+            return KILN_C99_OK;
+        }
         if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_NUMBER);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name_key(key, "toString")) {
-            *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_TO_STRING);
-            return KILN_C99_OK;
-        }
-        if (kiln_c99_same_name_key(key, "toFixed")) {
-            *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_TO_FIXED);
-            return KILN_C99_OK;
-        }
-        if (kiln_c99_same_name_key(key, "toExponential")) {
-            *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_TO_EXPONENTIAL);
-            return KILN_C99_OK;
-        }
-        if (kiln_c99_same_name_key(key, "toPrecision")) {
-            *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_TO_PRECISION);
-            return KILN_C99_OK;
-        }
-        if (kiln_c99_same_name_key(key, "valueOf")) {
-            *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_VALUE_OF);
-            return KILN_C99_OK;
-        }
         KILN_C99_ABSENT("not a member of Number.prototype", out);
+    }
     case KILN_VALUE_SYMBOL: {
         if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_SYMBOL);
