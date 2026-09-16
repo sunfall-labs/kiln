@@ -2172,7 +2172,10 @@ pub(super) fn emit_call_method(
         }
         other => other,
     };
-    let math_s = math_intrinsic.map(|s| format!(" {s}")).unwrap_or_default();
+    let math_s = math_intrinsic
+        .as_ref()
+        .map(|s| format!(" {s}"))
+        .unwrap_or_default();
     let await_resolve_s = await_resolve_intrinsic
         .map(|s| format!(" {s}"))
         .unwrap_or_default();
@@ -2215,6 +2218,32 @@ pub(super) fn emit_call_method(
         .map(|s| format!(" {s}"))
         .unwrap_or_default();
     let n = argc.max(1);
+
+    let typed_sync = if typed && spec.exits && spec.calls.contains(&vid) {
+        let invariant = lookup_speculation_invariant("method_call_number");
+        format!(
+            "/* Speculation exit [{}]: {} */ if (!kiln_twin) {{ if (KILN_UNLIKELY(!KILN_VAL_IS_NUMBER(v{v}))) {{ {} goto kiln_generic_resume_{v}; }} memcpy(&d{v}, &v{v}, sizeof(d{v})); }}",
+            invariant.name,
+            invariant.language_rule,
+            super::materialize_all_sunk(ctx.graph, symbol, ctx.defs, ctx.array_slots)
+        )
+    } else if typed {
+        format!("if (!kiln_twin) memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+    } else {
+        String::new()
+    };
+
+    let in_typed = matches!(ctx.kind, crate::emit_graph::EntryKind::Typed { .. });
+    if in_typed && math_intrinsic.is_some() {
+        writeln!(
+            output,
+            "    {{ int handled = 0; int kiln_twin = 0; (void)kiln_twin; \
+            {math_s} \
+            if (KILN_UNLIKELY(!handled)) {{ goto kiln_refusal; }} {typed_sync} }}"
+        )
+        .unwrap();
+        return;
+    }
 
     writeln!(
                 output,
@@ -2277,14 +2306,6 @@ pub(super) fn emit_call_method(
                     {check} \
                 }} {typed_sync} }}",
                 o = object.0,
-                typed_sync = if typed && spec.exits && spec.calls.contains(&vid) {
-                    let invariant = lookup_speculation_invariant("method_call_number");
-                    format!("/* Speculation exit [{}]: {} */ if (!kiln_twin) {{ if (KILN_UNLIKELY(!KILN_VAL_IS_NUMBER(v{v}))) {{ {} goto kiln_generic_resume_{v}; }} memcpy(&d{v}, &v{v}, sizeof(d{v})); }}", invariant.name, invariant.language_rule, super::materialize_all_sunk(ctx.graph, symbol, ctx.defs, ctx.array_slots))
-                } else if typed {
-                    format!("if (!kiln_twin) memcpy(&d{v}, &v{v}, sizeof(d{v}));")
-                } else {
-                    String::new()
-                }
             )
             .unwrap();
 }

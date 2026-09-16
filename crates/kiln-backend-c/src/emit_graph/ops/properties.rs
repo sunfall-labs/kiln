@@ -106,27 +106,38 @@ pub(super) fn emit_get_property(
         return;
     }
     let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
-    let length_check = if key_str == "length" && spec.arrays.contains(object) {
+    if key_str == "length" && spec.arrays.contains(object) {
         let box_stmt = if need_box {
-            format!(" v{v} = kiln_c99_val_from_double((double)arr->count);")
+            format!(
+                " v{v} = kiln_c99_val_from_double((double)kiln_spec_{o}_arr->count);",
+                o = object.0,
+                v = v
+            )
         } else {
             String::new()
         };
         let int_stmt = if typed_int {
-            format!(" i{v} = (int64_t)arr->count;")
+            format!(
+                " i{v} = (int64_t)kiln_spec_{o}_arr->count;",
+                o = object.0,
+                v = v
+            )
         } else {
             String::new()
         };
         let double_stmt = if typed {
-            format!(" d{v} = (double)arr->count;")
+            format!(
+                " d{v} = (double)kiln_spec_{o}_arr->count;",
+                o = object.0,
+                v = v
+            )
         } else {
             String::new()
         };
-        format!(
-            "{{ const kiln_array *arr = (const kiln_array *)KILN_VAL_PTR(v{o});{int_stmt}{double_stmt}{box_stmt} handled = 1; }} ",
-            o = object.0
-        )
-    } else if key_str == "length" {
+        writeln!(output, "    {{ {int_stmt}{double_stmt}{box_stmt} }}").unwrap();
+        return;
+    }
+    let length_check = if key_str == "length" {
         let box_stmt = if need_box {
             format!(" v{v} = kiln_c99_val_from_double((double)((const kiln_array *)ptr)->count);")
         } else {
@@ -589,24 +600,88 @@ pub(super) fn emit_get_computed(
         .unwrap();
         return;
     }
+    let key_is_int = ints.contains(key);
+    let key_non_neg = ctx.ivs.get(key).map_or(false, |iv| iv.non_negative);
+    let bce_proven = if let Some(iv) = ctx.ivs.get(key) {
+        if iv.non_negative && iv.step > 0 {
+            match ctx.defs.get(&iv.bound) {
+                Some(GraphOp::GetProperty {
+                    object: bound_obj,
+                    name,
+                    ..
+                }) => {
+                    let is_length = matches!(
+                        program.constants.get(*name as usize),
+                        Some(Constant::String(s)) if s == "length"
+                    );
+                    if is_length {
+                        if bound_obj == object {
+                            true
+                        } else {
+                            match (ctx.defs.get(bound_obj), ctx.defs.get(object)) {
+                                (
+                                    Some(GraphOp::LoadUpvalue(idx_a)),
+                                    Some(GraphOp::LoadUpvalue(idx_b)),
+                                ) => idx_a == idx_b,
+                                (
+                                    Some(GraphOp::LoadLocal(slot_a)),
+                                    Some(GraphOp::LoadLocal(slot_b)),
+                                ) => slot_a == slot_b,
+                                _ => false,
+                            }
+                        }
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
     // The object an array by the entry guard: no tag or kind to test, and an index
     // proven an integer is the element's index as it is.
-    let array_tier = if spec.arrays.contains(object) && ints.contains(key) {
+    let array_tier = if spec.arrays.contains(object) && key_is_int {
+        let cond = if bce_proven {
+            format!(
+                "kiln_spec_{o}_arr->elements[i{k}] != KILN_VAL_HOLE",
+                o = object.0,
+                k = key.0
+            )
+        } else if key_non_neg {
+            format!(
+                "(uint64_t)i{k} < kiln_spec_{o}_arr->count && kiln_spec_{o}_arr->elements[i{k}] != KILN_VAL_HOLE",
+                o = object.0,
+                k = key.0
+            )
+        } else {
+            format!(
+                "i{k} >= 0 && (uint64_t)i{k} < kiln_spec_{o}_arr->count && kiln_spec_{o}_arr->elements[i{k}] != KILN_VAL_HOLE",
+                o = object.0,
+                k = key.0
+            )
+        };
         format!(
-            "{{ const kiln_array *arr = (const kiln_array *)KILN_VAL_PTR(v{o}); if (KILN_LIKELY(i{k} >= 0 && (uint64_t)i{k} < arr->count && arr->elements[i{k}] != KILN_VAL_HOLE)) {{ v{v} = arr->elements[i{k}]; handled = 1; }} }} ",
+            "if (KILN_LIKELY({cond})) {{ v{v} = kiln_spec_{o}_arr->elements[i{k}]; handled = 1; }} ",
             o = object.0,
-            k = key.0
+            k = key.0,
+            v = v,
+            cond = cond
         )
     } else if spec.arrays.contains(object) {
         format!(
-            "if (KILN_VAL_IS_NUMBER(v{k})) {{ const kiln_array *arr = (const kiln_array *)KILN_VAL_PTR(v{o}); double idx; memcpy(&idx, &v{k}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && arr->elements[slot] != KILN_VAL_HOLE)) {{ v{v} = arr->elements[slot]; handled = 1; }} }} ",
+            "if (KILN_VAL_IS_NUMBER(v{k})) {{ const kiln_array *arr = kiln_spec_{o}_arr; double idx; memcpy(&idx, &v{k}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && arr->elements[slot] != KILN_VAL_HOLE)) {{ v{v} = arr->elements[slot]; handled = 1; }} }} ",
             o = object.0,
-            k = key.0
+            k = key.0,
+            v = v
         )
     } else {
         String::new()
     };
-    let (vk_decl, vk) = if spec.arrays.contains(object) && ints.contains(key) {
+    let (vk_decl, vk) = if spec.arrays.contains(object) && key_is_int {
         (
             format!(
                 "kiln_val vk = !handled ? kiln_c99_val_from_double((double)i{}) : 0; ",
@@ -617,13 +692,13 @@ pub(super) fn emit_get_computed(
     } else {
         (String::new(), format!("v{}", key.0))
     };
-    let key_is_int = ints.contains(key);
-    let key_non_neg = ctx.ivs.get(key).map_or(false, |iv| iv.non_negative);
     let (array_body, typed_body, string_body) = if key_is_int {
-        let arr_bound = if key_non_neg {
-            format!("(uint64_t)i{k} < arr->count", k = key.0)
+        let arr_bound = if bce_proven {
+            String::new()
+        } else if key_non_neg {
+            format!("(uint64_t)i{k} < arr->count && ", k = key.0)
         } else {
-            format!("i{k} >= 0 && (uint64_t)i{k} < arr->count", k = key.0)
+            format!("i{k} >= 0 && (uint64_t)i{k} < arr->count && ", k = key.0)
         };
         let typed_bound = if key_non_neg {
             format!("(uint64_t)i{k} < view->length", k = key.0)
@@ -637,9 +712,10 @@ pub(super) fn emit_get_computed(
         };
         (
             format!(
-                "const kiln_array *arr = (const kiln_array *)ptr; if (KILN_LIKELY({arr_bound} && arr->elements[i{k}] != KILN_VAL_HOLE)) {{ v{v} = arr->elements[i{k}]; handled = 1; }}",
+                "const kiln_array *arr = (const kiln_array *)ptr; if (KILN_LIKELY({arr_bound}arr->elements[i{k}] != KILN_VAL_HOLE)) {{ v{v} = arr->elements[i{k}]; handled = 1; }}",
                 k = key.0,
-                v = v
+                v = v,
+                arr_bound = arr_bound
             ),
             format!(
                 "kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY({typed_bound})) {{ double d = kiln_c99_typed_get(view, (size_t)i{k}); v{v} = kiln_c99_val_from_double(d); handled = 1; }}",
