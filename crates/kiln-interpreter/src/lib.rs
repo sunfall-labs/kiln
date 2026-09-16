@@ -45063,22 +45063,30 @@ fn function_property(intrinsics: &Intrinsics, name: &str, realm: RealmId) -> Val
     }
 }
 
+fn function_method_value(method: kiln_builtin_surface::FunctionMethod, realm: RealmId) -> Value {
+    match method {
+        kiln_builtin_surface::FunctionMethod::Apply => Value::Native(Native::FunctionApply, realm),
+        kiln_builtin_surface::FunctionMethod::Bind => Value::Native(Native::FunctionBind, realm),
+        kiln_builtin_surface::FunctionMethod::Call => Value::Native(Native::FunctionCall, realm),
+        kiln_builtin_surface::FunctionMethod::ToString => {
+            Value::Native(Native::FunctionToString, realm)
+        }
+    }
+}
+
 /// The same three with the realm's store left out: what `Function.prototype` was *built* with.
 fn tabulated_function_property(name: &str) -> Value {
-    match name {
-        // Not the source text, which the VM never sees -- the same reason an error carries no
-        // `stack`. What it does promise is that two different functions give two different
-        // strings, which is what the `isPlainObject` check every library ships depends on.
-        "toString" => Value::Native(Native::FunctionToString, RealmId::PRIMARY),
-        "call" => Value::Native(Native::FunctionCall, RealmId::PRIMARY),
-        "apply" => Value::Native(Native::FunctionApply, RealmId::PRIMARY),
-        "bind" => Value::Native(Native::FunctionBind, RealmId::PRIMARY),
-        // Published here rather than in `intrinsic_prototype_method_names`, which is what an
-        // earlier attempt did: that list is the *enumeration*, and a reserved key put in it leaks
-        // the internal spelling of the symbol into every property listing in the realm. This one
-        // is the existence-and-value path, which is where a symbol-keyed member belongs --
-        // `Date.prototype[@@toPrimitive]` is published the same way.
-        key if key == WellKnown::HasInstance.property_key() => {
+    let Some(member) = kiln_builtin_surface::find_prototype_member(
+        kiln_builtin_surface::PrototypeId::Function,
+        name,
+    ) else {
+        return Value::Undefined;
+    };
+    match member.binding {
+        kiln_builtin_surface::SemanticBinding::FunctionMethod(method) => {
+            function_method_value(method, RealmId::PRIMARY)
+        }
+        kiln_builtin_surface::SemanticBinding::FunctionHasInstance => {
             Value::Native(Native::FunctionHasInstance, RealmId::PRIMARY)
         }
         _ => Value::Undefined,
@@ -46151,6 +46159,7 @@ impl Intrinsics {
                         | PrototypeTable::BigInt
                         | PrototypeTable::Promise
                         | PrototypeTable::Object
+                        | PrototypeTable::Function
                 ),
                 _
             )
@@ -46327,7 +46336,8 @@ impl Intrinsics {
                 | PrototypeTable::Boolean
                 | PrototypeTable::BigInt
                 | PrototypeTable::Promise
-                | PrototypeTable::Object),
+                | PrototypeTable::Object
+                | PrototypeTable::Function),
             ),
             _,
         ) = target
@@ -46340,6 +46350,7 @@ impl Intrinsics {
                 PrototypeTable::BigInt => kiln_builtin_surface::PrototypeId::BigInt,
                 PrototypeTable::Promise => kiln_builtin_surface::PrototypeId::Promise,
                 PrototypeTable::Object => kiln_builtin_surface::PrototypeId::Object,
+                PrototypeTable::Function => kiln_builtin_surface::PrototypeId::Function,
                 _ => unreachable!(),
             };
             let mut data = ObjectData::default();
@@ -46379,6 +46390,7 @@ impl Intrinsics {
                             PrototypeTable::BigInt => Native::BigIntConstructor,
                             PrototypeTable::Promise => Native::PromiseConstructor,
                             PrototypeTable::Object => Native::ObjectConstructor,
+                            PrototypeTable::Function => Native::FunctionConstructor,
                             _ => unreachable!(),
                         };
                         Property::Value(Value::Native(ctor, realm))
@@ -46424,6 +46436,19 @@ impl Intrinsics {
                         get: Some(Value::Native(Native::ProtoGetter, realm)),
                         set: Some(Value::Native(Native::ProtoSetter, realm)),
                     },
+                    kiln_builtin_surface::SemanticBinding::FunctionMethod(method) => {
+                        Property::Value(function_method_value(method, realm))
+                    }
+                    kiln_builtin_surface::SemanticBinding::FunctionHasInstance => {
+                        Property::Value(Value::Native(Native::FunctionHasInstance, realm))
+                    }
+                    kiln_builtin_surface::SemanticBinding::FunctionCaller
+                    | kiln_builtin_surface::SemanticBinding::FunctionArguments => {
+                        Property::Accessor {
+                            get: Some(Value::Native(Native::ThrowTypeError, realm)),
+                            set: Some(Value::Native(Native::ThrowTypeError, realm)),
+                        }
+                    }
                 };
                 let attrs = Attributes {
                     writable: member.attributes.writable,
@@ -46679,14 +46704,6 @@ const STRING_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::Named
     "sup",
 ]);
 
-const FUNCTION_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
-    "toString",
-    "call",
-    "apply",
-    "bind",
-    "caller",
-    "arguments",
-]);
 const REG_EXP_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
     "exec",
     "dotAll",
@@ -46914,16 +46931,13 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
         },
         PrototypeTable::Array | PrototypeTable::TypedArray => ARRAY_MEMBERS.names(),
         PrototypeTable::String => STRING_MEMBERS.names(),
-        PrototypeTable::Object
+        PrototypeTable::Function
+        | PrototypeTable::Object
         | PrototypeTable::Number
         | PrototypeTable::Boolean
         | PrototypeTable::BigInt
         | PrototypeTable::Promise
         | PrototypeTable::Symbol => &[],
-        // `caller` and `arguments` are the restricted accessor pair
-        // `AddRestrictedFunctionProperties` installs here, and they are own properties of this
-        // object -- which is what makes every function that inherits from it throw on a read.
-        PrototypeTable::Function => FUNCTION_MEMBERS.names(),
         PrototypeTable::RegExp => REG_EXP_MEMBERS.names(),
         PrototypeTable::Date => DATE_MEMBERS.names(),
         PrototypeTable::ArrayBuffer => ARRAY_BUFFER_MEMBERS.names(),
@@ -46958,6 +46972,7 @@ fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String, Property)>
         PrototypeTable::BigInt => Some(kiln_builtin_surface::PrototypeId::BigInt),
         PrototypeTable::Promise => Some(kiln_builtin_surface::PrototypeId::Promise),
         PrototypeTable::Object => Some(kiln_builtin_surface::PrototypeId::Object),
+        PrototypeTable::Function => Some(kiln_builtin_surface::PrototypeId::Function),
         _ => None,
     } {
         return kiln_builtin_surface::prototype_members(proto_id)
@@ -46991,6 +47006,7 @@ fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String, Property)>
                             PrototypeTable::BigInt => Native::BigIntConstructor,
                             PrototypeTable::Promise => Native::PromiseConstructor,
                             PrototypeTable::Object => Native::ObjectConstructor,
+                            PrototypeTable::Function => Native::FunctionConstructor,
                             _ => unreachable!(),
                         };
                         Property::Value(Value::Native(ctor, RealmId::PRIMARY))
@@ -47033,6 +47049,16 @@ fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String, Property)>
                         get: Some(Value::Native(Native::ProtoGetter, RealmId::PRIMARY)),
                         set: Some(Value::Native(Native::ProtoSetter, RealmId::PRIMARY)),
                     },
+                    kiln_builtin_surface::SemanticBinding::FunctionMethod(method) => {
+                        Property::Value(function_method_value(method, RealmId::PRIMARY))
+                    }
+                    kiln_builtin_surface::SemanticBinding::FunctionCaller
+                    | kiln_builtin_surface::SemanticBinding::FunctionArguments => {
+                        Property::Accessor {
+                            get: Some(Value::Native(Native::ThrowTypeError, RealmId::PRIMARY)),
+                            set: Some(Value::Native(Native::ThrowTypeError, RealmId::PRIMARY)),
+                        }
+                    }
                     _ => return None,
                 };
                 Some((name.to_owned(), prop))
@@ -47839,7 +47865,8 @@ fn intrinsic_own_attributes(target: &Value, key: &str) -> Option<Attributes> {
         | PrototypeTable::Boolean
         | PrototypeTable::BigInt
         | PrototypeTable::Promise
-        | PrototypeTable::Object),
+        | PrototypeTable::Object
+        | PrototypeTable::Function),
     ) = native
     {
         let proto_id = match table {
@@ -47850,6 +47877,7 @@ fn intrinsic_own_attributes(target: &Value, key: &str) -> Option<Attributes> {
             PrototypeTable::BigInt => kiln_builtin_surface::PrototypeId::BigInt,
             PrototypeTable::Promise => kiln_builtin_surface::PrototypeId::Promise,
             PrototypeTable::Object => kiln_builtin_surface::PrototypeId::Object,
+            PrototypeTable::Function => kiln_builtin_surface::PrototypeId::Function,
             _ => unreachable!(),
         };
         return kiln_builtin_surface::find_prototype_member(proto_id, key).map(|member| {
@@ -47910,18 +47938,6 @@ fn published_attributes(target: &Value, native: Native, key: &str, found: &Value
         && intrinsic_static_property_names(target).contains(&key)
     {
         return Attributes::DEFAULT;
-    }
-    // `Function.prototype[Symbol.hasInstance]` is the one built-in the specification locks on
-    // *both* axes. It decides `instanceof` for every ordinary function in the realm, so a program
-    // that could assign over it or delete it could change what every one of them answers.
-    if matches!(native, Native::PrototypeOf(PrototypeTable::Function))
-        && key == WellKnown::HasInstance.property_key()
-    {
-        return Attributes {
-            writable: false,
-            enumerable: false,
-            configurable: false,
-        };
     }
     // An `@@toPrimitive` a prototype publishes is read-only wherever it appears -- `Date` and
     // `Symbol` both have one. It is what `ToPrimitive` finds before anything else, so a program

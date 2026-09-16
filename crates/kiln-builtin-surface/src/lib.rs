@@ -697,6 +697,7 @@ pub enum PrototypeId {
     BigInt,
     Promise,
     Object,
+    Function,
 }
 
 impl PrototypeId {
@@ -709,6 +710,7 @@ impl PrototypeId {
             Self::BigInt => "BigInt.prototype",
             Self::Promise => "Promise.prototype",
             Self::Object => "Object.prototype",
+            Self::Function => "Function.prototype",
         }
     }
 
@@ -727,6 +729,8 @@ impl PrototypeId {
             Some(Self::Promise)
         } else if same(name, "Object.prototype") {
             Some(Self::Object)
+        } else if same(name, "Function.prototype") {
+            Some(Self::Function)
         } else {
             None
         }
@@ -826,6 +830,15 @@ pub enum ObjectMethod {
     LookupSetter,
 }
 
+/// Built-in methods of `Function.prototype`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FunctionMethod {
+    Apply,
+    Bind,
+    Call,
+    ToString,
+}
+
 /// Authoritative semantic operation binding across both engines (ADR 0059, ADR 0060).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SemanticBinding {
@@ -844,6 +857,10 @@ pub enum SemanticBinding {
     PromiseMethod(PromiseMethod),
     ObjectMethod(ObjectMethod),
     ObjectProto,
+    FunctionMethod(FunctionMethod),
+    FunctionHasInstance,
+    FunctionCaller,
+    FunctionArguments,
 }
 
 /// One declarative row describing a prototype member.
@@ -1431,6 +1448,62 @@ pub const PROTOTYPE_SURFACE: &[PrototypeMember] = &[
         attributes: DescriptorAttributes::ACCESSOR,
         binding: SemanticBinding::ObjectProto,
     },
+    PrototypeMember {
+        prototype: PrototypeId::Function,
+        key: MemberKey::Named("constructor"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::Constructor,
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Function,
+        key: MemberKey::Named("apply"),
+        kind: MemberKind::Method { length: 2 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::FunctionMethod(FunctionMethod::Apply),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Function,
+        key: MemberKey::Named("bind"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::FunctionMethod(FunctionMethod::Bind),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Function,
+        key: MemberKey::Named("call"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::FunctionMethod(FunctionMethod::Call),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Function,
+        key: MemberKey::Named("toString"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::FunctionMethod(FunctionMethod::ToString),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Function,
+        key: MemberKey::Symbol(WellKnownSymbol::HasInstance),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::LOCKED,
+        binding: SemanticBinding::FunctionHasInstance,
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Function,
+        key: MemberKey::Named("caller"),
+        kind: MemberKind::Accessor,
+        attributes: DescriptorAttributes::ACCESSOR,
+        binding: SemanticBinding::FunctionCaller,
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Function,
+        key: MemberKey::Named("arguments"),
+        kind: MemberKind::Accessor,
+        attributes: DescriptorAttributes::ACCESSOR,
+        binding: SemanticBinding::FunctionArguments,
+    },
 ];
 
 const fn validate_prototype_surface(surface: &[PrototypeMember]) {
@@ -1595,5 +1668,20 @@ mod tests {
         assert!(prototype_has(PrototypeId::Object, "__lookupSetter__"));
         assert!(prototype_has(PrototypeId::Object, "__proto__"));
         assert!(!prototype_has(PrototypeId::Object, "nonexistent"));
+    }
+
+    #[test]
+    fn function_prototype_members_are_complete() {
+        let members: Vec<_> = prototype_members(PrototypeId::Function).collect();
+        assert_eq!(members.len(), 8);
+        assert!(prototype_has(PrototypeId::Function, "constructor"));
+        assert!(prototype_has(PrototypeId::Function, "apply"));
+        assert!(prototype_has(PrototypeId::Function, "bind"));
+        assert!(prototype_has(PrototypeId::Function, "call"));
+        assert!(prototype_has(PrototypeId::Function, "toString"));
+        assert!(prototype_has(PrototypeId::Function, "@@hasInstance"));
+        assert!(prototype_has(PrototypeId::Function, "caller"));
+        assert!(prototype_has(PrototypeId::Function, "arguments"));
+        assert!(!prototype_has(PrototypeId::Function, "nonexistent"));
     }
 }

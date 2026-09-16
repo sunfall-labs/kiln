@@ -1568,6 +1568,12 @@ builtin_surface! {
     (KILN_C99_BUILTIN_OBJECT_PROTOTYPE, "Object.prototype", "toLocaleString", code(KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING)),
     (KILN_C99_BUILTIN_OBJECT_PROTOTYPE, "Object.prototype", "toString", code(KILN_C99_METHOD_OBJECT_TO_STRING)),
     (KILN_C99_BUILTIN_OBJECT_PROTOTYPE, "Object.prototype", "valueOf", code(KILN_C99_METHOD_OBJECT_VALUE_OF)),
+
+    (KILN_C99_BUILTIN_FUNCTION_PROTOTYPE, "Function.prototype", "constructor", ctor(KILN_C99_BUILTIN_FUNCTION)),
+    (KILN_C99_BUILTIN_FUNCTION_PROTOTYPE, "Function.prototype", "apply", code(KILN_C99_METHOD_FUNCTION_APPLY)),
+    (KILN_C99_BUILTIN_FUNCTION_PROTOTYPE, "Function.prototype", "bind", code(KILN_C99_METHOD_FUNCTION_BIND)),
+    (KILN_C99_BUILTIN_FUNCTION_PROTOTYPE, "Function.prototype", "call", code(KILN_C99_METHOD_FUNCTION_CALL)),
+    (KILN_C99_BUILTIN_FUNCTION_PROTOTYPE, "Function.prototype", "toString", code(KILN_C99_METHOD_FUNCTION_TO_STRING)),
 }
 
 /// A member the shared surface declares and this backend does not answer, with the reason.
@@ -1621,6 +1627,12 @@ builtin_backlog! {
      "legacy Annex B accessor method not modeled in native C backend"),
     ("Object.prototype", "__proto__",
      "legacy Annex B proto accessor handled via runtime link rather than static table"),
+    ("Function.prototype", "@@hasInstance",
+     "not implemented; ordinary instanceof check handled via runtime rather than method call"),
+    ("Function.prototype", "caller",
+     "legacy Annex B restricted accessor property throwing TypeError not modeled in native C backend"),
+    ("Function.prototype", "arguments",
+     "legacy Annex B restricted accessor property throwing TypeError not modeled in native C backend"),
     ("Object", "groupBy",
      "not implemented; needs an iterator walk keyed by a callback's result"),
     ("Object", "seal",
