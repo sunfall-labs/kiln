@@ -7584,3 +7584,104 @@ fn executable_math_and_array_push_optimizations_execute_correctly() {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+#[test]
+fn executable_native_alu_and_bitwise_operations_execute_correctly() {
+    let constants = vec![
+        Constant::Number(12.0f64.to_bits()),          // 0: 12
+        Constant::Number(5.0f64.to_bits()),           // 1: 5
+        Constant::Number(2.0f64.to_bits()),           // 2: 2
+        Constant::Number(1.0f64.to_bits()),           // 3: 1
+        Constant::Number((-16.0f64).to_bits()),       // 4: -16
+        Constant::Number(1073741947.0f64.to_bits()),   // 5: expected sum
+    ];
+
+    let code = vec![
+        // local 0 = 12, local 1 = 5
+        Instruction::Const(0),
+        Instruction::StoreLocal(0),
+        Instruction::Const(1),
+        Instruction::StoreLocal(1),
+
+        // (a & b)
+        Instruction::LoadLocal(0),
+        Instruction::LoadLocal(1),
+        Instruction::Binary(BinaryOp::BitwiseAnd),
+
+        // + (a | b)
+        Instruction::LoadLocal(0),
+        Instruction::LoadLocal(1),
+        Instruction::Binary(BinaryOp::BitwiseOr),
+        Instruction::Binary(BinaryOp::Add),
+
+        // + (a ^ b)
+        Instruction::LoadLocal(0),
+        Instruction::LoadLocal(1),
+        Instruction::Binary(BinaryOp::BitwiseXor),
+        Instruction::Binary(BinaryOp::Add),
+
+        // + (a << 2)
+        Instruction::LoadLocal(0),
+        Instruction::Const(2),
+        Instruction::Binary(BinaryOp::ShiftLeft),
+        Instruction::Binary(BinaryOp::Add),
+
+        // + (a >> 1)
+        Instruction::LoadLocal(0),
+        Instruction::Const(3),
+        Instruction::Binary(BinaryOp::ShiftRight),
+        Instruction::Binary(BinaryOp::Add),
+
+        // + ((-16) >>> 2)
+        Instruction::Const(4),
+        Instruction::Const(2),
+        Instruction::Binary(BinaryOp::UnsignedShiftRight),
+        Instruction::Binary(BinaryOp::Add),
+
+        // + (a * b)
+        Instruction::LoadLocal(0),
+        Instruction::LoadLocal(1),
+        Instruction::Binary(BinaryOp::Multiply),
+        Instruction::Binary(BinaryOp::Add),
+
+        // + (~a)
+        Instruction::LoadLocal(0),
+        Instruction::Unary(UnaryOp::BitwiseNot),
+        Instruction::Binary(BinaryOp::Add),
+
+        // == 1073741947
+        Instruction::Const(5),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::Return,
+    ];
+
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants,
+        code,
+        local_count: 2,
+        functions: Vec::new(),
+        template_sites: Vec::new(),
+    };
+
+    let generated = emit(&program).expect("program emits");
+    assert!(
+        generated.source.contains("__builtin_mul_overflow"),
+        "expected __builtin_mul_overflow in generated source:\n{}",
+        generated.source
+    );
+    let wrapper = format!(
+        "int main(void) {{ kiln_value result; int status = {}(NULL, &result); if (status != 0) return 2; return (result.tag == KILN_VALUE_BOOLEAN && result.bits == 1) ? 0 : 3; }}\n",
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "alu-and-bitwise-optimizations");
+    assert!(
+        run.status.success(),
+        "alu and bitwise optimizations execution failed ({:?}):\nstdout: {}\nstderr: {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
