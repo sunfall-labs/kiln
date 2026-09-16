@@ -396,6 +396,7 @@ static inline uint64_t kiln_c99_val_collection_hash(kiln_val key) {
 
 static inline int kiln_c99_val_collection_eq(kiln_value a, kiln_val b) {
     if (KILN_LIKELY(a.tag == KILN_VALUE_NUMBER && KILN_VAL_IS_NUMBER(b))) {
+        if (a.bits == (uint64_t)b) return 1;
         double da = kiln_c99_as_number(a);
         double db;
         memcpy(&db, &b, sizeof(db));
@@ -431,10 +432,28 @@ static inline double kiln_c99_val_collection_find_fast(kiln_collection *collecti
 
 static int kiln_c99_collection_put_val_fast(kiln_collection *collection, kiln_val key, kiln_val value) {
     uint64_t hash = kiln_c99_val_collection_hash(key);
-    double at = kiln_c99_val_collection_find_fast(collection, key, hash);
-    if (at >= 0.0) {
-        collection->entries[(size_t)at].value = kiln_val_to_boundary(value);
-        return KILN_C99_OK;
+    size_t empty_slot = (size_t)-1;
+    if (collection->count > 0 && collection->hash_table != NULL && collection->hash_capacity > 0) {
+        size_t mask = collection->hash_capacity - 1;
+        size_t at = (size_t)hash & mask;
+        while (collection->hash_table[at] != 0) {
+            uint32_t idx = collection->hash_table[at] - 1;
+            if (!collection->entries[idx].dead &&
+                kiln_c99_val_collection_eq(collection->entries[idx].key, key)) {
+                collection->entries[idx].value = kiln_val_to_boundary(value);
+                return KILN_C99_OK;
+            }
+            at = (at + 1) & mask;
+        }
+        empty_slot = at;
+    } else if (collection->count > 0 && collection->hash_table == NULL) {
+        for (size_t index = 0; index < collection->count; ++index) {
+            if (collection->entries[index].dead) continue;
+            if (kiln_c99_val_collection_eq(collection->entries[index].key, key)) {
+                collection->entries[index].value = kiln_val_to_boundary(value);
+                return KILN_C99_OK;
+            }
+        }
     }
     int status = kiln_c99_reserve((void **)&collection->entries, &collection->capacity,
                                   collection->count + 1, sizeof *collection->entries);
@@ -455,6 +474,8 @@ static int kiln_c99_collection_put_val_fast(kiln_collection *collection, kiln_va
         if ((collection->count + 1) * 2 > collection->hash_capacity) {
             status = kiln_c99_collection_rehash(collection, collection->hash_capacity * 2);
             if (KILN_UNLIKELY(status != KILN_C99_OK)) return status;
+        } else if (empty_slot != (size_t)-1) {
+            collection->hash_table[empty_slot] = (uint32_t)(new_idx + 1);
         } else {
             size_t mask = collection->hash_capacity - 1;
             size_t h_at = (size_t)hash & mask;
@@ -470,7 +491,12 @@ static int kiln_c99_collection_put_val_fast(kiln_collection *collection, kiln_va
 static kiln_val kiln_c99_collection_get_val_fast(kiln_collection *collection, kiln_val key) {
     uint64_t hash = kiln_c99_val_collection_hash(key);
     double at = kiln_c99_val_collection_find_fast(collection, key, hash);
-    return at < 0.0 ? KILN_VAL_UNDEFINED : kiln_val_from_boundary(collection->entries[(size_t)at].value);
+    if (at < 0.0) return KILN_VAL_UNDEFINED;
+    kiln_value v = collection->entries[(size_t)at].value;
+    if (KILN_LIKELY(v.tag == KILN_VALUE_NUMBER)) {
+        return (kiln_val)v.bits;
+    }
+    return kiln_val_from_boundary(v);
 }
 
 static kiln_val kiln_c99_collection_has_val_fast(kiln_collection *collection, kiln_val key) {
