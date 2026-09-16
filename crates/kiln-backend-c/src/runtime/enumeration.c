@@ -188,7 +188,8 @@ static int kiln_c99_builtin_has_member(uint64_t builtin, const char *key, size_t
     }
     if (builtin == KILN_C99_BUILTIN_ARRAY_PROTOTYPE &&
         (kiln_c99_same_name(key, key_len, "@@iterator") ||
-         kiln_c99_same_name(key, key_len, "@@unscopables"))) {
+         kiln_c99_same_name(key, key_len, "@@unscopables") ||
+         kiln_c99_same_name(key, key_len, "length"))) {
         return 1;
     }
     /* A symbol key is settled by the lookup above and nowhere else. The per-kind predicates
