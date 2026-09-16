@@ -65,8 +65,8 @@ static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value 
     job->handler = handler;
     job->argument = argument;
     job->derived = derived;
-    job->rejected = rejected;
-    job->continuation = continuation;
+    job->rejected = (rejected != 0);
+    job->continuation = (uint8_t)continuation;
     return KILN_C99_OK;
 }
 
