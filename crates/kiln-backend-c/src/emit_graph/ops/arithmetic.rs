@@ -140,7 +140,7 @@ pub(super) fn emit_unary_typed(
         UnaryOp::BitwiseNot => {
             writeln!(
                 output,
-                "    v{v} = kiln_c99_val_unary_fast(5, v{x}); memcpy(&d{v}, &v{v}, sizeof(d{v});"
+                "    v{v} = kiln_c99_val_unary_fast(5, v{x}); memcpy(&d{v}, &v{v}, sizeof(d{v}));{box_stmt}"
             )
             .unwrap();
         }
@@ -354,9 +354,16 @@ pub(super) fn emit_binary_ints(
             }
         }
         BinaryOp::Multiply => {
-            writeln!(output, "    d{v} = (double)i{l} * (double)i{r};{box_stmt}").unwrap();
             if typed_int {
-                writeln!(output, "    i{v} = isfinite(d{v}) ? (int64_t)d{v} : 0;").unwrap();
+                writeln!(
+                    output,
+                    "    {{ int64_t res; if (KILN_LIKELY(!__builtin_mul_overflow(i{l}, i{r}, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL && (res != 0 || (i{l} >= 0 && i{r} >= 0) || (i{l} < 0 && i{r} < 0)))) {{ i{v} = res; d{v} = (double)res; }} else {{ d{v} = (double)i{l} * (double)i{r}; i{v} = isfinite(d{v}) ? (int64_t)d{v} : 0; }}{box_stmt} }}"
+                ).unwrap();
+            } else {
+                writeln!(
+                    output,
+                    "    {{ int64_t res; if (KILN_LIKELY(!__builtin_mul_overflow(i{l}, i{r}, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL && (res != 0 || (i{l} >= 0 && i{r} >= 0) || (i{l} < 0 && i{r} < 0)))) {{ d{v} = (double)res; }} else {{ d{v} = (double)i{l} * (double)i{r}; }}{box_stmt} }}"
+                ).unwrap();
             }
         }
         BinaryOp::Divide => {
