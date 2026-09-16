@@ -6048,7 +6048,6 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     if (receiver.tag == KILN_VALUE_TYPED_ARRAY) {
         kiln_typed_array *view = kiln_c99_typed_array_of(receiver);
         if (code == KILN_C99_METHOD_ARRAY_GENERIC_MAP ||
-            code == KILN_C99_METHOD_ARRAY_PARALLEL_MAP ||
             code == KILN_C99_METHOD_ARRAY_GENERIC_FILTER) {
             /* A method borrowed from Array.prototype is generic: its result is an ordinary
              * Array, even when the receiver is a typed view. Keep the original receiver in the
@@ -6169,6 +6168,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             return KILN_C99_OK;
         }
         case KILN_C99_METHOD_MAP:
+        case KILN_C99_METHOD_ARRAY_PARALLEL_MAP:
         case KILN_C99_METHOD_FILTER: {
             /* Both answer with a view of the receiver's kind. `filter`'s length is not known
              * until the predicate has run, so what it keeps is gathered first and the view is

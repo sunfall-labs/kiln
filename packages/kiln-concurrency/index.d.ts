@@ -55,4 +55,38 @@ declare global {
      */
     parallelMap<U>(fn: (item: T, index: number, array: T[]) => U): U[];
   }
+
+  interface Int8Array {
+    parallelMap(fn: (item: number, index: number, array: Int8Array) => number): Int8Array;
+  }
+  interface Uint8Array {
+    parallelMap(fn: (item: number, index: number, array: Uint8Array) => number): Uint8Array;
+  }
+  interface Uint8ClampedArray {
+    parallelMap(fn: (item: number, index: number, array: Uint8ClampedArray) => number): Uint8ClampedArray;
+  }
+  interface Int16Array {
+    parallelMap(fn: (item: number, index: number, array: Int16Array) => number): Int16Array;
+  }
+  interface Uint16Array {
+    parallelMap(fn: (item: number, index: number, array: Uint16Array) => number): Uint16Array;
+  }
+  interface Int32Array {
+    parallelMap(fn: (item: number, index: number, array: Int32Array) => number): Int32Array;
+  }
+  interface Uint32Array {
+    parallelMap(fn: (item: number, index: number, array: Uint32Array) => number): Uint32Array;
+  }
+  interface Float32Array {
+    parallelMap(fn: (item: number, index: number, array: Float32Array) => number): Float32Array;
+  }
+  interface Float64Array {
+    parallelMap(fn: (item: number, index: number, array: Float64Array) => number): Float64Array;
+  }
+  interface BigInt64Array {
+    parallelMap(fn: (item: bigint, index: number, array: BigInt64Array) => bigint): BigInt64Array;
+  }
+  interface BigUint64Array {
+    parallelMap(fn: (item: bigint, index: number, array: BigUint64Array) => bigint): BigUint64Array;
+  }
 }

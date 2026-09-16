@@ -43624,7 +43624,7 @@ fn typed_array_method(name: &str) -> Value {
 /// for each of them on a view. A program feature-detects on exactly that, so answering with a
 /// working function was a wrong answer rather than a bonus. The C backend already listed its
 /// members outright and so already agreed with node; this is the interpreter catching up.
-const TYPED_ARRAY_GENERIC_METHODS: [&str; 27] = [
+const TYPED_ARRAY_GENERIC_METHODS: [&str; 28] = [
     "at",
     "copyWithin",
     "entries",
@@ -43641,6 +43641,7 @@ const TYPED_ARRAY_GENERIC_METHODS: [&str; 27] = [
     "keys",
     "lastIndexOf",
     "map",
+    "parallelMap",
     "reduce",
     "reduceRight",
     "reverse",
