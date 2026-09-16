@@ -72,8 +72,11 @@
 /// the other -- so it reports `"alloc"`, the name of the function it actually is. Listing it is
 /// how the guards in both engines tell a known alias from a name that has drifted, and the list
 /// is short on purpose: the entry is a debt, not a licence.
-pub const NAME_IS_SHARED: &[(&str, &str)] =
-    &[("Buffer", "allocUnsafe"), ("Buffer", "allocUnsafeSlow")];
+pub const NAME_IS_SHARED: &[(&str, &str)] = &[
+    ("Buffer", "allocUnsafe"),
+    ("Buffer", "allocUnsafeSlow"),
+    ("Array.prototype", "@@iterator"),
+];
 
 /// A built-in global and the members it owns.
 pub struct Builtin {
@@ -450,3 +453,776 @@ const fn validate(surface: &[Builtin]) {
 }
 
 const _: () = validate(SURFACE);
+
+/// The 16 ECMAScript well-known symbols.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum WellKnownSymbol {
+    Iterator,
+    AsyncIterator,
+    HasInstance,
+    ToStringTag,
+    ToPrimitive,
+    Match,
+    MatchAll,
+    Replace,
+    Search,
+    Split,
+    Species,
+    Unscopables,
+    IsConcatSpreadable,
+    Dispose,
+    AsyncDispose,
+    NodeInspectCustom,
+}
+
+impl WellKnownSymbol {
+    pub const ALL: [Self; 16] = [
+        Self::Iterator,
+        Self::AsyncIterator,
+        Self::HasInstance,
+        Self::ToStringTag,
+        Self::ToPrimitive,
+        Self::Match,
+        Self::MatchAll,
+        Self::Replace,
+        Self::Search,
+        Self::Split,
+        Self::Species,
+        Self::Unscopables,
+        Self::IsConcatSpreadable,
+        Self::Dispose,
+        Self::AsyncDispose,
+        Self::NodeInspectCustom,
+    ];
+
+    pub const fn property_key(self) -> &'static str {
+        match self {
+            Self::Iterator => "@@iterator",
+            Self::AsyncIterator => "@@asyncIterator",
+            Self::HasInstance => "@@hasInstance",
+            Self::ToStringTag => "@@toStringTag",
+            Self::ToPrimitive => "@@toPrimitive",
+            Self::Match => "@@match",
+            Self::MatchAll => "@@matchAll",
+            Self::Replace => "@@replace",
+            Self::Search => "@@search",
+            Self::Split => "@@split",
+            Self::Species => "@@species",
+            Self::Unscopables => "@@unscopables",
+            Self::IsConcatSpreadable => "@@isConcatSpreadable",
+            Self::Dispose => "@@dispose",
+            Self::AsyncDispose => "@@asyncDispose",
+            Self::NodeInspectCustom => "@@nodeInspectCustom",
+        }
+    }
+
+    pub const fn js_name(self) -> &'static str {
+        match self {
+            Self::Iterator => "iterator",
+            Self::AsyncIterator => "asyncIterator",
+            Self::HasInstance => "hasInstance",
+            Self::ToStringTag => "toStringTag",
+            Self::ToPrimitive => "toPrimitive",
+            Self::Match => "match",
+            Self::MatchAll => "matchAll",
+            Self::Replace => "replace",
+            Self::Search => "search",
+            Self::Split => "split",
+            Self::Species => "species",
+            Self::Unscopables => "unscopables",
+            Self::IsConcatSpreadable => "isConcatSpreadable",
+            Self::Dispose => "dispose",
+            Self::AsyncDispose => "asyncDispose",
+            Self::NodeInspectCustom => "nodeInspectCustom",
+        }
+    }
+
+    pub const fn from_property_key(key: &str) -> Option<Self> {
+        let mut i = 0;
+        while i < Self::ALL.len() {
+            if same(Self::ALL[i].property_key(), key) {
+                return Some(Self::ALL[i]);
+            }
+            i += 1;
+        }
+        None
+    }
+
+    pub const fn ordinal(self) -> usize {
+        match self {
+            Self::Iterator => 0,
+            Self::AsyncIterator => 1,
+            Self::HasInstance => 2,
+            Self::ToStringTag => 3,
+            Self::ToPrimitive => 4,
+            Self::Match => 5,
+            Self::MatchAll => 6,
+            Self::Replace => 7,
+            Self::Search => 8,
+            Self::Split => 9,
+            Self::Species => 10,
+            Self::Unscopables => 11,
+            Self::IsConcatSpreadable => 12,
+            Self::Dispose => 13,
+            Self::AsyncDispose => 14,
+            Self::NodeInspectCustom => 15,
+        }
+    }
+
+    pub const fn published_by_symbol(self) -> bool {
+        !matches!(self, Self::NodeInspectCustom)
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Iterator => "Symbol.iterator",
+            Self::AsyncIterator => "Symbol.asyncIterator",
+            Self::HasInstance => "Symbol.hasInstance",
+            Self::ToStringTag => "Symbol.toStringTag",
+            Self::ToPrimitive => "Symbol.toPrimitive",
+            Self::Match => "Symbol.match",
+            Self::MatchAll => "Symbol.matchAll",
+            Self::Replace => "Symbol.replace",
+            Self::Search => "Symbol.search",
+            Self::Split => "Symbol.split",
+            Self::Species => "Symbol.species",
+            Self::Unscopables => "Symbol.unscopables",
+            Self::IsConcatSpreadable => "Symbol.isConcatSpreadable",
+            Self::Dispose => "Symbol.dispose",
+            Self::AsyncDispose => "Symbol.asyncDispose",
+            Self::NodeInspectCustom => "Symbol(nodejs.util.inspect.custom)",
+        }
+    }
+}
+
+/// The key a built-in member is published under.
+///
+/// Separates string-keyed members from symbol-keyed members by type, preventing internal
+/// `@@`-prefixed spellings from being exposed as string names (ADR 0054, ADR 0059).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MemberKey {
+    Named(&'static str),
+    Symbol(WellKnownSymbol),
+}
+
+impl MemberKey {
+    pub const fn property_key(self) -> &'static str {
+        match self {
+            Self::Named(name) => name,
+            Self::Symbol(symbol) => symbol.property_key(),
+        }
+    }
+
+    pub const fn is_symbol(self) -> bool {
+        matches!(self, Self::Symbol(_))
+    }
+
+    pub const fn same(self, other: MemberKey) -> bool {
+        match (self, other) {
+            (MemberKey::Named(a), MemberKey::Named(b)) => same(a, b),
+            (MemberKey::Symbol(a), MemberKey::Symbol(b)) => a as usize == b as usize,
+            _ => false,
+        }
+    }
+}
+
+pub const fn is_reserved_spelling(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.len() >= 2 && bytes[0] == b'@' && bytes[1] == b'@'
+}
+
+/// The kind of built-in member and its callable metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemberKind {
+    /// A callable method with a defined ECMAScript arity/length.
+    Method { length: usize },
+    /// An accessor property.
+    Accessor,
+    /// A plain data property.
+    Data,
+}
+
+/// ECMAScript property descriptor attributes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DescriptorAttributes {
+    pub writable: bool,
+    pub enumerable: bool,
+    pub configurable: bool,
+}
+
+impl DescriptorAttributes {
+    /// Standard built-in prototype method: { writable: true, enumerable: false, configurable: true }
+    pub const METHOD: Self = Self {
+        writable: true,
+        enumerable: false,
+        configurable: true,
+    };
+
+    /// Standard built-in prototype accessor: { writable: false, enumerable: false, configurable: true }
+    pub const ACCESSOR: Self = Self {
+        writable: false,
+        enumerable: false,
+        configurable: true,
+    };
+
+    /// Read-only configurable data property: { writable: false, enumerable: false, configurable: true }
+    pub const READONLY: Self = Self {
+        writable: false,
+        enumerable: false,
+        configurable: true,
+    };
+
+    /// Locked property: { writable: false, enumerable: false, configurable: false }
+    pub const LOCKED: Self = Self {
+        writable: false,
+        enumerable: false,
+        configurable: false,
+    };
+
+    /// Array.prototype.length: { writable: true, enumerable: false, configurable: false }
+    pub const ARRAY_LENGTH: Self = Self {
+        writable: true,
+        enumerable: false,
+        configurable: false,
+    };
+}
+
+/// Which built-in prototype owns this member.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PrototypeId {
+    Symbol,
+    Array,
+}
+
+impl PrototypeId {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Symbol => "Symbol.prototype",
+            Self::Array => "Array.prototype",
+        }
+    }
+
+    pub const fn from_name(name: &str) -> Option<Self> {
+        if same(name, "Symbol.prototype") {
+            Some(Self::Symbol)
+        } else if same(name, "Array.prototype") {
+            Some(Self::Array)
+        } else {
+            None
+        }
+    }
+}
+
+/// Built-in methods of `Array.prototype`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ArrayMethod {
+    At,
+    Concat,
+    CopyWithin,
+    Entries,
+    Every,
+    Fill,
+    Filter,
+    Find,
+    FindIndex,
+    FindLast,
+    FindLastIndex,
+    Flat,
+    FlatMap,
+    ForEach,
+    Includes,
+    IndexOf,
+    Join,
+    Keys,
+    LastIndexOf,
+    Map,
+    ParallelMap,
+    Pop,
+    Push,
+    Reduce,
+    ReduceRight,
+    Reverse,
+    Shift,
+    Slice,
+    Some,
+    Sort,
+    Splice,
+    ToLocaleString,
+    ToReversed,
+    ToSorted,
+    ToSpliced,
+    ToString,
+    Unshift,
+    Values,
+    With,
+}
+
+/// Authoritative semantic operation binding across both engines (ADR 0059, ADR 0060).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticBinding {
+    PrimitiveToString,
+    PrimitiveValueOf,
+    SymbolDescription,
+    SymbolToPrimitive,
+    StringTag(&'static str),
+    Constructor,
+    ArrayLength,
+    ArrayUnscopables,
+    ArrayMethod(ArrayMethod),
+}
+
+/// One declarative row describing a prototype member.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PrototypeMember {
+    pub prototype: PrototypeId,
+    pub key: MemberKey,
+    pub kind: MemberKind,
+    pub attributes: DescriptorAttributes,
+    pub binding: SemanticBinding,
+}
+
+/// Every prototype member declared for unified materialization across engines.
+pub const PROTOTYPE_SURFACE: &[PrototypeMember] = &[
+    PrototypeMember {
+        prototype: PrototypeId::Symbol,
+        key: MemberKey::Named("toString"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::PrimitiveToString,
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Symbol,
+        key: MemberKey::Named("valueOf"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::PrimitiveValueOf,
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Symbol,
+        key: MemberKey::Named("description"),
+        kind: MemberKind::Accessor,
+        attributes: DescriptorAttributes::ACCESSOR,
+        binding: SemanticBinding::SymbolDescription,
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Symbol,
+        key: MemberKey::Symbol(WellKnownSymbol::ToStringTag),
+        kind: MemberKind::Data,
+        attributes: DescriptorAttributes::READONLY,
+        binding: SemanticBinding::StringTag("Symbol"),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Symbol,
+        key: MemberKey::Symbol(WellKnownSymbol::ToPrimitive),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::READONLY,
+        binding: SemanticBinding::SymbolToPrimitive,
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Symbol,
+        key: MemberKey::Named("constructor"),
+        kind: MemberKind::Data,
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::Constructor,
+    },
+    // Array.prototype
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("length"),
+        kind: MemberKind::Data,
+        attributes: DescriptorAttributes::ARRAY_LENGTH,
+        binding: SemanticBinding::ArrayLength,
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("constructor"),
+        kind: MemberKind::Data,
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::Constructor,
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("map"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::Map),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("parallelMap"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::ParallelMap),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("forEach"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::ForEach),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("filter"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::Filter),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("reduce"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::Reduce),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("sort"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::Sort),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("findIndex"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::FindIndex),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("find"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::Find),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("some"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::Some),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("every"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::Every),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("flatMap"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::FlatMap),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("findLast"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::FindLast),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("findLastIndex"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::FindLastIndex),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("reduceRight"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::ReduceRight),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("join"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::Join),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("push"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::Push),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("pop"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::Pop),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("indexOf"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::IndexOf),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("includes"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::Includes),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("slice"),
+        kind: MemberKind::Method { length: 2 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::Slice),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("at"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::At),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("flat"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::Flat),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("entries"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::Entries),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("keys"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::Keys),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("concat"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::Concat),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("reverse"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::Reverse),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("shift"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::Shift),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("unshift"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::Unshift),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("lastIndexOf"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::LastIndexOf),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("fill"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::Fill),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("splice"),
+        kind: MemberKind::Method { length: 2 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::Splice),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("copyWithin"),
+        kind: MemberKind::Method { length: 2 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::CopyWithin),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("toString"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::ToString),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("toLocaleString"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::ToLocaleString),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("values"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::Values),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("with"),
+        kind: MemberKind::Method { length: 2 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::With),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("toReversed"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::ToReversed),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("toSorted"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::ToSorted),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Named("toSpliced"),
+        kind: MemberKind::Method { length: 2 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::ToSpliced),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Symbol(WellKnownSymbol::Iterator),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ArrayMethod(ArrayMethod::Values),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Array,
+        key: MemberKey::Symbol(WellKnownSymbol::Unscopables),
+        kind: MemberKind::Data,
+        attributes: DescriptorAttributes::READONLY,
+        binding: SemanticBinding::ArrayUnscopables,
+    },
+];
+
+const fn validate_prototype_surface(surface: &[PrototypeMember]) {
+    let mut index = 0;
+    while index < surface.len() {
+        let row = &surface[index];
+        if let MemberKey::Named(name) = row.key {
+            assert!(
+                !is_reserved_spelling(name),
+                "a symbol-keyed member cannot be published as a named key (use MemberKey::Symbol)"
+            );
+        }
+        let mut other = index + 1;
+        while other < surface.len() {
+            if row.prototype as usize == surface[other].prototype as usize {
+                assert!(
+                    !row.key.same(surface[other].key),
+                    "duplicate member key on the same prototype in PROTOTYPE_SURFACE"
+                );
+            }
+            other += 1;
+        }
+        index += 1;
+    }
+}
+
+const _: () = validate_prototype_surface(PROTOTYPE_SURFACE);
+
+pub fn prototype_members(prototype: PrototypeId) -> impl Iterator<Item = &'static PrototypeMember> {
+    PROTOTYPE_SURFACE
+        .iter()
+        .filter(move |m| m.prototype == prototype)
+}
+
+pub fn find_prototype_member(
+    prototype: PrototypeId,
+    key: &str,
+) -> Option<&'static PrototypeMember> {
+    PROTOTYPE_SURFACE
+        .iter()
+        .find(|m| m.prototype == prototype && m.key.property_key() == key)
+}
+
+pub const fn prototype_has(prototype: PrototypeId, key: &str) -> bool {
+    let mut index = 0;
+    while index < PROTOTYPE_SURFACE.len() {
+        if PROTOTYPE_SURFACE[index].prototype as usize == prototype as usize
+            && same(PROTOTYPE_SURFACE[index].key.property_key(), key)
+        {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn well_known_symbol_round_trip() {
+        for sym in WellKnownSymbol::ALL {
+            assert_eq!(
+                WellKnownSymbol::from_property_key(sym.property_key()),
+                Some(sym)
+            );
+        }
+    }
+
+    #[test]
+    fn symbol_prototype_members_are_complete() {
+        let members: Vec<_> = prototype_members(PrototypeId::Symbol).collect();
+        assert_eq!(members.len(), 6);
+        assert!(prototype_has(PrototypeId::Symbol, "toString"));
+        assert!(prototype_has(PrototypeId::Symbol, "valueOf"));
+        assert!(prototype_has(PrototypeId::Symbol, "description"));
+        assert!(prototype_has(PrototypeId::Symbol, "constructor"));
+        assert!(prototype_has(PrototypeId::Symbol, "@@toStringTag"));
+        assert!(prototype_has(PrototypeId::Symbol, "@@toPrimitive"));
+        assert!(!prototype_has(PrototypeId::Symbol, "nonexistent"));
+    }
+
+    #[test]
+    fn array_prototype_members_are_complete() {
+        let members: Vec<_> = prototype_members(PrototypeId::Array).collect();
+        assert_eq!(members.len(), 43);
+        assert!(prototype_has(PrototypeId::Array, "length"));
+        assert!(prototype_has(PrototypeId::Array, "constructor"));
+        assert!(prototype_has(PrototypeId::Array, "map"));
+        assert!(prototype_has(PrototypeId::Array, "parallelMap"));
+        assert!(prototype_has(PrototypeId::Array, "push"));
+        assert!(prototype_has(PrototypeId::Array, "pop"));
+        assert!(prototype_has(PrototypeId::Array, "slice"));
+        assert!(prototype_has(PrototypeId::Array, "@@iterator"));
+        assert!(prototype_has(PrototypeId::Array, "@@unscopables"));
+        assert!(!prototype_has(PrototypeId::Array, "nonexistent"));
+    }
+}

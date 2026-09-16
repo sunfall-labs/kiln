@@ -7,6 +7,15 @@ static int kiln_c99_node_has_lazy_header(kiln_value headers_obj, const char *key
 static int kiln_c99_val_call(kiln_host *host, kiln_val callee, const kiln_val *args, size_t argc,
                              int depth, kiln_value *thrown, const char *inst_site, size_t inst_idx,
                              const char *inst_op, kiln_val *out);
+int kiln_c99_get_array_unscopables(kiln_value *out);
+
+static const char *kiln_c99_builtin_owner_name(uint64_t builtin) {
+    switch (builtin) {
+    case KILN_C99_BUILTIN_SYMBOL_PROTOTYPE: return "Symbol.prototype";
+    case KILN_C99_BUILTIN_ARRAY_PROTOTYPE: return "Array.prototype";
+    default: return kiln_c99_builtin_name(builtin);
+    }
+}
 
 static int kiln_c99_backlog_names(const char *owner, const char *key, size_t key_len) {
     size_t index;
@@ -213,6 +222,8 @@ static int kiln_c99_surface_value(uint64_t builtin, const char *key, size_t key_
         return 1;
     case KILN_C99_MEMBER_SYMBOL:
         return kiln_c99_symbol_of_key(member->text, strlen(member->text), out);
+    case KILN_C99_MEMBER_UNSCOPABLES:
+        return kiln_c99_get_array_unscopables(out) == KILN_C99_OK;
     default:
         return 0;
     }
@@ -242,32 +253,12 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
     }
     /* The prototype object answers `@@iterator` with the same function an *instance* of it hands
      * out. It did not, and a `@@` key that no receiver answers is turned into `undefined` one
-     * frame up rather than refused -- so `Array.prototype[Symbol.iterator]` read `undefined` here
+     * frame up rather than refused -- so `String.prototype[Symbol.iterator]` read `undefined` here
      * against the interpreter's function, silently, which is how a polyfill decides the realm has
      * no iteration protocol and installs its own. */
-    if ((builtin == KILN_C99_BUILTIN_ARRAY_PROTOTYPE ||
-         builtin == KILN_C99_BUILTIN_STRING_PROTOTYPE) &&
+    if (builtin == KILN_C99_BUILTIN_STRING_PROTOTYPE &&
         kiln_c99_same_name(key, key_len, "@@iterator")) {
         return KILN_C99_METHOD_ARRAY_VALUES;
-    }
-    /* `values` is the same function `@@iterator` hands out, and an array *instance* has said so
-     * since the iteration protocol was written down (`read.c`, beside the `@@iterator` case).
-     * The prototype object did not: `values` is numbered in the generic group rather than the
-     * array-lookup one, so `kiln_c99_array_method` never answered it here. That made
-     * `Array.prototype.values` a refusal where `[].values` is a function, and -- because the
-     * own-keys walk lists a code only when the name it carries leads back to it -- left `values`
-     * out of `Object.getOwnPropertyNames(Array.prototype)`, one name short of the interpreter.
-     * `String.prototype` reaches the same code through `kiln_c99_string_method` already. */
-    if (builtin == KILN_C99_BUILTIN_ARRAY_PROTOTYPE &&
-        kiln_c99_same_name(key, key_len, "values")) {
-        return KILN_C99_METHOD_ARRAY_VALUES;
-    }
-    /* Every prototype that has one shares the generic `toLocaleString`, which invokes the
-     * receiver's own `toString` -- so an array's answer is its join, which is what the
-     * interpreter gives. A bundled `mobx` reads `Array.prototype.toLocaleString` by name. */
-    if (builtin == KILN_C99_BUILTIN_ARRAY_PROTOTYPE &&
-        kiln_c99_same_name(key, key_len, "toLocaleString")) {
-        return KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING;
     }
     switch (builtin) {
     /* `performance` carries exactly one member, and deliberately has no rows in the surface
@@ -293,8 +284,6 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
         }
         return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_HAS_OWN_PROPERTY,
                                       KILN_C99_METHOD_OBJECT_VALUE_OF);
-    case KILN_C99_BUILTIN_ARRAY_PROTOTYPE:
-        return kiln_c99_array_prototype_method(key, key_len);
     case KILN_C99_BUILTIN_ERROR_PROTOTYPE:
         /* `Error.prototype.toString` is the one member that is genuinely the error's rather than
          * `Object.prototype`'s, and it is what `String(err)` reaches. */

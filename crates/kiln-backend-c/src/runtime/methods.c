@@ -429,7 +429,6 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_ITERATOR_HELPER_NEXT: return "next";
     case KILN_C99_METHOD_ITERATOR_HELPER_RETURN: return "return";
     case KILN_C99_METHOD_ITERATOR_FROM: return "from";
-    case KILN_C99_METHOD_ARRAY_VALUES: return "values";
     /* `%ThrowTypeError%` is the realm's one anonymous function, so the name is empty rather
      * than descriptive: a program reading `arguments.callee`'s getter must not learn one. */
     case KILN_C99_METHOD_THROW_TYPE_ERROR: return "";

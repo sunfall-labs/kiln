@@ -147,7 +147,9 @@ fn every_natively_answered_global_is_shared_or_named() {
         .collect();
     let mut unaccounted: Vec<&str> = Vec::new();
     for global in kiln_backend_c::builtin_surface_owners() {
-        if kiln_builtin_surface::find(global).is_none() && !named.contains(global) {
+        let in_shared = kiln_builtin_surface::find(global).is_some()
+            || kiln_builtin_surface::PrototypeId::from_name(global).is_some();
+        if !in_shared && !named.contains(global) {
             unaccounted.push(global);
         }
     }
@@ -174,4 +176,51 @@ fn every_natively_answered_global_is_shared_or_named() {
              table has no rows for it"
         );
     }
+}
+
+#[test]
+fn the_prototype_backlog_names_every_gap_and_nothing_else() {
+    let answered: BTreeSet<(&str, &str)> = kiln_backend_c::BUILTIN_SURFACE
+        .iter()
+        .map(|member| (member.owner, member.name))
+        .collect();
+
+    let mut by_global: BTreeMap<&str, Vec<&kiln_backend_c::BuiltinGap>> = BTreeMap::new();
+    for gap in kiln_backend_c::BUILTIN_SURFACE_BACKLOG {
+        by_global.entry(gap.global).or_default().push(gap);
+    }
+
+    let mut unrecorded: Vec<String> = Vec::new();
+    let mut stale: Vec<String> = Vec::new();
+
+    for member in kiln_builtin_surface::PROTOTYPE_SURFACE {
+        let proto_name = member.prototype.name();
+        let member_key = match member.key {
+            kiln_builtin_surface::MemberKey::Named(name) => name,
+            kiln_builtin_surface::MemberKey::Symbol(sym) => sym.property_key(),
+        };
+        let gaps = by_global.get(proto_name).cloned().unwrap_or_default();
+        let named: BTreeSet<&str> = gaps.iter().map(|gap| gap.member).collect();
+        let implemented = answered.contains(&(proto_name, member_key));
+        if !implemented && !named.contains(member_key) {
+            unrecorded.push(format!("{proto_name}.{member_key}"));
+        }
+        if implemented && named.contains(member_key) {
+            stale.push(format!("{proto_name}.{member_key}"));
+        }
+    }
+
+    assert!(
+        unrecorded.is_empty(),
+        "the prototype surface declares {} member(s) the native backend neither answers nor records \
+         as backlog:\n  {}",
+        unrecorded.len(),
+        unrecorded.join("\n  ")
+    );
+    assert!(
+        stale.is_empty(),
+        "{} prototype backlog row(s) name a member the native backend now answers:\n  {}",
+        stale.len(),
+        stale.join("\n  ")
+    );
 }

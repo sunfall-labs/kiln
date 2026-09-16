@@ -1216,7 +1216,33 @@ impl Native {
                 _ => Value::Undefined,
             },
             PrototypeTable::Boolean => boolean_method(name),
-            PrototypeTable::Symbol => symbol_method(name),
+            PrototypeTable::Symbol => {
+                if let Some(member) = kiln_builtin_surface::find_prototype_member(
+                    kiln_builtin_surface::PrototypeId::Symbol,
+                    name,
+                ) {
+                    match member.binding {
+                        kiln_builtin_surface::SemanticBinding::PrimitiveToString => {
+                            Value::Native(Native::PrimitiveToString, RealmId::PRIMARY)
+                        }
+                        kiln_builtin_surface::SemanticBinding::PrimitiveValueOf => {
+                            Value::Native(Native::PrimitiveValueOf, RealmId::PRIMARY)
+                        }
+                        kiln_builtin_surface::SemanticBinding::StringTag(tag) => {
+                            Value::String(tag.to_owned().into())
+                        }
+                        kiln_builtin_surface::SemanticBinding::SymbolToPrimitive => {
+                            Value::Native(Native::SymbolToPrimitive, RealmId::PRIMARY)
+                        }
+                        kiln_builtin_surface::SemanticBinding::Constructor => {
+                            Value::Native(Native::SymbolConstructor, RealmId::PRIMARY)
+                        }
+                        _ => Value::Undefined,
+                    }
+                } else {
+                    Value::Undefined
+                }
+            }
             PrototypeTable::BigInt => bigint_method(name),
             PrototypeTable::Promise => promise_method(name),
             PrototypeTable::Map => collection_property(true, false, name),

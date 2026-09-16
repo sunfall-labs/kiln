@@ -464,80 +464,87 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
         return kiln_c99_proxy_describe(host, target, key_value, out, found, depth, thrown);
     }
     if (target.tag == KILN_VALUE_BUILTIN) {
+        if (target.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE &&
+            kiln_c99_same_name_key(view, "@@unscopables")) {
+            kiln_value val;
+            status = kiln_c99_get_array_unscopables(&val);
+            if (status != KILN_C99_OK) return status;
+            status = kiln_c99_new_object(&built);
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, built, "value", 5, val, 0, NULL);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(0), 0, NULL);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(0), 0, NULL);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(1), 0, NULL);
+            }
+            *found = 1;
+            *out = built;
+            return status;
+        }
+        if (target.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE &&
+            kiln_c99_same_name_key(view, "length")) {
+            status = kiln_c99_new_object(&built);
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, built, "value", 5, kiln_c99_number(0.0), 0, NULL);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(1), 0, NULL);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(0), 0, NULL);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(0), 0, NULL);
+            }
+            *found = 1;
+            *out = built;
+            return status;
+        }
         char intrinsic_buffer[256];
         const char *intrinsic_key;
         size_t intrinsic_len;
         if (kiln_c99_intrinsic_ascii_view(view, intrinsic_buffer, &intrinsic_key,
-                                          &intrinsic_len) &&
-            kiln_c99_namespace_method(target.bits, intrinsic_key, intrinsic_len) != 0) {
-        /* An intrinsic prototype's methods are real own properties even though this backend
-         * keeps them in a table: writable and configurable, never enumerated. A walker looking
-         * for the method it should invoke -- which is what a copy-on-write layer does before it
-         * forwards -- has to find one here or it forwards nothing. */
-        kiln_value method;
-        *found = 1;
-        status = kiln_c99_get_key(host, target, view, stable, &method, depth, thrown);
-        if (status == KILN_C99_OK) {
-            status = kiln_c99_new_object(&built);
+                                          &intrinsic_len)) {
+            int owned = 0;
+            const kiln_builtin_member *member =
+                kiln_c99_builtin_member(target.bits, intrinsic_key, intrinsic_len, &owned);
+            if (member != NULL || kiln_c99_namespace_method(target.bits, intrinsic_key, intrinsic_len) != 0) {
+                /* A table-driven or namespace member is an own property: writable and
+                 * configurable for methods and builtins, non-writable for text and numbers,
+                 * never enumerated. */
+                kiln_value val;
+                int writable = 1;
+                if (member != NULL && (member->kind == KILN_C99_MEMBER_TEXT ||
+                                       member->kind == KILN_C99_MEMBER_NUMBER ||
+                                       member->kind == KILN_C99_MEMBER_SYMBOL)) {
+                    writable = 0;
+                }
+                *found = 1;
+                status = kiln_c99_get_key(host, target, view, stable, &val, depth, thrown);
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_new_object(&built);
+                }
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_put(NULL, built, "value", 5, val, 0, NULL);
+                }
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(writable), 0, NULL);
+                }
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(0), 0, NULL);
+                }
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(1), 0, NULL);
+                }
+                *out = built;
+                return status;
+            }
         }
-        if (status == KILN_C99_OK) {
-            status = kiln_c99_put(NULL, built, "value", 5, method, 0, NULL);
-        }
-        if (status == KILN_C99_OK) {
-            status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(1), 0, NULL);
-        }
-        if (status == KILN_C99_OK) {
-            status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(0), 0, NULL);
-        }
-        if (status == KILN_C99_OK) {
-            status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(1), 0, NULL);
-        }
-        *out = built;
-        return status;
-        }
-    }
-    if (target.tag == KILN_VALUE_BUILTIN &&
-        target.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE &&
-        kiln_c99_same_name_key(view, "@@unscopables")) {
-        kiln_value val;
-        status = kiln_c99_get_array_unscopables(&val);
-        if (status != KILN_C99_OK) return status;
-        status = kiln_c99_new_object(&built);
-        if (status == KILN_C99_OK) {
-            status = kiln_c99_put(NULL, built, "value", 5, val, 0, NULL);
-        }
-        if (status == KILN_C99_OK) {
-            status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(0), 0, NULL);
-        }
-        if (status == KILN_C99_OK) {
-            status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(0), 0, NULL);
-        }
-        if (status == KILN_C99_OK) {
-            status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(1), 0, NULL);
-        }
-        *found = 1;
-        *out = built;
-        return status;
-    }
-    if (target.tag == KILN_VALUE_BUILTIN &&
-        target.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE &&
-        kiln_c99_same_name_key(view, "length")) {
-        status = kiln_c99_new_object(&built);
-        if (status == KILN_C99_OK) {
-            status = kiln_c99_put(NULL, built, "value", 5, kiln_c99_number(0.0), 0, NULL);
-        }
-        if (status == KILN_C99_OK) {
-            status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(1), 0, NULL);
-        }
-        if (status == KILN_C99_OK) {
-            status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(0), 0, NULL);
-        }
-        if (status == KILN_C99_OK) {
-            status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(0), 0, NULL);
-        }
-        *found = 1;
-        *out = built;
-        return status;
     }
     if (target.tag == KILN_VALUE_BUILTIN &&
         target.bits == KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE &&
@@ -644,7 +651,7 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
             size_t intrinsic_len;
             if (kiln_c99_intrinsic_ascii_view(view, intrinsic_buffer, &intrinsic_key,
                                               &intrinsic_len) &&
-                kiln_c99_backlog_names(kiln_c99_builtin_name(target.bits), intrinsic_key,
+                kiln_c99_backlog_names(kiln_c99_builtin_owner_name(target.bits), intrinsic_key,
                                        intrinsic_len)) {
                 KILN_C99_REFUSE("a member the language puts on this built-in and this backend has not "
                                 "built");

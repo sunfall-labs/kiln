@@ -1,6 +1,5 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 804
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -1985,6 +1984,7 @@ static uint64_t kiln_c99_string_method(const char *key, size_t key_len) {
 #define KILN_C99_MEMBER_TEXT 3
 #define KILN_C99_MEMBER_SYMBOL 4
 #define KILN_C99_MEMBER_BUILTIN 5
+#define KILN_C99_MEMBER_UNSCOPABLES 6
 typedef struct {
 static const kiln_builtin_member kiln_c99_builtin_members[] = {
 #define KILN_C99_SURFACE_MEMBER_COUNT \
@@ -1995,6 +1995,8 @@ static int kiln_c99_node_materialize_header(kiln_value headers_obj, const char *
 static void kiln_c99_node_materialize_all_headers(kiln_value headers_obj);
 static int kiln_c99_node_has_lazy_header(kiln_value headers_obj, const char *key, size_t key_len);
 static int kiln_c99_val_call(kiln_host *host, kiln_val callee, const kiln_val *args, size_t argc,
+int kiln_c99_get_array_unscopables(kiln_value *out);
+static const char *kiln_c99_builtin_owner_name(uint64_t builtin) {
 static int kiln_c99_backlog_names(const char *owner, const char *key, size_t key_len) {
 static int kiln_c99_has_surface(uint64_t builtin) {
 typedef struct kiln_builtin_member_entry {
@@ -2102,7 +2104,7 @@ static double kiln_c99_array_index(kiln_value key) {
 static int kiln_c99_prototype_object(kiln_value function, kiln_value *out) {
 static int kiln_c99_callable_prototype(kiln_value callable, kiln_value *out) {
 static kiln_value kiln_c99_array_unscopables;
-static int kiln_c99_get_array_unscopables(kiln_value *out) {
+int kiln_c99_get_array_unscopables(kiln_value *out) {
 static int kiln_c99_function_store(kiln_value function, kiln_value *out) {
 static kiln_method_store *kiln_c99_fixture_method_stores;
 static void kiln_c99_drop_callable_store(void *pointer) {

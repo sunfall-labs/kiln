@@ -1504,52 +1504,15 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
              * refusing; that is the honest answer for a question we cannot yet ask. */
             int owned = 0;
             (void)kiln_c99_builtin_member(target.bits, intrinsic_key, intrinsic_len, &owned);
-            if (owned && !kiln_c99_backlog_names(kiln_c99_builtin_name(target.bits), intrinsic_key, intrinsic_len)) {
+            if (owned && !kiln_c99_backlog_names(kiln_c99_builtin_owner_name(target.bits), intrinsic_key, intrinsic_len)) {
                 KILN_C99_ABSENT("not a member of this built-in; BUILTIN_SURFACE and "
                                 "BUILTIN_SURFACE_BACKLOG hold every one that is",
-                                out);
-            }
-            /* The prototype tables are not table-driven (ADR 0043 leaves them on the method-code
-             * ranges), but two of them have a member list already, written for the receivers
-             * themselves. An absent name is undefined there for the same reason it is on an array
-             * or a string: it is what the language answers. A bundled `mobx` reads names off
-             * `Array.prototype` one at a time, which is how a library patches methods. */
-            if (target.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE &&
-                kiln_c99_same_name_key(key, "@@unscopables")) {
-                return kiln_c99_get_array_unscopables(out);
-            }
-            if (target.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE &&
-                kiln_c99_same_name_key(key, "length")) {
-                *out = kiln_c99_number(0.0);
-                return KILN_C99_OK;
-            }
-            if (target.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE &&
-                !kiln_c99_is_array_member(intrinsic_key, intrinsic_len)) {
-                KILN_C99_ABSENT("not a member of Array.prototype; kiln_c99_is_array_member holds "
-                                "the ones that are",
                                 out);
             }
             if (target.bits == KILN_C99_BUILTIN_STRING_PROTOTYPE &&
                 !kiln_c99_is_string_member(intrinsic_key, intrinsic_len)) {
                 KILN_C99_ABSENT("not a member of String.prototype; kiln_c99_is_string_member holds "
                                 "the ones that are",
-                                out);
-            }
-            if (target.bits == KILN_C99_BUILTIN_SYMBOL_PROTOTYPE) {
-                if (kiln_c99_same_name_key(key, "toString")) {
-                    *out = kiln_c99_method(KILN_C99_METHOD_PRIMITIVE_TO_STRING);
-                    return KILN_C99_OK;
-                }
-                if (kiln_c99_same_name_key(key, "valueOf")) {
-                    *out = kiln_c99_method(KILN_C99_METHOD_OBJECT_VALUE_OF);
-                    return KILN_C99_OK;
-                }
-                if (kiln_c99_same_name_key(key, "constructor")) {
-                    *out = kiln_c99_builtin(KILN_C99_BUILTIN_SYMBOL);
-                    return KILN_C99_OK;
-                }
-                KILN_C99_ABSENT("not a member of Symbol.prototype; Symbol.prototype only owns "
-                                "toString, valueOf, description, @@toPrimitive, and constructor",
                                 out);
             }
             if (target.bits == KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE) {
