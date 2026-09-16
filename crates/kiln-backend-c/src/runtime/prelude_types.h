@@ -1272,7 +1272,7 @@ typedef struct kiln_reaction {
     /* Set when both handlers are the suspended frame an `await` left, to be stepped rather than
      * called: a frame is not callable, and a reaction merely carrying one would otherwise read
      * as a `then` with no handler. */
-    int continuation;
+    uint8_t continuation: 2;
 } kiln_reaction;
 
 typedef struct kiln_promise {
@@ -1372,8 +1372,8 @@ typedef struct kiln_microtask {
     kiln_value handler;
     kiln_value argument;
     kiln_value derived;
-    int rejected;
-    int continuation;
+    uint8_t rejected: 1;
+    uint8_t continuation: 2;
 } kiln_microtask;
 
 /* One process.nextTick callback. The Realm Runtime owns lane ordering; this payload contains
