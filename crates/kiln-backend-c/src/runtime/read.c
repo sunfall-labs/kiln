@@ -1519,6 +1519,11 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 return kiln_c99_get_array_unscopables(out);
             }
             if (target.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE &&
+                kiln_c99_same_name_key(key, "length")) {
+                *out = kiln_c99_number(0.0);
+                return KILN_C99_OK;
+            }
+            if (target.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE &&
                 !kiln_c99_is_array_member(intrinsic_key, intrinsic_len)) {
                 KILN_C99_ABSENT("not a member of Array.prototype; kiln_c99_is_array_member holds "
                                 "the ones that are",

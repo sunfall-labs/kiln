@@ -1348,7 +1348,14 @@ fn tabulated_property_key(
             intrinsic_identity(target).map(|(name, _)| Property::Value(Value::String(name.into())))
         }
         "length" => {
-            intrinsic_identity(target).map(|(_, length)| Property::Value(Value::Number(length)))
+            if matches!(
+                target,
+                Value::Native(Native::PrototypeOf(PrototypeTable::Array), _)
+            ) {
+                Some(Property::Value(Value::Number(0.0)))
+            } else {
+                intrinsic_identity(target).map(|(_, length)| Property::Value(Value::Number(length)))
+            }
         }
         "prototype" => intrinsic_prototype_in(intrinsics, target).map(Property::Value),
         _ if matches!(
@@ -1716,6 +1723,22 @@ fn define_own_property_key(
             }
         });
     }
+    if matches!(
+        target,
+        Value::Native(Native::PrototypeOf(PrototypeTable::Array), _)
+    ) && key.matches_ascii("length")
+    {
+        if let Some(value) = &descriptor.value {
+            let number = value.as_number();
+            if !number.is_finite()
+                || number < 0.0
+                || number.fract() != 0.0
+                || number > MAX_ARRAY_LENGTH
+            {
+                return Err(ExecutionError::InvalidArrayLength);
+            }
+        }
+    }
     let Some((current, attributes)) = own_property_state_key(intrinsics, target, key) else {
         if !is_extensible_target(intrinsics, target) {
             return Ok(false);
@@ -1734,6 +1757,30 @@ fn define_own_property_key(
             descriptor_property(descriptor, None),
             attributes,
         )?;
+        if matches!(
+            target,
+            Value::Native(Native::PrototypeOf(PrototypeTable::Array), _)
+        ) && let Some(index) = array_index_key(key)
+        {
+            let cur_len =
+                match own_property_state_key(intrinsics, target, PropertyKeyRef::Utf8("length")) {
+                    Some((Property::Value(v), _)) => v.as_number(),
+                    _ => 0.0,
+                };
+            if (index as f64) >= cur_len {
+                install_property_key(
+                    intrinsics,
+                    target,
+                    PropertyKeyRef::Utf8("length"),
+                    Property::Value(Value::Number((index + 1) as f64)),
+                    Attributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: false,
+                    },
+                )?;
+            }
+        }
         return Ok(true);
     };
     let current_is_accessor = matches!(current, Property::Accessor { .. });
@@ -1807,6 +1854,30 @@ fn define_own_property_key(
         descriptor_property(descriptor, Some(current)),
         merged,
     )?;
+    if matches!(
+        target,
+        Value::Native(Native::PrototypeOf(PrototypeTable::Array), _)
+    ) && let Some(index) = array_index_key(key)
+    {
+        let cur_len =
+            match own_property_state_key(intrinsics, target, PropertyKeyRef::Utf8("length")) {
+                Some((Property::Value(v), _)) => v.as_number(),
+                _ => 0.0,
+            };
+        if (index as f64) >= cur_len {
+            install_property_key(
+                intrinsics,
+                target,
+                PropertyKeyRef::Utf8("length"),
+                Property::Value(Value::Number((index + 1) as f64)),
+                Attributes {
+                    writable: true,
+                    enumerable: false,
+                    configurable: false,
+                },
+            )?;
+        }
+    }
     Ok(true)
 }
 
@@ -16326,39 +16397,37 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // Copying reads each property, and a read is a call when the property is an
             // accessor -- which is why this cannot be a pure transformation of its arguments.
             Native::ObjectAssign => {
-                if arguments
-                    .iter()
-                    .any(|argument| matches!(argument, Value::Proxy(_)))
-                {
-                    return self.object_assign_with_proxies(arguments, instruction);
-                }
                 // `ToObject(target)`: `Object.assign(1, { a: 2 })` copies onto a boxed number
-                // and hands it back. Writing straight to the primitive raised "cannot set a
-                // property on a number", which is the assignment's error, not this one's.
+                // and hands it back. Null and undefined throw TypeError.
                 let given = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let Some(target) = to_object(&given) else {
                     return Err(ExecutionError::TypeErrorMessage {
                         message: "Cannot convert undefined or null to object".to_owned(),
                     });
                 };
+                if arguments.len() <= 1 {
+                    return Ok(target);
+                }
                 for source in arguments.iter().skip(1) {
-                    for (key, property) in own_properties_units(&self.intrinsics, source) {
-                        let value = match property {
-                            Property::Value(value) => value,
-                            Property::Accessor { get, .. } => match get {
-                                Some(getter) => self.call_value(
-                                    &getter,
-                                    source.clone(),
-                                    Vec::new(),
-                                    instruction,
-                                )?,
-                                // Reading a setter-only property answers `undefined`, and
-                                // `Object.assign` writes what the read answered -- the same
-                                // rule object spread follows, because the two copy the same set.
-                                None => Value::Undefined,
-                            },
+                    if source.is_nullish() {
+                        continue;
+                    }
+                    let Some(from) = to_object(source) else {
+                        continue;
+                    };
+                    for key in self.own_keys_reflected(&from, instruction)? {
+                        let Some(descriptor) =
+                            self.own_descriptor_value(&from, &key, instruction)?
+                        else {
+                            continue;
                         };
-                        self.set_computed(&target, &Value::String(key), value, instruction)?;
+                        let enumerable =
+                            self.read_property(&descriptor, "enumerable", instruction)?;
+                        if !enumerable.is_truthy() {
+                            continue;
+                        }
+                        let value = self.read_computed(&from, &key, instruction)?;
+                        self.set_or_throw(&target, &key, value, instruction)?;
                     }
                 }
                 Ok(target)
@@ -30366,48 +30435,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(copied)
     }
 
-    /// `Object.assign` with a proxy source or target.  A proxy source is enumerated by
-    /// `ownKeys`, filtered through its descriptors, and read through its `get` trap; a proxy
-    /// target receives every write through `set`.
-    fn object_assign_with_proxies(
-        &mut self,
-        arguments: &[Value],
-        instruction: usize,
-    ) -> Result<Value, ExecutionError> {
-        let target = arguments.first().cloned().unwrap_or(Value::Undefined);
-        if target.is_nullish() {
-            return Err(ExecutionError::TypeErrorMessage {
-                message: "Cannot convert undefined or null to object".to_owned(),
-            });
-        }
-        for source in arguments.iter().skip(1) {
-            if source.is_nullish() {
-                continue;
-            }
-            if matches!(source, Value::Proxy(_)) {
-                self.for_each_proxy_own_enumerable(source, instruction, |this, key, value| {
-                    this.set_computed(&target, &Value::String(key), value, instruction)
-                        .map(|_| ())
-                })?;
-            } else {
-                for (key, property) in own_properties_units(&self.intrinsics, source) {
-                    let value = match property {
-                        Property::Value(value) => value,
-                        Property::Accessor { get, .. } => match get {
-                            Some(getter) => {
-                                self.call_value(&getter, source.clone(), Vec::new(), instruction)?
-                            }
-                            // As above: a read of a setter-only property answers `undefined`.
-                            None => Value::Undefined,
-                        },
-                    };
-                    self.set_computed(&target, &Value::String(key), value, instruction)?;
-                }
-            }
-        }
-        Ok(target)
-    }
-
     /// What a `set` trap that answered truthily may not have claimed.
     ///
     /// A handler is free to route a write anywhere it likes -- that is the point of the trap --
@@ -32701,6 +32728,35 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // assignments. Refusing them as "not an object" was this engine reporting that it
             // had nowhere to put the answer, not that the language forbade the write.
             Value::Native(_, _) | Value::Callback(_, _) => {
+                if matches!(
+                    target,
+                    Value::Native(Native::PrototypeOf(PrototypeTable::Array), _)
+                ) && property_key.matches_ascii("length")
+                {
+                    let number = self.as_number_argument(Some(&value), instruction)?;
+                    if !number.is_finite()
+                        || number < 0.0
+                        || number.fract() != 0.0
+                        || number > MAX_ARRAY_LENGTH
+                    {
+                        return Err(ExecutionError::InvalidArrayLength);
+                    }
+                    let attributes = own_attributes_key(&self.intrinsics, target, property_key);
+                    if attributes.is_some_and(|attributes| !attributes.writable) {
+                        return Ok(());
+                    }
+                    self.intrinsics.install_key(
+                        target,
+                        property_key,
+                        Property::Value(Value::Number(number)),
+                        attributes.unwrap_or(Attributes {
+                            writable: true,
+                            enumerable: false,
+                            configurable: false,
+                        }),
+                    );
+                    return Ok(());
+                }
                 // Bound out of the `if let`, because the setter is ordinary code that may write
                 // to this very built-in.
                 let existing = own_property_state_key(&self.intrinsics, target, property_key);
@@ -32726,6 +32782,32 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Property::Value(value),
                     attributes.unwrap_or(Attributes::DEFAULT),
                 );
+                if matches!(
+                    target,
+                    Value::Native(Native::PrototypeOf(PrototypeTable::Array), _)
+                ) && let Some(index) = array_index_key(property_key)
+                {
+                    let cur_len = match own_property_state_key(
+                        &self.intrinsics,
+                        target,
+                        PropertyKeyRef::Utf8("length"),
+                    ) {
+                        Some((Property::Value(v), _)) => v.as_number(),
+                        _ => 0.0,
+                    };
+                    if (index as f64) >= cur_len {
+                        self.intrinsics.install_key(
+                            target,
+                            PropertyKeyRef::Utf8("length"),
+                            Property::Value(Value::Number((index + 1) as f64)),
+                            Attributes {
+                                writable: true,
+                                enumerable: false,
+                                configurable: false,
+                            },
+                        );
+                    }
+                }
                 Ok(())
             }
             other => Err(ExecutionError::NotAnObject {
@@ -33376,8 +33458,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<Vec<Value>, ExecutionError> {
         let keys = match target {
             // A proxy answers with a trap rather than a store, and the trap already reports
-            // both kinds -- reduced to reserved strings on the way in, and restored here.
-            Value::Proxy(_) => self.own_keys(target, instruction)?,
+            // both kinds in the trap result's order.
+            Value::Proxy(_) => {
+                let raw_keys = self.own_keys(target, instruction)?;
+                return Ok(raw_keys
+                    .into_iter()
+                    .map(|key| {
+                        if is_reserved_units(&key) {
+                            if let Some(name) = PropertyKeyRef::Units(&key).known_ascii() {
+                                if let Some(sym) = self.symbol_of_key(name.as_ref()) {
+                                    return Value::Symbol(sym);
+                                }
+                            }
+                        }
+                        Value::String(key.into())
+                    })
+                    .collect());
+            }
             _ => own_property_keys_with_symbols_units(&self.intrinsics, target),
         };
         let (reserved, named): (Vec<StringUnits>, Vec<StringUnits>) =
@@ -35944,10 +36041,19 @@ fn call_native(
         }
         // A proxy of an array *is* an array: `isArray` looks through as many proxies as it
         // takes, which is what lets a library wrap one and still branch on the shape.
-        Native::ArrayIsArray => Value::Boolean(matches!(
-            arguments.first().map(unwrap_proxy),
-            Some(Value::Array(_))
-        )),
+        Native::ArrayIsArray => {
+            let mut current = arguments.first().unwrap_or(&Value::Undefined);
+            while let Value::Proxy(proxy) = current {
+                if proxy.revoked.get() {
+                    return Err(ExecutionError::RevokedProxy);
+                }
+                current = &proxy.target;
+            }
+            Value::Boolean(matches!(
+                current,
+                Value::Array(_) | Value::Native(Native::PrototypeOf(PrototypeTable::Array), _)
+            ))
+        }
         Native::BigIntConstructor => {
             let Some(value) = arguments.first() else {
                 return Ok(Value::BigInt(Rc::new(num_bigint::BigInt::from(0))));
@@ -36104,7 +36210,7 @@ fn call_native(
             match &wrapped_primitive(receiver).unwrap_or_else(|| receiver.clone()) {
                 Value::Undefined => "Undefined",
                 Value::Null => "Null",
-                Value::Array(_) => "Array",
+                Value::Array(_) | Value::Native(Native::PrototypeOf(PrototypeTable::Array), _) => "Array",
                 // The `arguments` object of a call. Ordinary in every other respect, so the
                 // brand is the only thing that separates it from the object it otherwise is.
                 Value::Object(object) if object.borrow().arguments_brand => "Arguments",
@@ -36153,7 +36259,10 @@ fn call_native(
                 // `IsArray` looks through a proxy, and this tag is built on `IsArray` rather
                 // than on the shape of the receiver -- so a proxy of an array reports `Array`,
                 // which is the whole reason a library may wrap one and still be recognised.
-                other if matches!(unwrap_proxy(other), Value::Array(_)) => "Array",
+                other if matches!(
+                    unwrap_proxy(other),
+                    Value::Array(_) | Value::Native(Native::PrototypeOf(PrototypeTable::Array), _)
+                ) => "Array",
                 _ => "Object",
             }
         ).into()),
@@ -40794,6 +40903,7 @@ fn array_property(name: &str) -> Value {
         return Value::Null;
     }
     match name {
+        "length" => Value::Number(0.0),
         "join" => Value::Native(Native::ArrayJoin, RealmId::PRIMARY),
         "push" => Value::Native(Native::ArrayPush, RealmId::PRIMARY),
         "pop" => Value::Native(Native::ArrayPop, RealmId::PRIMARY),
@@ -43903,10 +44013,13 @@ fn inherited_object_property(intrinsics: &Intrinsics, name: &str, realm: RealmId
 /// the tables whose members are published by earlier, more specific arms -- `EventEmitter` and the
 /// two stream tables -- owning what they publish.
 fn intrinsic_owns(native: Native, key: &str) -> Option<Value> {
-    if matches!(native, Native::PrototypeOf(PrototypeTable::Array))
-        && key == WellKnown::Unscopables.property_key()
-    {
-        return Some(Value::Null);
+    if matches!(native, Native::PrototypeOf(PrototypeTable::Array)) {
+        if key == WellKnown::Unscopables.property_key() {
+            return Some(Value::Null);
+        }
+        if key == "length" {
+            return Some(Value::Number(0.0));
+        }
     }
     let found = native.property(key)?;
     if matches!(found, Value::Undefined) {
@@ -46670,13 +46783,24 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
 
 fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String, Property)> {
     let target = Value::Native(Native::PrototypeOf(table), RealmId::PRIMARY);
-    std::iter::once("constructor")
-        // Unlike the methods below, this own property is supplied by String exotic semantics.
-        // It still belongs in the complete materialized store and in own-key enumeration.
-        .chain(matches!(table, PrototypeTable::String).then_some("length"))
+    let mut names = Vec::new();
+    if matches!(table, PrototypeTable::Array) {
+        names.push("length");
+        names.push("constructor");
+    } else {
+        names.push("constructor");
+        if matches!(table, PrototypeTable::String) {
+            names.push("length");
+        }
+    }
+    names
+        .into_iter()
         .chain(intrinsic_prototype_method_names(table).iter().copied())
         .chain(intrinsic_members::accessor_keys(table))
         .filter_map(|name| {
+            if matches!(table, PrototypeTable::Array) && name == "length" {
+                return Some((name.to_owned(), Property::Value(Value::Number(0.0))));
+            }
             if let Some(value) = string_exotic(&target, name) {
                 return Some((name.to_owned(), Property::Value(value)));
             }
@@ -47416,6 +47540,18 @@ fn tabulated_attributes_key(
     let key = key.as_ref();
     match key {
         "name" | "length" if intrinsic_identity(target).is_some() => Some(FUNCTION_IDENTITY),
+        "length"
+            if matches!(
+                target,
+                Value::Native(Native::PrototypeOf(PrototypeTable::Array), _)
+            ) =>
+        {
+            Some(Attributes {
+                writable: true,
+                enumerable: false,
+                configurable: false,
+            })
+        }
         // A built-in constructor's `prototype` is locked on every axis: the realm's intrinsics
         // are reachable through it, and letting a program move one would leave every instance
         // already made pointing at the old object.
@@ -47519,6 +47655,13 @@ fn published_attributes(target: &Value, native: Native, key: &str, found: &Value
             writable: false,
             enumerable: false,
             configurable: true,
+        };
+    }
+    if matches!(native, Native::PrototypeOf(PrototypeTable::Array)) && key == "length" {
+        return Attributes {
+            writable: true,
+            enumerable: false,
+            configurable: false,
         };
     }
     if found.type_of() == "function" {

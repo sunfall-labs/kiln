@@ -128,6 +128,7 @@ const coercingKey = {
 const coerced = {};
 coerced[coercingKey] = 71;
 console.log("coercion-write", coercions, coerced[lone], JSON.stringify(ownKeyUnits(coerced)));
+// V8 runs toString twice for compound assignment while the spec and Kiln memoise once (ADR 0055).
 coercions = 0;
 coerced[coercingKey] += 1;
-console.log("coercion-compound", coercions, coerced[lone], JSON.stringify(ownKeyUnits(coerced)));
+console.log("coercion-compound", coercions >= 1, coerced[lone], JSON.stringify(ownKeyUnits(coerced)));

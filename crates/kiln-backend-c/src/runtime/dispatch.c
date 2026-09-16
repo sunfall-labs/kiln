@@ -3265,13 +3265,22 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             *result = kiln_c99_boolean(argc > 0 && args[0].tag == KILN_VALUE_NUMBER &&
                                        isfinite(first));
             return KILN_C99_OK;
-        case KILN_C99_METHOD_IS_ARRAY:
-            /* Follows a proxy to what it stands in front of, which is what the operation is
-             * specified to do -- a proxy of an array *is* an array to every library that
-             * branches on this. */
+        case KILN_C99_METHOD_IS_ARRAY: {
+            kiln_value current = argc > 0 ? args[0] : kiln_c99_undefined();
+            while (current.tag == KILN_VALUE_PROXY) {
+                kiln_proxy *proxy = kiln_c99_proxy_of(current);
+                if (proxy->revoked) {
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                                "Cannot perform operation on a proxy that has been revoked");
+                }
+                current = proxy->target;
+            }
             *result = kiln_c99_boolean(
-                argc > 0 && kiln_c99_proxy_inner(args[0]).tag == KILN_VALUE_ARRAY);
+                current.tag == KILN_VALUE_ARRAY ||
+                (current.tag == KILN_VALUE_BUILTIN &&
+                 current.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE));
             return KILN_C99_OK;
+        }
         case KILN_C99_METHOD_ARRAY_OF: {
             kiln_value built;
             status = kiln_c99_new_array(&built);
