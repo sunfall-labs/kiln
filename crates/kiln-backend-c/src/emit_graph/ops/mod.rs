@@ -938,6 +938,51 @@ pub(super) fn emit_graph_op(
                 }
                 return;
             }
+            if count > 0 && count <= 8 {
+                let static_keys: Option<Vec<String>> = pairs
+                    .iter()
+                    .map(|(k, _)| resolve_const_string(*k, defs, program))
+                    .collect();
+                if let Some(keys) = static_keys
+                    && keys.iter().all(|k| k != "__proto__" && !k.starts_with('@'))
+                {
+                    let all_numbers = pairs.iter().all(|(_, val)| numbers.contains(val));
+                    let mask_expr = if all_numbers {
+                        String::new()
+                    } else {
+                        let terms = pairs
+                            .iter()
+                            .enumerate()
+                            .map(|(i, (_, val))| {
+                                format!("(KILN_VAL_IS_NUMBER(v{}) ? (1u << {i}) : 0)", val.0)
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" | ");
+                        format!("uint32_t mask = {terms}; ")
+                    };
+                    let mask_guard = if all_numbers {
+                        String::new()
+                    } else {
+                        " && lit_shape->double_slots_mask == mask".to_string()
+                    };
+                    let mut direct_stores = String::new();
+                    for (i, (_, val)) in pairs.iter().enumerate() {
+                        direct_stores.push_str(&format!(" obj->inline_slots[{i}] = v{};", val.0));
+                    }
+                    let mut defines = String::new();
+                    for (key, value) in pairs {
+                        defines.push_str(&format!(
+                            " status = kiln_c99_define_computed(built, kiln_val_to_boundary(v{}), kiln_val_to_boundary(v{})); {check}",
+                            key.0, value.0
+                        ));
+                    }
+                    writeln!(
+                        output,
+                        "    {{ static const kiln_shape *lit_shape = NULL; kiln_value built; int status = kiln_c99_new_object(&built); if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; kiln_object *obj = kiln_c99_object_of(built); {mask_expr}if (KILN_LIKELY(lit_shape != NULL{mask_guard})) {{{direct_stores} obj->shape = (kiln_shape *)lit_shape; }} else {{{defines} if (status == KILN_C99_OK && obj->shape != NULL) lit_shape = obj->shape; }} v{v} = kiln_val_from_boundary(built); }}"
+                    ).unwrap();
+                    return;
+                }
+            }
             let alloc = if count > 0 {
                 format!("kiln_c99_new_object_with_capacity(&built, (size_t){count})")
             } else {
