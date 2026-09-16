@@ -617,42 +617,73 @@ pub(super) fn emit_get_computed(
     } else {
         (String::new(), format!("v{}", key.0))
     };
+    let key_is_int = ints.contains(key);
+    let key_non_neg = ctx.ivs.get(key).map_or(false, |iv| iv.non_negative);
+    let (array_body, typed_body, string_body) = if key_is_int {
+        let arr_bound = if key_non_neg {
+            format!("(uint64_t)i{k} < arr->count", k = key.0)
+        } else {
+            format!("i{k} >= 0 && (uint64_t)i{k} < arr->count", k = key.0)
+        };
+        let typed_bound = if key_non_neg {
+            format!("(uint64_t)i{k} < view->length", k = key.0)
+        } else {
+            format!("i{k} >= 0 && (uint64_t)i{k} < view->length", k = key.0)
+        };
+        let str_bound = if key_non_neg {
+            format!("(uint64_t)i{k} < str->unit_len", k = key.0)
+        } else {
+            format!("i{k} >= 0 && (uint64_t)i{k} < str->unit_len", k = key.0)
+        };
+        (
+            format!(
+                "const kiln_array *arr = (const kiln_array *)ptr; if (KILN_LIKELY({arr_bound} && arr->elements[i{k}] != KILN_VAL_HOLE)) {{ v{v} = arr->elements[i{k}]; handled = 1; }}",
+                k = key.0, v = v
+            ),
+            format!(
+                "kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY({typed_bound})) {{ double d = kiln_c99_typed_get(view, (size_t)i{k}); v{v} = kiln_c99_val_from_double(d); handled = 1; }}",
+                k = key.0, v = v
+            ),
+            format!(
+                "const kiln_string *str = (const kiln_string *)KILN_VAL_PTR(v{o}); if (KILN_LIKELY(str != NULL && {str_bound})) {{ v{v} = kiln_c99_val_from_unit(kiln_string_unit_at(str, (size_t)i{k})); handled = 1; }}",
+                o = object.0, k = key.0, v = v
+            ),
+        )
+    } else {
+        (
+            format!(
+                "double idx; memcpy(&idx, &{vk}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; const kiln_array *arr = (const kiln_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && arr->elements[slot] != KILN_VAL_HOLE)) {{ v{v} = arr->elements[slot]; handled = 1; }}",
+                vk = vk, v = v
+            ),
+            format!(
+                "double idx; memcpy(&idx, &{vk}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < view->length)) {{ double d = kiln_c99_typed_get(view, slot); v{v} = kiln_c99_val_from_double(d); handled = 1; }}",
+                vk = vk, v = v
+            ),
+            format!(
+                "double idx; memcpy(&idx, &{vk}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; const kiln_string *str = (const kiln_string *)KILN_VAL_PTR(v{o}); if (KILN_LIKELY(str != NULL && idx >= 0.0 && idx == (double)slot && slot < str->unit_len)) {{ v{v} = kiln_c99_val_from_unit(kiln_string_unit_at(str, slot)); handled = 1; }}",
+                vk = vk, o = object.0, v = v
+            ),
+        )
+    };
+    let number_guard = if key_is_int {
+        String::new()
+    } else {
+        format!(" && KILN_VAL_IS_NUMBER({vk})")
+    };
     writeln!(
                 output,
                 "    {{ static kiln_c99_site site = {{0}}; \
                 int handled = 0; {array_tier}{vk_decl}\
-                if (!handled && KILN_LIKELY((v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_NUMBER({vk}))) {{ \
+                if (!handled && KILN_LIKELY((v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX{number_guard})) {{ \
                     void *ptr = KILN_VAL_PTR(v{o}); \
                     if (site.has_cached_method == 1 || kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                         site.has_cached_method = 1; \
-                        double idx; \
-                        memcpy(&idx, &{vk}, sizeof(idx)); \
-                        size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; \
-                        const kiln_array *arr = (const kiln_array *)ptr; \
-                        if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && arr->elements[slot] != KILN_VAL_HOLE)) {{ \
-                            v{v} = arr->elements[slot]; \
-                            handled = 1; \
-                        }} \
+                        {array_body} \
                     }} else if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY) {{ \
-                        double idx; \
-                        memcpy(&idx, &{vk}, sizeof(idx)); \
-                        size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; \
-                        kiln_typed_array *view = (kiln_typed_array *)ptr; \
-                        if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < view->length)) {{ \
-                            double d = kiln_c99_typed_get(view, slot); \
-                            v{v} = kiln_c99_val_from_double(d); \
-                            handled = 1; \
-                        }} \
+                        {typed_body} \
                     }} \
-                }} else if (!handled && KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_NUMBER({vk})) {{ \
-                    double idx; \
-                    memcpy(&idx, &{vk}, sizeof(idx)); \
-                    size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; \
-                    const kiln_string *str = (const kiln_string *)KILN_VAL_PTR(v{o}); \
-                    if (KILN_LIKELY(str != NULL && idx >= 0.0 && idx == (double)slot && slot < str->unit_len)) {{ \
-                        v{v} = kiln_c99_val_from_unit(kiln_string_unit_at(str, slot)); \
-                        handled = 1; \
-                    }} \
+                }} else if (!handled && KILN_VAL_IS_STRING(v{o}){number_guard}) {{ \
+                    {string_body} \
                 }} \
                 if (!handled) {{ \
                     int status = kiln_c99_val_read_element(host, v{o}, {vk}, depth, thrown, &v{v}); \
@@ -661,6 +692,10 @@ pub(super) fn emit_get_computed(
                 }} }}\
                 {typed_sync}",
                 o = object.0,
+                number_guard = number_guard,
+                array_body = array_body,
+                typed_body = typed_body,
+                string_body = string_body,
                 vk = vk,
                 typed_sync = if typed { format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));") } else { String::new() }
             )
@@ -743,40 +778,74 @@ pub(super) fn emit_set_computed(
         .unwrap();
         return;
     }
+    let key_is_int = ints.contains(key);
+    let key_non_neg = ctx.ivs.get(key).map_or(false, |iv| iv.non_negative);
+    let val_is_num = numbers.contains(value);
+    let (array_body, typed_body) = if key_is_int {
+        let arr_bound = if key_non_neg {
+            format!("(uint64_t)i{k} < arr->count", k = key.0)
+        } else {
+            format!("i{k} >= 0 && (uint64_t)i{k} < arr->count", k = key.0)
+        };
+        let typed_bound = if key_non_neg {
+            format!("(uint64_t)i{k} < view->length", k = key.0)
+        } else {
+            format!("i{k} >= 0 && (uint64_t)i{k} < view->length", k = key.0)
+        };
+        let val_d_init = if val_is_num {
+            format!("double val_d = d{val};", val = value.0)
+        } else {
+            format!(
+                "double val_d; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{val}))) memcpy(&val_d, &v{val}, sizeof(val_d)); else val_d = kiln_c99_as_number(kiln_val_to_boundary(v{val}));",
+                val = value.0
+            )
+        };
+        (
+            format!(
+                "kiln_array *arr = (kiln_array *)ptr; if (KILN_LIKELY({arr_bound} && !arr->frozen)) {{ if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v{val})) arr->is_numeric = 0; arr->elements[i{k}] = v{val}; v{v} = v{val}; handled = 1; }}",
+                k = key.0, val = value.0, v = v
+            ),
+            format!(
+                "kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY({typed_bound})) {{ {val_d_init} kiln_c99_typed_set(view, (size_t)i{k}, val_d); v{v} = v{val}; handled = 1; }}",
+                k = key.0, val = value.0, v = v
+            ),
+        )
+    } else {
+        let val_d_init = if val_is_num {
+            format!("double val_d = d{val};", val = value.0)
+        } else {
+            format!(
+                "double val_d; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{val}))) memcpy(&val_d, &v{val}, sizeof(val_d)); else val_d = kiln_c99_as_number(kiln_val_to_boundary(v{val}));",
+                val = value.0
+            )
+        };
+        (
+            format!(
+                "double idx; memcpy(&idx, &v{k}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_array *arr = (kiln_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && !arr->frozen)) {{ if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v{val})) arr->is_numeric = 0; arr->elements[slot] = v{val}; v{v} = v{val}; handled = 1; }}",
+                k = key.0, val = value.0, v = v
+            ),
+            format!(
+                "double idx; memcpy(&idx, &v{k}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < view->length)) {{ {val_d_init} kiln_c99_typed_set(view, slot, val_d); v{v} = v{val}; handled = 1; }}",
+                k = key.0, val = value.0, v = v
+            ),
+        )
+    };
+    let number_guard = if key_is_int {
+        String::new()
+    } else {
+        format!(" && KILN_VAL_IS_NUMBER(v{k})", k = key.0)
+    };
     writeln!(
                 output,
                 "    {{ static kiln_c99_site site = {{0}}; \
                 int handled = 0; \
-                if (KILN_LIKELY((v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_NUMBER(v{k}))) {{ \
+                if (KILN_LIKELY((v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX{number_guard})) {{ \
                     void *ptr = KILN_VAL_PTR(v{o}); \
                     if (site.has_cached_method == 1 || kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                         site.has_cached_method = 1; \
-                        double idx; \
-                        memcpy(&idx, &v{k}, sizeof(idx)); \
-                        size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; \
-                        kiln_array *arr = (kiln_array *)ptr; \
-                        if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && !arr->frozen)) {{ \
-                            if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v{val})) arr->is_numeric = 0; \
-                            arr->elements[slot] = v{val}; \
-                            v{v} = v{val}; \
-                            handled = 1; \
-                        }} \
+                        {array_body} \
                     }} else if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY) {{ \
-                        double idx; \
-                        memcpy(&idx, &v{k}, sizeof(idx)); \
-                        size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; \
-                        kiln_typed_array *view = (kiln_typed_array *)ptr; \
-                        if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < view->length)) {{ \
-                            double val_d; \
-                            if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{val}))) {{ \
-                                memcpy(&val_d, &v{val}, sizeof(val_d)); \
-                            }} else {{ \
-                                val_d = kiln_c99_as_number(kiln_val_to_boundary(v{val})); \
-                            }} \
-                            kiln_c99_typed_set(view, slot, val_d); \
-                            v{v} = v{val}; \
-                            handled = 1; \
-                        }} \
+                        {typed_body} \
                     }} \
                 }} \
                 if (!handled) {{ \
@@ -788,6 +857,9 @@ pub(super) fn emit_set_computed(
                 o = object.0,
                 k = key.0,
                 val = value.0,
+                number_guard = number_guard,
+                array_body = array_body,
+                typed_body = typed_body,
                 typed_sync = if typed { format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));") } else { String::new() }
             )
             .unwrap();
