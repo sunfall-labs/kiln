@@ -17,8 +17,8 @@
       "passed": 40
     },
     "built-ins/Array": {
-      "failed": 227,
-      "passed": 5890
+      "failed": 217,
+      "passed": 5900
     },
     "built-ins/ArrayBuffer": {
       "failed": 26,
@@ -133,16 +133,16 @@
       "passed": 671
     },
     "built-ins/Object": {
-      "failed": 195,
-      "passed": 6607
+      "failed": 175,
+      "passed": 6627
     },
     "built-ins/Promise": {
       "failed": 130,
       "passed": 1328
     },
     "built-ins/Proxy": {
-      "failed": 52,
-      "passed": 555
+      "failed": 47,
+      "passed": 560
     },
     "built-ins/Reflect": {
       "failed": 4,
@@ -377,8 +377,8 @@
       "passed": 3
     },
     "language/expressions": {
-      "failed": 336,
-      "passed": 20634
+      "failed": 334,
+      "passed": 20636
     },
     "language/function-code": {
       "failed": 4,
@@ -477,8 +477,8 @@
       "passed": 6
     },
     "staging/sm": {
-      "failed": 626,
-      "passed": 1970
+      "failed": 618,
+      "passed": 1978
     },
     "staging/source-phase-imports": {
       "failed": 0,
