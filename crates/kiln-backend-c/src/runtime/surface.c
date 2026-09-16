@@ -17,6 +17,7 @@ static const char *kiln_c99_builtin_owner_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE: return "Boolean.prototype";
     case KILN_C99_BUILTIN_BIGINT_PROTOTYPE: return "BigInt.prototype";
     case KILN_C99_BUILTIN_PROMISE_PROTOTYPE: return "Promise.prototype";
+    case KILN_C99_BUILTIN_OBJECT_PROTOTYPE: return "Object.prototype";
     default: return kiln_c99_builtin_name(builtin);
     }
 }
@@ -273,21 +274,6 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
      * quietly down the branch written for a realm that never had them. */
     case KILN_C99_BUILTIN_PERFORMANCE:
         return kiln_c99_same_name(key, key_len, "now") ? KILN_C99_METHOD_PERFORMANCE_NOW : 0;
-    case KILN_C99_BUILTIN_OBJECT_PROTOTYPE:
-        if (kiln_c99_same_name(key, key_len, "constructor")) {
-            return 0;
-        }
-        if (kiln_c99_same_name(key, key_len, "toLocaleString")) {
-            return KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING;
-        }
-        if (kiln_c99_same_name(key, key_len, "isPrototypeOf")) {
-            return KILN_C99_METHOD_IS_PROTOTYPE_OF;
-        }
-        if (kiln_c99_same_name(key, key_len, "propertyIsEnumerable")) {
-            return KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE;
-        }
-        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_HAS_OWN_PROPERTY,
-                                      KILN_C99_METHOD_OBJECT_VALUE_OF);
     case KILN_C99_BUILTIN_ERROR_PROTOTYPE:
         /* `Error.prototype.toString` is the one member that is genuinely the error's rather than
          * `Object.prototype`'s, and it is what `String(err)` reaches. */

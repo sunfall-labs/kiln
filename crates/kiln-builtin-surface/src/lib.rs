@@ -696,6 +696,7 @@ pub enum PrototypeId {
     Boolean,
     BigInt,
     Promise,
+    Object,
 }
 
 impl PrototypeId {
@@ -707,6 +708,7 @@ impl PrototypeId {
             Self::Boolean => "Boolean.prototype",
             Self::BigInt => "BigInt.prototype",
             Self::Promise => "Promise.prototype",
+            Self::Object => "Object.prototype",
         }
     }
 
@@ -723,6 +725,8 @@ impl PrototypeId {
             Some(Self::BigInt)
         } else if same(name, "Promise.prototype") {
             Some(Self::Promise)
+        } else if same(name, "Object.prototype") {
+            Some(Self::Object)
         } else {
             None
         }
@@ -807,6 +811,21 @@ pub enum PromiseMethod {
     Finally,
 }
 
+/// Built-in methods of `Object.prototype`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ObjectMethod {
+    HasOwnProperty,
+    IsPrototypeOf,
+    PropertyIsEnumerable,
+    ToString,
+    ToLocaleString,
+    ValueOf,
+    DefineGetter,
+    DefineSetter,
+    LookupGetter,
+    LookupSetter,
+}
+
 /// Authoritative semantic operation binding across both engines (ADR 0059, ADR 0060).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SemanticBinding {
@@ -823,6 +842,8 @@ pub enum SemanticBinding {
     BooleanMethod(BooleanMethod),
     BigIntMethod(BigIntMethod),
     PromiseMethod(PromiseMethod),
+    ObjectMethod(ObjectMethod),
+    ObjectProto,
 }
 
 /// One declarative row describing a prototype member.
@@ -1325,6 +1346,91 @@ pub const PROTOTYPE_SURFACE: &[PrototypeMember] = &[
         attributes: DescriptorAttributes::READONLY,
         binding: SemanticBinding::StringTag("Promise"),
     },
+    // Object.prototype (ECMAScript §20.1.3 and Annex B.2.2)
+    PrototypeMember {
+        prototype: PrototypeId::Object,
+        key: MemberKey::Named("constructor"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::Constructor,
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Object,
+        key: MemberKey::Named("hasOwnProperty"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ObjectMethod(ObjectMethod::HasOwnProperty),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Object,
+        key: MemberKey::Named("isPrototypeOf"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ObjectMethod(ObjectMethod::IsPrototypeOf),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Object,
+        key: MemberKey::Named("propertyIsEnumerable"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ObjectMethod(ObjectMethod::PropertyIsEnumerable),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Object,
+        key: MemberKey::Named("toLocaleString"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ObjectMethod(ObjectMethod::ToLocaleString),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Object,
+        key: MemberKey::Named("toString"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ObjectMethod(ObjectMethod::ToString),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Object,
+        key: MemberKey::Named("valueOf"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ObjectMethod(ObjectMethod::ValueOf),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Object,
+        key: MemberKey::Named("__defineGetter__"),
+        kind: MemberKind::Method { length: 2 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ObjectMethod(ObjectMethod::DefineGetter),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Object,
+        key: MemberKey::Named("__defineSetter__"),
+        kind: MemberKind::Method { length: 2 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ObjectMethod(ObjectMethod::DefineSetter),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Object,
+        key: MemberKey::Named("__lookupGetter__"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ObjectMethod(ObjectMethod::LookupGetter),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Object,
+        key: MemberKey::Named("__lookupSetter__"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::ObjectMethod(ObjectMethod::LookupSetter),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Object,
+        key: MemberKey::Named("__proto__"),
+        kind: MemberKind::Accessor,
+        attributes: DescriptorAttributes::ACCESSOR,
+        binding: SemanticBinding::ObjectProto,
+    },
 ];
 
 const fn validate_prototype_surface(surface: &[PrototypeMember]) {
@@ -1470,5 +1576,24 @@ mod tests {
         assert!(prototype_has(PrototypeId::Promise, "finally"));
         assert!(prototype_has(PrototypeId::Promise, "@@toStringTag"));
         assert!(!prototype_has(PrototypeId::Promise, "nonexistent"));
+    }
+
+    #[test]
+    fn object_prototype_members_are_complete() {
+        let members: Vec<_> = prototype_members(PrototypeId::Object).collect();
+        assert_eq!(members.len(), 12);
+        assert!(prototype_has(PrototypeId::Object, "constructor"));
+        assert!(prototype_has(PrototypeId::Object, "hasOwnProperty"));
+        assert!(prototype_has(PrototypeId::Object, "isPrototypeOf"));
+        assert!(prototype_has(PrototypeId::Object, "propertyIsEnumerable"));
+        assert!(prototype_has(PrototypeId::Object, "toLocaleString"));
+        assert!(prototype_has(PrototypeId::Object, "toString"));
+        assert!(prototype_has(PrototypeId::Object, "valueOf"));
+        assert!(prototype_has(PrototypeId::Object, "__defineGetter__"));
+        assert!(prototype_has(PrototypeId::Object, "__defineSetter__"));
+        assert!(prototype_has(PrototypeId::Object, "__lookupGetter__"));
+        assert!(prototype_has(PrototypeId::Object, "__lookupSetter__"));
+        assert!(prototype_has(PrototypeId::Object, "__proto__"));
+        assert!(!prototype_has(PrototypeId::Object, "nonexistent"));
     }
 }

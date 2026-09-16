@@ -205,15 +205,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                     return KILN_C99_OK;
                 }
             }
-            inherited = kiln_c99_same_name_key(key, "isPrototypeOf")
-                                     ? KILN_C99_METHOD_IS_PROTOTYPE_OF
-                                 : kiln_c99_same_name_key(key, "propertyIsEnumerable")
-                                     ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
-                                 : kiln_c99_same_name_key(key, "toLocaleString")
-                                     ? KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING
-                                     : kiln_c99_lookup_method(intrinsic_key, intrinsic_len,
-                                                              KILN_C99_METHOD_HAS_OWN_PROPERTY,
-                                                              KILN_C99_METHOD_OBJECT_VALUE_OF);
+            inherited = kiln_c99_namespace_method(KILN_C99_BUILTIN_OBJECT_PROTOTYPE,
+                                                  intrinsic_key, intrinsic_len);
             if (inherited != 0) {
                 *out = kiln_c99_method(inherited);
                 return KILN_C99_OK;
@@ -1551,10 +1544,6 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             }
             if (target.bits == KILN_C99_BUILTIN_FUNCTION) {
                 KILN_C99_ABSENT("not a member of Function; Function only owns length, name, and prototype",
-                                out);
-            }
-            if (target.bits == KILN_C99_BUILTIN_OBJECT_PROTOTYPE) {
-                KILN_C99_ABSENT("not a member of Object.prototype; Object.prototype only owns standard methods",
                                 out);
             }
             if (target.bits == KILN_C99_BUILTIN_ERROR_PROTOTYPE) {
