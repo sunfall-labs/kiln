@@ -1560,6 +1560,14 @@ builtin_surface! {
     (KILN_C99_BUILTIN_PROMISE_PROTOTYPE, "Promise.prototype", "catch", code(KILN_C99_METHOD_CATCH)),
     (KILN_C99_BUILTIN_PROMISE_PROTOTYPE, "Promise.prototype", "finally", code(KILN_C99_METHOD_FINALLY)),
     (KILN_C99_BUILTIN_PROMISE_PROTOTYPE, "Promise.prototype", "@@toStringTag", text("Promise")),
+
+    (KILN_C99_BUILTIN_OBJECT_PROTOTYPE, "Object.prototype", "constructor", ctor(KILN_C99_BUILTIN_OBJECT)),
+    (KILN_C99_BUILTIN_OBJECT_PROTOTYPE, "Object.prototype", "hasOwnProperty", code(KILN_C99_METHOD_HAS_OWN_PROPERTY)),
+    (KILN_C99_BUILTIN_OBJECT_PROTOTYPE, "Object.prototype", "isPrototypeOf", code(KILN_C99_METHOD_IS_PROTOTYPE_OF)),
+    (KILN_C99_BUILTIN_OBJECT_PROTOTYPE, "Object.prototype", "propertyIsEnumerable", code(KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE)),
+    (KILN_C99_BUILTIN_OBJECT_PROTOTYPE, "Object.prototype", "toLocaleString", code(KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING)),
+    (KILN_C99_BUILTIN_OBJECT_PROTOTYPE, "Object.prototype", "toString", code(KILN_C99_METHOD_OBJECT_TO_STRING)),
+    (KILN_C99_BUILTIN_OBJECT_PROTOTYPE, "Object.prototype", "valueOf", code(KILN_C99_METHOD_OBJECT_VALUE_OF)),
 }
 
 /// A member the shared surface declares and this backend does not answer, with the reason.
@@ -1603,6 +1611,16 @@ macro_rules! builtin_backlog {
 }
 
 builtin_backlog! {
+    ("Object.prototype", "__defineGetter__",
+     "legacy Annex B accessor method not modeled in native C backend"),
+    ("Object.prototype", "__defineSetter__",
+     "legacy Annex B accessor method not modeled in native C backend"),
+    ("Object.prototype", "__lookupGetter__",
+     "legacy Annex B accessor method not modeled in native C backend"),
+    ("Object.prototype", "__lookupSetter__",
+     "legacy Annex B accessor method not modeled in native C backend"),
+    ("Object.prototype", "__proto__",
+     "legacy Annex B proto accessor handled via runtime link rather than static table"),
     ("Object", "groupBy",
      "not implemented; needs an iterator walk keyed by a callback's result"),
     ("Object", "seal",
@@ -1988,7 +2006,7 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     },
     AbsentAnswer {
         function: "kiln_c99_get_own_kind",
-        sites: 26,
+        sites: 25,
         proved_by: "one membership predicate per receiver kind -- kiln_c99_is_array_member, \
                     kiln_c99_is_string_member, kiln_c99_is_date_member, \
                     kiln_c99_is_collection_member and the kiln_c99_collection_kind_member \

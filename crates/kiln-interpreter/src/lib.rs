@@ -43955,46 +43955,66 @@ fn data_view_method(name: &str) -> Value {
 /// `ToPrimitive` looks for a `toString` and would start finding this one, changing what `"" + {}`
 /// and every comparison against an object produce. They are reachable through
 /// `Object.prototype.toString`, which is where programs actually use them.
-fn object_property(name: &str) -> Value {
-    match name {
-        "hasOwnProperty" => Value::Native(Native::ObjectHasOwnProperty, RealmId::PRIMARY),
-        "isPrototypeOf" => Value::Native(Native::ObjectIsPrototypeOf, RealmId::PRIMARY),
-        "propertyIsEnumerable" => {
-            Value::Native(Native::ObjectPropertyIsEnumerable, RealmId::PRIMARY)
+fn object_method_value(method: kiln_builtin_surface::ObjectMethod, realm: RealmId) -> Value {
+    match method {
+        kiln_builtin_surface::ObjectMethod::HasOwnProperty => {
+            Value::Native(Native::ObjectHasOwnProperty, realm)
         }
-        "toString" => Value::Native(Native::ObjectToStringTag, RealmId::PRIMARY),
-        "toLocaleString" => Value::Native(Native::ObjectToLocaleString, RealmId::PRIMARY),
-        "valueOf" => Value::Native(Native::ObjectValueOf, RealmId::PRIMARY),
-        // Annex B's four, which predate `Object.defineProperty` and are still how a great deal
-        // of shipped code installs an accessor.
-        "__defineGetter__" => Value::Native(
+        kiln_builtin_surface::ObjectMethod::IsPrototypeOf => {
+            Value::Native(Native::ObjectIsPrototypeOf, realm)
+        }
+        kiln_builtin_surface::ObjectMethod::PropertyIsEnumerable => {
+            Value::Native(Native::ObjectPropertyIsEnumerable, realm)
+        }
+        kiln_builtin_surface::ObjectMethod::ToString => {
+            Value::Native(Native::ObjectToStringTag, realm)
+        }
+        kiln_builtin_surface::ObjectMethod::ToLocaleString => {
+            Value::Native(Native::ObjectToLocaleString, realm)
+        }
+        kiln_builtin_surface::ObjectMethod::ValueOf => Value::Native(Native::ObjectValueOf, realm),
+        kiln_builtin_surface::ObjectMethod::DefineGetter => Value::Native(
             Native::LegacyAccessor {
                 defines: true,
                 setter: false,
             },
-            RealmId::PRIMARY,
+            realm,
         ),
-        "__defineSetter__" => Value::Native(
+        kiln_builtin_surface::ObjectMethod::DefineSetter => Value::Native(
             Native::LegacyAccessor {
                 defines: true,
                 setter: true,
             },
-            RealmId::PRIMARY,
+            realm,
         ),
-        "__lookupGetter__" => Value::Native(
+        kiln_builtin_surface::ObjectMethod::LookupGetter => Value::Native(
             Native::LegacyAccessor {
                 defines: false,
                 setter: false,
             },
-            RealmId::PRIMARY,
+            realm,
         ),
-        "__lookupSetter__" => Value::Native(
+        kiln_builtin_surface::ObjectMethod::LookupSetter => Value::Native(
             Native::LegacyAccessor {
                 defines: false,
                 setter: true,
             },
-            RealmId::PRIMARY,
+            realm,
         ),
+    }
+}
+
+fn object_property(name: &str) -> Value {
+    let Some(member) = kiln_builtin_surface::find_prototype_member(
+        kiln_builtin_surface::PrototypeId::Object,
+        name,
+    ) else {
+        return Value::Undefined;
+    };
+    match member.binding {
+        kiln_builtin_surface::SemanticBinding::ObjectMethod(method) => {
+            object_method_value(method, RealmId::PRIMARY)
+        }
         _ => Value::Undefined,
     }
 }
@@ -44073,18 +44093,19 @@ fn intrinsic_owns(native: Native, key: &str) -> Option<Value> {
 }
 
 fn tabulated_object_property(name: &str) -> Value {
-    match name {
-        "constructor" => Value::Native(Native::ObjectConstructor, RealmId::PRIMARY),
-        "hasOwnProperty"
-        | "isPrototypeOf"
-        | "propertyIsEnumerable"
-        | "toString"
-        | "toLocaleString"
-        | "valueOf"
-        | "__defineGetter__"
-        | "__defineSetter__"
-        | "__lookupGetter__"
-        | "__lookupSetter__" => object_property(name),
+    let Some(member) = kiln_builtin_surface::find_prototype_member(
+        kiln_builtin_surface::PrototypeId::Object,
+        name,
+    ) else {
+        return Value::Undefined;
+    };
+    match member.binding {
+        kiln_builtin_surface::SemanticBinding::Constructor => {
+            Value::Native(Native::ObjectConstructor, RealmId::PRIMARY)
+        }
+        kiln_builtin_surface::SemanticBinding::ObjectMethod(method) => {
+            object_method_value(method, RealmId::PRIMARY)
+        }
         _ => Value::Undefined,
     }
 }
@@ -46129,6 +46150,7 @@ impl Intrinsics {
                         | PrototypeTable::Boolean
                         | PrototypeTable::BigInt
                         | PrototypeTable::Promise
+                        | PrototypeTable::Object
                 ),
                 _
             )
@@ -46304,7 +46326,8 @@ impl Intrinsics {
                 | PrototypeTable::Number
                 | PrototypeTable::Boolean
                 | PrototypeTable::BigInt
-                | PrototypeTable::Promise),
+                | PrototypeTable::Promise
+                | PrototypeTable::Object),
             ),
             _,
         ) = target
@@ -46316,6 +46339,7 @@ impl Intrinsics {
                 PrototypeTable::Boolean => kiln_builtin_surface::PrototypeId::Boolean,
                 PrototypeTable::BigInt => kiln_builtin_surface::PrototypeId::BigInt,
                 PrototypeTable::Promise => kiln_builtin_surface::PrototypeId::Promise,
+                PrototypeTable::Object => kiln_builtin_surface::PrototypeId::Object,
                 _ => unreachable!(),
             };
             let mut data = ObjectData::default();
@@ -46354,6 +46378,7 @@ impl Intrinsics {
                             PrototypeTable::Boolean => Native::BooleanConstructor,
                             PrototypeTable::BigInt => Native::BigIntConstructor,
                             PrototypeTable::Promise => Native::PromiseConstructor,
+                            PrototypeTable::Object => Native::ObjectConstructor,
                             _ => unreachable!(),
                         };
                         Property::Value(Value::Native(ctor, realm))
@@ -46392,6 +46417,13 @@ impl Intrinsics {
                     kiln_builtin_surface::SemanticBinding::PromiseMethod(
                         kiln_builtin_surface::PromiseMethod::Finally,
                     ) => Property::Value(Value::Native(Native::PromiseFinally, realm)),
+                    kiln_builtin_surface::SemanticBinding::ObjectMethod(method) => {
+                        Property::Value(object_method_value(method, realm))
+                    }
+                    kiln_builtin_surface::SemanticBinding::ObjectProto => Property::Accessor {
+                        get: Some(Value::Native(Native::ProtoGetter, realm)),
+                        set: Some(Value::Native(Native::ProtoSetter, realm)),
+                    },
                 };
                 let attrs = Attributes {
                     writable: member.attributes.writable,
@@ -46552,19 +46584,6 @@ const UINT8_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedM
 /// four text conversions, which is why it has a list of its own.
 const TYPED_ARRAY_VIEW_MEMBERS: intrinsic_members::NamedMembers =
     intrinsic_members::NamedMembers::new(&["BYTES_PER_ELEMENT"]);
-const OBJECT_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
-    "hasOwnProperty",
-    "isPrototypeOf",
-    "propertyIsEnumerable",
-    "toString",
-    "toLocaleString",
-    "valueOf",
-    "__defineGetter__",
-    "__defineSetter__",
-    "__lookupGetter__",
-    "__lookupSetter__",
-    "__proto__",
-]);
 const ARRAY_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
     "map",
     "parallelMap",
@@ -46893,10 +46912,10 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
             TypedKind::Uint8 => UINT8_MEMBERS.names(),
             _ => TYPED_ARRAY_VIEW_MEMBERS.names(),
         },
-        PrototypeTable::Object => OBJECT_MEMBERS.names(),
         PrototypeTable::Array | PrototypeTable::TypedArray => ARRAY_MEMBERS.names(),
         PrototypeTable::String => STRING_MEMBERS.names(),
-        PrototypeTable::Number
+        PrototypeTable::Object
+        | PrototypeTable::Number
         | PrototypeTable::Boolean
         | PrototypeTable::BigInt
         | PrototypeTable::Promise
@@ -46938,6 +46957,7 @@ fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String, Property)>
         PrototypeTable::Boolean => Some(kiln_builtin_surface::PrototypeId::Boolean),
         PrototypeTable::BigInt => Some(kiln_builtin_surface::PrototypeId::BigInt),
         PrototypeTable::Promise => Some(kiln_builtin_surface::PrototypeId::Promise),
+        PrototypeTable::Object => Some(kiln_builtin_surface::PrototypeId::Object),
         _ => None,
     } {
         return kiln_builtin_surface::prototype_members(proto_id)
@@ -46970,6 +46990,7 @@ fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String, Property)>
                             PrototypeTable::Boolean => Native::BooleanConstructor,
                             PrototypeTable::BigInt => Native::BigIntConstructor,
                             PrototypeTable::Promise => Native::PromiseConstructor,
+                            PrototypeTable::Object => Native::ObjectConstructor,
                             _ => unreachable!(),
                         };
                         Property::Value(Value::Native(ctor, RealmId::PRIMARY))
@@ -47005,6 +47026,13 @@ fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String, Property)>
                     kiln_builtin_surface::SemanticBinding::PromiseMethod(
                         kiln_builtin_surface::PromiseMethod::Finally,
                     ) => Property::Value(Value::Native(Native::PromiseFinally, RealmId::PRIMARY)),
+                    kiln_builtin_surface::SemanticBinding::ObjectMethod(method) => {
+                        Property::Value(object_method_value(method, RealmId::PRIMARY))
+                    }
+                    kiln_builtin_surface::SemanticBinding::ObjectProto => Property::Accessor {
+                        get: Some(Value::Native(Native::ProtoGetter, RealmId::PRIMARY)),
+                        set: Some(Value::Native(Native::ProtoSetter, RealmId::PRIMARY)),
+                    },
                     _ => return None,
                 };
                 Some((name.to_owned(), prop))
@@ -47810,7 +47838,8 @@ fn intrinsic_own_attributes(target: &Value, key: &str) -> Option<Attributes> {
         | PrototypeTable::Number
         | PrototypeTable::Boolean
         | PrototypeTable::BigInt
-        | PrototypeTable::Promise),
+        | PrototypeTable::Promise
+        | PrototypeTable::Object),
     ) = native
     {
         let proto_id = match table {
@@ -47820,6 +47849,7 @@ fn intrinsic_own_attributes(target: &Value, key: &str) -> Option<Attributes> {
             PrototypeTable::Boolean => kiln_builtin_surface::PrototypeId::Boolean,
             PrototypeTable::BigInt => kiln_builtin_surface::PrototypeId::BigInt,
             PrototypeTable::Promise => kiln_builtin_surface::PrototypeId::Promise,
+            PrototypeTable::Object => kiln_builtin_surface::PrototypeId::Object,
             _ => unreachable!(),
         };
         return kiln_builtin_surface::find_prototype_member(proto_id, key).map(|member| {
