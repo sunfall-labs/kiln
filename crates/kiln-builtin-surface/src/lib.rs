@@ -698,6 +698,10 @@ pub enum PrototypeId {
     Promise,
     Object,
     Function,
+    Map,
+    Set,
+    WeakMap,
+    WeakSet,
 }
 
 impl PrototypeId {
@@ -711,6 +715,10 @@ impl PrototypeId {
             Self::Promise => "Promise.prototype",
             Self::Object => "Object.prototype",
             Self::Function => "Function.prototype",
+            Self::Map => "Map.prototype",
+            Self::Set => "Set.prototype",
+            Self::WeakMap => "WeakMap.prototype",
+            Self::WeakSet => "WeakSet.prototype",
         }
     }
 
@@ -731,6 +739,14 @@ impl PrototypeId {
             Some(Self::Object)
         } else if same(name, "Function.prototype") {
             Some(Self::Function)
+        } else if same(name, "Map.prototype") {
+            Some(Self::Map)
+        } else if same(name, "Set.prototype") {
+            Some(Self::Set)
+        } else if same(name, "WeakMap.prototype") {
+            Some(Self::WeakMap)
+        } else if same(name, "WeakSet.prototype") {
+            Some(Self::WeakSet)
         } else {
             None
         }
@@ -839,6 +855,61 @@ pub enum FunctionMethod {
     ToString,
 }
 
+/// Built-in methods of `Map.prototype`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MapMethod {
+    Clear,
+    Delete,
+    Entries,
+    ForEach,
+    Get,
+    GetOrInsert,
+    GetOrInsertComputed,
+    Has,
+    Keys,
+    Set,
+    Values,
+}
+
+/// Built-in methods of `Set.prototype`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SetMethod {
+    Add,
+    Clear,
+    Delete,
+    Entries,
+    ForEach,
+    Has,
+    Keys,
+    Values,
+    Union,
+    Intersection,
+    Difference,
+    SymmetricDifference,
+    IsSubsetOf,
+    IsSupersetOf,
+    IsDisjointFrom,
+}
+
+/// Built-in methods of `WeakMap.prototype`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum WeakMapMethod {
+    Delete,
+    Get,
+    GetOrInsert,
+    GetOrInsertComputed,
+    Has,
+    Set,
+}
+
+/// Built-in methods of `WeakSet.prototype`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum WeakSetMethod {
+    Add,
+    Delete,
+    Has,
+}
+
 /// Authoritative semantic operation binding across both engines (ADR 0059, ADR 0060).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SemanticBinding {
@@ -861,6 +932,12 @@ pub enum SemanticBinding {
     FunctionHasInstance,
     FunctionCaller,
     FunctionArguments,
+    MapMethod(MapMethod),
+    SetMethod(SetMethod),
+    WeakMapMethod(WeakMapMethod),
+    WeakSetMethod(WeakSetMethod),
+    CollectionSize(bool),     // true = Map, false = Set
+    CollectionIterator(bool), // true = Map, false = Set
 }
 
 /// One declarative row describing a prototype member.
@@ -1504,6 +1581,339 @@ pub const PROTOTYPE_SURFACE: &[PrototypeMember] = &[
         attributes: DescriptorAttributes::ACCESSOR,
         binding: SemanticBinding::FunctionArguments,
     },
+    // Map.prototype (ECMAScript §24.1.3)
+    PrototypeMember {
+        prototype: PrototypeId::Map,
+        key: MemberKey::Named("constructor"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::Constructor,
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Map,
+        key: MemberKey::Named("clear"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::MapMethod(MapMethod::Clear),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Map,
+        key: MemberKey::Named("delete"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::MapMethod(MapMethod::Delete),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Map,
+        key: MemberKey::Named("entries"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::MapMethod(MapMethod::Entries),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Map,
+        key: MemberKey::Named("forEach"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::MapMethod(MapMethod::ForEach),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Map,
+        key: MemberKey::Named("get"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::MapMethod(MapMethod::Get),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Map,
+        key: MemberKey::Named("getOrInsert"),
+        kind: MemberKind::Method { length: 2 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::MapMethod(MapMethod::GetOrInsert),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Map,
+        key: MemberKey::Named("getOrInsertComputed"),
+        kind: MemberKind::Method { length: 2 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::MapMethod(MapMethod::GetOrInsertComputed),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Map,
+        key: MemberKey::Named("has"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::MapMethod(MapMethod::Has),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Map,
+        key: MemberKey::Named("keys"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::MapMethod(MapMethod::Keys),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Map,
+        key: MemberKey::Named("set"),
+        kind: MemberKind::Method { length: 2 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::MapMethod(MapMethod::Set),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Map,
+        key: MemberKey::Named("size"),
+        kind: MemberKind::Accessor,
+        attributes: DescriptorAttributes::ACCESSOR,
+        binding: SemanticBinding::CollectionSize(true),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Map,
+        key: MemberKey::Named("values"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::MapMethod(MapMethod::Values),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Map,
+        key: MemberKey::Symbol(WellKnownSymbol::Iterator),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::CollectionIterator(true),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Map,
+        key: MemberKey::Symbol(WellKnownSymbol::ToStringTag),
+        kind: MemberKind::Data,
+        attributes: DescriptorAttributes::READONLY,
+        binding: SemanticBinding::StringTag("Map"),
+    },
+    // Set.prototype (ECMAScript §24.2.3)
+    PrototypeMember {
+        prototype: PrototypeId::Set,
+        key: MemberKey::Named("constructor"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::Constructor,
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Set,
+        key: MemberKey::Named("add"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::SetMethod(SetMethod::Add),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Set,
+        key: MemberKey::Named("clear"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::SetMethod(SetMethod::Clear),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Set,
+        key: MemberKey::Named("delete"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::SetMethod(SetMethod::Delete),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Set,
+        key: MemberKey::Named("difference"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::SetMethod(SetMethod::Difference),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Set,
+        key: MemberKey::Named("entries"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::SetMethod(SetMethod::Entries),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Set,
+        key: MemberKey::Named("forEach"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::SetMethod(SetMethod::ForEach),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Set,
+        key: MemberKey::Named("has"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::SetMethod(SetMethod::Has),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Set,
+        key: MemberKey::Named("intersection"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::SetMethod(SetMethod::Intersection),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Set,
+        key: MemberKey::Named("isDisjointFrom"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::SetMethod(SetMethod::IsDisjointFrom),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Set,
+        key: MemberKey::Named("isSubsetOf"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::SetMethod(SetMethod::IsSubsetOf),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Set,
+        key: MemberKey::Named("isSupersetOf"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::SetMethod(SetMethod::IsSupersetOf),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Set,
+        key: MemberKey::Named("keys"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::SetMethod(SetMethod::Keys),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Set,
+        key: MemberKey::Named("size"),
+        kind: MemberKind::Accessor,
+        attributes: DescriptorAttributes::ACCESSOR,
+        binding: SemanticBinding::CollectionSize(false),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Set,
+        key: MemberKey::Named("symmetricDifference"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::SetMethod(SetMethod::SymmetricDifference),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Set,
+        key: MemberKey::Named("union"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::SetMethod(SetMethod::Union),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Set,
+        key: MemberKey::Named("values"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::SetMethod(SetMethod::Values),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Set,
+        key: MemberKey::Symbol(WellKnownSymbol::Iterator),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::CollectionIterator(false),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Set,
+        key: MemberKey::Symbol(WellKnownSymbol::ToStringTag),
+        kind: MemberKind::Data,
+        attributes: DescriptorAttributes::READONLY,
+        binding: SemanticBinding::StringTag("Set"),
+    },
+    // WeakMap.prototype (ECMAScript §24.3.3)
+    PrototypeMember {
+        prototype: PrototypeId::WeakMap,
+        key: MemberKey::Named("constructor"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::Constructor,
+    },
+    PrototypeMember {
+        prototype: PrototypeId::WeakMap,
+        key: MemberKey::Named("delete"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::WeakMapMethod(WeakMapMethod::Delete),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::WeakMap,
+        key: MemberKey::Named("get"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::WeakMapMethod(WeakMapMethod::Get),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::WeakMap,
+        key: MemberKey::Named("getOrInsert"),
+        kind: MemberKind::Method { length: 2 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::WeakMapMethod(WeakMapMethod::GetOrInsert),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::WeakMap,
+        key: MemberKey::Named("getOrInsertComputed"),
+        kind: MemberKind::Method { length: 2 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::WeakMapMethod(WeakMapMethod::GetOrInsertComputed),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::WeakMap,
+        key: MemberKey::Named("has"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::WeakMapMethod(WeakMapMethod::Has),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::WeakMap,
+        key: MemberKey::Named("set"),
+        kind: MemberKind::Method { length: 2 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::WeakMapMethod(WeakMapMethod::Set),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::WeakMap,
+        key: MemberKey::Symbol(WellKnownSymbol::ToStringTag),
+        kind: MemberKind::Data,
+        attributes: DescriptorAttributes::READONLY,
+        binding: SemanticBinding::StringTag("WeakMap"),
+    },
+    // WeakSet.prototype (ECMAScript §24.4.3)
+    PrototypeMember {
+        prototype: PrototypeId::WeakSet,
+        key: MemberKey::Named("constructor"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::Constructor,
+    },
+    PrototypeMember {
+        prototype: PrototypeId::WeakSet,
+        key: MemberKey::Named("add"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::WeakSetMethod(WeakSetMethod::Add),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::WeakSet,
+        key: MemberKey::Named("delete"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::WeakSetMethod(WeakSetMethod::Delete),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::WeakSet,
+        key: MemberKey::Named("has"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::WeakSetMethod(WeakSetMethod::Has),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::WeakSet,
+        key: MemberKey::Symbol(WellKnownSymbol::ToStringTag),
+        kind: MemberKind::Data,
+        attributes: DescriptorAttributes::READONLY,
+        binding: SemanticBinding::StringTag("WeakSet"),
+    },
 ];
 
 const fn validate_prototype_surface(surface: &[PrototypeMember]) {
@@ -1683,5 +2093,80 @@ mod tests {
         assert!(prototype_has(PrototypeId::Function, "caller"));
         assert!(prototype_has(PrototypeId::Function, "arguments"));
         assert!(!prototype_has(PrototypeId::Function, "nonexistent"));
+    }
+
+    #[test]
+    fn map_prototype_members_are_complete() {
+        let members: Vec<_> = prototype_members(PrototypeId::Map).collect();
+        assert_eq!(members.len(), 15);
+        assert!(prototype_has(PrototypeId::Map, "constructor"));
+        assert!(prototype_has(PrototypeId::Map, "clear"));
+        assert!(prototype_has(PrototypeId::Map, "delete"));
+        assert!(prototype_has(PrototypeId::Map, "entries"));
+        assert!(prototype_has(PrototypeId::Map, "forEach"));
+        assert!(prototype_has(PrototypeId::Map, "get"));
+        assert!(prototype_has(PrototypeId::Map, "getOrInsert"));
+        assert!(prototype_has(PrototypeId::Map, "getOrInsertComputed"));
+        assert!(prototype_has(PrototypeId::Map, "has"));
+        assert!(prototype_has(PrototypeId::Map, "keys"));
+        assert!(prototype_has(PrototypeId::Map, "set"));
+        assert!(prototype_has(PrototypeId::Map, "size"));
+        assert!(prototype_has(PrototypeId::Map, "values"));
+        assert!(prototype_has(PrototypeId::Map, "@@iterator"));
+        assert!(prototype_has(PrototypeId::Map, "@@toStringTag"));
+        assert!(!prototype_has(PrototypeId::Map, "nonexistent"));
+    }
+
+    #[test]
+    fn set_prototype_members_are_complete() {
+        let members: Vec<_> = prototype_members(PrototypeId::Set).collect();
+        assert_eq!(members.len(), 19);
+        assert!(prototype_has(PrototypeId::Set, "constructor"));
+        assert!(prototype_has(PrototypeId::Set, "add"));
+        assert!(prototype_has(PrototypeId::Set, "clear"));
+        assert!(prototype_has(PrototypeId::Set, "delete"));
+        assert!(prototype_has(PrototypeId::Set, "difference"));
+        assert!(prototype_has(PrototypeId::Set, "entries"));
+        assert!(prototype_has(PrototypeId::Set, "forEach"));
+        assert!(prototype_has(PrototypeId::Set, "has"));
+        assert!(prototype_has(PrototypeId::Set, "intersection"));
+        assert!(prototype_has(PrototypeId::Set, "isDisjointFrom"));
+        assert!(prototype_has(PrototypeId::Set, "isSubsetOf"));
+        assert!(prototype_has(PrototypeId::Set, "isSupersetOf"));
+        assert!(prototype_has(PrototypeId::Set, "keys"));
+        assert!(prototype_has(PrototypeId::Set, "size"));
+        assert!(prototype_has(PrototypeId::Set, "symmetricDifference"));
+        assert!(prototype_has(PrototypeId::Set, "union"));
+        assert!(prototype_has(PrototypeId::Set, "values"));
+        assert!(prototype_has(PrototypeId::Set, "@@iterator"));
+        assert!(prototype_has(PrototypeId::Set, "@@toStringTag"));
+        assert!(!prototype_has(PrototypeId::Set, "nonexistent"));
+    }
+
+    #[test]
+    fn weak_map_prototype_members_are_complete() {
+        let members: Vec<_> = prototype_members(PrototypeId::WeakMap).collect();
+        assert_eq!(members.len(), 8);
+        assert!(prototype_has(PrototypeId::WeakMap, "constructor"));
+        assert!(prototype_has(PrototypeId::WeakMap, "delete"));
+        assert!(prototype_has(PrototypeId::WeakMap, "get"));
+        assert!(prototype_has(PrototypeId::WeakMap, "getOrInsert"));
+        assert!(prototype_has(PrototypeId::WeakMap, "getOrInsertComputed"));
+        assert!(prototype_has(PrototypeId::WeakMap, "has"));
+        assert!(prototype_has(PrototypeId::WeakMap, "set"));
+        assert!(prototype_has(PrototypeId::WeakMap, "@@toStringTag"));
+        assert!(!prototype_has(PrototypeId::WeakMap, "nonexistent"));
+    }
+
+    #[test]
+    fn weak_set_prototype_members_are_complete() {
+        let members: Vec<_> = prototype_members(PrototypeId::WeakSet).collect();
+        assert_eq!(members.len(), 5);
+        assert!(prototype_has(PrototypeId::WeakSet, "constructor"));
+        assert!(prototype_has(PrototypeId::WeakSet, "add"));
+        assert!(prototype_has(PrototypeId::WeakSet, "delete"));
+        assert!(prototype_has(PrototypeId::WeakSet, "has"));
+        assert!(prototype_has(PrototypeId::WeakSet, "@@toStringTag"));
+        assert!(!prototype_has(PrototypeId::WeakSet, "nonexistent"));
     }
 }
