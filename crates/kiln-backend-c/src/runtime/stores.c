@@ -126,7 +126,7 @@ static int kiln_c99_callable_prototype(kiln_value callable, kiln_value *out) {
  * `Array.prototype[Symbol.unscopables] === Array.prototype[Symbol.unscopables]`. */
 static kiln_value kiln_c99_array_unscopables;
 
-static int kiln_c99_get_array_unscopables(kiln_value *out) {
+int kiln_c99_get_array_unscopables(kiln_value *out) {
     if (kiln_c99_array_unscopables.tag == KILN_VALUE_UNDEFINED) {
         kiln_value built;
         int status = kiln_c99_new_object(&built);

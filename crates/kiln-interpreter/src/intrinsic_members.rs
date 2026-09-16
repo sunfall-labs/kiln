@@ -18,34 +18,8 @@
 //! made unspellable: [`MemberKey`] separates a string key from a symbol key by *type*, and
 //! [`NamedMembers`] refuses a reserved spelling at compile time rather than at review time.
 
-use crate::symbol::WellKnown;
 use crate::{BuiltinAccessor, PrototypeTable};
-
-/// The key a built-in member is published under.
-///
-/// Two variants rather than one string because a symbol key and a string key are listed by
-/// different operations -- `getOwnPropertySymbols` against `getOwnPropertyNames` -- and reached
-/// by different syntax. Collapsing them into one string is what let `"@@hasInstance"`, the
-/// *internal* spelling of `Symbol.hasInstance`, be written into a list of names and reported to
-/// programs as though it were one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MemberKey {
-    /// An ordinary string-keyed member: `map`, `toString`, `byteLength`.
-    Named(&'static str),
-    /// A well-known-symbol-keyed member: `Symbol.iterator`, `Symbol.hasInstance`.
-    #[allow(dead_code)]
-    Symbol(WellKnown),
-}
-
-impl MemberKey {
-    /// The reserved string this key is stored under.
-    pub fn property_key(self) -> &'static str {
-        match self {
-            Self::Named(name) => name,
-            Self::Symbol(well_known) => well_known.property_key(),
-        }
-    }
-}
+pub use kiln_builtin_surface::MemberKey;
 
 /// Whether a string is the internal spelling of a symbol.
 ///
@@ -180,11 +154,6 @@ pub static PROTOTYPE_ACCESSORS: &[Accessor] = &[
         table: PrototypeTable::TypedArray,
         key: MemberKey::Named("length"),
         getter: BuiltinAccessor::TypedArrayLength,
-    },
-    Accessor {
-        table: PrototypeTable::Symbol,
-        key: MemberKey::Named("description"),
-        getter: BuiltinAccessor::SymbolDescription,
     },
     Accessor {
         table: PrototypeTable::Map,

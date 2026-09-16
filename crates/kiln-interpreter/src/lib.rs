@@ -31433,7 +31433,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 &self.intrinsics,
                 PrototypeTable::Symbol,
                 name,
-                symbol_method(name),
+                Native::PrototypeOf(PrototypeTable::Symbol)
+                    .property(name)
+                    .unwrap_or(Value::Undefined),
                 value_realm(target),
             ) {
                 Value::Undefined => {
@@ -40806,24 +40808,48 @@ fn same_value_zero(left: &Value, right: &Value) -> bool {
     }
 }
 
-/// Array methods that call back into user code, and so cannot be plain natives.
-fn array_callback_method(name: &str) -> Option<CallbackMethod> {
-    match name {
-        "map" => Some(CallbackMethod::Map),
-        "parallelMap" => Some(CallbackMethod::ParallelMap),
-        "forEach" => Some(CallbackMethod::ForEach),
-        "filter" => Some(CallbackMethod::Filter),
-        "reduce" => Some(CallbackMethod::Reduce),
-        "sort" => Some(CallbackMethod::Sort),
-        "findIndex" => Some(CallbackMethod::FindIndex),
-        "find" => Some(CallbackMethod::Find),
-        "some" => Some(CallbackMethod::Some),
-        "every" => Some(CallbackMethod::Every),
-        "flatMap" => Some(CallbackMethod::FlatMap),
-        "findLast" => Some(CallbackMethod::FindLast),
-        "findLastIndex" => Some(CallbackMethod::FindLastIndex),
-        "reduceRight" => Some(CallbackMethod::ReduceRight),
-        _ => None,
+fn array_method_value(method: kiln_builtin_surface::ArrayMethod, realm: RealmId) -> Value {
+    use kiln_builtin_surface::ArrayMethod;
+    match method {
+        ArrayMethod::At => Value::Native(Native::ArrayAt, realm),
+        ArrayMethod::Concat => Value::Native(Native::ArrayConcat, realm),
+        ArrayMethod::CopyWithin => Value::Native(Native::ArrayCopyWithin, realm),
+        ArrayMethod::Entries => Value::Native(Native::ArrayEntries, realm),
+        ArrayMethod::Every => Value::Callback(CallbackMethod::Every, realm),
+        ArrayMethod::Fill => Value::Native(Native::ArrayFill, realm),
+        ArrayMethod::Filter => Value::Callback(CallbackMethod::Filter, realm),
+        ArrayMethod::Find => Value::Callback(CallbackMethod::Find, realm),
+        ArrayMethod::FindIndex => Value::Callback(CallbackMethod::FindIndex, realm),
+        ArrayMethod::FindLast => Value::Callback(CallbackMethod::FindLast, realm),
+        ArrayMethod::FindLastIndex => Value::Callback(CallbackMethod::FindLastIndex, realm),
+        ArrayMethod::Flat => Value::Native(Native::ArrayFlat, realm),
+        ArrayMethod::FlatMap => Value::Callback(CallbackMethod::FlatMap, realm),
+        ArrayMethod::ForEach => Value::Callback(CallbackMethod::ForEach, realm),
+        ArrayMethod::Includes => Value::Native(Native::ArrayIncludes, realm),
+        ArrayMethod::IndexOf => Value::Native(Native::ArrayIndexOf, realm),
+        ArrayMethod::Join => Value::Native(Native::ArrayJoin, realm),
+        ArrayMethod::Keys => Value::Native(Native::ArrayKeys, realm),
+        ArrayMethod::LastIndexOf => Value::Native(Native::ArrayLastIndexOf, realm),
+        ArrayMethod::Map => Value::Callback(CallbackMethod::Map, realm),
+        ArrayMethod::ParallelMap => Value::Callback(CallbackMethod::ParallelMap, realm),
+        ArrayMethod::Pop => Value::Native(Native::ArrayPop, realm),
+        ArrayMethod::Push => Value::Native(Native::ArrayPush, realm),
+        ArrayMethod::Reduce => Value::Callback(CallbackMethod::Reduce, realm),
+        ArrayMethod::ReduceRight => Value::Callback(CallbackMethod::ReduceRight, realm),
+        ArrayMethod::Reverse => Value::Native(Native::ArrayReverse, realm),
+        ArrayMethod::Shift => Value::Native(Native::ArrayShift, realm),
+        ArrayMethod::Slice => Value::Native(Native::ArraySlice, realm),
+        ArrayMethod::Some => Value::Callback(CallbackMethod::Some, realm),
+        ArrayMethod::Sort => Value::Callback(CallbackMethod::Sort, realm),
+        ArrayMethod::Splice => Value::Native(Native::ArraySplice, realm),
+        ArrayMethod::ToLocaleString => Value::Native(Native::ArrayToLocaleString, realm),
+        ArrayMethod::ToReversed => Value::Native(Native::ArrayCopy(ArrayCopy::ToReversed), realm),
+        ArrayMethod::ToSorted => Value::Native(Native::ArrayCopy(ArrayCopy::ToSorted), realm),
+        ArrayMethod::ToSpliced => Value::Native(Native::ArrayCopy(ArrayCopy::ToSpliced), realm),
+        ArrayMethod::ToString => Value::Native(Native::ArrayJoinDefault, realm),
+        ArrayMethod::Unshift => Value::Native(Native::ArrayUnshift, realm),
+        ArrayMethod::Values => Value::Native(Native::ArrayValues, realm),
+        ArrayMethod::With => Value::Native(Native::ArrayCopy(ArrayCopy::With), realm),
     }
 }
 
@@ -40896,42 +40922,19 @@ fn number_property(name: &str) -> Value {
 }
 
 fn array_property(name: &str) -> Value {
-    if let Some(method) = array_callback_method(name) {
-        return Value::Callback(method, RealmId::PRIMARY);
-    }
-    if name == WellKnown::Unscopables.property_key() {
-        return Value::Null;
-    }
-    match name {
-        "length" => Value::Number(0.0),
-        "join" => Value::Native(Native::ArrayJoin, RealmId::PRIMARY),
-        "push" => Value::Native(Native::ArrayPush, RealmId::PRIMARY),
-        "pop" => Value::Native(Native::ArrayPop, RealmId::PRIMARY),
-        "indexOf" => Value::Native(Native::ArrayIndexOf, RealmId::PRIMARY),
-        "includes" => Value::Native(Native::ArrayIncludes, RealmId::PRIMARY),
-        "slice" => Value::Native(Native::ArraySlice, RealmId::PRIMARY),
-        "at" => Value::Native(Native::ArrayAt, RealmId::PRIMARY),
-        "flat" => Value::Native(Native::ArrayFlat, RealmId::PRIMARY),
-        "entries" => Value::Native(Native::ArrayEntries, RealmId::PRIMARY),
-        "keys" => Value::Native(Native::ArrayKeys, RealmId::PRIMARY),
-        "concat" => Value::Native(Native::ArrayConcat, RealmId::PRIMARY),
-        "reverse" => Value::Native(Native::ArrayReverse, RealmId::PRIMARY),
-        "with" => Value::Native(Native::ArrayCopy(ArrayCopy::With), RealmId::PRIMARY),
-        "toReversed" => Value::Native(Native::ArrayCopy(ArrayCopy::ToReversed), RealmId::PRIMARY),
-        "toSorted" => Value::Native(Native::ArrayCopy(ArrayCopy::ToSorted), RealmId::PRIMARY),
-        "toSpliced" => Value::Native(Native::ArrayCopy(ArrayCopy::ToSpliced), RealmId::PRIMARY),
-        "shift" => Value::Native(Native::ArrayShift, RealmId::PRIMARY),
-        "unshift" => Value::Native(Native::ArrayUnshift, RealmId::PRIMARY),
-        "lastIndexOf" => Value::Native(Native::ArrayLastIndexOf, RealmId::PRIMARY),
-        "fill" => Value::Native(Native::ArrayFill, RealmId::PRIMARY),
-        "splice" => Value::Native(Native::ArraySplice, RealmId::PRIMARY),
-        "copyWithin" => Value::Native(Native::ArrayCopyWithin, RealmId::PRIMARY),
-        // `Array.prototype.toString` is `join(",")`, which is why `String([1, 2])` is `"1,2"`.
-        "toString" => Value::Native(Native::ArrayJoinDefault, RealmId::PRIMARY),
-        "toLocaleString" => Value::Native(Native::ArrayToLocaleString, RealmId::PRIMARY),
-        "values" => Value::Native(Native::ArrayValues, RealmId::PRIMARY),
-        key if key == WellKnown::Iterator.property_key() => {
-            Value::Native(Native::ArrayValues, RealmId::PRIMARY)
+    let Some(member) =
+        kiln_builtin_surface::find_prototype_member(kiln_builtin_surface::PrototypeId::Array, name)
+    else {
+        return Value::Undefined;
+    };
+    match member.binding {
+        kiln_builtin_surface::SemanticBinding::ArrayLength => Value::Number(0.0),
+        kiln_builtin_surface::SemanticBinding::Constructor => {
+            Value::Native(Native::ArrayConstructor, RealmId::PRIMARY)
+        }
+        kiln_builtin_surface::SemanticBinding::ArrayUnscopables => Value::Null,
+        kiln_builtin_surface::SemanticBinding::ArrayMethod(method) => {
+            array_method_value(method, RealmId::PRIMARY)
         }
         _ => Value::Undefined,
     }
@@ -44094,29 +44097,6 @@ fn boolean_method(name: &str) -> Value {
     }
 }
 
-/// What `Symbol.prototype` answers.
-///
-/// `toString` is the display form rather than `ToString` of the receiver: a symbol is the one
-/// primitive that refuses implicit conversion, and `Symbol.prototype.toString` is the explicit
-/// way past that refusal.
-fn symbol_method(name: &str) -> Value {
-    match name {
-        // Not `toLocaleString`: a symbol inherits `Object.prototype`'s.
-        "toString" => Value::Native(Native::PrimitiveToString, RealmId::PRIMARY),
-        "valueOf" => Value::Native(Native::PrimitiveValueOf, RealmId::PRIMARY),
-        key if key == WellKnown::ToStringTag.property_key() => {
-            Value::String("Symbol".to_owned().into())
-        }
-        // `thisSymbolValue`, which answers the symbol itself for every hint. It is what makes
-        // `` `${sym}` `` a TypeError rather than a description: the reduction reaches a symbol,
-        // and a symbol has no string.
-        key if key == WellKnown::ToPrimitive.property_key() => {
-            Value::Native(Native::SymbolToPrimitive, RealmId::PRIMARY)
-        }
-        _ => Value::Undefined,
-    }
-}
-
 /// What `BigInt.prototype` answers.
 fn bigint_method(name: &str) -> Value {
     match name {
@@ -46083,6 +46063,16 @@ impl Intrinsics {
         let Some(identity) = intrinsic_key(target) else {
             return Overridden::Untouched;
         };
+        if matches!(
+            target,
+            Value::Native(
+                Native::PrototypeOf(PrototypeTable::Symbol | PrototypeTable::Array),
+                _
+            )
+        ) && !self.is_materialized(target)
+        {
+            self.materialize(target);
+        }
         let entries = self.entries.borrow();
         let Some((_, slots)) = entries.iter().find(|(held, _)| *held == identity) else {
             return Overridden::Untouched;
@@ -46244,6 +46234,78 @@ impl Intrinsics {
             return;
         }
         let realm = value_realm(target);
+        if let Value::Native(
+            Native::PrototypeOf(table @ (PrototypeTable::Symbol | PrototypeTable::Array)),
+            _,
+        ) = target
+        {
+            let proto_id = match table {
+                PrototypeTable::Symbol => kiln_builtin_surface::PrototypeId::Symbol,
+                PrototypeTable::Array => kiln_builtin_surface::PrototypeId::Array,
+                _ => unreachable!(),
+            };
+            let mut data = ObjectData::default();
+            for member in kiln_builtin_surface::prototype_members(proto_id) {
+                let key_str = match member.key {
+                    kiln_builtin_surface::MemberKey::Named(name) => name,
+                    kiln_builtin_surface::MemberKey::Symbol(sym) => sym.property_key(),
+                };
+                let prop = match member.binding {
+                    kiln_builtin_surface::SemanticBinding::PrimitiveToString => {
+                        Property::Value(Value::Native(Native::PrimitiveToString, realm))
+                    }
+                    kiln_builtin_surface::SemanticBinding::PrimitiveValueOf => {
+                        Property::Value(Value::Native(Native::PrimitiveValueOf, realm))
+                    }
+                    kiln_builtin_surface::SemanticBinding::SymbolDescription => {
+                        Property::Accessor {
+                            get: Some(Value::Native(
+                                Native::BuiltinAccessor(BuiltinAccessor::SymbolDescription),
+                                realm,
+                            )),
+                            set: None,
+                        }
+                    }
+                    kiln_builtin_surface::SemanticBinding::StringTag(tag) => {
+                        Property::Value(Value::String(tag.to_owned().into()))
+                    }
+                    kiln_builtin_surface::SemanticBinding::SymbolToPrimitive => {
+                        Property::Value(Value::Native(Native::SymbolToPrimitive, realm))
+                    }
+                    kiln_builtin_surface::SemanticBinding::Constructor => {
+                        let ctor = match table {
+                            PrototypeTable::Symbol => Native::SymbolConstructor,
+                            PrototypeTable::Array => Native::ArrayConstructor,
+                            _ => unreachable!(),
+                        };
+                        Property::Value(Value::Native(ctor, realm))
+                    }
+                    kiln_builtin_surface::SemanticBinding::ArrayLength => {
+                        Property::Value(Value::Number(0.0))
+                    }
+                    kiln_builtin_surface::SemanticBinding::ArrayUnscopables => {
+                        Property::Value(self.array_unscopables(realm))
+                    }
+                    kiln_builtin_surface::SemanticBinding::ArrayMethod(method) => {
+                        Property::Value(array_method_value(method, realm))
+                    }
+                };
+                let attrs = Attributes {
+                    writable: member.attributes.writable,
+                    enumerable: member.attributes.enumerable,
+                    configurable: member.attributes.configurable,
+                };
+                data.install_key(PropertyKeyRef::Utf8(key_str), prop, attrs);
+            }
+            data.set_prototype(prototype_of(target));
+            let mut entries = self.entries.borrow_mut();
+            if let Some((_, slot)) = entries.iter_mut().find(|(key, _)| *key == identity) {
+                *slot = data;
+            } else {
+                entries.push((identity, data));
+            }
+            return;
+        }
         let mut keys: Vec<String> = match target {
             Value::Native(Native::PrototypeOf(table), _) => intrinsic_prototype_entries(*table)
                 .into_iter()
@@ -46782,25 +46844,63 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
 }
 
 fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String, Property)> {
+    if let Some(proto_id) = match table {
+        PrototypeTable::Symbol => Some(kiln_builtin_surface::PrototypeId::Symbol),
+        PrototypeTable::Array => Some(kiln_builtin_surface::PrototypeId::Array),
+        _ => None,
+    } {
+        return kiln_builtin_surface::prototype_members(proto_id)
+            .filter_map(|member| {
+                let name = match member.key {
+                    kiln_builtin_surface::MemberKey::Named(name) => name,
+                    kiln_builtin_surface::MemberKey::Symbol(_) => return None,
+                };
+                let prop = match member.binding {
+                    kiln_builtin_surface::SemanticBinding::PrimitiveToString => {
+                        Property::Value(Value::Native(Native::PrimitiveToString, RealmId::PRIMARY))
+                    }
+                    kiln_builtin_surface::SemanticBinding::PrimitiveValueOf => {
+                        Property::Value(Value::Native(Native::PrimitiveValueOf, RealmId::PRIMARY))
+                    }
+                    kiln_builtin_surface::SemanticBinding::SymbolDescription => {
+                        Property::Accessor {
+                            get: Some(Value::Native(
+                                Native::BuiltinAccessor(BuiltinAccessor::SymbolDescription),
+                                RealmId::PRIMARY,
+                            )),
+                            set: None,
+                        }
+                    }
+                    kiln_builtin_surface::SemanticBinding::Constructor => {
+                        let ctor = match table {
+                            PrototypeTable::Symbol => Native::SymbolConstructor,
+                            PrototypeTable::Array => Native::ArrayConstructor,
+                            _ => unreachable!(),
+                        };
+                        Property::Value(Value::Native(ctor, RealmId::PRIMARY))
+                    }
+                    kiln_builtin_surface::SemanticBinding::ArrayLength => {
+                        Property::Value(Value::Number(0.0))
+                    }
+                    kiln_builtin_surface::SemanticBinding::ArrayMethod(method) => {
+                        Property::Value(array_method_value(method, RealmId::PRIMARY))
+                    }
+                    _ => return None,
+                };
+                Some((name.to_owned(), prop))
+            })
+            .collect();
+    }
     let target = Value::Native(Native::PrototypeOf(table), RealmId::PRIMARY);
-    let mut names = Vec::new();
-    if matches!(table, PrototypeTable::Array) {
+    let mut names = vec!["constructor"];
+    if matches!(table, PrototypeTable::String) {
         names.push("length");
-        names.push("constructor");
-    } else {
-        names.push("constructor");
-        if matches!(table, PrototypeTable::String) {
-            names.push("length");
-        }
     }
     names
         .into_iter()
         .chain(intrinsic_prototype_method_names(table).iter().copied())
         .chain(intrinsic_members::accessor_keys(table))
         .filter_map(|name| {
-            if matches!(table, PrototypeTable::Array) && name == "length" {
-                return Some((name.to_owned(), Property::Value(Value::Number(0.0))));
-            }
             if let Some(value) = string_exotic(&target, name) {
                 return Some((name.to_owned(), Property::Value(value)));
             }
@@ -47584,6 +47684,20 @@ fn intrinsic_own_attributes(target: &Value, key: &str) -> Option<Attributes> {
     let Value::Native(native, _) = target else {
         return None;
     };
+    if let Native::PrototypeOf(table @ (PrototypeTable::Symbol | PrototypeTable::Array)) = native {
+        let proto_id = match table {
+            PrototypeTable::Symbol => kiln_builtin_surface::PrototypeId::Symbol,
+            PrototypeTable::Array => kiln_builtin_surface::PrototypeId::Array,
+            _ => unreachable!(),
+        };
+        return kiln_builtin_surface::find_prototype_member(proto_id, key).map(|member| {
+            Attributes {
+                writable: member.attributes.writable,
+                enumerable: member.attributes.enumerable,
+                configurable: member.attributes.configurable,
+            }
+        });
+    }
     if string_exotic(target, key).is_some() {
         return Some(Attributes::NONE);
     }

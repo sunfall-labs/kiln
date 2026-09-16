@@ -1251,6 +1251,15 @@ macro_rules! builtin_member_row {
             "\", NULL},\n"
         )
     };
+    ($builtin:ident, $name:literal, unscopables()) => {
+        concat!(
+            "    {",
+            stringify!($builtin),
+            ", KILN_C99_MEMBER_UNSCOPABLES, 0, 0.0, \"",
+            $name,
+            "\", NULL},\n"
+        )
+    };
 }
 
 /// The single declaration of every table-driven built-in's static surface.
@@ -1474,6 +1483,59 @@ builtin_surface! {
     (KILN_C99_BUILTIN_MATH, "Math", "LOG2E", num("1.44269504088896340736")),
     (KILN_C99_BUILTIN_MATH, "Math", "LOG10E", num("0.43429448190325182765")),
     (KILN_C99_BUILTIN_MATH, "Math", "@@toStringTag", text("Math")),
+
+    (KILN_C99_BUILTIN_SYMBOL_PROTOTYPE, "Symbol.prototype", "toString",
+     code(KILN_C99_METHOD_PRIMITIVE_TO_STRING)),
+    (KILN_C99_BUILTIN_SYMBOL_PROTOTYPE, "Symbol.prototype", "valueOf",
+     code(KILN_C99_METHOD_OBJECT_VALUE_OF)),
+    (KILN_C99_BUILTIN_SYMBOL_PROTOTYPE, "Symbol.prototype", "constructor",
+     ctor(KILN_C99_BUILTIN_SYMBOL)),
+    (KILN_C99_BUILTIN_SYMBOL_PROTOTYPE, "Symbol.prototype", "@@toStringTag",
+     text("Symbol")),
+
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "length", num("0.0")),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "constructor", ctor(KILN_C99_BUILTIN_ARRAY)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "map", code(KILN_C99_METHOD_ARRAY_GENERIC_MAP)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "parallelMap", code(KILN_C99_METHOD_ARRAY_PARALLEL_MAP)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "forEach", code(KILN_C99_METHOD_FOR_EACH)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "filter", code(KILN_C99_METHOD_ARRAY_GENERIC_FILTER)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "reduce", code(KILN_C99_METHOD_REDUCE)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "sort", code(KILN_C99_METHOD_ARRAY_SORT)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "findIndex", code(KILN_C99_METHOD_ARRAY_FIND_INDEX)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "find", code(KILN_C99_METHOD_ARRAY_FIND)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "some", code(KILN_C99_METHOD_ARRAY_SOME)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "every", code(KILN_C99_METHOD_ARRAY_EVERY)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "flatMap", code(KILN_C99_METHOD_ARRAY_FLAT_MAP)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "findLast", code(KILN_C99_METHOD_ARRAY_FIND_LAST)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "findLastIndex", code(KILN_C99_METHOD_ARRAY_FIND_LAST_INDEX)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "reduceRight", code(KILN_C99_METHOD_ARRAY_REDUCE_RIGHT)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "join", code(KILN_C99_METHOD_JOIN)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "push", code(KILN_C99_METHOD_PUSH)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "pop", code(KILN_C99_METHOD_POP)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "indexOf", code(KILN_C99_METHOD_INDEX_OF)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "includes", code(KILN_C99_METHOD_INCLUDES)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "slice", code(KILN_C99_METHOD_SLICE)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "at", code(KILN_C99_METHOD_ARRAY_AT)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "flat", code(KILN_C99_METHOD_ARRAY_FLAT)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "entries", code(KILN_C99_METHOD_ARRAY_ENTRIES)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "keys", code(KILN_C99_METHOD_ARRAY_KEYS)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "concat", code(KILN_C99_METHOD_CONCAT)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "reverse", code(KILN_C99_METHOD_ARRAY_REVERSE)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "shift", code(KILN_C99_METHOD_ARRAY_SHIFT)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "unshift", code(KILN_C99_METHOD_ARRAY_UNSHIFT)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "lastIndexOf", code(KILN_C99_METHOD_ARRAY_LAST_INDEX_OF)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "fill", code(KILN_C99_METHOD_ARRAY_FILL)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "splice", code(KILN_C99_METHOD_ARRAY_SPLICE)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "copyWithin", code(KILN_C99_METHOD_ARRAY_COPY_WITHIN)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "toString", code(KILN_C99_METHOD_ARRAY_TO_STRING)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "toLocaleString", code(KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "values", code(KILN_C99_METHOD_ARRAY_VALUES)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "with", code(KILN_C99_METHOD_ARRAY_WITH)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "toReversed", code(KILN_C99_METHOD_ARRAY_TO_REVERSED)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "toSorted", code(KILN_C99_METHOD_ARRAY_TO_SORTED)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "toSpliced", code(KILN_C99_METHOD_ARRAY_TO_SPLICED)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "@@iterator", code(KILN_C99_METHOD_ARRAY_VALUES)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "@@unscopables", unscopables()),
 }
 
 /// A member the shared surface declares and this backend does not answer, with the reason.
@@ -1611,6 +1673,10 @@ builtin_backlog! {
      "refused by name: shared memory has no representation here"),
     ("Atomics", "@@toStringTag",
      "refused by name: shared memory has no representation here"),
+    ("Symbol.prototype", "description",
+     "not implemented; needs an accessor method on native Symbol.prototype"),
+    ("Symbol.prototype", "@@toPrimitive",
+     "not implemented; needs @@toPrimitive method code"),
 }
 
 const fn surface_answers(surface: &[BuiltinMember], global: &str, member: &str) -> bool {
@@ -1670,17 +1736,39 @@ const fn assert_surface_is_covered(surface: &[BuiltinMember], backlog: &[Builtin
         index += 1;
     }
 
+    // Check prototype surface coverage as well (ADR 0059)
+    let proto_shared = kiln_builtin_surface::PROTOTYPE_SURFACE;
+    let mut p_idx = 0;
+    while p_idx < proto_shared.len() {
+        let proto = proto_shared[p_idx].prototype;
+        let member_key = proto_shared[p_idx].key.property_key();
+        assert!(
+            surface_answers(surface, proto.name(), member_key)
+                || backlog_names(backlog, proto.name(), member_key),
+            "a prototype member of kiln_builtin_surface::PROTOTYPE_SURFACE is neither in BUILTIN_SURFACE nor in BUILTIN_SURFACE_BACKLOG"
+        );
+        p_idx += 1;
+    }
+
     // The other direction. A member only one engine has is drift whichever engine has it, and
     // this backend inventing one is the harder half to notice: nothing refuses, and the two
     // engines simply answer differently.
     index = 0;
     while index < surface.len() {
-        assert!(
-            !kiln_builtin_surface::is_declared(surface[index].owner)
-                || kiln_builtin_surface::has(surface[index].owner, surface[index].name),
-            "BUILTIN_SURFACE answers a member kiln_builtin_surface::SURFACE does not declare; \
-             either declare it there so both engines have it, or drop the row"
-        );
+        let is_proto = kiln_builtin_surface::PrototypeId::from_name(surface[index].owner);
+        if let Some(proto) = is_proto {
+            assert!(
+                kiln_builtin_surface::prototype_has(proto, surface[index].name),
+                "BUILTIN_SURFACE answers a prototype member kiln_builtin_surface::PROTOTYPE_SURFACE does not declare"
+            );
+        } else {
+            assert!(
+                !kiln_builtin_surface::is_declared(surface[index].owner)
+                    || kiln_builtin_surface::has(surface[index].owner, surface[index].name),
+                "BUILTIN_SURFACE answers a member kiln_builtin_surface::SURFACE does not declare; \
+                 either declare it there so both engines have it, or drop the row"
+            );
+        }
         index += 1;
     }
 
@@ -1692,11 +1780,19 @@ const fn assert_surface_is_covered(surface: &[BuiltinMember], backlog: &[Builtin
             !backlog[index].why.is_empty(),
             "a BUILTIN_SURFACE_BACKLOG row has no reason, which cannot be told from an oversight"
         );
-        assert!(
-            kiln_builtin_surface::is_declared(backlog[index].global)
-                && kiln_builtin_surface::has(backlog[index].global, backlog[index].member),
-            "a BUILTIN_SURFACE_BACKLOG row names a member the shared surface does not declare"
-        );
+        let is_proto = kiln_builtin_surface::PrototypeId::from_name(backlog[index].global);
+        if let Some(proto) = is_proto {
+            assert!(
+                kiln_builtin_surface::prototype_has(proto, backlog[index].member),
+                "a BUILTIN_SURFACE_BACKLOG row names a prototype member the shared surface does not declare"
+            );
+        } else {
+            assert!(
+                kiln_builtin_surface::is_declared(backlog[index].global)
+                    && kiln_builtin_surface::has(backlog[index].global, backlog[index].member),
+                "a BUILTIN_SURFACE_BACKLOG row names a member the shared surface does not declare"
+            );
+        }
         assert!(
             !surface_answers(surface, backlog[index].global, backlog[index].member),
             "a BUILTIN_SURFACE_BACKLOG row names a member BUILTIN_SURFACE now answers; delete the \
@@ -1868,7 +1964,7 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     },
     AbsentAnswer {
         function: "kiln_c99_get_own_kind",
-        sites: 28,
+        sites: 26,
         proved_by: "one membership predicate per receiver kind -- kiln_c99_is_array_member, \
                     kiln_c99_is_string_member, kiln_c99_is_date_member, \
                     kiln_c99_is_collection_member and the kiln_c99_collection_kind_member \
@@ -4178,6 +4274,7 @@ static uint64_t kiln_c99_string_method(const char *key, size_t key_len) {
 #define KILN_C99_MEMBER_TEXT 3
 #define KILN_C99_MEMBER_SYMBOL 4
 #define KILN_C99_MEMBER_BUILTIN 5
+#define KILN_C99_MEMBER_UNSCOPABLES 6
 
 typedef struct {
     uint16_t builtin;
