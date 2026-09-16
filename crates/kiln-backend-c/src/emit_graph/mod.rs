@@ -238,116 +238,148 @@ static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
     return (uint8_t)rounded;\n\
 }}\n\
 static void __attribute__((unused)) {symbol}_pmap_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
-    const kiln_val * restrict src = (const kiln_val * restrict)in;\n\
-    kiln_val * restrict dst = (kiln_val * restrict)out;\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+    const kiln_val * restrict in_arr = (const kiln_val * restrict)in;\n\
+    kiln_val * restrict out_arr = (kiln_val * restrict)out;\n\
+    int failed = 0;\n\
+    #pragma clang loop vectorize(enable) interleave(enable)\n\
     for (size_t i = start; i < end; ++i) {{\n\
-        if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
-        double d; memcpy(&d, &src[i], sizeof d);\n\
+        double d; memcpy(&d, &in_arr[i], sizeof d);\n\
         double r = {symbol}_fn_{index}_p(1, d{index_arg});\n\
-        if (KILN_UNLIKELY(kiln_c99_typed_failed(r))) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
-        dst[i] = kiln_c99_val_from_double(r);\n\
+        failed |= kiln_c99_typed_failed(r);\n\
+        out_arr[i] = kiln_c99_val_from_double(r);\n\
     }}\n\
+    if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
 }}\n\
 static void __attribute__((unused)) {symbol}_pmap_f64_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
-    const double * restrict src = (const double * restrict)in;\n\
-    double * restrict dst = (double * restrict)out;\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+    const double * restrict in_arr = (const double * restrict)in;\n\
+    double * restrict out_arr = (double * restrict)out;\n\
+    int failed = 0;\n\
+    #pragma clang loop vectorize(enable) interleave(enable)\n\
     for (size_t i = start; i < end; ++i) {{\n\
-        if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
-        double r = {symbol}_fn_{index}_p(1, src[i]{index_arg});\n\
-        if (KILN_UNLIKELY(kiln_c99_typed_failed(r))) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
-        dst[i] = r;\n\
+        double r = {symbol}_fn_{index}_p(1, in_arr[i]{index_arg});\n\
+        failed |= kiln_c99_typed_failed(r);\n\
+        out_arr[i] = r;\n\
     }}\n\
+    if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
 }}\n\
 static void __attribute__((unused)) {symbol}_pmap_f32_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
-    const float * restrict src = (const float * restrict)in;\n\
-    float * restrict dst = (float * restrict)out;\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+    const float * restrict in_arr = (const float * restrict)in;\n\
+    float * restrict out_arr = (float * restrict)out;\n\
+    int failed = 0;\n\
+    #pragma clang loop vectorize(enable) interleave(enable)\n\
     for (size_t i = start; i < end; ++i) {{\n\
-        if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
-        double r = {symbol}_fn_{index}_p(1, (double)src[i]{index_arg});\n\
-        if (KILN_UNLIKELY(kiln_c99_typed_failed(r))) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
-        dst[i] = (float)r;\n\
+        double r = {symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
+        failed |= kiln_c99_typed_failed(r);\n\
+        out_arr[i] = (float)r;\n\
     }}\n\
+    if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
 }}\n\
 static void __attribute__((unused)) {symbol}_pmap_i32_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
-    const int32_t * restrict src = (const int32_t * restrict)in;\n\
-    int32_t * restrict dst = (int32_t * restrict)out;\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+    const int32_t * restrict in_arr = (const int32_t * restrict)in;\n\
+    int32_t * restrict out_arr = (int32_t * restrict)out;\n\
+    int failed = 0;\n\
+    #pragma clang loop vectorize(enable) interleave(enable)\n\
     for (size_t i = start; i < end; ++i) {{\n\
-        if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
-        double r = {symbol}_fn_{index}_p(1, (double)src[i]{index_arg});\n\
-        if (KILN_UNLIKELY(kiln_c99_typed_failed(r))) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
-        dst[i] = (int32_t){symbol}_to_u32_{index}(r);\n\
+        double r = {symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
+        failed |= kiln_c99_typed_failed(r);\n\
+        out_arr[i] = (int32_t){symbol}_to_u32_{index}(r);\n\
     }}\n\
+    if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
 }}\n\
 static void __attribute__((unused)) {symbol}_pmap_u32_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
-    const uint32_t * restrict src = (const uint32_t * restrict)in;\n\
-    uint32_t * restrict dst = (uint32_t * restrict)out;\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+    const uint32_t * restrict in_arr = (const uint32_t * restrict)in;\n\
+    uint32_t * restrict out_arr = (uint32_t * restrict)out;\n\
+    int failed = 0;\n\
+    #pragma clang loop vectorize(enable) interleave(enable)\n\
     for (size_t i = start; i < end; ++i) {{\n\
-        if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
-        double r = {symbol}_fn_{index}_p(1, (double)src[i]{index_arg});\n\
-        if (KILN_UNLIKELY(kiln_c99_typed_failed(r))) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
-        dst[i] = {symbol}_to_u32_{index}(r);\n\
+        double r = {symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
+        failed |= kiln_c99_typed_failed(r);\n\
+        out_arr[i] = {symbol}_to_u32_{index}(r);\n\
     }}\n\
+    if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
 }}\n\
 static void __attribute__((unused)) {symbol}_pmap_i16_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
-    const int16_t * restrict src = (const int16_t * restrict)in;\n\
-    int16_t * restrict dst = (int16_t * restrict)out;\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+    const int16_t * restrict in_arr = (const int16_t * restrict)in;\n\
+    int16_t * restrict out_arr = (int16_t * restrict)out;\n\
+    int failed = 0;\n\
+    #pragma clang loop vectorize(enable) interleave(enable)\n\
     for (size_t i = start; i < end; ++i) {{\n\
-        if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
-        double r = {symbol}_fn_{index}_p(1, (double)src[i]{index_arg});\n\
-        if (KILN_UNLIKELY(kiln_c99_typed_failed(r))) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
-        dst[i] = (int16_t)(uint16_t){symbol}_to_u32_{index}(r);\n\
+        double r = {symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
+        failed |= kiln_c99_typed_failed(r);\n\
+        out_arr[i] = (int16_t)(uint16_t){symbol}_to_u32_{index}(r);\n\
     }}\n\
+    if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
 }}\n\
 static void __attribute__((unused)) {symbol}_pmap_u16_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
-    const uint16_t * restrict src = (const uint16_t * restrict)in;\n\
-    uint16_t * restrict dst = (uint16_t * restrict)out;\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+    const uint16_t * restrict in_arr = (const uint16_t * restrict)in;\n\
+    uint16_t * restrict out_arr = (uint16_t * restrict)out;\n\
+    int failed = 0;\n\
+    #pragma clang loop vectorize(enable) interleave(enable)\n\
     for (size_t i = start; i < end; ++i) {{\n\
-        if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
-        double r = {symbol}_fn_{index}_p(1, (double)src[i]{index_arg});\n\
-        if (KILN_UNLIKELY(kiln_c99_typed_failed(r))) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
-        dst[i] = (uint16_t){symbol}_to_u32_{index}(r);\n\
+        double r = {symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
+        failed |= kiln_c99_typed_failed(r);\n\
+        out_arr[i] = (uint16_t){symbol}_to_u32_{index}(r);\n\
     }}\n\
+    if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
 }}\n\
 static void __attribute__((unused)) {symbol}_pmap_i8_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
-    const int8_t * restrict src = (const int8_t * restrict)in;\n\
-    int8_t * restrict dst = (int8_t * restrict)out;\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+    const int8_t * restrict in_arr = (const int8_t * restrict)in;\n\
+    int8_t * restrict out_arr = (int8_t * restrict)out;\n\
+    int failed = 0;\n\
+    #pragma clang loop vectorize(enable) interleave(enable)\n\
     for (size_t i = start; i < end; ++i) {{\n\
-        if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
-        double r = {symbol}_fn_{index}_p(1, (double)src[i]{index_arg});\n\
-        if (KILN_UNLIKELY(kiln_c99_typed_failed(r))) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
-        dst[i] = (int8_t)(uint8_t){symbol}_to_u32_{index}(r);\n\
+        double r = {symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
+        failed |= kiln_c99_typed_failed(r);\n\
+        out_arr[i] = (int8_t)(uint8_t){symbol}_to_u32_{index}(r);\n\
     }}\n\
+    if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
 }}\n\
 static void __attribute__((unused)) {symbol}_pmap_u8_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
-    const uint8_t * restrict src = (const uint8_t * restrict)in;\n\
-    uint8_t * restrict dst = (uint8_t * restrict)out;\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+    const uint8_t * restrict in_arr = (const uint8_t * restrict)in;\n\
+    uint8_t * restrict out_arr = (uint8_t * restrict)out;\n\
+    int failed = 0;\n\
+    #pragma clang loop vectorize(enable) interleave(enable)\n\
     for (size_t i = start; i < end; ++i) {{\n\
-        if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
-        double r = {symbol}_fn_{index}_p(1, (double)src[i]{index_arg});\n\
-        if (KILN_UNLIKELY(kiln_c99_typed_failed(r))) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
-        dst[i] = (uint8_t){symbol}_to_u32_{index}(r);\n\
+        double r = {symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
+        failed |= kiln_c99_typed_failed(r);\n\
+        out_arr[i] = (uint8_t){symbol}_to_u32_{index}(r);\n\
     }}\n\
+    if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
 }}\n\
 static void __attribute__((unused)) {symbol}_pmap_u8c_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
-    const uint8_t * restrict src = (const uint8_t * restrict)in;\n\
-    uint8_t * restrict dst = (uint8_t * restrict)out;\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+    const uint8_t * restrict in_arr = (const uint8_t * restrict)in;\n\
+    uint8_t * restrict out_arr = (uint8_t * restrict)out;\n\
+    int failed = 0;\n\
+    #pragma clang loop vectorize(enable) interleave(enable)\n\
     for (size_t i = start; i < end; ++i) {{\n\
-        if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
-        double r = {symbol}_fn_{index}_p(1, (double)src[i]{index_arg});\n\
-        if (KILN_UNLIKELY(kiln_c99_typed_failed(r))) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
-        dst[i] = {symbol}_clamp_u8_{index}(r);\n\
+        double r = {symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
+        failed |= kiln_c99_typed_failed(r);\n\
+        out_arr[i] = {symbol}_clamp_u8_{index}(r);\n\
     }}\n\
+    if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
 }}\n\
 static void __attribute__((unused)) {symbol}_pmap_typed_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
-    kiln_typed_array * restrict src = (kiln_typed_array * restrict)in;\n\
-    kiln_typed_array * restrict dst = (kiln_typed_array * restrict)out;\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+    kiln_typed_array * restrict in_arr = (kiln_typed_array * restrict)in;\n\
+    kiln_typed_array * restrict out_arr = (kiln_typed_array * restrict)out;\n\
+    int failed = 0;\n\
     for (size_t i = start; i < end; ++i) {{\n\
-        if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
-        double d = kiln_c99_typed_get(src, i);\n\
+        double d = kiln_c99_typed_get(in_arr, i);\n\
         double r = {symbol}_fn_{index}_p(1, d{index_arg});\n\
-        if (KILN_UNLIKELY(kiln_c99_typed_failed(r))) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
-        kiln_c99_typed_set(dst, i, r);\n\
+        failed |= kiln_c99_typed_failed(r);\n\
+        kiln_c99_typed_set(out_arr, i, r);\n\
     }}\n\
+    if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
 }}"
     )
     .unwrap();

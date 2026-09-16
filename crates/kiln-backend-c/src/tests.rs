@@ -7051,6 +7051,32 @@ fn pure_closure_classification_and_parallel_map_emission() {
         generated.source.contains("built_arr"),
         "emitted C should contain native array lowering for parallelMap"
     );
+    assert!(
+        generated
+            .source
+            .contains("#pragma clang loop vectorize(enable)"),
+        "emitted C should contain vectorization hint for chunk workers"
+    );
+    assert!(
+        generated.source.contains("in_arr"),
+        "emitted C should use in_arr restrict pointer in chunk workers"
+    );
+    assert!(
+        generated.source.contains("out_arr"),
+        "emitted C should use out_arr restrict pointer in chunk workers"
+    );
+    assert!(
+        generated.source.contains("_pmap_f64_"),
+        "emitted C should contain specialized f64 chunk worker"
+    );
+    assert!(
+        generated.source.contains("const double * restrict in_arr"),
+        "emitted C should define in_arr restrict pointer for f64"
+    );
+    assert!(
+        generated.source.contains("double * restrict out_arr"),
+        "emitted C should define out_arr restrict pointer for f64"
+    );
 }
 
 #[test]
