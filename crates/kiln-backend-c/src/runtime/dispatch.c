@@ -104,9 +104,7 @@ static int kiln_c99_json_indent_string(kiln_value value, kiln_text *out) {
     view = *source;
     view.unit_len = (uint32_t)units;
     if (units != 0 && source->data != NULL) {
-        view.data = kiln_string_is_utf16(source)
-                        ? (const uint16_t *)source->data
-                        : (const uint8_t *)source->data;
+        view.data = source->data;
     }
     if (kiln_string_is_utf16(&view)) {
         for (index = 0; index < units; ++index) {
