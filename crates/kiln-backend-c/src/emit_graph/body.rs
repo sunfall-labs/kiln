@@ -1689,6 +1689,29 @@ fn emit_blocks(
             conds.push(format!(
                 "(argc > {slot} && ((args[{slot}] & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && kiln_c99_gc_kind_of_ptr(KILN_VAL_PTR(args[{slot}])) == KILN_GC_ARRAY))"
             ));
+            writeln!(
+                output,
+                "    const kiln_array *kiln_param_{slot}_arr = (argc > {slot}) ? (const kiln_array *)KILN_VAL_PTR(args[{slot}]) : NULL; (void)kiln_param_{slot}_arr;"
+            )
+            .unwrap();
+            if let Some(&initial) = graph.initial_locals.get(slot) {
+                writeln!(
+                    output,
+                    "    const kiln_array *kiln_spec_{v}_arr = kiln_param_{slot}_arr; (void)kiln_spec_{v}_arr;",
+                    v = initial.0
+                )
+                .unwrap();
+            }
+            for (vid, op) in &ops {
+                if matches!(op, GraphOp::LoadLocal(load_slot) if *load_slot as usize == slot) {
+                    writeln!(
+                        output,
+                        "    const kiln_array *kiln_spec_{v}_arr = kiln_param_{slot}_arr; (void)kiln_spec_{v}_arr;",
+                        v = vid.0
+                    )
+                    .unwrap();
+                }
+            }
         }
         let mut spec_sorted: Vec<ValueId> = spec_arrays.iter().copied().collect();
         spec_sorted.sort();
@@ -1705,8 +1728,8 @@ fn emit_blocks(
             .unwrap();
             writeln!(
                 output,
-                "    kiln_val kiln_spec_{} = *(const kiln_val *)KILN_VAL_PTR(upvalues[{index}]);",
-                vid.0
+                "    kiln_val kiln_spec_{v} = *(const kiln_val *)KILN_VAL_PTR(upvalues[{index}]);\n    const kiln_array *kiln_spec_{v}_arr = (const kiln_array *)KILN_VAL_PTR(kiln_spec_{v}); (void)kiln_spec_{v}_arr;",
+                v = vid.0
             )
             .unwrap();
             conds.push(format!(
