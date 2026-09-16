@@ -7565,9 +7565,7 @@ fn executable_math_and_array_push_optimizations_execute_correctly() {
 
     let generated = emit(&program).expect("program emits");
     assert!(
-        generated
-            .source
-            .contains("arr->count < arr->capacity"),
+        generated.source.contains("arr->count < arr->capacity"),
         "expected inline push fast path in generated source:\n{}",
         generated.source
     );
@@ -7588,12 +7586,12 @@ fn executable_math_and_array_push_optimizations_execute_correctly() {
 #[test]
 fn executable_native_alu_and_bitwise_operations_execute_correctly() {
     let constants = vec![
-        Constant::Number(12.0f64.to_bits()),          // 0: 12
-        Constant::Number(5.0f64.to_bits()),           // 1: 5
-        Constant::Number(2.0f64.to_bits()),           // 2: 2
-        Constant::Number(1.0f64.to_bits()),           // 3: 1
-        Constant::Number((-16.0f64).to_bits()),       // 4: -16
-        Constant::Number(1073741947.0f64.to_bits()),   // 5: expected sum
+        Constant::Number(12.0f64.to_bits()),         // 0: 12
+        Constant::Number(5.0f64.to_bits()),          // 1: 5
+        Constant::Number(2.0f64.to_bits()),          // 2: 2
+        Constant::Number(1.0f64.to_bits()),          // 3: 1
+        Constant::Number((-16.0f64).to_bits()),      // 4: -16
+        Constant::Number(1073741947.0f64.to_bits()), // 5: expected sum
     ];
 
     let code = vec![
@@ -7602,53 +7600,44 @@ fn executable_native_alu_and_bitwise_operations_execute_correctly() {
         Instruction::StoreLocal(0),
         Instruction::Const(1),
         Instruction::StoreLocal(1),
-
         // (a & b)
         Instruction::LoadLocal(0),
         Instruction::LoadLocal(1),
         Instruction::Binary(BinaryOp::BitwiseAnd),
-
         // + (a | b)
         Instruction::LoadLocal(0),
         Instruction::LoadLocal(1),
         Instruction::Binary(BinaryOp::BitwiseOr),
         Instruction::Binary(BinaryOp::Add),
-
         // + (a ^ b)
         Instruction::LoadLocal(0),
         Instruction::LoadLocal(1),
         Instruction::Binary(BinaryOp::BitwiseXor),
         Instruction::Binary(BinaryOp::Add),
-
         // + (a << 2)
         Instruction::LoadLocal(0),
         Instruction::Const(2),
         Instruction::Binary(BinaryOp::ShiftLeft),
         Instruction::Binary(BinaryOp::Add),
-
         // + (a >> 1)
         Instruction::LoadLocal(0),
         Instruction::Const(3),
         Instruction::Binary(BinaryOp::ShiftRight),
         Instruction::Binary(BinaryOp::Add),
-
         // + ((-16) >>> 2)
         Instruction::Const(4),
         Instruction::Const(2),
         Instruction::Binary(BinaryOp::UnsignedShiftRight),
         Instruction::Binary(BinaryOp::Add),
-
         // + (a * b)
         Instruction::LoadLocal(0),
         Instruction::LoadLocal(1),
         Instruction::Binary(BinaryOp::Multiply),
         Instruction::Binary(BinaryOp::Add),
-
         // + (~a)
         Instruction::LoadLocal(0),
         Instruction::Unary(UnaryOp::BitwiseNot),
         Instruction::Binary(BinaryOp::Add),
-
         // == 1073741947
         Instruction::Const(5),
         Instruction::Binary(BinaryOp::StrictEqual),
@@ -7684,4 +7673,3 @@ fn executable_native_alu_and_bitwise_operations_execute_correctly() {
         String::from_utf8_lossy(&run.stderr)
     );
 }
-

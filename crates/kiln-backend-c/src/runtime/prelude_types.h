@@ -995,6 +995,7 @@ typedef struct kiln_proxy {
 typedef enum kiln_gc_kind {
     KILN_GC_NONE = 0,
     KILN_GC_STRING,
+    KILN_GC_SLICED_STRING,
     KILN_GC_BYTES,
     KILN_GC_OBJECT,
     KILN_GC_CLOSURE,

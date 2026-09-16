@@ -82,7 +82,7 @@ static kiln_value kiln_val_to_boundary(kiln_val v) {
                     return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)&kiln_c99_empty_string, 0);
                 }
                 kiln_value result = kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)s, s->unit_len);
-                if (s->data == (const char *)(s + 1)) result.flags = KILN_VALUE_FLAG_OWNED_STRING;
+                if (!kiln_string_is_sliced(s) && s->data == (const char *)(s + 1)) result.flags = KILN_VALUE_FLAG_OWNED_STRING;
                 return result;
             }
             if (tag == KILN_TAG_CLOSURE_PREFIX) {

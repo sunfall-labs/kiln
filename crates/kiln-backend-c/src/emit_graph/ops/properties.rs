@@ -638,30 +638,38 @@ pub(super) fn emit_get_computed(
         (
             format!(
                 "const kiln_array *arr = (const kiln_array *)ptr; if (KILN_LIKELY({arr_bound} && arr->elements[i{k}] != KILN_VAL_HOLE)) {{ v{v} = arr->elements[i{k}]; handled = 1; }}",
-                k = key.0, v = v
+                k = key.0,
+                v = v
             ),
             format!(
                 "kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY({typed_bound})) {{ double d = kiln_c99_typed_get(view, (size_t)i{k}); v{v} = kiln_c99_val_from_double(d); handled = 1; }}",
-                k = key.0, v = v
+                k = key.0,
+                v = v
             ),
             format!(
                 "const kiln_string *str = (const kiln_string *)KILN_VAL_PTR(v{o}); if (KILN_LIKELY(str != NULL && {str_bound})) {{ v{v} = kiln_c99_val_from_unit(kiln_string_unit_at(str, (size_t)i{k})); handled = 1; }}",
-                o = object.0, k = key.0, v = v
+                o = object.0,
+                k = key.0,
+                v = v
             ),
         )
     } else {
         (
             format!(
                 "double idx; memcpy(&idx, &{vk}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; const kiln_array *arr = (const kiln_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && arr->elements[slot] != KILN_VAL_HOLE)) {{ v{v} = arr->elements[slot]; handled = 1; }}",
-                vk = vk, v = v
+                vk = vk,
+                v = v
             ),
             format!(
                 "double idx; memcpy(&idx, &{vk}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < view->length)) {{ double d = kiln_c99_typed_get(view, slot); v{v} = kiln_c99_val_from_double(d); handled = 1; }}",
-                vk = vk, v = v
+                vk = vk,
+                v = v
             ),
             format!(
                 "double idx; memcpy(&idx, &{vk}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; const kiln_string *str = (const kiln_string *)KILN_VAL_PTR(v{o}); if (KILN_LIKELY(str != NULL && idx >= 0.0 && idx == (double)slot && slot < str->unit_len)) {{ v{v} = kiln_c99_val_from_unit(kiln_string_unit_at(str, slot)); handled = 1; }}",
-                vk = vk, o = object.0, v = v
+                vk = vk,
+                o = object.0,
+                v = v
             ),
         )
     };
@@ -803,11 +811,15 @@ pub(super) fn emit_set_computed(
         (
             format!(
                 "kiln_array *arr = (kiln_array *)ptr; if (KILN_LIKELY({arr_bound} && !arr->frozen)) {{ if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v{val})) arr->is_numeric = 0; arr->elements[i{k}] = v{val}; v{v} = v{val}; handled = 1; }}",
-                k = key.0, val = value.0, v = v
+                k = key.0,
+                val = value.0,
+                v = v
             ),
             format!(
                 "kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY({typed_bound})) {{ {val_d_init} kiln_c99_typed_set(view, (size_t)i{k}, val_d); v{v} = v{val}; handled = 1; }}",
-                k = key.0, val = value.0, v = v
+                k = key.0,
+                val = value.0,
+                v = v
             ),
         )
     } else {
@@ -822,11 +834,15 @@ pub(super) fn emit_set_computed(
         (
             format!(
                 "double idx; memcpy(&idx, &v{k}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_array *arr = (kiln_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && !arr->frozen)) {{ if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v{val})) arr->is_numeric = 0; arr->elements[slot] = v{val}; v{v} = v{val}; handled = 1; }}",
-                k = key.0, val = value.0, v = v
+                k = key.0,
+                val = value.0,
+                v = v
             ),
             format!(
                 "double idx; memcpy(&idx, &v{k}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < view->length)) {{ {val_d_init} kiln_c99_typed_set(view, slot, val_d); v{v} = v{val}; handled = 1; }}",
-                k = key.0, val = value.0, v = v
+                k = key.0,
+                val = value.0,
+                v = v
             ),
         )
     };

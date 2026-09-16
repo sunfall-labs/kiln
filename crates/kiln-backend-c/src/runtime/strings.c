@@ -110,6 +110,49 @@ static kiln_value kiln_c99_from_units(const uint16_t *units, size_t count) {
     return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)string, count);
 }
 
+/* Zero-copy sliced string: points directly into parent string buffer with start offset and length.
+ * The slice is backed by KILN_GC_SLICED_STRING (24 bytes) which roots parent, guaranteeing zero copies.
+ * Chains of slices are flattened to the root parent on creation, keeping reference depth strictly <= 1. */
+kiln_val kiln_c99_val_slice_string(const kiln_string *source, size_t start, size_t len) {
+    if (source == NULL || len == 0 || start >= source->unit_len) {
+        return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_c99_empty_string);
+    }
+    if (len > source->unit_len - start) {
+        len = source->unit_len - start;
+    }
+    if (len == 0) {
+        return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_c99_empty_string);
+    }
+    if (start == 0 && len == source->unit_len) {
+        return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, source);
+    }
+    if (len == 1 && !kiln_string_is_utf16(source)) {
+        return kiln_c99_val_single_char(((const unsigned char *)kiln_string_latin1(source))[start]);
+    }
+    while (kiln_string_is_sliced(source)) {
+        const kiln_sliced_string *sliced_src = (const kiln_sliced_string *)source;
+        if (kiln_string_is_utf16(source)) {
+            start += (size_t)((const uint16_t *)source->data - (const uint16_t *)sliced_src->parent->data);
+        } else {
+            start += (size_t)((const char *)source->data - (const char *)sliced_src->parent->data);
+        }
+        source = sliced_src->parent;
+    }
+    kiln_sliced_string *sliced = (kiln_sliced_string *)kiln_c99_gc_alloc_hot(KILN_GC_SLICED_STRING, sizeof(kiln_sliced_string), 1);
+    if (KILN_UNLIKELY(sliced == NULL)) {
+        return KILN_VAL_UNDEFINED;
+    }
+    sliced->base.unit_len = (uint32_t)len;
+    sliced->base.flags = (source->flags & (KILN_STRING_UTF16 | KILN_STRING_LATIN1)) | KILN_STRING_SLICED;
+    if (kiln_string_is_utf16(source)) {
+        sliced->base.data = (const void *)(((const uint16_t *)source->data) + start);
+    } else {
+        sliced->base.data = (const void *)(((const char *)source->data) + start);
+    }
+    sliced->parent = source;
+    return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &sliced->base);
+}
+
 /* Copy a range without crossing a codec boundary.  Latin1 storage is already one code unit per
  * byte, but those bytes are not UTF-8: passing a range through `kiln_c99_copy_text` would decode
  * 0xE9 (or any other high byte) as malformed input and replace it. */
@@ -237,6 +280,82 @@ static size_t kiln_c99_unit_position(kiln_value value, size_t length, size_t fal
  * so the last kept piece is searched for like every other. A string with more parts than the
  * scan buffer holds falls back to the growable path, which answers identically and is bounded by
  * the array rather than by the stack. */
+/* Zero-copy split: splits an ASCII/Latin1 string by a 1-byte separator using sliced strings.
+ * Each part is an O(1) slice pointing directly into source->data without allocating text buffers. */
+int kiln_c99_split_string_ascii_byte(kiln_value *result, const kiln_string *source,
+                                      char separator, size_t limit) {
+    enum { KILN_C99_SPLIT_SCAN = 64 };
+    const char *starts[KILN_C99_SPLIT_SCAN];
+    size_t lens[KILN_C99_SPLIT_SCAN];
+    const char *bytes = source != NULL ? (const char *)kiln_string_latin1(source) : "";
+    size_t byte_len = source != NULL ? source->unit_len : 0;
+    const char *p = bytes;
+    const char *end = bytes + byte_len;
+    size_t count = 0;
+    size_t index;
+    int exhausted = 0;
+    kiln_value built;
+    kiln_array *array;
+    int status;
+
+    if (limit == 0) {
+        return kiln_c99_new_array_with_capacity(result, 0, 0);
+    }
+
+    while (count < KILN_C99_SPLIT_SCAN && count < limit) {
+        const char *next = kiln_c99_find_byte(p, end, separator);
+        size_t len = next != NULL ? (size_t)(next - p) : (size_t)(end - p);
+        starts[count] = p;
+        lens[count] = len;
+        count += 1;
+        if (next == NULL) {
+            exhausted = 1;
+            break;
+        }
+        p = next + 1;
+    }
+
+    if (!exhausted && count < limit) {
+        status = kiln_c99_new_array(&built);
+        if (status != KILN_C99_OK) return status;
+        array = kiln_c99_array_of(built);
+        array->is_numeric = 0;
+        p = bytes;
+        for (index = 0; index < limit; ++index) {
+            const char *next = kiln_c99_find_byte(p, end, separator);
+            size_t len = next != NULL ? (size_t)(next - p) : (size_t)(end - p);
+            status = kiln_c99_array_reserve(array, array->count + 1);
+            if (status != KILN_C99_OK) return status;
+            kiln_val part = kiln_c99_val_slice_string(source, (size_t)(p - bytes), len);
+            if (part == KILN_VAL_UNDEFINED) return KILN_C99_OUT_OF_MEMORY;
+            array->elements[array->count] = part;
+            array->count += 1;
+            if (next == NULL) break;
+            p = next + 1;
+        }
+        *result = built;
+        return KILN_C99_OK;
+    }
+
+    status = kiln_c99_new_array_with_capacity(&built, count, 0);
+    if (status != KILN_C99_OK) return status;
+    array = kiln_c99_array_of(built);
+    {
+        kiln_val *slots = array->elements;
+        for (index = 0; index < count; ++index) {
+            kiln_val part = kiln_c99_val_slice_string(source, (size_t)(starts[index] - bytes), lens[index]);
+            if (part == KILN_VAL_UNDEFINED) {
+                array->count = index;
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            slots[index] = part;
+            array->count = index + 1;
+        }
+    }
+    *result = built;
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_split_ascii_byte(kiln_value *result, const char *bytes, size_t byte_len,
                                      char separator, size_t limit) {
     enum { KILN_C99_SPLIT_SCAN = 64 };
@@ -385,7 +504,10 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
                 /* `slice` clamps a reversed range to the start; only `substring` swaps it. */
                 end = start;
             }
-            return kiln_c99_copy_string_slice(receiver_string, start, end, result);
+            kiln_val v = kiln_c99_val_slice_string(receiver_string, start, end > start ? end - start : 0);
+            if (v == KILN_VAL_UNDEFINED) return KILN_C99_OUT_OF_MEMORY;
+            *result = kiln_val_to_boundary(v);
+            return KILN_C99_OK;
         }
         if (code == KILN_C99_METHOD_STRING_INDEX_OF || code == KILN_C99_METHOD_STRING_INCLUDES) {
             kiln_value needle_arg = argc > 0 ? args[0] : kiln_c99_undefined();
@@ -457,8 +579,8 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
                     return KILN_C99_OK;
                 }
                 if (shown.len == 1) {
-                    return kiln_c99_split_ascii_byte(result, (const char *)kiln_string_latin1(receiver_string), receiver_string->unit_len,
-                                                     (char)kiln_string_unit_at(shown_string, 0), lim);
+                    return kiln_c99_split_string_ascii_byte(result, receiver_string,
+                                                           (char)kiln_string_unit_at(shown_string, 0), lim);
                 }
                 /* Counted first and written once, directly, never through the growable
                  * `kiln_c99_array_push`: that reallocs the array's element pointer, and an
@@ -482,10 +604,7 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
                         /* A truncating limit drops the tail rather than merging it into the
                          * last kept piece, so the last piece is searched for like every other.
                          *
-                         * `kiln_c99_val_from_ascii` rather than a boundary value: the boundary
-                         * form of a string is bytes and a length, and turning one back into a
-                         * value allocates and copies a *second* time -- every part of every
-                         * split through here was built twice. */
+                         * Sliced strings point directly into receiver_string without copying. */
                         kiln_array *arr = kiln_c99_array_of(built);
                         const char *p = (const char *)kiln_string_latin1(receiver_string);
                         const char *end = p + receiver_string->unit_len;
@@ -493,9 +612,7 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
                             const char *next =
                                 kiln_c99_memmem(p, (size_t)(end - p), (const char *)kiln_string_latin1(shown_string), shown_string->unit_len);
                             size_t len = next != NULL ? (size_t)(next - p) : (size_t)(end - p);
-                            /* The part before the slot it goes in: building it can collect, and
-                             * a slot the count already covers would be traced unwritten. */
-                            kiln_val part = kiln_c99_val_from_ascii(p, len);
+                            kiln_val part = kiln_c99_val_slice_string(receiver_string, (size_t)(p - (const char *)kiln_string_latin1(receiver_string)), len);
                             if (part == KILN_VAL_UNDEFINED) return KILN_C99_OUT_OF_MEMORY;
                             arr->elements[arr->count] = part;
                             arr->count += 1;

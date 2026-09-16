@@ -236,24 +236,38 @@ macro_rules! kiln_string_abi_declaration {
     () => {
         r#"#define KILN_STRING_LATIN1 UINT32_C(0)
 #define KILN_STRING_UTF16 UINT32_C(1)
+#define KILN_STRING_SLICED UINT32_C(2)
 typedef struct kiln_string {
     uint32_t unit_len;
     uint32_t flags;
     const void *data;
 } kiln_string;
+typedef struct kiln_sliced_string {
+    kiln_string base;
+    const kiln_string *parent;
+} kiln_sliced_string;
 #if defined(__cplusplus)
 static_assert(offsetof(kiln_string, unit_len) == 0, "kiln_string.unit_len ABI offset");
 static_assert(offsetof(kiln_string, flags) == 4, "kiln_string.flags ABI offset");
 static_assert(offsetof(kiln_string, data) == 8, "kiln_string.data ABI offset");
 static_assert(sizeof(kiln_string) == 16, "kiln_string ABI size");
+static_assert(offsetof(kiln_sliced_string, base) == 0, "kiln_sliced_string.base ABI offset");
+static_assert(offsetof(kiln_sliced_string, parent) == 16, "kiln_sliced_string.parent ABI offset");
+static_assert(sizeof(kiln_sliced_string) == 24, "kiln_sliced_string ABI size");
 #elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 _Static_assert(offsetof(kiln_string, unit_len) == 0, "kiln_string.unit_len ABI offset");
 _Static_assert(offsetof(kiln_string, flags) == 4, "kiln_string.flags ABI offset");
 _Static_assert(offsetof(kiln_string, data) == 8, "kiln_string.data ABI offset");
 _Static_assert(sizeof(kiln_string) == 16, "kiln_string ABI size");
+_Static_assert(offsetof(kiln_sliced_string, base) == 0, "kiln_sliced_string.base ABI offset");
+_Static_assert(offsetof(kiln_sliced_string, parent) == 16, "kiln_sliced_string.parent ABI offset");
+_Static_assert(sizeof(kiln_sliced_string) == 24, "kiln_sliced_string ABI size");
 #endif
 static inline int kiln_string_is_utf16(const kiln_string *string) {
     return string != NULL && (string->flags & KILN_STRING_UTF16) != 0;
+}
+static inline int kiln_string_is_sliced(const kiln_string *string) {
+    return string != NULL && (string->flags & KILN_STRING_SLICED) != 0;
 }
 static inline const uint8_t *kiln_string_latin1(const kiln_string *string) {
     return (const uint8_t *)(string == NULL ? NULL : string->data);
