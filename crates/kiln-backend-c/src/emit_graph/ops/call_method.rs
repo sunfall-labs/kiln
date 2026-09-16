@@ -341,6 +341,7 @@ pub(super) fn emit_call_method(
     let symbol = ctx.symbol;
     let diagnostic_site = ctx.diagnostic_site;
     let numbers = ctx.numbers;
+    let ints = ctx.ints;
     // In the parallel clone (ADR 0058, application 2) a `Math.<name>` call on the builtin
     // itself, with every argument proven a number, is the bare libm call and nothing else: no
     // generic fallback, because the clone runs on a thread with no realm to fall back to. The
@@ -416,6 +417,7 @@ pub(super) fn emit_call_method(
     let plan = ctx.plan;
     let spec = ctx.spec;
     let typed = numbers.contains(&vid);
+    let typed_int = ints.contains(&vid);
     let (pc, label) = ctx
         .origins
         .get(&vid)
@@ -675,6 +677,42 @@ pub(super) fn emit_call_method(
 
     // 1. Math.* intrinsic if closed_world
     let math_intrinsic = if closed_world && await_resolve_intrinsic.is_none() {
+        let arg0_is_num = argc >= 1 && numbers.contains(&args[0]);
+        let (guard0, load0) = if arg0_is_num {
+            (String::new(), format!("double d = d{};", args[0].0))
+        } else if argc >= 1 {
+            (
+                format!("if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a}))) ", a = args[0].0),
+                format!("double d; memcpy(&d, &v{a}, sizeof(d));", a = args[0].0),
+            )
+        } else {
+            (String::new(), String::new())
+        };
+
+        let arg1_is_num = argc >= 2 && numbers.contains(&args[1]);
+        let (guard2, load2) = if argc >= 2 {
+            match (arg0_is_num, arg1_is_num) {
+                (true, true) => (
+                    String::new(),
+                    format!("double d0 = d{a0}; double d1 = d{a1};", a0 = args[0].0, a1 = args[1].0),
+                ),
+                (true, false) => (
+                    format!("if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a1}))) ", a1 = args[1].0),
+                    format!("double d0 = d{a0}; double d1; memcpy(&d1, &v{a1}, sizeof(d1));", a0 = args[0].0, a1 = args[1].0),
+                ),
+                (false, true) => (
+                    format!("if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}))) ", a0 = args[0].0),
+                    format!("double d0; memcpy(&d0, &v{a0}, sizeof(d0)); double d1 = d{a1};", a0 = args[0].0, a1 = args[1].0),
+                ),
+                (false, false) => (
+                    format!("if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}) && KILN_VAL_IS_NUMBER(v{a1}))) ", a0 = args[0].0, a1 = args[1].0),
+                    format!("double d0, d1; memcpy(&d0, &v{a0}, sizeof(d0)); memcpy(&d1, &v{a1}, sizeof(d1));", a0 = args[0].0, a1 = args[1].0),
+                ),
+            }
+        } else {
+            (String::new(), String::new())
+        };
+
         match (key_str.as_str(), argc) {
             ("resolve", 1) => Some(format!(
                 "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_PROMISE)) {{ \
@@ -690,44 +728,47 @@ pub(super) fn emit_call_method(
             )),
             ("sqrt", 1) => Some(format!(
                 "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
-                             if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}))) {{ \
-                                 double d; memcpy(&d, &v{a0}, sizeof(d)); \
+                             {guard0}{{ \
+                                 {load0} \
                                  v{v} = kiln_c99_val_from_double(sqrt(d)); \
                                  handled = 1; \
                              }} \
                          }}",
                 o = object.0,
-                a0 = args[0].0,
+                guard0 = guard0,
+                load0 = load0,
                 v = v
             )),
             ("floor", 1) => Some(format!(
                 "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
-                             if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}))) {{ \
-                                 double d; memcpy(&d, &v{a0}, sizeof(d)); \
+                             {guard0}{{ \
+                                 {load0} \
                                  v{v} = kiln_c99_val_from_double(floor(d)); \
                                  handled = 1; \
                              }} \
                          }}",
                 o = object.0,
-                a0 = args[0].0,
+                guard0 = guard0,
+                load0 = load0,
                 v = v
             )),
             ("ceil", 1) => Some(format!(
                 "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
-                             if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}))) {{ \
-                                 double d; memcpy(&d, &v{a0}, sizeof(d)); \
+                             {guard0}{{ \
+                                 {load0} \
                                  v{v} = kiln_c99_val_from_double(ceil(d)); \
                                  handled = 1; \
                              }} \
                          }}",
                 o = object.0,
-                a0 = args[0].0,
+                guard0 = guard0,
+                load0 = load0,
                 v = v
             )),
             ("round", 1) => Some(format!(
                 "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
-                             if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}))) {{ \
-                                 double d; memcpy(&d, &v{a0}, sizeof(d)); \
+                             {guard0}{{ \
+                                 {load0} \
                                  double r = isfinite(d) ? floor(d + 0.5) : d; \
                                  if (r == 0.0 && signbit(d)) r = -0.0; \
                                  v{v} = kiln_c99_val_from_double(r); \
@@ -735,84 +776,152 @@ pub(super) fn emit_call_method(
                              }} \
                          }}",
                 o = object.0,
-                a0 = args[0].0,
+                guard0 = guard0,
+                load0 = load0,
                 v = v
             )),
             ("trunc", 1) => Some(format!(
                 "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
-                             if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}))) {{ \
-                                 double d; memcpy(&d, &v{a0}, sizeof(d)); \
+                             {guard0}{{ \
+                                 {load0} \
                                  v{v} = kiln_c99_val_from_double(trunc(d)); \
                                  handled = 1; \
                              }} \
                          }}",
                 o = object.0,
-                a0 = args[0].0,
+                guard0 = guard0,
+                load0 = load0,
                 v = v
             )),
             ("abs", 1) => Some(format!(
                 "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
-                             if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}))) {{ \
-                                 double d; memcpy(&d, &v{a0}, sizeof(d)); \
+                             {guard0}{{ \
+                                 {load0} \
                                  v{v} = kiln_c99_val_from_double(fabs(d)); \
                                  handled = 1; \
                              }} \
                          }}",
                 o = object.0,
-                a0 = args[0].0,
+                guard0 = guard0,
+                load0 = load0,
                 v = v
             )),
             ("sign", 1) => Some(format!(
                 "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
-                             if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}))) {{ \
-                                 double d; memcpy(&d, &v{a0}, sizeof(d)); \
+                             {guard0}{{ \
+                                 {load0} \
                                  v{v} = kiln_c99_val_from_double(isnan(d) || d == 0.0 ? d : (d < 0.0 ? -1.0 : 1.0)); \
                                  handled = 1; \
                              }} \
                          }}",
                 o = object.0,
-                a0 = args[0].0,
+                guard0 = guard0,
+                load0 = load0,
                 v = v
             )),
+            ("clz32", 1) => {
+                let a0 = args[0].0;
+                let load_u0 = if ints.contains(&args[0]) {
+                    format!("uint32_t u0 = (uint32_t)i{a0};")
+                } else if numbers.contains(&args[0]) {
+                    format!("uint32_t u0 = (uint32_t)(int64_t)d{a0};")
+                } else {
+                    format!("uint32_t u0; {{ double d; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}))) memcpy(&d, &v{a0}, sizeof(d)); else d = kiln_c99_as_number(kiln_val_to_boundary(v{a0})); u0 = (uint32_t)(int64_t)d; }}")
+                };
+                Some(format!(
+                    "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
+                         {load_u0} \
+                         int32_t res = u0 ? (int32_t)__builtin_clz(u0) : 32; \
+                         v{v} = kiln_c99_val_from_double((double)res); \
+                         handled = 1; \
+                     }}",
+                    o = object.0,
+                    load_u0 = load_u0,
+                    v = v
+                ))
+            }
+            ("fround", 1) => Some(format!(
+                "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
+                             {guard0}{{ \
+                                 {load0} \
+                                 v{v} = kiln_c99_val_from_double((double)(float)d); \
+                                 handled = 1; \
+                             }} \
+                         }}",
+                o = object.0,
+                guard0 = guard0,
+                load0 = load0,
+                v = v
+            )),
+            ("imul", 2) => {
+                let a0 = args[0].0;
+                let a1 = args[1].0;
+                let load_i0 = if ints.contains(&args[0]) {
+                    format!("int32_t i0 = (int32_t)i{a0};")
+                } else if numbers.contains(&args[0]) {
+                    format!("int32_t i0 = (int32_t)(uint32_t)(int64_t)d{a0};")
+                } else {
+                    format!("int32_t i0; {{ double d; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}))) memcpy(&d, &v{a0}, sizeof(d)); else d = kiln_c99_as_number(kiln_val_to_boundary(v{a0})); i0 = (int32_t)(uint32_t)(int64_t)d; }}")
+                };
+                let load_i1 = if ints.contains(&args[1]) {
+                    format!("int32_t i1 = (int32_t)i{a1};")
+                } else if numbers.contains(&args[1]) {
+                    format!("int32_t i1 = (int32_t)(uint32_t)(int64_t)d{a1};")
+                } else {
+                    format!("int32_t i1; {{ double d; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a1}))) memcpy(&d, &v{a1}, sizeof(d)); else d = kiln_c99_as_number(kiln_val_to_boundary(v{a1})); i1 = (int32_t)(uint32_t)(int64_t)d; }}")
+                };
+                Some(format!(
+                    "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
+                         {load_i0} {load_i1} \
+                         int32_t res = (int32_t)((uint32_t)i0 * (uint32_t)i1); \
+                         v{v} = kiln_c99_val_from_double((double)res); \
+                         handled = 1; \
+                     }}",
+                    o = object.0,
+                    load_i0 = load_i0,
+                    load_i1 = load_i1,
+                    v = v
+                ))
+            }
             ("pow", 2) => Some(format!(
                 "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
-                             if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}) && KILN_VAL_IS_NUMBER(v{a1}))) {{ \
-                                 double d0, d1; memcpy(&d0, &v{a0}, sizeof(d0)); memcpy(&d1, &v{a1}, sizeof(d1)); \
+                             {guard2}{{ \
+                                 {load2} \
                                  v{v} = kiln_c99_val_from_double(pow(d0, d1)); \
                                  handled = 1; \
                              }} \
                          }}",
                 o = object.0,
-                a0 = args[0].0,
-                a1 = args[1].0,
+                guard2 = guard2,
+                load2 = load2,
                 v = v
             )),
             ("min", 2) => Some(format!(
                 "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
-                             if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}) && KILN_VAL_IS_NUMBER(v{a1}))) {{ \
-                                 double d0, d1; memcpy(&d0, &v{a0}, sizeof(d0)); memcpy(&d1, &v{a1}, sizeof(d1)); \
+                             {guard2}{{ \
+                                 {load2} \
                                  double res = (isnan(d0) || isnan(d1)) ? NAN : ((d0 < d1 || (d0 == 0.0 && d1 == 0.0 && signbit(d0))) ? d0 : d1); \
                                  v{v} = kiln_c99_val_from_double(res); \
                                  handled = 1; \
                              }} \
                          }}",
                 o = object.0,
-                a0 = args[0].0,
-                a1 = args[1].0,
+                guard2 = guard2,
+                load2 = load2,
                 v = v
             )),
             ("max", 2) => Some(format!(
                 "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
-                             if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}) && KILN_VAL_IS_NUMBER(v{a1}))) {{ \
-                                 double d0, d1; memcpy(&d0, &v{a0}, sizeof(d0)); memcpy(&d1, &v{a1}, sizeof(d1)); \
+                             {guard2}{{ \
+                                 {load2} \
                                  double res = (isnan(d0) || isnan(d1)) ? NAN : ((d0 > d1 || (d0 == 0.0 && d1 == 0.0 && !signbit(d0))) ? d0 : d1); \
                                  v{v} = kiln_c99_val_from_double(res); \
                                  handled = 1; \
                              }} \
                          }}",
                 o = object.0,
-                a0 = args[0].0,
-                a1 = args[1].0,
+                guard2 = guard2,
+                load2 = load2,
                 v = v
             )),
             ("sin", 1)
@@ -837,14 +946,15 @@ pub(super) fn emit_call_method(
                 let func_name = &key_str;
                 Some(format!(
                     "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
-                                 if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}))) {{ \
-                                     double d; memcpy(&d, &v{a0}, sizeof(d)); \
+                                 {guard0}{{ \
+                                     {load0} \
                                      v{v} = kiln_c99_val_from_double({func_name}(d)); \
                                      handled = 1; \
                                  }} \
                              }}",
                     o = object.0,
-                    a0 = args[0].0,
+                    guard0 = guard0,
+                    load0 = load0,
                     v = v
                 ))
             }
@@ -852,15 +962,15 @@ pub(super) fn emit_call_method(
                 let func_name = &key_str;
                 Some(format!(
                     "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
-                                 if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}) && KILN_VAL_IS_NUMBER(v{a1}))) {{ \
-                                     double d0, d1; memcpy(&d0, &v{a0}, sizeof(d0)); memcpy(&d1, &v{a1}, sizeof(d1)); \
+                                 {guard2}{{ \
+                                     {load2} \
                                      v{v} = kiln_c99_val_from_double({func_name}(d0, d1)); \
                                      handled = 1; \
                                  }} \
                              }}",
                     o = object.0,
-                    a0 = args[0].0,
-                    a1 = args[1].0,
+                    guard2 = guard2,
+                    load2 = load2,
                     v = v
                 ))
             }
@@ -877,12 +987,57 @@ pub(super) fn emit_call_method(
 
     // 2. Array push intrinsic
     let push_intrinsic = if key_str == "push" && argc == 1 {
+        let a0 = args[0].0;
+        let is_num = numbers.contains(&args[0]);
+        let numeric_check = if is_num {
+            String::new()
+        } else {
+            format!("if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v{a0})) arr->is_numeric = 0; ")
+        };
+        let push_arg = if is_num && !ctx.boxed.map_or(true, |b| b.contains(&args[0])) {
+            format!("kiln_c99_val_from_double(d{a0})")
+        } else {
+            format!("v{a0}")
+        };
+        let (typed_ret, typed_fallback) = if typed {
+            let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+            let box_stmt = if need_box {
+                format!(" v{v} = kiln_c99_val_from_double(d{v});")
+            } else {
+                String::new()
+            };
+            (
+                format!("d{v} = (double)arr->count;{box_stmt} kiln_twin = 1;"),
+                format!("d{v} = (double)arr->count;"),
+            )
+        } else {
+            (
+                format!("v{v} = kiln_c99_val_from_double((double)arr->count);"),
+                String::new(),
+            )
+        };
         Some(format!(
-            "if (!handled && kiln_c99_val_array_push_fast(v{o}, v{a0}, &v{v}) == KILN_C99_OK) {{ \
+            "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX) {{ \
+                 void *ptr = KILN_VAL_PTR(v{o}); \
+                 if (KILN_LIKELY(kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY)) {{ \
+                     kiln_array *arr = (kiln_array *)ptr; \
+                     if (KILN_LIKELY(!arr->frozen && !arr->not_extensible && arr->count < arr->capacity)) {{ \
+                         {numeric_check}\
+                         arr->elements[arr->count++] = {push_arg}; \
+                         {typed_ret} \
                          handled = 1; \
-                     }}",
+                     }} \
+                 }} \
+             }} \
+             if (!handled && kiln_c99_val_array_push_fast(v{o}, {push_arg}, &v{v}) == KILN_C99_OK) {{ \
+                 {typed_fallback} \
+                 handled = 1; \
+             }}",
             o = object.0,
-            a0 = args[0].0,
+            push_arg = push_arg,
+            numeric_check = numeric_check,
+            typed_ret = typed_ret,
+            typed_fallback = typed_fallback,
             v = v
         ))
     } else {
@@ -1245,42 +1400,87 @@ pub(super) fn emit_call_method(
     };
 
     let slice_intrinsic = if closed_world && key_str == "slice" && argc == 1 {
-        Some(format!(
-            "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_NUMBER(v{a0})) {{ \
-                         void *ptr = KILN_VAL_PTR(v{o}); \
-                         if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
-                             kiln_array *arr = (kiln_array *)ptr; \
-                             double d0; memcpy(&d0, &v{a0}, sizeof(d0)); \
-                             if (d0 >= 0.0 && d0 == floor(d0)) {{ \
-                                 size_t start = (size_t)d0; \
-                                 size_t slice_len = start < arr->count ? arr->count - start : 0; \
-                                 kiln_value built_val; \
-                                 int status = kiln_c99_new_array_with_capacity(&built_val, slice_len, arr->is_numeric); \
-                                 if (status != KILN_C99_OK) return status; \
-                                 if (slice_len > 0) {{ \
-                                     kiln_array *b_arr = kiln_c99_array_of(built_val); \
-                                     memcpy(b_arr->elements, arr->elements + start, slice_len * sizeof(kiln_val)); \
-                                     b_arr->count = slice_len; \
-                                 }} \
-                                 v{v} = kiln_val_from_boundary(built_val); \
-                                 handled = 1; \
-                             }} \
+        let a0 = args[0].0;
+        let (array_body, string_body, guard) = if ints.contains(&args[0]) {
+            (
+                format!(
+                    "if (i{a0} >= 0) {{ \
+                         size_t start = (size_t)i{a0}; \
+                         size_t slice_len = start < arr->count ? arr->count - start : 0; \
+                         kiln_value built_val; \
+                         int status = kiln_c99_new_array_with_capacity(&built_val, slice_len, arr->is_numeric); \
+                         if (status != KILN_C99_OK) return status; \
+                         if (slice_len > 0) {{ \
+                             kiln_array *b_arr = kiln_c99_array_of(built_val); \
+                             memcpy(b_arr->elements, arr->elements + start, slice_len * sizeof(kiln_val)); \
+                             b_arr->count = slice_len; \
                          }} \
-                     }} else if (!handled && KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_NUMBER(v{a0})) {{ \
-                         const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
-                         if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
-                             double d0; memcpy(&d0, &v{a0}, sizeof(d0)); \
-                             if (d0 >= 0.0 && d0 == floor(d0)) {{ \
-                                 size_t start = (size_t)d0; \
-                                 size_t slen = start < s_recv->unit_len ? s_recv->unit_len - start : 0; \
-                                 v{v} = kiln_c99_val_from_ascii(kiln_string_latin1(s_recv) + start, slen); \
-                                 handled = 1; \
-                             }} \
-                         }} \
+                         v{v} = kiln_val_from_boundary(built_val); \
+                         handled = 1; \
                      }}",
+                    a0 = a0, v = v
+                ),
+                format!(
+                    "if (i{a0} >= 0) {{ \
+                         size_t start = (size_t)i{a0}; \
+                         size_t slen = start < s_recv->unit_len ? s_recv->unit_len - start : 0; \
+                         v{v} = kiln_c99_val_from_ascii((const char *)kiln_string_latin1(s_recv) + start, slen); \
+                         handled = 1; \
+                     }}",
+                    a0 = a0, v = v
+                ),
+                String::new(),
+            )
+        } else {
+            (
+                format!(
+                    "double d0; memcpy(&d0, &v{a0}, sizeof(d0)); \
+                     if (d0 >= 0.0 && d0 == floor(d0)) {{ \
+                         size_t start = (size_t)d0; \
+                         size_t slice_len = start < arr->count ? arr->count - start : 0; \
+                         kiln_value built_val; \
+                         int status = kiln_c99_new_array_with_capacity(&built_val, slice_len, arr->is_numeric); \
+                         if (status != KILN_C99_OK) return status; \
+                         if (slice_len > 0) {{ \
+                             kiln_array *b_arr = kiln_c99_array_of(built_val); \
+                             memcpy(b_arr->elements, arr->elements + start, slice_len * sizeof(kiln_val)); \
+                             b_arr->count = slice_len; \
+                         }} \
+                         v{v} = kiln_val_from_boundary(built_val); \
+                         handled = 1; \
+                     }}",
+                    a0 = a0, v = v
+                ),
+                format!(
+                    "double d0; memcpy(&d0, &v{a0}, sizeof(d0)); \
+                     if (d0 >= 0.0 && d0 == floor(d0)) {{ \
+                         size_t start = (size_t)d0; \
+                         size_t slen = start < s_recv->unit_len ? s_recv->unit_len - start : 0; \
+                         v{v} = kiln_c99_val_from_ascii((const char *)kiln_string_latin1(s_recv) + start, slen); \
+                         handled = 1; \
+                     }}",
+                    a0 = a0, v = v
+                ),
+                format!(" && KILN_VAL_IS_NUMBER(v{a0})"),
+            )
+        };
+        Some(format!(
+            "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX{guard}) {{ \
+                 void *ptr = KILN_VAL_PTR(v{o}); \
+                 if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
+                     kiln_array *arr = (kiln_array *)ptr; \
+                     {array_body} \
+                 }} \
+             }} else if (!handled && KILN_VAL_IS_STRING(v{o}){guard}) {{ \
+                 const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
+                 if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
+                     {string_body} \
+                 }} \
+             }}",
             o = object.0,
-            a0 = args[0].0,
-            v = v
+            guard = guard,
+            array_body = array_body,
+            string_body = string_body
         ))
     } else {
         None
@@ -1358,42 +1558,83 @@ pub(super) fn emit_call_method(
     };
 
     let index_of_intrinsic = if closed_world && key_str == "indexOf" && argc == 1 {
+        let (int_stmt, double_stmt, box_stmt) = if typed {
+            let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+            let box_stmt = if need_box { format!(" v{v} = kiln_c99_val_from_double(d{v});") } else { String::new() };
+            let int_stmt = if typed_int { format!(" i{v} = found ? (int64_t)(found - (const char *)kiln_string_latin1(s_recv)) : -1LL;") } else { String::new() };
+            (
+                int_stmt,
+                format!(" d{v} = found ? (double)(found - (const char *)kiln_string_latin1(s_recv)) : -1.0;"),
+                format!("{box_stmt} kiln_twin = 1;"),
+            )
+        } else {
+            (
+                String::new(),
+                String::new(),
+                format!(" v{v} = kiln_c99_val_from_double(found ? (double)(found - (const char *)kiln_string_latin1(s_recv)) : -1.0);"),
+            )
+        };
         Some(format!(
             "if (!handled && KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_STRING(v{a0})) {{ \
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                          const kiln_string *s_ndl = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
                          if (s_recv != NULL && s_ndl != NULL && !kiln_string_is_utf16(s_recv) && !kiln_string_is_utf16(s_ndl)) {{ \
                              const char *found = kiln_c99_memmem((const char *)kiln_string_latin1(s_recv), s_recv->unit_len, (const char *)kiln_string_latin1(s_ndl), s_ndl->unit_len); \
-                             v{v} = kiln_c99_val_from_double(found ? (double)(found - (const char *)kiln_string_latin1(s_recv)) : -1.0); \
+                             {int_stmt}{double_stmt}{box_stmt} \
                              handled = 1; \
                          }} \
                      }}",
             o = object.0,
             a0 = args[0].0,
-            v = v
+            int_stmt = int_stmt,
+            double_stmt = double_stmt,
+            box_stmt = box_stmt
         ))
     } else {
         None
     };
 
     let substring_intrinsic = if closed_world && key_str == "substring" && argc == 2 {
+        let a0 = args[0].0;
+        let a1 = args[1].0;
+        let (guard, check_and_extract) = if ints.contains(&args[0]) && ints.contains(&args[1]) {
+            (
+                String::new(),
+                format!(
+                    "if (i{a0} >= 0 && i{a1} >= i{a0} && (size_t)i{a1} <= s_recv->unit_len) {{ \
+                         size_t start = (size_t)i{a0}; \
+                         size_t len = (size_t)i{a1} - start; \
+                         v{v} = kiln_c99_val_from_ascii((const char *)kiln_string_latin1(s_recv) + start, len); \
+                         handled = 1; \
+                     }}",
+                    a0 = a0, a1 = a1, v = v
+                ),
+            )
+        } else {
+            (
+                format!(" && KILN_VAL_IS_NUMBER(v{a0}) && KILN_VAL_IS_NUMBER(v{a1})"),
+                format!(
+                    "double d0, d1; memcpy(&d0, &v{a0}, sizeof(d0)); memcpy(&d1, &v{a1}, sizeof(d1)); \
+                     if (d0 == floor(d0) && d1 == floor(d1) && d0 >= 0.0 && d1 >= d0 && (size_t)d1 <= s_recv->unit_len) {{ \
+                         size_t start = (size_t)d0; \
+                         size_t len = (size_t)d1 - start; \
+                         v{v} = kiln_c99_val_from_ascii((const char *)kiln_string_latin1(s_recv) + start, len); \
+                         handled = 1; \
+                     }}",
+                    a0 = a0, a1 = a1, v = v
+                ),
+            )
+        };
         Some(format!(
-            "if (!handled && KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_NUMBER(v{a0}) && KILN_VAL_IS_NUMBER(v{a1})) {{ \
+            "if (!handled && KILN_VAL_IS_STRING(v{o}){guard}) {{ \
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                          if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
-                             double d0, d1; memcpy(&d0, &v{a0}, sizeof(d0)); memcpy(&d1, &v{a1}, sizeof(d1)); \
-                             if (d0 == floor(d0) && d1 == floor(d1) && d0 >= 0.0 && d1 >= d0 && (size_t)d1 <= s_recv->unit_len) {{ \
-                                 size_t start = (size_t)d0; \
-                                 size_t len = (size_t)d1 - start; \
-                                 v{v} = kiln_c99_val_from_ascii((const char *)kiln_string_latin1(s_recv) + start, len); \
-                                 handled = 1; \
-                             }} \
+                             {check_and_extract} \
                          }} \
                      }}",
             o = object.0,
-            a0 = args[0].0,
-            a1 = args[1].0,
-            v = v
+            guard = guard,
+            check_and_extract = check_and_extract
         ))
     } else {
         None
@@ -1642,46 +1883,94 @@ pub(super) fn emit_call_method(
             a0 = args[0].0,
             v = v
         )),
-        ("charCodeAt", 1) => Some(format!(
-            "if (!handled && KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_NUMBER(v{a0})) {{ \
-                         const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
-                         if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
-                             double d0; memcpy(&d0, &v{a0}, sizeof(d0)); \
-                             if (isnan(d0)) d0 = 0.0; \
-                             d0 = trunc(d0); \
-                             if (d0 >= 0.0 && (size_t)d0 < s_recv->unit_len) {{ \
-                                 v{v} = kiln_c99_val_from_double((double)kiln_string_unit_at(s_recv, (size_t)d0)); \
-                                 handled = 1; \
-                             }} else {{ \
-                                 v{v} = KILN_QNAN_BASE; \
-                                 handled = 1; \
+        ("charCodeAt", 1) => {
+            let a0 = args[0].0;
+            let a0_is_int = ints.contains(&args[0]);
+            let a0_non_neg = ctx.ivs.get(&args[0]).map_or(false, |iv| iv.non_negative);
+            let idx_bound = if a0_non_neg {
+                format!("(uint64_t)i{a0} < s_recv->unit_len")
+            } else {
+                format!("i{a0} >= 0 && (uint64_t)i{a0} < s_recv->unit_len")
+            };
+            let (body, number_guard) = if a0_is_int {
+                let code_read = if typed {
+                    let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+                    let box_stmt = if need_box { format!(" v{v} = kiln_c99_val_from_double(d{v});") } else { String::new() };
+                    let int_stmt = if typed_int { format!(" i{v} = (int64_t)code;") } else { String::new() };
+                    format!("uint16_t code = kiln_string_unit_at(s_recv, (size_t)i{a0}); d{v} = (double)code;{int_stmt}{box_stmt} kiln_twin = 1;")
+                } else {
+                    format!("v{v} = kiln_c99_val_from_double((double)kiln_string_unit_at(s_recv, (size_t)i{a0}));")
+                };
+                let nan_ret = if typed {
+                    let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+                    let box_stmt = if need_box { format!(" v{v} = KILN_QNAN_BASE;") } else { String::new() };
+                    let int_stmt = if typed_int { format!(" i{v} = 0;") } else { String::new() };
+                    format!("d{v} = NAN;{int_stmt}{box_stmt} kiln_twin = 1;")
+                } else {
+                    format!("v{v} = KILN_QNAN_BASE;")
+                };
+                (
+                    format!(
+                        "if ({idx_bound}) {{ {code_read} handled = 1; }} else {{ {nan_ret} handled = 1; }}"
+                    ),
+                    String::new(),
+                )
+            } else {
+                (
+                    format!(
+                        "double d0; memcpy(&d0, &v{a0}, sizeof(d0)); if (isnan(d0)) d0 = 0.0; d0 = trunc(d0); if (d0 >= 0.0 && (size_t)d0 < s_recv->unit_len) {{ v{v} = kiln_c99_val_from_double((double)kiln_string_unit_at(s_recv, (size_t)d0)); handled = 1; }} else {{ v{v} = KILN_QNAN_BASE; handled = 1; }}"
+                    ),
+                    format!(" && KILN_VAL_IS_NUMBER(v{a0})"),
+                )
+            };
+            Some(format!(
+                "if (!handled && KILN_VAL_IS_STRING(v{o}){number_guard}) {{ \
+                             const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
+                             if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
+                                 {body} \
                              }} \
-                         }} \
-                     }}",
-            o = object.0,
-            a0 = args[0].0,
-            v = v
-        )),
-        ("charAt", 1) => Some(format!(
-            "if (!handled && KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_NUMBER(v{a0})) {{ \
-                         const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
-                         if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
-                             double d0; memcpy(&d0, &v{a0}, sizeof(d0)); \
-                             if (isnan(d0)) d0 = 0.0; \
-                             d0 = trunc(d0); \
-                             if (d0 >= 0.0 && (size_t)d0 < s_recv->unit_len) {{ \
-                                 v{v} = kiln_c99_val_from_unit(kiln_string_unit_at(s_recv, (size_t)d0)); \
-                                 handled = 1; \
-                             }} else {{ \
-                                 v{v} = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_c99_empty_string); \
-                                 handled = 1; \
+                         }}",
+                o = object.0,
+                number_guard = number_guard,
+                body = body
+            ))
+        }
+        ("charAt", 1) => {
+            let a0 = args[0].0;
+            let a0_is_int = ints.contains(&args[0]);
+            let a0_non_neg = ctx.ivs.get(&args[0]).map_or(false, |iv| iv.non_negative);
+            let idx_bound = if a0_non_neg {
+                format!("(uint64_t)i{a0} < s_recv->unit_len")
+            } else {
+                format!("i{a0} >= 0 && (uint64_t)i{a0} < s_recv->unit_len")
+            };
+            let (body, number_guard) = if a0_is_int {
+                (
+                    format!(
+                        "if ({idx_bound}) {{ v{v} = kiln_c99_val_from_unit(kiln_string_unit_at(s_recv, (size_t)i{a0})); handled = 1; }} else {{ v{v} = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_c99_empty_string); handled = 1; }}"
+                    ),
+                    String::new(),
+                )
+            } else {
+                (
+                    format!(
+                        "double d0; memcpy(&d0, &v{a0}, sizeof(d0)); if (isnan(d0)) d0 = 0.0; d0 = trunc(d0); if (d0 >= 0.0 && (size_t)d0 < s_recv->unit_len) {{ v{v} = kiln_c99_val_from_unit(kiln_string_unit_at(s_recv, (size_t)d0)); handled = 1; }} else {{ v{v} = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_c99_empty_string); handled = 1; }}"
+                    ),
+                    format!(" && KILN_VAL_IS_NUMBER(v{a0})"),
+                )
+            };
+            Some(format!(
+                "if (!handled && KILN_VAL_IS_STRING(v{o}){number_guard}) {{ \
+                             const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
+                             if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
+                                 {body} \
                              }} \
-                         }} \
-                     }}",
-            o = object.0,
-            a0 = args[0].0,
-            v = v
-        )),
+                         }}",
+                o = object.0,
+                number_guard = number_guard,
+                body = body
+            ))
+        }
         ("trim", 0) => Some(format!(
             "if (!handled && KILN_VAL_IS_STRING(v{o})) {{ \
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
@@ -1697,25 +1986,51 @@ pub(super) fn emit_call_method(
             o = object.0,
             v = v
         )),
-        ("slice", 2) => Some(format!(
-            "if (!handled && KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_NUMBER(v{a0}) && KILN_VAL_IS_NUMBER(v{a1})) {{ \
-                         const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
-                         if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
-                             double d0, d1; memcpy(&d0, &v{a0}, sizeof(d0)); memcpy(&d1, &v{a1}, sizeof(d1)); \
-                             if (d0 >= 0.0 && d0 == floor(d0) && d1 >= d0 && d1 == floor(d1)) {{ \
-                                 size_t start = (size_t)d0; \
-                                 size_t end = (size_t)d1 <= s_recv->unit_len ? (size_t)d1 : s_recv->unit_len; \
-                                 size_t slen = start < end ? end - start : 0; \
-                                 v{v} = kiln_c99_val_from_ascii((const char *)kiln_string_latin1(s_recv) + start, slen); \
-                                 handled = 1; \
+        ("slice", 2) => {
+            let a0 = args[0].0;
+            let a1 = args[1].0;
+            let (guard, check_and_extract) = if ints.contains(&args[0]) && ints.contains(&args[1]) {
+                (
+                    String::new(),
+                    format!(
+                        "if (i{a0} >= 0 && i{a1} >= i{a0}) {{ \
+                             size_t start = (size_t)i{a0}; \
+                             size_t end = (size_t)i{a1} <= s_recv->unit_len ? (size_t)i{a1} : s_recv->unit_len; \
+                             size_t slen = start < end ? end - start : 0; \
+                             v{v} = kiln_c99_val_from_ascii((const char *)kiln_string_latin1(s_recv) + start, slen); \
+                             handled = 1; \
+                         }}",
+                        a0 = a0, a1 = a1, v = v
+                    ),
+                )
+            } else {
+                (
+                    format!(" && KILN_VAL_IS_NUMBER(v{a0}) && KILN_VAL_IS_NUMBER(v{a1})"),
+                    format!(
+                        "double d0, d1; memcpy(&d0, &v{a0}, sizeof(d0)); memcpy(&d1, &v{a1}, sizeof(d1)); \
+                         if (d0 >= 0.0 && d0 == floor(d0) && d1 >= d0 && d1 == floor(d1)) {{ \
+                             size_t start = (size_t)d0; \
+                             size_t end = (size_t)d1 <= s_recv->unit_len ? (size_t)d1 : s_recv->unit_len; \
+                             size_t slen = start < end ? end - start : 0; \
+                             v{v} = kiln_c99_val_from_ascii((const char *)kiln_string_latin1(s_recv) + start, slen); \
+                             handled = 1; \
+                         }}",
+                        a0 = a0, a1 = a1, v = v
+                    ),
+                )
+            };
+            Some(format!(
+                "if (!handled && KILN_VAL_IS_STRING(v{o}){guard}) {{ \
+                             const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
+                             if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
+                                 {check_and_extract} \
                              }} \
-                         }} \
-                     }}",
-            o = object.0,
-            a0 = args[0].0,
-            a1 = args[1].0,
-            v = v
-        )),
+                         }}",
+                o = object.0,
+                guard = guard,
+                check_and_extract = check_and_extract
+            ))
+        }
         _ => None,
     };
 
@@ -1754,6 +2069,11 @@ pub(super) fn emit_call_method(
             } else {
                 String::new()
             };
+            let int_stmt = if typed_int {
+                format!(" i{v} = (int64_t)d{v};")
+            } else {
+                String::new()
+            };
             let assign = format!("v{v} = kiln_c99_val_from_double(");
             let mut out = String::with_capacity(text.len());
             let mut rest = text.as_str();
@@ -1764,7 +2084,7 @@ pub(super) fn emit_call_method(
                 };
                 let expr = &rest[expr_start..expr_start + end];
                 out.push_str(&rest[..at]);
-                out.push_str(&format!("d{v} = {expr};{box_stmt} kiln_twin = 1;"));
+                out.push_str(&format!("d{v} = {expr};{int_stmt}{box_stmt} kiln_twin = 1;"));
                 rest = &rest[expr_start + end + 2..];
             }
             out.push_str(rest);
