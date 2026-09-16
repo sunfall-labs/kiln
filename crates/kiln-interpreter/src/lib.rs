@@ -40900,23 +40900,41 @@ pub enum CallbackMethod {
     ReduceRight,
 }
 
-/// The methods a number primitive exposes.
-///
-/// Read off the value rather than through `Number.prototype`, which does not exist yet. Unbound,
-/// like the string and array tables, so `CallMethod` supplies the receiver.
-fn number_property(name: &str) -> Value {
-    match name {
-        "toString" => Value::Native(Native::NumberToString, RealmId::PRIMARY),
-        "toFixed" => Value::Native(Native::NumberToFixed, RealmId::PRIMARY),
-        "toExponential" => Value::Native(Native::NumberToExponential, RealmId::PRIMARY),
-        "toPrecision" => Value::Native(Native::NumberToPrecision, RealmId::PRIMARY),
-        "valueOf" => Value::Native(Native::NumberValueOf, RealmId::PRIMARY),
-        // ECMA-402 replaces this one outright: it is `Intl.NumberFormat` with the receiver as its
-        // argument, exceptions and all, so it is dispatched there rather than reimplemented.
-        "toLocaleString" => Value::Native(
+fn number_method_value(method: kiln_builtin_surface::NumberMethod, realm: RealmId) -> Value {
+    match method {
+        kiln_builtin_surface::NumberMethod::ToString => {
+            Value::Native(Native::NumberToString, realm)
+        }
+        kiln_builtin_surface::NumberMethod::ToFixed => Value::Native(Native::NumberToFixed, realm),
+        kiln_builtin_surface::NumberMethod::ToExponential => {
+            Value::Native(Native::NumberToExponential, realm)
+        }
+        kiln_builtin_surface::NumberMethod::ToPrecision => {
+            Value::Native(Native::NumberToPrecision, realm)
+        }
+        kiln_builtin_surface::NumberMethod::ValueOf => Value::Native(Native::NumberValueOf, realm),
+        kiln_builtin_surface::NumberMethod::ToLocaleString => Value::Native(
             Native::Intl(intl::Op::Adapter(intl::Adapter::NumberToLocaleString)),
-            RealmId::PRIMARY,
+            realm,
         ),
+    }
+}
+
+/// The methods a number primitive exposes.
+fn number_property(name: &str) -> Value {
+    let Some(member) = kiln_builtin_surface::find_prototype_member(
+        kiln_builtin_surface::PrototypeId::Number,
+        name,
+    ) else {
+        return Value::Undefined;
+    };
+    match member.binding {
+        kiln_builtin_surface::SemanticBinding::Constructor => {
+            Value::Native(Native::NumberConstructor, RealmId::PRIMARY)
+        }
+        kiln_builtin_surface::SemanticBinding::NumberMethod(method) => {
+            number_method_value(method, RealmId::PRIMARY)
+        }
         _ => Value::Undefined,
     }
 }
@@ -44088,11 +44106,22 @@ fn inherit_from_object(table: PrototypeTable, found: Value, name: &str) -> Value
 
 /// What `Boolean.prototype` answers, and what a boolean primitive finds through it.
 fn boolean_method(name: &str) -> Value {
-    match name {
-        // Not `toLocaleString`: a boolean inherits `Object.prototype`'s, and answering one here
-        // made it an own property of `Boolean.prototype`, which it is not.
-        "toString" => Value::Native(Native::BooleanToString, RealmId::PRIMARY),
-        "valueOf" => Value::Native(Native::BooleanValueOf, RealmId::PRIMARY),
+    let Some(member) = kiln_builtin_surface::find_prototype_member(
+        kiln_builtin_surface::PrototypeId::Boolean,
+        name,
+    ) else {
+        return Value::Undefined;
+    };
+    match member.binding {
+        kiln_builtin_surface::SemanticBinding::Constructor => {
+            Value::Native(Native::BooleanConstructor, RealmId::PRIMARY)
+        }
+        kiln_builtin_surface::SemanticBinding::BooleanMethod(
+            kiln_builtin_surface::BooleanMethod::ToString,
+        ) => Value::Native(Native::BooleanToString, RealmId::PRIMARY),
+        kiln_builtin_surface::SemanticBinding::BooleanMethod(
+            kiln_builtin_surface::BooleanMethod::ValueOf,
+        ) => Value::Native(Native::BooleanValueOf, RealmId::PRIMARY),
         _ => Value::Undefined,
     }
 }
@@ -46066,7 +46095,12 @@ impl Intrinsics {
         if matches!(
             target,
             Value::Native(
-                Native::PrototypeOf(PrototypeTable::Symbol | PrototypeTable::Array),
+                Native::PrototypeOf(
+                    PrototypeTable::Symbol
+                        | PrototypeTable::Array
+                        | PrototypeTable::Number
+                        | PrototypeTable::Boolean
+                ),
                 _
             )
         ) && !self.is_materialized(target)
@@ -46235,13 +46269,20 @@ impl Intrinsics {
         }
         let realm = value_realm(target);
         if let Value::Native(
-            Native::PrototypeOf(table @ (PrototypeTable::Symbol | PrototypeTable::Array)),
+            Native::PrototypeOf(
+                table @ (PrototypeTable::Symbol
+                | PrototypeTable::Array
+                | PrototypeTable::Number
+                | PrototypeTable::Boolean),
+            ),
             _,
         ) = target
         {
             let proto_id = match table {
                 PrototypeTable::Symbol => kiln_builtin_surface::PrototypeId::Symbol,
                 PrototypeTable::Array => kiln_builtin_surface::PrototypeId::Array,
+                PrototypeTable::Number => kiln_builtin_surface::PrototypeId::Number,
+                PrototypeTable::Boolean => kiln_builtin_surface::PrototypeId::Boolean,
                 _ => unreachable!(),
             };
             let mut data = ObjectData::default();
@@ -46276,6 +46317,8 @@ impl Intrinsics {
                         let ctor = match table {
                             PrototypeTable::Symbol => Native::SymbolConstructor,
                             PrototypeTable::Array => Native::ArrayConstructor,
+                            PrototypeTable::Number => Native::NumberConstructor,
+                            PrototypeTable::Boolean => Native::BooleanConstructor,
                             _ => unreachable!(),
                         };
                         Property::Value(Value::Native(ctor, realm))
@@ -46289,6 +46332,15 @@ impl Intrinsics {
                     kiln_builtin_surface::SemanticBinding::ArrayMethod(method) => {
                         Property::Value(array_method_value(method, realm))
                     }
+                    kiln_builtin_surface::SemanticBinding::NumberMethod(method) => {
+                        Property::Value(number_method_value(method, realm))
+                    }
+                    kiln_builtin_surface::SemanticBinding::BooleanMethod(
+                        kiln_builtin_surface::BooleanMethod::ToString,
+                    ) => Property::Value(Value::Native(Native::BooleanToString, realm)),
+                    kiln_builtin_surface::SemanticBinding::BooleanMethod(
+                        kiln_builtin_surface::BooleanMethod::ValueOf,
+                    ) => Property::Value(Value::Native(Native::BooleanValueOf, realm)),
                 };
                 let attrs = Attributes {
                     writable: member.attributes.writable,
@@ -46556,14 +46608,7 @@ const STRING_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::Named
     "sub",
     "sup",
 ]);
-const NUMBER_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
-    "toString",
-    "toLocaleString",
-    "toFixed",
-    "toExponential",
-    "toPrecision",
-    "valueOf",
-]);
+
 const FUNCTION_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
     "toString",
     "call",
@@ -46687,10 +46732,6 @@ const ITERATOR_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::Nam
 const BIG_INT_MEMBERS: intrinsic_members::NamedMembers =
     intrinsic_members::NamedMembers::new(&["toString", "toLocaleString", "valueOf"]);
 
-/// `Boolean.prototype` and `Symbol.prototype`, which do not: theirs is inherited from
-/// `Object.prototype`, so listing one made an own property out of something that is not one.
-const WRAPPER_MEMBERS: intrinsic_members::NamedMembers =
-    intrinsic_members::NamedMembers::new(&["toString", "valueOf"]);
 const PROMISE_MEMBERS: intrinsic_members::NamedMembers =
     intrinsic_members::NamedMembers::new(&["then", "catch", "finally"]);
 const MAP_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
@@ -46810,7 +46851,7 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
         PrototypeTable::Object => OBJECT_MEMBERS.names(),
         PrototypeTable::Array | PrototypeTable::TypedArray => ARRAY_MEMBERS.names(),
         PrototypeTable::String => STRING_MEMBERS.names(),
-        PrototypeTable::Number => NUMBER_MEMBERS.names(),
+        PrototypeTable::Number | PrototypeTable::Boolean | PrototypeTable::Symbol => &[],
         // `caller` and `arguments` are the restricted accessor pair
         // `AddRestrictedFunctionProperties` installs here, and they are own properties of this
         // object -- which is what makes every function that inherits from it throw on a read.
@@ -46823,7 +46864,6 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
         PrototypeTable::Iterator => ITERATOR_MEMBERS.names(),
         PrototypeTable::Generator | PrototypeTable::AsyncGenerator => GENERATOR_MEMBERS.names(),
         PrototypeTable::IteratorFor(_) => BUILT_IN_ITERATOR_MEMBERS.names(),
-        PrototypeTable::Boolean | PrototypeTable::Symbol => WRAPPER_MEMBERS.names(),
         PrototypeTable::BigInt => BIG_INT_MEMBERS.names(),
         PrototypeTable::Promise => PROMISE_MEMBERS.names(),
         PrototypeTable::Map => MAP_MEMBERS.names(),
@@ -46847,6 +46887,8 @@ fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String, Property)>
     if let Some(proto_id) = match table {
         PrototypeTable::Symbol => Some(kiln_builtin_surface::PrototypeId::Symbol),
         PrototypeTable::Array => Some(kiln_builtin_surface::PrototypeId::Array),
+        PrototypeTable::Number => Some(kiln_builtin_surface::PrototypeId::Number),
+        PrototypeTable::Boolean => Some(kiln_builtin_surface::PrototypeId::Boolean),
         _ => None,
     } {
         return kiln_builtin_surface::prototype_members(proto_id)
@@ -46875,6 +46917,8 @@ fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String, Property)>
                         let ctor = match table {
                             PrototypeTable::Symbol => Native::SymbolConstructor,
                             PrototypeTable::Array => Native::ArrayConstructor,
+                            PrototypeTable::Number => Native::NumberConstructor,
+                            PrototypeTable::Boolean => Native::BooleanConstructor,
                             _ => unreachable!(),
                         };
                         Property::Value(Value::Native(ctor, RealmId::PRIMARY))
@@ -46885,6 +46929,15 @@ fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String, Property)>
                     kiln_builtin_surface::SemanticBinding::ArrayMethod(method) => {
                         Property::Value(array_method_value(method, RealmId::PRIMARY))
                     }
+                    kiln_builtin_surface::SemanticBinding::NumberMethod(method) => {
+                        Property::Value(number_method_value(method, RealmId::PRIMARY))
+                    }
+                    kiln_builtin_surface::SemanticBinding::BooleanMethod(
+                        kiln_builtin_surface::BooleanMethod::ToString,
+                    ) => Property::Value(Value::Native(Native::BooleanToString, RealmId::PRIMARY)),
+                    kiln_builtin_surface::SemanticBinding::BooleanMethod(
+                        kiln_builtin_surface::BooleanMethod::ValueOf,
+                    ) => Property::Value(Value::Native(Native::BooleanValueOf, RealmId::PRIMARY)),
                     _ => return None,
                 };
                 Some((name.to_owned(), prop))
@@ -47684,10 +47737,18 @@ fn intrinsic_own_attributes(target: &Value, key: &str) -> Option<Attributes> {
     let Value::Native(native, _) = target else {
         return None;
     };
-    if let Native::PrototypeOf(table @ (PrototypeTable::Symbol | PrototypeTable::Array)) = native {
+    if let Native::PrototypeOf(
+        table @ (PrototypeTable::Symbol
+        | PrototypeTable::Array
+        | PrototypeTable::Number
+        | PrototypeTable::Boolean),
+    ) = native
+    {
         let proto_id = match table {
             PrototypeTable::Symbol => kiln_builtin_surface::PrototypeId::Symbol,
             PrototypeTable::Array => kiln_builtin_surface::PrototypeId::Array,
+            PrototypeTable::Number => kiln_builtin_surface::PrototypeId::Number,
+            PrototypeTable::Boolean => kiln_builtin_surface::PrototypeId::Boolean,
             _ => unreachable!(),
         };
         return kiln_builtin_surface::find_prototype_member(proto_id, key).map(|member| {

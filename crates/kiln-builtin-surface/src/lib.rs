@@ -692,6 +692,8 @@ impl DescriptorAttributes {
 pub enum PrototypeId {
     Symbol,
     Array,
+    Number,
+    Boolean,
 }
 
 impl PrototypeId {
@@ -699,6 +701,8 @@ impl PrototypeId {
         match self {
             Self::Symbol => "Symbol.prototype",
             Self::Array => "Array.prototype",
+            Self::Number => "Number.prototype",
+            Self::Boolean => "Boolean.prototype",
         }
     }
 
@@ -707,6 +711,10 @@ impl PrototypeId {
             Some(Self::Symbol)
         } else if same(name, "Array.prototype") {
             Some(Self::Array)
+        } else if same(name, "Number.prototype") {
+            Some(Self::Number)
+        } else if same(name, "Boolean.prototype") {
+            Some(Self::Boolean)
         } else {
             None
         }
@@ -757,6 +765,24 @@ pub enum ArrayMethod {
     With,
 }
 
+/// Built-in methods of `Number.prototype`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum NumberMethod {
+    ToExponential,
+    ToFixed,
+    ToLocaleString,
+    ToPrecision,
+    ToString,
+    ValueOf,
+}
+
+/// Built-in methods of `Boolean.prototype`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BooleanMethod {
+    ToString,
+    ValueOf,
+}
+
 /// Authoritative semantic operation binding across both engines (ADR 0059, ADR 0060).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SemanticBinding {
@@ -769,6 +795,8 @@ pub enum SemanticBinding {
     ArrayLength,
     ArrayUnscopables,
     ArrayMethod(ArrayMethod),
+    NumberMethod(NumberMethod),
+    BooleanMethod(BooleanMethod),
 }
 
 /// One declarative row describing a prototype member.
@@ -1127,6 +1155,78 @@ pub const PROTOTYPE_SURFACE: &[PrototypeMember] = &[
         attributes: DescriptorAttributes::READONLY,
         binding: SemanticBinding::ArrayUnscopables,
     },
+    // Number.prototype (ECMAScript §21.1.3)
+    PrototypeMember {
+        prototype: PrototypeId::Number,
+        key: MemberKey::Named("constructor"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::Constructor,
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Number,
+        key: MemberKey::Named("toExponential"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::NumberMethod(NumberMethod::ToExponential),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Number,
+        key: MemberKey::Named("toFixed"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::NumberMethod(NumberMethod::ToFixed),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Number,
+        key: MemberKey::Named("toPrecision"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::NumberMethod(NumberMethod::ToPrecision),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Number,
+        key: MemberKey::Named("toString"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::NumberMethod(NumberMethod::ToString),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Number,
+        key: MemberKey::Named("valueOf"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::NumberMethod(NumberMethod::ValueOf),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Number,
+        key: MemberKey::Named("toLocaleString"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::NumberMethod(NumberMethod::ToLocaleString),
+    },
+    // Boolean.prototype (ECMAScript §20.3.3)
+    PrototypeMember {
+        prototype: PrototypeId::Boolean,
+        key: MemberKey::Named("constructor"),
+        kind: MemberKind::Method { length: 1 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::Constructor,
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Boolean,
+        key: MemberKey::Named("toString"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::BooleanMethod(BooleanMethod::ToString),
+    },
+    PrototypeMember {
+        prototype: PrototypeId::Boolean,
+        key: MemberKey::Named("valueOf"),
+        kind: MemberKind::Method { length: 0 },
+        attributes: DescriptorAttributes::METHOD,
+        binding: SemanticBinding::BooleanMethod(BooleanMethod::ValueOf),
+    },
 ];
 
 const fn validate_prototype_surface(surface: &[PrototypeMember]) {
@@ -1224,5 +1324,29 @@ mod tests {
         assert!(prototype_has(PrototypeId::Array, "@@iterator"));
         assert!(prototype_has(PrototypeId::Array, "@@unscopables"));
         assert!(!prototype_has(PrototypeId::Array, "nonexistent"));
+    }
+
+    #[test]
+    fn number_prototype_members_are_complete() {
+        let members: Vec<_> = prototype_members(PrototypeId::Number).collect();
+        assert_eq!(members.len(), 7);
+        assert!(prototype_has(PrototypeId::Number, "constructor"));
+        assert!(prototype_has(PrototypeId::Number, "toExponential"));
+        assert!(prototype_has(PrototypeId::Number, "toFixed"));
+        assert!(prototype_has(PrototypeId::Number, "toPrecision"));
+        assert!(prototype_has(PrototypeId::Number, "toString"));
+        assert!(prototype_has(PrototypeId::Number, "valueOf"));
+        assert!(prototype_has(PrototypeId::Number, "toLocaleString"));
+        assert!(!prototype_has(PrototypeId::Number, "nonexistent"));
+    }
+
+    #[test]
+    fn boolean_prototype_members_are_complete() {
+        let members: Vec<_> = prototype_members(PrototypeId::Boolean).collect();
+        assert_eq!(members.len(), 3);
+        assert!(prototype_has(PrototypeId::Boolean, "constructor"));
+        assert!(prototype_has(PrototypeId::Boolean, "toString"));
+        assert!(prototype_has(PrototypeId::Boolean, "valueOf"));
+        assert!(!prototype_has(PrototypeId::Boolean, "nonexistent"));
     }
 }

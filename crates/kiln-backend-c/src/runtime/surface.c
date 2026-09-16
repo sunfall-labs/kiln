@@ -13,6 +13,8 @@ static const char *kiln_c99_builtin_owner_name(uint64_t builtin) {
     switch (builtin) {
     case KILN_C99_BUILTIN_SYMBOL_PROTOTYPE: return "Symbol.prototype";
     case KILN_C99_BUILTIN_ARRAY_PROTOTYPE: return "Array.prototype";
+    case KILN_C99_BUILTIN_NUMBER_PROTOTYPE: return "Number.prototype";
+    case KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE: return "Boolean.prototype";
     default: return kiln_c99_builtin_name(builtin);
     }
 }
@@ -329,9 +331,6 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
     case KILN_C99_BUILTIN_DATE_PROTOTYPE:
         return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_GET_TIME,
                                       KILN_C99_METHOD_DATE_TO_STRING);
-    case KILN_C99_BUILTIN_NUMBER_PROTOTYPE:
-        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_NUMBER_TO_STRING,
-                                      KILN_C99_METHOD_NUMBER_VALUE_OF);
     case KILN_C99_BUILTIN_FUNCTION_PROTOTYPE:
         return kiln_c99_callable_method(key, key_len);
     case KILN_C99_BUILTIN_PROMISE_PROTOTYPE:

@@ -1536,6 +1536,18 @@ builtin_surface! {
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "toSpliced", code(KILN_C99_METHOD_ARRAY_TO_SPLICED)),
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "@@iterator", code(KILN_C99_METHOD_ARRAY_VALUES)),
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "@@unscopables", unscopables()),
+
+    (KILN_C99_BUILTIN_NUMBER_PROTOTYPE, "Number.prototype", "constructor", ctor(KILN_C99_BUILTIN_NUMBER)),
+    (KILN_C99_BUILTIN_NUMBER_PROTOTYPE, "Number.prototype", "toExponential", code(KILN_C99_METHOD_NUMBER_TO_EXPONENTIAL)),
+    (KILN_C99_BUILTIN_NUMBER_PROTOTYPE, "Number.prototype", "toFixed", code(KILN_C99_METHOD_NUMBER_TO_FIXED)),
+    (KILN_C99_BUILTIN_NUMBER_PROTOTYPE, "Number.prototype", "toPrecision", code(KILN_C99_METHOD_NUMBER_TO_PRECISION)),
+    (KILN_C99_BUILTIN_NUMBER_PROTOTYPE, "Number.prototype", "toString", code(KILN_C99_METHOD_NUMBER_TO_STRING)),
+    (KILN_C99_BUILTIN_NUMBER_PROTOTYPE, "Number.prototype", "valueOf", code(KILN_C99_METHOD_NUMBER_VALUE_OF)),
+    (KILN_C99_BUILTIN_NUMBER_PROTOTYPE, "Number.prototype", "toLocaleString", code(KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING)),
+
+    (KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE, "Boolean.prototype", "constructor", ctor(KILN_C99_BUILTIN_BOOLEAN)),
+    (KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE, "Boolean.prototype", "toString", code(KILN_C99_METHOD_PRIMITIVE_TO_STRING)),
+    (KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE, "Boolean.prototype", "valueOf", code(KILN_C99_METHOD_OBJECT_VALUE_OF)),
 }
 
 /// A member the shared surface declares and this backend does not answer, with the reason.
@@ -2982,6 +2994,7 @@ enum kiln_value_tag {
 #define KILN_C99_BUILTIN_BUFFER 64
 #define KILN_C99_BUILTIN_SYMBOL_PROTOTYPE 96
 #define KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE 97
+#define KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE 98
 
 /* Array methods, part two.
  *
