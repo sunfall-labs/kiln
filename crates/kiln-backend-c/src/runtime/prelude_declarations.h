@@ -21,6 +21,9 @@ extern char *kiln_c99_gc_alloc_text(size_t len);
 extern kiln_val kiln_c99_val_from_text(const char *bytes, size_t len);
 extern kiln_val kiln_c99_val_from_ascii(const char *bytes, size_t len);
 extern kiln_val kiln_c99_val_from_unit(uint16_t unit);
+extern kiln_val kiln_c99_val_slice_string(const kiln_string *source, size_t start, size_t len);
+extern int kiln_c99_split_string_ascii_byte(kiln_value *result, const kiln_string *source,
+                                            char separator, size_t limit);
 extern int kiln_c99_split_ascii_byte(kiln_value *result, const char *bytes, size_t byte_len,
                                      char separator, size_t limit);
 extern const kiln_string *kiln_c99_intern_static(const char *bytes, size_t len);

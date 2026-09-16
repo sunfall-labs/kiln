@@ -1,5 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 804
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -87,19 +88,28 @@ expression: abi_surface(prelude)
 #endif
 #define KILN_STRING_LATIN1 UINT32_C(0)
 #define KILN_STRING_UTF16 UINT32_C(1)
+#define KILN_STRING_SLICED UINT32_C(2)
 typedef struct kiln_string {
+typedef struct kiln_sliced_string {
 #if defined(__cplusplus)
 static_assert(offsetof(kiln_string, unit_len) == 0, "kiln_string.unit_len ABI offset");
 static_assert(offsetof(kiln_string, flags) == 4, "kiln_string.flags ABI offset");
 static_assert(offsetof(kiln_string, data) == 8, "kiln_string.data ABI offset");
 static_assert(sizeof(kiln_string) == 16, "kiln_string ABI size");
+static_assert(offsetof(kiln_sliced_string, base) == 0, "kiln_sliced_string.base ABI offset");
+static_assert(offsetof(kiln_sliced_string, parent) == 16, "kiln_sliced_string.parent ABI offset");
+static_assert(sizeof(kiln_sliced_string) == 24, "kiln_sliced_string ABI size");
 #elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 _Static_assert(offsetof(kiln_string, unit_len) == 0, "kiln_string.unit_len ABI offset");
 _Static_assert(offsetof(kiln_string, flags) == 4, "kiln_string.flags ABI offset");
 _Static_assert(offsetof(kiln_string, data) == 8, "kiln_string.data ABI offset");
 _Static_assert(sizeof(kiln_string) == 16, "kiln_string ABI size");
+_Static_assert(offsetof(kiln_sliced_string, base) == 0, "kiln_sliced_string.base ABI offset");
+_Static_assert(offsetof(kiln_sliced_string, parent) == 16, "kiln_sliced_string.parent ABI offset");
+_Static_assert(sizeof(kiln_sliced_string) == 24, "kiln_sliced_string ABI size");
 #endif
 static inline int kiln_string_is_utf16(const kiln_string *string) {
+static inline int kiln_string_is_sliced(const kiln_string *string) {
 static inline const uint8_t *kiln_string_latin1(const kiln_string *string) {
 static inline const uint16_t *kiln_string_utf16(const kiln_string *string) {
 static inline uint16_t kiln_string_unit_at(const kiln_string *string, size_t index) {
@@ -2158,12 +2168,14 @@ static kiln_value kiln_c99_inspect(kiln_value value) {
 static int kiln_c99_to_units(kiln_value value, uint16_t **out, size_t *count) {
 static int kiln_c99_units_ascii(const uint16_t *units, size_t count) {
 static kiln_value kiln_c99_from_units(const uint16_t *units, size_t count) {
+kiln_val kiln_c99_val_slice_string(const kiln_string *source, size_t start, size_t len) {
 static int kiln_c99_copy_string_slice(const kiln_string *source, size_t start, size_t end,
 static double kiln_c99_units_find(const uint16_t *haystack, size_t haystack_len,
 static int kiln_c99_is_trimmed(uint16_t unit) {
 static int kiln_c99_same_value_zero(kiln_value left, kiln_value right) {
 static size_t kiln_c99_relative_index(kiln_value value, size_t length, size_t fallback) {
 static size_t kiln_c99_unit_position(kiln_value value, size_t length, size_t fallback,
+int kiln_c99_split_string_ascii_byte(kiln_value *result, const kiln_string *source,
 static int kiln_c99_split_ascii_byte(kiln_value *result, const char *bytes, size_t byte_len,
 static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_match_result(kiln_host *host, kiln_value *out, const uint16_t *units,

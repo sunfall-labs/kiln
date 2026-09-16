@@ -1157,7 +1157,8 @@ static kiln_gc_block *kiln_c99_gc_lookup_nursery(const kiln_gc_heap *heap, const
         const char *q = p - sizeof(kiln_string);
         if (kiln_c99_nursery_locate(heap, q, &base, &limit, &bitmap, &words)) {
             block = kiln_c99_nursery_block_at(base, limit, bitmap, words, q - sizeof(kiln_gc_block));
-            if (block != NULL && (block->kind & KILN_GC_KIND_MASK) == KILN_GC_STRING) return block;
+            if (block != NULL && ((block->kind & KILN_GC_KIND_MASK) == KILN_GC_STRING ||
+                                  (block->kind & KILN_GC_KIND_MASK) == KILN_GC_SLICED_STRING)) return block;
         }
     }
     return NULL;
@@ -1171,7 +1172,8 @@ static kiln_gc_block *kiln_c99_gc_lookup(const kiln_gc_heap *heap, const void *p
     if (payload != NULL && ((uintptr_t)payload % sizeof(void *)) == 0 && (uintptr_t)payload >= sizeof(kiln_string)) {
         const void *str_payload = (const char *)payload - sizeof(kiln_string);
         block = kiln_c99_gc_lookup_slab(heap, str_payload, NULL);
-        if (block != NULL && (block->kind & KILN_GC_KIND_MASK) == KILN_GC_STRING) return block;
+        if (block != NULL && ((block->kind & KILN_GC_KIND_MASK) == KILN_GC_STRING ||
+                              (block->kind & KILN_GC_KIND_MASK) == KILN_GC_SLICED_STRING)) return block;
     }
     return NULL;
 }
@@ -2613,6 +2615,13 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         kiln_c99_gc_mark_value(heap, &symbol->description_value);
         break;
     }
+    case KILN_GC_SLICED_STRING: {
+        const kiln_sliced_string *sliced = (const kiln_sliced_string *)payload;
+        if (sliced->parent != NULL) {
+            kiln_c99_gc_mark_block(heap, sliced->parent);
+        }
+        break;
+    }
     case KILN_GC_STRING:
     case KILN_GC_BYTES:
     case KILN_GC_DATE:
@@ -2628,6 +2637,10 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
 static void kiln_c99_gc_finalize(kiln_gc_block *block) {
     void *payload = block + 1;
     switch (block->kind & KILN_GC_KIND_MASK) {
+    case KILN_GC_STRING:
+    case KILN_GC_SLICED_STRING:
+    case KILN_GC_BYTES:
+        break;
     case KILN_GC_OBJECT:
         free(((kiln_object *)payload)->properties);
         if (((kiln_object *)payload)->slots != ((kiln_object *)payload)->inline_slots) {
