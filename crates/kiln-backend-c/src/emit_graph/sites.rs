@@ -180,7 +180,7 @@ pub(super) fn receiver_prologue(
             )
         };
     format!(
-        "    const uint32_t *recv_row = {init}; const kiln_object *recv_obj = NULL; if (KILN_VAL_IS_OBJECT(receiver)) {{ recv_obj = (const kiln_object *)KILN_VAL_PTR(receiver); if (recv_obj == NULL) __builtin_unreachable(); {lookup}{{ recv_row = kiln_c99_recv_row({shapes_var}, &{slot_var}[0][0], {count}, recv_obj->shape); if (recv_row == NULL && !kiln_c99_recv_refused({refused_var}, recv_obj->shape) && kiln_c99_gc_kind_of_ptr(recv_obj) == KILN_GC_OBJECT) {{ const char *const recv_keys[{count}] = {{ {} }}; recv_row = kiln_c99_recv_claim({shapes_var}, {refused_var}, &{slot_var}[0][0], {count}, recv_keys, recv_obj, {double_mask}u); }} }} }} (void)recv_row; (void)recv_obj;\n{check_guard}",
+        "    const uint32_t *recv_row = {init}; const kiln_object *recv_obj = NULL; if (KILN_VAL_IS_OBJECT(receiver)) {{ recv_obj = (const kiln_object *)KILN_VAL_PTR(receiver); if (recv_obj == NULL) __builtin_unreachable(); {lookup}{{ recv_row = kiln_c99_recv_row({shapes_var}, &{slot_var}[0][0], {count}, recv_obj->shape); if (recv_row == NULL && !kiln_c99_recv_refused({refused_var}, recv_obj->shape) && kiln_c99_gc_kind_of_ptr(recv_obj) == KILN_GC_OBJECT) {{ const kiln_string *const recv_keys[{count}] = {{ {} }}; recv_row = kiln_c99_recv_claim({shapes_var}, {refused_var}, &{slot_var}[0][0], {count}, recv_keys, recv_obj, {double_mask}u); }} }} }} (void)recv_row; (void)recv_obj;\n{check_guard}",
         keys.join(", ")
     )
 }

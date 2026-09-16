@@ -325,6 +325,7 @@ typedef struct kiln_gc_heap {
     size_t job_head;
     size_t job_tail;
     size_t job_capacity;
+    size_t job_mask;
 } kiln_gc_heap;
 
 static const kiln_gc_hooks kiln_c99_gc_hooks;
@@ -2922,7 +2923,7 @@ static void kiln_c99_nursery_spare(kiln_gc_heap *heap, kiln_nursery_chunk *chunk
 static void kiln_c99_gc_mark_promise_jobs(kiln_gc_heap *heap) {
     size_t index;
     for (index = heap->job_head; index < heap->job_tail; ++index) {
-        kiln_microtask *job = &heap->jobs[index];
+        kiln_microtask *job = &heap->jobs[index & heap->job_mask];
         kiln_c99_gc_mark_value(heap, &job->handler);
         kiln_c99_gc_mark_value(heap, &job->argument);
         kiln_c99_gc_mark_value(heap, &job->derived);

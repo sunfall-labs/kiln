@@ -5006,7 +5006,7 @@ static kiln_value kiln_graph_diagnostic(const char *phase, const char *module) {
     text[value.len] = '\0';
     string.unit_len = (uint32_t)value.len;
     string.data = text;
-    value.ptr = &string;
+    value.ptr = (const char *)&string;
     return value;
 }
 
@@ -6086,7 +6086,7 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
     if (status != 0) kiln_cli_report_failure_in(status, graph.result, phase);
     if (writes_result && status == 0 && kiln_cli_write_result(graph.entry_result) != 0) {
         static const kiln_string refusal_str = { 17, 0, "filesystem access" };
-        kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 17, .ptr = &refusal_str }, "result write");
+        kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 17, .ptr = (const char *)&refusal_str }, "result write");
         status = 1;
     }
     destroy_status = kiln_realm_destroy(realm);
