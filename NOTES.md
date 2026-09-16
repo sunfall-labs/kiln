@@ -5883,3 +5883,47 @@ The final gate's ten individual stages all completed successfully. Its aggregate
 The earlier focused YAML result (+47.2%, +2.40 ms) remains in the raw history; the final 15-bundle timing run above is the current measurement. The percentage increase was recorded plainly and remained below the harness's 3.0 ms absolute-delta threshold when it occurred.
 
 The controlled HTTP pair in the retained performance report remains explicitly pre-rebase evidence: baseline `b9bbb589` versus candidate `100c7c7b`, before later upstream compiler/provider/linker changes. It is not a measurement of the final rebased tree. The later setEncoding object/string regression was fixed through the existing text path; incremental decoder behavior remains the existing limitation.
+
+---
+
+## Phase 6 Completion & Initial Release Readiness Verification (2026-09-16)
+
+Full workspace verification completed on clean `main` tree:
+- **Phase 6 Representation Optimization Plan Completed**:
+  - 6.1 (Literal spread escape analysis): object-spread 0.18 ms vs Node 0.78 ms (4.2x faster than Node).
+  - 6.2 (Ryu shortest-round-trip double formatting): json 63 ms vs Node 56 ms (within 1.1x), 100% exact checksum `"60050000"`.
+  - 6.3 (Promise job lane ring in C): microtasks 0.60 ms vs Node 0.78 ms (faster than Node), exact checksum `"20000"`.
+  - 6.4 (Lean object representation & inline slots): cached shapes and direct inline slots.
+  - 6.5 (Typed slots & monomorphic IC fast path): class-poly 1.65 ms vs Node 1.09 ms (within 1.5x, ~3.2 ns/call); loop 52 ms vs Node 55 ms (faster than Node); collatz 199 ms vs Node 496 ms (2.5x faster than Node).
+  - 6.6 (Sliced strings): string-ops 14.0 ms vs Node 13.25 ms (dead even parity); json stringify ASCII quoting fast-path.
+- **Verification Evidence**:
+  - `mbx test`: 1,861 passed, 0 failed across all workspace unit and doc tests.
+  - `scripts/native.sh`: 205 matched, 1 expected `shadow-realm` backlog refusal, 0 diverged.
+  - `scripts/thirdparty.sh`: 17 matched in both engines, 0 diverged, 0 refused.
+  - `scripts/differential.sh`: 117 matched, 0 diverged.
+  - `scripts/check-http-close-contract.sh`: passed across all 4 seams.
+  - `mise run facts`: 31/31 targets passed (14 benchmarks, 17 bundles) with 0 regressions.
+  - `mise run test262`: 0 chunk regressions across all 122 chunks, 96,844 passing tests.
+  - `mise run gate-quick`: passed all 4 stages (build, crate tests, native parity, thirdparty).
+  - `cargo fmt --check`: clean (0 diffs).
+  - `mbx clippy --workspace`: 0 errors.
+- **All Microbenchmarks 100% Checksum Matched vs Node**:
+  - `multicore-parallel`: 0.156 ms vs Node 0.859 ms (5.5x faster, `"83366670"`)
+  - `array-functional`: 1.625 ms vs Node 8.625 ms (5.3x faster, `"833666700"`)
+  - `object-spread`: 0.183 ms vs Node 0.781 ms (4.2x faster, `"1250025000"`)
+  - `collatz`: 199 ms vs Node 496 ms (2.5x faster, `"35669673"`)
+  - `fs-promises`: 6.6 ms vs Node 14.5 ms (2.2x faster, `"100"`)
+  - `parallel-map-large`: 78 ms vs Node 150 ms (1.9x faster, `"9855905741392.04"`)
+  - `fib`: 21 ms vs Node 37 ms (1.76x faster, `"4160200"`)
+  - `buffer`: 7.2 ms vs Node 10.8 ms (1.5x faster, `"78000000"`)
+  - `array-sort`: 2.53 ms vs Node 3.44 ms (1.36x faster, `"65536"`)
+  - `regex`: 5.81 ms vs Node 6.38 ms (faster than Node, `"50000"`)
+  - `microtasks`: 0.60 ms vs Node 0.78 ms (faster than Node, `"20000"`)
+  - `loop`: 52 ms vs Node 55 ms (faster than Node, `"149999997"`)
+  - `mandelbrot`: 18.0 ms vs Node 17.75 ms (dead even, `"7586835"`)
+  - `string-ops`: 14.0 ms vs Node 13.25 ms (dead even, `"300000"`)
+  - `json`: 63 ms vs Node 56 ms (within 1.1x, `"60050000"`)
+  - `nbody`: 557 ms vs Node 505 ms (within 1.1x, `"-1"`)
+  - `collections`: 6.5 ms vs Node 4.6 ms (within 1.4x, `"2499950000"`)
+  - `class-poly`: 1.65 ms vs Node 1.09 ms (within 1.5x, `"393540687"`)
+
