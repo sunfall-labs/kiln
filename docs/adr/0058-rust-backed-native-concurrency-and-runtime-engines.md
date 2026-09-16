@@ -121,11 +121,13 @@ lends a per-thread tape, and walks it. Both the C recursive-descent reader and t
   `Math.sqrt` never reaches the bare call.
 * **TypedArrays.** `parallelMap` is supported across all 9 numeric TypedArrays (`Float64Array`,
   `Float32Array`, `Int32Array`, `Uint32Array`, `Int16Array`, `Uint16Array`, `Int8Array`, `Uint8Array`,
-  `Uint8ClampedArray`) returning a typed view of the receiver's kind. `Float64Array` lowers to
-  `{symbol}_pmap_f64_{index}` operating directly on contiguous unboxed `double *` arrays without
-  NaN-boxing overhead. Other typed arrays lower to `{symbol}_pmap_typed_{index}` reading and writing
-  disjoint byte ranges via `kiln_c99_typed_get` and `kiln_c99_typed_set`. Non-pool-safe or allocating
-  callbacks take the sequential typed lowering, preserving full language semantics.
+  `Uint8ClampedArray`) returning a typed view of the receiver's kind. Each kind lowers to its own
+  dedicated unboxed chunk worker (`_pmap_f64_`, `_pmap_f32_`, `_pmap_i32_`, `_pmap_u32_`, `_pmap_i16_`,
+  `_pmap_u16_`, `_pmap_i8_`, `_pmap_u8_`, `_pmap_u8c_`) operating directly on unboxed typed memory
+  slices (`double *`, `float *`, `int32_t *`, `uint32_t *`, etc.) with inlined ECMAScript-compliant
+  truncation and banker's rounding (`ToUint32`, `ToUint8Clamp`), eliminating all per-iteration function
+  calls and branch overhead while unlocking SIMD auto-vectorization across both 64-bit and 32-bit floats.
+  Non-pool-safe or allocating callbacks take the sequential typed lowering, preserving full language semantics.
 * **Pool.** Sized from `available_parallelism`, overridable with `KILN_PARALLELISM`; `1` runs
   every such map inline in the same binary, which is how the sequential number is measured.
 * **Measured** (`bench/non-io/parallel-map-large.mjs`, 2e6 elements, `sqrt`, `pow`, `%` and

@@ -1320,7 +1320,17 @@ fn render_functions(
             if direct.parallel_chunk(index as u32) {
                 writeln!(
                     output,
-                    "static void {symbol}_pmap_{index}(const void *in, void *out, size_t start, size_t end, void *ctx);"
+                    "static void {symbol}_pmap_{index}(const void *in, void *out, size_t start, size_t end, void *ctx);\n\
+                     static void {symbol}_pmap_f64_{index}(const void *in, void *out, size_t start, size_t end, void *ctx);\n\
+                     static void {symbol}_pmap_f32_{index}(const void *in, void *out, size_t start, size_t end, void *ctx);\n\
+                     static void {symbol}_pmap_i32_{index}(const void *in, void *out, size_t start, size_t end, void *ctx);\n\
+                     static void {symbol}_pmap_u32_{index}(const void *in, void *out, size_t start, size_t end, void *ctx);\n\
+                     static void {symbol}_pmap_i16_{index}(const void *in, void *out, size_t start, size_t end, void *ctx);\n\
+                     static void {symbol}_pmap_u16_{index}(const void *in, void *out, size_t start, size_t end, void *ctx);\n\
+                     static void {symbol}_pmap_i8_{index}(const void *in, void *out, size_t start, size_t end, void *ctx);\n\
+                     static void {symbol}_pmap_u8_{index}(const void *in, void *out, size_t start, size_t end, void *ctx);\n\
+                     static void {symbol}_pmap_u8c_{index}(const void *in, void *out, size_t start, size_t end, void *ctx);\n\
+                     static void {symbol}_pmap_typed_{index}(const void *in, void *out, size_t start, size_t end, void *ctx);"
                 )
                 .unwrap();
             }

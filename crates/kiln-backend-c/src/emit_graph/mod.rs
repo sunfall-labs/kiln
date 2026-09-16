@@ -222,7 +222,22 @@ pub fn emit_parallel_chunk(output: &mut String, symbol: &str, index: usize, para
     };
     writeln!(
         output,
-        "static void __attribute__((unused)) {symbol}_pmap_{index}(const void *in, void *out, size_t start, size_t end, void *ctx) {{\n\
+        "static inline uint32_t {symbol}_to_u32_{index}(double value) {{\n\
+    if (!isfinite(value) || value == 0.0) return 0;\n\
+    double wrapped = fmod(trunc(value), 4294967296.0);\n\
+    if (wrapped < 0.0) wrapped += 4294967296.0;\n\
+    return (uint32_t)wrapped;\n\
+}}\n\
+static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
+    if (isnan(value) || value <= 0.0) return 0;\n\
+    if (value >= 255.0) return 255;\n\
+    double rounded = floor(value);\n\
+    if (value - rounded > 0.5 || (value - rounded == 0.5 && fmod(rounded, 2.0) != 0.0)) {{\n\
+        rounded += 1.0;\n\
+    }}\n\
+    return (uint8_t)rounded;\n\
+}}\n\
+static void __attribute__((unused)) {symbol}_pmap_{index}(const void *in, void *out, size_t start, size_t end, void *ctx) {{\n\
     const kiln_val *src = (const kiln_val *)in;\n\
     kiln_val *dst = (kiln_val *)out;\n\
     for (size_t i = start; i < end; ++i) {{\n\
@@ -241,6 +256,86 @@ static void __attribute__((unused)) {symbol}_pmap_f64_{index}(const void *in, vo
         double r = {symbol}_fn_{index}_p(1, src[i]{index_arg});\n\
         if (KILN_UNLIKELY(kiln_c99_typed_failed(r))) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
         dst[i] = r;\n\
+    }}\n\
+}}\n\
+static void __attribute__((unused)) {symbol}_pmap_f32_{index}(const void *in, void *out, size_t start, size_t end, void *ctx) {{\n\
+    const float *src = (const float *)in;\n\
+    float *dst = (float *)out;\n\
+    for (size_t i = start; i < end; ++i) {{\n\
+        if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+        double r = {symbol}_fn_{index}_p(1, (double)src[i]{index_arg});\n\
+        if (KILN_UNLIKELY(kiln_c99_typed_failed(r))) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
+        dst[i] = (float)r;\n\
+    }}\n\
+}}\n\
+static void __attribute__((unused)) {symbol}_pmap_i32_{index}(const void *in, void *out, size_t start, size_t end, void *ctx) {{\n\
+    const int32_t *src = (const int32_t *)in;\n\
+    int32_t *dst = (int32_t *)out;\n\
+    for (size_t i = start; i < end; ++i) {{\n\
+        if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+        double r = {symbol}_fn_{index}_p(1, (double)src[i]{index_arg});\n\
+        if (KILN_UNLIKELY(kiln_c99_typed_failed(r))) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
+        dst[i] = (int32_t){symbol}_to_u32_{index}(r);\n\
+    }}\n\
+}}\n\
+static void __attribute__((unused)) {symbol}_pmap_u32_{index}(const void *in, void *out, size_t start, size_t end, void *ctx) {{\n\
+    const uint32_t *src = (const uint32_t *)in;\n\
+    uint32_t *dst = (uint32_t *)out;\n\
+    for (size_t i = start; i < end; ++i) {{\n\
+        if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+        double r = {symbol}_fn_{index}_p(1, (double)src[i]{index_arg});\n\
+        if (KILN_UNLIKELY(kiln_c99_typed_failed(r))) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
+        dst[i] = {symbol}_to_u32_{index}(r);\n\
+    }}\n\
+}}\n\
+static void __attribute__((unused)) {symbol}_pmap_i16_{index}(const void *in, void *out, size_t start, size_t end, void *ctx) {{\n\
+    const int16_t *src = (const int16_t *)in;\n\
+    int16_t *dst = (int16_t *)out;\n\
+    for (size_t i = start; i < end; ++i) {{\n\
+        if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+        double r = {symbol}_fn_{index}_p(1, (double)src[i]{index_arg});\n\
+        if (KILN_UNLIKELY(kiln_c99_typed_failed(r))) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
+        dst[i] = (int16_t)(uint16_t){symbol}_to_u32_{index}(r);\n\
+    }}\n\
+}}\n\
+static void __attribute__((unused)) {symbol}_pmap_u16_{index}(const void *in, void *out, size_t start, size_t end, void *ctx) {{\n\
+    const uint16_t *src = (const uint16_t *)in;\n\
+    uint16_t *dst = (uint16_t *)out;\n\
+    for (size_t i = start; i < end; ++i) {{\n\
+        if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+        double r = {symbol}_fn_{index}_p(1, (double)src[i]{index_arg});\n\
+        if (KILN_UNLIKELY(kiln_c99_typed_failed(r))) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
+        dst[i] = (uint16_t){symbol}_to_u32_{index}(r);\n\
+    }}\n\
+}}\n\
+static void __attribute__((unused)) {symbol}_pmap_i8_{index}(const void *in, void *out, size_t start, size_t end, void *ctx) {{\n\
+    const int8_t *src = (const int8_t *)in;\n\
+    int8_t *dst = (int8_t *)out;\n\
+    for (size_t i = start; i < end; ++i) {{\n\
+        if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+        double r = {symbol}_fn_{index}_p(1, (double)src[i]{index_arg});\n\
+        if (KILN_UNLIKELY(kiln_c99_typed_failed(r))) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
+        dst[i] = (int8_t)(uint8_t){symbol}_to_u32_{index}(r);\n\
+    }}\n\
+}}\n\
+static void __attribute__((unused)) {symbol}_pmap_u8_{index}(const void *in, void *out, size_t start, size_t end, void *ctx) {{\n\
+    const uint8_t *src = (const uint8_t *)in;\n\
+    uint8_t *dst = (uint8_t *)out;\n\
+    for (size_t i = start; i < end; ++i) {{\n\
+        if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+        double r = {symbol}_fn_{index}_p(1, (double)src[i]{index_arg});\n\
+        if (KILN_UNLIKELY(kiln_c99_typed_failed(r))) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
+        dst[i] = (uint8_t){symbol}_to_u32_{index}(r);\n\
+    }}\n\
+}}\n\
+static void __attribute__((unused)) {symbol}_pmap_u8c_{index}(const void *in, void *out, size_t start, size_t end, void *ctx) {{\n\
+    const uint8_t *src = (const uint8_t *)in;\n\
+    uint8_t *dst = (uint8_t *)out;\n\
+    for (size_t i = start; i < end; ++i) {{\n\
+        if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+        double r = {symbol}_fn_{index}_p(1, (double)src[i]{index_arg});\n\
+        if (KILN_UNLIKELY(kiln_c99_typed_failed(r))) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
+        dst[i] = {symbol}_clamp_u8_{index}(r);\n\
     }}\n\
 }}\n\
 static void __attribute__((unused)) {symbol}_pmap_typed_{index}(const void *in, void *out, size_t start, size_t end, void *ctx) {{\n\
