@@ -105,14 +105,14 @@ fn emit_map_typed(
         format!(
             "double r_elem = {symbol}_fn_{target}_t({call_args}); \
              if (KILN_UNLIKELY(kiln_c99_typed_failed(r_elem))) {typed_failed} \
-             built_arr->elements[idx] = kiln_c99_val_from_double(r_elem);"
+             out_elems[idx] = kiln_c99_val_from_double(r_elem);"
         )
     } else {
         format!(
             "kiln_val r_elem = {symbol}_fn_{target}_t({call_args}); \
              if (KILN_UNLIKELY(r_elem == KILN_VAL_TYPED_FAIL)) {typed_failed} \
              if (built_arr->is_numeric && !KILN_VAL_IS_NUMBER(r_elem)) built_arr->is_numeric = 0; \
-             built_arr->elements[idx] = r_elem;"
+             out_elems[idx] = r_elem;"
         )
     };
     format!(
@@ -1018,7 +1018,9 @@ pub(super) fn emit_call_method(
                              if (status != KILN_C99_OK) return status; \
                              kiln_array *built_arr = kiln_c99_array_of(built_val); \
                              int pmap_failed = 0; \
-                             if (kiln_parallel_map(arr->elements, count0, built_arr->elements, {symbol}_pmap_{target}, &pmap_failed) == 0 && !pmap_failed) {{ \
+                             const kiln_val * restrict in_elems = (const kiln_val * restrict)arr->elements; \
+                             kiln_val * restrict out_elems = (kiln_val * restrict)built_arr->elements; \
+                             if (kiln_parallel_map(in_elems, count0, out_elems, {symbol}_pmap_{target}, &pmap_failed) == 0 && !pmap_failed) {{ \
                                  built_arr->count = count0; \
                                  v{v} = kiln_val_from_boundary(built_val); \
                                  handled = 1; \
@@ -1084,13 +1086,15 @@ pub(super) fn emit_call_method(
                                  built_arr->count = arr->count; \
                                  kiln_val vrecv = plain->arrow ? plain->captured_this : v{o}; \
                                  if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
+                                 const kiln_val * restrict in_elems = (const kiln_val * restrict)arr->elements; \
+                                 kiln_val * restrict out_elems = (kiln_val * restrict)built_arr->elements; \
                                  for (size_t idx = 0; idx < arr->count; ++idx) {{ \
-                                     if (arr->elements[idx] == KILN_VAL_HOLE) {{ \
-                                         built_arr->elements[idx] = KILN_VAL_HOLE; \
+                                     if (in_elems[idx] == KILN_VAL_HOLE) {{ \
+                                         out_elems[idx] = KILN_VAL_HOLE; \
                                          built_arr->is_numeric = 0; \
                                          continue; \
                                      }} \
-                                     kiln_val vargs[3] = {{ arr->elements[idx], kiln_c99_val_from_double((double)idx), v{o} }}; \
+                                     kiln_val vargs[3] = {{ in_elems[idx], kiln_c99_val_from_double((double)idx), v{o} }}; \
                                      kiln_val prod = KILN_VAL_UNDEFINED; \
                                      int status; \
                                      if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
@@ -1101,7 +1105,7 @@ pub(super) fn emit_call_method(
                                      if (built_arr->is_numeric && !KILN_VAL_IS_NUMBER(prod)) {{ \
                                          built_arr->is_numeric = 0; \
                                      }} \
-                                     built_arr->elements[idx] = prod; \
+                                     out_elems[idx] = prod; \
                                  }} \
                                  v{v} = kiln_val_from_boundary(built_val); \
                                  handled = 1; \
