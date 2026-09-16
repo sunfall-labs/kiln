@@ -633,6 +633,16 @@ pub(super) fn emit_get_computed(
                             v{v} = arr->elements[slot]; \
                             handled = 1; \
                         }} \
+                    }} else if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY) {{ \
+                        double idx; \
+                        memcpy(&idx, &{vk}, sizeof(idx)); \
+                        size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; \
+                        kiln_typed_array *view = (kiln_typed_array *)ptr; \
+                        if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < view->length)) {{ \
+                            double d = kiln_c99_typed_get(view, slot); \
+                            v{v} = kiln_c99_val_from_double(d); \
+                            handled = 1; \
+                        }} \
                     }} \
                 }} else if (!handled && KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_NUMBER({vk})) {{ \
                     double idx; \
@@ -748,6 +758,22 @@ pub(super) fn emit_set_computed(
                         if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && !arr->frozen)) {{ \
                             if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v{val})) arr->is_numeric = 0; \
                             arr->elements[slot] = v{val}; \
+                            v{v} = v{val}; \
+                            handled = 1; \
+                        }} \
+                    }} else if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY) {{ \
+                        double idx; \
+                        memcpy(&idx, &v{k}, sizeof(idx)); \
+                        size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; \
+                        kiln_typed_array *view = (kiln_typed_array *)ptr; \
+                        if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < view->length)) {{ \
+                            double val_d; \
+                            if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{val}))) {{ \
+                                memcpy(&val_d, &v{val}, sizeof(val_d)); \
+                            }} else {{ \
+                                val_d = kiln_c99_as_number(kiln_val_to_boundary(v{val})); \
+                            }} \
+                            kiln_c99_typed_set(view, slot, val_d); \
                             v{v} = v{val}; \
                             handled = 1; \
                         }} \
