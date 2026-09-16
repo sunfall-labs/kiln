@@ -817,16 +817,22 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 return status;
             }
         }
-        uint64_t code;
+        uint64_t code = kiln_c99_namespace_method(KILN_C99_BUILTIN_PROMISE_PROTOTYPE, intrinsic_key,
+                                                  intrinsic_len);
+        if (code != 0) {
+            *out = kiln_c99_method(code);
+            return KILN_C99_OK;
+        }
         if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_PROMISE);
             return KILN_C99_OK;
         }
-        code = kiln_c99_lookup_method(intrinsic_key, intrinsic_len, KILN_C99_METHOD_THEN,
-                                      KILN_C99_METHOD_FINALLY);
-        if (code != 0) {
-            *out = kiln_c99_method(code);
-            return KILN_C99_OK;
+        {
+            kiln_value member;
+            if (kiln_c99_surface_value(KILN_C99_BUILTIN_PROMISE_PROTOTYPE, intrinsic_key, intrinsic_len, &member)) {
+                *out = member;
+                return KILN_C99_OK;
+            }
         }
         KILN_C99_ABSENT("not a member of Promise.prototype; Promise only defines then, catch, "
                         "finally, constructor, and @@toStringTag",
@@ -1344,6 +1350,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                           {KILN_C99_BUILTIN_DATE_PROTOTYPE, KILN_C99_BUILTIN_DATE},
                           {KILN_C99_BUILTIN_NUMBER_PROTOTYPE, KILN_C99_BUILTIN_NUMBER},
                           {KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE, KILN_C99_BUILTIN_BOOLEAN},
+                          {KILN_C99_BUILTIN_BIGINT_PROTOTYPE, KILN_C99_BUILTIN_BIGINT},
                           {KILN_C99_BUILTIN_FUNCTION_PROTOTYPE, KILN_C99_BUILTIN_FUNCTION},
                           {KILN_C99_BUILTIN_PROMISE_PROTOTYPE, KILN_C99_BUILTIN_PROMISE},
                           {KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE, KILN_C99_BUILTIN_DATA_VIEW},
@@ -1434,6 +1441,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 {KILN_C99_BUILTIN_DATE, KILN_C99_BUILTIN_DATE_PROTOTYPE},
                 {KILN_C99_BUILTIN_NUMBER, KILN_C99_BUILTIN_NUMBER_PROTOTYPE},
                 {KILN_C99_BUILTIN_BOOLEAN, KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE},
+                {KILN_C99_BUILTIN_BIGINT, KILN_C99_BUILTIN_BIGINT_PROTOTYPE},
                 {KILN_C99_BUILTIN_FUNCTION, KILN_C99_BUILTIN_FUNCTION_PROTOTYPE},
                 {KILN_C99_BUILTIN_PROMISE, KILN_C99_BUILTIN_PROMISE_PROTOTYPE},
                 {KILN_C99_BUILTIN_DATA_VIEW, KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE},
@@ -1584,23 +1592,30 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                                     target.tag == KILN_VALUE_NULL
                                         ? "Cannot read properties of null"
                                         : "Cannot read properties of undefined");
-    case KILN_VALUE_BIGINT:
-        /* `toString` and `valueOf` share the number codes: the dispatch reads the receiver, and
-         * the receiver is what tells the two types apart. */
+    case KILN_VALUE_BIGINT: {
+        (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
+                                            &intrinsic_len);
+        uint64_t code = kiln_c99_namespace_method(KILN_C99_BUILTIN_BIGINT_PROTOTYPE, intrinsic_key,
+                                                  intrinsic_len);
+        if (code != 0) {
+            *out = kiln_c99_method(code);
+            return KILN_C99_OK;
+        }
         if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_BIGINT);
             return KILN_C99_OK;
         }
-        if (kiln_c99_same_name_key(key, "toString") ||
-            kiln_c99_same_name_key(key, "toLocaleString")) {
-            *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_TO_STRING);
-            return KILN_C99_OK;
+        {
+            kiln_value member;
+            if (kiln_c99_surface_value(KILN_C99_BUILTIN_BIGINT_PROTOTYPE, intrinsic_key,
+                                       intrinsic_len, &member)) {
+                *out = member;
+                return KILN_C99_OK;
+            }
         }
-        if (kiln_c99_same_name_key(key, "valueOf")) {
-            *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_VALUE_OF);
-            return KILN_C99_OK;
-        }
-        KILN_C99_ABSENT("not a member of BigInt.prototype", out);
+        KILN_C99_ABSENT("not a member of BigInt.prototype; BUILTIN_SURFACE holds the ones that are",
+                        out);
+    }
     case KILN_VALUE_NUMBER: {
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
                                             &intrinsic_len);
