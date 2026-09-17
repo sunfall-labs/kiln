@@ -459,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "frontend-oxc"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "kiln-hir",
  "kiln-host-abi",
@@ -1259,14 +1259,14 @@ dependencies = [
 
 [[package]]
 name = "kiln-artifact-cache"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "kiln-digest",
 ]
 
 [[package]]
 name = "kiln-backend-c"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bitflags",
  "insta",
@@ -1286,7 +1286,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-bench"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "frontend-oxc",
  "kiln-artifact-cache",
@@ -1307,11 +1307,11 @@ dependencies = [
 
 [[package]]
 name = "kiln-builtin-surface"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "kiln-builtins"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "frontend-oxc",
  "kiln-ir",
@@ -1320,7 +1320,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-cli"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "annotate-snippets",
  "frontend-oxc",
@@ -1344,7 +1344,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-conformance"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "frontend-oxc",
  "kiln-digest",
@@ -1361,7 +1361,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-daemon"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "frontend-oxc",
  "kiln-artifact-cache",
@@ -1387,7 +1387,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-data-formats"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1395,7 +1395,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-db"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "ahash",
  "kiln-backend-c",
@@ -1407,18 +1407,18 @@ dependencies = [
 
 [[package]]
 name = "kiln-digest"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "kiln-hir"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "kiln-string",
 ]
 
 [[package]]
 name = "kiln-host-abi"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "kiln-number-core",
  "kiln-string",
@@ -1426,7 +1426,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-interpreter"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "cap-std",
  "digest",
@@ -1454,7 +1454,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-intl"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "fixed_decimal",
  "icu_calendar",
@@ -1473,7 +1473,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-ir"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "kiln-hir",
  "kiln-host-abi",
@@ -1482,7 +1482,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-json"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "encoding_rs",
  "kiln-string",
@@ -1490,7 +1490,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-liveness"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "kiln-backend-c",
  "kiln-ir",
@@ -1502,7 +1502,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-module-graph"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "frontend-oxc",
  "kiln-builtins",
@@ -1527,7 +1527,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-native"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "frontend-oxc",
  "kiln-artifact-cache",
@@ -1556,18 +1556,18 @@ dependencies = [
 
 [[package]]
 name = "kiln-native-number"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "kiln-number-core",
 ]
 
 [[package]]
 name = "kiln-native-number-abi"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "kiln-native-number-ffi"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "hashbrown 0.16.1",
  "kiln-host-abi",
@@ -1590,7 +1590,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-native-provider-contract"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "kiln-digest",
  "kiln-native-number",
@@ -1601,7 +1601,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-native-runtime"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "kiln-host-abi",
  "kiln-native-number",
@@ -1610,22 +1610,22 @@ dependencies = [
 
 [[package]]
 name = "kiln-native-toolchain"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "kiln-node-path"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "kiln-number-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "dragonbox_ecma",
 ]
 
 [[package]]
 name = "kiln-proto"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "kiln-digest",
  "serde",
@@ -1634,7 +1634,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-runtime"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bytes",
  "h2",
@@ -1651,21 +1651,21 @@ dependencies = [
 
 [[package]]
 name = "kiln-string"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "encoding_rs",
 ]
 
 [[package]]
 name = "kiln-temporal"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "temporal_rs",
 ]
 
 [[package]]
 name = "kiln-test-selector"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "kiln-test262"
