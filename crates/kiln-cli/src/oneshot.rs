@@ -134,7 +134,7 @@ mod tests {
 
         let dir = {
             let mut session = OneShot::start().expect("start an in-process engine");
-            let out = commands::check(&mut session, &source, &fixture)
+            let out = commands::check(&mut session, &source, &fixture, false)
                 .expect("check")
                 .text;
             assert!(out.contains("a.js  r"), "{out}");

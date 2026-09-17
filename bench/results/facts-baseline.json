@@ -187875,31 +187875,314 @@
                 },
                 {
                   "id": 26,
+                  "kind": "Call"
+                },
+                {
+                  "id": 27,
+                  "kind": "Call"
+                },
+                {
+                  "id": 28,
+                  "kind": "Call"
+                },
+                {
+                  "id": 29,
+                  "kind": "Call"
+                },
+                {
+                  "id": 30,
+                  "kind": "Call"
+                },
+                {
+                  "id": 31,
+                  "kind": "Call"
+                },
+                {
+                  "id": 32,
+                  "kind": "Call"
+                },
+                {
+                  "id": 33,
+                  "kind": "Call"
+                },
+                {
+                  "id": 34,
+                  "kind": "Call"
+                },
+                {
+                  "id": 35,
+                  "kind": "Call"
+                },
+                {
+                  "id": 36,
+                  "kind": "Call"
+                },
+                {
+                  "id": 37,
+                  "kind": "Call"
+                },
+                {
+                  "id": 38,
+                  "kind": "Call"
+                },
+                {
+                  "id": 39,
+                  "kind": "Call"
+                },
+                {
+                  "id": 40,
+                  "kind": "Call"
+                },
+                {
+                  "id": 41,
+                  "kind": "Call"
+                },
+                {
+                  "id": 42,
+                  "kind": "Call"
+                },
+                {
+                  "id": 43,
+                  "kind": "Call"
+                },
+                {
+                  "id": 44,
+                  "kind": "Call"
+                },
+                {
+                  "id": 45,
+                  "kind": "Call"
+                },
+                {
+                  "id": 46,
+                  "kind": "Call"
+                },
+                {
+                  "id": 47,
+                  "kind": "Call"
+                },
+                {
+                  "id": 48,
+                  "kind": "Call"
+                },
+                {
+                  "id": 49,
+                  "kind": "Call"
+                },
+                {
+                  "id": 52,
+                  "kind": "Call"
+                },
+                {
+                  "id": 53,
+                  "kind": "Call"
+                },
+                {
+                  "id": 54,
+                  "kind": "Call"
+                },
+                {
+                  "id": 55,
+                  "kind": "Call"
+                },
+                {
+                  "id": 56,
+                  "kind": "Call"
+                },
+                {
+                  "id": 57,
+                  "kind": "Call"
+                },
+                {
+                  "id": 58,
+                  "kind": "Call"
+                },
+                {
+                  "id": 59,
+                  "kind": "Call"
+                },
+                {
+                  "id": 60,
+                  "kind": "Call"
+                },
+                {
+                  "id": 61,
+                  "kind": "Call"
+                },
+                {
+                  "id": 62,
+                  "kind": "Call"
+                },
+                {
+                  "id": 63,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 64,
                   "kind": "MakeFunction",
                   "detail": "proto #3"
                 },
                 {
-                  "id": 27,
+                  "id": 65,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"@@private:0:%brand\""
+                },
+                {
+                  "id": 66,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 67,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 68,
                   "kind": "MakeFunction",
                   "detail": "proto #4"
                 },
                 {
-                  "id": 28,
+                  "id": 69,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 70,
                   "kind": "MakeFunction",
                   "detail": "proto #5"
                 },
                 {
-                  "id": 29,
+                  "id": 71,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 72,
                   "kind": "MakeFunction",
                   "detail": "proto #6"
                 },
                 {
-                  "id": 30,
+                  "id": 73,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 74,
                   "kind": "MakeFunction",
                   "detail": "proto #7"
                 },
                 {
-                  "id": 33,
+                  "id": 75,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 76,
+                  "kind": "MakeFunction",
+                  "detail": "proto #8"
+                },
+                {
+                  "id": 77,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 78,
+                  "kind": "MakeFunction",
+                  "detail": "proto #9"
+                },
+                {
+                  "id": 79,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 80,
+                  "kind": "MakeFunction",
+                  "detail": "proto #10"
+                },
+                {
+                  "id": 81,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"@@private:1:%brand\""
+                },
+                {
+                  "id": 82,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 83,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 84,
+                  "kind": "MakeFunction",
+                  "detail": "proto #11"
+                },
+                {
+                  "id": 85,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 86,
+                  "kind": "MakeFunction",
+                  "detail": "proto #12"
+                },
+                {
+                  "id": 87,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 88,
+                  "kind": "MakeFunction",
+                  "detail": "proto #13"
+                },
+                {
+                  "id": 89,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 90,
+                  "kind": "MakeFunction",
+                  "detail": "proto #14"
+                },
+                {
+                  "id": 91,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 92,
+                  "kind": "MakeFunction",
+                  "detail": "proto #15"
+                },
+                {
+                  "id": 93,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 94,
+                  "kind": "MakeFunction",
+                  "detail": "proto #16"
+                },
+                {
+                  "id": 95,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 96,
+                  "kind": "MakeFunction",
+                  "detail": "proto #17"
+                },
+                {
+                  "id": 98,
                   "kind": "SetPropertyStrict",
                   "detail": "\"default\""
                 }
@@ -187970,119 +188253,140 @@
               ]
             },
             {
-              "name": "appendFile",
-              "return_type": "Unknown",
+              "name": "FSWatcher",
+              "return_type": "Undefined",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
               "sites": [
                 {
-                  "id": 0,
-                  "kind": "GetProperty",
-                  "detail": "\"appendFile\""
-                },
-                {
                   "id": 1,
-                  "kind": "GetProperty",
-                  "detail": "\"appendFile\""
-                },
-                {
-                  "id": 2,
-                  "kind": "NewArray"
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"@@private:0:%brand\""
                 }
               ]
             },
             {
-              "name": "mkdir",
+              "return_type": "Undefined",
+              "pure": true,
+              "can_throw": false,
+              "reads_arguments": false
+            },
+            {
               "return_type": "Unknown",
+              "pure": true,
+              "can_throw": false,
+              "reads_arguments": false
+            },
+            {
+              "return_type": "Unknown",
+              "pure": true,
+              "can_throw": false,
+              "reads_arguments": false
+            },
+            {
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false
+            },
+            {
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false
+            },
+            {
+              "return_type": "Boolean",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false
+            },
+            {
+              "name": "Stats",
+              "return_type": "Undefined",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
               "sites": [
                 {
-                  "id": 0,
-                  "kind": "GetProperty",
-                  "detail": "\"mkdir\""
-                },
-                {
                   "id": 1,
-                  "kind": "GetProperty",
-                  "detail": "\"mkdir\""
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"@@private:1:%brand\""
                 },
                 {
                   "id": 2,
-                  "kind": "NewArray"
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"size\""
+                },
+                {
+                  "id": 3,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"mtimeMs\""
+                },
+                {
+                  "id": 4,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"ctimeMs\""
+                },
+                {
+                  "id": 5,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"atimeMs\""
+                },
+                {
+                  "id": 6,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"birthtimeMs\""
+                },
+                {
+                  "id": 7,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"mode\""
                 }
               ]
             },
             {
-              "name": "readFile",
-              "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
-              "reads_arguments": false,
-              "sites": [
-                {
-                  "id": 0,
-                  "kind": "GetProperty",
-                  "detail": "\"readFile\""
-                },
-                {
-                  "id": 1,
-                  "kind": "GetProperty",
-                  "detail": "\"readFile\""
-                },
-                {
-                  "id": 2,
-                  "kind": "NewArray"
-                }
-              ]
+              "return_type": "Boolean",
+              "pure": true,
+              "can_throw": false,
+              "reads_arguments": false
             },
             {
-              "name": "stat",
-              "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
-              "reads_arguments": false,
-              "sites": [
-                {
-                  "id": 0,
-                  "kind": "GetProperty",
-                  "detail": "\"stat\""
-                },
-                {
-                  "id": 1,
-                  "kind": "GetProperty",
-                  "detail": "\"stat\""
-                },
-                {
-                  "id": 2,
-                  "kind": "NewArray"
-                }
-              ]
+              "return_type": "Boolean",
+              "pure": true,
+              "can_throw": false,
+              "reads_arguments": false
             },
             {
-              "name": "writeFile",
-              "return_type": "Unknown",
-              "pure": false,
-              "can_throw": true,
-              "reads_arguments": false,
-              "sites": [
-                {
-                  "id": 0,
-                  "kind": "GetProperty",
-                  "detail": "\"writeFile\""
-                },
-                {
-                  "id": 1,
-                  "kind": "GetProperty",
-                  "detail": "\"writeFile\""
-                },
-                {
-                  "id": 2,
-                  "kind": "NewArray"
-                }
-              ]
+              "return_type": "Boolean",
+              "pure": true,
+              "can_throw": false,
+              "reads_arguments": false
+            },
+            {
+              "return_type": "Boolean",
+              "pure": true,
+              "can_throw": false,
+              "reads_arguments": false
+            },
+            {
+              "return_type": "Boolean",
+              "pure": true,
+              "can_throw": false,
+              "reads_arguments": false
+            },
+            {
+              "return_type": "Boolean",
+              "pure": true,
+              "can_throw": false,
+              "reads_arguments": false
+            },
+            {
+              "return_type": "Boolean",
+              "pure": true,
+              "can_throw": false,
+              "reads_arguments": false
             }
           ]
         },
@@ -188150,14 +188454,69 @@
                   "detail": "proto #10"
                 },
                 {
-                  "id": 11,
-                  "kind": "SetPropertyStrict",
-                  "detail": "\"posix\""
+                  "id": 10,
+                  "kind": "MakeFunction",
+                  "detail": "proto #11"
                 },
                 {
                   "id": 12,
                   "kind": "SetPropertyStrict",
+                  "detail": "\"posix\""
+                },
+                {
+                  "id": 13,
+                  "kind": "SetPropertyStrict",
                   "detail": "\"default\""
+                },
+                {
+                  "id": 14,
+                  "kind": "MakeFunction",
+                  "detail": "proto #12"
+                },
+                {
+                  "id": 15,
+                  "kind": "MakeFunction",
+                  "detail": "proto #13"
+                },
+                {
+                  "id": 16,
+                  "kind": "MakeFunction",
+                  "detail": "proto #14"
+                },
+                {
+                  "id": 17,
+                  "kind": "MakeFunction",
+                  "detail": "proto #15"
+                },
+                {
+                  "id": 18,
+                  "kind": "MakeFunction",
+                  "detail": "proto #16"
+                },
+                {
+                  "id": 19,
+                  "kind": "MakeFunction",
+                  "detail": "proto #17"
+                },
+                {
+                  "id": 20,
+                  "kind": "MakeFunction",
+                  "detail": "proto #18"
+                },
+                {
+                  "id": 22,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"win32\""
+                },
+                {
+                  "id": 23,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"default\""
+                },
+                {
+                  "id": 24,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"win32\""
                 }
               ]
             },
@@ -188806,6 +189165,204 @@
                   "id": 12,
                   "kind": "GetProperty",
                   "detail": "\"length\""
+                }
+              ]
+            },
+            {
+              "name": "toNamespacedPath",
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": true,
+              "can_throw": false,
+              "reads_arguments": false
+            },
+            {
+              "name": "basename",
+              "parameter_types": [
+                "Unknown",
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "returned_sites": [
+                1
+              ],
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "CallMethod",
+                  "detail": "\"replace\""
+                },
+                {
+                  "id": 1,
+                  "kind": "Call"
+                }
+              ]
+            },
+            {
+              "name": "dirname",
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "returned_sites": [
+                2
+              ],
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "CallMethod",
+                  "detail": "\"replace\""
+                },
+                {
+                  "id": 1,
+                  "kind": "Call"
+                },
+                {
+                  "id": 2,
+                  "kind": "CallMethod",
+                  "detail": "\"replace\""
+                }
+              ]
+            },
+            {
+              "name": "isAbsolute",
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "returned_sites": [
+                0,
+                1
+              ],
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "CallMethod",
+                  "detail": "\"test\""
+                },
+                {
+                  "id": 1,
+                  "kind": "CallMethod",
+                  "detail": "\"startsWith\""
+                }
+              ]
+            },
+            {
+              "name": "join",
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "returned_sites": [
+                1
+              ],
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 1,
+                  "kind": "CallMethod",
+                  "detail": "\"replace\""
+                }
+              ]
+            },
+            {
+              "name": "normalize",
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "returned_sites": [
+                2
+              ],
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "CallMethod",
+                  "detail": "\"replace\""
+                },
+                {
+                  "id": 1,
+                  "kind": "Call"
+                },
+                {
+                  "id": 2,
+                  "kind": "CallMethod",
+                  "detail": "\"replace\""
+                }
+              ]
+            },
+            {
+              "name": "resolve",
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "returned_sites": [
+                1
+              ],
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 1,
+                  "kind": "CallMethod",
+                  "detail": "\"replace\""
+                }
+              ]
+            },
+            {
+              "name": "toNamespacedPath",
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "GetProperty",
+                  "detail": "\"length\""
+                },
+                {
+                  "id": 1,
+                  "kind": "CallMethod",
+                  "detail": "\"startsWith\""
+                },
+                {
+                  "id": 2,
+                  "kind": "CallMethod",
+                  "detail": "\"startsWith\""
+                },
+                {
+                  "id": 3,
+                  "kind": "CallMethod",
+                  "detail": "\"slice\""
+                },
+                {
+                  "id": 4,
+                  "kind": "CallMethod",
+                  "detail": "\"test\""
                 }
               ]
             }

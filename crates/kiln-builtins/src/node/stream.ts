@@ -580,6 +580,25 @@ export function pipeline(...args: any[]): any {
   return streams[streams.length - 1];
 }
 
+export const promises = {
+  finished(stream: any, options?: any): Promise<void> {
+    return new Promise((resolve, reject) => {
+      finished(stream, (err?: any) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+  },
+  pipeline(...streams: any[]): Promise<void> {
+    return new Promise((resolve, reject) => {
+      pipeline(...streams, (err?: any) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+  },
+};
+
 Stream.Readable = Readable;
 Stream.Writable = Writable;
 Stream.Duplex = Duplex;
@@ -587,6 +606,7 @@ Stream.Transform = Transform;
 Stream.PassThrough = PassThrough;
 Stream.pipeline = pipeline;
 Stream.finished = finished;
+Stream.promises = promises;
 Stream.addAbortSignal = addAbortSignal;
 Stream.Stream = Stream;
 Stream.default = Stream;

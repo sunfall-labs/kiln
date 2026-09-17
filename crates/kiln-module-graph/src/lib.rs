@@ -1340,31 +1340,54 @@ impl ModuleGraph {
         importer: &Path,
         provider: &Path,
         import: &kiln_ir::ImportBinding,
+        values: &HashMap<PathBuf, HashMap<String, Value>>,
         pending: &mut HashMap<(PathBuf, String), Cell>,
     ) -> Result<Cell, ModuleGraphError> {
         if import.imported == kiln_ir::NAMESPACE_IMPORT {
-            return Err(ModuleGraphError::Source {
-                path: importer.to_path_buf(),
-                message: format!(
-                    "`import * as` of `{}`, which imports it back before it has run, needs a \
-                     live namespace this linker cannot yet build",
-                    provider.display()
-                ),
-            });
+            if let Some(exports) = values.get(provider) {
+                let mut entries: Vec<(String, Value)> = exports
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect();
+                entries.sort_by(|left, right| left.0.cmp(&right.0));
+                let ns = kiln_interpreter::namespace_object(entries);
+                return Ok(std::rc::Rc::new(std::cell::RefCell::new(ns)));
+            }
+            return Ok(pending
+                .entry((
+                    provider.to_path_buf(),
+                    kiln_ir::NAMESPACE_IMPORT.to_string(),
+                ))
+                .or_insert_with(|| {
+                    std::rc::Rc::new(std::cell::RefCell::new(Value::Native(
+                        kiln_interpreter::Native::Uninitialized,
+                        kiln_interpreter::RealmId::PRIMARY,
+                    )))
+                })
+                .clone());
         }
         let (origin, local_slot) = match self.resolved_export(provider, &import.imported) {
             Some(ResolvedExport::Local { module, local_slot }) => (module.clone(), *local_slot),
             Some(ResolvedExport::CommonJsNamed { module, .. }) => (module.clone(), 0),
             Some(ResolvedExport::Namespace { module }) => {
-                return Err(ModuleGraphError::Source {
-                    path: importer.to_path_buf(),
-                    message: format!(
-                        "`{}` re-exports the namespace of `{}` around a cycle, which needs a \
-                         live namespace this linker cannot yet build",
-                        provider.display(),
-                        module.display()
-                    ),
-                });
+                if let Some(exports) = values.get(module) {
+                    let mut entries: Vec<(String, Value)> = exports
+                        .iter()
+                        .map(|(name, value)| (name.clone(), value.clone()))
+                        .collect();
+                    entries.sort_by(|left, right| left.0.cmp(&right.0));
+                    let ns = kiln_interpreter::namespace_object(entries);
+                    return Ok(std::rc::Rc::new(std::cell::RefCell::new(ns)));
+                }
+                return Ok(pending
+                    .entry((module.clone(), kiln_ir::NAMESPACE_IMPORT.to_string()))
+                    .or_insert_with(|| {
+                        std::rc::Rc::new(std::cell::RefCell::new(Value::Native(
+                            kiln_interpreter::Native::Uninitialized,
+                            kiln_interpreter::RealmId::PRIMARY,
+                        )))
+                    })
+                    .clone());
             }
             Some(ResolvedExport::Ambiguous) => {
                 return Err(ModuleGraphError::AmbiguousExport {
@@ -1979,6 +2002,7 @@ impl ModuleGraph {
                         path,
                         &dependency.target,
                         import,
+                        &values,
                         &mut pending_cycle_cells,
                     )?;
                     imports.push(Value::Cell(cell));
@@ -2096,6 +2120,16 @@ impl ModuleGraph {
                 if let Some(cell) = pending_cycle_cells.remove(&(path.clone(), name.clone())) {
                     *cell.borrow_mut() = read_through_cell(value);
                 }
+            }
+            if let Some(cell) =
+                pending_cycle_cells.remove(&(path.clone(), kiln_ir::NAMESPACE_IMPORT.to_string()))
+            {
+                let mut entries: Vec<(String, Value)> = exports
+                    .iter()
+                    .map(|(name, value)| (name.clone(), read_through_cell(value)))
+                    .collect();
+                entries.sort_by(|left, right| left.0.cmp(&right.0));
+                *cell.borrow_mut() = kiln_interpreter::namespace_object(entries);
             }
             values.insert(path.clone(), exports);
             if path == &self.entry {
@@ -3452,6 +3486,9 @@ fn asset_module_program(path: &str) -> Program {
 fn validate_exports(path: &Path, program: &ModuleProgram) -> Result<(), ModuleGraphError> {
     let mut names = HashSet::new();
     for export in &program.exports {
+        if export.exported.starts_with(kiln_ir::STAR_REEXPORT_PREFIX) {
+            continue;
+        }
         if !names.insert(export.exported.clone()) {
             return Err(ModuleGraphError::DuplicateExport {
                 module: path.to_path_buf(),

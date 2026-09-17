@@ -116,10 +116,24 @@ fn target_for_command(command: &Command) -> Option<&Path> {
     match command {
         Command::Run { path, .. }
         | Command::Build { path, .. }
-        | Command::Check { path }
+        | Command::Check { path, .. }
         | Command::Watch { path, .. } => Some(path.as_path()),
         _ => None,
     }
+}
+
+fn is_workspace_root(dir: &Path) -> bool {
+    if dir.join("pnpm-workspace.yaml").is_file() {
+        return true;
+    }
+    let manifest_path = dir.join("package.json");
+    if let Ok(content) = std::fs::read_to_string(&manifest_path)
+        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content)
+        && parsed.get("workspaces").is_some()
+    {
+        return true;
+    }
+    false
 }
 
 fn find_project_root(target: Option<&Path>) -> Result<PathBuf> {
@@ -157,14 +171,19 @@ fn find_project_root(target: Option<&Path>) -> Result<PathBuf> {
     };
 
     let mut current = Some(start_dir.as_path());
+    let mut candidate = None;
 
     while let Some(dir) = current {
-        if dir.join("package.json").is_file()
-            || dir.join("tsconfig.json").is_file()
-            || dir.join("jsconfig.json").is_file()
-            || dir.join("node_modules").is_dir()
-        {
+        if is_workspace_root(dir) {
             return Ok(dir.to_path_buf());
+        }
+        if candidate.is_none()
+            && (dir.join("package.json").is_file()
+                || dir.join("tsconfig.json").is_file()
+                || dir.join("jsconfig.json").is_file()
+                || dir.join("node_modules").is_dir())
+        {
+            candidate = Some(dir.to_path_buf());
         }
         // A repository is a project boundary, and the search stops at one rather than treating
         // it as a fallback to be used only if nothing above matched. It was a fallback, and a
@@ -180,12 +199,12 @@ fn find_project_root(target: Option<&Path>) -> Result<PathBuf> {
         // A `node_modules` that belongs to this project is still found, because it is at or
         // below the repository root and so is reached before this returns.
         if dir.join(".git").exists() {
-            return Ok(dir.to_path_buf());
+            return Ok(candidate.unwrap_or_else(|| dir.to_path_buf()));
         }
         current = dir.parent();
     }
 
-    Ok(start_dir)
+    Ok(candidate.unwrap_or(start_dir))
 }
 
 fn dispatch(invocation: Invocation) -> Result<i32> {
@@ -337,9 +356,10 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                 pgo_use.as_deref(),
             )?)
         }
-        Command::Check { path } => {
+        Command::Check { path, node } => {
+            let node = auto_node(node);
             let mut backend = open(one_shot, &socket)?;
-            report(commands::check(backend.as_mut(), &path, &root)?)
+            report(commands::check(backend.as_mut(), &path, &root, node)?)
         }
         Command::Test {
             path,
@@ -588,6 +608,34 @@ mod tests {
             found,
             project_dir.canonicalize().expect("canonical project_dir")
         );
+
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[test]
+    fn find_project_root_locates_monorepo_workspace_root() {
+        let fixture =
+            std::env::temp_dir().join(format!("kiln-test-monorepo-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&fixture);
+        let repo_dir = fixture.join("monorepo");
+        let sub_dir = repo_dir.join("packages/subpkg/src");
+        std::fs::create_dir_all(&sub_dir).expect("create test directories");
+        std::fs::create_dir_all(repo_dir.join(".git")).expect("create .git");
+        std::fs::write(
+            repo_dir.join("package.json"),
+            r#"{"workspaces": ["packages/*"]}"#,
+        )
+        .expect("write root package.json");
+        std::fs::write(
+            repo_dir.join("packages/subpkg/package.json"),
+            r#"{"name": "subpkg"}"#,
+        )
+        .expect("write subpkg package.json");
+        let target_file = sub_dir.join("index.ts");
+        std::fs::write(&target_file, "console.log(1);").expect("write file");
+
+        let found = find_project_root(Some(&target_file)).expect("discover root");
+        assert_eq!(found, repo_dir.canonicalize().expect("canonical repo_dir"));
 
         let _ = std::fs::remove_dir_all(&fixture);
     }

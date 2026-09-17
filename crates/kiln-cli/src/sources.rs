@@ -582,19 +582,14 @@ fn to_wire_node_format(format: ResolverNodeModuleFormat) -> NodeModuleFormat {
 /// Audit reachable package resolutions against the root `package.json`.
 /// Emits diagnostic notes for "phantom dependencies" (packages imported by project code
 /// that resolved from `node_modules` but are not declared in root `package.json`).
-pub(crate) fn audit_phantom_dependencies(
-    project_root: &Path,
-    resolutions: &[PackageResolution],
-) -> Vec<String> {
-    let manifest_path = project_root.join("package.json");
-    let Ok(manifest_bytes) = std::fs::read(&manifest_path) else {
-        return Vec::new();
+fn read_declared_deps(manifest_path: &Path) -> HashSet<String> {
+    let mut declared = HashSet::new();
+    let Ok(manifest_bytes) = std::fs::read(manifest_path) else {
+        return declared;
     };
     let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&manifest_bytes) else {
-        return Vec::new();
+        return declared;
     };
-
-    let mut declared_deps = HashSet::new();
     for section in [
         "dependencies",
         "devDependencies",
@@ -603,10 +598,21 @@ pub(crate) fn audit_phantom_dependencies(
     ] {
         if let Some(obj) = manifest.get(section).and_then(|v| v.as_object()) {
             for key in obj.keys() {
-                declared_deps.insert(key.clone());
+                declared.insert(key.clone());
             }
         }
     }
+    declared
+}
+
+pub(crate) fn audit_phantom_dependencies(
+    project_root: &Path,
+    resolutions: &[PackageResolution],
+) -> Vec<String> {
+    let mut manifest_cache: HashMap<PathBuf, HashSet<String>> = HashMap::new();
+    let root_manifest_path = project_root.join("package.json");
+    let root_declared = read_declared_deps(&root_manifest_path);
+    manifest_cache.insert(project_root.to_path_buf(), root_declared);
 
     let mut notes = Vec::new();
     let mut seen = HashSet::new();
@@ -650,10 +656,32 @@ pub(crate) fn audit_phantom_dependencies(
             .components()
             .any(|c| c.as_os_str() == "node_modules");
 
-        if is_in_node_modules
-            && !declared_deps.contains(&pkg_name)
-            && seen.insert((pkg_name.clone(), res.importer.clone()))
-        {
+        if !is_in_node_modules {
+            continue;
+        }
+
+        let mut is_declared = false;
+        let mut current = importer_path.parent();
+        while let Some(dir) = current {
+            let deps = manifest_cache.entry(dir.to_path_buf()).or_insert_with(|| {
+                let p = dir.join("package.json");
+                if p.is_file() {
+                    read_declared_deps(&p)
+                } else {
+                    HashSet::new()
+                }
+            });
+            if deps.contains(&pkg_name) {
+                is_declared = true;
+                break;
+            }
+            if dir == project_root {
+                break;
+            }
+            current = dir.parent();
+        }
+
+        if !is_declared && seen.insert((pkg_name.clone(), res.importer.clone())) {
             let display_importer = importer_path
                 .strip_prefix(project_root)
                 .unwrap_or(importer_path)

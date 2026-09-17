@@ -551,7 +551,7 @@ pub fn retained_method_groups(
                     | groups::BUFFER
             }
             Events => groups::NODE_EVENT,
-            Stream => groups::NODE_STREAM | groups::NODE_EVENT | groups::BUFFER,
+            Stream | StreamPromises => groups::NODE_STREAM | groups::NODE_EVENT | groups::BUFFER,
             Buffer => groups::BUFFER,
             Path => groups::NODE_PATH,
             Util => groups::NODE_UTIL,
@@ -559,7 +559,8 @@ pub fn retained_method_groups(
             Fs | FsPromises => groups::NODE_STREAM | groups::NODE_EVENT | groups::BUFFER,
             // Audited `Direct`-only (see phase1-PRD): no groups implicated.
             Assert | Console | Crypto | Dns | Module | Os | Process | Tty | Zlib
-            | StringDecoder | QueryString | Url | WorkerThreads | PerfHooks | AsyncHooks => 0,
+            | StringDecoder | QueryString | Url | WorkerThreads | PerfHooks | AsyncHooks
+            | ChildProcess | Timers | TimersPromises | Readline | ReadlinePromises | Sqlite => 0,
             // `dlopen` hands out raw pointers: anything is reachable.
             Ffi => return None,
         })

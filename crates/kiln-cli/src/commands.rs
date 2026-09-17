@@ -559,14 +559,14 @@ fn native_output_path(
 }
 
 /// Check one file: push its current contents, ask for its summary, report the cost.
-pub fn check(backend: &mut dyn Backend, path: &Path, root: &Path) -> Result<Output> {
+pub fn check(backend: &mut dyn Backend, path: &Path, root: &Path, node: bool) -> Result<Output> {
     let display = path.display().to_string();
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
     let before = backend.stats()?;
     let started = Instant::now();
     let (mut notes, synced_paths, _, _, mut source_view) =
-        sync_project_sources_with_override(backend, root, Some((&canonical, &text)), false)?;
+        sync_project_sources_with_override(backend, root, Some((&canonical, &text)), node)?;
     if !synced_paths.contains(&canonical) {
         source_view =
             set_external_source_with_one_resync(backend, root, &canonical, &text, source_view)?;
@@ -575,12 +575,8 @@ pub fn check(backend: &mut dyn Backend, path: &Path, root: &Path) -> Result<Outp
     let summary = match backend.check_at_view(canonical.clone(), root_text.clone(), source_view)? {
         SourceResponse::Ready(summary) => summary,
         SourceResponse::Stale(_) => {
-            let (retry_notes, retry_paths, _, _, view) = sync_project_sources_with_override(
-                backend,
-                root,
-                Some((&canonical, &text)),
-                false,
-            )?;
+            let (retry_notes, retry_paths, _, _, view) =
+                sync_project_sources_with_override(backend, root, Some((&canonical, &text)), node)?;
             notes.extend(retry_notes);
             source_view = view;
             if !retry_paths.contains(&canonical) {
@@ -1624,7 +1620,7 @@ mod tests {
         std::fs::write(&entry, "export * from './dependency.js';\n").expect("write entry");
 
         let mut backend = Fake::new();
-        check(&mut backend, &entry, &root).expect("check graph");
+        check(&mut backend, &entry, &root, false).expect("check graph");
         assert_eq!(
             backend.names(),
             [
@@ -2334,7 +2330,7 @@ mod tests {
         std::fs::write(&entry, "export const answer = 42;\n").expect("write fixture");
 
         let mut backend = StaleBackend::new(1, 0);
-        check(&mut backend, &entry, &dir).expect("stale commit is retried");
+        check(&mut backend, &entry, &dir, false).expect("stale commit is retried");
         let syncs = backend
             .inner
             .seen
@@ -2376,7 +2372,7 @@ mod tests {
         std::fs::write(&entry, "export const answer = 42;\n").expect("write fixture");
 
         let mut backend = StaleBackend::new(0, 1);
-        check(&mut backend, &entry, &dir).expect("stale check is retried");
+        check(&mut backend, &entry, &dir, false).expect("stale check is retried");
         assert_eq!(
             backend
                 .inner
@@ -2408,7 +2404,7 @@ mod tests {
         std::fs::write(&entry, "export const answer = 42;\n").expect("write fixture");
 
         let mut backend = StaleBackend::new(2, 0);
-        let error = check(&mut backend, &entry, &dir).expect_err("second stale is bounded");
+        let error = check(&mut backend, &entry, &dir, false).expect_err("second stale is bounded");
         assert!(error.to_string().contains("stale source view"));
         assert_eq!(
             backend
@@ -2636,6 +2632,7 @@ mod tests {
             &mut fake,
             Path::new("definitely/not/here.js"),
             Path::new("."),
+            false,
         )
         .expect_err("should fail");
         assert!(matches!(err, Error::MissingFile(_)), "{err:?}");

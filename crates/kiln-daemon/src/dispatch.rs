@@ -391,7 +391,8 @@ pub(crate) fn check_with_cache<E: QueryEngine>(
         .collect::<Vec<_>>();
     let resolved_exports = if diagnostics.is_empty() {
         entry.and_then(|entry| {
-            match graph_snapshot(engine, cache, &entry, &project_root, resolutions, false) {
+            let node = resolutions.is_some_and(|r| !r.node_formats.is_empty());
+            match graph_snapshot(engine, cache, &entry, &project_root, resolutions, node) {
                 Ok(graph) => graph.resolved_export_names(&entry),
                 Err(error) => {
                     diagnostics.extend(module_graph_diagnostics(error));
