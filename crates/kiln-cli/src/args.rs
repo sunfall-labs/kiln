@@ -63,6 +63,9 @@ pub enum Command {
         /// Number of concurrent worker realms / threads sharing the listening socket.
         workers: usize,
         march_native: bool,
+        static_link: bool,
+        pgo_generate: Option<PathBuf>,
+        pgo_use: Option<PathBuf>,
     },
     Build {
         path: PathBuf,
@@ -72,6 +75,9 @@ pub enum Command {
         node: bool,
         march_native: bool,
         explain: bool,
+        static_link: bool,
+        pgo_generate: Option<PathBuf>,
+        pgo_use: Option<PathBuf>,
     },
     Test {
         path: PathBuf,
@@ -133,6 +139,9 @@ where
     let mut shared = false;
     let mut march_native = false;
     let mut explain = false;
+    let mut static_link = false;
+    let mut pgo_generate: Option<PathBuf> = None;
+    let mut pgo_use: Option<PathBuf> = None;
     let mut dry_run = false;
     let mut only_positional = false;
 
@@ -224,6 +233,16 @@ where
             "--explain" => {
                 explain = true;
             }
+            "--static" => {
+                reject_inline_value(&flag, &inline)?;
+                static_link = true;
+            }
+            "--pgo-generate" => {
+                pgo_generate = Some(PathBuf::from(value_for(&flag, inline, &mut args)?));
+            }
+            "--pgo-use" => {
+                pgo_use = Some(PathBuf::from(value_for(&flag, inline, &mut args)?));
+            }
             _ => {
                 return Err(Error::usage(format!("unknown option `{arg}`")));
             }
@@ -285,6 +304,26 @@ where
             "--march=native only applies to native `kiln run` or `kiln build`",
         ));
     }
+    if static_link && name != "build" && !native {
+        return Err(Error::usage(
+            "--static only applies to native `kiln run` or `kiln build`",
+        ));
+    }
+    if pgo_generate.is_some() && name != "build" && !native {
+        return Err(Error::usage(
+            "--pgo-generate only applies to native `kiln run` or `kiln build`",
+        ));
+    }
+    if pgo_use.is_some() && name != "build" && !native {
+        return Err(Error::usage(
+            "--pgo-use only applies to native `kiln run` or `kiln build`",
+        ));
+    }
+    if pgo_generate.is_some() && pgo_use.is_some() {
+        return Err(Error::usage(
+            "--pgo-generate and --pgo-use cannot be used together",
+        ));
+    }
     if max_steps.is_some() && name != "run" {
         return Err(Error::usage("--max-steps only applies to `kiln run`"));
     }
@@ -314,6 +353,9 @@ where
             steps: max_steps.map_or(StepBudget::Unmetered, StepBudget::Limited),
             workers: workers.unwrap_or(1),
             march_native,
+            static_link,
+            pgo_generate,
+            pgo_use,
         },
         "build" => Command::Build {
             path: PathBuf::from(one_operand(&name, &mut positional)?),
@@ -323,6 +365,9 @@ where
             node,
             march_native,
             explain,
+            static_link,
+            pgo_generate,
+            pgo_use,
         },
         "test" => Command::Test {
             path: PathBuf::from(one_operand(&name, &mut positional)?),
@@ -530,6 +575,9 @@ options:
                         see scripts/profile-native.sh)
     --march=native     with `build` or native `run`, generate host-specific CPU
                        instructions rather than a portable baseline
+    --static           with `build` or native `run`, link a static binary (Linux only)
+    --pgo-generate <dir> with `build` or native `run`, instrument binary to generate PGO profiles
+    --pgo-use <path>   with `build` or native `run`, optimize binary using Clang PGO profile
     --max-steps <n>    with `run`, refuse after n interpreter steps. Unbounded by
                        default: a program you are running yourself is not one this
                        tool needs protecting from. The conformance corpus keeps its
@@ -601,6 +649,9 @@ mod tests {
                 node: false,
                 march_native: false,
                 explain: false,
+                static_link: false,
+                pgo_generate: None,
+                pgo_use: None,
             }
         );
         assert!(matches!(
@@ -628,6 +679,9 @@ mod tests {
                 steps: StepBudget::Unmetered,
                 workers: 1,
                 march_native: false,
+                static_link: false,
+                pgo_generate: None,
+                pgo_use: None,
             }
         );
     }
@@ -900,6 +954,9 @@ mod tests {
                 node: false,
                 march_native: true,
                 explain: false,
+                static_link: false,
+                pgo_generate: None,
+                pgo_use: None,
             }
         );
         assert_eq!(
@@ -912,6 +969,9 @@ mod tests {
                 node: false,
                 march_native: true,
                 explain: false,
+                static_link: false,
+                pgo_generate: None,
+                pgo_use: None,
             }
         );
         assert_eq!(
@@ -924,6 +984,9 @@ mod tests {
                 steps: StepBudget::Unmetered,
                 workers: 1,
                 march_native: true,
+                static_link: false,
+                pgo_generate: None,
+                pgo_use: None,
             }
         );
     }
@@ -940,8 +1003,87 @@ mod tests {
                 node: false,
                 march_native: false,
                 explain: true,
+                static_link: false,
+                pgo_generate: None,
+                pgo_use: None,
             }
         );
         assert!(usage_error(&["run", "a.js", "--explain"]).contains("only applies"));
+    }
+
+    #[test]
+    fn static_and_pgo_options_parse_for_build_and_native_run() {
+        assert_eq!(
+            run(&["build", "src/main.ts", "--static"]).command,
+            Command::Build {
+                path: PathBuf::from("src/main.ts"),
+                output: None,
+                profile: NativeProfile::Dev,
+                shared: false,
+                node: false,
+                march_native: false,
+                explain: false,
+                static_link: true,
+                pgo_generate: None,
+                pgo_use: None,
+            }
+        );
+        assert_eq!(
+            run(&[
+                "run",
+                "src/main.ts",
+                "--native",
+                "--static",
+                "--pgo-generate",
+                "/tmp/pgo"
+            ])
+            .command,
+            Command::Run {
+                path: PathBuf::from("src/main.ts"),
+                node: false,
+                native: true,
+                profile: NativeProfile::Dev,
+                steps: StepBudget::Unmetered,
+                workers: 1,
+                march_native: false,
+                static_link: true,
+                pgo_generate: Some(PathBuf::from("/tmp/pgo")),
+                pgo_use: None,
+            }
+        );
+        assert_eq!(
+            run(&[
+                "build",
+                "src/main.ts",
+                "--pgo-use=/tmp/pgo/profile.profdata"
+            ])
+            .command,
+            Command::Build {
+                path: PathBuf::from("src/main.ts"),
+                output: None,
+                profile: NativeProfile::Dev,
+                shared: false,
+                node: false,
+                march_native: false,
+                explain: false,
+                static_link: false,
+                pgo_generate: None,
+                pgo_use: Some(PathBuf::from("/tmp/pgo/profile.profdata")),
+            }
+        );
+        assert!(usage_error(&["run", "a.js", "--static"]).contains("only applies"));
+        assert!(usage_error(&["run", "a.js", "--pgo-generate", "dir"]).contains("only applies"));
+        assert!(usage_error(&["run", "a.js", "--pgo-use", "file"]).contains("only applies"));
+        assert!(
+            usage_error(&[
+                "build",
+                "a.js",
+                "--pgo-generate",
+                "dir",
+                "--pgo-use",
+                "file"
+            ])
+            .contains("cannot be used together")
+        );
     }
 }

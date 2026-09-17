@@ -765,6 +765,9 @@ impl Refresher {
                             explain: false,
                             source_view: job.source_view,
                             expected_revision: job.revision,
+                            static_link: false,
+                            pgo_generate: None,
+                            pgo_use: None,
                         })
                         .and_then(|build| match build {
                             NativeBuildAtRevision::Built(summary) => {

@@ -254,6 +254,9 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             steps: _,
             workers,
             march_native: _,
+            static_link,
+            pgo_generate,
+            pgo_use,
         } => {
             let node = auto_node(node);
             if workers > 1 {
@@ -262,9 +265,20 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                     let path = path.clone();
                     let root = root.clone();
                     let socket = socket.clone();
+                    let pgo_gen = pgo_generate.clone();
+                    let pgo_u = pgo_use.clone();
                     handles.push(std::thread::spawn(move || {
                         let mut backend = open(one_shot, &socket)?;
-                        commands::native_run(backend.as_mut(), &path, &root, profile, node)
+                        commands::native_run(
+                            backend.as_mut(),
+                            &path,
+                            &root,
+                            profile,
+                            node,
+                            static_link,
+                            pgo_gen.as_deref(),
+                            pgo_u.as_deref(),
+                        )
                     }));
                 }
                 let mut status = 0;
@@ -289,6 +303,9 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                     &root,
                     profile,
                     node,
+                    static_link,
+                    pgo_generate.as_deref(),
+                    pgo_use.as_deref(),
                 )?)
             }
         }
@@ -300,6 +317,9 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             node,
             march_native: _,
             explain,
+            static_link,
+            pgo_generate,
+            pgo_use,
         } => {
             let node = if shared { false } else { auto_node(node) };
             let mut backend = open(one_shot, &socket)?;
@@ -312,6 +332,9 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                 shared,
                 node,
                 explain,
+                static_link,
+                pgo_generate.as_deref(),
+                pgo_use.as_deref(),
             )?)
         }
         Command::Check { path } => {

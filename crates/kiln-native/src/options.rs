@@ -50,6 +50,9 @@ pub struct NativeBuildOptions {
     pub profile: NativeProfile,
     pub realm: NativeRealmPolicy,
     pub march_native: bool,
+    pub static_link: bool,
+    pub pgo_generate: Option<PathBuf>,
+    pub pgo_use: Option<PathBuf>,
 }
 
 impl Default for NativeBuildOptions {
@@ -59,6 +62,9 @@ impl Default for NativeBuildOptions {
             profile: NativeProfile::default(),
             realm: NativeRealmPolicy::default(),
             march_native: false,
+            static_link: false,
+            pgo_generate: None,
+            pgo_use: None,
         }
     }
 }
@@ -70,6 +76,9 @@ impl NativeBuildOptions {
             profile,
             realm: NativeRealmPolicy::default(),
             march_native: false,
+            static_link: false,
+            pgo_generate: None,
+            pgo_use: None,
         }
     }
 
@@ -80,6 +89,21 @@ impl NativeBuildOptions {
 
     pub fn with_march_native(mut self, march_native: bool) -> Self {
         self.march_native = march_native;
+        self
+    }
+
+    pub fn with_static_link(mut self, static_link: bool) -> Self {
+        self.static_link = static_link;
+        self
+    }
+
+    pub fn with_pgo_generate(mut self, pgo_generate: Option<PathBuf>) -> Self {
+        self.pgo_generate = pgo_generate;
+        self
+    }
+
+    pub fn with_pgo_use(mut self, pgo_use: Option<PathBuf>) -> Self {
+        self.pgo_use = pgo_use;
         self
     }
 

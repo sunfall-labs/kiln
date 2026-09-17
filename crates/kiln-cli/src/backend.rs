@@ -21,6 +21,9 @@ pub(crate) struct NativeBuildAtRevisionParams {
     pub explain: bool,
     pub source_view: SourceView,
     pub expected_revision: u64,
+    pub static_link: bool,
+    pub pgo_generate: Option<String>,
+    pub pgo_use: Option<String>,
 }
 
 pub trait Backend: Send {
@@ -49,6 +52,9 @@ pub trait Backend: Send {
             explain: params.explain,
             source_view: params.source_view,
             expected_revision: params.expected_revision,
+            static_link: params.static_link,
+            pgo_generate: params.pgo_generate,
+            pgo_use: params.pgo_use,
         })? {
             Response::NativeBuilt(summary) => Ok(NativeBuildAtRevision::Built(summary)),
             Response::Stale { current_revision } => {
@@ -154,6 +160,9 @@ pub trait Backend: Send {
         profile: NativeProfile,
         node: bool,
         explain: bool,
+        static_link: bool,
+        pgo_generate: Option<String>,
+        pgo_use: Option<String>,
         source_view: SourceView,
     ) -> Result<SourceResponse<NativeBuildSummary>> {
         match self.request(Request::NativeBuild {
@@ -163,6 +172,9 @@ pub trait Backend: Send {
             profile,
             node,
             explain,
+            static_link,
+            pgo_generate,
+            pgo_use,
             source_view,
         })? {
             Response::NativeBuilt(summary) => Ok(SourceResponse::Ready(summary)),
@@ -170,12 +182,16 @@ pub trait Backend: Send {
             other => Err(mismatch("NativeBuild", &other)),
         }
     }
+    #[allow(clippy::too_many_arguments)]
     fn native_run_at_view(
         &mut self,
         path: String,
         project_root: String,
         profile: NativeProfile,
         node: bool,
+        static_link: bool,
+        pgo_generate: Option<String>,
+        pgo_use: Option<String>,
         source_view: SourceView,
     ) -> Result<SourceResponse<NativeRunSummary>> {
         match self.request(Request::NativeRun {
@@ -183,6 +199,9 @@ pub trait Backend: Send {
             project_root,
             profile,
             node,
+            static_link,
+            pgo_generate,
+            pgo_use,
             source_view,
         })? {
             Response::NativeRan(summary) => Ok(SourceResponse::Ready(summary)),
@@ -262,6 +281,7 @@ pub trait Backend: Send {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum NativeBuildAtRevision {
     Built(NativeBuildSummary),
     Stale { current_revision: u64 },

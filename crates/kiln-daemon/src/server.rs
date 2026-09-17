@@ -767,6 +767,9 @@ fn handle<E: QueryEngine>(
             profile,
             source_view,
             explain,
+            static_link,
+            pgo_generate,
+            pgo_use,
         } => {
             let prepared = match prepare_native_snapshot(
                 state,
@@ -779,12 +782,34 @@ fn handle<E: QueryEngine>(
                 Ok(prepared) => prepared,
                 Err(response) => return (response, Next::Continue),
             };
+            let pgo_gen = pgo_generate.map(PathBuf::from);
+            let pgo_u = pgo_use.map(PathBuf::from);
             match prepared {
                 PreparedNative::Graph(graph) => run_without_engine_lock(|| {
-                    native_build_graph(&graph, path, project_root, output, profile, explain)
+                    native_build_graph(
+                        &graph,
+                        path,
+                        project_root,
+                        output,
+                        profile,
+                        explain,
+                        static_link,
+                        pgo_gen,
+                        pgo_u,
+                    )
                 }),
                 PreparedNative::Program(program) => run_without_engine_lock(|| {
-                    native_build_program(program, path, project_root, output, profile, explain)
+                    native_build_program(
+                        program,
+                        path,
+                        project_root,
+                        output,
+                        profile,
+                        explain,
+                        static_link,
+                        pgo_gen,
+                        pgo_u,
+                    )
                 }),
             }
         }
@@ -821,6 +846,9 @@ fn handle<E: QueryEngine>(
             profile,
             node,
             source_view,
+            static_link,
+            pgo_generate,
+            pgo_use,
         } => {
             let prepared = match prepare_native_snapshot(
                 state,
@@ -833,12 +861,30 @@ fn handle<E: QueryEngine>(
                 Ok(prepared) => prepared,
                 Err(response) => return (response, Next::Continue),
             };
+            let pgo_gen = pgo_generate.map(PathBuf::from);
+            let pgo_u = pgo_use.map(PathBuf::from);
             match prepared {
                 PreparedNative::Graph(graph) => run_without_engine_lock(|| {
-                    native_run_graph(&graph, path, project_root, profile)
+                    native_run_graph(
+                        &graph,
+                        path,
+                        project_root,
+                        profile,
+                        static_link,
+                        pgo_gen,
+                        pgo_u,
+                    )
                 }),
                 PreparedNative::Program(program) => run_without_engine_lock(|| {
-                    native_run_program(program, path, project_root, profile)
+                    native_run_program(
+                        program,
+                        path,
+                        project_root,
+                        profile,
+                        static_link,
+                        pgo_gen,
+                        pgo_u,
+                    )
                 }),
             }
         }
@@ -1043,6 +1089,9 @@ fn handle_native_build_at_revision<E: QueryEngine>(
         source_view,
         expected_revision,
         explain,
+        static_link,
+        pgo_generate,
+        pgo_use,
     } = request
     else {
         unreachable!("native revision build handler received another request")
@@ -1138,6 +1187,8 @@ fn handle_native_build_at_revision<E: QueryEngine>(
         );
     }
     let temp_output = snapshot_temp_output(&final_output);
+    let pgo_gen = pgo_generate.map(PathBuf::from);
+    let pgo_u = pgo_use.map(PathBuf::from);
     let response = run_without_engine_lock(|| match prepared {
         PreparedNative::Graph(graph) => native_build_graph(
             &graph,
@@ -1146,6 +1197,9 @@ fn handle_native_build_at_revision<E: QueryEngine>(
             Some(temp_output.to_string_lossy().into_owned()),
             profile,
             explain,
+            static_link,
+            pgo_gen.clone(),
+            pgo_u.clone(),
         ),
         PreparedNative::Program(program) => native_build_program(
             program,
@@ -1154,6 +1208,9 @@ fn handle_native_build_at_revision<E: QueryEngine>(
             Some(temp_output.to_string_lossy().into_owned()),
             profile,
             explain,
+            static_link,
+            pgo_gen,
+            pgo_u,
         ),
     })
     .0;

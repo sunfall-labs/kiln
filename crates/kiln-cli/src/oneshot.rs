@@ -252,6 +252,9 @@ server.listen(0, "127.0.0.1", () => {
                 &fixture,
                 kiln_proto::NativeProfile::Dev,
                 true,
+                false,
+                None,
+                None,
             )
             .expect("run native Node graph")
         };
@@ -281,6 +284,9 @@ server.listen(0, "127.0.0.1", () => {
                 &fixture,
                 kiln_proto::NativeProfile::Dev,
                 true,
+                false,
+                None,
+                None,
             )
             .expect("run canonical native Node server roundtrip")
         };
@@ -314,6 +320,9 @@ server.listen(0, "127.0.0.1", () => {
                 false,
                 true,
                 false,
+                false,
+                None,
+                None,
             )
             .expect("build standalone native Node server")
         };
@@ -354,6 +363,9 @@ server.listen(0, "127.0.0.1", () => {
                 &fixture,
                 kiln_proto::NativeProfile::Dev,
                 true,
+                false,
+                None,
+                None,
             )
             .expect("run canonical native Node request-body roundtrip")
         };
@@ -394,6 +406,9 @@ server.listen(0, "127.0.0.1", () => {
                 false,
                 true,
                 false,
+                false,
+                None,
+                None,
             )
             .expect("build standalone native request-body server")
         };
@@ -469,6 +484,9 @@ server.listen(0, "127.0.0.1", () => {
                 &fixture,
                 kiln_proto::NativeProfile::Dev,
                 true,
+                false,
+                None,
+                None,
             )
             .expect("run native Node request identity fixture")
         };
@@ -509,6 +527,9 @@ server.listen(0, "127.0.0.1", () => {
                 &fixture,
                 kiln_proto::NativeProfile::Dev,
                 true,
+                false,
+                None,
+                None,
             )
             .expect("run native HTTP half-close fixture")
         };
@@ -684,6 +705,9 @@ server.listen(0, "127.0.0.1", () => {
                 false,
                 false,
                 true,
+                false,
+                None,
+                None,
             )
             .expect("build with explain")
         };
