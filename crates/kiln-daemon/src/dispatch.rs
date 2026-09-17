@@ -187,21 +187,44 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             profile,
             source_view: _,
             explain,
-        } => (
-            match native_graph(engine, resolutions, &path, &project_root, node) {
-                Ok(Some(graph)) => {
-                    native_build_graph(&graph, path, project_root, output, profile, explain)
-                }
-                Ok(None) => match native_program(engine, &path) {
-                    Ok(program) => {
-                        native_build_program(program, path, project_root, output, profile, explain)
-                    }
+            static_link,
+            pgo_generate,
+            pgo_use,
+        } => {
+            let pgo_gen = pgo_generate.map(PathBuf::from);
+            let pgo_u = pgo_use.map(PathBuf::from);
+            (
+                match native_graph(engine, resolutions, &path, &project_root, node) {
+                    Ok(Some(graph)) => native_build_graph(
+                        &graph,
+                        path,
+                        project_root,
+                        output,
+                        profile,
+                        explain,
+                        static_link,
+                        pgo_gen,
+                        pgo_u,
+                    ),
+                    Ok(None) => match native_program(engine, &path) {
+                        Ok(program) => native_build_program(
+                            program,
+                            path,
+                            project_root,
+                            output,
+                            profile,
+                            explain,
+                            static_link,
+                            pgo_gen,
+                            pgo_u,
+                        ),
+                        Err(message) => Response::Error { message },
+                    },
                     Err(message) => Response::Error { message },
                 },
-                Err(message) => Response::Error { message },
-            },
-            Next::Continue,
-        ),
+                Next::Continue,
+            )
+        }
         Request::NativeBuildAtRevision { .. } => (
             Response::Error {
                 message: "revision-pinned native builds require daemon snapshot handling".into(),
@@ -235,17 +258,40 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             profile,
             node,
             source_view: _,
-        } => (
-            match native_graph(engine, resolutions, &path, &project_root, node) {
-                Ok(Some(graph)) => native_run_graph(&graph, path, project_root, profile),
-                Ok(None) => match native_program(engine, &path) {
-                    Ok(program) => native_run_program(program, path, project_root, profile),
+            static_link,
+            pgo_generate,
+            pgo_use,
+        } => {
+            let pgo_gen = pgo_generate.map(PathBuf::from);
+            let pgo_u = pgo_use.map(PathBuf::from);
+            (
+                match native_graph(engine, resolutions, &path, &project_root, node) {
+                    Ok(Some(graph)) => native_run_graph(
+                        &graph,
+                        path,
+                        project_root,
+                        profile,
+                        static_link,
+                        pgo_gen,
+                        pgo_u,
+                    ),
+                    Ok(None) => match native_program(engine, &path) {
+                        Ok(program) => native_run_program(
+                            program,
+                            path,
+                            project_root,
+                            profile,
+                            static_link,
+                            pgo_gen,
+                            pgo_u,
+                        ),
+                        Err(message) => Response::Error { message },
+                    },
                     Err(message) => Response::Error { message },
                 },
-                Err(message) => Response::Error { message },
-            },
-            Next::Continue,
-        ),
+                Next::Continue,
+            )
+        }
         Request::Test {
             root,
             mode,
@@ -1466,6 +1512,7 @@ pub(crate) fn cache_gc(project_root: &str, dry_run: bool) -> Response {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn native_build_program(
     program: kiln_ir::Program,
     path: String,
@@ -1473,6 +1520,9 @@ pub(crate) fn native_build_program(
     output: Option<String>,
     profile: NativeProfile,
     explain: bool,
+    static_link: bool,
+    pgo_generate: Option<PathBuf>,
+    pgo_use: Option<PathBuf>,
 ) -> Response {
     let project_root = PathBuf::from(project_root);
     let builder = match discover_native_builder(&project_root) {
@@ -1505,6 +1555,9 @@ pub(crate) fn native_build_program(
             profile: native_profile(profile),
             realm: kiln_native::NativeRealmPolicy::host_clock(),
             march_native: false,
+            static_link,
+            pgo_generate,
+            pgo_use,
         },
     ) {
         Ok(report) => {
@@ -1632,10 +1685,12 @@ fn prepare_native_shared_build(
             profile: native_profile(profile),
             realm: kiln_native::NativeRealmPolicy::default(),
             march_native: false,
+            ..kiln_native::NativeBuildOptions::default()
         },
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn native_build_graph(
     graph: &ModuleGraph,
     path: String,
@@ -1643,6 +1698,9 @@ pub(crate) fn native_build_graph(
     output: Option<String>,
     profile: NativeProfile,
     explain: bool,
+    static_link: bool,
+    pgo_generate: Option<PathBuf>,
+    pgo_use: Option<PathBuf>,
 ) -> Response {
     let project_root = PathBuf::from(project_root);
     let builder = match discover_native_builder(&project_root) {
@@ -1675,6 +1733,9 @@ pub(crate) fn native_build_graph(
             profile: native_profile(profile),
             realm: kiln_native::NativeRealmPolicy::host_clock(),
             march_native: false,
+            static_link,
+            pgo_generate,
+            pgo_use,
         },
     ) {
         Ok(report) => {
@@ -1717,6 +1778,9 @@ pub(crate) fn native_run_program(
     path: String,
     project_root: String,
     profile: NativeProfile,
+    static_link: bool,
+    pgo_generate: Option<PathBuf>,
+    pgo_use: Option<PathBuf>,
 ) -> Response {
     let project_root = PathBuf::from(project_root);
     let builder = match discover_native_builder(&project_root) {
@@ -1735,6 +1799,9 @@ pub(crate) fn native_run_program(
             profile: native_profile(profile),
             realm: kiln_native::NativeRealmPolicy::default(),
             march_native: false,
+            static_link,
+            pgo_generate,
+            pgo_use,
         },
     ) {
         Ok(report) => native_ran(&project_root, &builder, report),
@@ -1749,6 +1816,9 @@ pub(crate) fn native_run_graph(
     path: String,
     project_root: String,
     profile: NativeProfile,
+    static_link: bool,
+    pgo_generate: Option<PathBuf>,
+    pgo_use: Option<PathBuf>,
 ) -> Response {
     let project_root = PathBuf::from(project_root);
     let builder = match discover_native_builder(&project_root) {
@@ -1767,6 +1837,9 @@ pub(crate) fn native_run_graph(
             profile: native_profile(profile),
             realm: kiln_native::NativeRealmPolicy::default(),
             march_native: false,
+            static_link,
+            pgo_generate,
+            pgo_use,
         },
     ) {
         Ok(report) => native_ran(&project_root, &builder, report),

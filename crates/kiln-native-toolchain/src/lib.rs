@@ -498,6 +498,8 @@ pub struct CompileOptions {
     pub position_independent: bool,
     /// Target the host processor's instruction set (`-march=native`).
     pub march_native: bool,
+    pub pgo_generate: Option<PathBuf>,
+    pub pgo_use: Option<PathBuf>,
 }
 
 impl Default for CompileOptions {
@@ -509,6 +511,8 @@ impl Default for CompileOptions {
             current_dir: None,
             position_independent: false,
             march_native: false,
+            pgo_generate: None,
+            pgo_use: None,
         }
     }
 }
@@ -525,6 +529,9 @@ pub struct LinkOptions {
     pub libraries: Vec<String>,
     pub extra_args: Vec<OsString>,
     pub current_dir: Option<PathBuf>,
+    pub static_link: bool,
+    pub pgo_generate: Option<PathBuf>,
+    pub pgo_use: Option<PathBuf>,
 }
 
 impl Default for LinkOptions {
@@ -536,6 +543,9 @@ impl Default for LinkOptions {
             libraries: Vec::new(),
             extra_args: Vec::new(),
             current_dir: None,
+            static_link: false,
+            pgo_generate: None,
+            pgo_use: None,
         }
     }
 }
@@ -1183,6 +1193,15 @@ impl Toolchain {
         if options.march_native {
             args.push(OsString::from("-march=native"));
         }
+        if let Some(dir) = &options.pgo_generate {
+            args.push(OsString::from(format!(
+                "-fprofile-generate={}",
+                dir.display()
+            )));
+        }
+        if let Some(path) = &options.pgo_use {
+            args.push(OsString::from(format!("-fprofile-use={}", path.display())));
+        }
         if options.position_independent {
             args.push(OsString::from("-fPIC"));
         }
@@ -1278,6 +1297,24 @@ impl Toolchain {
             self.identity.kind,
         ) {
             args.push(OsString::from(flag));
+        }
+        if options.static_link {
+            if self.identity.target_platform() == TargetPlatform::Macos {
+                return Err(ToolchainError::UnsupportedPlatform {
+                    operation: "static linking",
+                    platform: "macOS".to_string(),
+                });
+            }
+            args.push(OsString::from("-static"));
+        }
+        if let Some(dir) = &options.pgo_generate {
+            args.push(OsString::from(format!(
+                "-fprofile-generate={}",
+                dir.display()
+            )));
+        }
+        if let Some(path) = &options.pgo_use {
+            args.push(OsString::from(format!("-fprofile-use={}", path.display())));
         }
         args.extend(objects.iter().map(|object| object.as_os_str().to_owned()));
         for directory in &options.library_search_paths {
@@ -2681,6 +2718,68 @@ mod tests {
                 .args
                 .iter()
                 .any(|arg| arg == "-ffp-contract=fast")
+        );
+
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn static_link_and_pgo_pass_flags() {
+        let directory = temp_dir("static-pgo");
+        let source = directory.join("main.c");
+        let object = directory.join("main.o");
+        let executable = directory.join("main");
+        fs::write(&source, "int main(void) { return 0; }\n").expect("source");
+        let runner_impl = Arc::new(FakeRunner::new(
+            [
+                ProcessOutput::success("clang version 18.1\n", ""),
+                ProcessOutput::success("x86_64-unknown-linux-gnu\n", ""),
+                ProcessOutput::success("compile ok\n", ""),
+                ProcessOutput::success("link ok\n", ""),
+            ],
+            true,
+        ));
+        let runner: Arc<dyn ProcessRunner> = runner_impl.clone();
+        let toolchain =
+            Toolchain::from_compiler_with_runner("/opt/clang", runner).expect("compiler probe");
+        toolchain
+            .compile_c(
+                &source,
+                &object,
+                &CompileOptions {
+                    profile: BuildProfile::NativeRelease,
+                    pgo_generate: Some(PathBuf::from("/tmp/pgo-profiles")),
+                    ..CompileOptions::default()
+                },
+            )
+            .expect("compile");
+        toolchain
+            .link_executable(
+                std::slice::from_ref(&object),
+                &executable,
+                &LinkOptions {
+                    profile: BuildProfile::NativeRelease,
+                    static_link: true,
+                    pgo_generate: Some(PathBuf::from("/tmp/pgo-profiles")),
+                    ..LinkOptions::default()
+                },
+            )
+            .expect("link");
+
+        let commands = runner_impl.commands();
+        assert_eq!(commands.len(), 4);
+        assert!(
+            commands[2]
+                .args
+                .iter()
+                .any(|arg| arg == "-fprofile-generate=/tmp/pgo-profiles")
+        );
+        assert!(commands[3].args.iter().any(|arg| arg == "-static"));
+        assert!(
+            commands[3]
+                .args
+                .iter()
+                .any(|arg| arg == "-fprofile-generate=/tmp/pgo-profiles")
         );
 
         fs::remove_dir_all(directory).expect("cleanup");

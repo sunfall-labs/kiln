@@ -33,7 +33,7 @@ pub enum StepBudget {
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 30;
+pub const PROTOCOL_VERSION: u32 = 31;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -519,6 +519,12 @@ pub enum Request {
         source_view: SourceView,
         #[serde(default)]
         explain: bool,
+        #[serde(default)]
+        static_link: bool,
+        #[serde(default)]
+        pgo_generate: Option<String>,
+        #[serde(default)]
+        pgo_use: Option<String>,
     },
     /// Build from an exact database snapshot, publishing only if that snapshot remains current.
     NativeBuildAtRevision {
@@ -532,6 +538,12 @@ pub enum Request {
         expected_revision: u64,
         #[serde(default)]
         explain: bool,
+        #[serde(default)]
+        static_link: bool,
+        #[serde(default)]
+        pgo_generate: Option<String>,
+        #[serde(default)]
+        pgo_use: Option<String>,
     },
     /// Emit, compile, and link one scalar module as a shared library for an embedding host.
     NativeSharedBuild {
@@ -551,6 +563,12 @@ pub enum Request {
         /// Enable the typed Node resolver and native runtime-module materializers.
         node: bool,
         source_view: SourceView,
+        #[serde(default)]
+        static_link: bool,
+        #[serde(default)]
+        pgo_generate: Option<String>,
+        #[serde(default)]
+        pgo_use: Option<String>,
     },
     /// Discover, select, and execute a conformance corpus in this resident process.
     Test {
@@ -922,7 +940,7 @@ mod tests {
 
     #[test]
     fn current_protocol_run_step_budget_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 30);
+        assert_eq!(PROTOCOL_VERSION, 31);
 
         let requests = [
             (
@@ -998,6 +1016,9 @@ mod tests {
                     profile: NativeProfile::Release,
                     source_view: SourceView(12),
                     explain: false,
+                    static_link: false,
+                    pgo_generate: None,
+                    pgo_use: None,
                 },
                 serde_json::json!({"NativeBuild": {
                     "path": "server.mjs",
@@ -1006,7 +1027,10 @@ mod tests {
                     "output": "/project/server",
                     "profile": "Release",
                     "source_view": 12,
-                    "explain": false
+                    "explain": false,
+                    "static_link": false,
+                    "pgo_generate": null,
+                    "pgo_use": null
                 }}),
             ),
             (

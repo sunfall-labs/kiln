@@ -746,6 +746,7 @@ fn run_native_http_fixture(name: &str, source: &str) -> Option<String> {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native node:http graph builds");
@@ -789,6 +790,7 @@ fn run_native_release_fixture(name: &str, source: &str) -> Option<String> {
                 profile: NativeProfile::Release,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native release graph builds");
@@ -851,6 +853,7 @@ fn run_native_failure_fixture(name: &str, source: &str) -> Option<String> {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native diagnostic graph builds");
@@ -895,6 +898,7 @@ fn run_native_failure_fixture_with_dependency(
                 profile,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native diagnostic graph builds");
@@ -1461,6 +1465,7 @@ console.log(edges.missing === "", edges[""], edges["empty-value"] === "", edges.
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native querystring graph builds and runs");
@@ -1516,6 +1521,7 @@ console.log(path.dirname === staticallyLoadedPath.dirname, path.basename("/tmp/f
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native createRequire graph builds and runs");
@@ -1580,6 +1586,7 @@ module.exports = { loads: globalThis.__loads };"#,
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native escaped createRequire graph builds and runs");
@@ -1751,6 +1758,7 @@ fn native_process_next_tick_forwards_variadic_arguments() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native process.nextTick graph builds");
@@ -1838,6 +1846,7 @@ writeFile({path:?}, 'héllo').then(() => readFile({path:?}, 'utf8')).then((text)
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native node:fs/promises graph builds");
@@ -2083,6 +2092,7 @@ console.log("pass");
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native invalid-options graph builds");
@@ -2143,6 +2153,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native node:net graph builds");
@@ -2256,6 +2267,7 @@ socket.on("close", () => {{
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native node:net client builds");
@@ -2304,6 +2316,7 @@ fn native_node_http_server_responds_after_node_net_client_half_close() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native HTTP half-close fixture builds");
@@ -2392,6 +2405,7 @@ server.listen({port}, "127.0.0.1");
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native HTTP pipelining fixture builds");
@@ -2584,6 +2598,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native node:http graph builds");
@@ -2713,6 +2728,7 @@ fn native_fastify_server_case_runs_through_the_production_graph_when_installed()
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native Fastify graph builds");
@@ -2819,6 +2835,7 @@ server.listen(0, "127.0.0.1", () => {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native node:http setEncoding graph builds");
@@ -2888,6 +2905,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native delayed-close fixture builds");
@@ -3014,6 +3032,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native HTTP destroy fixture builds");
@@ -3684,6 +3703,7 @@ fn one_realm_defers_dependency_work_until_the_complete_native_graph_finishes() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native scheduling graph runs");
@@ -3738,6 +3758,7 @@ fn native_process_argv_reports_the_single_executable_command_line() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("process.argv graph builds natively");
@@ -3807,6 +3828,7 @@ setTimeout(function () { console.log(order.join(",")); }, 0);
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("process.nextTick graph runs natively");
@@ -3844,6 +3866,7 @@ fn embedded_graph_owns_one_realm_through_async_quiescence() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("build embedded scheduling graph");
@@ -3961,6 +3984,7 @@ fn embedded_shared_graph_dynamic_import_keeps_context_after_body_returns() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("build delayed dynamic shared graph");
@@ -4080,6 +4104,7 @@ module.exports = { loads: globalThis.__shared_create_require_loads };"#)
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("build shared createRequire library");
@@ -4398,6 +4423,7 @@ fn native_graph_wiring_uses_resolved_star_export_origins() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native star graph runs");
@@ -4410,6 +4436,7 @@ fn native_graph_wiring_uses_resolved_star_export_origins() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native shared star graph links");
@@ -4518,6 +4545,7 @@ fn native_graph_reserves_commonjs_wrapper_bindings_for_the_launcher() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native mixed graph builds and runs");
@@ -4533,6 +4561,7 @@ fn native_graph_reserves_commonjs_wrapper_bindings_for_the_launcher() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native shared CommonJS graph builds and links");
@@ -4557,6 +4586,7 @@ fn native_graph_reserves_commonjs_wrapper_bindings_for_the_launcher() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native CommonJS require graph builds and runs");
@@ -4587,6 +4617,7 @@ fn native_graph_reserves_commonjs_wrapper_bindings_for_the_launcher() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native repeated CommonJS require graph builds and runs");
@@ -4669,6 +4700,7 @@ fn native_commonjs_require_receives_the_builtin_projection_on_both_graph_paths()
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("standalone graph runs");
@@ -4681,6 +4713,7 @@ fn native_commonjs_require_receives_the_builtin_projection_on_both_graph_paths()
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("shared graph builds");
@@ -4720,6 +4753,7 @@ fn native_commonjs_object_exports_finish_successfully_with_no_scalar_result() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native CommonJS graph builds and runs");
@@ -4774,6 +4808,7 @@ fn native_commonjs_callable_exports_cross_module_boundaries() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native CommonJS callable graph builds and runs");
@@ -4827,6 +4862,7 @@ console.log(written === read, read.realmMarker.answer);"#,
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native realm callable-property graph builds and runs");
@@ -4881,6 +4917,7 @@ console.log(ready, globalThis.realmMarker, process.realmMarker, Atomics.realmMar
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native realm-singleton graph builds and runs");
@@ -4947,6 +4984,7 @@ fn native_commonjs_real_package_callable_executes_after_require() {
                     profile: NativeProfile::Dev,
                     realm: NativeRealmPolicy::default(),
                     march_native: false,
+                    ..NativeBuildOptions::default()
                 },
             ),
         )
@@ -5004,6 +5042,7 @@ fn native_fastify_constructor_probe() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
     });
@@ -5069,6 +5108,7 @@ fn native_commonjs_builtin_namespace_is_not_its_default_export() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("standalone graph runs");
@@ -5125,6 +5165,7 @@ fn native_commonjs_require_materializes_captured_json_once() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("native CommonJS JSON graph builds and runs");
@@ -5167,6 +5208,7 @@ fn native_graphs_materialize_one_snapshot_namespace_per_provider() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("namespace graph builds and runs");
@@ -5188,6 +5230,7 @@ fn native_graphs_materialize_one_snapshot_namespace_per_provider() {
                     profile: NativeProfile::Dev,
                     realm: NativeRealmPolicy::default(),
                     march_native: false,
+                    ..NativeBuildOptions::default()
                 },
             )
             .expect("namespace shared graph links");
@@ -5233,6 +5276,7 @@ console.log(direct === via, via.answer);
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("namespace re-export graph builds and runs");
@@ -5322,6 +5366,7 @@ fn native_named_reexport_of_commonjs_default_keeps_slot_zero() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("CommonJS re-export graph builds and runs");
@@ -5372,6 +5417,7 @@ fn native_named_import_and_reexport_of_commonjs_properties_resolve_property_valu
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("CommonJS named import graph builds and runs");
@@ -5417,6 +5463,7 @@ fn native_namespace_import_of_commonjs_resolves_property_values() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("CommonJS namespace import graph builds and runs");
@@ -5469,6 +5516,7 @@ fn native_dynamic_import_resolves_opentui_and_in_graph_modules() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("dynamic import graph builds and runs");
@@ -5528,6 +5576,7 @@ fn native_deferred_dynamic_import_failures_are_catchable() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("deferred failure graph builds and runs");
@@ -5727,6 +5776,7 @@ fn native_failed_dynamic_closure_preserves_shared_successful_dependencies() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("run sharing graph");
@@ -5775,6 +5825,7 @@ fn native_dynamic_top_level_await_import_waits_for_completion() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("dynamic TLA graph builds and runs");
@@ -5823,6 +5874,7 @@ fn native_dynamic_import_static_tla_dependency_waits_for_completion() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("dynamic static-TLA graph builds and runs");
@@ -5857,6 +5909,7 @@ fn native_dynamic_tla_rejection_preserves_original_error() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .unwrap();
@@ -5896,6 +5949,7 @@ fn native_dynamic_import_static_tla_target_rejection_is_cached() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .unwrap();
@@ -5934,6 +5988,7 @@ fn native_dynamic_import_rejected_static_dependency_skips_target_body() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .unwrap();
@@ -5973,6 +6028,7 @@ fn native_static_top_level_await_resolves_before_entry() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("static top-level await graph builds and runs");
@@ -6034,6 +6090,7 @@ fn native_dynamic_import_uses_importer_identity_for_relative_modules() {
                 profile,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("dynamic importer graph builds and runs");
@@ -6113,6 +6170,7 @@ fn native_dynamic_import_initializes_once_and_stays_lazy() {
                 profile,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("dynamic lifecycle graph builds and runs");
@@ -6170,6 +6228,7 @@ fn native_failed_dynamic_dependency_is_cached_with_original_error() {
                 profile,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("dynamic failure graph builds and runs");
@@ -6221,6 +6280,7 @@ fn a_second_build_reuses_every_material_artifact_and_runs() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("first native build succeeds");
@@ -6235,6 +6295,7 @@ fn a_second_build_reuses_every_material_artifact_and_runs() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("cached native build and run succeeds");
@@ -6304,6 +6365,7 @@ fn embedded_shared_library_calls_host_without_cli_runtime_and_reuses_cache() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect_err("a library output cannot alias its derived header");
@@ -6317,6 +6379,7 @@ fn embedded_shared_library_calls_host_without_cli_runtime_and_reuses_cache() {
         profile: NativeProfile::Dev,
         realm: NativeRealmPolicy::default(),
         march_native: false,
+        ..NativeBuildOptions::default()
     };
     let first = builder
         .build_shared_library(&program, &options)
@@ -6332,6 +6395,7 @@ fn embedded_shared_library_calls_host_without_cli_runtime_and_reuses_cache() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("ordinary executable build succeeds after PIC build");
@@ -6387,6 +6451,7 @@ fn embedded_shared_library_calls_host_without_cli_runtime_and_reuses_cache() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("renamed shared-library build succeeds");
@@ -6526,6 +6591,7 @@ fn owned_result_scalar_api_copies_strings_and_is_idempotent() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("build owned-result scalar library");
@@ -6664,6 +6730,7 @@ fn owned_result_scalar_api_rejects_malformed_host_strings() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("build malformed-host scalar library");
@@ -6775,6 +6842,7 @@ fn owned_result_graph_api_preserves_uncaught_thrown_scalars() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("build throw graph");
@@ -6864,6 +6932,7 @@ fn concurrent_runs_with_one_public_output_launch_their_private_program() {
                     profile: NativeProfile::Dev,
                     realm: NativeRealmPolicy::default(),
                     march_native: false,
+                    ..NativeBuildOptions::default()
                 },
             )
             .expect("prime each native executable");
@@ -6886,6 +6955,7 @@ fn concurrent_runs_with_one_public_output_launch_their_private_program() {
                         profile: NativeProfile::Dev,
                         realm: NativeRealmPolicy::default(),
                         march_native: false,
+                        ..NativeBuildOptions::default()
                     },
                 )
                 .expect("concurrent native run succeeds")
@@ -6940,6 +7010,7 @@ fn native_and_interpreter_agree_across_the_scalar_control_flow_slice() {
                     profile: NativeProfile::Dev,
                     realm: NativeRealmPolicy::default(),
                     march_native: false,
+                    ..NativeBuildOptions::default()
                 },
             )
             .unwrap_or_else(|error| panic!("native fixture {name} failed: {error}"));
@@ -6984,6 +7055,7 @@ fn native_json_errors_are_catchable_and_uncaught_errors_are_reported() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("catchable JSON exceptions run natively");
@@ -7010,6 +7082,7 @@ fn native_json_errors_are_catchable_and_uncaught_errors_are_reported() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("uncaught JSON exception run reports a native result");
@@ -7040,6 +7113,7 @@ fn native_json_errors_are_catchable_and_uncaught_errors_are_reported() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("uncaught cyclic JSON run reports a native result");
@@ -7168,6 +7242,7 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("first graph build succeeds");
@@ -7180,6 +7255,7 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("second graph build succeeds");
@@ -7252,6 +7328,7 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("edited graph build succeeds");
@@ -7520,6 +7597,7 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("build shared graph succeeds");
@@ -7533,6 +7611,7 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("cached shared graph succeeds");
@@ -7556,6 +7635,7 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("renamed shared graph succeeds");
@@ -7740,6 +7820,7 @@ fn shared_graph_proxy_preserves_host_strings_across_module_boundaries() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("build shared host graph");
@@ -7915,6 +7996,7 @@ fn content_named_loaders_allow_same_basename_libraries_in_one_host() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("build first same-basename library");
@@ -7926,6 +8008,7 @@ fn content_named_loaders_allow_same_basename_libraries_in_one_host() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("build second same-basename library");
@@ -8059,6 +8142,7 @@ fn shared_graph_libraries_hide_path_symbols_with_profile(profile: NativeProfile)
                 profile,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("build first graph library");
@@ -8074,6 +8158,7 @@ fn shared_graph_libraries_hide_path_symbols_with_profile(profile: NativeProfile)
                 profile,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("build second graph library");
@@ -8288,6 +8373,7 @@ fn native_host_clock_is_explicit_while_default_date_stays_at_epoch() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("deterministic Date program runs");
@@ -8306,6 +8392,7 @@ fn native_host_clock_is_explicit_while_default_date_stays_at_epoch() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::host_clock(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("host-backed Date program runs");
@@ -8370,6 +8457,7 @@ fn native_host_process_completion_beats_realm_timeout() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::host_clock(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("run host process timing graph");
@@ -10104,6 +10192,7 @@ fn embedded_shared_graph_dynamic_import_rejects_unsupported_builtin() {
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
+                ..NativeBuildOptions::default()
             },
         )
         .expect("build delayed dynamic shared graph");

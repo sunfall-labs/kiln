@@ -1204,6 +1204,9 @@ fn native_run_round_trips_through_the_daemon_and_reuses_artifacts() {
         project_root,
         profile: NativeProfile::Dev,
         node: false,
+        static_link: false,
+        pgo_generate: None,
+        pgo_use: None,
     };
     let first = client.request(&request).expect("first native request");
     let Response::NativeRan(first) = first else {
@@ -1304,6 +1307,9 @@ fn revision_pinned_native_build_rejects_stale_source_before_publication() {
             profile: NativeProfile::Dev,
             expected_revision: first.revision,
             explain: false,
+            static_link: false,
+            pgo_generate: None,
+            pgo_use: None,
         })
         .expect("stale native build response");
     assert!(
@@ -1327,6 +1333,9 @@ fn revision_pinned_native_build_rejects_stale_source_before_publication() {
             profile: NativeProfile::Dev,
             expected_revision: second.revision,
             explain: false,
+            static_link: false,
+            pgo_generate: None,
+            pgo_use: None,
         })
         .expect("current native build response");
     let Response::NativeBuilt(summary) = response else {
@@ -3083,6 +3092,9 @@ fn revision_pinned_native_build_accepts_relative_alias_reconciliation() {
             profile: NativeProfile::Dev,
             expected_revision: before.revision,
             explain: false,
+            static_link: false,
+            pgo_generate: None,
+            pgo_use: None,
         })
         .expect("revision-pinned relative build");
     match response {
@@ -3202,6 +3214,9 @@ fn production_daemon_native_graph_matches_interpreter_order_and_reuses_artifacts
         project_root: root,
         profile: NativeProfile::Dev,
         node: false,
+        static_link: false,
+        pgo_generate: None,
+        pgo_use: None,
     };
     let first = client.request(&request).expect("native graph run");
     let Response::NativeRan(first) = first else {

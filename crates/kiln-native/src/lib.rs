@@ -524,6 +524,31 @@ fn prelude_object_options(base: Digest, profile: NativeProfile) -> Digest {
     Digest::hash(&identity)
 }
 
+fn pgo_options_fingerprint(options: &NativeBuildOptions) -> String {
+    if let Some(dir) = &options.pgo_generate {
+        format!("\0pgo-gen:{}", dir.display())
+    } else if let Some(path) = &options.pgo_use {
+        let digest = std::fs::read(path)
+            .map(|b| Digest::hash(&b))
+            .unwrap_or_default();
+        format!("\0pgo-use:{}:{digest}", path.display())
+    } else {
+        String::new()
+    }
+}
+
+fn executable_link_options_digest(profile: NativeProfile, options: &NativeBuildOptions) -> Digest {
+    let static_opt = if options.static_link { "\0static" } else { "" };
+    let pgo_opt = pgo_options_fingerprint(options);
+    Digest::hash(
+        format!(
+            "{}\0system-math\0system-entropy-v1{static_opt}{pgo_opt}",
+            profile.as_str()
+        )
+        .as_bytes(),
+    )
+}
+
 /// Prelude object options folded with a dispatch-group mask.
 ///
 /// A full mask returns today's identity byte-for-byte: programs that retain
@@ -935,9 +960,10 @@ impl NativeBuilder {
         } else {
             ""
         };
+        let pgo_opt = pgo_options_fingerprint(options);
         let object_options = Digest::hash(
             format!(
-                "c11\0{}\0{}\0generator-{C_GENERATOR_VERSION}{march_opt}",
+                "c11\0{}\0{}\0generator-{C_GENERATOR_VERSION}{march_opt}{pgo_opt}",
                 identity.kind,
                 profile.as_str()
             )
@@ -972,9 +998,7 @@ impl NativeBuilder {
             [launcher_source_digest],
         );
 
-        let link_options_digest = Digest::hash(
-            format!("{}\0system-math\0system-entropy-v1", profile.as_str()).as_bytes(),
-        );
+        let link_options_digest = executable_link_options_digest(profile, options);
         if let Some(app_info) = self.lookup_digest(&application_key)?
             && let Some(prelude_info) = self.lookup_digest(&prelude_key)?
             && let Some(runtime_info) = self.lookup_digest(&runtime_key)?
@@ -1041,6 +1065,8 @@ impl NativeBuilder {
         let compile_options = CompileOptions {
             profile: profile.toolchain(),
             march_native: options.march_native,
+            pgo_generate: options.pgo_generate.clone(),
+            pgo_use: options.pgo_use.clone(),
             ..CompileOptions::default()
         };
         let mut prelude_compile_options = compile_options.clone();
@@ -1113,9 +1139,7 @@ impl NativeBuilder {
             compile_started.elapsed()
         };
 
-        let link_options_digest = Digest::hash(
-            format!("{}\0system-math\0system-entropy-v1", profile.as_str()).as_bytes(),
-        );
+        let link_options_digest = executable_link_options_digest(profile, options);
         let executable_key = NativeArtifactFamily::ExecutableLink.key(
             &compiler,
             &target,
@@ -1140,6 +1164,9 @@ impl NativeBuilder {
                     materialize(&paths.number_provider_a, &number_provider, false)?;
                     let mut link_options = LinkOptions {
                         profile: profile.toolchain(),
+                        static_link: options.static_link,
+                        pgo_generate: options.pgo_generate.clone(),
+                        pgo_use: options.pgo_use.clone(),
                         ..LinkOptions::default()
                     };
                     if cfg!(not(target_os = "windows")) {
@@ -2253,9 +2280,10 @@ impl NativeBuilder {
         } else {
             ""
         };
+        let pgo_opt = pgo_options_fingerprint(options);
         let object_options = Digest::hash(
             format!(
-                "c11\0{}\0{}\0generator-{C_GENERATOR_VERSION}{march_opt}",
+                "c11\0{}\0{}\0generator-{C_GENERATOR_VERSION}{march_opt}{pgo_opt}",
                 identity.kind,
                 profile.as_str()
             )
@@ -2264,6 +2292,8 @@ impl NativeBuilder {
         let compile_options = CompileOptions {
             profile: profile.toolchain(),
             march_native: options.march_native,
+            pgo_generate: options.pgo_generate.clone(),
+            pgo_use: options.pgo_use.clone(),
             ..CompileOptions::default()
         };
         let mut prelude_compile_options = compile_options.clone();
@@ -2352,9 +2382,7 @@ impl NativeBuilder {
             [launcher_source_digest],
         );
 
-        let link_options_digest = Digest::hash(
-            format!("{}\0system-math\0system-entropy-v1", profile.as_str()).as_bytes(),
-        );
+        let link_options_digest = executable_link_options_digest(profile, options);
 
         let mut module_object_infos = Vec::with_capacity(module_keys.len());
         let mut all_modules_cached = true;
@@ -2518,9 +2546,7 @@ impl NativeBuilder {
             compile_started.elapsed()
         };
 
-        let link_options_digest = Digest::hash(
-            format!("{}\0system-math\0system-entropy-v1", profile.as_str()).as_bytes(),
-        );
+        let link_options_digest = executable_link_options_digest(profile, options);
         let mut link_inputs = module_objects
             .iter()
             .map(|(_, digest, _)| *digest)
@@ -2556,6 +2582,9 @@ impl NativeBuilder {
                 objects.push(paths.launcher_o.clone());
                 let mut link_options = LinkOptions {
                     profile: profile.toolchain(),
+                    static_link: options.static_link,
+                    pgo_generate: options.pgo_generate.clone(),
+                    pgo_use: options.pgo_use.clone(),
                     ..LinkOptions::default()
                 };
                 if cfg!(not(target_os = "windows")) {

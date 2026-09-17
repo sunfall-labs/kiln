@@ -311,6 +311,9 @@ pub fn build(
     shared: bool,
     node: bool,
     explain: bool,
+    static_link: bool,
+    pgo_generate: Option<&Path>,
+    pgo_use: Option<&Path>,
 ) -> Result<Output> {
     let display = path.display().to_string();
     let canonical = canonical_path(path)?;
@@ -382,6 +385,8 @@ pub fn build(
             source_view: Some(source_view),
         });
     }
+    let pgo_gen = pgo_generate.map(|p| p.to_string_lossy().into_owned());
+    let pgo_u = pgo_use.map(|p| p.to_string_lossy().into_owned());
     let summary = match backend.native_build_at_view(
         canonical.clone(),
         project_root.clone(),
@@ -389,6 +394,9 @@ pub fn build(
         profile,
         node,
         explain,
+        static_link,
+        pgo_gen.clone(),
+        pgo_u.clone(),
         source_view,
     )? {
         SourceResponse::Ready(summary) => summary,
@@ -404,6 +412,9 @@ pub fn build(
                 profile,
                 node,
                 explain,
+                static_link,
+                pgo_gen,
+                pgo_u,
                 source_view,
             )? {
                 SourceResponse::Ready(summary) => summary,
@@ -432,12 +443,16 @@ pub fn build(
 const SIGNALLED_EXIT_CODE: i32 = 128;
 
 /// Build and execute one source file through the native backend from one command-entry snapshot.
+#[allow(clippy::too_many_arguments)]
 pub fn native_run(
     backend: &mut dyn Backend,
     path: &Path,
     project_root: &Path,
     profile: NativeProfile,
     node: bool,
+    static_link: bool,
+    pgo_generate: Option<&Path>,
+    pgo_use: Option<&Path>,
 ) -> Result<Output> {
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
@@ -453,11 +468,16 @@ pub fn native_run(
         )?;
     }
     let project_root_text = project_root_string(project_root)?;
+    let pgo_gen = pgo_generate.map(|p| p.to_string_lossy().into_owned());
+    let pgo_u = pgo_use.map(|p| p.to_string_lossy().into_owned());
     let summary = match backend.native_run_at_view(
         canonical.clone(),
         project_root_text.clone(),
         profile,
         node,
+        static_link,
+        pgo_gen.clone(),
+        pgo_u.clone(),
         source_view,
     )? {
         SourceResponse::Ready(summary) => summary,
@@ -470,6 +490,9 @@ pub fn native_run(
                 project_root_text,
                 profile,
                 node,
+                static_link,
+                pgo_gen,
+                pgo_u,
                 source_view,
             )? {
                 SourceResponse::Ready(summary) => summary,
@@ -1769,6 +1792,9 @@ mod tests {
             true,
             false,
             false,
+            false,
+            None,
+            None,
         )
         .expect("shared build");
         assert!(
@@ -1814,6 +1840,9 @@ mod tests {
             false,
             false,
             false,
+            false,
+            None,
+            None,
         )
         .expect("native build keeps its captured entry snapshot");
 
@@ -1861,6 +1890,9 @@ mod tests {
             false,
             false,
             true,
+            false,
+            None,
+            None,
         )
         .expect("native build with explain");
 
@@ -1887,8 +1919,17 @@ mod tests {
         let canonical = canonical_path(&entry).expect("canonical native run entry");
 
         let mut backend = RemoveEntryDuringSync::new(entry.clone());
-        let output = native_run(&mut backend, &entry, &root, NativeProfile::Dev, false)
-            .expect("native run keeps its captured entry snapshot");
+        let output = native_run(
+            &mut backend,
+            &entry,
+            &root,
+            NativeProfile::Dev,
+            false,
+            false,
+            None,
+            None,
+        )
+        .expect("native run keeps its captured entry snapshot");
 
         assert_eq!(output.text, "native hello\n");
         assert_eq!(
