@@ -51,6 +51,7 @@ pub struct Invocation {
 pub enum Command {
     Check {
         path: PathBuf,
+        node: bool,
     },
     Run {
         path: PathBuf,
@@ -279,9 +280,15 @@ where
             "--out cannot be combined with `kiln test --parse-only`: results must be from an interpreter run",
         ));
     }
-    if node && name != "test" && name != "run" && name != "build" && name != "watch" {
+    if node
+        && name != "test"
+        && name != "run"
+        && name != "build"
+        && name != "watch"
+        && name != "check"
+    {
         return Err(Error::usage(
-            "--node only applies to `kiln run`, `kiln build`, `kiln test`, or `kiln watch`",
+            "--node only applies to `kiln run`, `kiln build`, `kiln test`, `kiln watch`, or `kiln check`",
         ));
     }
     if node && shared {
@@ -325,7 +332,9 @@ where
         ));
     }
     if max_steps.is_some() && name != "run" {
-        return Err(Error::usage("--max-steps only applies to `kiln run`"));
+        return Err(Error::usage(
+            "--max-steps only applies to interpreted `kiln run`",
+        ));
     }
     if workers.is_some() && name != "run" {
         return Err(Error::usage("--workers only applies to `kiln run`"));
@@ -344,6 +353,7 @@ where
     let command = match name.as_str() {
         "check" => Command::Check {
             path: PathBuf::from(one_operand(&name, &mut positional)?),
+            node,
         },
         "run" => Command::Run {
             path: PathBuf::from(one_operand(&name, &mut positional)?),
@@ -625,7 +635,8 @@ mod tests {
         assert_eq!(
             before.command,
             Command::Check {
-                path: PathBuf::from("a.js")
+                path: PathBuf::from("a.js"),
+                node: false,
             }
         );
     }
@@ -906,7 +917,8 @@ mod tests {
         assert_eq!(
             invocation.command,
             Command::Check {
-                path: PathBuf::from("--weird-name.js")
+                path: PathBuf::from("--weird-name.js"),
+                node: false,
             }
         );
     }

@@ -91,6 +91,13 @@ pub enum NodeBuiltin {
     QueryString,
     Url,
     Util,
+    ChildProcess,
+    Timers,
+    TimersPromises,
+    Readline,
+    ReadlinePromises,
+    StreamPromises,
+    Sqlite,
 }
 
 impl NodeBuiltin {
@@ -123,11 +130,18 @@ impl NodeBuiltin {
         Self::QueryString,
         Self::Url,
         Self::Util,
+        Self::ChildProcess,
+        Self::Timers,
+        Self::TimersPromises,
+        Self::Readline,
+        Self::ReadlinePromises,
+        Self::StreamPromises,
+        Self::Sqlite,
     ];
 
     pub fn parse(specifier: &str) -> Option<Self> {
         Some(match specifier.strip_prefix("node:").unwrap_or(specifier) {
-            "kiln:process" => Self::Process,
+            "process" | "kiln:process" => Self::Process,
             "assert" | "assert/strict" => Self::Assert,
             "buffer" => Self::Buffer,
             "async_hooks" => Self::AsyncHooks,
@@ -151,10 +165,17 @@ impl NodeBuiltin {
             "tty" => Self::Tty,
             "zlib" => Self::Zlib,
             "stream" => Self::Stream,
+            "stream/promises" => Self::StreamPromises,
             "string_decoder" => Self::StringDecoder,
             "querystring" => Self::QueryString,
             "url" => Self::Url,
             "util" => Self::Util,
+            "child_process" => Self::ChildProcess,
+            "timers" => Self::Timers,
+            "timers/promises" => Self::TimersPromises,
+            "readline" => Self::Readline,
+            "readline/promises" => Self::ReadlinePromises,
+            "sqlite" => Self::Sqlite,
             _ => return None,
         })
     }
@@ -185,10 +206,17 @@ impl NodeBuiltin {
             Self::Tty => "node:tty",
             Self::Zlib => "node:zlib",
             Self::Stream => "node:stream",
+            Self::StreamPromises => "node:stream/promises",
             Self::StringDecoder => "node:string_decoder",
             Self::QueryString => "node:querystring",
             Self::Url => "node:url",
             Self::Util => "node:util",
+            Self::ChildProcess => "node:child_process",
+            Self::Timers => "node:timers",
+            Self::TimersPromises => "node:timers/promises",
+            Self::Readline => "node:readline",
+            Self::ReadlinePromises => "node:readline/promises",
+            Self::Sqlite => "node:sqlite",
         }
     }
 
@@ -1282,6 +1310,14 @@ fn resolve_in_root(
 fn classify_specifier(specifier: &str) -> Result<ResolutionKind, ResolveError> {
     let reason = if specifier.is_empty() {
         Some(InvalidSpecifierReason::Empty)
+    } else if specifier.starts_with('#') {
+        if specifier.len() == 1 {
+            Some(InvalidSpecifierReason::Empty)
+        } else if specifier[1..].contains(['?', '#']) {
+            Some(InvalidSpecifierReason::QueryOrFragment)
+        } else {
+            None
+        }
     } else if specifier.contains(['?', '#']) {
         Some(InvalidSpecifierReason::QueryOrFragment)
     } else if specifier.as_bytes().contains(&0) {

@@ -264,6 +264,10 @@ export function format(pathObject: FormatInputPathObject): string {
   return directory + "/" + resolvedBase;
 }
 
+export function toNamespacedPath(p: string): string {
+  return typeof p === "string" ? p : "";
+}
+
 const path = {
   basename,
   delimiter,
@@ -278,10 +282,43 @@ const path = {
   relative,
   resolve,
   sep,
+  toNamespacedPath,
+  win32: undefined as any,
   default: undefined as any,
 };
 path.posix = path;
 path.default = path;
+
+export const win32: any = {
+  basename: (p: string, ext?: string) => basename(p ? p.replace(/\\/g, "/") : "", ext),
+  delimiter: ";",
+  dirname: (p: string) => dirname(p ? p.replace(/\\/g, "/") : "").replace(/\//g, "\\"),
+  extname,
+  format,
+  isAbsolute: (p?: string) => {
+    if (!p) return false;
+    return /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith("\\\\");
+  },
+  join: (...args: string[]) => join(...args).replace(/\//g, "\\"),
+  normalize: (p: string) => normalize(p ? p.replace(/\\/g, "/") : "").replace(/\//g, "\\"),
+  parse,
+  posix: path,
+  relative,
+  resolve: (...args: string[]) => resolve(...args).replace(/\//g, "\\"),
+  sep: "\\",
+  toNamespacedPath: (p: string) => {
+    if (typeof p !== "string" || p.length === 0) return "";
+    if (p.startsWith("\\\\?\\")) return p;
+    if (p.startsWith("\\\\")) return "\\\\?\\UNC\\" + p.slice(2);
+    if (/^[a-zA-Z]:/.test(p)) return "\\\\?\\" + p;
+    return p;
+  },
+  win32: undefined as any,
+  default: undefined as any,
+};
+win32.win32 = win32;
+win32.default = win32;
+path.win32 = win32;
 
 export const posix = path;
 export default path;

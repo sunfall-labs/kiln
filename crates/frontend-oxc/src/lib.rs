@@ -1085,7 +1085,7 @@ fn lower_parsed_in_context(
                     ExportExportName::Null => true,
                 })
         })
-        .map(lower_export)
+        .map(|entry| lower_export(entry, &parsed.module_record.import_entries))
         .collect::<Vec<_>>();
 
     for entry in parsed
@@ -1098,8 +1098,19 @@ fn lower_parsed_in_context(
                     .contains(&(entry.statement_span.start, entry.statement_span.end))
         })
     {
-        exports.push(lower_export(entry));
+        exports.push(lower_export(entry, &parsed.module_record.import_entries));
     }
+    // When deduplicating exports, prefer runtime value exports over type-only exports (e.g.
+    // when TypeScript code declares both `export type X = ...` and `export const X = ...`).
+    exports.sort_by_key(|export| (export.type_only, export.span.start));
+    let mut seen_exports = HashSet::new();
+    exports.retain(|export| {
+        if let Some(exported) = &export.exported {
+            seen_exports.insert(exported.as_str().to_owned())
+        } else {
+            true
+        }
+    });
     exports.sort_by_key(|export| export.span.start);
 
     let mut diagnostics = parsed
@@ -1362,7 +1373,12 @@ impl Lowerer<'_> {
     fn statement(&mut self, statement: &Statement<'_>) -> Option<HirStatement> {
         let statement_span = span(statement.span());
         let kind = match statement {
-            Statement::VariableDeclaration(declaration) => self.variable(declaration),
+            Statement::VariableDeclaration(declaration) => {
+                if declaration.declare {
+                    return None;
+                }
+                self.variable(declaration)
+            }
             Statement::ExportDeclaration(declaration) => {
                 return self.declaration(&declaration.declaration, statement_span);
             }
@@ -1377,6 +1393,9 @@ impl Lowerer<'_> {
                 } else if let ExportDefaultDeclarationKind::FunctionDeclaration(declaration) =
                     &declaration.declaration
                 {
+                    if declaration.body.is_none() || declaration.declare {
+                        return None;
+                    }
                     // `export default function f() {}` declares `f` and exports it under
                     // `default`; the anonymous form declares the name the module record already
                     // uses for it, which carries characters an identifier cannot.
@@ -1393,6 +1412,9 @@ impl Lowerer<'_> {
                 } else if let ExportDefaultDeclarationKind::ClassDeclaration(declaration) =
                     &declaration.declaration
                 {
+                    if declaration.declare {
+                        return None;
+                    }
                     let lowered = self.class(declaration, statement_span).map(|mut class| {
                         class
                             .name
@@ -1436,12 +1458,31 @@ impl Lowerer<'_> {
             | Statement::TSTypeAliasDeclaration(_)
             | Statement::TSInterfaceDeclaration(_)
             | Statement::TSGlobalDeclaration(_)
+            | Statement::TSExternalModuleDeclaration(_)
             | Statement::TSNamespaceExportDeclaration(_) => return None,
+            Statement::TSNamespaceDeclaration(declaration) => {
+                if declaration.declare {
+                    return None;
+                }
+                self.unsupported_statement("TypeScript runtime declaration", statement_span)
+            }
+            Statement::TSImportEqualsDeclaration(declaration) => {
+                if declaration.import_kind.is_type() {
+                    return None;
+                }
+                self.unsupported_statement("TypeScript import equals", statement_span)
+            }
 
             Statement::FunctionDeclaration(declaration) => {
+                if declaration.body.is_none() || declaration.declare {
+                    return None;
+                }
                 self.function_declaration(declaration, statement_span)
             }
             Statement::ClassDeclaration(declaration) => {
+                if declaration.declare {
+                    return None;
+                }
                 match self.class(declaration, statement_span) {
                     Ok(class) => HirStatementKind::Class(Box::new(class)),
                     Err(feature) => self.unsupported_statement(&feature, statement_span),
@@ -1694,7 +1735,12 @@ impl Lowerer<'_> {
         statement_span: HirSpan,
     ) -> Option<HirStatement> {
         let kind = match declaration {
-            Declaration::VariableDeclaration(declaration) => self.variable(declaration),
+            Declaration::VariableDeclaration(declaration) => {
+                if declaration.declare {
+                    return None;
+                }
+                self.variable(declaration)
+            }
             Declaration::TSTypeAliasDeclaration(_)
             | Declaration::TSInterfaceDeclaration(_)
             | Declaration::TSGlobalDeclaration(_) => return None,
@@ -1702,13 +1748,25 @@ impl Lowerer<'_> {
             // side is read from the module record separately, so lowering only has to produce
             // the declaration -- the same one the unexported form produces.
             Declaration::FunctionDeclaration(declaration) => {
+                if declaration.body.is_none() || declaration.declare {
+                    return None;
+                }
                 self.function_declaration(declaration, statement_span)
             }
             Declaration::ClassDeclaration(declaration) => {
+                if declaration.declare {
+                    return None;
+                }
                 match self.class(declaration, statement_span) {
                     Ok(class) => HirStatementKind::Class(Box::new(class)),
                     Err(feature) => self.unsupported_statement(&feature, statement_span),
                 }
+            }
+            Declaration::TSNamespaceDeclaration(declaration) => {
+                if declaration.declare {
+                    return None;
+                }
+                self.unsupported_statement("TypeScript runtime declaration", statement_span)
             }
             _ => self.unsupported_statement("TypeScript runtime declaration", statement_span),
         };
@@ -1858,27 +1916,73 @@ impl Lowerer<'_> {
                 }
             }
             Expression::BinaryExpression(expression) => {
-                let Some(operator) = lower_binary_operator(expression.operator) else {
-                    return self.unsupported_expression(
-                        &format!("binary operator `{}`", expression.operator.as_str()),
-                        expression_span,
-                    );
-                };
-                HirExpressionKind::Binary {
-                    operator,
-                    left: Box::new(self.expression(&expression.left)),
-                    right: Box::new(self.expression(&expression.right)),
+                // To avoid overflowing the stack on deep left-skewed binary expressions
+                // (e.g. "a" + "b" + "c" + ... with hundreds or thousands of terms),
+                // iteratively peel the left spine.
+                let mut spine = Vec::new();
+                let mut current = expression;
+                loop {
+                    let current_span = span(current.span);
+                    let Some(operator) = lower_binary_operator(current.operator) else {
+                        return self.unsupported_expression(
+                            &format!("binary operator `{}`", current.operator.as_str()),
+                            current_span,
+                        );
+                    };
+                    spine.push((current_span, operator, &current.right));
+                    if let Expression::BinaryExpression(left_bin) = &current.left {
+                        current = left_bin;
+                    } else {
+                        break;
+                    }
                 }
+                let mut acc = self.expression(&current.left);
+                for (op_span, operator, right_expr) in spine.into_iter().rev() {
+                    let right = self.expression(right_expr);
+                    acc = HirExpression {
+                        kind: HirExpressionKind::Binary {
+                            operator,
+                            left: Box::new(acc),
+                            right: Box::new(right),
+                        },
+                        span: op_span,
+                    };
+                }
+                return acc;
             }
-            Expression::LogicalExpression(expression) => HirExpressionKind::Logical {
-                operator: match expression.operator {
-                    LogicalOperator::And => HirLogicalOperator::And,
-                    LogicalOperator::Or => HirLogicalOperator::Or,
-                    LogicalOperator::Coalesce => HirLogicalOperator::NullishCoalesce,
-                },
-                left: Box::new(self.expression(&expression.left)),
-                right: Box::new(self.expression(&expression.right)),
-            },
+            Expression::LogicalExpression(expression) => {
+                // To avoid overflowing the stack on deep left-skewed logical expressions,
+                // iteratively peel the left spine.
+                let mut spine = Vec::new();
+                let mut current = expression;
+                loop {
+                    let current_span = span(current.span);
+                    let operator = match current.operator {
+                        LogicalOperator::And => HirLogicalOperator::And,
+                        LogicalOperator::Or => HirLogicalOperator::Or,
+                        LogicalOperator::Coalesce => HirLogicalOperator::NullishCoalesce,
+                    };
+                    spine.push((current_span, operator, &current.right));
+                    if let Expression::LogicalExpression(left_log) = &current.left {
+                        current = left_log;
+                    } else {
+                        break;
+                    }
+                }
+                let mut acc = self.expression(&current.left);
+                for (op_span, operator, right_expr) in spine.into_iter().rev() {
+                    let right = self.expression(right_expr);
+                    acc = HirExpression {
+                        kind: HirExpressionKind::Logical {
+                            operator,
+                            left: Box::new(acc),
+                            right: Box::new(right),
+                        },
+                        span: op_span,
+                    };
+                }
+                return acc;
+            }
             Expression::AssignmentExpression(expression) => {
                 let Some(operator) = lower_assignment_operator(expression.operator) else {
                     return self.unsupported_expression(
@@ -2877,9 +2981,12 @@ impl Lowerer<'_> {
                     continue;
                 }
                 ClassElement::TSIndexSignature(_) => {
-                    return Err("TypeScript index signature".into());
+                    continue;
                 }
             };
+            if method.value.body.is_none() {
+                continue;
+            }
             let lowered = self
                 .function(
                     &method.value,
@@ -3297,7 +3404,10 @@ fn lower_import_name(name: &ImportImportName<'_>) -> ImportName {
     }
 }
 
-fn lower_export(entry: &OxcExportEntry<'_>) -> Export {
+fn lower_export(
+    entry: &OxcExportEntry<'_>,
+    import_entries: &[oxc_syntax::module_record::ImportEntry<'_>],
+) -> Export {
     let exported = match &entry.export_name {
         ExportExportName::Name(name) => Some(ExportName::Name(name.name.to_string())),
         ExportExportName::Default(_) => Some(ExportName::Default),
@@ -3313,10 +3423,28 @@ fn lower_export(entry: &OxcExportEntry<'_>) -> Export {
             local: local.name.to_string(),
         },
         (None, ExportImportName::Null, ExportLocalName::Null) => ExportOrigin::DefaultExpression,
-        (Some(source), ExportImportName::Name(imported), _) => ExportOrigin::ReExport {
-            source,
-            imported: ImportName::Name(imported.name.to_string()),
-        },
+        (Some(source), ExportImportName::Name(imported), _) => {
+            // Oxc's ExportImportName enum lacks a Default variant, so when an imported default
+            // binding is re-exported via `export { Diff }`, Oxc sets `import_name: Name("Diff")`.
+            // Check import_entries to see if this local name was actually imported from `source`
+            // as Default, and restore the true ESM semantics.
+            let imported_name = if import_entries.iter().any(|i| {
+                i.module_request.name == source
+                    && i.local_name.name == imported.name
+                    && matches!(
+                        i.import_name,
+                        oxc_syntax::module_record::ImportImportName::Default(_)
+                    )
+            }) {
+                ImportName::Default
+            } else {
+                ImportName::Name(imported.name.to_string())
+            };
+            ExportOrigin::ReExport {
+                source,
+                imported: imported_name,
+            }
+        }
         (Some(source), ExportImportName::All, _) => ExportOrigin::NamespaceReExport { source },
         (Some(source), ExportImportName::AllButDefault, _) => ExportOrigin::Star { source },
         (source, import_name, _) => ExportOrigin::Unsupported {
@@ -3769,6 +3897,23 @@ mod tests {
         assert_eq!(module.source_kind, SourceKind::TypeScript);
         assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
         assert_eq!(module.runtime_export_names(), ["value"]);
+    }
+
+    #[test]
+    fn preserves_runtime_export_when_type_and_value_share_identifier() {
+        let module = parse(
+            "module.ts",
+            r#"
+                export type Result<T> = { ok: true; value: T };
+                export const Result = {
+                    ok: (v) => ({ ok: true, value: v }),
+                };
+            "#,
+        );
+
+        assert_eq!(module.source_kind, SourceKind::TypeScript);
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        assert_eq!(module.runtime_export_names(), ["Result"]);
     }
 
     #[test]
@@ -4770,6 +4915,73 @@ mod tests {
         assert_eq!(
             raw[0].to_units().as_ref(),
             "\\ud800�abcd".encode_utf16().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_ambient_function_overloads() {
+        let source = r#"
+declare const globalConst: string;
+declare function globalFunc(): void;
+declare class GlobalClass {}
+
+export function defineService(a: number): void;
+export function defineService(a: string): void;
+export function defineService(a: any): void {
+    return a;
+}
+
+function localOverload(x: number): void;
+function localOverload(x: any): void {}
+
+class MyClass {
+    [key: string]: any;
+    compute(x: number): number;
+    compute(x: string): string;
+    compute(x: any): any {
+        return x;
+    }
+}
+"#;
+        let module = parse("overloads.ts", source);
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        for stmt in &module.body {
+            assert!(
+                !matches!(stmt.kind, kiln_hir::StatementKind::Unsupported { .. }),
+                "found unsupported statement: {:?}",
+                stmt.kind
+            );
+        }
+        // There should be exactly 3 statements: defineService, localOverload, and MyClass.
+        assert_eq!(module.body.len(), 3);
+        // Exports should contain exactly 1 entry for defineService.
+        let define_service_exports: Vec<_> = module
+            .exports
+            .iter()
+            .filter(|e| e.exported.as_ref().map(|n| n.as_str()) == Some("defineService"))
+            .collect();
+        assert_eq!(define_service_exports.len(), 1);
+    }
+
+    #[test]
+    fn test_import_default_and_export_named() {
+        let source = r#"
+import Diff from './diff/base.js';
+export { Diff };
+"#;
+        let module = parse("index.js", source);
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let diff_export = module
+            .exports
+            .iter()
+            .find(|e| e.exported.as_ref().map(|n| n.as_str()) == Some("Diff"))
+            .expect("Diff export");
+        assert_eq!(
+            diff_export.origin,
+            ExportOrigin::ReExport {
+                source: "./diff/base.js".to_owned(),
+                imported: ImportName::Default,
+            }
         );
     }
 }

@@ -271,10 +271,13 @@ pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagn
         // `export *` names nothing, so the main loop below -- which needs an exported name --
         // never sees it. Its export entry is made here instead, naming the source.
         if let ExportOrigin::Star { source } = &export.origin {
-            star_exports.push(ExportBinding {
-                exported: format!("{STAR_REEXPORT_PREFIX}{source}"),
-                local_slot,
-            });
+            let exported = format!("{STAR_REEXPORT_PREFIX}{source}");
+            if !star_exports.iter().any(|e| e.exported == exported) {
+                star_exports.push(ExportBinding {
+                    exported,
+                    local_slot,
+                });
+            }
         } else {
             reexport_slots.insert(index, local_slot);
         }

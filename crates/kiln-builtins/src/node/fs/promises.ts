@@ -6,47 +6,65 @@ const nativeModule =
       (process as any).__kilnNativeModules?.fs?.promises || null
     : null;
 
-export function appendFile(...args: any[]): any {
-  if (nativeModule && typeof nativeModule.appendFile === "function") {
-    return nativeModule.appendFile(...args);
+function unmaterialized(name: string): any {
+  if (nativeModule && typeof nativeModule[name] === "function") {
+    return nativeModule[name];
   }
-  throw new Error("node:fs/promises requires an FS host capability that this realm does not provide");
+  return (..._args: any[]) => {
+    return Promise.reject(
+      new Error(`node:fs/promises ${name} requires an FS host capability that this realm does not provide`)
+    );
+  };
 }
 
-export function mkdir(...args: any[]): any {
-  if (nativeModule && typeof nativeModule.mkdir === "function") {
-    return nativeModule.mkdir(...args);
-  }
-  throw new Error("node:fs/promises requires an FS host capability that this realm does not provide");
-}
-
-export function readFile(...args: any[]): any {
-  if (nativeModule && typeof nativeModule.readFile === "function") {
-    return nativeModule.readFile(...args);
-  }
-  throw new Error("node:fs/promises requires an FS host capability that this realm does not provide");
-}
-
-export function stat(...args: any[]): any {
-  if (nativeModule && typeof nativeModule.stat === "function") {
-    return nativeModule.stat(...args);
-  }
-  throw new Error("node:fs/promises requires an FS host capability that this realm does not provide");
-}
-
-export function writeFile(...args: any[]): any {
-  if (nativeModule && typeof nativeModule.writeFile === "function") {
-    return nativeModule.writeFile(...args);
-  }
-  throw new Error("node:fs/promises requires an FS host capability that this realm does not provide");
-}
+export const access = unmaterialized("access");
+export const appendFile = unmaterialized("appendFile");
+export const chmod = unmaterialized("chmod");
+export const chown = unmaterialized("chown");
+export const copyFile = unmaterialized("copyFile");
+export const link = unmaterialized("link");
+export const lstat = unmaterialized("lstat");
+export const mkdir = unmaterialized("mkdir");
+export const mkdtemp = unmaterialized("mkdtemp");
+export const open = unmaterialized("open");
+export const readdir = unmaterialized("readdir");
+export const readFile = unmaterialized("readFile");
+export const readlink = unmaterialized("readlink");
+export const realpath = unmaterialized("realpath");
+export const rename = unmaterialized("rename");
+export const rm = unmaterialized("rm");
+export const rmdir = unmaterialized("rmdir");
+export const stat = unmaterialized("stat");
+export const symlink = unmaterialized("symlink");
+export const truncate = unmaterialized("truncate");
+export const unlink = unmaterialized("unlink");
+export const utimes = unmaterialized("utimes");
+export const writeFile = unmaterialized("writeFile");
 
 const fsPromisesNamespace = {
+  access,
   appendFile,
+  chmod,
+  chown,
+  copyFile,
   default: undefined as any,
+  link,
+  lstat,
   mkdir,
+  mkdtemp,
+  open,
+  readdir,
   readFile,
+  readlink,
+  realpath,
+  rename,
+  rm,
+  rmdir,
   stat,
+  symlink,
+  truncate,
+  unlink,
+  utimes,
   writeFile,
 };
 fsPromisesNamespace.default = fsPromisesNamespace;
