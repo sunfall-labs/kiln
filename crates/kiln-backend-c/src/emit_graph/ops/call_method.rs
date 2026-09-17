@@ -121,7 +121,7 @@ fn emit_map_typed(
              if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                  kiln_array *arr = (kiln_array *)ptr; \
                  kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                 if (!kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                 if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
                      kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
                      if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
                      if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
@@ -217,7 +217,7 @@ fn emit_filter_typed(
              if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                  kiln_array *arr = (kiln_array *)ptr; \
                  kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                 if (!kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                 if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
                      kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
                      if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
                      if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
@@ -287,7 +287,7 @@ fn emit_reduce_typed(
              if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                  kiln_array *arr = (kiln_array *)ptr; \
                  kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                 if (!kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                 if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
                      kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
                      if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
                      if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
@@ -652,8 +652,6 @@ pub(super) fn emit_call_method(
     };
     let prep_args = format!("if (!call_args_ready) {{ {init_stmts} call_args_ready = 1; }} ");
     let check = status_check(diagnostic_site, pc, label, unwind);
-    let closed_world = !program.has_direct_eval() && !program.has_dynamic_import();
-
     // `await Promise.resolve(number)` still has to suspend once, but the intermediate fulfilled
     // promise is unobservable when this call result is consumed only by that await. The graph
     // supplies this marker only for an exact builtin receiver and immediate await; the runtime
@@ -661,7 +659,6 @@ pub(super) fn emit_call_method(
     // through to the generic method call; this marked site deliberately does not use the older
     // Promise.resolve intrinsic because its result is immediately consumed by the await path.
     let await_resolve_intrinsic = if ctx.await_resolve_arg.is_some()
-        && closed_world
         && key_str == "resolve"
         && argc == 1
     {
@@ -675,8 +672,8 @@ pub(super) fn emit_call_method(
         None
     };
 
-    // 1. Math.* intrinsic if closed_world
-    let math_intrinsic = if closed_world && await_resolve_intrinsic.is_none() {
+    // 1. Math.* intrinsic
+    let math_intrinsic = if await_resolve_intrinsic.is_none() {
         let arg0_is_num = argc >= 1 && numbers.contains(&args[0]);
         let (guard0, load0) = if arg0_is_num {
             (String::new(), format!("double d = d{};", args[0].0))
@@ -1100,16 +1097,16 @@ pub(super) fn emit_call_method(
     // directly from the loop, ahead of the generic (boxed) one. `DirectPlan::plan`'s
     // `callback_targets` references such a proto from the same three call shapes read here, so
     // its typed entry exists exactly when one of these finds it.
-    let map_typed = (closed_world && key_str == "map" && argc == 1)
+    let map_typed = (key_str == "map" && argc == 1)
         .then(|| typed_callback(plan, program, args[0], &[1, 2]))
         .flatten();
-    let filter_typed = (closed_world && key_str == "filter" && argc == 1)
+    let filter_typed = (key_str == "filter" && argc == 1)
         .then(|| typed_callback(plan, program, args[0], &[1, 2]))
         .flatten();
     // `reduce`'s accumulator has to stay a `double` for the whole loop, so the typed loop is
     // reached only when the typed entry is proven to return one and the initial value is
     // already proven a number -- both checked here, not inside the loop.
-    let reduce_typed = (closed_world && key_str == "reduce" && argc == 2)
+    let reduce_typed = (key_str == "reduce" && argc == 2)
         .then(|| typed_callback(plan, program, args[0], &[2]))
         .flatten()
         .filter(|c| c.returns_double && numbers.contains(&args[1]));
@@ -1120,7 +1117,7 @@ pub(super) fn emit_call_method(
         "{{ int status = kiln_c99_typed_status; if (status == KILN_C99_THROWN) *thrown = kiln_c99_typed_thrown; {diag} {typed_check} }}"
     );
 
-    let map_intrinsic = if closed_world && key_str == "map" && argc == 1 {
+    let map_intrinsic = if key_str == "map" && argc == 1 {
         Some(match &map_typed {
             Some(c) => emit_map_typed(symbol, object.0, args[0].0, v, &check, &typed_failed, c),
             None => format!(
@@ -1129,7 +1126,7 @@ pub(super) fn emit_call_method(
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                              kiln_array *arr = (kiln_array *)ptr; \
                              kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                             if (!plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                             if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
                                  kiln_value built_val; \
                                  int status = kiln_c99_new_array_with_capacity(&built_val, arr->count, arr->is_numeric); \
                                  if (status != KILN_C99_OK) return status; \
@@ -1179,7 +1176,7 @@ pub(super) fn emit_call_method(
     // whose closure really is that proto; a typed entry that bails out, or a provider that could
     // not run the pool, leaves `handled` clear and the sequential lowering answers -- the same
     // answer, recomputed. Nothing is refused here.
-    let parallel_pool_intrinsic = (closed_world && key_str == "parallelMap" && argc == 1)
+    let parallel_pool_intrinsic = (key_str == "parallelMap" && argc == 1)
         .then(|| typed_callback(plan, program, args[0], &[1, 2]))
         .flatten()
         .filter(|c| {
@@ -1198,7 +1195,7 @@ pub(super) fn emit_call_method(
                      if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                          kiln_array *arr = (kiln_array *)ptr; \
                          kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                         if (arr->is_numeric && kiln_c99_builtin_store_epoch == 0 && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
+                         if (arr->is_numeric && kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
                              size_t count0 = arr->count; \
                              kiln_value built_val; \
                              int status = kiln_c99_new_array_with_capacity(&built_val, count0, 1); \
@@ -1338,7 +1335,7 @@ pub(super) fn emit_call_method(
         None
     };
 
-    let filter_intrinsic = if closed_world && key_str == "filter" && argc == 1 {
+    let filter_intrinsic = if key_str == "filter" && argc == 1 {
         Some(match &filter_typed {
             Some(c) => emit_filter_typed(symbol, object.0, args[0].0, v, &check, &typed_failed, c),
             None => format!(
@@ -1347,7 +1344,7 @@ pub(super) fn emit_call_method(
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                              kiln_array *arr = (kiln_array *)ptr; \
                              kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                             if (!plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                             if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
                                  kiln_value built_val; \
                                  int status = kiln_c99_new_array_with_capacity(&built_val, arr->count, arr->is_numeric); \
                                  if (status != KILN_C99_OK) return status; \
@@ -1384,7 +1381,7 @@ pub(super) fn emit_call_method(
         None
     };
 
-    let reduce_intrinsic = if closed_world && key_str == "reduce" && argc == 2 {
+    let reduce_intrinsic = if key_str == "reduce" && argc == 2 {
         Some(match &reduce_typed {
             Some(c) => emit_reduce_typed(
                 symbol,
@@ -1399,7 +1396,7 @@ pub(super) fn emit_call_method(
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                              kiln_array *arr = (kiln_array *)ptr; \
                              kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                             if (!plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                             if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
                                  kiln_val vacc = v{a1}; \
                                  kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
                                  if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
@@ -1431,7 +1428,7 @@ pub(super) fn emit_call_method(
         None
     };
 
-    let slice_intrinsic = if closed_world && key_str == "slice" && argc == 1 {
+    let slice_intrinsic = if key_str == "slice" && argc == 1 {
         let a0 = args[0].0;
         let (array_body, string_body, guard) = if ints.contains(&args[0]) {
             (
@@ -1505,12 +1502,16 @@ pub(super) fn emit_call_method(
                  void *ptr = KILN_VAL_PTR(v{o}); \
                  if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                      kiln_array *arr = (kiln_array *)ptr; \
-                     {array_body} \
+                     if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED)) {{ \
+                         {array_body} \
+                     }} \
                  }} \
              }} else if (!handled && KILN_VAL_IS_STRING(v{o}){guard}) {{ \
-                 const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
-                 if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
-                     {string_body} \
+                 if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0)) {{ \
+                     const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
+                     if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
+                         {string_body} \
+                     }} \
                  }} \
              }}",
             o = object.0,
@@ -1522,43 +1523,45 @@ pub(super) fn emit_call_method(
         None
     };
 
-    let join_intrinsic = if closed_world && key_str == "join" && argc == 1 {
+    let join_intrinsic = if key_str == "join" && argc == 1 {
         Some(format!(
             "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_STRING(v{a0})) {{ \
                          void *ptr = KILN_VAL_PTR(v{o}); \
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                              kiln_array *arr = (kiln_array *)ptr; \
-                             const kiln_string *sep = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
-                             size_t total_bytes = 0; \
-                             int can_fast = (sep != NULL && !kiln_string_is_utf16(sep)); \
-                             for (size_t idx = 0; idx < arr->count && can_fast; ++idx) {{ \
-                                 kiln_val elem = arr->elements[idx]; \
-                                 if (KILN_VAL_IS_STRING(elem)) {{ \
-                                     const kiln_string *es = (const kiln_string *)KILN_VAL_PTR(elem); \
-                                     if (es != NULL && !kiln_string_is_utf16(es)) total_bytes += es->unit_len; \
-                                     else can_fast = 0; \
-                                 }} else {{ can_fast = 0; }} \
-                             }} \
-                             if (can_fast) {{ \
-                                 if (arr->count > 1) total_bytes += (arr->count - 1) * sep->unit_len; \
-                                 char *buf = kiln_c99_gc_alloc_text(total_bytes); \
-                                 if (buf != NULL) {{ \
-                                     char *dst = buf; \
-                                     for (size_t idx = 0; idx < arr->count; ++idx) {{ \
-                                         if (idx > 0 && sep->unit_len > 0) {{ \
-                                             if (sep->unit_len == 1) {{ *dst = (char)kiln_string_unit_at(sep, 0); }} \
-                                             else {{ kiln_c99_copy_short(dst, (const char *)kiln_string_latin1(sep), sep->unit_len); }} \
-                                             dst += sep->unit_len; \
+                             if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED)) {{ \
+                                 const kiln_string *sep = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
+                                 size_t total_bytes = 0; \
+                                 int can_fast = (sep != NULL && !kiln_string_is_utf16(sep)); \
+                                 for (size_t idx = 0; idx < arr->count && can_fast; ++idx) {{ \
+                                     kiln_val elem = arr->elements[idx]; \
+                                     if (KILN_VAL_IS_STRING(elem)) {{ \
+                                         const kiln_string *es = (const kiln_string *)KILN_VAL_PTR(elem); \
+                                         if (es != NULL && !kiln_string_is_utf16(es)) total_bytes += es->unit_len; \
+                                         else can_fast = 0; \
+                                     }} else {{ can_fast = 0; }} \
+                                 }} \
+                                 if (can_fast) {{ \
+                                     if (arr->count > 1) total_bytes += (arr->count - 1) * sep->unit_len; \
+                                     char *buf = kiln_c99_gc_alloc_text(total_bytes); \
+                                     if (buf != NULL) {{ \
+                                         char *dst = buf; \
+                                         for (size_t idx = 0; idx < arr->count; ++idx) {{ \
+                                             if (idx > 0 && sep->unit_len > 0) {{ \
+                                                 if (sep->unit_len == 1) {{ *dst = (char)kiln_string_unit_at(sep, 0); }} \
+                                                 else {{ kiln_c99_copy_short(dst, (const char *)kiln_string_latin1(sep), sep->unit_len); }} \
+                                                 dst += sep->unit_len; \
+                                             }} \
+                                             const kiln_string *es = (const kiln_string *)KILN_VAL_PTR(arr->elements[idx]); \
+                                             if (es && es->unit_len > 0) {{ \
+                                                 kiln_c99_copy_short(dst, (const char *)kiln_string_latin1(es), es->unit_len); \
+                                                 dst += es->unit_len; \
+                                             }} \
                                          }} \
-                                         const kiln_string *es = (const kiln_string *)KILN_VAL_PTR(arr->elements[idx]); \
-                                         if (es && es->unit_len > 0) {{ \
-                                             kiln_c99_copy_short(dst, (const char *)kiln_string_latin1(es), es->unit_len); \
-                                             dst += es->unit_len; \
-                                         }} \
+                                         kiln_string *s = ((kiln_string *)buf) - 1; \
+                                         v{v} = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, s); \
+                                         handled = 1; \
                                      }} \
-                                     kiln_string *s = ((kiln_string *)buf) - 1; \
-                                     v{v} = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, s); \
-                                     handled = 1; \
                                  }} \
                              }} \
                          }} \
@@ -1571,9 +1574,9 @@ pub(super) fn emit_call_method(
         None
     };
 
-    let split_intrinsic = if closed_world && key_str == "split" && argc == 1 {
+    let split_intrinsic = if key_str == "split" && argc == 1 {
         Some(format!(
-            "if (!handled && KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_STRING(v{a0})) {{ \
+            "if (!handled && KILN_LIKELY(kiln_c99_builtin_store_epoch == 0) && KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_STRING(v{a0})) {{ \
                          const kiln_string *src = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                          const kiln_string *sep = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
                          if (src != NULL && sep != NULL && !kiln_string_is_utf16(src) && !kiln_string_is_utf16(sep) && sep->unit_len == 1) {{ \
@@ -1593,7 +1596,7 @@ pub(super) fn emit_call_method(
         None
     };
 
-    let index_of_intrinsic = if closed_world && key_str == "indexOf" && argc == 1 {
+    let index_of_intrinsic = if key_str == "indexOf" && argc == 1 {
         let (int_stmt, double_stmt, box_stmt) = if typed {
             let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
             let box_stmt = if need_box {
@@ -1625,7 +1628,7 @@ pub(super) fn emit_call_method(
             )
         };
         Some(format!(
-            "if (!handled && KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_STRING(v{a0})) {{ \
+            "if (!handled && KILN_LIKELY(kiln_c99_builtin_store_epoch == 0) && KILN_VAL_IS_STRING(v{o}) && KILN_VAL_IS_STRING(v{a0})) {{ \
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                          const kiln_string *s_ndl = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
                          if (s_recv != NULL && s_ndl != NULL && !kiln_string_is_utf16(s_recv) && !kiln_string_is_utf16(s_ndl)) {{ \
@@ -1644,7 +1647,7 @@ pub(super) fn emit_call_method(
         None
     };
 
-    let substring_intrinsic = if closed_world && key_str == "substring" && argc == 2 {
+    let substring_intrinsic = if key_str == "substring" && argc == 2 {
         let a0 = args[0].0;
         let a1 = args[1].0;
         let (guard, check_and_extract) = if ints.contains(&args[0]) && ints.contains(&args[1]) {
@@ -1680,7 +1683,7 @@ pub(super) fn emit_call_method(
             )
         };
         Some(format!(
-            "if (!handled && KILN_VAL_IS_STRING(v{o}){guard}) {{ \
+            "if (!handled && KILN_LIKELY(kiln_c99_builtin_store_epoch == 0) && KILN_VAL_IS_STRING(v{o}){guard}) {{ \
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                          if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
                              {check_and_extract} \
