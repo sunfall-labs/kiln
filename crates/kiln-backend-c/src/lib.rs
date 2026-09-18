@@ -3109,6 +3109,7 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
     let mut has_cell = false;
     let mut has_binary = false;
     let mut has_read_property = false;
+    let mut has_write_property = false;
     let mut has_status = false;
 
     let check_inst = |inst: &Instruction,
@@ -3118,7 +3119,8 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
                       has_closure: &mut bool,
                       has_cell: &mut bool,
                       has_binary: &mut bool,
-                      has_read_property: &mut bool| {
+                      has_read_property: &mut bool,
+                      has_write_property: &mut bool| {
         match inst {
             Instruction::Call { .. } => {
                 *has_call = true;
@@ -3142,9 +3144,11 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
                 *has_read_property = true;
                 *has_status = true;
             }
-            Instruction::SetProperty(_)
-            | Instruction::SetPropertyStrict { .. }
-            | Instruction::SetComputed
+            Instruction::SetProperty(_) | Instruction::SetPropertyStrict { .. } => {
+                *has_write_property = true;
+                *has_status = true;
+            }
+            Instruction::SetComputed
             | Instruction::SetComputedStrict { .. }
             | Instruction::SetPrototype
             | Instruction::SetSuperPropertyStrict { .. }
@@ -3170,6 +3174,7 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
             &mut has_cell,
             &mut has_binary,
             &mut has_read_property,
+            &mut has_write_property,
         );
     }
     for func in &program.functions {
@@ -3183,9 +3188,11 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
                 &mut has_cell,
                 &mut has_binary,
                 &mut has_read_property,
+                &mut has_write_property,
             );
         }
     }
+    output.push_str("static __attribute__((unused, noinline)) int ku_truthy(kiln_val v) { return kiln_c99_val_truthy(v); }\n#define kiln_c99_val_truthy ku_truthy\n");
     if has_status {
         output.push_str("#define KU_STATUS(PC, OP, UNWIND) do { if (KILN_UNLIKELY(status != KILN_C99_OK)) { if (status == KILN_C99_THROWN) { UNWIND; } if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal(ku_site, (size_t)(PC), (OP), (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } return status; } } while (0)\n");
     }
@@ -3197,6 +3204,11 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
     }
     if has_read_property {
         output.push_str("#define KU_READ_PROPERTY(DST, OBJECT, KEY, KEY_LEN, SITE, PC, OP, UNWIND) do { int status = kiln_c99_val_read_property_key(host, (OBJECT), (KEY), depth, thrown, (SITE), &(DST)); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(OBJECT)); KU_STATUS((PC), (OP), UNWIND); } while (0)\n");
+        output.push_str("static __attribute__((unused, noinline)) kiln_val ku_pic_poly_read(const kiln_object *obj, const kiln_c99_site *site) {\n    const kiln_shape *shape = obj->shape;\n    uint32_t slot = UINT32_MAX;\n    if (shape == site->entries[1].shape) slot = site->entries[1].slot;\n    else if (shape == site->entries[2].shape) slot = site->entries[2].slot;\n    else if (shape == site->entries[3].shape) slot = site->entries[3].slot;\n    if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity)) {\n        return slot < KILN_C99_INLINE_SLOTS ? obj->inline_slots[slot] : obj->slots[slot];\n    }\n    return KILN_VAL_HOLE;\n}\n");
+    }
+    if has_write_property {
+        output.push_str("#define KU_WRITE_PROPERTY(OBJECT, KEY, VAL, STRICT, SITE, PC, OP, UNWIND) do { int status = kiln_c99_val_write_property_key(host, (OBJECT), (KEY), (VAL), (STRICT), depth, thrown, (SITE)); KU_STATUS((PC), (OP), UNWIND); } while (0)\n");
+        output.push_str("static __attribute__((unused, noinline)) int ku_pic_poly_write(kiln_object *obj, const kiln_c99_site *site, kiln_val val) {\n    const kiln_shape *shape = obj->shape;\n    uint32_t slot = UINT32_MAX;\n    if (shape == site->entries[1].shape && site->entries[1].transition_to == NULL) slot = site->entries[1].slot;\n    else if (shape == site->entries[2].shape && site->entries[2].transition_to == NULL) slot = site->entries[2].slot;\n    else if (shape == site->entries[3].shape && site->entries[3].transition_to == NULL) slot = site->entries[3].slot;\n    if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity && !obj->frozen)) {\n        kiln_c99_prototype_touched(obj);\n        if (slot < KILN_C99_INLINE_SLOTS) obj->inline_slots[slot] = val;\n        else obj->slots[slot] = val;\n        return 1;\n    }\n    return 0;\n}\n");
     }
     if !program.functions.is_empty() {
         output.push_str("#define KU_PARAMS kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc\n");
