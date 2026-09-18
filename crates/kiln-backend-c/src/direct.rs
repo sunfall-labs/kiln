@@ -667,14 +667,34 @@ pub(crate) fn direct_callable(proto: &FunctionProto, publishes_frame: bool) -> b
 /// What the unit knows about the built-ins it lowers as intrinsics: a `Math` method of the
 /// emitter's list, in a program that cannot redefine it, answers a number whenever it answers.
 /// The proofs are seeds for every plan of the body, so a body that ends in `Math.sqrt(..)`
-/// returns a number wherever its inputs came from.
-fn intrinsic_results(graph: &FunctionGraph, program: &Program) -> HashMap<ValueId, Proven> {
+/// The proven results of static built-in method calls whose return type is guaranteed by the
+/// language regardless of argument types.
+pub(crate) fn intrinsic_results(
+    graph: &FunctionGraph,
+    program: &Program,
+) -> HashMap<ValueId, Proven> {
     let math: HashSet<ValueId> = graph
         .blocks
         .iter()
         .flat_map(|b| b.operations.iter())
         .filter_map(|(v, op)| {
             matches!(op, GraphOp::LoadBuiltin(kiln_ir::Builtin::Math)).then_some(*v)
+        })
+        .collect();
+    let number: HashSet<ValueId> = graph
+        .blocks
+        .iter()
+        .flat_map(|b| b.operations.iter())
+        .filter_map(|(v, op)| {
+            matches!(op, GraphOp::LoadBuiltin(kiln_ir::Builtin::Number)).then_some(*v)
+        })
+        .collect();
+    let array: HashSet<ValueId> = graph
+        .blocks
+        .iter()
+        .flat_map(|b| b.operations.iter())
+        .filter_map(|(v, op)| {
+            matches!(op, GraphOp::LoadBuiltin(kiln_ir::Builtin::Array)).then_some(*v)
         })
         .collect();
     graph
@@ -689,10 +709,36 @@ fn intrinsic_results(graph: &FunctionGraph, program: &Program) -> HashMap<ValueI
                     Some(Constant::String(s)) => s.to_scalar_string().ok()?,
                     _ => return None,
                 };
-                let intrinsic = crate::parallel::PARALLEL_MATH
+                if matches!(key.as_str(), "clz32" if args.len() == 1)
+                    || matches!(key.as_str(), "imul" if args.len() == 2)
+                {
+                    Some((*v, Proven::Int))
+                } else if crate::parallel::PARALLEL_MATH
                     .iter()
-                    .any(|(k, n)| key == *k && *n == args.len());
-                intrinsic.then_some((*v, Proven::Number))
+                    .any(|(k, n)| key == *k && *n == args.len())
+                {
+                    Some((*v, Proven::Number))
+                } else {
+                    None
+                }
+            }
+            GraphOp::CallMethod { object, name, .. } if number.contains(object) => {
+                let key = match program.constants.get(*name as usize) {
+                    Some(Constant::String(s)) => s.to_scalar_string().ok()?,
+                    _ => return None,
+                };
+                matches!(
+                    key.as_str(),
+                    "isFinite" | "isNaN" | "isInteger" | "isSafeInteger"
+                )
+                .then_some((*v, Proven::Boolean))
+            }
+            GraphOp::CallMethod { object, name, .. } if array.contains(object) => {
+                let key = match program.constants.get(*name as usize) {
+                    Some(Constant::String(s)) => s.to_scalar_string().ok()?,
+                    _ => return None,
+                };
+                (key == "isArray").then_some((*v, Proven::Boolean))
             }
             _ => None,
         })

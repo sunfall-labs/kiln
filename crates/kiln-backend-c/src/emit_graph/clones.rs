@@ -28,25 +28,71 @@ fn restartable(
         | GraphOp::IsReturnSignal(_) => true,
         GraphOp::LoadUpvalue(_) | GraphOp::LoadCell(_) => plan.unchecked.contains(&vid),
         GraphOp::Binary { op, .. } => !matches!(op, BinaryOp::In | BinaryOp::InstanceOf),
-        // A method call is restartable only as an intrinsic on the `Math` built-in: the call
-        // that would otherwise run is a user function, which must not run twice.
+        // A method call is restartable only as an intrinsic on pure static built-in methods:
+        // user functions must not run twice, but built-in pure math and type predicates have no
+        // observable side effects on their fast paths.
         GraphOp::CallMethod { object, name, .. } => {
-            let on_math = graph
+            let builtin = graph
                 .blocks
                 .iter()
                 .flat_map(|b| b.operations.iter())
-                .any(|(v, op)| {
-                    v == object && matches!(op, GraphOp::LoadBuiltin(kiln_ir::Builtin::Math))
+                .find_map(|(v, op)| {
+                    if v == object {
+                        if let GraphOp::LoadBuiltin(b) = op {
+                            return Some(*b);
+                        }
+                    }
+                    None
                 });
             let key = match program.constants.get(*name as usize) {
                 Some(Constant::String(s)) => s.to_scalar_string().unwrap_or_default(),
                 _ => String::new(),
             };
-            on_math
-                && matches!(
+            match builtin {
+                Some(kiln_ir::Builtin::Math) => matches!(
                     key.as_str(),
-                    "sqrt" | "abs" | "floor" | "ceil" | "round" | "min" | "max" | "trunc" | "sign"
-                )
+                    "sqrt"
+                        | "abs"
+                        | "floor"
+                        | "ceil"
+                        | "round"
+                        | "trunc"
+                        | "sign"
+                        | "sin"
+                        | "cos"
+                        | "tan"
+                        | "asin"
+                        | "acos"
+                        | "atan"
+                        | "sinh"
+                        | "cosh"
+                        | "tanh"
+                        | "asinh"
+                        | "acosh"
+                        | "atanh"
+                        | "exp"
+                        | "expm1"
+                        | "log"
+                        | "log2"
+                        | "log10"
+                        | "log1p"
+                        | "cbrt"
+                        | "pow"
+                        | "min"
+                        | "max"
+                        | "atan2"
+                        | "hypot"
+                        | "clz32"
+                        | "fround"
+                        | "imul"
+                ),
+                Some(kiln_ir::Builtin::Number) => matches!(
+                    key.as_str(),
+                    "isFinite" | "isNaN" | "isInteger" | "isSafeInteger"
+                ),
+                Some(kiln_ir::Builtin::Array) => key == "isArray",
+                _ => false,
+            }
         }
         _ => false,
     }
