@@ -2439,6 +2439,67 @@ fn compile_module_records_only_side_effect_free_declaration_ranges() {
 }
 
 #[test]
+fn compile_module_detects_pure_removable_declarations() {
+    let linked = compile_module(&module(vec![
+        declaration(VariableKind::Const, "num", Some(number(100.0))),
+        declaration(VariableKind::Const, "str", Some(string("hello"))),
+        declaration(
+            VariableKind::Const,
+            "neg",
+            Some(Expression {
+                kind: ExpressionKind::Unary {
+                    operator: UnaryOperator::Negate,
+                    argument: Box::new(number(1.0)),
+                },
+                span: Span::default(),
+            }),
+        ),
+        declaration(
+            VariableKind::Const,
+            "arr",
+            Some(Expression {
+                kind: ExpressionKind::Array {
+                    elements: vec![
+                        ListElement::Item(number(1.0)),
+                        ListElement::Item(number(2.0)),
+                    ],
+                },
+                span: Span::default(),
+            }),
+        ),
+        declaration(
+            VariableKind::Const,
+            "obj",
+            Some(Expression {
+                kind: ExpressionKind::Object {
+                    members: vec![ObjectMember::Property(kiln_hir::ObjectProperty {
+                        key: ObjectKey::Static(StringUnits::from("k")),
+                        value: number(42.0),
+                        form: kiln_hir::PropertyForm::KeyValue,
+                        span: Span::default(),
+                    })],
+                },
+                span: Span::default(),
+            }),
+        ),
+        declaration(
+            VariableKind::Const,
+            "side_effect",
+            Some(call(identifier("sideEffect"), Vec::new())),
+        ),
+    ]))
+    .expect("compilation succeeds");
+
+    let declarations = &linked.link_facts.removable_declarations;
+    // Exactly the 5 pure declarations are removable; the side_effect call is not.
+    assert_eq!(declarations.len(), 5);
+    for decl in declarations {
+        assert_eq!(decl.local_slots.len(), 1);
+        assert!(decl.pc_start < decl.pc_end);
+    }
+}
+
+#[test]
 fn compile_module_detects_new_function() {
     let m = module(vec![statement(StatementKind::Expression(Expression {
         kind: ExpressionKind::New {
