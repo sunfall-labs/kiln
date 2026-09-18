@@ -480,7 +480,6 @@ static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
                                           const kiln_value *args, size_t argc,
                                           kiln_value *thrown);
 static int kiln_c99_form_decode(const char *bytes, size_t len, kiln_value *out);
-static int kiln_c99_node_querystring_parse(kiln_value *out, const kiln_value *args, size_t argc);
 static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t count);
 static int kiln_c99_buffer_from_bytes(kiln_value *out, const uint8_t *bytes, uint64_t length);
 static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
@@ -489,17 +488,6 @@ static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
 static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, kiln_value *thrown);
 static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value receiver,
                                   const kiln_value *args, size_t argc, kiln_value *thrown);
-static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
-                              const kiln_value *args, size_t argc, int depth,
-                              kiln_value *thrown);
-static int kiln_c99_node_diagnostics(kiln_host *host, kiln_value *out, uint64_t code,
-                                     const kiln_value *args, size_t argc, int depth,
-                                     kiln_value *thrown);
-static int kiln_c99_node_dns_lookup(kiln_host *host, kiln_value *out,
-                                    const kiln_value *args, size_t argc, int depth,
-                                    kiln_value *thrown);
-static int kiln_c99_node_path(kiln_value *out, uint64_t code,
-                              const kiln_value *args, size_t argc, kiln_value *thrown);
 static int kiln_c99_node_ffi(kiln_host *host, kiln_value *out, uint64_t code,
                              kiln_value receiver, const kiln_value *args, size_t argc,
                              int depth, kiln_value *thrown);
@@ -864,156 +852,6 @@ static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t co
         *result = receiver; return status;
     }
     KILN_C99_REFUSE("a stream method this backend has not implemented");
-}
-
-/* `node:path`'s algorithms live in Rust now, in the crate the interpreter links too: `dirname`
- * and friends are fiddlier than they look -- `dirname("a//b")` is "a/", `extname("..")` is "" but
- * `extname("...")` is "." -- and the two hand-written copies had drifted from node in seven and
- * five places respectively, in different places. One implementation cannot disagree with itself.
- *
- * The answer is a slice of the caller's own path for everything but `normalize`, so the provider
- * allocates nothing and this copies once. The caller passes a bound it can prove, which makes this
- * a single call rather than the usual ask-the-length-then-ask-again pair; the stack covers every
- * ordinary path and only an absurd one reaches the heap. */
-#define KILN_C99_NODE_PATH_NORMALIZE 3u
-#define KILN_C99_NODE_PATH_RELATIVE 4u
-static int kiln_c99_node_path_answer(uint32_t part, const uint8_t *first, uint64_t first_len,
-                                     const uint8_t *second, uint64_t second_len, size_t bound,
-                                     kiln_value *result, kiln_value *thrown) {
-    uint8_t inline_buffer[512];
-    uint8_t *buffer = inline_buffer;
-    uint8_t *spilled = NULL;
-    uint64_t written = 0;
-    int status;
-    if (bound > sizeof inline_buffer) {
-        spilled = (uint8_t *)malloc(bound);
-        if (spilled == NULL)
-            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
-                                        "out of memory answering node:path");
-        buffer = spilled;
-    }
-    status = part == KILN_C99_NODE_PATH_RELATIVE
-                 ? kiln_node_path_relative(first, first_len, second, second_len, buffer,
-                                           (uint64_t)bound, &written)
-                 : kiln_node_path_part(part, first, first_len, second, second_len, buffer,
-                                       (uint64_t)bound, &written);
-    if (status == KILN_C99_OK)
-        *result = kiln_c99_copy_text((const char *)buffer, (size_t)written);
-    free(spilled);
-    if (status != KILN_C99_OK)
-        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
-                                    "node:path provider refused the request");
-    return KILN_C99_OK;
-}
-
-static int kiln_c99_node_path(kiln_value *result, uint64_t code,
-                              const kiln_value *args, size_t argc, kiln_value *thrown) {
-    kiln_text joined = {0};
-    size_t index;
-    int absolute = code == KILN_C99_METHOD_NODE_PATH_RESOLVE;
-    int status = KILN_C99_OK;
-    if (code == KILN_C99_METHOD_NODE_PATH_IS_ABSOLUTE) {
-        kiln_value path = argc > 0 ? args[0] : kiln_c99_undefined();
-        if (path.tag != KILN_VALUE_STRING)
-            return kiln_c99_throw_not_a(thrown, path, "string path");
-        size_t path_len = 0;
-        const char *path_bytes = kiln_c99_string_ascii_bytes(path, &path_len);
-        *result = kiln_c99_boolean(path_bytes != NULL && path_len > 0 && path_bytes[0] == '/');
-        return KILN_C99_OK;
-    }
-    if (code == KILN_C99_METHOD_NODE_PATH_DIRNAME ||
-        code == KILN_C99_METHOD_NODE_PATH_BASENAME ||
-        code == KILN_C99_METHOD_NODE_PATH_EXTNAME) {
-        kiln_value path = argc > 0 ? args[0] : kiln_c99_undefined();
-        const uint8_t *suffix_ptr = NULL;
-        uint64_t suffix_len = 0;
-        uint32_t part = code == KILN_C99_METHOD_NODE_PATH_DIRNAME    ? 0u
-                        : code == KILN_C99_METHOD_NODE_PATH_BASENAME ? 1u
-                                                                     : 2u;
-        if (path.tag != KILN_VALUE_STRING)
-            return kiln_c99_throw_not_a(thrown, path, "string path");
-        size_t path_len = 0;
-        const char *path_bytes = kiln_c99_string_ascii_bytes(path, &path_len);
-        if (path_bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
-        if (part == 1u && argc > 1 && args[1].tag == KILN_VALUE_STRING) {
-            size_t suffix_size = 0;
-            const char *suffix_bytes = kiln_c99_string_ascii_bytes(args[1], &suffix_size);
-            if (suffix_bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
-            suffix_ptr = (const uint8_t *)suffix_bytes;
-            suffix_len = (uint64_t)suffix_size;
-        }
-        /* No decomposition is longer than the path it came from; the empty path answers ".". */
-        return kiln_c99_node_path_answer(part, (const uint8_t *)path_bytes, (uint64_t)path_len,
-                                         suffix_ptr, suffix_len, path_len + 1, result, thrown);
-    }
-    if (code == KILN_C99_METHOD_NODE_PATH_RELATIVE) {
-        kiln_value from = argc > 0 ? args[0] : kiln_c99_undefined();
-        kiln_value to = argc > 1 ? args[1] : kiln_c99_undefined();
-        if (from.tag != KILN_VALUE_STRING)
-            return kiln_c99_throw_not_a(thrown, from, "string path");
-        if (to.tag != KILN_VALUE_STRING)
-            return kiln_c99_throw_not_a(thrown, to, "string path");
-        size_t from_len = 0;
-        size_t to_len = 0;
-        const char *from_bytes = kiln_c99_string_ascii_bytes(from, &from_len);
-        const char *to_bytes = kiln_c99_string_ascii_bytes(to, &to_len);
-        if (from_bytes == NULL || to_bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
-        /* Unlike the decompositions this can outgrow both inputs: every component of `from` that
-         * `to` does not share becomes "../", and a component can be a single byte. */
-        return kiln_c99_node_path_answer(KILN_C99_NODE_PATH_RELATIVE, (const uint8_t *)from_bytes,
-                                         (uint64_t)from_len, (const uint8_t *)to_bytes,
-                                         (uint64_t)to_len, from_len * 3 + to_len + 1, result,
-                                         thrown);
-    }
-    /* `join` concatenates every argument with a separator and normalizes the result -- the empty
-     * ones included, which is the interpreter's arithmetic exactly. Skipping an empty argument
-     * here instead is what made `join("a", "")` answer "a" where the interpreter answers "a/",
-     * and dropping the leading separator with it made `join("/a", "b/")` answer "a/b" -- a
-     * relative path where an absolute one was asked for, which is the worst shape this can take.
-     * `resolve` does skip the empty ones, and restarts at any argument that is itself absolute. */
-    for (index = 0; index < argc; ++index) {
-        kiln_value part;
-        if (args[index].tag != KILN_VALUE_STRING)
-            return kiln_c99_throw_not_a(thrown, args[index], "string path");
-        part = args[index];
-        size_t part_len = 0;
-        const char *part_bytes = kiln_c99_string_ascii_bytes(part, &part_len);
-        if (part_bytes == NULL) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
-        if (code == KILN_C99_METHOD_NODE_PATH_RESOLVE) {
-            if (part_len == 0) continue;
-            if (part_bytes[0] == '/') {
-                joined.len = 0;
-                absolute = 1;
-            }
-            if (joined.len != 0 && joined.bytes[joined.len - 1] != '/')
-                status = kiln_c99_text_append_c(&joined, "/");
-        } else if (index > 0) {
-            status = kiln_c99_text_append_c(&joined, "/");
-        }
-        if (status == KILN_C99_OK) status = kiln_c99_text_append(&joined, part_bytes, part_len);
-        if (status != KILN_C99_OK) goto done;
-    }
-    if (absolute && (joined.len == 0 || joined.bytes[0] != '/')) {
-        kiln_text prefixed = {0};
-        status = kiln_c99_text_append_c(&prefixed, "/");
-        if (status == KILN_C99_OK)
-            status = kiln_c99_text_append(&prefixed, joined.bytes, joined.len);
-        free(joined.bytes);
-        joined = prefixed;
-        if (status != KILN_C99_OK) goto done;
-    }
-    /* ...and then the same normalizer the interpreter calls, across the provider boundary. Both
-     * of these are "assemble a string, then normalize it" in the interpreter, and the assembly is
-     * concatenation rather than path arithmetic -- so this crosses the ABI exactly once, for the
-     * half that is an algorithm, and keeps ADR 0048 true for the whole of `node:path` rather than
-     * for four of its members. The bound is the same one the decompositions use: normalizing
-     * never adds more than the "." an empty path answers with. */
-    status = kiln_c99_node_path_answer(KILN_C99_NODE_PATH_NORMALIZE, (const uint8_t *)joined.bytes,
-                                       (uint64_t)joined.len, NULL, 0, joined.len + 1, result,
-                                       thrown);
-done:
-    free(joined.bytes);
-    return status;
 }
 
 /* Low-level dynamic-call machinery for source-backed runtime modules. This owns no Node policy:

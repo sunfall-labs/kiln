@@ -1411,30 +1411,6 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         return kiln_c99_buffer_method(result, code, receiver, args, argc, thrown);
     }
 #endif
-#if KILN_RETAIN_GROUP_NODE_UTIL
-    if ((groups & KILN_C99_GROUP_NODE_UTIL)) {
-        return kiln_c99_node_util(host, result, code, args, argc, depth, thrown);
-    }
-#endif
-#if KILN_RETAIN_GROUP_NODE_DIAGNOSTICS
-    if ((groups & KILN_C99_GROUP_NODE_DIAGNOSTICS)) {
-        return kiln_c99_node_diagnostics(host, result, code, args, argc, depth, thrown);
-    }
-#endif
-    if (code == KILN_C99_METHOD_NODE_HTTPS_CREATE_SERVER) {
-        return kiln_c99_throw_error(
-            thrown, KILN_C99_BUILTIN_ERROR,
-            "node:https requires a TLS host capability that this realm does not provide");
-    }
-    if (code == KILN_C99_METHOD_NODE_HTTP2_CREATE_SERVER ||
-        code == KILN_C99_METHOD_NODE_HTTP2_CREATE_SECURE_SERVER) {
-        return kiln_c99_throw_error(
-            thrown, KILN_C99_BUILTIN_ERROR,
-            "node:http2 requires an HTTP/2 host capability that this realm does not provide");
-    }
-    if (code == KILN_C99_METHOD_NODE_DNS_LOOKUP) {
-        return kiln_c99_node_dns_lookup(host, result, args, argc, depth, thrown);
-    }
     if (code == KILN_C99_METHOD_SYMBOL_FOR) {
         return kiln_c99_symbol_for(result, argc > 0 ? args[0] : kiln_c99_undefined());
     }
@@ -1574,11 +1550,6 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     }
     if (code == KILN_C99_METHOD_PROCESS_START_RAW || code == KILN_C99_METHOD_PROCESS_CANCEL_RAW)
         return kiln_c99_node_process_raw(host, result, code, args, argc, depth, thrown);
-#if KILN_RETAIN_GROUP_NODE_PATH
-    if ((groups & KILN_C99_GROUP_NODE_PATH)) {
-        return kiln_c99_node_path(result, code, args, argc, thrown);
-    }
-#endif
     if (code == KILN_C99_METHOD_NODE_ASSERT_OK) {
         if (!kiln_c99_truthy(argc > 0 ? args[0] : kiln_c99_undefined())) {
             kiln_value message = argc > 1 ? kiln_c99_text(args[1])
@@ -1666,9 +1637,6 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     }
     if (code == KILN_C99_METHOD_NODE_URL_PARSE) {
         return kiln_c99_url_construct(result, args, argc, thrown);
-    }
-    if (code == KILN_C99_METHOD_NODE_QUERYSTRING_PARSE) {
-        return kiln_c99_node_querystring_parse(result, args, argc);
     }
     if (code == KILN_C99_METHOD_NODE_ASYNC_RESOURCE) {
         kiln_value resource = receiver;
