@@ -153,6 +153,21 @@ pub(super) fn emit_get_property(
         } else {
             String::new()
         };
+        let ta_box_stmt = if need_box {
+            format!(" v{v} = kiln_c99_val_from_double((double)view->length);")
+        } else {
+            String::new()
+        };
+        let ta_int_stmt = if typed_int {
+            format!(" i{v} = (int64_t)view->length;")
+        } else {
+            String::new()
+        };
+        let ta_double_stmt = if typed {
+            format!(" d{v} = (double)view->length;")
+        } else {
+            String::new()
+        };
         let str_int_stmt = if typed_int {
             format!(" i{v} = (int64_t)str->unit_len;")
         } else {
@@ -174,6 +189,10 @@ pub(super) fn emit_get_property(
                          if (KILN_LIKELY(site.has_cached_method == 1 || kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY)) {{ \
                              site.has_cached_method = 1; \
                              {int_stmt}{double_stmt}{box_stmt} \
+                             handled = 1; \
+                         }} else if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY) {{ \
+                             const kiln_typed_array *view = (const kiln_typed_array *)ptr; \
+                             {ta_int_stmt}{ta_double_stmt}{ta_box_stmt} \
                              handled = 1; \
                          }} \
                      }} else if (KILN_VAL_IS_STRING(v{o})) {{ \
@@ -726,7 +745,7 @@ pub(super) fn emit_get_computed(
     } else {
         String::new()
     };
-    let (vk_decl, vk) = if spec.arrays.contains(object) && key_is_int {
+    let (vk_decl, vk) = if key_is_int {
         (
             format!(
                 "kiln_val vk = !handled ? kiln_c99_val_from_double((double)i{}) : 0; ",
@@ -967,6 +986,17 @@ pub(super) fn emit_set_computed(
             ),
         )
     };
+    let (vk_decl, vk) = if key_is_int {
+        (
+            format!(
+                "kiln_val vk = !handled ? kiln_c99_val_from_double((double)i{}) : 0; ",
+                key.0
+            ),
+            "vk".to_string(),
+        )
+    } else {
+        (String::new(), format!("v{}", key.0))
+    };
     let number_guard = if key_is_int {
         String::new()
     } else {
@@ -975,7 +1005,7 @@ pub(super) fn emit_set_computed(
     writeln!(
                 output,
                 "    {{ static kiln_c99_site site = {{0}}; \
-                int handled = 0; \
+                int handled = 0; {vk_decl}\
                 if (KILN_LIKELY((v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX{number_guard})) {{ \
                     void *ptr = KILN_VAL_PTR(v{o}); \
                     if (site.has_cached_method == 1 || kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
@@ -986,14 +1016,15 @@ pub(super) fn emit_set_computed(
                     }} \
                 }} \
                 if (!handled) {{ \
-                    int status = kiln_c99_val_write_element(host, v{o}, v{k}, v{val}, {strict}, depth, thrown); \
+                    int status = kiln_c99_val_write_element(host, v{o}, {vk}, v{val}, {strict}, depth, thrown); \
                     {check} \
                     v{v} = v{val}; \
                 }} }}\
                 {typed_sync}",
                 o = object.0,
-                k = key.0,
                 val = value.0,
+                vk_decl = vk_decl,
+                vk = vk,
                 number_guard = number_guard,
                 array_body = array_body,
                 typed_body = typed_body,

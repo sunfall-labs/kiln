@@ -8312,3 +8312,163 @@ fn executable_static_builtin_predicates_number() {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+#[test]
+fn executable_length_specialization() {
+    let constants = vec![
+        Constant::String("length".into()),   // 0: "length"
+        Constant::Number(10.0f64.to_bits()), // 1: 10
+        Constant::Number(20.0f64.to_bits()), // 2: 20
+        Constant::Number(30.0f64.to_bits()), // 3: 30
+        Constant::Number(3.0f64.to_bits()),  // 4: expected array length
+        Constant::String("hello".into()),    // 5: "hello"
+        Constant::Number(5.0f64.to_bits()),  // 6: expected string length
+    ];
+
+    let code = vec![
+        // arr = [10, 20, 30]
+        Instruction::Const(1),
+        Instruction::Const(2),
+        Instruction::Const(3),
+        Instruction::NewArray { count: 3 },
+        Instruction::StoreLocal(0),
+        // len1 = arr.length
+        Instruction::LoadLocal(0),
+        Instruction::GetProperty(0),
+        Instruction::StoreLocal(1),
+        // check len1 === 3
+        Instruction::LoadLocal(1),
+        Instruction::Const(4),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::StoreLocal(2),
+        // str = "hello"
+        Instruction::Const(5),
+        Instruction::StoreLocal(3),
+        // len2 = str.length
+        Instruction::LoadLocal(3),
+        Instruction::GetProperty(0),
+        Instruction::StoreLocal(4),
+        // check len2 === 5
+        Instruction::LoadLocal(4),
+        Instruction::Const(6),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::StoreLocal(5),
+        // result = check1 && check2
+        Instruction::LoadLocal(2),
+        Instruction::LoadLocal(5),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::Return,
+    ];
+
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants,
+        code,
+        local_count: 6,
+        functions: Vec::new(),
+        template_sites: Vec::new(),
+    };
+
+    let generated = emit(&program).expect("length program emits");
+    let wrapper = format!(
+        "int main(void) {{ kiln_value result; int status = {}(NULL, &result); if (status != 0) return 2; return (result.tag == KILN_VALUE_BOOLEAN && result.bits == 1) ? 0 : 3; }}\n",
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "length-specialization");
+    assert!(
+        run.status.success(),
+        "length specialization execution failed ({:?}):\nstdout: {}\nstderr: {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_array_indexing_and_bounds() {
+    let constants = vec![
+        Constant::Number(100.0f64.to_bits()), // 0: 100
+        Constant::Number(200.0f64.to_bits()), // 1: 200
+        Constant::Number(0.0f64.to_bits()),   // 2: 0
+        Constant::Number(1.0f64.to_bits()),   // 3: 1
+        Constant::Number(999.0f64.to_bits()), // 4: 999
+        Constant::Number(5.0f64.to_bits()),   // 5: 5 (out of bounds)
+        Constant::Undefined,                  // 6: undefined
+    ];
+
+    let code = vec![
+        // arr = [100, 200]
+        Instruction::Const(0),
+        Instruction::Const(1),
+        Instruction::NewArray { count: 2 },
+        Instruction::StoreLocal(0),
+        // r1 = arr[0] (should be 100)
+        Instruction::LoadLocal(0),
+        Instruction::Const(2),
+        Instruction::GetComputed,
+        Instruction::StoreLocal(1),
+        // check1 = (r1 === 100)
+        Instruction::LoadLocal(1),
+        Instruction::Const(0),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::StoreLocal(2),
+        // arr[1] = 999
+        Instruction::LoadLocal(0),
+        Instruction::Const(3),
+        Instruction::Const(4),
+        Instruction::SetComputed,
+        Instruction::Pop,
+        // r3 = arr[1] (should be 999)
+        Instruction::LoadLocal(0),
+        Instruction::Const(3),
+        Instruction::GetComputed,
+        Instruction::StoreLocal(3),
+        // check2 = (r3 === 999)
+        Instruction::LoadLocal(3),
+        Instruction::Const(4),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::StoreLocal(4),
+        // r5 = arr[5] (out-of-bounds, should be undefined)
+        Instruction::LoadLocal(0),
+        Instruction::Const(5),
+        Instruction::GetComputed,
+        Instruction::StoreLocal(5),
+        // check3 = (r5 === undefined)
+        Instruction::LoadLocal(5),
+        Instruction::Const(6),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::StoreLocal(6),
+        // result = check1 && check2 && check3
+        Instruction::LoadLocal(2),
+        Instruction::LoadLocal(4),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::LoadLocal(6),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::Return,
+    ];
+
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants,
+        code,
+        local_count: 7,
+        functions: Vec::new(),
+        template_sites: Vec::new(),
+    };
+
+    let generated = emit(&program).expect("array indexing program emits");
+    let wrapper = format!(
+        "int main(void) {{ kiln_value result; int status = {}(NULL, &result); if (status != 0) return 2; return (result.tag == KILN_VALUE_BOOLEAN && result.bits == 1) ? 0 : 3; }}\n",
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "array-indexing");
+    assert!(
+        run.status.success(),
+        "array indexing execution failed ({:?}):\nstdout: {}\nstderr: {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}

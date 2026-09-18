@@ -19,3 +19,6 @@ Leverage Kiln's sound speculation model:
 - **Tier 2**:
   - `Array.isArray(x)` inline fast path.
   - `Number.isFinite`, `Number.isNaN`, `Number.isInteger`, `Number.isSafeInteger` inline fast paths.
+- **Tier 3**:
+  - Specialize `.length` reads: TypedArray inline support, `Proven::Int` for definite arrays/strings in `direct.rs` and `graph.rs`.
+  - Open-world array indexing (`arr[i]`, `arr[i] = v`): unbox integer keys across `GetComputed` and `SetComputed`, expand `length_bounds` to all `.length` reads, and expand `feeds_arithmetic` to comparisons and bitwise ops.
