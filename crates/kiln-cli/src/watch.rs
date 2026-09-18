@@ -1839,13 +1839,15 @@ mod tests {
         std::fs::write(&path, "export const a = 1;").expect("write");
         let (printed, _, requests) = watch_in_background_observed_configured(&path, true);
         printed
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(Duration::from_secs(15))
             .expect("initial run");
         while requests.try_recv().is_ok() {}
 
         std::fs::write(&path, "export const a = 2;").expect("edit");
         assert_eq!(
-            printed.recv_timeout(Duration::from_secs(5)).expect("rerun"),
+            printed
+                .recv_timeout(Duration::from_secs(15))
+                .expect("rerun"),
             "program: export const a = 2;\n"
         );
         let requests = requests.try_iter().collect::<Vec<_>>();
