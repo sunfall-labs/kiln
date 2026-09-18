@@ -151,6 +151,8 @@ pub enum BuildProfile {
     Debug,
     /// Optimized artifacts intended for release.
     Release,
+    /// Size-optimized release artifacts.
+    ReleaseSize,
     /// Validation artifacts with assertions or sanitizers enabled.
     Check,
     /// Release artifacts carrying profiler instrumentation. Its own bucket so an instrumented
@@ -166,6 +168,7 @@ impl BuildProfile {
         match self {
             Self::Debug => "debug",
             Self::Release => "release",
+            Self::ReleaseSize => "release-size",
             Self::Check => "check",
             Self::Profile => "profile",
             Self::Custom(name) => name,

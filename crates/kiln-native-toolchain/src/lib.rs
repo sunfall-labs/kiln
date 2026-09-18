@@ -411,6 +411,8 @@ pub enum BuildProfile {
     NativeCheck,
     /// Optimized release objects and links.
     NativeRelease,
+    /// Size-optimized release objects and links.
+    NativeReleaseSize,
     /// Release objects, plus `gprof` instrumentation.
     ///
     /// Release rather than debug on purpose: a profile of `-O0` code measures the wrong program,
@@ -428,6 +430,7 @@ impl BuildProfile {
             // No `errno` from `sqrt` and friends: the language has none, and the check for a
             // negative operand before every square root is a branch the loop pays for it.
             Self::NativeRelease => &["-O3", "-ffp-contract=off", "-fno-math-errno"],
+            Self::NativeReleaseSize => &["-Oz", "-ffp-contract=off", "-fno-math-errno"],
             Self::NativeProfile => &["-O3", "-ffp-contract=off", "-fno-math-errno", "-pg"],
         }
     }
@@ -437,6 +440,7 @@ impl BuildProfile {
             Self::NativeDev => &[],
             Self::NativeCheck => &["-fsanitize=undefined"],
             Self::NativeRelease => &["-O3"],
+            Self::NativeReleaseSize => &["-Oz"],
             Self::NativeProfile => &["-O3", "-pg"],
         }
     }
@@ -446,8 +450,10 @@ fn release_section_flags(
     profile: BuildProfile,
     platform: TargetPlatform,
 ) -> &'static [&'static str] {
-    if profile == BuildProfile::NativeRelease
-        && matches!(platform, TargetPlatform::Linux | TargetPlatform::Macos)
+    if matches!(
+        profile,
+        BuildProfile::NativeRelease | BuildProfile::NativeReleaseSize
+    ) && matches!(platform, TargetPlatform::Linux | TargetPlatform::Macos)
     {
         &["-ffunction-sections", "-fdata-sections"]
     } else {
@@ -459,7 +465,10 @@ fn release_dead_strip_flag(
     profile: BuildProfile,
     platform: TargetPlatform,
 ) -> Option<&'static str> {
-    if profile != BuildProfile::NativeRelease {
+    if !matches!(
+        profile,
+        BuildProfile::NativeRelease | BuildProfile::NativeReleaseSize
+    ) {
         return None;
     }
     match platform {
@@ -474,7 +483,11 @@ fn release_debug_strip_flag(
     platform: TargetPlatform,
     compiler: CompilerKind,
 ) -> Option<&'static str> {
-    if profile != BuildProfile::NativeRelease || compiler == CompilerKind::Zig {
+    if !matches!(
+        profile,
+        BuildProfile::NativeRelease | BuildProfile::NativeReleaseSize
+    ) || compiler == CompilerKind::Zig
+    {
         return None;
     }
     match platform {

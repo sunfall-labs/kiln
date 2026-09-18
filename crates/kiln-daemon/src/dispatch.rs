@@ -1947,6 +1947,7 @@ fn native_profile(profile: NativeProfile) -> kiln_native::NativeProfile {
         NativeProfile::Dev => kiln_native::NativeProfile::Dev,
         NativeProfile::Check => kiln_native::NativeProfile::Check,
         NativeProfile::Release => kiln_native::NativeProfile::Release,
+        NativeProfile::ReleaseSize => kiln_native::NativeProfile::ReleaseSize,
         NativeProfile::Profile => kiln_native::NativeProfile::Profile,
     }
 }

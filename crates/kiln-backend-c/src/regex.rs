@@ -737,7 +737,12 @@ pub fn try_compile_regex(pattern: &str, flags_str: &str) -> Option<CompiledRegex
 }
 
 /// Emits the C code for the lowered regex matcher state machine.
-pub fn emit_regex_matcher(output: &mut String, prefix: &str, compiled: &CompiledRegex) {
+pub fn emit_regex_matcher(
+    output: &mut String,
+    prefix: &str,
+    compiled: &CompiledRegex,
+    should_chunk: bool,
+) {
     writeln!(output, "// Lowered regex matcher for /{}/", compiled.source).unwrap();
 
     // 1. Emit character class predicates
@@ -789,13 +794,19 @@ pub fn emit_regex_matcher(output: &mut String, prefix: &str, compiled: &Compiled
     }
 
     // 2. Emit uint16_t matcher
-    emit_matcher_impl(output, prefix, compiled, false);
+    emit_matcher_impl(output, prefix, compiled, false, should_chunk);
 
     // 3. Emit uint8_t (ASCII) matcher
-    emit_matcher_impl(output, prefix, compiled, true);
+    emit_matcher_impl(output, prefix, compiled, true, should_chunk);
 }
 
-fn emit_matcher_impl(output: &mut String, prefix: &str, compiled: &CompiledRegex, is_ascii: bool) {
+fn emit_matcher_impl(
+    output: &mut String,
+    prefix: &str,
+    compiled: &CompiledRegex,
+    is_ascii: bool,
+    should_chunk: bool,
+) {
     let fn_prefix = if is_ascii {
         format!("{prefix}_ascii")
     } else {
@@ -1051,9 +1062,10 @@ fn emit_matcher_impl(output: &mut String, prefix: &str, compiled: &CompiledRegex
         ("start > count", "count")
     };
 
+    let linkage = if should_chunk { "" } else { "static " };
     writeln!(
         output,
-        "static int {matcher_fn_name}(const {char_type} *units, size_t count, size_t start,
+        "{linkage}int {matcher_fn_name}(const {char_type} *units, size_t count, size_t start,
                      int64_t *ranges, size_t capacity, size_t *groups,
                      int *matched) {{
     *matched = 0;

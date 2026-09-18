@@ -317,7 +317,10 @@ fn selection_options_with_exclusions(
     excluded: &BTreeSet<PathBuf>,
 ) -> kiln_liveness::SelectionOptions {
     kiln_liveness::SelectionOptions {
-        production_dispatch: matches!(profile, NativeProfile::Release | NativeProfile::Profile),
+        production_dispatch: matches!(
+            profile,
+            NativeProfile::Release | NativeProfile::ReleaseSize | NativeProfile::Profile
+        ),
         excluded: excluded.clone(),
     }
 }
@@ -473,7 +476,11 @@ fn emit_graph_module_for_profile(
     let mut policy = policy.clone();
     if profile == NativeProfile::Release {
         policy.generic_only = release_module_uses_generic_bodies(&node.program, &policy);
+    } else if profile == NativeProfile::ReleaseSize {
+        policy.generic_only = true;
+        policy.omit_source = true;
     }
+    policy.compact = profile != NativeProfile::Profile;
     emit_native_graph_module_with_policy(node, logical_path, &policy)
 }
 
@@ -505,6 +512,13 @@ fn configure_release_module_compile(options: &mut CompileOptions, generic_only: 
     }
 }
 
+fn configure_release_size_module_compile(options: &mut CompileOptions) {
+    options.extra_args.push("-fno-sanitize=undefined".into());
+    options.extra_args.push("-fno-function-sections".into());
+    options.extra_args.push("-fno-data-sections".into());
+    options.extra_args.push("-fvisibility=hidden".into());
+}
+
 fn release_module_compile_identity(generic_only: bool) -> &'static str {
     if generic_only {
         "generic-o0-nosan-nosections"
@@ -513,8 +527,12 @@ fn release_module_compile_identity(generic_only: bool) -> &'static str {
     }
 }
 
+fn release_size_module_compile_identity() -> &'static str {
+    "oz-nosan-nosections-hidden"
+}
+
 fn prelude_object_options(base: Digest, profile: NativeProfile) -> Digest {
-    if profile != NativeProfile::Release {
+    if !matches!(profile, NativeProfile::Release | NativeProfile::ReleaseSize) {
         return base;
     }
     let mut identity =
@@ -779,6 +797,7 @@ impl NativeBuilder {
             NativeProfile::Dev,
             NativeProfile::Check,
             NativeProfile::Release,
+            NativeProfile::ReleaseSize,
             NativeProfile::Profile,
         ] {
             let profile = profile.cache();
@@ -894,11 +913,16 @@ impl NativeBuilder {
         if emission.compile_regex.is_none() {
             emission.compile_regex = Some(matches!(
                 options.profile,
-                NativeProfile::Release | NativeProfile::Profile
+                NativeProfile::Release | NativeProfile::ReleaseSize | NativeProfile::Profile
             ));
         }
-        emission.generic_only =
-            matches!(options.profile, NativeProfile::Dev | NativeProfile::Check);
+        emission.generic_only = matches!(
+            options.profile,
+            NativeProfile::Dev | NativeProfile::Check | NativeProfile::ReleaseSize
+        );
+        if options.profile == NativeProfile::ReleaseSize {
+            emission.omit_source = true;
+        }
         if options.profile == NativeProfile::Profile {
             emission.type_profile_record = true;
         }
@@ -961,9 +985,16 @@ impl NativeBuilder {
             ""
         };
         let pgo_opt = pgo_options_fingerprint(options);
+        let module_opt = if profile == NativeProfile::Release {
+            release_module_compile_identity(emission.generic_only)
+        } else if profile == NativeProfile::ReleaseSize {
+            release_size_module_compile_identity()
+        } else {
+            "profile-default"
+        };
         let object_options = Digest::hash(
             format!(
-                "c11\0{}\0{}\0generator-{C_GENERATOR_VERSION}{march_opt}{pgo_opt}",
+                "c11\0{}\0{}\0generator-{C_GENERATOR_VERSION}{march_opt}{pgo_opt}\0module-opt={module_opt}",
                 identity.kind,
                 profile.as_str()
             )
@@ -1069,8 +1100,14 @@ impl NativeBuilder {
             pgo_use: options.pgo_use.clone(),
             ..CompileOptions::default()
         };
-        let mut prelude_compile_options = compile_options.clone();
+        let mut app_compile_options = compile_options.clone();
         if profile == NativeProfile::Release {
+            configure_release_module_compile(&mut app_compile_options, emission.generic_only);
+        } else if profile == NativeProfile::ReleaseSize {
+            configure_release_size_module_compile(&mut app_compile_options);
+        }
+        let mut prelude_compile_options = compile_options.clone();
+        if matches!(profile, NativeProfile::Release | NativeProfile::ReleaseSize) {
             configure_release_prelude_compile(&mut prelude_compile_options);
         }
         let compile_started = Instant::now();
@@ -1086,7 +1123,7 @@ impl NativeBuilder {
                                         &module_source,
                                         &paths.module_c,
                                         &paths.module_o,
-                                        &compile_options,
+                                        &app_compile_options,
                                     )
                                 })
                             },
@@ -1254,11 +1291,16 @@ impl NativeBuilder {
         if emission.compile_regex.is_none() {
             emission.compile_regex = Some(matches!(
                 options.profile,
-                NativeProfile::Release | NativeProfile::Profile
+                NativeProfile::Release | NativeProfile::ReleaseSize | NativeProfile::Profile
             ));
         }
-        emission.generic_only =
-            matches!(options.profile, NativeProfile::Dev | NativeProfile::Check);
+        emission.generic_only = matches!(
+            options.profile,
+            NativeProfile::Dev | NativeProfile::Check | NativeProfile::ReleaseSize
+        );
+        if options.profile == NativeProfile::ReleaseSize {
+            emission.omit_source = true;
+        }
         let module = emit_with_policy(program, emission.clone())?;
         let module_api_symbol = embedding_module_api_symbol(&module.symbol)?;
         let module_wrapper = owned_result_wrapper_source(
@@ -1575,7 +1617,10 @@ impl NativeBuilder {
         )
         .map_err(NativeError::Graph)?;
         let (reduced, demand) = reduced_graph(graph, &demand)?;
-        let (reduced, demand) = if options.profile == NativeProfile::Release {
+        let (reduced, demand) = if matches!(
+            options.profile,
+            NativeProfile::Release | NativeProfile::ReleaseSize
+        ) {
             dce_release_graph_to_fixpoint(
                 reduced,
                 demand,
@@ -1590,11 +1635,16 @@ impl NativeBuilder {
         if emission.compile_regex.is_none() {
             emission.compile_regex = Some(matches!(
                 options.profile,
-                NativeProfile::Release | NativeProfile::Profile
+                NativeProfile::Release | NativeProfile::ReleaseSize | NativeProfile::Profile
             ));
         }
-        emission.generic_only =
-            matches!(options.profile, NativeProfile::Dev | NativeProfile::Check);
+        emission.generic_only = matches!(
+            options.profile,
+            NativeProfile::Dev | NativeProfile::Check | NativeProfile::ReleaseSize
+        );
+        if options.profile == NativeProfile::ReleaseSize {
+            emission.omit_source = true;
+        }
         // Shared graph modules link against one prelude object; keep runtime definitions out of
         // every module object so exported graph helpers have a single authoritative owner.
         emission.decoupled_prelude = true;
@@ -1687,26 +1737,35 @@ impl NativeBuilder {
         header_source.shrink_to_fit();
 
         let workspace = WorkDirectory::create()?;
-        let symbol_list = modules
-            .iter()
-            .map(|(_, emitted)| &emitted.symbol)
-            .collect::<Vec<_>>();
+        let mut symbol_list = Vec::new();
+        let mut module_sources = Vec::new();
+        let mut module_generic_only = Vec::new();
+        for ((_, module), &hit) in modules.iter().zip(&generated_c_hits) {
+            if module.chunks.is_empty() {
+                symbol_list.push(module.symbol.clone());
+                module_sources.push((
+                    module.source.as_bytes().to_vec(),
+                    Digest::hash(module.source.as_bytes()),
+                    hit,
+                ));
+                module_generic_only.push(module.generic_only);
+            } else {
+                for (chunk_idx, chunk_source) in module.chunks.iter().enumerate() {
+                    symbol_list.push(format!("{}_chunk_{chunk_idx}", module.symbol));
+                    module_sources.push((
+                        chunk_source.as_bytes().to_vec(),
+                        Digest::hash(chunk_source.as_bytes()),
+                        hit,
+                    ));
+                    module_generic_only.push(module.generic_only);
+                }
+            }
+        }
         let paths = SharedGraphLibraryPaths::new(workspace.path(), &symbol_list);
         let profile = options.profile;
         let embedding_abi = runtime_abi_identity();
         let compiler = compiler_identity(&identity);
         let (number_provider, number_provider_digest, _) = self.cached_number_provider(&target)?;
-        let module_sources = modules
-            .iter()
-            .zip(&generated_c_hits)
-            .map(|((_, module), &hit)| {
-                (
-                    module.source.as_bytes().to_vec(),
-                    Digest::hash(module.source.as_bytes()),
-                    hit,
-                )
-            })
-            .collect::<Vec<_>>();
         let wrapper_source_key = NativeArtifactFamily::SharedGraphWrapperSource.source_key(
             &target,
             Digest::hash(b"deterministic-c11-shared-graph-wrapper-owned-result-v2"),
@@ -1720,16 +1779,18 @@ impl NativeBuilder {
         } else {
             ""
         };
-        let module_object_options = modules
+        let module_object_options = module_generic_only
             .iter()
-            .map(|(_, module)| {
+            .map(|&generic_only| {
                 Digest::hash(
                     format!(
                         "shared-graph\0pic\0c11\0visibility-hidden\0{}\0{}{march_opt}\0module-opt={}",
                         identity.kind,
                         profile.as_str(),
                         if profile == NativeProfile::Release {
-                            release_module_compile_identity(module.generic_only)
+                            release_module_compile_identity(generic_only)
+                        } else if profile == NativeProfile::ReleaseSize {
+                            release_size_module_compile_identity()
                         } else {
                             "profile-default"
                         }
@@ -1750,9 +1811,9 @@ impl NativeBuilder {
         // contain the same logical path with different bytecode, so exporting those symbols lets
         // a dynamic loader interpose one library's module into another library's wrapper. Keep
         // the six-argument entries externally linkable inside this DSO but hidden outside it.
-        let module_compile_options = modules
+        let module_compile_options = module_generic_only
             .iter()
-            .map(|(_, module)| {
+            .map(|&generic_only| {
                 let mut compile = CompileOptions {
                     profile: profile.toolchain(),
                     position_independent: true,
@@ -1761,7 +1822,9 @@ impl NativeBuilder {
                 };
                 compile.extra_args.push("-fvisibility=hidden".into());
                 if profile == NativeProfile::Release {
-                    configure_release_module_compile(&mut compile, module.generic_only);
+                    configure_release_module_compile(&mut compile, generic_only);
+                } else if profile == NativeProfile::ReleaseSize {
+                    configure_release_size_module_compile(&mut compile);
                 }
                 compile
             })
@@ -2016,7 +2079,7 @@ impl NativeBuilder {
         let (library, library_hit, link_elapsed) = match self.lookup(&library_key)? {
             Lookup::Hit(artifact) => (artifact.bytes, true, Duration::ZERO),
             Lookup::Miss => {
-                let mut objects = Vec::with_capacity(modules.len() + 2);
+                let mut objects = Vec::with_capacity(module_objects.len() + 2);
                 for (index, (object, _, _)) in module_objects.iter().enumerate() {
                     materialize(&paths.module_o[index], object, false)?;
                     objects.push(paths.module_o[index].clone());
@@ -2114,11 +2177,16 @@ impl NativeBuilder {
         if emission.compile_regex.is_none() {
             emission.compile_regex = Some(matches!(
                 options.profile,
-                NativeProfile::Release | NativeProfile::Profile
+                NativeProfile::Release | NativeProfile::ReleaseSize | NativeProfile::Profile
             ));
         }
-        emission.generic_only =
-            matches!(options.profile, NativeProfile::Dev | NativeProfile::Check);
+        emission.generic_only = matches!(
+            options.profile,
+            NativeProfile::Dev | NativeProfile::Check | NativeProfile::ReleaseSize
+        );
+        if options.profile == NativeProfile::ReleaseSize {
+            emission.omit_source = true;
+        }
         if options.profile == NativeProfile::Profile {
             emission.type_profile_record = true;
         }
@@ -2136,7 +2204,10 @@ impl NativeBuilder {
         // live edges. With everything live this is the identity transform.
         let demand = selected.demand();
         let (reduced, demand) = reduced_graph(graph, &demand)?;
-        let (reduced, demand) = if options.profile == NativeProfile::Release {
+        let (reduced, demand) = if matches!(
+            options.profile,
+            NativeProfile::Release | NativeProfile::ReleaseSize
+        ) {
             dce_release_graph_to_fixpoint(reduced, demand, &selection)?
         } else {
             (reduced, demand)
@@ -2212,11 +2283,34 @@ impl NativeBuilder {
         let runtime = runtime_source();
 
         let workspace = WorkDirectory::create()?;
-        let mut symbol_list = modules
-            .iter()
-            .map(|(_, emitted)| &emitted.symbol)
-            .collect::<Vec<_>>();
-        symbol_list.push(&bootstrap.symbol);
+        let mut symbol_list = Vec::new();
+        let mut module_sources = Vec::new();
+        let mut module_generic_only = Vec::new();
+        let mut module_chunk_ranges = Vec::with_capacity(modules.len());
+        for ((_, module), &hit) in modules.iter().zip(&generated_c_hits) {
+            let start = symbol_list.len();
+            if module.chunks.is_empty() {
+                symbol_list.push(module.symbol.clone());
+                module_sources.push((
+                    module.source.as_bytes().to_vec(),
+                    Digest::hash(module.source.as_bytes()),
+                    hit,
+                ));
+                module_generic_only.push(module.generic_only);
+            } else {
+                for (chunk_idx, chunk_source) in module.chunks.iter().enumerate() {
+                    symbol_list.push(format!("{}_chunk_{chunk_idx}", module.symbol));
+                    module_sources.push((
+                        chunk_source.as_bytes().to_vec(),
+                        Digest::hash(chunk_source.as_bytes()),
+                        hit,
+                    ));
+                    module_generic_only.push(module.generic_only);
+                }
+            }
+            module_chunk_ranges.push(start..symbol_list.len());
+        }
+        symbol_list.push(bootstrap.symbol.clone());
         let paths = GraphBuildPaths::new(workspace.path(), &symbol_list);
         let profile = options.profile;
         let compiler = compiler_identity(&identity);
@@ -2225,17 +2319,6 @@ impl NativeBuilder {
         let (number_provider, number_provider_digest, _, provider_capabilities) =
             self.cached_number_provider_for(&target, required_provider_capabilities)?;
 
-        let mut module_sources = modules
-            .iter()
-            .zip(&generated_c_hits)
-            .map(|((_, module), &hit)| {
-                (
-                    module.source.as_bytes().to_vec(),
-                    Digest::hash(module.source.as_bytes()),
-                    hit,
-                )
-            })
-            .collect::<Vec<_>>();
         let bootstrap_source_key = NativeArtifactFamily::ModuleSource.source_key(
             &target,
             Digest::hash(b"native-builtin-bootstrap-c11"),
@@ -2243,6 +2326,7 @@ impl NativeBuilder {
         );
         module_sources
             .push(self.cached_payload(&bootstrap_source_key, bootstrap.source.as_bytes())?);
+        module_generic_only.push(bootstrap.generic_only);
         let runtime_source_key = NativeArtifactFamily::RuntimeSource.source_key(
             &target,
             Digest::hash(b"portable-runtime-c11"),
@@ -2297,7 +2381,10 @@ impl NativeBuilder {
             ..CompileOptions::default()
         };
         let mut prelude_compile_options = compile_options.clone();
-        if matches!(profile, NativeProfile::Release | NativeProfile::Profile) {
+        if matches!(
+            profile,
+            NativeProfile::Release | NativeProfile::ReleaseSize | NativeProfile::Profile
+        ) {
             // Release CommonJS dispatchers are specialized to this same observable value below.
             // Keep the runtime fact and graph selection one profile decision, or an omitted
             // development arm could become reachable without its module being linked.
@@ -2305,7 +2392,7 @@ impl NativeBuilder {
                 .extra_args
                 .push("-DKILN_NODE_ENV_PRODUCTION=1".into());
         }
-        if profile == NativeProfile::Release {
+        if matches!(profile, NativeProfile::Release | NativeProfile::ReleaseSize) {
             configure_release_prelude_compile(&mut prelude_compile_options);
         }
         // Dispatch groups the program cannot reach compile out of the prelude
@@ -2314,25 +2401,21 @@ impl NativeBuilder {
         prelude_compile_options
             .extra_args
             .extend(prelude_group_defines(group_mask));
-        let module_compile_options = modules
+        let module_compile_options = module_generic_only
             .iter()
-            .map(|(_, module)| module.generic_only)
-            .chain(std::iter::once(bootstrap.generic_only))
-            .map(|generic_only| {
+            .map(|&generic_only| {
                 let mut compile = compile_options.clone();
                 if profile == NativeProfile::Release {
-                    // Large generic units are compile-through glue. Small specialized units keep
-                    // scalar/direct lowering under O2; the shared runtime and prelude remain O3.
                     configure_release_module_compile(&mut compile, generic_only);
+                } else if profile == NativeProfile::ReleaseSize {
+                    configure_release_size_module_compile(&mut compile);
                 }
                 compile
             })
             .collect::<Vec<_>>();
-        let module_object_options = modules
+        let module_object_options = module_generic_only
             .iter()
-            .map(|(_, module)| module.generic_only)
-            .chain(std::iter::once(bootstrap.generic_only))
-            .map(|generic_only| {
+            .map(|&generic_only| {
                 Digest::hash(
                     format!(
                         "c11\0{}\0{}\0generator-{C_GENERATOR_VERSION}{march_opt}\0module-opt={}",
@@ -2340,6 +2423,8 @@ impl NativeBuilder {
                         profile.as_str(),
                         if profile == NativeProfile::Release {
                             release_module_compile_identity(generic_only)
+                        } else if profile == NativeProfile::ReleaseSize {
+                            release_size_module_compile_identity()
                         } else {
                             "profile-default"
                         }
@@ -2419,13 +2504,22 @@ impl NativeBuilder {
                 debug_assert_eq!(artifact.digest, Digest::hash(&artifact.bytes));
                 materialize(&options.output, &artifact.bytes, true)?;
                 let mut module_artifacts = Vec::with_capacity(modules.len());
-                for (index, _) in modules.iter().enumerate() {
+                for (index, range) in module_chunk_ranges.iter().enumerate() {
+                    let gen_c_bytes: u64 = module_sources[range.clone()]
+                        .iter()
+                        .map(|(s, _, _)| s.len() as u64)
+                        .sum();
+                    let obj_bytes: u64 = module_object_infos[range.clone()]
+                        .iter()
+                        .map(|(_, size)| *size)
+                        .sum();
+                    let gen_hit = module_sources[range.clone()].iter().all(|(_, _, hit)| *hit);
                     module_artifacts.push(ModuleArtifactInfo {
                         logical_path: Some(logical_paths[index].clone()),
-                        generated_c_cache_hit: module_sources[index].2,
+                        generated_c_cache_hit: gen_hit,
                         object_cache_hit: true,
-                        generated_c_bytes: module_sources[index].0.len() as u64,
-                        object_bytes: module_object_infos[index].1,
+                        generated_c_bytes: gen_c_bytes,
+                        object_bytes: obj_bytes,
                     });
                 }
                 let total_elapsed = total_started.elapsed();
@@ -2568,7 +2662,7 @@ impl NativeBuilder {
         {
             Lookup::Hit(artifact) => (artifact.bytes, artifact.digest, true, Duration::ZERO),
             Lookup::Miss => {
-                let mut objects = Vec::with_capacity(modules.len() + 3);
+                let mut objects = Vec::with_capacity(module_objects.len() + 3);
                 for (index, (object, _, _)) in module_objects.iter().enumerate() {
                     materialize(&paths.module_o[index], object, false)?;
                     objects.push(paths.module_o[index].clone());
@@ -2607,16 +2701,26 @@ impl NativeBuilder {
         debug_assert_eq!(executable_digest, Digest::hash(&executable));
         materialize(&options.output, &executable, true)?;
 
-        let module_artifacts = (0..modules.len())
-            .map(|index| {
-                let (source, _, source_hit) = &module_sources[index];
-                let (object, _, object_hit) = &module_objects[index];
+        let module_artifacts = module_chunk_ranges
+            .iter()
+            .enumerate()
+            .map(|(index, range)| {
+                let gen_c_bytes: u64 = module_sources[range.clone()]
+                    .iter()
+                    .map(|(s, _, _)| s.len() as u64)
+                    .sum();
+                let obj_bytes: u64 = module_objects[range.clone()]
+                    .iter()
+                    .map(|(o, _, _)| o.len() as u64)
+                    .sum();
+                let gen_hit = module_sources[range.clone()].iter().all(|(_, _, hit)| *hit);
+                let obj_hit = module_objects[range.clone()].iter().all(|(_, _, hit)| *hit);
                 ModuleArtifactInfo {
                     logical_path: Some(logical_paths[index].clone()),
-                    generated_c_cache_hit: *source_hit,
-                    object_cache_hit: *object_hit,
-                    generated_c_bytes: source.len() as u64,
-                    object_bytes: object.len() as u64,
+                    generated_c_cache_hit: gen_hit,
+                    object_cache_hit: obj_hit,
+                    generated_c_bytes: gen_c_bytes,
+                    object_bytes: obj_bytes,
                 }
             })
             .collect();
@@ -3278,7 +3382,7 @@ fn cached_graph_module(
     );
     let cache_key = NativeArtifactFamily::ModuleSource.source_key(
         target,
-        Digest::hash(b"native-graph-emission-input-v2"),
+        Digest::hash(b"native-graph-emission-input-v3"),
         [
             input,
             prelude_header_digest(),
@@ -3288,17 +3392,23 @@ fn cached_graph_module(
     );
     match cache.lookup(&cache_key)? {
         Lookup::Hit(artifact) => {
-            let (program_hash, symbol, source, generic_only): (u64, String, String, bool) =
-                serde_json::from_slice(&artifact.bytes).map_err(|error| CacheError::Corrupt {
-                    path: artifact.path,
-                    reason: format!("invalid cached C module: {error}"),
-                })?;
+            let (program_hash, symbol, source, generic_only, chunks): (
+                u64,
+                String,
+                String,
+                bool,
+                Vec<String>,
+            ) = serde_json::from_slice(&artifact.bytes).map_err(|error| CacheError::Corrupt {
+                path: artifact.path,
+                reason: format!("invalid cached C module: {error}"),
+            })?;
             Ok((
                 kiln_backend_c::CModule {
                     program_hash,
                     symbol,
                     source,
                     generic_only,
+                    chunks,
                 },
                 true,
             ))
@@ -3310,6 +3420,7 @@ fn cached_graph_module(
                 &module.symbol,
                 &module.source,
                 module.generic_only,
+                &module.chunks,
             ))
             .expect("C module contains only strings and an integer");
             cache.put(&cache_key, &bytes)?;

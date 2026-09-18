@@ -45,7 +45,11 @@ fn retain_used_context(output: &mut String, context: std::ops::Range<usize>) {
     let mut used = [false; LOCALS.len()];
     let setup = &output[context.clone()];
     let body = &output[context.end..];
-    if body.contains("KU_BINARY(") || body.contains("KU_READ_PROPERTY(") {
+    if body.contains("KU_BINARY(")
+        || body.contains("KU_READ_PROPERTY(")
+        || body.contains("KU_CALL(")
+        || body.contains("KU_CALL_METHOD(")
+    {
         used[0] = true;
         used[1] = true;
         used[3] = true;
@@ -174,6 +178,7 @@ pub fn emit_function_from_graph(
         kind,
         None,
         false,
+        0,
     );
 }
 
@@ -193,7 +198,8 @@ pub fn emit_function_from_graph_with_profile(
     kind: EntryKind,
     func_profile: Option<&FunctionTypeProfile>,
     type_profile_record: bool,
-) {
+    site_offset: usize,
+) -> usize {
     let function_start = output.len();
     if kind == EntryKind::Boxed {
         let typed_sites = sites::collect_typed_call_sites(graph, program, plan, &plan.numbers);
@@ -234,16 +240,56 @@ pub fn emit_function_from_graph_with_profile(
     // struct to build and read back, no argument array, no count. Every caller of it proved
     // the arguments are numbers and passed exactly the parameter count.
     match kind {
-        EntryKind::Boxed => writeln!(
-            output,
-            "static inline int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {{"
-        )
-        .unwrap(),
-        EntryKind::Fast => writeln!(
-            output,
-            "static inline __attribute__((always_inline)) int {symbol}_fn_{index}_f(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {{"
-        )
-        .unwrap(),
+        EntryKind::Boxed => {
+            let optnone = if proto.code.len() > 3000 {
+                "__attribute__((optnone)) "
+            } else {
+                ""
+            };
+            let static_kw = if plan.should_chunk {
+                ""
+            } else {
+                "static inline "
+            };
+            if plan.compact {
+                writeln!(
+                    output,
+                    "{optnone}{static_kw}int {symbol}_fn_{index}(KU_PARAMS) {{"
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    output,
+                    "{optnone}{static_kw}int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {{"
+                )
+                .unwrap();
+            }
+        }
+        EntryKind::Fast => {
+            let static_kw = if plan.should_chunk {
+                ""
+            } else {
+                "static inline "
+            };
+            let always_inline = if plan.should_chunk {
+                ""
+            } else {
+                "__attribute__((always_inline)) "
+            };
+            if plan.compact {
+                writeln!(
+                    output,
+                    "{static_kw}{always_inline}int {symbol}_fn_{index}_f(KU_PARAMS) {{"
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    output,
+                    "{static_kw}{always_inline}int {symbol}_fn_{index}_f(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {{"
+                )
+                .unwrap();
+            }
+        }
         EntryKind::Typed {
             returns_number,
             restartable,
@@ -264,15 +310,17 @@ pub fn emit_function_from_graph_with_profile(
                     .iter()
                     .any(|(_, op)| matches!(op, GraphOp::Call { .. }))
             });
-            let inline = if restartable || (!needs.runtime && !has_user_calls) {
-                "static inline __attribute__((always_inline))"
+            let inline = if plan.should_chunk {
+                ""
+            } else if restartable || (!needs.runtime && !has_user_calls) {
+                "static inline __attribute__((always_inline)) "
             } else {
-                "static inline"
+                "static inline "
             };
             let suffix = if super::parallel_clone() { "_p" } else { "_t" };
             writeln!(
                 output,
-                "{inline} {result} {symbol}_fn_{index}{suffix}({params}) {{"
+                "{inline}{result} {symbol}_fn_{index}{suffix}({params}) {{"
             )
             .unwrap();
         }
@@ -478,11 +526,19 @@ pub fn emit_function_from_graph_with_profile(
     if kind == EntryKind::Boxed && (shared_sites > 0 || this_sites > 0) {
         let mut declarations = String::new();
         if shared_sites > 0 {
-            writeln!(
-                declarations,
-                "static kiln_c99_site {symbol}_fn_{index}_site[{shared_sites}] = {{0}};"
-            )
-            .unwrap();
+            if plan.compact {
+                writeln!(
+                    declarations,
+                    "#define {symbol}_fn_{index}_site (&{symbol}_sites[{site_offset}])"
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    declarations,
+                    "static kiln_c99_site {symbol}_fn_{index}_site[{shared_sites}] = {{0}};"
+                )
+                .unwrap();
+            }
         }
         if this_sites > 0 {
             let row = vec!["UINT32_MAX"; this_sites].join(", ");
@@ -494,6 +550,7 @@ pub fn emit_function_from_graph_with_profile(
         }
         output.insert_str(function_start, &declarations);
     }
+    shared_sites
 }
 
 /// Emits the unit's entry point body from its graph. The caller has opened the function,
@@ -531,6 +588,7 @@ pub fn emit_entry_from_graph(
         commonjs,
         plan,
         false,
+        0,
     );
 }
 
@@ -550,7 +608,8 @@ pub fn emit_entry_from_graph_with_profile(
     commonjs: bool,
     plan: &CallPlan,
     type_profile_record: bool,
-) {
+    _site_offset: usize,
+) -> usize {
     let typed_sites = sites::collect_typed_call_sites(graph, program, plan, &plan.numbers);
     for (vid, typed_candidates) in &typed_sites {
         for &i in typed_candidates {
@@ -574,7 +633,7 @@ pub fn emit_entry_from_graph_with_profile(
     output.push_str(
         "    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;\n",
     );
-    emit_blocks(
+    let (shared_sites, _) = emit_blocks(
         output,
         graph,
         proto,
@@ -591,6 +650,7 @@ pub fn emit_entry_from_graph_with_profile(
         None,
         type_profile_record,
     );
+    shared_sites
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -605,7 +665,8 @@ pub fn emit_async_entry_body(
     strict_functions: &[bool],
     plan: &CallPlan,
     type_profile_record: bool,
-) {
+    _site_offset: usize,
+) -> usize {
     writeln!(
         output,
         "static inline int {symbol}_entry_body(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {{"
@@ -650,7 +711,7 @@ pub fn emit_async_entry_body(
     }
     output.push_str("        default: return KILN_C99_CONTROL_ERROR;\n        }\n    }\n");
     let array_slots = (0..proto.local_count).collect::<HashSet<u32>>();
-    emit_blocks(
+    let (shared_sites, _) = emit_blocks(
         output,
         graph,
         proto,
@@ -668,6 +729,7 @@ pub fn emit_async_entry_body(
         type_profile_record,
     );
     output.push_str("}\n");
+    shared_sites
 }
 
 fn emit_ssa_declarations(
@@ -751,6 +813,21 @@ fn emit_ssa_declarations(
                 writeln!(output, "    double d{alloc}_f_{idx} = 0.0;").unwrap();
                 writeln!(output, "    int64_t i{alloc}_f_{idx} = 0;").unwrap();
             }
+        }
+    }
+    if compact {
+        let max_call_argc = graph
+            .blocks
+            .iter()
+            .flat_map(|b| b.operations.iter())
+            .map(|(_, op)| match op {
+                GraphOp::Call { args, .. } | GraphOp::CallMethod { args, .. } => args.len(),
+                _ => 0,
+            })
+            .max()
+            .unwrap_or(0);
+        if max_call_argc > 0 {
+            writeln!(output, "    kiln_val ku_args[{max_call_argc}];").unwrap();
         }
     }
 }
@@ -892,20 +969,21 @@ fn emit_block_sequence(
     // a versioned body's clones share every value, and the generic one reads them boxed. (A
     // fast clone that boxed only at its exits was tried on 2026-09-06: it measured nothing,
     // and a bundled `marked` answered wrongly under it.)
-    let boxed = if block_prefix == "kiln_generic_block_" {
-        None
-    } else {
-        Some(boxed_uses(
-            graph,
-            program,
-            numbers,
-            ints,
-            booleans,
-            array_slots,
-            kind,
-            spec,
-        ))
-    };
+    let boxed =
+        if block_prefix == "kiln_generic_block_" || (plan.generic_only && numbers.is_empty()) {
+            None
+        } else {
+            Some(boxed_uses(
+                graph,
+                program,
+                numbers,
+                ints,
+                booleans,
+                array_slots,
+                kind,
+                spec,
+            ))
+        };
     // A second read of the same `this` slot in a block, with nothing between the two that could
     // run code or write a property, reads what the first read. Only the row path copies -- an
     // accessor puts its object in dictionary mode, and a dictionary object has no row -- so the
@@ -1270,6 +1348,7 @@ fn boxed_uses(
     kind: EntryKind,
     spec: &Speculation,
 ) -> HashSet<ValueId> {
+    let closed_world = !program.has_direct_eval() && !program.has_dynamic_import();
     let twin_only = |op: &BinaryOp| {
         matches!(
             op,
@@ -1324,8 +1403,7 @@ fn boxed_uses(
                 GraphOp::CallMethod {
                     object, name, args, ..
                 } => {
-                    let is_math = !program.has_direct_eval()
-                        && !program.has_dynamic_import()
+                    let is_math = closed_world
                         && matches!(
                             defs.get(object),
                             Some(GraphOp::LoadBuiltin(kiln_ir::Builtin::Math))
@@ -1861,14 +1939,24 @@ fn emit_blocks(
         }
     }
 
-    // 5c. A function's sites are shared by its clones.
+    // 5c. A function's sites are shared by its clones, and compact mode pools all sites into one table.
     let mut shared_sites = 0usize;
-    if let Site::Function { index } = site {
-        let (renamed, count) =
-            share_sites(&output[body_start..], &format!("{symbol}_fn_{index}_site"));
-        output.truncate(body_start);
-        output.push_str(&renamed);
-        shared_sites = count;
+    match site {
+        Site::Function { index } => {
+            let (renamed, count) =
+                share_sites(&output[body_start..], &format!("{symbol}_fn_{index}_site"));
+            output.truncate(body_start);
+            output.push_str(&renamed);
+            shared_sites = count;
+        }
+        Site::Entry { .. } | Site::AsyncEntry if plan.compact => {
+            let (renamed, count) =
+                share_sites(&output[body_start..], &format!("{symbol}_entry_site"));
+            output.truncate(body_start);
+            output.push_str(&renamed);
+            shared_sites = count;
+        }
+        _ => {}
     }
 
     // 6. Unwind and refusal handlers
@@ -1884,7 +1972,7 @@ fn emit_blocks(
             let fail = typed_fail(kind);
             let body = &output[body_start..];
             let unwinds = body.contains("goto kiln_unwind;");
-            let refuses = body.contains("goto kiln_refusal;");
+            let refuses = body.contains("goto kiln_refusal;") || plan.compact;
             if unwinds {
                 output.push_str("kiln_unwind:;\n");
                 writeln!(
@@ -1906,20 +1994,24 @@ fn emit_blocks(
             output.push_str(&routed);
         }
         Site::Function { .. } => {
-            output.push_str("kiln_unwind:;\n");
-            output.push_str("    return KILN_C99_THROWN;\n");
-            if !scalar_proto {
-                output.push_str("kiln_refusal:;\n");
-                output.push_str(
-                    "    *result = kiln_val_from_boundary(kiln_c99_control_diagnostic());\n",
-                );
-                output.push_str("    return KILN_C99_CONTROL_ERROR;\n");
+            if plan.compact && !scalar_proto {
+                output.push_str("KU_EPILOGUE()\n");
+            } else {
+                output.push_str("kiln_unwind:;\n");
+                output.push_str("    return KILN_C99_THROWN;\n");
+                if !scalar_proto {
+                    output.push_str("kiln_refusal:;\n");
+                    output.push_str(
+                        "    *result = kiln_val_from_boundary(kiln_c99_control_diagnostic());\n",
+                    );
+                    output.push_str("    return KILN_C99_CONTROL_ERROR;\n");
+                }
             }
         }
         Site::AsyncEntry => {
             let body = &output[body_start..];
             let unwinds = body.contains("goto kiln_unwind;");
-            let refuses = body.contains("goto kiln_refusal;");
+            let refuses = body.contains("goto kiln_refusal;") || plan.compact;
             if unwinds {
                 output.push_str("kiln_unwind:;\n");
                 output.push_str("    return KILN_C99_THROWN;\n");
@@ -1937,7 +2029,7 @@ fn emit_blocks(
             // Graph module entries preserve the raw language value for dynamic-import rejection;
             // standalone entries format it at their embedding boundary.
             let unwinds = output[body_start..].contains("goto kiln_unwind;");
-            let refuses = output[body_start..].contains("goto kiln_refusal;");
+            let refuses = output[body_start..].contains("goto kiln_refusal;") || plan.compact;
             if unwinds {
                 output.push_str("kiln_unwind:;\n");
                 if exports.is_some() {

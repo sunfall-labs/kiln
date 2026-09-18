@@ -40,6 +40,38 @@ pub(crate) fn method_candidates(
     found
 }
 
+pub(crate) fn method_candidates_map(
+    program: &Program,
+    publishes_frame: &[bool],
+) -> std::collections::HashMap<kiln_ir::StringUnits, Vec<u32>> {
+    let mut map = std::collections::HashMap::new();
+    let mut scan = |code: &[Instruction]| {
+        for window in code.windows(3) {
+            if let [
+                Instruction::Const(k),
+                Instruction::MakeFunction(i),
+                Instruction::DefineMethod,
+            ] = window
+                && let Some(Constant::String(s)) = program.constants.get(*k as usize)
+                && direct_callable(
+                    &program.functions[*i as usize],
+                    publishes_frame[*i as usize],
+                )
+            {
+                let list = map.entry(s.clone()).or_insert_with(Vec::new);
+                if !list.contains(i) {
+                    list.push(*i);
+                }
+            }
+        }
+    };
+    scan(&program.code);
+    for proto in &program.functions {
+        scan(&proto.code);
+    }
+    map
+}
+
 /// A function's inline-cache sites, shared by every clone of it. Each operation declares its
 /// site inline as `static kiln_c99_site site`; a clone that declared its own would start
 /// empty and, having no slow path to learn with, stay empty. So the sites are hoisted to file
@@ -191,6 +223,9 @@ pub(crate) fn collect_typed_call_sites(
     plan: &CallPlan,
     numbers: &HashSet<ValueId>,
 ) -> Vec<(ValueId, Vec<u32>)> {
+    if plan.generic_only || numbers.is_empty() || !plan.typed_entries.iter().any(|&e| e) {
+        return Vec::new();
+    }
     let mut sites = Vec::new();
     for block in &graph.blocks {
         for (vid, op) in &block.operations {
