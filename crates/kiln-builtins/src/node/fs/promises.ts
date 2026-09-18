@@ -48,7 +48,7 @@ export class FileHandle {
   }
   async readFile(options?: any): Promise<any> {
     const fs = (process as any).__kilnNativeModules?.fs;
-    const BufferClass = (globalThis as any).Buffer;
+    const BufferClass = typeof Buffer !== "undefined" ? (Buffer as any) : null;
     if (fs && typeof fs.fstatSync === "function" && typeof fs.readSync === "function") {
       const stats = fs.fstatSync(this.fd);
       const size = (stats && typeof stats.size === "number") ? stats.size : 0;
@@ -85,6 +85,88 @@ export class FileHandle {
   async datasync(): Promise<void> {
     return this.sync();
   }
+  async read<T extends Uint8Array>(
+    bufferOrOptions?: T | { buffer?: T; offset?: number; length?: number; position?: number | null },
+    offset?: number | null,
+    length?: number | null,
+    position?: number | null
+  ): Promise<{ bytesRead: number; buffer: T }> {
+    const fs = (process as any).__kilnNativeModules?.fs;
+    if (!fs || typeof fs.readSync !== "function") {
+      throw new Error("node:fs/promises FileHandle.prototype.read requires an FS host capability that this realm does not provide");
+    }
+    const BufferClass = typeof Buffer !== "undefined" ? (Buffer as any) : null;
+    let targetBuffer: any = bufferOrOptions;
+    let targetOffset = offset ?? 0;
+    let targetLength = length;
+    let targetPosition = position ?? null;
+
+    if (!targetBuffer || (typeof targetBuffer === "object" && !("byteLength" in targetBuffer))) {
+      const opts = targetBuffer;
+      targetBuffer = opts?.buffer || (BufferClass && typeof BufferClass.alloc === "function" ? BufferClass.alloc(16384) : new Uint8Array(16384));
+      targetOffset = opts?.offset ?? 0;
+      targetLength = opts?.length ?? (targetBuffer.byteLength - targetOffset);
+      targetPosition = opts?.position ?? null;
+    } else {
+      if (targetLength === undefined || targetLength === null) {
+        targetLength = targetBuffer.byteLength - targetOffset;
+      }
+    }
+
+    const bytesRead = fs.readSync(this.fd, targetBuffer, targetOffset, targetLength, targetPosition);
+    return { bytesRead, buffer: targetBuffer };
+  }
+  async write(
+    buffer: any,
+    offsetOrPosition?: number | null,
+    lengthOrEncoding?: number | string | null,
+    position?: number | null
+  ): Promise<{ bytesWritten: number; buffer: any }> {
+    const fs = (process as any).__kilnNativeModules?.fs;
+    if (!fs || typeof fs.writeSync !== "function") {
+      throw new Error("node:fs/promises FileHandle.prototype.write requires an FS host capability that this realm does not provide");
+    }
+    if (typeof buffer === "string") {
+      const pos = typeof offsetOrPosition === "number" ? offsetOrPosition : null;
+      const enc = typeof lengthOrEncoding === "string" ? lengthOrEncoding : "utf8";
+      const bytesWritten = fs.writeSync(this.fd, buffer, pos, enc);
+      return { bytesWritten, buffer };
+    }
+    const offset = typeof offsetOrPosition === "number" ? offsetOrPosition : 0;
+    const length = typeof lengthOrEncoding === "number" ? lengthOrEncoding : (buffer.byteLength - offset);
+    const pos = typeof position === "number" ? position : null;
+    const bytesWritten = fs.writeSync(this.fd, buffer, offset, length, pos);
+    return { bytesWritten, buffer };
+  }
+  async chmod(mode: number): Promise<void> {
+    const fs = (process as any).__kilnNativeModules?.fs;
+    if (fs && typeof fs.fchmodSync === "function") {
+      fs.fchmodSync(this.fd, mode);
+      return;
+    }
+    throw new Error("node:fs/promises FileHandle.prototype.chmod requires an FS host capability that this realm does not provide");
+  }
+  async utimes(atime: any, mtime: any): Promise<void> {
+    const fs = (process as any).__kilnNativeModules?.fs;
+    if (fs && typeof fs.futimesSync === "function") {
+      fs.futimesSync(this.fd, atime, mtime);
+      return;
+    }
+    throw new Error("node:fs/promises FileHandle.prototype.utimes requires an FS host capability that this realm does not provide");
+  }
+  async chown(uid: number, gid: number): Promise<void> {
+    const fs = (process as any).__kilnNativeModules?.fs;
+    if (fs && typeof fs.fchownSync === "function") {
+      fs.fchownSync(this.fd, uid, gid);
+      return;
+    }
+  }
+}
+
+if (typeof Symbol !== "undefined" && (Symbol as any).asyncDispose) {
+  (FileHandle.prototype as any)[(Symbol as any).asyncDispose] = function (this: FileHandle) {
+    return this.close();
+  };
 }
 
 export async function open(path: string, flags: string = "r", mode?: number): Promise<FileHandle> {

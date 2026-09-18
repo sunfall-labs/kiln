@@ -2303,6 +2303,55 @@ fn node_builtin_fs_promises_open_and_file_handle() {
 }
 
 #[test]
+fn node_builtin_fs_promises_file_handle_read_write_chmod_utimes() {
+    let project = TempProject::new();
+    let sample_file = project.write("sample.txt", "hello world");
+    let entry = project.write(
+        "main.js",
+        &format!(
+            concat!(
+                "import fs from 'node:fs';\n",
+                "import {{ open, FileHandle }} from 'node:fs/promises';\n",
+                "const handle = await open({:?}, 'r+');\n",
+                "const buf = new Uint8Array(5);\n",
+                "const {{ bytesRead }} = await handle.read(buf, 0, 5, 0);\n",
+                "const {{ bytesWritten }} = await handle.write(' EARTH', 5);\n",
+                "await handle.chmod(0o644);\n",
+                "await handle.utimes(1700000000, 1700000000);\n",
+                "await handle.close();\n",
+                "console.log(bytesRead, bytesWritten, fs.promises.FileHandle === FileHandle, typeof fs.fchmodSync, typeof fs.futimesSync);\n",
+            ),
+            sample_file.to_string_lossy()
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with fs/promises read write chmod");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute fs/promises read write chmod");
+    assert_eq!(host.output, ["5 6 true function function"]);
+    let updated = fs::read_to_string(&sample_file).expect("read sample");
+    assert_eq!(updated, "hello EARTH");
+}
+
+#[test]
 fn node_builtin_os_ts_evaluates_and_exports_cleanly() {
     let project = TempProject::new();
     let entry = project.write(

@@ -15570,11 +15570,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | Native::NodeFsAccessSync
             | Native::NodeFsAppendFileSync
             | Native::NodeFsChmodSync
+            | Native::NodeFsFchmodSync
             | Native::NodeFsOpenSync
             | Native::NodeFsCloseSync
             | Native::NodeFsReadlinkSync
             | Native::NodeFsRmdirSync
             | Native::NodeFsUtimesSync
+            | Native::NodeFsFutimesSync
             | Native::NodeFsSync
             | Native::NodeFsWriteSync
             | Native::NodeFsFtruncateSync
@@ -39376,11 +39378,13 @@ fn call_native(
         | Native::NodeFsAccessSync
         | Native::NodeFsAppendFileSync
         | Native::NodeFsChmodSync
+        | Native::NodeFsFchmodSync
         | Native::NodeFsOpenSync
         | Native::NodeFsCloseSync
         | Native::NodeFsReadlinkSync
         | Native::NodeFsRmdirSync
         | Native::NodeFsUtimesSync
+        | Native::NodeFsFutimesSync
         | Native::NodeFsSync
         | Native::NodeFsWriteSync
         | Native::NodeFsFtruncateSync

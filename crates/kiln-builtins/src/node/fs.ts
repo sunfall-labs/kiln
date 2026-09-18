@@ -1,5 +1,7 @@
 // kiln-builtins: node:fs implementation (Phase 5.2, ADR 0005)
 
+import { FileHandle, open } from "node:fs/promises";
+
 const nativeModule =
   typeof process !== "undefined"
     ? (process as any).__kilnNativeModules?.fs || null
@@ -84,34 +86,39 @@ export const realpath = makeCallback(realpathSync);
 export const readFile = makeCallback(readFileSync);
 export const writeFile = makeCallback(writeFileSync);
 export const unlink = makeCallback(unlinkSync);
+export const fchmodSync = unmaterialized("fchmodSync");
+export const futimesSync = unmaterialized("futimesSync");
+export const fchmod = makeCallback(fchmodSync);
+export const futimes = makeCallback(futimesSync);
 
-export const promises: any = nativePromises || {
-  access: unmaterialized("access"),
-  appendFile: unmaterialized("appendFile"),
-  chmod: unmaterialized("chmod"),
-  chown: unmaterialized("chown"),
-  copyFile: unmaterialized("copyFile"),
-  cp: unmaterialized("cp"),
-  glob: unmaterialized("glob"),
-  link: unmaterialized("link"),
-  lstat: unmaterialized("lstat"),
-  mkdir: unmaterialized("mkdir"),
-  mkdtemp: unmaterialized("mkdtemp"),
-  open: unmaterialized("open"),
-  readdir: unmaterialized("readdir"),
-  readFile: unmaterialized("readFile"),
-  readlink: unmaterialized("readlink"),
-  realpath: unmaterialized("realpath"),
-  rename: unmaterialized("rename"),
-  rm: unmaterialized("rm"),
-  rmdir: unmaterialized("rmdir"),
-  stat: unmaterialized("stat"),
-  symlink: unmaterialized("symlink"),
-  truncate: unmaterialized("truncate"),
-  unlink: unmaterialized("unlink"),
-  utimes: unmaterialized("utimes"),
-  watch: unmaterialized("watch"),
-  writeFile: unmaterialized("writeFile"),
+export const promises: any = {
+  FileHandle,
+  open,
+  access: nativePromises?.access || unmaterialized("access"),
+  appendFile: nativePromises?.appendFile || unmaterialized("appendFile"),
+  chmod: nativePromises?.chmod || unmaterialized("chmod"),
+  chown: nativePromises?.chown || unmaterialized("chown"),
+  copyFile: nativePromises?.copyFile || unmaterialized("copyFile"),
+  cp: nativePromises?.cp || unmaterialized("cp"),
+  glob: nativePromises?.glob || unmaterialized("glob"),
+  link: nativePromises?.link || unmaterialized("link"),
+  lstat: nativePromises?.lstat || unmaterialized("lstat"),
+  mkdir: nativePromises?.mkdir || unmaterialized("mkdir"),
+  mkdtemp: nativePromises?.mkdtemp || unmaterialized("mkdtemp"),
+  readdir: nativePromises?.readdir || unmaterialized("readdir"),
+  readFile: nativePromises?.readFile || unmaterialized("readFile"),
+  readlink: nativePromises?.readlink || unmaterialized("readlink"),
+  realpath: nativePromises?.realpath || unmaterialized("realpath"),
+  rename: nativePromises?.rename || unmaterialized("rename"),
+  rm: nativePromises?.rm || unmaterialized("rm"),
+  rmdir: nativePromises?.rmdir || unmaterialized("rmdir"),
+  stat: nativePromises?.stat || unmaterialized("stat"),
+  symlink: nativePromises?.symlink || unmaterialized("symlink"),
+  truncate: nativePromises?.truncate || unmaterialized("truncate"),
+  unlink: nativePromises?.unlink || unmaterialized("unlink"),
+  utimes: nativePromises?.utimes || unmaterialized("utimes"),
+  watch: nativePromises?.watch || unmaterialized("watch"),
+  writeFile: nativePromises?.writeFile || unmaterialized("writeFile"),
 };
 
 export const constants = {
@@ -211,10 +218,14 @@ const fsNamespace = {
   createWriteStream,
   default: undefined as any,
   existsSync,
+  fchmod,
+  fchmodSync,
   fdatasyncSync,
   fstatSync,
   fsyncSync,
   ftruncateSync,
+  futimes,
+  futimesSync,
   glob,
   globSync,
   lstat,
