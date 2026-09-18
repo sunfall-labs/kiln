@@ -73,10 +73,8 @@ static int kiln_module_59a72d05a23a0c8ab2fcab3810349835_body(kiln_host *host, ki
     int depth = 0;
     kiln_value thrown_value = kiln_c99_undefined();
     kiln_value *thrown = &thrown_value;
-    kiln_val locals[1];
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
-    for (size_t slot = 0; slot < (size_t)1; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
     const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;
     kiln_val kiln_out = KILN_VAL_UNDEFINED;
     int64_t i4 = 0, i5 = 0;

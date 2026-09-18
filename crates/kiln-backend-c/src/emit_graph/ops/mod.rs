@@ -13,6 +13,7 @@ use crate::prelude::lookup_speculation_invariant;
 use crate::tail::{TailContext, emit_tail_instruction};
 use crate::{
     BuiltinLoad, builtin_load, closure_construction, compact_diagnostic_site, diagnostic_source,
+    host_op_code,
 };
 use kiln_ir::Instruction;
 use kiln_ir::Upvalue;
@@ -485,6 +486,46 @@ pub(super) fn emit_graph_op(
             // A sunk literal's spread or define: the fast clone's graph alone carries it as a
             // scalar object (`FunctionGraph::spread_sinks`).
             emit_sunk_bridge(output, vid, instruction, operands, &ctx);
+        }
+        GraphOp::Bridge {
+            instruction: Instruction::HostCall { op, argc },
+            operands,
+            pushes: _,
+        } => {
+            let op_code = host_op_code(*op);
+            if *argc == 0 {
+                writeln!(
+                    output,
+                    "    {{ kiln_value host_result; if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({op_code}), UINT16_C(0), NULL, &host_result) != 0) return KILN_C99_HOST_ERROR; v{v} = kiln_val_from_boundary(host_result); }}"
+                )
+                .unwrap();
+            } else if !scalar_proto {
+                let mut init = String::new();
+                for (i, op_vid) in operands.iter().enumerate() {
+                    init.push_str(&format!(
+                        " kiln_value a{i} = kiln_val_to_boundary(v{}); if (kiln_c99_crosses_boundary(a{i})) a{i} = kiln_c99_inspect(a{i}); host_args[{i}] = a{i};",
+                        op_vid.0
+                    ));
+                }
+                writeln!(
+                    output,
+                    "    {{ kiln_value host_result; kiln_value host_args[{argc}];{init} if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({op_code}), UINT16_C({argc}), host_args, &host_result) != 0) return KILN_C99_HOST_ERROR; v{v} = kiln_val_from_boundary(host_result); }}"
+                )
+                .unwrap();
+            } else {
+                let mut init = String::new();
+                for (i, op_vid) in operands.iter().enumerate() {
+                    init.push_str(&format!(
+                        " host_args[{i}] = kiln_val_to_boundary(v{});",
+                        op_vid.0
+                    ));
+                }
+                writeln!(
+                    output,
+                    "    {{ kiln_value host_result; kiln_value host_args[{argc}];{init} if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({op_code}), UINT16_C({argc}), host_args, &host_result) != 0) return KILN_C99_HOST_ERROR; v{v} = kiln_val_from_boundary(host_result); }}"
+                )
+                .unwrap();
+            }
         }
         GraphOp::Bridge {
             instruction,

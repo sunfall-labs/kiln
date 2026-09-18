@@ -2205,13 +2205,6 @@ fn render_entry(
         output.push_str("    kiln_value thrown_value = kiln_c99_undefined();\n");
         output.push_str("    kiln_value *thrown = &thrown_value;\n");
     }
-    let locals = usize::try_from(program.local_count).unwrap().max(1);
-    if module_scope {
-        writeln!(output, "    kiln_val *locals = {unit_symbol}_globals;").unwrap();
-    } else {
-        writeln!(output, "    kiln_val locals[{locals}];").unwrap();
-    }
-    output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
     let mut array_slots: HashSet<u32> = if module_scope {
         (0..program.local_count).collect()
     } else {
@@ -2219,11 +2212,34 @@ fn render_entry(
     };
     let mut exports: Option<&[kiln_ir::ExportBinding]> = None;
     let mut commonjs = false;
+    if let Some((module, is_commonjs)) = module {
+        commonjs = is_commonjs;
+        exports = Some(&module.exports);
+        array_slots.extend(module.imports.iter().map(|binding| binding.local_slot));
+        array_slots.extend(module.exports.iter().map(|binding| binding.local_slot));
+        if is_commonjs {
+            array_slots.insert(2);
+        }
+    }
+    let max_slot = array_slots
+        .iter()
+        .copied()
+        .max()
+        .map(|s| (s as usize) + 1)
+        .unwrap_or(0);
+    let locals = usize::try_from(program.local_count)
+        .unwrap()
+        .max(max_slot)
+        .max(1);
+    if module_scope {
+        writeln!(output, "    kiln_val *locals = {unit_symbol}_globals;").unwrap();
+    } else if !array_slots.is_empty() {
+        writeln!(output, "    kiln_val locals[{locals}];").unwrap();
+    }
+    output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
     match module {
         None => output.push_str("    kiln_c99_reset_diagnostics();\n"),
         Some((module, is_commonjs)) => {
-            commonjs = is_commonjs;
-            exports = Some(&module.exports);
             let export_count = if is_commonjs { 1 } else { module.exports.len() };
             writeln!(
                 output,
@@ -2236,19 +2252,15 @@ fn render_entry(
                 "    if (export_count != (size_t){export_count} || (export_count != 0 && exports == NULL)) return KILN_C99_INVALID_ARGUMENT;"
             )
             .unwrap();
-            array_slots.extend(module.imports.iter().map(|binding| binding.local_slot));
-            array_slots.extend(module.exports.iter().map(|binding| binding.local_slot));
-            if is_commonjs {
-                // `module`, whose `exports` is the unit's one export.
-                array_slots.insert(2);
-            }
         }
     }
-    writeln!(
-        output,
-        "    for (size_t slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = KILN_VAL_UNDEFINED;"
-    )
-    .unwrap();
+    if module_scope || !array_slots.is_empty() {
+        writeln!(
+            output,
+            "    for (size_t slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = KILN_VAL_UNDEFINED;"
+        )
+        .unwrap();
+    }
     if let Some((module, _)) = module {
         let boxed_imports = slots_read_as_cells(&program.code, &program.functions);
         for (index, binding) in module.imports.iter().enumerate() {
@@ -4592,7 +4604,7 @@ fn binary_code(operator: BinaryOp) -> u16 {
     }
 }
 
-fn host_op_code(operation: HostOp) -> u16 {
+pub(crate) fn host_op_code(operation: HostOp) -> u16 {
     operation as u16
 }
 
