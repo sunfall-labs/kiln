@@ -796,6 +796,20 @@ pub(crate) fn intrinsic_results(
                 };
                 (key == "isArray").then_some((*v, Proven::Boolean))
             }
+            GraphOp::CallMethod { name, .. } => {
+                let key = match program.constants.get(*name as usize) {
+                    Some(Constant::String(s)) => s.to_scalar_string().ok()?,
+                    _ => return None,
+                };
+                match key.as_str() {
+                    "indexOf" | "lastIndexOf" | "push" => Some((*v, Proven::Int)),
+                    "includes" | "startsWith" | "endsWith" => Some((*v, Proven::Boolean)),
+                    "substring" | "trim" | "toLowerCase" | "toUpperCase" | "join" => {
+                        Some((*v, Proven::String))
+                    }
+                    _ => None,
+                }
+            }
             GraphOp::GetProperty { object, name, .. } => {
                 let key = match program.constants.get(*name as usize) {
                     Some(Constant::String(s)) => s.to_scalar_string().ok()?,
@@ -815,6 +829,21 @@ pub(crate) fn intrinsic_results(
                         op: UnaryOp::TypeOf,
                         ..
                     }) => true,
+                    Some(GraphOp::CallMethod { name, .. }) => {
+                        match program.constants.get(*name as usize) {
+                            Some(Constant::String(s)) => match s.to_scalar_string().ok().as_deref()
+                            {
+                                Some(
+                                    "map" | "filter" | "slice" | "concat" | "split" | "flat"
+                                    | "flatMap" | "substring" | "substr" | "trim" | "trimStart"
+                                    | "trimEnd" | "toLowerCase" | "toUpperCase" | "join"
+                                    | "replace" | "replaceAll",
+                                ) => true,
+                                _ => false,
+                            },
+                            _ => false,
+                        }
+                    }
                     _ => false,
                 };
                 if is_definite_array_or_string {

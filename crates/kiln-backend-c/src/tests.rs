@@ -7960,6 +7960,314 @@ int main(void) {
 }
 
 #[test]
+fn compact_module_with_many_keys_uses_dense_static_key_array_and_loop() {
+    let module = module(
+        Program {
+            source: "".into(),
+            version: BYTECODE_VERSION,
+            constants: vec![
+                Constant::String("k0".to_owned().into()),
+                Constant::String("k1".to_owned().into()),
+                Constant::String("k2".to_owned().into()),
+                Constant::String("k3".to_owned().into()),
+                Constant::String("k4".to_owned().into()),
+                Constant::String("k5".to_owned().into()),
+                Constant::Number(0.0f64.to_bits()),
+            ],
+            code: vec![
+                Instruction::Const(6),
+                Instruction::GetProperty(0),
+                Instruction::GetProperty(1),
+                Instruction::GetProperty(2),
+                Instruction::GetProperty(3),
+                Instruction::GetProperty(4),
+                Instruction::GetProperty(5),
+                Instruction::Return,
+            ],
+            local_count: 0,
+            functions: Vec::new(),
+            template_sites: Vec::new(),
+        },
+        Vec::new(),
+        Vec::new(),
+    );
+    let emitted = emit_module_with_logical_path_and_policy(
+        &module,
+        "dense_keys.js",
+        EmissionPolicy {
+            compact: true,
+            ..EmissionPolicy::default()
+        },
+    )
+    .expect("compact module with 6 keys emits");
+
+    // Dense key table with >4 keys emits static array and loop
+    assert!(
+        emitted
+            .source
+            .contains("static const kiln_string *const ku_static_keys[6] = {")
+    );
+    assert!(
+        emitted
+            .source
+            .contains("for (size_t i = 0; i < (size_t)6; ++i) {")
+    );
+    assert!(
+        emitted
+            .source
+            .contains("if ((ku_keys[i] = kiln_c99_intern_static_key(ku_static_keys[i])) == NULL) return KILN_C99_OUT_OF_MEMORY;")
+    );
+
+    let wrapper = r#"
+int main(void) {
+    kiln_host host;
+    memset(&host, 0, sizeof(host));
+    kiln_value result = kiln_c99_undefined();
+    int status = ku_body(&host, &result, NULL, 0, NULL, 0);
+    if (ku_keys_ready != 1) return 2;
+    for (size_t i = 0; i < 6; ++i) {
+        if (ku_keys[i] == NULL) return 3;
+    }
+    return 0;
+}
+"#;
+    let run = run_with_main(&emitted, wrapper, "dense-keys");
+    assert!(
+        run.status.success(),
+        "dense keys executable failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn test_proven_types_recognize_new_object_and_method_returns() {
+    use crate::graph::{Proven, build_function_graph, proven_types_with_bounds};
+    use std::collections::{HashMap, HashSet};
+
+    let mut proto = function(vec![
+        Instruction::NewObject { count: 0 },
+        Instruction::StoreLocal(0), // obj
+        Instruction::NewArray { count: 0 },
+        Instruction::StoreLocal(1), // arr
+        Instruction::LoadLocal(1),
+        Instruction::Const(5),
+        Instruction::CallMethod { name: 0, argc: 1 }, // arr.indexOf(0)
+        Instruction::StoreLocal(2),                   // idx
+        Instruction::LoadLocal(1),
+        Instruction::Const(6),
+        Instruction::CallMethod { name: 1, argc: 1 }, // arr.push(1)
+        Instruction::StoreLocal(3),                   // len
+        Instruction::Const(4),                        // "abc"
+        Instruction::Const(5),                        // 0
+        Instruction::Const(6),                        // 1
+        Instruction::CallMethod { name: 2, argc: 2 }, // "abc".substring(0, 1)
+        Instruction::StoreLocal(4),                   // sub
+        Instruction::LoadLocal(4),
+        Instruction::GetProperty(3), // sub.length
+        Instruction::StoreLocal(5),  // subLen
+        Instruction::Return,
+    ]);
+    proto.local_count = 6;
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: vec![
+            Constant::String("indexOf".to_owned().into()),   // 0
+            Constant::String("push".to_owned().into()),      // 1
+            Constant::String("substring".to_owned().into()), // 2
+            Constant::String("length".to_owned().into()),    // 3
+            Constant::String("abc".to_owned().into()),       // 4
+            Constant::Number(0.0f64.to_bits()),              // 5
+            Constant::Number(1.0f64.to_bits()),              // 6
+        ],
+        code: vec![Instruction::Return],
+        local_count: 0,
+        functions: vec![proto.clone()],
+        template_sites: Vec::new(),
+    };
+    let graph = build_function_graph(&proto, &program).unwrap();
+    let proven = proven_types_with_bounds(&graph, &HashMap::new(), &HashSet::new());
+    let intrinsics = crate::direct::intrinsic_results(&graph, &program);
+
+    // 1. NewObject is Proven::Object
+    let obj_vid = graph.blocks[0]
+        .operations
+        .iter()
+        .find_map(|(v, op)| matches!(op, GraphOp::NewObject { .. }).then_some(*v))
+        .expect("NewObject operation exists");
+    assert_eq!(proven.get(&obj_vid), Some(&Proven::Object));
+
+    // 2. indexOf is Proven::Int
+    let index_of_vid = graph.blocks[0]
+        .operations
+        .iter()
+        .find_map(|(v, op)| {
+            if let GraphOp::CallMethod { name, .. } = op
+                && *name == 0
+            {
+                Some(*v)
+            } else {
+                None
+            }
+        })
+        .expect("indexOf operation exists");
+    assert_eq!(intrinsics.get(&index_of_vid), Some(&Proven::Int));
+
+    // 3. push is Proven::Int
+    let push_vid = graph.blocks[0]
+        .operations
+        .iter()
+        .find_map(|(v, op)| {
+            if let GraphOp::CallMethod { name, .. } = op
+                && *name == 1
+            {
+                Some(*v)
+            } else {
+                None
+            }
+        })
+        .expect("push operation exists");
+    assert_eq!(intrinsics.get(&push_vid), Some(&Proven::Int));
+
+    // 4. substring is Proven::String
+    let substring_vid = graph.blocks[0]
+        .operations
+        .iter()
+        .find_map(|(v, op)| {
+            if let GraphOp::CallMethod { name, .. } = op
+                && *name == 2
+            {
+                Some(*v)
+            } else {
+                None
+            }
+        })
+        .expect("substring operation exists");
+    assert_eq!(intrinsics.get(&substring_vid), Some(&Proven::String));
+
+    // 5. sub.length is Proven::Int
+    let sub_len_vid = graph.blocks[0]
+        .operations
+        .iter()
+        .find_map(|(v, op)| {
+            if let GraphOp::GetProperty { name, .. } = op
+                && *name == 3
+            {
+                Some(*v)
+            } else {
+                None
+            }
+        })
+        .expect("GetProperty length operation exists");
+    assert_eq!(intrinsics.get(&sub_len_vid), Some(&Proven::Int));
+}
+
+#[test]
+fn executable_chained_intrinsic_array_and_string_devirtualization() {
+    let constants = vec![
+        Constant::Number(10.0f64.to_bits()),    // 0
+        Constant::Number(20.0f64.to_bits()),    // 1
+        Constant::Number(30.0f64.to_bits()),    // 2
+        Constant::Number(40.0f64.to_bits()),    // 3
+        Constant::Number(1.0f64.to_bits()),     // 4
+        Constant::Number(0.0f64.to_bits()),     // 5
+        Constant::Number(5.0f64.to_bits()),     // 6
+        Constant::Number(4.0f64.to_bits()),     // 7 ("o" is at index 4 in "hello")
+        Constant::String("push".into()),        // 8
+        Constant::String("slice".into()),       // 9
+        Constant::String("join".into()),        // 10
+        Constant::String(",".into()),           // 11
+        Constant::String("20,30,40".into()),    // 12
+        Constant::String("hello-world".into()), // 13
+        Constant::String("substring".into()),   // 14
+        Constant::String("indexOf".into()),     // 15
+        Constant::String("o".into()),           // 16
+        Constant::Boolean(false),               // 17
+    ];
+
+    let code = vec![
+        // arr = [10, 20, 30]
+        Instruction::Const(0),
+        Instruction::Const(1),
+        Instruction::Const(2),
+        Instruction::NewArray { count: 3 },
+        Instruction::StoreLocal(0), // arr
+        // arr.push(40)
+        Instruction::LoadLocal(0),
+        Instruction::Const(3), // 40
+        Instruction::CallMethod { name: 8, argc: 1 },
+        Instruction::Pop,
+        // sub = arr.slice(1)
+        Instruction::LoadLocal(0),
+        Instruction::Const(4), // 1
+        Instruction::CallMethod { name: 9, argc: 1 },
+        Instruction::StoreLocal(1), // sub
+        // joined = sub.join(",")
+        Instruction::LoadLocal(1),
+        Instruction::Const(11), // ","
+        Instruction::CallMethod { name: 10, argc: 1 },
+        Instruction::StoreLocal(2), // joined
+        // s = "hello-world"
+        Instruction::Const(13),
+        Instruction::StoreLocal(3), // s
+        // part = s.substring(0, 5)
+        Instruction::LoadLocal(3),
+        Instruction::Const(5), // 0
+        Instruction::Const(6), // 5
+        Instruction::CallMethod { name: 14, argc: 2 },
+        Instruction::StoreLocal(4), // part
+        // idx = part.indexOf("o")
+        Instruction::LoadLocal(4),
+        Instruction::Const(16), // "o"
+        Instruction::CallMethod { name: 15, argc: 1 },
+        Instruction::StoreLocal(5), // idx
+        // check: (joined === "20,30,40") && (idx === 4)
+        Instruction::LoadLocal(2),
+        Instruction::Const(12),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::JumpIfFalse(36),
+        Instruction::LoadLocal(5),
+        Instruction::Const(7),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::Return,
+        Instruction::Const(17),
+        Instruction::Return,
+    ];
+
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants,
+        code,
+        local_count: 6,
+        functions: Vec::new(),
+        template_sites: Vec::new(),
+    };
+
+    let generated = emit(&program).expect("program emits");
+    assert!(
+        generated
+            .source
+            .contains("kiln_array *arr = (kiln_array *)KILN_VAL_PTR("),
+        "expected direct kiln_array cast in generated source:\n{}",
+        generated.source
+    );
+    let wrapper = format!(
+        "int main(void) {{ kiln_value result; int status = {}(NULL, &result); if (status != 0) return 2; return (result.tag == KILN_VALUE_BOOLEAN && result.bits == 1) ? 0 : 3; }}\n",
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "chained-intrinsic-devirtualization");
+    assert!(
+        run.status.success(),
+        "chained intrinsic devirtualization execution failed ({:?}):\nstdout: {}\nstderr: {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr),
+    );
+}
+
+#[test]
 fn executable_math_all_pure_functions_unboxed() {
     // const s = Math.sin(0.0); // 0.0
     // const c = Math.cos(0.0); // 1.0
