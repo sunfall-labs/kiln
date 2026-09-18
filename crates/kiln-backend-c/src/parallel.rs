@@ -104,7 +104,7 @@ pub fn parallel_safe(graph: &FunctionGraph, proto: &FunctionProto, program: &Pro
             Terminator::Throw(_) | Terminator::Return(None) => {
                 // An unreachable `return undefined` the compiler leaves after the last statement
                 // is fine; one something reaches is not a number.
-                let reachable = block.id == graph.entry_block || !block.predecessors.is_empty();
+                let reachable = block.is_reachable_from_entry(graph.entry_block);
                 if matches!(block.terminator, Terminator::Throw(_)) || reachable {
                     return false;
                 }

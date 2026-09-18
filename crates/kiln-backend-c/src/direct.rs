@@ -309,7 +309,7 @@ impl DirectPlan {
                 let returns_number = graph
                     .blocks
                     .iter()
-                    .filter(|b| b.id == graph.entry_block || !b.predecessors.is_empty())
+                    .filter(|b| b.is_reachable_from_entry(graph.entry_block))
                     .all(|b| match &b.terminator {
                         Terminator::Return(Some(v)) => proven.get(v).is_some_and(|k| k.is_number()),
                         Terminator::Return(None) => false,

@@ -45,7 +45,6 @@ static int kiln_module_8cab9f398c71107445e85d10c77ee0f7_body(kiln_host *host, ki
     kiln_val kiln_out = KILN_VAL_UNDEFINED;
     kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED, v4 = KILN_VAL_UNDEFINED, v5 = KILN_VAL_UNDEFINED, v6 = KILN_VAL_UNDEFINED, v7 = KILN_VAL_UNDEFINED, v8 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
-    v0 = KILN_VAL_UNDEFINED;
     v1 = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_module_8cab9f398c71107445e85d10c77ee0f7_string_0);
     v2 = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_module_8cab9f398c71107445e85d10c77ee0f7_string_3);
     if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v1) && KILN_VAL_IS_NUMBER(v2))) { double a; memcpy(&a, &v1, sizeof(a)); double b; memcpy(&b, &v2, sizeof(b)); v3 = kiln_c99_val_from_double(a + b); } else { int status = KILN_C99_OK; v3 = kiln_c99_val_binary(1, host, v1, v2, &status, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_unwind; if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal("kiln_module_8cab9f398c71107445e85d10c77ee0f7", (size_t)2, "Binary", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; }

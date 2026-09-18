@@ -568,10 +568,14 @@ pub(super) fn emit_graph_op(
                 },
                 unwind,
             );
-            if *pushes > 0 {
-                writeln!(output, "    v{v} = stack[sp - 1]; }}").unwrap();
+            if is_used {
+                if *pushes > 0 {
+                    writeln!(output, "    v{v} = stack[sp - 1]; }}").unwrap();
+                } else {
+                    writeln!(output, "    v{v} = KILN_VAL_UNDEFINED; }}").unwrap();
+                }
             } else {
-                writeln!(output, "    v{v} = KILN_VAL_UNDEFINED; }}").unwrap();
+                writeln!(output, "    }}").unwrap();
             }
         }
         GraphOp::MakeCell(slot) => {

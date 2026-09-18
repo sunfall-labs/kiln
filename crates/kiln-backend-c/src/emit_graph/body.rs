@@ -1121,7 +1121,7 @@ fn emit_block_sequence(
     // has replaced is the common case.
     let mut used: HashSet<ValueId> = HashSet::new();
     for block in &graph.blocks {
-        if block.id != graph.entry_block && block.predecessors.is_empty() {
+        if !block.is_reachable_from_entry(graph.entry_block) {
             continue;
         }
         for (vid, op) in &block.operations {
@@ -1179,15 +1179,19 @@ fn emit_block_sequence(
             _ => {}
         }
     }
-    let dead_read = |vid: ValueId, op: &GraphOp| {
+    let is_dead_effectless_op = |vid: ValueId, op: &GraphOp| {
         !used.contains(&vid)
             && match op {
-                GraphOp::LoadGlobal(_) | GraphOp::Const { .. } => true,
-                GraphOp::LoadLocal(_) | GraphOp::LoadThis | GraphOp::LoadNewTarget
-                    if plan.compact || plan.generic_only =>
-                {
-                    true
-                }
+                GraphOp::LoadGlobal(_)
+                | GraphOp::Const { .. }
+                | GraphOp::LoadLocal(_)
+                | GraphOp::LoadThis
+                | GraphOp::LoadNewTarget
+                | GraphOp::LoadBuiltin(_)
+                | GraphOp::IsReturnSignal(_)
+                | GraphOp::Unary {
+                    op: UnaryOp::Void, ..
+                } => true,
                 GraphOp::LoadCell(_) | GraphOp::LoadUpvalue(_) => plan.unchecked.contains(&vid),
                 GraphOp::StoreLocal { slot, .. } => !array_slots.contains(slot),
                 GraphOp::CheckTdz { value, .. } => {
@@ -1202,7 +1206,7 @@ fn emit_block_sequence(
     for block in &graph.blocks {
         // A block nothing jumps to is the dead code the compiler leaves after a body's
         // explicit returns: emitted, it would be an unreachable dead block epilogue.
-        if block.id != graph.entry_block && block.predecessors.is_empty() {
+        if !block.is_reachable_from_entry(graph.entry_block) {
             continue;
         }
         for from in &graph.blocks {
@@ -1329,7 +1333,7 @@ fn emit_block_sequence(
         }
 
         for &(vid, ref op) in &block.operations {
-            if dead_read(vid, op) {
+            if is_dead_effectless_op(vid, op) {
                 continue;
             }
             let mut op_text = String::new();
@@ -1485,7 +1489,7 @@ fn boxed_uses(
     // are copies: they read their input boxed only if something reads them boxed.
     let mut phis: Vec<(ValueId, Vec<ValueId>)> = Vec::new();
     for block in &graph.blocks {
-        if block.id != graph.entry_block && block.predecessors.is_empty() {
+        if !block.is_reachable_from_entry(graph.entry_block) {
             continue;
         }
         for (vid, op) in &block.operations {

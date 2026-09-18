@@ -41,8 +41,6 @@ static int kiln_module_42ec9ea3f562544b895db789b3681ee2_body(kiln_host *host, ki
     double d6_f_1 = 0.0;
     int64_t i6_f_1 = 0;
 kiln_block_0:;
-    v0 = KILN_VAL_UNDEFINED;
-    v1 = KILN_VAL_UNDEFINED;
     v2 = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_module_42ec9ea3f562544b895db789b3681ee2_string_0);
     v3 = UINT64_C(4607182418800017408);
     memcpy(&d3, &v3, sizeof(d3));
