@@ -11,13 +11,11 @@ static void kiln_module_20b1346c14e4496a4fdb7adbcd141221_gc_roots(void *heap, vo
 }
 static int kiln_module_20b1346c14e4496a4fdb7adbcd141221_body(kiln_host *host, kiln_value *result) {
     (void)kiln_realm_gc_register_roots(kiln_module_20b1346c14e4496a4fdb7adbcd141221_gc_roots, NULL, 0);
-    kiln_val receiver = KILN_VAL_UNDEFINED; (void)receiver;
     int depth = 0;
     kiln_value thrown_value = kiln_c99_undefined();
     kiln_value *thrown = &thrown_value;
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
-    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;
     kiln_val kiln_out = KILN_VAL_UNDEFINED;
     int64_t i1 = 0;
     double d1 = 0.0;

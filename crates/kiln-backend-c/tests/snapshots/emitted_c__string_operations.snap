@@ -36,13 +36,12 @@ static void kiln_module_8cab9f398c71107445e85d10c77ee0f7_gc_roots(void *heap, vo
 static int kiln_module_8cab9f398c71107445e85d10c77ee0f7_body(kiln_host *host, kiln_value *result) {
     (void)kiln_realm_gc_register_roots(kiln_module_8cab9f398c71107445e85d10c77ee0f7_gc_roots, NULL, 0);
     if (!kiln_module_8cab9f398c71107445e85d10c77ee0f7_keys_ready) { int keyed = kiln_module_8cab9f398c71107445e85d10c77ee0f7_intern_keys(); if (keyed != KILN_C99_OK) return keyed; }
-    kiln_val receiver = KILN_VAL_UNDEFINED; (void)receiver;
     int depth = 0;
     kiln_value thrown_value = kiln_c99_undefined();
     kiln_value *thrown = &thrown_value;
+    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
-    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;
     kiln_val kiln_out = KILN_VAL_UNDEFINED;
     kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED, v4 = KILN_VAL_UNDEFINED, v5 = KILN_VAL_UNDEFINED, v6 = KILN_VAL_UNDEFINED, v7 = KILN_VAL_UNDEFINED, v8 = KILN_VAL_UNDEFINED;
 kiln_block_0:;

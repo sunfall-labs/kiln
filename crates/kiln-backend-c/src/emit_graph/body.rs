@@ -85,6 +85,82 @@ fn retain_used_context(output: &mut String, context: std::ops::Range<usize>) {
     output.replace_range(context, &retained);
 }
 
+pub fn retain_used_entry_context(output: &mut String, context: std::ops::Range<usize>) {
+    const LOCALS: [(&str, &[&str]); 4] = [
+        (
+            "receiver",
+            &["    kiln_val receiver = KILN_VAL_UNDEFINED; (void)receiver;\n"],
+        ),
+        ("depth", &["    int depth = 0;\n"]),
+        (
+            "thrown",
+            &[
+                "    kiln_value thrown_value = kiln_c99_undefined();\n",
+                "    kiln_value *thrown = &thrown_value;\n",
+            ],
+        ),
+        (
+            "kiln_inheriting",
+            &[
+                "    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;\n",
+            ],
+        ),
+    ];
+    let mut used = [false; LOCALS.len()];
+    let setup = &output[context.clone()];
+    let body = &output[context.end..];
+    if body.contains("KU_BINARY(")
+        || body.contains("KU_READ_PROPERTY(")
+        || body.contains("KU_WRITE_PROPERTY(")
+        || body.contains("KU_CALL(")
+        || body.contains("KU_CALL_METHOD(")
+    {
+        used[1] = true;
+        used[2] = true;
+    }
+    if body.contains("KU_LOAD_CELL(") || body.contains("KU_STATUS(") {
+        used[2] = true;
+    }
+    let remaining_setup = setup.split_inclusive('\n').filter(|line| {
+        !LOCALS
+            .iter()
+            .any(|(_, declarations)| declarations.contains(&line))
+    });
+    for text in remaining_setup.chain(std::iter::once(body)) {
+        for identifier in text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
+            match identifier {
+                "receiver" => used[0] = true,
+                "depth" => used[1] = true,
+                "thrown" => used[2] = true,
+                "kiln_inheriting" => used[3] = true,
+                _ => {}
+            }
+        }
+    }
+    let retained = setup
+        .split_inclusive('\n')
+        .filter(|line| {
+            !LOCALS
+                .iter()
+                .enumerate()
+                .any(|(index, (_, declarations))| !used[index] && declarations.contains(&line))
+        })
+        .collect::<String>();
+    output.replace_range(context, &retained);
+}
+
+pub(crate) fn body_can_refuse(body: &str, compact: bool) -> bool {
+    body.contains("goto kiln_refusal;")
+        || (compact
+            && (body.contains("KU_STATUS(")
+                || body.contains("KU_LOAD_CELL(")
+                || body.contains("KU_BINARY(")
+                || body.contains("KU_READ_PROPERTY(")
+                || body.contains("KU_WRITE_PROPERTY(")
+                || body.contains("KU_CALL(")
+                || body.contains("KU_CALL_METHOD(")))
+}
+
 /// A runtime call that writes its answer through `&vN` takes the address of the SSA value, and
 /// a C compiler then keeps that value in memory for the whole body -- every read of it, on
 /// every path, pays a load and a store, for a slow path that rarely runs. The answer goes
@@ -631,9 +707,6 @@ pub fn emit_entry_from_graph_with_profile(
             }
         }
     }
-    output.push_str(
-        "    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;\n",
-    );
     let (shared_sites, _) = emit_blocks(
         output,
         graph,
@@ -1976,7 +2049,7 @@ fn emit_blocks(
             let fail = typed_fail(kind);
             let body = &output[body_start..];
             let unwinds = body.contains("goto kiln_unwind;");
-            let refuses = body.contains("goto kiln_refusal;") || plan.compact;
+            let refuses = body_can_refuse(body, plan.compact);
             if unwinds {
                 output.push_str("kiln_unwind:;\n");
                 writeln!(
@@ -2015,7 +2088,7 @@ fn emit_blocks(
         Site::AsyncEntry => {
             let body = &output[body_start..];
             let unwinds = body.contains("goto kiln_unwind;");
-            let refuses = body.contains("goto kiln_refusal;") || plan.compact;
+            let refuses = body_can_refuse(body, plan.compact);
             if unwinds {
                 output.push_str("kiln_unwind:;\n");
                 output.push_str("    return KILN_C99_THROWN;\n");
@@ -2033,7 +2106,7 @@ fn emit_blocks(
             // Graph module entries preserve the raw language value for dynamic-import rejection;
             // standalone entries format it at their embedding boundary.
             let unwinds = output[body_start..].contains("goto kiln_unwind;");
-            let refuses = output[body_start..].contains("goto kiln_refusal;") || plan.compact;
+            let refuses = body_can_refuse(&output[body_start..], plan.compact);
             if unwinds {
                 output.push_str("kiln_unwind:;\n");
                 if exports.is_some() {

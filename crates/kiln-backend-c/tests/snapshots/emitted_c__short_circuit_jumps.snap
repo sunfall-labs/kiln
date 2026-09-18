@@ -8,10 +8,8 @@ static void kiln_module_c5f5386408ed495d3a2dbd10ae063118_gc_roots(void *heap, vo
 }
 int kiln_module_c5f5386408ed495d3a2dbd10ae063118(kiln_host *host, kiln_value *result) {
     (void)kiln_realm_gc_register_roots(kiln_module_c5f5386408ed495d3a2dbd10ae063118_gc_roots, NULL, 0);
-    kiln_val receiver = KILN_VAL_UNDEFINED; (void)receiver;
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
-    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;
     int64_t i1 = 0;
     double d1 = 0.0;
     kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED;
