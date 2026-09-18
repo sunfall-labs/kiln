@@ -180,20 +180,13 @@ static const char *kiln_c99_method_name(uint64_t code) {
     }
 #endif
     switch (code) {
-    /* What `require("node:assert")` and `require("node:events")` hand back. Both are the module's
-     * callable default, and node names them for the module rather than for the implementation:
-     * `assert` and `EventEmitter`. One code serves `assert`, `assert.ok` and `assert.strict` here,
-     * so the name is the one node gives the value `require` returns -- the read this was measured
-     * on -- and `assert.ok.name` reads "assert" rather than node's "ok" until the three become
-     * three codes. */
-    case KILN_C99_METHOD_NODE_ASSERT_OK: return "assert";
+    /* What `require("node:events")` hands back: the module's callable default, EventEmitter. */
     case KILN_C99_METHOD_NODE_EVENT_EMITTER: return "EventEmitter";
     case KILN_C99_METHOD_NODE_EVENT_LISTENER_COUNT: return "listenerCount";
     case KILN_C99_METHOD_NODE_HTTP_SERVER: return "Server";
     case KILN_C99_METHOD_NODE_REQUEST_HEADERS_GET: return "headers";
     case KILN_C99_METHOD_NODE_REQUEST_HEADERS_SET: return "headers";
     case KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER: return "createServer";
-    case KILN_C99_METHOD_NODE_QUERYSTRING_PARSE: return "parse";
     case KILN_C99_METHOD_PROCESS_NEXT_TICK: return "nextTick";
     case KILN_C99_METHOD_PROCESS_KILL: return "kill";
     case KILN_C99_METHOD_PROCESS_EXIT: return "exit";
@@ -530,8 +523,6 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_OBJECT_PREVENT_EXTENSIONS: return "preventExtensions";
     case KILN_C99_METHOD_OBJECT_IS_EXTENSIBLE: return "isExtensible";
     case KILN_C99_METHOD_NODE_READABLE_SET_RAW_MODE: return "setRawMode";
-    case KILN_C99_METHOD_NODE_OS_HOMEDIR: return "homedir";
-    case KILN_C99_METHOD_NODE_OS_TMPDIR: return "tmpdir";
     case KILN_C99_METHOD_NODE_FS_MKDIR: return "mkdir";
     default: return NULL;
     }

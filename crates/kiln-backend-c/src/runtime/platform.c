@@ -129,37 +129,6 @@ static int kiln_c99_new_text_decoder(kiln_value *out, const kiln_value *args, si
     return status;
 }
 
-static int kiln_c99_new_async_local_storage(kiln_value *out) {
-    int status = kiln_c99_new_object(out);
-    if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, *out, "*store", 6, kiln_c99_undefined(), 0, NULL);
-    if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(*out, "getStore", 8,
-                                        kiln_c99_method(KILN_C99_METHOD_NODE_ALS_GET_STORE));
-    if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(*out, "run", 3,
-                                        kiln_c99_method(KILN_C99_METHOD_NODE_ALS_RUN));
-    if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(*out, "enterWith", 9,
-                                        kiln_c99_method(KILN_C99_METHOD_NODE_ALS_ENTER_WITH));
-    if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(*out, "exit", 4,
-                                        kiln_c99_method(KILN_C99_METHOD_NODE_ALS_EXIT));
-    if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(*out, "disable", 7,
-                                        kiln_c99_method(KILN_C99_METHOD_NODE_ALS_DISABLE));
-    if (status == KILN_C99_OK) {
-        kiln_object *object = kiln_c99_object_of(*out);
-        size_t index;
-        if (object->shape != NULL) {
-            kiln_c99_ensure_dictionary(object);
-            object->shape = NULL;
-        }
-        for (index = 0; index < object->count; ++index) object->properties[index].enumerable = 0;
-    }
-    return status;
-}
-
 static int kiln_c99_abort(kiln_host *host, kiln_value signal, kiln_value reason, int depth,
                           kiln_value *thrown) {
     kiln_value aborted;

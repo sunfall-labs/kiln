@@ -81,16 +81,12 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     }
     if (callee.tag == KILN_VALUE_METHOD &&
         (callee.bits == KILN_C99_METHOD_NODE_EVENT_EMITTER ||
-         callee.bits == KILN_C99_METHOD_NODE_ASYNC_LOCAL_STORAGE ||
          callee.bits == KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER ||
          callee.bits == KILN_C99_METHOD_NODE_STREAM ||
          callee.bits == KILN_C99_METHOD_NODE_READABLE ||
          callee.bits == KILN_C99_METHOD_NODE_WRITABLE ||
          callee.bits == KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE ||
          callee.bits == KILN_C99_METHOD_NODE_HTTP_SERVER)) {
-        if (callee.bits == KILN_C99_METHOD_NODE_ASYNC_LOCAL_STORAGE) {
-            return kiln_c99_new_async_local_storage(result);
-        }
         /* Runtime-provided constructors are methods so their identity can cross generated
          * modules without exporting a backend-private closure. EventEmitter is constructible,
          * and its ordinary-call and `new` forms deliberately share one initializer.
