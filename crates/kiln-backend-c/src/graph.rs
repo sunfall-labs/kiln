@@ -1214,7 +1214,16 @@ pub fn proven_types_with(
     graph: &FunctionGraph,
     assumptions: &HashMap<ValueId, Proven>,
 ) -> HashMap<ValueId, Proven> {
-    let ivs = find_induction_variables(graph, &HashSet::new());
+    proven_types_with_bounds(graph, assumptions, &std::collections::HashSet::new())
+}
+
+/// `proven_types_with` with explicit `length_bounds` for induction variable discovery.
+pub fn proven_types_with_bounds(
+    graph: &FunctionGraph,
+    assumptions: &HashMap<ValueId, Proven>,
+    length_bounds: &std::collections::HashSet<ValueId>,
+) -> HashMap<ValueId, Proven> {
+    let ivs = find_induction_variables(graph, length_bounds);
     // A resume target's stack phis also take what a suspend spilled and what the caller sent,
     // neither of which is an input here, so they prove nothing.
     let resume_targets: std::collections::HashSet<BlockId> = graph

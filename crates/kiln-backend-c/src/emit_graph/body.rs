@@ -1439,7 +1439,7 @@ fn boxed_uses(
     booleans: &HashSet<ValueId>,
     array_slots: &HashSet<u32>,
     kind: EntryKind,
-    spec: &Speculation,
+    _spec: &Speculation,
 ) -> HashSet<ValueId> {
     let twin_only = |op: &BinaryOp| {
         matches!(
@@ -1499,7 +1499,19 @@ fn boxed_uses(
                             && ints.contains(right)) => {}
                 GraphOp::GetComputed { object, key, .. } => {
                     used.insert(*object);
-                    if !(spec.arrays.contains(object) && ints.contains(key)) {
+                    if !ints.contains(key) {
+                        used.insert(*key);
+                    }
+                }
+                GraphOp::SetComputed {
+                    object, key, value, ..
+                }
+                | GraphOp::SetComputedStrict {
+                    object, key, value, ..
+                } => {
+                    used.insert(*object);
+                    used.insert(*value);
+                    if !ints.contains(key) {
                         used.insert(*key);
                     }
                 }
@@ -1686,7 +1698,7 @@ fn emit_blocks(
         ops.iter().any(|(_, op)| match op {
             GraphOp::Binary { op, left, right } => {
                 (left == vid || right == vid)
-                    && matches!(
+                    && (matches!(
                         op,
                         BinaryOp::Add
                             | BinaryOp::Subtract
@@ -1694,7 +1706,19 @@ fn emit_blocks(
                             | BinaryOp::Divide
                             | BinaryOp::Remainder
                             | BinaryOp::Exponentiate
-                    )
+                            | BinaryOp::LessThan
+                            | BinaryOp::LessThanOrEqual
+                            | BinaryOp::GreaterThan
+                            | BinaryOp::GreaterThanOrEqual
+                    ) || matches!(
+                        op,
+                        BinaryOp::BitwiseAnd
+                            | BinaryOp::BitwiseOr
+                            | BinaryOp::BitwiseXor
+                            | BinaryOp::ShiftLeft
+                            | BinaryOp::ShiftRight
+                            | BinaryOp::UnsignedShiftRight
+                    ))
             }
             _ => false,
         })
@@ -1762,13 +1786,12 @@ fn emit_blocks(
         .flat_map(|b| b.operations.iter().map(|(v, op)| (*v, op)))
         .collect();
     let use_counts = graph_value_use_counts(graph);
-    // A read of `length` from a guarded array bounds a loop below 2^32.
+    // A read of `length` bounds a loop below 2^32.
     let length_bounds: HashSet<ValueId> = ops
         .iter()
         .filter_map(|(vid, op)| match op {
-            GraphOp::GetProperty { object, name, .. }
-                if spec_arrays.contains(object)
-                    && matches!(program.constants.get(*name as usize), Some(Constant::String(s)) if s == "length") =>
+            GraphOp::GetProperty { name, .. }
+                if matches!(program.constants.get(*name as usize), Some(Constant::String(s)) if s == "length") =>
             {
                 Some(*vid)
             }
@@ -1810,18 +1833,16 @@ fn emit_blocks(
         // An array's `length` is an integer below 2^32; any other read of a guarded array is
         // a number, as before.
         for (vid, op) in &ops {
-            if let GraphOp::GetProperty { object, name, .. } = op
-                && spec_arrays.contains(object)
-            {
+            if let GraphOp::GetProperty { object, name, .. } = op {
                 let is_length = matches!(program.constants.get(*name as usize), Some(Constant::String(s)) if s == "length");
-                candidate_assumptions.insert(
-                    *vid,
-                    if is_length {
-                        Proven::Int
-                    } else {
-                        Proven::Number
-                    },
-                );
+                if is_length
+                    && (spec_arrays.contains(object)
+                        || matches!(defs.get(object), Some(GraphOp::NewArray { .. })))
+                {
+                    candidate_assumptions.insert(*vid, Proven::Int);
+                } else if spec_arrays.contains(object) {
+                    candidate_assumptions.insert(*vid, Proven::Number);
+                }
             }
         }
         let speculative_numbers =

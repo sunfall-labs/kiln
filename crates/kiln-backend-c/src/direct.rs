@@ -30,12 +30,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use kiln_ir::{Constant, FunctionProto, Instruction, Program, Upvalue};
+use kiln_ir::{Constant, FunctionProto, Instruction, Program, UnaryOp, Upvalue};
 
 use crate::emit_graph::method_candidates_map;
 use crate::emit_graph::sites::this_columns;
 use crate::graph::{
-    BlockId, FunctionGraph, GraphOp, Proven, Terminator, ValueId, proven_types_with,
+    BlockId, FunctionGraph, GraphOp, Proven, Terminator, ValueId, proven_types_with_bounds,
 };
 
 /// Which body a graph belongs to.
@@ -256,6 +256,25 @@ impl DirectPlan {
             .collect();
         let entry_sites = sites_of(entry, &known.entry);
 
+        let length_bounds_of = |g: &FunctionGraph| -> HashSet<ValueId> {
+            g.blocks
+                .iter()
+                .flat_map(|b| b.operations.iter())
+                .filter_map(|(v, op)| match op {
+                    GraphOp::GetProperty { name, .. } => {
+                        match program.constants.get(*name as usize) {
+                            Some(Constant::String(s)) if s == "length" => Some(*v),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let length_bounds: Vec<HashSet<ValueId>> =
+            graphs.iter().map(|g| length_bounds_of(g)).collect();
+        let entry_length_bounds = length_bounds_of(entry);
+
         // Greatest fixpoint: every typed entry returns a number until proven otherwise.
         let mut typed_returns: Vec<bool> = typed_eligible.clone();
         loop {
@@ -275,6 +294,7 @@ impl DirectPlan {
                     seeds.insert(vid, Proven::Number);
                 }
                 seeds.extend(intrinsics[i].iter().map(|(&v, &k)| (v, k)));
+
                 let (proven, _) = settle(
                     graph,
                     seeds,
@@ -282,6 +302,7 @@ impl DirectPlan {
                     &typed_eligible,
                     &typed_returns,
                     &params,
+                    &length_bounds[i],
                 );
                 // Every return a number. A block nothing reaches -- the `return undefined` the
                 // compiler leaves after a body's last statement -- returns nothing.
@@ -316,7 +337,8 @@ impl DirectPlan {
         let plan_for = |graph: &FunctionGraph,
                         known: &KnownValues,
                         sites: &[Site],
-                        seeds: HashMap<ValueId, Proven>|
+                        seeds: HashMap<ValueId, Proven>,
+                        lb: &HashSet<ValueId>|
          -> CallPlan {
             let (proven, typed_sites) = settle(
                 graph,
@@ -325,6 +347,7 @@ impl DirectPlan {
                 &typed_eligible,
                 &typed_returns,
                 &params,
+                lb,
             );
             CallPlan {
                 compact,
@@ -375,6 +398,7 @@ impl DirectPlan {
                     &known.functions[i],
                     &function_sites[i],
                     intrinsics[i].clone(),
+                    &length_bounds[i],
                 )
             })
             .collect();
@@ -396,10 +420,22 @@ impl DirectPlan {
                     seeds.insert(vid, Proven::Number);
                 }
                 seeds.extend(intrinsics[i].iter().map(|(&v, &k)| (v, k)));
-                Some(plan_for(g, &known.functions[i], &function_sites[i], seeds))
+                Some(plan_for(
+                    g,
+                    &known.functions[i],
+                    &function_sites[i],
+                    seeds,
+                    &length_bounds[i],
+                ))
             })
             .collect();
-        let entry_plan = plan_for(entry, &known.entry, &entry_sites, entry_intrinsics);
+        let entry_plan = plan_for(
+            entry,
+            &known.entry,
+            &entry_sites,
+            entry_intrinsics,
+            &entry_length_bounds,
+        );
 
         // A method call reaches a typed entry by name when the callee the cache remembers is
         // one of the unit's own methods of that name, so every such method a site could enter
@@ -673,6 +709,26 @@ pub(crate) fn intrinsic_results(
     graph: &FunctionGraph,
     program: &Program,
 ) -> HashMap<ValueId, Proven> {
+    let defs: HashMap<ValueId, &GraphOp> = graph
+        .blocks
+        .iter()
+        .flat_map(|b| b.operations.iter().map(|(v, op)| (*v, op)))
+        .collect();
+    let resolve_alias = |mut v: ValueId| -> ValueId {
+        for _ in 0..10 {
+            match defs.get(&v) {
+                Some(GraphOp::Unary {
+                    op: UnaryOp::ToNumeric | UnaryOp::Plus,
+                    value,
+                }) => v = *value,
+                Some(GraphOp::StoreLocal { value, .. })
+                | Some(GraphOp::StoreCell { value, .. })
+                | Some(GraphOp::CheckTdz { value, .. }) => v = *value,
+                _ => break,
+            }
+        }
+        v
+    };
     let math: HashSet<ValueId> = graph
         .blocks
         .iter()
@@ -740,6 +796,33 @@ pub(crate) fn intrinsic_results(
                 };
                 (key == "isArray").then_some((*v, Proven::Boolean))
             }
+            GraphOp::GetProperty { object, name, .. } => {
+                let key = match program.constants.get(*name as usize) {
+                    Some(Constant::String(s)) => s.to_scalar_string().ok()?,
+                    _ => return None,
+                };
+                if key != "length" {
+                    return None;
+                }
+                let resolved = resolve_alias(*object);
+                let is_definite_array_or_string = match defs.get(&resolved) {
+                    Some(GraphOp::NewArray { .. }) => true,
+                    Some(GraphOp::Const {
+                        constant: Constant::String(_),
+                        ..
+                    }) => true,
+                    Some(GraphOp::Unary {
+                        op: UnaryOp::TypeOf,
+                        ..
+                    }) => true,
+                    _ => false,
+                };
+                if is_definite_array_or_string {
+                    Some((*v, Proven::Int))
+                } else {
+                    None
+                }
+            }
             _ => None,
         })
         .collect()
@@ -756,6 +839,7 @@ fn settle(
     typed_eligible: &[bool],
     typed_returns: &[bool],
     params: &[u32],
+    length_bounds: &HashSet<ValueId>,
 ) -> (HashMap<ValueId, Proven>, HashSet<ValueId>) {
     let mut typed_sites: HashSet<ValueId> = sites
         .iter()
@@ -771,7 +855,7 @@ fn settle(
                 assumptions.insert(site.result, Proven::Number);
             }
         }
-        let proven = proven_types_with(graph, &assumptions);
+        let proven = proven_types_with_bounds(graph, &assumptions, length_bounds);
         let before = typed_sites.len();
         typed_sites.retain(|result| {
             let site = sites
