@@ -183,12 +183,13 @@ if [[ $KILN_NUMBER_SLIM_RUSTC_IDENTITY != "$KILN_NUMBER_EXPECTED_RUSTC_IDENTITY"
 fi
 
 "$KILN_NUMBER_CC" -std=c11 -pedantic -Wall -Wextra -Werror \
-	crates/kiln-native-number-ffi/tests/ffi_harness.c \
+	crates/kiln-native-provider-ffi/tests/ffi_harness.c \
 	"$KILN_NUMBER_ARCHIVE" -lm -o "$KILN_NUMBER_TEMP/probe"
 "$KILN_NUMBER_TEMP/probe"
 
 # Exercise the same package through the product resolver/linker. The explicit manifest wins over
 # source fallback, so a schema, target, digest, cache-key, or archive-link regression fails here.
+KILN_NATIVE_PROVIDER_MANIFEST="$KILN_NUMBER_MANIFEST" \
 KILN_NATIVE_NUMBER_PROVIDER_MANIFEST="$KILN_NUMBER_MANIFEST" \
 	kiln_cargo run --quiet --locked -p kiln-cli --bin kiln -- \
 	--one-shot build examples/hello.ts --output "$KILN_NUMBER_TEMP/native-probe" >/dev/null

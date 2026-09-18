@@ -8,10 +8,8 @@
 //!
 //! The exported names are link-time implementation details of generated artifacts, not additions
 //! to the public embedding ABI.
-//!
-//! The crate is still called `kiln-native-number-ffi`, which is now half a name. Renaming it moves
-//! a packaging contract -- the manifest field, the archive filename, the environment variable --
-//! and that is `kiln-native`'s to move; see NOTES.md.
+//! The crate is called `kiln-native-provider-ffi` (renamed from `kiln-native-number-ffi` per ADR 0025).
+//! It supplies the private Rust runtime engines and HostOps capabilities linked into native executables.
 #![deny(
     unsafe_op_in_unsafe_fn,
     clippy::arithmetic_side_effects,

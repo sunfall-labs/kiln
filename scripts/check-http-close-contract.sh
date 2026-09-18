@@ -19,7 +19,7 @@ kiln_cargo test --locked -p kiln-runtime \
 	scripted_provider_drains_response_before_same_turn_server_close
 
 kiln_say "http-close contract: the provider rejects raw HTTP resource closes"
-kiln_cargo test --locked -p kiln-native-number-ffi \
+kiln_cargo test --locked -p kiln-native-provider-ffi \
 	registered_http_connection_rejects_raw_hostops_close
 
 kiln_say "http-close contract: generated C routes HTTP closes through the realm"

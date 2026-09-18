@@ -41,7 +41,7 @@ pub const PROVIDER_GROUP_OWNERSHIP: &[GroupOwnership] = &[
     },
     GroupOwnership {
         group: "bigint",
-        owner: "kiln-native-number-ffi BigInt engine",
+        owner: "kiln-native-provider-ffi BigInt engine",
         kind: OwnershipKind::SharedSemanticEngine,
     },
     GroupOwnership {
@@ -61,12 +61,12 @@ pub const PROVIDER_GROUP_OWNERSHIP: &[GroupOwnership] = &[
     },
     GroupOwnership {
         group: "parallel",
-        owner: "kiln-native-number-ffi parallel engine",
+        owner: "kiln-native-provider-ffi parallel engine",
         kind: OwnershipKind::RuntimeEngine,
     },
     GroupOwnership {
         group: "ffi",
-        owner: "kiln-native-number-ffi foreign interface",
+        owner: "kiln-native-provider-ffi foreign interface",
         kind: OwnershipKind::ForeignInterface,
     },
 ];

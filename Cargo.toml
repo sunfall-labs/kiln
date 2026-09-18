@@ -33,7 +33,7 @@ kiln-native = { path = "crates/kiln-native" }
 kiln-native-number = { path = "crates/kiln-native-number" }
 kiln-native-number-abi = { path = "crates/kiln-native-number-abi" }
 kiln-native-provider-contract = { path = "crates/kiln-native-provider-contract" }
-kiln-native-number-ffi = { path = "crates/kiln-native-number-ffi" }
+kiln-native-provider-ffi = { path = "crates/kiln-native-provider-ffi" }
 kiln-native-runtime = { path = "crates/kiln-native-runtime" }
 kiln-number-core = { path = "crates/kiln-number-core" }
 kiln-runtime = { path = "crates/kiln-runtime" }
