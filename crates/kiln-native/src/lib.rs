@@ -1835,8 +1835,8 @@ impl NativeBuilder {
             march_native: options.march_native,
             ..CompileOptions::default()
         };
-        let mut module_keys = Vec::with_capacity(modules.len());
-        for (index, _) in modules.iter().enumerate() {
+        let mut module_keys = Vec::with_capacity(module_sources.len());
+        for index in 0..module_sources.len() {
             let (_, source_digest, _) = &module_sources[index];
             module_keys.push(NativeArtifactFamily::SharedGraphModuleObject.key(
                 &compiler,
