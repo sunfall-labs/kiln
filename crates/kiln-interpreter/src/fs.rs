@@ -147,11 +147,13 @@ pub(crate) fn property(prop: &str) -> Option<Value> {
             RealmId::PRIMARY,
         )),
         "chmodSync" => Some(Value::Native(Native::NodeFsChmodSync, RealmId::PRIMARY)),
+        "fchmodSync" => Some(Value::Native(Native::NodeFsFchmodSync, RealmId::PRIMARY)),
         "openSync" => Some(Value::Native(Native::NodeFsOpenSync, RealmId::PRIMARY)),
         "closeSync" => Some(Value::Native(Native::NodeFsCloseSync, RealmId::PRIMARY)),
         "readlinkSync" => Some(Value::Native(Native::NodeFsReadlinkSync, RealmId::PRIMARY)),
         "rmdirSync" => Some(Value::Native(Native::NodeFsRmdirSync, RealmId::PRIMARY)),
         "utimesSync" => Some(Value::Native(Native::NodeFsUtimesSync, RealmId::PRIMARY)),
+        "futimesSync" => Some(Value::Native(Native::NodeFsFutimesSync, RealmId::PRIMARY)),
         "readSync" => Some(Value::Native(Native::NodeFsSync, RealmId::PRIMARY)),
         "writeSync" => Some(Value::Native(Native::NodeFsWriteSync, RealmId::PRIMARY)),
         "ftruncateSync" | "truncateSync" => {
@@ -211,11 +213,13 @@ pub(crate) const fn js_name(native: Native) -> Option<&'static str> {
         Native::NodeFsAccessSync => Some("accessSync"),
         Native::NodeFsAppendFileSync => Some("appendFileSync"),
         Native::NodeFsChmodSync => Some("chmodSync"),
+        Native::NodeFsFchmodSync => Some("fchmodSync"),
         Native::NodeFsOpenSync => Some("openSync"),
         Native::NodeFsCloseSync => Some("closeSync"),
         Native::NodeFsReadlinkSync => Some("readlinkSync"),
         Native::NodeFsRmdirSync => Some("rmdirSync"),
         Native::NodeFsUtimesSync => Some("utimesSync"),
+        Native::NodeFsFutimesSync => Some("futimesSync"),
         Native::NodeFsReadFile => Some("readFile"),
         Native::NodeFsWriteFile => Some("writeFile"),
         Native::NodeFsAppendFile => Some("appendFile"),
@@ -684,6 +688,39 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
             }
             Ok(Value::Undefined)
         }
+        Native::NodeFsFchmodSync => {
+            let fd = arguments.first().map_or(0.0, Value::as_number) as u32;
+            let mode = arguments.get(1).map_or(0.0, Value::as_number) as u32;
+            let vfile = match vm.fd_table.get_mut(fd) {
+                Some(f) => f,
+                None => {
+                    let err = std::io::Error::from_raw_os_error(9);
+                    return Err(throw_node_error(vm, "fchmod", None, err));
+                }
+            };
+            let mut err_res = None;
+            match vfile {
+                VirtualFile::Memory { .. } => {}
+                VirtualFile::Os { file, .. } => {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let permissions = std::fs::Permissions::from_mode(mode);
+                        if let Err(err) = file.set_permissions(permissions) {
+                            err_res = Some(err);
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let _ = mode;
+                    }
+                }
+            }
+            if let Some(err) = err_res {
+                return Err(throw_node_error(vm, "fchmod", None, err));
+            }
+            Ok(Value::Undefined)
+        }
         Native::NodeFsOpenSync => {
             let path_str = arguments
                 .first()
@@ -868,6 +905,66 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
                 let err =
                     std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid time value");
                 return Err(throw_node_error(vm, "utime", Some(path_str), err));
+            }
+            Ok(Value::Undefined)
+        }
+        Native::NodeFsFutimesSync => {
+            let fd = arguments.first().map_or(0.0, Value::as_number) as u32;
+            let parse_time = |val: Option<&Value>| -> Option<std::time::SystemTime> {
+                let ms = match val? {
+                    Value::Date(d) => d.time.get(),
+                    Value::Number(n) => n * 1000.0,
+                    Value::String(s) => s.to_lossy_string().parse::<f64>().ok()? * 1000.0,
+                    _ => return None,
+                };
+                if ms.is_nan() || ms.is_infinite() {
+                    return None;
+                }
+                if ms >= 0.0 {
+                    Some(
+                        std::time::SystemTime::UNIX_EPOCH
+                            + std::time::Duration::from_millis(ms as u64),
+                    )
+                } else {
+                    Some(
+                        std::time::SystemTime::UNIX_EPOCH
+                            - std::time::Duration::from_millis((-ms) as u64),
+                    )
+                }
+            };
+            let atime = parse_time(arguments.get(1));
+            let mtime = parse_time(arguments.get(2));
+            let (atime, mtime) = match (atime, mtime) {
+                (Some(a), Some(m)) => (a, m),
+                _ => {
+                    let err =
+                        std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid time value");
+                    return Err(throw_node_error(vm, "futimes", None, err));
+                }
+            };
+
+            let vfile = match vm.fd_table.get_mut(fd) {
+                Some(f) => f,
+                None => {
+                    let err = std::io::Error::from_raw_os_error(9);
+                    return Err(throw_node_error(vm, "futimes", None, err));
+                }
+            };
+
+            let mut err_res = None;
+            match vfile {
+                VirtualFile::Memory { .. } => {}
+                VirtualFile::Os { file, .. } => {
+                    let mut times = std::fs::FileTimes::new();
+                    times = times.set_accessed(atime);
+                    times = times.set_modified(mtime);
+                    if let Err(err) = file.set_times(times) {
+                        err_res = Some(err);
+                    }
+                }
+            }
+            if let Some(err) = err_res {
+                return Err(throw_node_error(vm, "futimes", None, err));
             }
             Ok(Value::Undefined)
         }
@@ -1571,7 +1668,63 @@ mod tests {
         .expect("fsyncSync succeeds");
         assert!(matches!(sync_res, Value::Undefined));
 
-        // 8. closeSync
+        // 8. fchmodSync and futimesSync
+        let chmod_args = vec![Value::Number(fd as f64), Value::Number(0o644 as f64)];
+        let chmod_res = dispatch(
+            &mut vm,
+            Native::NodeFsFchmodSync,
+            &Value::Undefined,
+            &chmod_args,
+            0,
+        )
+        .expect("fchmodSync succeeds");
+        assert!(matches!(chmod_res, Value::Undefined));
+
+        let utimes_args = vec![
+            Value::Number(fd as f64),
+            Value::Number(1700000000.0),
+            Value::Number(1700000000.0),
+        ];
+        let utimes_res = dispatch(
+            &mut vm,
+            Native::NodeFsFutimesSync,
+            &Value::Undefined,
+            &utimes_args,
+            0,
+        )
+        .expect("futimesSync succeeds");
+        assert!(matches!(utimes_res, Value::Undefined));
+
+        // Invalid fd throws EBADF
+        let bad_chmod_args = vec![Value::Number(999.0), Value::Number(0o644 as f64)];
+        assert!(
+            dispatch(
+                &mut vm,
+                Native::NodeFsFchmodSync,
+                &Value::Undefined,
+                &bad_chmod_args,
+                0
+            )
+            .is_err()
+        );
+
+        let bad_utimes_args = vec![
+            Value::Number(999.0),
+            Value::Number(1000.0),
+            Value::Number(2000.0),
+        ];
+        assert!(
+            dispatch(
+                &mut vm,
+                Native::NodeFsFutimesSync,
+                &Value::Undefined,
+                &bad_utimes_args,
+                0
+            )
+            .is_err()
+        );
+
+        // 9. closeSync
         let close_args = vec![Value::Number(fd as f64)];
         let close_res = dispatch(
             &mut vm,
@@ -1583,7 +1736,7 @@ mod tests {
         .expect("closeSync succeeds");
         assert!(matches!(close_res, Value::Undefined));
 
-        // 9. Check VFS backing has "Hello"
+        // 10. Check VFS backing has "Hello"
         let final_bytes = with_fs(&mut vm, |fs| fs.read(&test_path)).expect("vfs read");
         assert_eq!(final_bytes, b"Hello");
     }
