@@ -1233,3 +1233,18 @@ declare_ts_builtins! {
         ],
     },
 }
+
+pub const WEB_BOOTSTRAP_SOURCE: &str = include_str!("web.ts");
+
+#[cfg(test)]
+mod web_tests {
+    use super::*;
+
+    #[test]
+    fn web_bootstrap_compiles_cleanly() {
+        let hir = frontend_oxc::parse("@kiln/web-bootstrap.ts", WEB_BOOTSTRAP_SOURCE);
+        let program = kiln_ir::compile_module(&hir)
+            .expect("web bootstrap should compile to IR without error");
+        assert!(!program.program.code.is_empty());
+    }
+}

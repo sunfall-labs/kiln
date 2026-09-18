@@ -208,6 +208,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
                         project_root,
                         output,
                         profile,
+                        node,
                         explain,
                         static_link,
                         pgo_gen,
@@ -279,6 +280,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
                         path,
                         project_root,
                         profile,
+                        node,
                         static_link,
                         pgo_gen,
                         pgo_u,
@@ -1645,6 +1647,7 @@ pub(crate) fn native_build_program(
             static_link,
             pgo_generate,
             pgo_use,
+            node: false,
         },
     ) {
         Ok(report) => {
@@ -1784,6 +1787,7 @@ pub(crate) fn native_build_graph(
     project_root: String,
     output: Option<String>,
     profile: NativeProfile,
+    node: bool,
     explain: bool,
     static_link: bool,
     pgo_generate: Option<PathBuf>,
@@ -1823,6 +1827,7 @@ pub(crate) fn native_build_graph(
             static_link,
             pgo_generate,
             pgo_use,
+            node,
         },
     ) {
         Ok(report) => {
@@ -1889,6 +1894,7 @@ pub(crate) fn native_run_program(
             static_link,
             pgo_generate,
             pgo_use,
+            node: false,
         },
     ) {
         Ok(report) => native_ran(&project_root, &builder, report),
@@ -1898,11 +1904,13 @@ pub(crate) fn native_run_program(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn native_run_graph(
     graph: &ModuleGraph,
     path: String,
     project_root: String,
     profile: NativeProfile,
+    node: bool,
     static_link: bool,
     pgo_generate: Option<PathBuf>,
     pgo_use: Option<PathBuf>,
@@ -1927,6 +1935,7 @@ pub(crate) fn native_run_graph(
             static_link,
             pgo_generate,
             pgo_use,
+            node,
         },
     ) {
         Ok(report) => native_ran(&project_root, &builder, report),

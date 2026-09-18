@@ -2262,7 +2262,8 @@ impl NativeBuilder {
             generated_c_hits.push(generated_c_hit);
             modules.push((node, emitted));
         }
-        let bootstrap = native_builtin_bootstrap_module(&emission)?;
+        let (bootstrap, bootstrap_program) =
+            native_builtin_bootstrap_module(&emission, options.node)?;
         if !symbols.insert(bootstrap.symbol.clone()) {
             return Err(NativeError::SymbolCollision {
                 symbol: bootstrap.symbol,
@@ -2314,8 +2315,11 @@ impl NativeBuilder {
         let paths = GraphBuildPaths::new(workspace.path(), &symbol_list);
         let profile = options.profile;
         let compiler = compiler_identity(&identity);
+        let bootstrap_capabilities =
+            kiln_liveness::program_provider_capabilities(&bootstrap_program, None);
         let required_provider_capabilities =
-            kiln_liveness::retained_provider_capabilities(graph, &demand, &members);
+            kiln_liveness::retained_provider_capabilities(graph, &demand, &members)
+                .union(bootstrap_capabilities);
         let (number_provider, number_provider_digest, _, provider_capabilities) =
             self.cached_number_provider_for(&target, required_provider_capabilities)?;
 
@@ -3527,20 +3531,27 @@ fn emit_native_graph_module_with_policy(
 
 fn native_builtin_bootstrap_module(
     policy: &EmissionPolicy,
-) -> Result<kiln_backend_c::CModule, NativeError> {
+    node: bool,
+) -> Result<(kiln_backend_c::CModule, kiln_ir::ModuleProgram), NativeError> {
     const LOGICAL_PATH: &str = "@kiln/runtime-bootstrap.ts";
-    let hir = frontend_oxc::parse(LOGICAL_PATH, NATIVE_BUILTIN_BOOTSTRAP_SOURCE);
+    let source = if node {
+        format!(
+            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{}",
+            kiln_builtins::WEB_BOOTSTRAP_SOURCE
+        )
+    } else {
+        NATIVE_BUILTIN_BOOTSTRAP_SOURCE.to_owned()
+    };
+    let hir = frontend_oxc::parse(LOGICAL_PATH, &source);
     let program = kiln_ir::compile_module(&hir).map_err(|diagnostics| {
         NativeError::Graph(ModuleGraphError::Compile {
             path: PathBuf::from(LOGICAL_PATH),
             diagnostics,
         })
     })?;
-    Ok(emit_module_with_logical_path_and_policy(
-        &program,
-        LOGICAL_PATH,
-        policy.clone(),
-    )?)
+    let c_module =
+        emit_module_with_logical_path_and_policy(&program, LOGICAL_PATH, policy.clone())?;
+    Ok((c_module, program))
 }
 
 fn cached_payload(

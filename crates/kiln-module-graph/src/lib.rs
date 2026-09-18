@@ -1912,6 +1912,37 @@ impl ModuleGraph {
             ensuring_targets: HashSet::new(),
         };
 
+        if node {
+            let hir = frontend_oxc::parse(
+                "@kiln/web-bootstrap.ts",
+                kiln_builtins::WEB_BOOTSTRAP_SOURCE,
+            );
+            let bootstrap_program =
+                compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+                    path: PathBuf::from("@kiln/web-bootstrap.ts"),
+                    diagnostics,
+                })?;
+            let res = execute_node_module_in_session_with_loader(
+                &bootstrap_program,
+                &[],
+                &[],
+                host,
+                limits,
+                &mut runtime,
+                node_session.as_mut().expect("Node mode owns a session"),
+                capabilities.clone(),
+                false,
+                &mut commonjs_loader,
+                true,
+                Some("@kiln/web-bootstrap.ts"),
+            )
+            .map_err(|error| ModuleGraphError::Execution {
+                module: PathBuf::from("@kiln/web-bootstrap.ts"),
+                error,
+            })?;
+            total_steps = total_steps.saturating_add(res.execution.steps);
+        }
+
         let static_reachable = self.statically_reachable();
         for path in self.order.iter() {
             if !static_reachable.contains(path) {

@@ -4368,8 +4368,9 @@ fn native_graph_wiring_uses_resolved_star_export_origins() {
         1
     );
     assert!(!launcher.contains("kiln_graph_enter_module"));
-    let bootstrap = native_builtin_bootstrap_module(&NativeRealmPolicy::default().emission())
-        .expect("builtin bootstrap emits");
+    let (bootstrap, _) =
+        native_builtin_bootstrap_module(&NativeRealmPolicy::default().emission(), false)
+            .expect("builtin bootstrap emits");
     let bootstrapped = graph_launcher_source_with_imports(
         &graph,
         &modules,
