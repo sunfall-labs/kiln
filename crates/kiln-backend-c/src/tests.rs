@@ -8020,3 +8020,295 @@ int main(void) {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+#[test]
+fn executable_math_all_pure_functions_unboxed() {
+    // const s = Math.sin(0.0); // 0.0
+    // const c = Math.cos(0.0); // 1.0
+    // const h = Math.hypot(3.0, 4.0); // 5.0
+    // const l = Math.log2(8.0); // 3.0
+    // return (s === 0.0) && (c === 1.0) && (h === 5.0) && (l === 3.0);
+    let constants = vec![
+        Constant::String("sin".into()),     // 0
+        Constant::Number(0.0f64.to_bits()), // 1
+        Constant::String("cos".into()),     // 2
+        Constant::String("hypot".into()),   // 3
+        Constant::Number(3.0f64.to_bits()), // 4
+        Constant::Number(4.0f64.to_bits()), // 5
+        Constant::String("log2".into()),    // 6
+        Constant::Number(8.0f64.to_bits()), // 7
+        Constant::Number(1.0f64.to_bits()), // 8
+        Constant::Number(5.0f64.to_bits()), // 9
+    ];
+
+    let code = vec![
+        // s = Math.sin(0.0)
+        Instruction::LoadBuiltin(kiln_ir::Builtin::Math),
+        Instruction::Const(1),
+        Instruction::CallMethod { name: 0, argc: 1 },
+        Instruction::Const(1),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::StoreLocal(0),
+        // c = Math.cos(0.0)
+        Instruction::LoadBuiltin(kiln_ir::Builtin::Math),
+        Instruction::Const(1),
+        Instruction::CallMethod { name: 2, argc: 1 },
+        Instruction::Const(8),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::StoreLocal(1),
+        // h = Math.hypot(3.0, 4.0)
+        Instruction::LoadBuiltin(kiln_ir::Builtin::Math),
+        Instruction::Const(4),
+        Instruction::Const(5),
+        Instruction::CallMethod { name: 3, argc: 2 },
+        Instruction::Const(9),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::StoreLocal(2),
+        // l = Math.log2(8.0)
+        Instruction::LoadBuiltin(kiln_ir::Builtin::Math),
+        Instruction::Const(7),
+        Instruction::CallMethod { name: 6, argc: 1 },
+        Instruction::Const(4),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::StoreLocal(3),
+        // s && c && h && l (all are boolean true)
+        Instruction::LoadLocal(0),
+        Instruction::LoadLocal(1),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::LoadLocal(2),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::LoadLocal(3),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::Return,
+    ];
+
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants,
+        code,
+        local_count: 4,
+        functions: Vec::new(),
+        template_sites: Vec::new(),
+    };
+
+    let generated = emit(&program).expect("program emits");
+    assert!(
+        generated.source.contains("sin(") && generated.source.contains("hypot("),
+        "expected inline sin and hypot in generated source:\n{}",
+        generated.source
+    );
+    let wrapper = format!(
+        "int main(void) {{ kiln_value result; int status = {}(NULL, &result); if (status != 0) return 2; return (result.tag == KILN_VALUE_BOOLEAN && result.bits == 1) ? 0 : 3; }}\n",
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "math-pure-unboxed");
+    assert!(
+        run.status.success(),
+        "math pure unboxed execution failed ({:?}):\nstdout: {}\nstderr: {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_static_builtin_predicates_array_is_array() {
+    let constants = vec![
+        Constant::String("isArray".into()),  // 0
+        Constant::Number(42.0f64.to_bits()), // 1
+        Constant::String("hello".into()),    // 2
+        Constant::Boolean(true),             // 3
+        Constant::Null,                      // 4
+    ];
+
+    let code = vec![
+        // r0 = Array.isArray([]) -> true
+        Instruction::LoadBuiltin(kiln_ir::Builtin::Array),
+        Instruction::NewArray { count: 0 },
+        Instruction::CallMethod { name: 0, argc: 1 },
+        Instruction::StoreLocal(0),
+        // r1 = Array.isArray(42) -> false
+        Instruction::LoadBuiltin(kiln_ir::Builtin::Array),
+        Instruction::Const(1),
+        Instruction::CallMethod { name: 0, argc: 1 },
+        Instruction::Unary(UnaryOp::Not),
+        Instruction::StoreLocal(1),
+        // r2 = Array.isArray("hello") -> false
+        Instruction::LoadBuiltin(kiln_ir::Builtin::Array),
+        Instruction::Const(2),
+        Instruction::CallMethod { name: 0, argc: 1 },
+        Instruction::Unary(UnaryOp::Not),
+        Instruction::StoreLocal(2),
+        // r3 = Array.isArray(true) -> false
+        Instruction::LoadBuiltin(kiln_ir::Builtin::Array),
+        Instruction::Const(3),
+        Instruction::CallMethod { name: 0, argc: 1 },
+        Instruction::Unary(UnaryOp::Not),
+        Instruction::StoreLocal(3),
+        // r4 = Array.isArray(null) -> false
+        Instruction::LoadBuiltin(kiln_ir::Builtin::Array),
+        Instruction::Const(4),
+        Instruction::CallMethod { name: 0, argc: 1 },
+        Instruction::Unary(UnaryOp::Not),
+        Instruction::StoreLocal(4),
+        // r0 && r1 && r2 && r3 && r4
+        Instruction::LoadLocal(0),
+        Instruction::LoadLocal(1),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::LoadLocal(2),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::LoadLocal(3),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::LoadLocal(4),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::Return,
+    ];
+
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants,
+        code,
+        local_count: 5,
+        functions: Vec::new(),
+        template_sites: Vec::new(),
+    };
+
+    let generated = emit(&program).expect("program emits");
+    assert!(
+        generated.source.contains("KILN_C99_BUILTIN_ARRAY"),
+        "expected KILN_C99_BUILTIN_ARRAY in generated source:\n{}",
+        generated.source
+    );
+    let wrapper = format!(
+        "int main(void) {{ kiln_value result; int status = {}(NULL, &result); if (status != 0) return 2; return (result.tag == KILN_VALUE_BOOLEAN && result.bits == 1) ? 0 : 3; }}\n",
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "array-is-array");
+    assert!(
+        run.status.success(),
+        "array isArray execution failed ({:?}):\nstdout: {}\nstderr: {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_static_builtin_predicates_number() {
+    let constants = vec![
+        Constant::String("isFinite".into()),               // 0
+        Constant::Number(100.0f64.to_bits()),              // 1
+        Constant::Number(f64::INFINITY.to_bits()),         // 2
+        Constant::String("isNaN".into()),                  // 3
+        Constant::Number(f64::NAN.to_bits()),              // 4
+        Constant::String("isInteger".into()),              // 5
+        Constant::Number(42.5f64.to_bits()),               // 6
+        Constant::String("isSafeInteger".into()),          // 7
+        Constant::Number(9007199254740991.0f64.to_bits()), // 8: 2^53 - 1
+        Constant::Number(9007199254740992.0f64.to_bits()), // 9: 2^53
+        Constant::String("42".into()),                     // 10: string "42"
+    ];
+
+    let code = vec![
+        // r0 = Number.isFinite(100) -> true
+        Instruction::LoadBuiltin(kiln_ir::Builtin::Number),
+        Instruction::Const(1),
+        Instruction::CallMethod { name: 0, argc: 1 },
+        Instruction::StoreLocal(0),
+        // r1 = Number.isFinite(Infinity) -> false
+        Instruction::LoadBuiltin(kiln_ir::Builtin::Number),
+        Instruction::Const(2),
+        Instruction::CallMethod { name: 0, argc: 1 },
+        Instruction::Unary(UnaryOp::Not),
+        Instruction::StoreLocal(1),
+        // r2 = Number.isNaN(NaN) -> true
+        Instruction::LoadBuiltin(kiln_ir::Builtin::Number),
+        Instruction::Const(4),
+        Instruction::CallMethod { name: 3, argc: 1 },
+        Instruction::StoreLocal(2),
+        // r3 = Number.isNaN(100) -> false
+        Instruction::LoadBuiltin(kiln_ir::Builtin::Number),
+        Instruction::Const(1),
+        Instruction::CallMethod { name: 3, argc: 1 },
+        Instruction::Unary(UnaryOp::Not),
+        Instruction::StoreLocal(3),
+        // r4 = Number.isInteger(100) -> true
+        Instruction::LoadBuiltin(kiln_ir::Builtin::Number),
+        Instruction::Const(1),
+        Instruction::CallMethod { name: 5, argc: 1 },
+        Instruction::StoreLocal(4),
+        // r5 = Number.isInteger(42.5) -> false
+        Instruction::LoadBuiltin(kiln_ir::Builtin::Number),
+        Instruction::Const(6),
+        Instruction::CallMethod { name: 5, argc: 1 },
+        Instruction::Unary(UnaryOp::Not),
+        Instruction::StoreLocal(5),
+        // r6 = Number.isSafeInteger(9007199254740991) -> true
+        Instruction::LoadBuiltin(kiln_ir::Builtin::Number),
+        Instruction::Const(8),
+        Instruction::CallMethod { name: 7, argc: 1 },
+        Instruction::StoreLocal(6),
+        // r7 = Number.isSafeInteger(9007199254740992) -> false
+        Instruction::LoadBuiltin(kiln_ir::Builtin::Number),
+        Instruction::Const(9),
+        Instruction::CallMethod { name: 7, argc: 1 },
+        Instruction::Unary(UnaryOp::Not),
+        Instruction::StoreLocal(7),
+        // r8 = Number.isInteger("42") -> false
+        Instruction::LoadBuiltin(kiln_ir::Builtin::Number),
+        Instruction::Const(10),
+        Instruction::CallMethod { name: 5, argc: 1 },
+        Instruction::Unary(UnaryOp::Not),
+        Instruction::StoreLocal(8),
+        // Check all are true: r0 && r1 && r2 && r3 && r4 && r5 && r6 && r7 && r8
+        Instruction::LoadLocal(0),
+        Instruction::LoadLocal(1),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::LoadLocal(2),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::LoadLocal(3),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::LoadLocal(4),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::LoadLocal(5),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::LoadLocal(6),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::LoadLocal(7),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::LoadLocal(8),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::Return,
+    ];
+
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants,
+        code,
+        local_count: 9,
+        functions: Vec::new(),
+        template_sites: Vec::new(),
+    };
+
+    let generated = emit(&program).expect("program emits");
+    assert!(
+        generated.source.contains("KILN_C99_BUILTIN_NUMBER"),
+        "expected KILN_C99_BUILTIN_NUMBER in generated source:\n{}",
+        generated.source
+    );
+    let wrapper = format!(
+        "int main(void) {{ kiln_value result; int status = {}(NULL, &result); if (status != 0) return 2; return (result.tag == KILN_VALUE_BOOLEAN && result.bits == 1) ? 0 : 3; }}\n",
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "number-predicates");
+    assert!(
+        run.status.success(),
+        "number predicates execution failed ({:?}):\nstdout: {}\nstderr: {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}

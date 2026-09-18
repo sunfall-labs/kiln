@@ -1035,6 +1035,134 @@ pub(super) fn emit_call_method(
     let math_intrinsic = math_intrinsic
         .map(|text| format!("if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0)) {{ {text} }}"));
 
+    // 1b. Array.isArray static predicate
+    let array_is_array_intrinsic = if key_str == "isArray" {
+        let arg_check = if argc == 0 {
+            format!("v{v} = KILN_VAL_FALSE; handled = 1;")
+        } else {
+            let a0 = args[0].0;
+            if numbers.contains(&args[0]) {
+                format!("v{v} = KILN_VAL_FALSE; handled = 1;")
+            } else {
+                format!(
+                    "if ((v{a0} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_LIKELY(kiln_c99_gc_kind_of_ptr(KILN_VAL_PTR(v{a0})) == KILN_GC_ARRAY)) {{ \
+                         v{v} = KILN_VAL_TRUE; \
+                         handled = 1; \
+                     }} else if (KILN_VAL_IS_NUMBER(v{a0}) || KILN_VAL_IS_BOOLEAN(v{a0}) || KILN_VAL_IS_NULLISH(v{a0}) || KILN_VAL_IS_STRING(v{a0}) || ((v{a0} & KILN_TAG_MASK) == KILN_TAG_BIGINT_PREFIX) || ((v{a0} & KILN_TAG_MASK) == KILN_TAG_SYMBOL_PREFIX) || KILN_VAL_IS_CLOSURE(v{a0})) {{ \
+                         v{v} = KILN_VAL_FALSE; \
+                         handled = 1; \
+                     }}"
+                )
+            }
+        };
+        Some(format!(
+            "if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_ARRAY)) {{ \
+                 {arg_check} \
+             }}",
+            o = object.0,
+            arg_check = arg_check
+        ))
+    } else {
+        None
+    };
+
+    // 1c. Number.* static predicates (isFinite, isNaN, isInteger, isSafeInteger)
+    let number_predicate_intrinsic = match (key_str.as_str(), argc) {
+        ("isFinite" | "isNaN" | "isInteger" | "isSafeInteger", 0) => Some(format!(
+            "if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
+                 v{v} = KILN_VAL_FALSE; \
+                 handled = 1; \
+             }}",
+            o = object.0,
+            v = v
+        )),
+        ("isFinite", _) => {
+            let a0 = args[0].0;
+            let check = if ints.contains(&args[0]) {
+                format!("v{v} = KILN_VAL_TRUE; handled = 1;")
+            } else if numbers.contains(&args[0]) {
+                format!("v{v} = isfinite(d{a0}) ? KILN_VAL_TRUE : KILN_VAL_FALSE; handled = 1;")
+            } else {
+                format!(
+                    "if (!KILN_VAL_IS_NUMBER(v{a0})) {{ v{v} = KILN_VAL_FALSE; handled = 1; }} \
+                     else {{ double d; memcpy(&d, &v{a0}, sizeof(d)); v{v} = isfinite(d) ? KILN_VAL_TRUE : KILN_VAL_FALSE; handled = 1; }}"
+                )
+            };
+            Some(format!(
+                "if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
+                     {check} \
+                 }}",
+                o = object.0,
+                check = check
+            ))
+        }
+        ("isNaN", _) => {
+            let a0 = args[0].0;
+            let check = if ints.contains(&args[0]) {
+                format!("v{v} = KILN_VAL_FALSE; handled = 1;")
+            } else if numbers.contains(&args[0]) {
+                format!("v{v} = isnan(d{a0}) ? KILN_VAL_TRUE : KILN_VAL_FALSE; handled = 1;")
+            } else {
+                format!(
+                    "if (!KILN_VAL_IS_NUMBER(v{a0})) {{ v{v} = KILN_VAL_FALSE; handled = 1; }} \
+                     else {{ double d; memcpy(&d, &v{a0}, sizeof(d)); v{v} = isnan(d) ? KILN_VAL_TRUE : KILN_VAL_FALSE; handled = 1; }}"
+                )
+            };
+            Some(format!(
+                "if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
+                     {check} \
+                 }}",
+                o = object.0,
+                check = check
+            ))
+        }
+        ("isInteger", _) => {
+            let a0 = args[0].0;
+            let check = if ints.contains(&args[0]) {
+                format!("v{v} = KILN_VAL_TRUE; handled = 1;")
+            } else if numbers.contains(&args[0]) {
+                format!(
+                    "v{v} = (isfinite(d{a0}) && floor(d{a0}) == d{a0}) ? KILN_VAL_TRUE : KILN_VAL_FALSE; handled = 1;"
+                )
+            } else {
+                format!(
+                    "if (!KILN_VAL_IS_NUMBER(v{a0})) {{ v{v} = KILN_VAL_FALSE; handled = 1; }} \
+                     else {{ double d; memcpy(&d, &v{a0}, sizeof(d)); v{v} = (isfinite(d) && floor(d) == d) ? KILN_VAL_TRUE : KILN_VAL_FALSE; handled = 1; }}"
+                )
+            };
+            Some(format!(
+                "if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
+                     {check} \
+                 }}",
+                o = object.0,
+                check = check
+            ))
+        }
+        ("isSafeInteger", _) => {
+            let a0 = args[0].0;
+            let check = if ints.contains(&args[0]) {
+                format!("v{v} = KILN_VAL_TRUE; handled = 1;")
+            } else if numbers.contains(&args[0]) {
+                format!(
+                    "v{v} = (isfinite(d{a0}) && floor(d{a0}) == d{a0} && fabs(d{a0}) <= 9007199254740991.0) ? KILN_VAL_TRUE : KILN_VAL_FALSE; handled = 1;"
+                )
+            } else {
+                format!(
+                    "if (!KILN_VAL_IS_NUMBER(v{a0})) {{ v{v} = KILN_VAL_FALSE; handled = 1; }} \
+                     else {{ double d; memcpy(&d, &v{a0}, sizeof(d)); v{v} = (isfinite(d) && floor(d) == d && fabs(d) <= 9007199254740991.0) ? KILN_VAL_TRUE : KILN_VAL_FALSE; handled = 1; }}"
+                )
+            };
+            Some(format!(
+                "if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
+                     {check} \
+                 }}",
+                o = object.0,
+                check = check
+            ))
+        }
+        _ => None,
+    };
+
     // 2. Array push intrinsic
     let push_intrinsic = if key_str == "push" && argc == 1 {
         let a0 = args[0].0;
@@ -2200,6 +2328,12 @@ pub(super) fn emit_call_method(
         .as_ref()
         .map(|s| format!(" {s}"))
         .unwrap_or_default();
+    let array_is_array_s = array_is_array_intrinsic
+        .map(|s| format!(" {s}"))
+        .unwrap_or_default();
+    let number_predicate_s = number_predicate_intrinsic
+        .map(|s| format!(" {s}"))
+        .unwrap_or_default();
     let await_resolve_s = await_resolve_intrinsic
         .map(|s| format!(" {s}"))
         .unwrap_or_default();
@@ -2274,7 +2408,7 @@ pub(super) fn emit_call_method(
                 "    {{ static kiln_c99_site site = {{0}}; \
                 kiln_val call_args[{n}]; int call_args_ready = 0; (void)call_args_ready; \
                 int handled = 0; int kiln_twin = 0; (void)kiln_twin; {typed_remembered}\
-                {await_resolve_s}{math_s}{push_s}{regex_s}{map_s}{parallel_pool_s}{parallel_map_s}{filter_s}{reduce_s}{slice_s}{join_s}{split_s}{index_of_s}{substring_s}{collection_s}{json_s}{sort_s}{array_extra_s}{string_extra_s}{iterator_s} \
+                {await_resolve_s}{math_s}{array_is_array_s}{number_predicate_s}{push_s}{regex_s}{map_s}{parallel_pool_s}{parallel_map_s}{filter_s}{reduce_s}{slice_s}{join_s}{split_s}{index_of_s}{substring_s}{collection_s}{json_s}{sort_s}{array_extra_s}{string_extra_s}{iterator_s} \
                 if (!handled && KILN_VAL_IS_OBJECT(v{o})) {{ \
                     const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); if (obj == NULL) __builtin_unreachable(); \
                     {typed_fast_block}\

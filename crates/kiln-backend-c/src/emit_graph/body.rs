@@ -1482,10 +1482,21 @@ fn boxed_uses(
                     phis.push((*vid, vec![*value]));
                 }
                 GraphOp::Unary { op, value }
-                    if matches!(op, UnaryOp::Plus | UnaryOp::ToNumeric | UnaryOp::Negate)
-                        && numbers.contains(value) => {}
+                    if (matches!(op, UnaryOp::Plus | UnaryOp::ToNumeric | UnaryOp::Negate)
+                        && numbers.contains(value))
+                        || (*op == UnaryOp::BitwiseNot && ints.contains(value)) => {}
                 GraphOp::Binary { op, left, right }
-                    if twin_only(op) && numbers.contains(left) && numbers.contains(right) => {}
+                    if (twin_only(op) && numbers.contains(left) && numbers.contains(right))
+                        || (matches!(
+                            op,
+                            BinaryOp::BitwiseAnd
+                                | BinaryOp::BitwiseOr
+                                | BinaryOp::BitwiseXor
+                                | BinaryOp::ShiftLeft
+                                | BinaryOp::ShiftRight
+                                | BinaryOp::UnsignedShiftRight
+                        ) && ints.contains(left)
+                            && ints.contains(right)) => {}
                 GraphOp::GetComputed { object, key, .. } => {
                     used.insert(*object);
                     if !(spec.arrays.contains(object) && ints.contains(key)) {
@@ -1495,26 +1506,38 @@ fn boxed_uses(
                 GraphOp::CallMethod {
                     object, name, args, ..
                 } => {
-                    let is_math = matches!(
-                        defs.get(object),
-                        Some(GraphOp::LoadBuiltin(kiln_ir::Builtin::Math))
-                    );
+                    let builtin = match defs.get(object) {
+                        Some(GraphOp::LoadBuiltin(b)) => Some(*b),
+                        _ => None,
+                    };
                     let key = program.constants.get(*name as usize).and_then(|c| match c {
                         Constant::String(s) => s.to_scalar_string().ok(),
                         _ => None,
                     });
-                    let is_math_intrinsic = is_math
+                    let is_pure_math = matches!(builtin, Some(kiln_ir::Builtin::Math))
                         && match (key.as_deref(), args.len()) {
                             (
                                 Some(
-                                    "sqrt" | "abs" | "floor" | "ceil" | "round" | "trunc" | "sign",
+                                    "sqrt" | "abs" | "floor" | "ceil" | "round" | "trunc" | "sign"
+                                    | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh"
+                                    | "cosh" | "tanh" | "asinh" | "acosh" | "atanh" | "exp"
+                                    | "expm1" | "log" | "log2" | "log10" | "log1p" | "cbrt"
+                                    | "clz32" | "fround",
                                 ),
                                 1,
                             ) => true,
-                            (Some("pow" | "min" | "max"), 2) => true,
+                            (Some("pow" | "min" | "max" | "atan2" | "hypot" | "imul"), 2) => true,
                             _ => false,
                         };
-                    if is_math_intrinsic {
+                    let is_number_predicate = matches!(builtin, Some(kiln_ir::Builtin::Number))
+                        && matches!(
+                            key.as_deref(),
+                            Some("isFinite" | "isNaN" | "isInteger" | "isSafeInteger")
+                        );
+                    let is_array_predicate = matches!(builtin, Some(kiln_ir::Builtin::Array))
+                        && key.as_deref() == Some("isArray");
+
+                    if is_pure_math || is_number_predicate || is_array_predicate {
                         for arg in args {
                             if !numbers.contains(arg) {
                                 used.insert(*arg);
@@ -1722,17 +1745,16 @@ fn emit_blocks(
 
     let baseline_numbers = &plan.numbers;
     let baseline_ints = &plan.ints;
+    let baseline_assumptions: std::collections::HashMap<ValueId, Proven> = baseline_numbers
+        .iter()
+        .map(|&v| (v, Proven::Number))
+        .chain(baseline_ints.iter().map(|&v| (v, Proven::Int)))
+        .chain(crate::direct::intrinsic_results(graph, program))
+        .collect();
     let baseline_booleans = if plan.generic_only {
         HashSet::new()
     } else {
-        booleans_with(
-            graph,
-            &baseline_numbers
-                .iter()
-                .map(|&v| (v, Proven::Number))
-                .chain(baseline_ints.iter().map(|&v| (v, Proven::Int)))
-                .collect(),
-        )
+        booleans_with(graph, &baseline_assumptions)
     };
     let defs: std::collections::HashMap<ValueId, &GraphOp> = graph
         .blocks
@@ -1776,11 +1798,7 @@ fn emit_blocks(
         // proofs is not a proof -- an operation whose operands each came from one would be
         // typed by neither and have no twin.
         let mut candidate_assumptions: std::collections::HashMap<ValueId, Proven> =
-            baseline_numbers
-                .iter()
-                .map(|&v| (v, Proven::Number))
-                .chain(baseline_ints.iter().map(|&v| (v, Proven::Int)))
-                .collect();
+            baseline_assumptions.clone();
         for &slot in &candidate_params {
             if let Some(&vid) = graph.initial_locals.get(slot) {
                 candidate_assumptions.insert(vid, Proven::Number);
