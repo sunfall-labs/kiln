@@ -710,6 +710,7 @@ declare_ts_builtins! {
         presence_test: fs_promises_builtin_source_is_present,
         compilation_test: fs_promises_builtin_compiles_cleanly,
         exports: [
+            "FileHandle",
             "access",
             "appendFile",
             "chmod",
@@ -761,7 +762,10 @@ declare_ts_builtins! {
             "createWriteStream",
             "default",
             "existsSync",
+            "fdatasyncSync",
             "fstatSync",
+            "fsyncSync",
+            "ftruncateSync",
             "glob",
             "globSync",
             "lstatSync",
