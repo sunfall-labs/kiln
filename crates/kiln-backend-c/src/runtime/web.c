@@ -317,50 +317,6 @@ static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
     return KILN_C99_OK;
 }
 
-/* Decode one application/x-www-form-urlencoded component. Unlike decodeURIComponent, malformed
- * percent escapes remain literal and `+` names a space. Query strings are deliberately forgiving:
- * one bad escape must not make the whole request unreadable. */
-static int kiln_c99_form_decode(const char *bytes, size_t len, kiln_value *out) {
-    kiln_text decoded = {NULL, 0, 0};
-    size_t index = 0;
-    int status;
-    while (index < len) {
-        char byte = bytes[index];
-        if (byte == '+') {
-            byte = ' ';
-        } else if (byte == '%' && index + 2 < len) {
-            int high = kiln_c99_hex_digit(bytes[index + 1]);
-            int low = kiln_c99_hex_digit(bytes[index + 2]);
-            if (high >= 0 && low >= 0) {
-                byte = (char)((high << 4) | low);
-                index += 2;
-            }
-        }
-        status = kiln_c99_text_append(&decoded, &byte, 1);
-        if (status != KILN_C99_OK) {
-            free(decoded.bytes);
-            return status;
-        }
-        index += 1;
-    }
-    if (kiln_c99_valid_utf8(decoded.bytes, decoded.len)) {
-        *out = kiln_c99_text_value(&decoded);
-        return KILN_C99_OK;
-    }
-    {
-        kiln_value raw = kiln_c99_copy_text(decoded.bytes, decoded.len);
-        uint16_t *units = NULL;
-        size_t count = 0;
-        status = kiln_c99_to_units(raw, &units, &count);
-        if (status == KILN_C99_OK) {
-            *out = kiln_c99_from_units(units, count);
-            if (out->tag != KILN_VALUE_STRING) status = KILN_C99_OUT_OF_MEMORY;
-        }
-        free(units);
-        free(decoded.bytes);
-        return status;
-    }
-}
 
 
 /* `Number.prototype.toFixed`, rounded on the value's *exact* decimal expansion.
