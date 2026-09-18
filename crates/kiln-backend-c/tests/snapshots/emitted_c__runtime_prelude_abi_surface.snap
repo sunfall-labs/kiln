@@ -1314,7 +1314,6 @@ static int kiln_c99_valid_utf8(const char *bytes, size_t len);
 static int kiln_c99_refuse_named_key(const char *lacked, const kiln_string *key) {
 static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_t argc,
 static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
-static int kiln_c99_form_decode(const char *bytes, size_t len, kiln_value *out);
 static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t count);
 static int kiln_c99_buffer_from_bytes(kiln_value *out, const uint8_t *bytes, uint64_t length);
 static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
@@ -1817,7 +1816,6 @@ static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_
 static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
 #define KILN_QUERY_RETURN(result) do { \
 #undef KILN_QUERY_RETURN
-static int kiln_c99_form_decode(const char *bytes, size_t len, kiln_value *out) {
 static const uint64_t kiln_c99_ryu_pow5_inv[292][2] = {
 static const uint64_t kiln_c99_ryu_pow5[326][2] = {
 static uint32_t kiln_c99_ryu_log10_pow2(uint32_t e) { return (e * UINT32_C(78913)) >> 18; }
