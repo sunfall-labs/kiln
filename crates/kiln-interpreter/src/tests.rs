@@ -1182,6 +1182,7 @@ fn builtin_bindings_are_present_on_the_realm_global_and_share_values_with_load_b
             builtin,
             kiln_ir::Builtin::GlobalThis
                 | kiln_ir::Builtin::Process
+                | kiln_ir::Builtin::StructuredClone
                 | kiln_ir::Builtin::NotANumber
                 | kiln_ir::Builtin::Infinity
         ) {

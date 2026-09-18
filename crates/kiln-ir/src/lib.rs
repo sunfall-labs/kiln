@@ -840,6 +840,7 @@ pub enum Builtin {
     AbortSignal,
     /// The UTF-8 encoder half of the pair whose decoder is already here.
     TextEncoder,
+    StructuredClone,
 }
 
 macro_rules! builtin_bindings {
@@ -938,6 +939,7 @@ impl Builtin {
         AbortController => "AbortController",
         AbortSignal => "AbortSignal",
         TextEncoder => "TextEncoder",
+        StructuredClone => "structuredClone",
     }
 }
 

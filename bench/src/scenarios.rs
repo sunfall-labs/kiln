@@ -317,6 +317,7 @@ impl WarmDaemonFixture {
                 // refusal.
                 steps: StepBudget::Unmetered,
                 source_view,
+                args: Vec::new(),
             })
             .map_err(|error| format!("warm daemon Run: {error}"))?;
         match response {

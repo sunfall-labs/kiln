@@ -1089,6 +1089,7 @@ method_ids! {
     // Captured and deleted by the compiled builtin bootstrap before user code runs.
     (KILN_C99_METHOD_UINT8_TO_HEX_RAW, 510, Direct; 0, 0),
     (KILN_C99_METHOD_UINT8_TO_BASE64_RAW, 511, Direct; 0, 0),
+    (KILN_C99_METHOD_PROCESS_EXIT, 513, Direct; 0, 0),
 }
 
 /// The hook a host installs when it lets a program make a second realm.
@@ -3590,6 +3591,7 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_NODE_FS_MKDIR),
     emit_method_define!(KILN_C99_METHOD_UINT8_TO_HEX_RAW),
     emit_method_define!(KILN_C99_METHOD_UINT8_TO_BASE64_RAW),
+    emit_method_define!(KILN_C99_METHOD_PROCESS_EXIT),
     emit_method_define!(KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE),
     emit_method_define!(KILN_C99_METHOD_NODE_QUERYSTRING_PARSE),
     r#"

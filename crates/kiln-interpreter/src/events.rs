@@ -85,6 +85,18 @@ pub(crate) fn property(prop: &str) -> Option<Value> {
         "EventEmitter" | "default" => {
             Some(Value::Native(Native::NodeEventEmitter, RealmId::PRIMARY))
         }
+        "Event" => Some(Value::Native(
+            Native::WebStub(crate::native::WebStubKind::Event),
+            RealmId::PRIMARY,
+        )),
+        "EventTarget" => Some(Value::Native(
+            Native::WebStub(crate::native::WebStubKind::EventTarget),
+            RealmId::PRIMARY,
+        )),
+        "CustomEvent" => Some(Value::Native(
+            Native::WebStub(crate::native::WebStubKind::CustomEvent),
+            RealmId::PRIMARY,
+        )),
         _ => None,
     }
 }
@@ -98,6 +110,18 @@ pub(crate) fn event_emitter_property(prop: &str) -> Option<Value> {
         "EventEmitter" | "default" => {
             Some(Value::Native(Native::NodeEventEmitter, RealmId::PRIMARY))
         }
+        "Event" => Some(Value::Native(
+            Native::WebStub(crate::native::WebStubKind::Event),
+            RealmId::PRIMARY,
+        )),
+        "EventTarget" => Some(Value::Native(
+            Native::WebStub(crate::native::WebStubKind::EventTarget),
+            RealmId::PRIMARY,
+        )),
+        "CustomEvent" => Some(Value::Native(
+            Native::WebStub(crate::native::WebStubKind::CustomEvent),
+            RealmId::PRIMARY,
+        )),
         "listenerCount" => Some(Value::Native(
             Native::NodeEventListenerCount,
             RealmId::PRIMARY,

@@ -59,13 +59,23 @@ impl Output {
 pub fn run(
     backend: &mut dyn Backend,
     path: &Path,
+    args: &[String],
     project_root: &Path,
     node: bool,
     steps: StepBudget,
 ) -> Result<Output> {
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
-    run_source(backend, path, project_root, &canonical, text, node, steps)
+    run_source(
+        backend,
+        path,
+        args,
+        project_root,
+        &canonical,
+        text,
+        node,
+        steps,
+    )
 }
 
 /// Compile and execute a source snapshot that the caller has already read. This is used by
@@ -74,14 +84,24 @@ pub fn run(
 pub(crate) fn run_source(
     backend: &mut dyn Backend,
     path: &Path,
+    args: &[String],
     project_root: &Path,
     canonical: &str,
     text: String,
     node: bool,
     steps: StepBudget,
 ) -> Result<Output> {
-    run_source_with_manifest(backend, path, project_root, canonical, text, node, steps)
-        .map(|(output, _, _, _)| output)
+    run_source_with_manifest(
+        backend,
+        path,
+        args,
+        project_root,
+        canonical,
+        text,
+        node,
+        steps,
+    )
+    .map(|(output, _, _, _)| output)
 }
 
 pub(crate) type SourceManifest = HashMap<String, SourceDigest>;
@@ -92,6 +112,7 @@ pub(crate) type SourceManifest = HashMap<String, SourceDigest>;
 pub(crate) fn run_source_with_manifest(
     backend: &mut dyn Backend,
     path: &Path,
+    args: &[String],
     project_root: &Path,
     canonical: &str,
     text: String,
@@ -115,6 +136,7 @@ pub(crate) fn run_source_with_manifest(
     let mut output = match backend.run_at_view(
         canonical.to_owned(),
         project_root_string(project_root)?,
+        args.to_vec(),
         node,
         steps,
         source_view,
@@ -132,6 +154,7 @@ pub(crate) fn run_source_with_manifest(
             match backend.run_at_view(
                 canonical.to_owned(),
                 project_root_string(project_root)?,
+                args.to_vec(),
                 node,
                 steps,
                 source_view,
@@ -175,6 +198,7 @@ pub(crate) fn run_watched_source_at_view(
         .run_at_view(
             canonical.to_owned(),
             project_root_string(project_root)?,
+            Vec::new(),
             node,
             // `watch` re-runs the same program the user is editing, so it is bounded by nothing
             // but the user's patience, exactly as `kiln run` is.
@@ -291,7 +315,9 @@ fn finish_run_summary(
         text: summary.stdout,
         error_text: summary.stderr,
         notes,
-        exit_code: if summary.succeeded { 0 } else { 1 },
+        exit_code: summary
+            .exit_code
+            .unwrap_or(if summary.succeeded { 0 } else { 1 }),
         revision: Some(summary.revision),
         value: summary.scalar_value,
         source_view: None,
@@ -448,6 +474,7 @@ pub fn native_run(
     backend: &mut dyn Backend,
     path: &Path,
     project_root: &Path,
+    args: &[String],
     profile: NativeProfile,
     node: bool,
     static_link: bool,
@@ -473,6 +500,7 @@ pub fn native_run(
     let summary = match backend.native_run_at_view(
         canonical.clone(),
         project_root_text.clone(),
+        args.to_vec(),
         profile,
         node,
         static_link,
@@ -488,6 +516,7 @@ pub fn native_run(
             match backend.native_run_at_view(
                 canonical,
                 project_root_text,
+                args.to_vec(),
                 profile,
                 node,
                 static_link,
@@ -1365,6 +1394,7 @@ mod tests {
                     path,
                     file: FileId(1),
                     succeeded: self.diagnostics.is_empty(),
+                    exit_code: None,
                     stdout: "hello from kiln\n".to_string(),
                     stderr: String::new(),
                     value: Some("undefined".to_string()),
@@ -1659,6 +1689,7 @@ mod tests {
             .run_at_view(
                 "/tmp/main.ts".to_string(),
                 "/tmp".to_string(),
+                Vec::new(),
                 false,
                 StepBudget::Unmetered,
                 source_view,
@@ -1688,8 +1719,15 @@ mod tests {
         .expect("write entry");
 
         let mut backend = Fake::new();
-        let output =
-            run(&mut backend, &entry, &root, false, StepBudget::Unmetered).expect("run graph");
+        let output = run(
+            &mut backend,
+            &entry,
+            &[],
+            &root,
+            false,
+            StepBudget::Unmetered,
+        )
+        .expect("run graph");
         assert_eq!(output.text, "hello from kiln\n");
         assert_eq!(output.exit_code, 0);
         assert_eq!(
@@ -1919,6 +1957,7 @@ mod tests {
             &mut backend,
             &entry,
             &root,
+            &[],
             NativeProfile::Dev,
             false,
             false,
@@ -2254,6 +2293,7 @@ mod tests {
                 path: "/tmp/main.js".to_owned(),
                 file: FileId(1),
                 succeeded: false,
+                exit_code: None,
                 stdout: String::new(),
                 stderr: String::new(),
                 value: None,
@@ -2472,7 +2512,7 @@ mod tests {
         std::fs::write(&entry, "console.log('node');\n").expect("write fixture");
 
         let mut backend = StaleBackend::with_stale_runs(1);
-        run(&mut backend, &entry, &dir, true, StepBudget::Unmetered)
+        run(&mut backend, &entry, &[], &dir, true, StepBudget::Unmetered)
             .expect("stale Node run is retried");
         let runs = backend
             .inner
@@ -2504,6 +2544,7 @@ mod tests {
         run_source(
             &mut fake,
             &path,
+            &[],
             &dir,
             &canonical,
             captured.to_owned(),

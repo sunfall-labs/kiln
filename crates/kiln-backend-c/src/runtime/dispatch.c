@@ -1824,6 +1824,14 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         *result = kiln_c99_boolean(1);
         return KILN_C99_OK;
     }
+    if (code == KILN_C99_METHOD_PROCESS_EXIT) {
+        int exit_code = 0;
+        if (argc > 0 && args[0].tag == KILN_VALUE_NUMBER) {
+            exit_code = (int)kiln_c99_as_number(args[0]);
+        }
+        fflush(NULL);
+        exit(exit_code);
+    }
     if (code == KILN_C99_METHOD_PROCESS_HRTIME ||
         code == KILN_C99_METHOD_PROCESS_HRTIME_BIGINT) {
         int64_t high;

@@ -55,6 +55,7 @@ pub enum Command {
     },
     Run {
         path: PathBuf,
+        args: Vec<String>,
         node: bool,
         native: bool,
         profile: NativeProfile,
@@ -158,8 +159,20 @@ where
         };
         match flag.as_str() {
             "--" => only_positional = true,
-            "-h" | "--help" => return Ok(Parsed::Help),
-            "-V" | "--version" => return Ok(Parsed::Version),
+            "-h" | "--help" => {
+                if positional.len() >= 2 && positional[0] == "run" {
+                    positional.push(arg);
+                } else {
+                    return Ok(Parsed::Help);
+                }
+            }
+            "-V" | "--version" => {
+                if positional.len() >= 2 && positional[0] == "run" {
+                    positional.push(arg);
+                } else {
+                    return Ok(Parsed::Version);
+                }
+            }
             "--one-shot" => {
                 reject_inline_value(&flag, &inline)?;
                 one_shot = true;
@@ -245,7 +258,11 @@ where
                 pgo_use = Some(PathBuf::from(value_for(&flag, inline, &mut args)?));
             }
             _ => {
-                return Err(Error::usage(format!("unknown option `{arg}`")));
+                if positional.len() >= 2 && positional[0] == "run" {
+                    positional.push(arg);
+                } else {
+                    return Err(Error::usage(format!("unknown option `{arg}`")));
+                }
             }
         }
     }
@@ -355,18 +372,25 @@ where
             path: PathBuf::from(one_operand(&name, &mut positional)?),
             node,
         },
-        "run" => Command::Run {
-            path: PathBuf::from(one_operand(&name, &mut positional)?),
-            node,
-            native,
-            profile: profile.unwrap_or_default(),
-            steps: max_steps.map_or(StepBudget::Unmetered, StepBudget::Limited),
-            workers: workers.unwrap_or(1),
-            march_native,
-            static_link,
-            pgo_generate,
-            pgo_use,
-        },
+        "run" => {
+            let Some(path) = positional.next() else {
+                return Err(Error::usage("`kiln run` needs an argument"));
+            };
+            let args: Vec<String> = positional.collect();
+            Command::Run {
+                path: PathBuf::from(path),
+                args,
+                node,
+                native,
+                profile: profile.unwrap_or_default(),
+                steps: max_steps.map_or(StepBudget::Unmetered, StepBudget::Limited),
+                workers: workers.unwrap_or(1),
+                march_native,
+                static_link,
+                pgo_generate,
+                pgo_use,
+            }
+        }
         "build" => Command::Build {
             path: PathBuf::from(one_operand(&name, &mut positional)?),
             output,
@@ -684,6 +708,7 @@ mod tests {
             .command,
             Command::Run {
                 path: PathBuf::from("src/main.ts"),
+                args: Vec::new(),
                 node: false,
                 native: true,
                 profile: NativeProfile::Check,
@@ -990,6 +1015,7 @@ mod tests {
             run(&["run", "src/main.ts", "--native", "--march=native"]).command,
             Command::Run {
                 path: PathBuf::from("src/main.ts"),
+                args: Vec::new(),
                 node: false,
                 native: true,
                 profile: NativeProfile::Dev,
@@ -1052,6 +1078,7 @@ mod tests {
             .command,
             Command::Run {
                 path: PathBuf::from("src/main.ts"),
+                args: Vec::new(),
                 node: false,
                 native: true,
                 profile: NativeProfile::Dev,
@@ -1063,6 +1090,7 @@ mod tests {
                 pgo_use: None,
             }
         );
+
         assert_eq!(
             run(&[
                 "build",
@@ -1096,6 +1124,42 @@ mod tests {
                 "file"
             ])
             .contains("cannot be used together")
+        );
+    }
+
+    #[test]
+    fn run_forwards_arguments_after_script_path() {
+        assert_eq!(
+            run(&["run", "--node", "cli.ts", "--version"]).command,
+            Command::Run {
+                path: PathBuf::from("cli.ts"),
+                args: vec!["--version".to_string()],
+                node: true,
+                native: false,
+                profile: NativeProfile::Dev,
+                steps: StepBudget::Unmetered,
+                workers: 1,
+                march_native: false,
+                static_link: false,
+                pgo_generate: None,
+                pgo_use: None,
+            }
+        );
+        assert_eq!(
+            run(&["run", "app.ts", "cmd", "--flag", "val"]).command,
+            Command::Run {
+                path: PathBuf::from("app.ts"),
+                args: vec!["cmd".to_string(), "--flag".to_string(), "val".to_string()],
+                node: false,
+                native: false,
+                profile: NativeProfile::Dev,
+                steps: StepBudget::Unmetered,
+                workers: 1,
+                march_native: false,
+                static_link: false,
+                pgo_generate: None,
+                pgo_use: None,
+            }
         );
     }
 }

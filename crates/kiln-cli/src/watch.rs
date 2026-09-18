@@ -456,6 +456,7 @@ fn run_once(
                 commands::run_source_with_manifest(
                     backend,
                     path,
+                    &[],
                     project_root,
                     source.canonical,
                     source.text,
@@ -1292,6 +1293,7 @@ mod tests {
                         path,
                         file: FileId(1),
                         succeeded: !failed,
+                        exit_code: None,
                         stdout: format!("program: {}\n", source.trim()),
                         stderr: String::new(),
                         value: Some("undefined".to_string()),

@@ -98,6 +98,11 @@ pub enum NodeBuiltin {
     ReadlinePromises,
     StreamPromises,
     Sqlite,
+    UtilTypes,
+    StreamWeb,
+    Constants,
+    V8,
+    Vm,
 }
 
 impl NodeBuiltin {
@@ -137,6 +142,11 @@ impl NodeBuiltin {
         Self::ReadlinePromises,
         Self::StreamPromises,
         Self::Sqlite,
+        Self::UtilTypes,
+        Self::StreamWeb,
+        Self::Constants,
+        Self::V8,
+        Self::Vm,
     ];
 
     pub fn parse(specifier: &str) -> Option<Self> {
@@ -176,6 +186,11 @@ impl NodeBuiltin {
             "readline" => Self::Readline,
             "readline/promises" => Self::ReadlinePromises,
             "sqlite" => Self::Sqlite,
+            "util/types" => Self::UtilTypes,
+            "stream/web" => Self::StreamWeb,
+            "constants" => Self::Constants,
+            "v8" => Self::V8,
+            "vm" => Self::Vm,
             _ => return None,
         })
     }
@@ -217,6 +232,11 @@ impl NodeBuiltin {
             Self::Readline => "node:readline",
             Self::ReadlinePromises => "node:readline/promises",
             Self::Sqlite => "node:sqlite",
+            Self::UtilTypes => "node:util/types",
+            Self::StreamWeb => "node:stream/web",
+            Self::Constants => "node:constants",
+            Self::V8 => "node:v8",
+            Self::Vm => "node:vm",
         }
     }
 

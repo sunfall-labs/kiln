@@ -135,6 +135,7 @@ pub trait Backend: Send {
         &mut self,
         path: String,
         project_root: String,
+        args: Vec<String>,
         node: bool,
         steps: StepBudget,
         source_view: SourceView,
@@ -142,6 +143,7 @@ pub trait Backend: Send {
         match self.request(Request::Run {
             path,
             project_root,
+            args,
             node,
             steps,
             source_view,
@@ -187,6 +189,7 @@ pub trait Backend: Send {
         &mut self,
         path: String,
         project_root: String,
+        args: Vec<String>,
         profile: NativeProfile,
         node: bool,
         static_link: bool,
@@ -197,6 +200,7 @@ pub trait Backend: Send {
         match self.request(Request::NativeRun {
             path,
             project_root,
+            args,
             profile,
             node,
             static_link,

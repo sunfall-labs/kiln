@@ -187772,42 +187772,43 @@
                 },
                 {
                   "id": 2,
-                  "kind": "GetProperty",
-                  "detail": "\"__kilnNativeModules\""
+                  "kind": "MakeFunction",
+                  "detail": "proto #6"
                 },
                 {
                   "id": 3,
                   "kind": "GetProperty",
-                  "detail": "\"fs\""
+                  "detail": "\"__kilnNativeModules\""
                 },
                 {
                   "id": 4,
                   "kind": "GetProperty",
-                  "detail": "\"__kilnNativeModules\""
+                  "detail": "\"fs\""
                 },
                 {
                   "id": 5,
                   "kind": "GetProperty",
-                  "detail": "\"fs_promises\""
+                  "detail": "\"__kilnNativeModules\""
                 },
                 {
                   "id": 6,
                   "kind": "GetProperty",
-                  "detail": "\"__kilnNativeModules\""
+                  "detail": "\"fs_promises\""
                 },
                 {
                   "id": 7,
                   "kind": "GetProperty",
-                  "detail": "\"fs\""
+                  "detail": "\"__kilnNativeModules\""
                 },
                 {
                   "id": 8,
                   "kind": "GetProperty",
-                  "detail": "\"promises\""
+                  "detail": "\"fs\""
                 },
                 {
                   "id": 9,
-                  "kind": "Call"
+                  "kind": "GetProperty",
+                  "detail": "\"promises\""
                 },
                 {
                   "id": 10,
@@ -187970,6 +187971,14 @@
                   "kind": "Call"
                 },
                 {
+                  "id": 50,
+                  "kind": "Call"
+                },
+                {
+                  "id": 51,
+                  "kind": "Call"
+                },
+                {
                   "id": 52,
                   "kind": "Call"
                 },
@@ -188015,96 +188024,74 @@
                 },
                 {
                   "id": 63,
-                  "kind": "NewArray"
+                  "kind": "Call"
                 },
                 {
                   "id": 64,
-                  "kind": "MakeFunction",
-                  "detail": "proto #3"
-                },
-                {
-                  "id": 65,
-                  "kind": "SetPropertyStrict",
-                  "detail": "\"@@private:0:%brand\""
-                },
-                {
-                  "id": 66,
-                  "kind": "GetProperty",
-                  "detail": "\"prototype\""
+                  "kind": "Call"
                 },
                 {
                   "id": 67,
-                  "kind": "GetProperty",
-                  "detail": "\"prototype\""
+                  "kind": "Call"
                 },
                 {
                   "id": 68,
-                  "kind": "MakeFunction",
-                  "detail": "proto #4"
+                  "kind": "Call"
                 },
                 {
                   "id": 69,
-                  "kind": "GetProperty",
-                  "detail": "\"prototype\""
+                  "kind": "Call"
                 },
                 {
                   "id": 70,
-                  "kind": "MakeFunction",
-                  "detail": "proto #5"
+                  "kind": "Call"
                 },
                 {
                   "id": 71,
-                  "kind": "GetProperty",
-                  "detail": "\"prototype\""
+                  "kind": "Call"
                 },
                 {
                   "id": 72,
-                  "kind": "MakeFunction",
-                  "detail": "proto #6"
+                  "kind": "Call"
                 },
                 {
                   "id": 73,
-                  "kind": "GetProperty",
-                  "detail": "\"prototype\""
+                  "kind": "Call"
                 },
                 {
                   "id": 74,
+                  "kind": "Call"
+                },
+                {
+                  "id": 75,
+                  "kind": "Call"
+                },
+                {
+                  "id": 76,
+                  "kind": "Call"
+                },
+                {
+                  "id": 77,
+                  "kind": "Call"
+                },
+                {
+                  "id": 78,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 79,
                   "kind": "MakeFunction",
                   "detail": "proto #7"
                 },
                 {
-                  "id": 75,
-                  "kind": "GetProperty",
-                  "detail": "\"prototype\""
-                },
-                {
-                  "id": 76,
-                  "kind": "MakeFunction",
-                  "detail": "proto #8"
-                },
-                {
-                  "id": 77,
-                  "kind": "GetProperty",
-                  "detail": "\"prototype\""
-                },
-                {
-                  "id": 78,
-                  "kind": "MakeFunction",
-                  "detail": "proto #9"
-                },
-                {
-                  "id": 79,
-                  "kind": "NewArray"
-                },
-                {
                   "id": 80,
-                  "kind": "MakeFunction",
-                  "detail": "proto #10"
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"@@private:0:%brand\""
                 },
                 {
                   "id": 81,
-                  "kind": "SetPropertyStrict",
-                  "detail": "\"@@private:1:%brand\""
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
                 },
                 {
                   "id": 82,
@@ -188113,76 +188100,150 @@
                 },
                 {
                   "id": 83,
+                  "kind": "MakeFunction",
+                  "detail": "proto #8"
+                },
+                {
+                  "id": 84,
                   "kind": "GetProperty",
                   "detail": "\"prototype\""
                 },
                 {
-                  "id": 84,
+                  "id": 85,
+                  "kind": "MakeFunction",
+                  "detail": "proto #9"
+                },
+                {
+                  "id": 86,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 87,
+                  "kind": "MakeFunction",
+                  "detail": "proto #10"
+                },
+                {
+                  "id": 88,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 89,
                   "kind": "MakeFunction",
                   "detail": "proto #11"
                 },
                 {
-                  "id": 85,
+                  "id": 90,
                   "kind": "GetProperty",
                   "detail": "\"prototype\""
                 },
                 {
-                  "id": 86,
+                  "id": 91,
                   "kind": "MakeFunction",
                   "detail": "proto #12"
                 },
                 {
-                  "id": 87,
+                  "id": 92,
                   "kind": "GetProperty",
                   "detail": "\"prototype\""
                 },
                 {
-                  "id": 88,
+                  "id": 93,
                   "kind": "MakeFunction",
                   "detail": "proto #13"
                 },
                 {
-                  "id": 89,
-                  "kind": "GetProperty",
-                  "detail": "\"prototype\""
+                  "id": 94,
+                  "kind": "NewArray"
                 },
                 {
-                  "id": 90,
+                  "id": 95,
                   "kind": "MakeFunction",
                   "detail": "proto #14"
                 },
                 {
-                  "id": 91,
+                  "id": 96,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"@@private:1:%brand\""
+                },
+                {
+                  "id": 97,
                   "kind": "GetProperty",
                   "detail": "\"prototype\""
                 },
                 {
-                  "id": 92,
+                  "id": 98,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 99,
                   "kind": "MakeFunction",
                   "detail": "proto #15"
                 },
                 {
-                  "id": 93,
+                  "id": 100,
                   "kind": "GetProperty",
                   "detail": "\"prototype\""
                 },
                 {
-                  "id": 94,
+                  "id": 101,
                   "kind": "MakeFunction",
                   "detail": "proto #16"
                 },
                 {
-                  "id": 95,
+                  "id": 102,
                   "kind": "GetProperty",
                   "detail": "\"prototype\""
                 },
                 {
-                  "id": 96,
+                  "id": 103,
                   "kind": "MakeFunction",
                   "detail": "proto #17"
                 },
                 {
-                  "id": 98,
+                  "id": 104,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 105,
+                  "kind": "MakeFunction",
+                  "detail": "proto #18"
+                },
+                {
+                  "id": 106,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 107,
+                  "kind": "MakeFunction",
+                  "detail": "proto #19"
+                },
+                {
+                  "id": 108,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 109,
+                  "kind": "MakeFunction",
+                  "detail": "proto #20"
+                },
+                {
+                  "id": 110,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 111,
+                  "kind": "MakeFunction",
+                  "detail": "proto #21"
+                },
+                {
+                  "id": 113,
                   "kind": "SetPropertyStrict",
                   "detail": "\"default\""
                 }
@@ -188249,6 +188310,120 @@
                 {
                   "id": 2,
                   "kind": "NewArray"
+                }
+              ]
+            },
+            {
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "returned_sites": [
+                0
+              ],
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "Call"
+                }
+              ]
+            },
+            {
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "returned_sites": [
+                0
+              ],
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "Call"
+                }
+              ]
+            },
+            {
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "GetProperty",
+                  "detail": "\"length\""
+                },
+                {
+                  "id": 1,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 2,
+                  "kind": "CallMethod",
+                  "detail": "\"pop\""
+                },
+                {
+                  "id": 3,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 4,
+                  "kind": "GetProperty",
+                  "detail": "\"nextTick\""
+                },
+                {
+                  "id": 5,
+                  "kind": "MakeFunction",
+                  "detail": "proto #3"
+                },
+                {
+                  "id": 6,
+                  "kind": "CallMethod",
+                  "detail": "\"nextTick\""
+                },
+                {
+                  "id": 7,
+                  "kind": "Call"
+                },
+                {
+                  "id": 8,
+                  "kind": "GetProperty",
+                  "detail": "\"nextTick\""
+                },
+                {
+                  "id": 9,
+                  "kind": "MakeFunction",
+                  "detail": "proto #4"
+                },
+                {
+                  "id": 10,
+                  "kind": "CallMethod",
+                  "detail": "\"nextTick\""
+                },
+                {
+                  "id": 11,
+                  "kind": "Call"
+                }
+              ]
+            },
+            {
+              "name": "makeCallback",
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Callable",
+              "pure": false,
+              "can_throw": false,
+              "reads_arguments": false,
+              "returned_sites": [
+                0
+              ],
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "MakeFunction",
+                  "detail": "proto #5"
                 }
               ]
             },

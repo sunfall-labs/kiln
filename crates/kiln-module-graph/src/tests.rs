@@ -5737,6 +5737,59 @@ fn a_star_cycle_still_finds_a_name_one_side_provides() {
 }
 
 #[test]
+fn reexport_from_star_export_ts() {
+    let project = TempProject::new();
+    project.write(
+        "agent-session-runtime.ts",
+        "export class AgentSessionRuntime {}",
+    );
+    let _sdk = project.write("sdk.ts", "export * from './agent-session-runtime.ts';");
+    let entry = project.write(
+        "index.ts",
+        "export { AgentSessionRuntime } from './sdk.ts';",
+    );
+    let graph = project.graph(&entry).expect("build graph");
+    assert!(
+        graph
+            .resolved_export(&entry, "AgentSessionRuntime")
+            .is_some()
+    );
+}
+
+#[test]
+fn debug_pi_index_ts() {
+    let handle = std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            let index_path = std::path::Path::new(
+                "/path/to/pi/packages/coding-agent/src/cli.ts",
+            );
+            if !index_path.exists() {
+                return;
+            }
+            let project_root = std::path::Path::new("/path/to/pi");
+            let res = ModuleGraph::build_node(
+                index_path,
+                kiln_module_resolver::NodeRuntimeResolver::new(project_root).expect("resolver"),
+                |path: &std::path::Path| {
+                    fs::read_to_string(path).map_err(|error| error.to_string())
+                },
+                OxcFrontend,
+            );
+            if let Ok(graph) = &res {
+                let sdk_path = std::path::Path::new(
+                    "/path/to/pi/packages/coding-agent/src/core/sdk.ts",
+                );
+                let resolved = graph.resolved_export(sdk_path, "AgentSessionRuntime");
+                eprintln!("DEBUG_PI SDK RESOLVED: {:?}", resolved);
+            }
+            assert!(res.is_ok(), "failed: {:?}", res.err());
+        })
+        .unwrap();
+    handle.join().unwrap();
+}
+
+#[test]
 fn order_is_deterministic_and_dependencies_first() {
     let project = TempProject::new();
     let c = project.write("c.js", "console.log('c');");

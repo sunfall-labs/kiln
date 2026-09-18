@@ -32,12 +32,14 @@ pub(crate) enum PreparedRun {
     Graph {
         graph: Result<Arc<ModuleGraph>, kiln_module_graph::ModuleGraphError>,
         path: String,
+        args: Vec<String>,
         file: kiln_db::FileId,
         revision: u64,
     },
     Program {
         program: Result<kiln_ir::Program, Vec<kiln_ir::CompileDiagnostic>>,
         path: String,
+        args: Vec<String>,
         file: kiln_db::FileId,
         revision: u64,
     },
@@ -68,6 +70,7 @@ pub(crate) enum GraphRunPlan {
     Cached {
         graph: Arc<ModuleGraph>,
         path: String,
+        args: Vec<String>,
         file: DbFileId,
         revision: u64,
     },
@@ -76,6 +79,7 @@ pub(crate) enum GraphRunPlan {
         key: GraphCacheKey,
         stale: Option<(Arc<ModuleGraph>, GraphSourceRevision)>,
         path: String,
+        args: Vec<String>,
         file: DbFileId,
         revision: u64,
     },
@@ -172,11 +176,12 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
         Request::Run {
             path,
             project_root,
+            args,
             node,
             steps,
             source_view: _,
         } => (
-            run(engine, resolutions, path, project_root, node, steps),
+            run(engine, resolutions, path, project_root, args, node, steps),
             Next::Continue,
         ),
         Request::NativeBuild {
@@ -255,6 +260,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
         Request::NativeRun {
             path,
             project_root,
+            args: _,
             profile,
             node,
             source_view: _,
@@ -420,16 +426,18 @@ pub(crate) fn prepare_run<E: QueryEngine>(
     engine: &mut E,
     resolutions: Option<&ResolutionMap>,
     path: String,
+    args: Vec<String>,
     project_root: String,
     node: bool,
 ) -> Result<PreparedRun, String> {
-    prepare_run_with_cache(engine, None, path, project_root, resolutions, node)
+    prepare_run_with_cache(engine, None, path, args, project_root, resolutions, node)
 }
 
 pub(crate) fn prepare_run_with_cache<E: QueryEngine>(
     engine: &mut E,
     cache: Option<&mut GraphCache>,
     path: String,
+    args: Vec<String>,
     project_root: String,
     resolutions: Option<&kiln_proto::ResolutionMap>,
     node: bool,
@@ -440,6 +448,7 @@ pub(crate) fn prepare_run_with_cache<E: QueryEngine>(
         PreparedRun::Graph {
             graph: graph_snapshot(engine, cache, &entry, &project_root, resolutions, node),
             path,
+            args,
             file,
             revision: engine.revision().0,
         }
@@ -448,6 +457,7 @@ pub(crate) fn prepare_run_with_cache<E: QueryEngine>(
         PreparedRun::Program {
             program: engine.ir(file),
             path,
+            args,
             file,
             revision: engine.revision().0,
         }
@@ -464,6 +474,7 @@ pub(crate) fn graph_run_plan<E: QueryEngine>(
     cache: &mut GraphCache,
     source_view: SourceView,
     path: String,
+    args: Vec<String>,
     file: DbFileId,
     project_root: String,
     entry: PathBuf,
@@ -494,6 +505,7 @@ pub(crate) fn graph_run_plan<E: QueryEngine>(
             return Ok(GraphRunPlan::Cached {
                 graph,
                 path,
+                args,
                 file,
                 revision: engine.revision().0,
             });
@@ -545,6 +557,7 @@ pub(crate) fn graph_run_plan<E: QueryEngine>(
         key,
         stale,
         path,
+        args,
         file,
         revision: engine.revision().0,
     })
@@ -754,15 +767,17 @@ pub(crate) fn execute_prepared_run(
         PreparedRun::Graph {
             graph,
             path,
+            args,
             file,
             revision,
-        } => execute_graph(graph, path, file, revision, node, limits),
+        } => execute_graph(graph, path, args, file, revision, node, limits),
         PreparedRun::Program {
             program,
             path,
+            args,
             file,
             revision,
-        } => execute_program(program, path, file, revision, node, limits),
+        } => execute_program(program, path, args, file, revision, node, limits),
     }
 }
 
@@ -905,43 +920,47 @@ fn run<E: QueryEngine>(
     resolutions: Option<&ResolutionMap>,
     path: String,
     project_root: String,
+    args: Vec<String>,
     node: bool,
     steps: StepBudget,
 ) -> Response {
-    match prepare_run(engine, resolutions, path, project_root, node) {
+    match prepare_run(engine, resolutions, path, args, project_root, node) {
         Ok(prepared) => execute_prepared_run(prepared, node, steps),
         Err(message) => Response::Error { message },
     }
 }
 
 /// What `process.argv` reports for an interpreted run, in node's spelling: the executable that
-/// is running, then the entry it was pointed at.
+/// is running, then the entry it was pointed at, followed by any arguments passed to the script.
 ///
 /// A natively compiled program answers the same question with the same two slots, but both hold
 /// its own path -- there is no separate interpreter and no script file, which is the single
 /// executable convention. Either way `process.argv[2..]` is where the program's own arguments
-/// begin, and `kiln run` takes none, so here it is always empty.
+/// begin.
 ///
 /// `current_exe` can fail on an exotic host. The entry path is still worth reporting when it
 /// does, so the executable slot falls back to the name every launcher of this program has:
 /// leaving both slots off would move the entry to index 0 and shift what a program reads.
-pub(crate) fn interpreted_argv(path: &str) -> Vec<String> {
+pub(crate) fn interpreted_argv(path: &str, args: &[String]) -> Vec<String> {
     let executable = std::env::current_exe()
         .map(|exe| exe.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "kiln".to_owned());
-    vec![executable, path.to_owned()]
+    let mut argv = vec![executable, path.to_owned()];
+    argv.extend(args.iter().cloned());
+    argv
 }
 
 fn execute_graph(
     graph: Result<Arc<ModuleGraph>, kiln_module_graph::ModuleGraphError>,
     path: String,
+    args: Vec<String>,
     file: kiln_db::FileId,
     revision: u64,
     node: bool,
     limits: kiln_interpreter::ExecutionLimits,
 ) -> Response {
     let capabilities =
-        kiln_conformance::source_compiler_capability().with_argv(interpreted_argv(&path));
+        kiln_conformance::source_compiler_capability().with_argv(interpreted_argv(&path, &args));
     let mut host = kiln_runtime::CaptureHost::new();
     // One shaken graph feeds execution: reduce to the closed-world live
     // subset first, so dead modules never evaluate. Development selection
@@ -979,6 +998,7 @@ fn execute_graph(
                 path,
                 file: FileId(file.0),
                 succeeded: true,
+                exit_code: Some(0),
                 stdout: host.stdout().to_owned(),
                 stderr: host.stderr().to_owned(),
                 value: Some(execution.value.to_display_string()),
@@ -987,11 +1007,28 @@ fn execute_graph(
                 diagnostics: Vec::new(),
             })
         }
+        Err(kiln_module_graph::ModuleGraphError::Execution {
+            error: kiln_interpreter::ExecutionError::ProcessExited(code),
+            ..
+        }) => Response::Ran(RunSummary {
+            revision,
+            path,
+            file: FileId(file.0),
+            succeeded: code == 0,
+            exit_code: Some(code),
+            stdout: host.stdout().to_owned(),
+            stderr: host.stderr().to_owned(),
+            value: None,
+            scalar_value: None,
+            instructions: 0,
+            diagnostics: Vec::new(),
+        }),
         Err(error) => Response::Ran(RunSummary {
             revision,
             path,
             file: FileId(file.0),
             succeeded: false,
+            exit_code: Some(1),
             stdout: host.stdout().to_owned(),
             stderr: host.stderr().to_owned(),
             value: None,
@@ -1312,12 +1349,14 @@ pub(crate) fn native_graph_with_cache<E: QueryEngine>(
 fn execute_program(
     program: Result<kiln_ir::Program, Vec<kiln_ir::CompileDiagnostic>>,
     path: String,
+    args: Vec<String>,
     file: kiln_db::FileId,
     revision: u64,
     node: bool,
     limits: kiln_interpreter::ExecutionLimits,
 ) -> Response {
-    let capabilities = kiln_conformance::source_compiler_capability();
+    let capabilities =
+        kiln_conformance::source_compiler_capability().with_argv(interpreted_argv(&path, &args));
     let program = match program {
         Ok(program) => program,
         Err(diagnostics) => {
@@ -1326,6 +1365,7 @@ fn execute_program(
                 path,
                 file: FileId(file.0),
                 succeeded: false,
+                exit_code: Some(1),
                 stdout: String::new(),
                 stderr: String::new(),
                 value: None,
@@ -1358,6 +1398,7 @@ fn execute_program(
                 path,
                 file: FileId(file.0),
                 succeeded: true,
+                exit_code: Some(0),
                 stdout: host.stdout().to_owned(),
                 stderr: host.stderr().to_owned(),
                 value: Some(execution.value.to_display_string()),
@@ -1366,11 +1407,25 @@ fn execute_program(
                 diagnostics: Vec::new(),
             })
         }
+        Err(kiln_interpreter::ExecutionError::ProcessExited(code)) => Response::Ran(RunSummary {
+            revision,
+            path,
+            file: FileId(file.0),
+            succeeded: code == 0,
+            exit_code: Some(code),
+            stdout: host.stdout().to_owned(),
+            stderr: host.stderr().to_owned(),
+            value: None,
+            scalar_value: None,
+            instructions: 0,
+            diagnostics: Vec::new(),
+        }),
         Err(error) => Response::Ran(RunSummary {
             revision,
             path,
             file: FileId(file.0),
             succeeded: false,
+            exit_code: Some(1),
             stdout: host.stdout().to_owned(),
             stderr: host.stderr().to_owned(),
             value: None,

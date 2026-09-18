@@ -270,6 +270,36 @@ impl ModuleLoaderService for GraphModuleLoader {
                 node.dependencies
                     .iter()
                     .find(|dependency| dependency.specifier == request.specifier)
+            });
+        let target = dependency
+            .map(|dependency| dependency.target.clone())
+            .or_else(|| {
+                if let Some(builtin) = NodeBuiltin::parse(&request.specifier) {
+                    self.graph.modules.iter().find_map(|(path, node)| {
+                        (node.source == ModuleSource::NodeBuiltin(builtin)).then(|| path.clone())
+                    })
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                let direct = PathBuf::from(&request.specifier);
+                if self.graph.modules.contains_key(&direct) {
+                    return Some(direct);
+                }
+                if let Some(parent) = importer.parent() {
+                    let relative = parent.join(&request.specifier);
+                    if self.graph.modules.contains_key(&relative) {
+                        return Some(relative);
+                    }
+                    for ext in &[".ts", ".js", ".json", "/index.ts", "/index.js"] {
+                        let candidate = parent.join(format!("{}{ext}", request.specifier));
+                        if self.graph.modules.contains_key(&candidate) {
+                            return Some(candidate);
+                        }
+                    }
+                }
+                None
             })
             .ok_or_else(|| {
                 ModuleLoadError::NotFound(format!(
@@ -279,7 +309,7 @@ impl ModuleLoaderService for GraphModuleLoader {
                 ))
             })?;
         self.graph
-            .import_plan_for_request(&dependency.target, request.attributes.as_ref())
+            .import_plan_for_request(&target, request.attributes.as_ref())
             .map_err(|error| ModuleLoadError::Unsupported(error.to_string()))
     }
 }
@@ -1567,10 +1597,13 @@ impl ModuleGraph {
             let node = self
                 .module_node(path)
                 .ok_or_else(|| ModuleGraphError::InternalMissingModule { path: path.clone() })?;
-            // Only a source module has a body to run. A JSON module, a CommonJS wrapper and a
-            // Node builtin each need their own materialisation, and answering with an empty
-            // namespace for one would be a wrong answer rather than a missing feature.
-            if node.source != ModuleSource::Source && node.source != ModuleSource::Asset {
+            // Only a source module has a body to run. A JSON module and a CommonJS wrapper each
+            // need their own materialisation, and answering with an empty namespace for one
+            // would be a wrong answer rather than a missing feature.
+            if !matches!(
+                node.source,
+                ModuleSource::Source | ModuleSource::Asset | ModuleSource::NodeBuiltin(_)
+            ) {
                 return Err(ModuleGraphError::Source {
                     path: path.clone(),
                     message: format!(
@@ -2008,14 +2041,110 @@ impl ModuleGraph {
                     imports.push(Value::Cell(cell));
                     continue;
                 };
-                let value =
-                    linked_import_value(provider, &import.imported, false).ok_or_else(|| {
-                        ModuleGraphError::MissingExport {
-                            importer: path.clone(),
-                            provider: dependency.target.clone(),
-                            name: import.imported.clone(),
+                let value = match linked_import_value(provider, &import.imported, false) {
+                    Some(value) => value,
+                    None => match self.resolved_export(&dependency.target, &import.imported) {
+                        Some(ResolvedExport::Local {
+                            module: origin,
+                            local_slot,
+                        }) => {
+                            if let Some(origin_exports) = values.get(origin) {
+                                let origin_node = self.module_node(origin);
+                                let exported_name = origin_node
+                                    .and_then(|node| {
+                                        node.program.exports.iter().find(|export| {
+                                            export.local_slot == *local_slot
+                                                && !export
+                                                    .exported
+                                                    .starts_with(kiln_ir::STAR_REEXPORT_PREFIX)
+                                        })
+                                    })
+                                    .map(|export| export.exported.as_str())
+                                    .unwrap_or(&import.imported);
+                                linked_import_value(origin_exports, exported_name, false)
+                                    .ok_or_else(|| ModuleGraphError::MissingExport {
+                                        importer: path.clone(),
+                                        provider: origin.clone(),
+                                        name: import.imported.clone(),
+                                    })?
+                            } else {
+                                let cell = self.cycle_cell(
+                                    path,
+                                    &dependency.target,
+                                    import,
+                                    &values,
+                                    &mut pending_cycle_cells,
+                                )?;
+                                imports.push(Value::Cell(cell));
+                                continue;
+                            }
                         }
-                    })?;
+                        Some(ResolvedExport::CommonJsNamed {
+                            module: origin,
+                            property,
+                        }) => {
+                            if let Some(origin_exports) = values.get(origin) {
+                                linked_import_value(origin_exports, property, false).ok_or_else(
+                                    || ModuleGraphError::MissingExport {
+                                        importer: path.clone(),
+                                        provider: origin.clone(),
+                                        name: import.imported.clone(),
+                                    },
+                                )?
+                            } else {
+                                let cell = self.cycle_cell(
+                                    path,
+                                    &dependency.target,
+                                    import,
+                                    &values,
+                                    &mut pending_cycle_cells,
+                                )?;
+                                imports.push(Value::Cell(cell));
+                                continue;
+                            }
+                        }
+                        Some(ResolvedExport::Namespace { module: origin }) => {
+                            if let Some(origin_exports) = values.get(origin) {
+                                linked_import_value(
+                                    origin_exports,
+                                    kiln_ir::NAMESPACE_IMPORT,
+                                    false,
+                                )
+                                .ok_or_else(|| {
+                                    ModuleGraphError::MissingExport {
+                                        importer: path.clone(),
+                                        provider: origin.clone(),
+                                        name: import.imported.clone(),
+                                    }
+                                })?
+                            } else {
+                                let cell = self.cycle_cell(
+                                    path,
+                                    &dependency.target,
+                                    import,
+                                    &values,
+                                    &mut pending_cycle_cells,
+                                )?;
+                                imports.push(Value::Cell(cell));
+                                continue;
+                            }
+                        }
+                        Some(ResolvedExport::Ambiguous) => {
+                            return Err(ModuleGraphError::AmbiguousExport {
+                                importer: path.clone(),
+                                provider: dependency.target.clone(),
+                                name: import.imported.clone(),
+                            });
+                        }
+                        None => {
+                            return Err(ModuleGraphError::MissingExport {
+                                importer: path.clone(),
+                                provider: dependency.target.clone(),
+                                name: import.imported.clone(),
+                            });
+                        }
+                    },
+                };
                 imports.push(value);
             }
 
@@ -2110,6 +2239,84 @@ impl ModuleGraph {
                         )
                     {
                         exports.entry(name).or_insert(value);
+                    }
+                }
+            }
+            if let Some(resolutions) = self.export_resolutions.get(path) {
+                for (name, resolution) in resolutions {
+                    if name == "default" || exports.contains_key(name) {
+                        continue;
+                    }
+                    match resolution {
+                        ResolvedExport::Local {
+                            module: origin,
+                            local_slot,
+                        } => {
+                            if let Some(origin_exports) = values.get(origin) {
+                                let origin_node = self.module_node(origin);
+                                let exported_name = origin_node
+                                    .and_then(|node| {
+                                        node.program.exports.iter().find(|export| {
+                                            export.local_slot == *local_slot
+                                                && !export
+                                                    .exported
+                                                    .starts_with(kiln_ir::STAR_REEXPORT_PREFIX)
+                                        })
+                                    })
+                                    .map(|export| export.exported.as_str())
+                                    .unwrap_or(name);
+                                if let Some(val) = origin_exports.get(exported_name) {
+                                    exports.insert(name.clone(), val.clone());
+                                }
+                            } else {
+                                let origin_node = self.module_node(origin);
+                                let origin_exported = origin_node
+                                    .and_then(|node| {
+                                        node.program.exports.iter().find(|export| {
+                                            export.local_slot == *local_slot
+                                                && !export
+                                                    .exported
+                                                    .starts_with(kiln_ir::STAR_REEXPORT_PREFIX)
+                                        })
+                                    })
+                                    .map(|export| export.exported.clone())
+                                    .unwrap_or_else(|| name.clone());
+                                let cell = pending_cycle_cells
+                                    .entry((origin.clone(), origin_exported))
+                                    .or_insert_with(|| {
+                                        std::rc::Rc::new(std::cell::RefCell::new(Value::Native(
+                                            kiln_interpreter::Native::Uninitialized,
+                                            kiln_interpreter::RealmId::PRIMARY,
+                                        )))
+                                    })
+                                    .clone();
+                                exports.insert(name.clone(), Value::Cell(cell));
+                            }
+                        }
+                        ResolvedExport::CommonJsNamed {
+                            module: origin,
+                            property,
+                        } => {
+                            if let Some(origin_exports) = values.get(origin) {
+                                if let Some(val) = origin_exports.get(property) {
+                                    exports.insert(name.clone(), val.clone());
+                                }
+                            }
+                        }
+                        ResolvedExport::Namespace { module: origin } => {
+                            if let Some(origin_exports) = values.get(origin) {
+                                let mut entries: Vec<(String, Value)> = origin_exports
+                                    .iter()
+                                    .map(|(n, v)| (n.clone(), read_through_cell(v)))
+                                    .collect();
+                                entries.sort_by(|l, r| l.0.cmp(&r.0));
+                                exports.insert(
+                                    name.clone(),
+                                    kiln_interpreter::namespace_object(entries),
+                                );
+                            }
+                        }
+                        ResolvedExport::Ambiguous => {}
                     }
                 }
             }
@@ -3588,12 +3795,14 @@ fn validate_links(
 /// `(module, name)` pairs in the graph.
 struct ExportResolver<'graph> {
     modules: &'graph BTreeMap<PathBuf, ModuleNode>,
+    commonjs_imported_names: HashMap<PathBuf, HashSet<String>>,
 }
 
 /// What one `ResolveExport` question answers.
 ///
 /// `Circular` is kept apart from `None`: both mean the importer has no binding to bind, but only
 /// the first has to stop a `export *` search from treating the absence as a real answer.
+#[derive(Debug)]
 enum Resolution {
     Found(ResolvedExport),
     Ambiguous,
@@ -3601,6 +3810,94 @@ enum Resolution {
 }
 
 impl<'graph> ExportResolver<'graph> {
+    fn new(modules: &'graph BTreeMap<PathBuf, ModuleNode>) -> Self {
+        // Collect direct star edges: path -> [target_path]
+        let mut star_direct: HashMap<&Path, Vec<&Path>> = HashMap::new();
+        for (path, node) in modules {
+            let stars: Vec<&Path> = node
+                .program
+                .exports
+                .iter()
+                .filter_map(|export| export.exported.strip_prefix(kiln_ir::STAR_REEXPORT_PREFIX))
+                .filter_map(|specifier| {
+                    node.dependencies
+                        .iter()
+                        .find(|dep| dep.specifier == specifier)
+                        .map(|dep| dep.target.as_path())
+                })
+                .collect();
+            if !stars.is_empty() {
+                star_direct.insert(path.as_path(), stars);
+            }
+        }
+
+        // Transitive closure of star edges
+        let mut star_reachable: HashMap<&Path, HashSet<&Path>> = HashMap::new();
+        for &start in star_direct.keys() {
+            let mut reachable = HashSet::new();
+            let mut queue = Vec::new();
+            if let Some(targets) = star_direct.get(start) {
+                for &t in targets {
+                    if reachable.insert(t) {
+                        queue.push(t);
+                    }
+                }
+            }
+            while let Some(current) = queue.pop() {
+                if let Some(targets) = star_direct.get(current) {
+                    for &t in targets {
+                        if reachable.insert(t) {
+                            queue.push(t);
+                        }
+                    }
+                }
+            }
+            star_reachable.insert(start, reachable);
+        }
+
+        // Collect all named exports requested from CommonJS modules by any importer in the graph.
+        let mut commonjs_imported_names: HashMap<PathBuf, HashSet<String>> = HashMap::new();
+        for other in modules.values() {
+            for import in &other.program.imports {
+                if import.imported == kiln_ir::NAMESPACE_IMPORT {
+                    continue;
+                }
+                let Some(dep) = other
+                    .dependencies
+                    .iter()
+                    .find(|d| d.specifier == import.source)
+                else {
+                    continue;
+                };
+                if let Some(target_node) = modules.get(&dep.target) {
+                    if target_node.source == ModuleSource::CommonJs {
+                        commonjs_imported_names
+                            .entry(dep.target.clone())
+                            .or_default()
+                            .insert(import.imported.clone());
+                    }
+                }
+                if let Some(reachable) = star_reachable.get(dep.target.as_path()) {
+                    for &cjs_path in reachable {
+                        if let Some(target_node) = modules.get(cjs_path) {
+                            if target_node.source == ModuleSource::CommonJs {
+                                commonjs_imported_names
+                                    .entry(cjs_path.to_path_buf())
+                                    .or_default()
+                                    .insert(import.imported.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Self {
+            modules,
+            commonjs_imported_names,
+        }
+    }
+
     /// The dependency a module reaches through one written specifier.
     fn dependency(&self, node: &ModuleNode, specifier: &str) -> Option<&'graph ModuleNode> {
         let target = &node
@@ -3635,23 +3932,6 @@ impl<'graph> ExportResolver<'graph> {
             .filter_map(|export| export.exported.strip_prefix(kiln_ir::STAR_REEXPORT_PREFIX))
     }
 
-    fn reexports_star(&self, from: &Path, target: &Path, visited: &mut HashSet<PathBuf>) -> bool {
-        if !visited.insert(from.to_path_buf()) {
-            return false;
-        }
-        let Some(node) = self.modules.get(from) else {
-            return false;
-        };
-        for specifier in self.star_sources(node) {
-            if let Some(dep) = self.dependency(node, specifier)
-                && (dep.path == target || self.reexports_star(&dep.path, target, visited))
-            {
-                return true;
-            }
-        }
-        false
-    }
-
     /// The names a module offers, `export *` included. `default` never arrives through a star.
     fn exported_names(&self, path: &Path, visited: &mut HashSet<PathBuf>) -> Vec<String> {
         if !visited.insert(path.to_path_buf()) {
@@ -3666,17 +3946,10 @@ impl<'graph> ExportResolver<'graph> {
         // It also provides any named export requested from it by an importer in the graph.
         if node.source == ModuleSource::CommonJs {
             names.push("default".to_owned());
-            for other in self.modules.values() {
-                for import in &other.program.imports {
-                    if import.imported != kiln_ir::NAMESPACE_IMPORT
-                        && !names.contains(&import.imported)
-                        && other.dependencies.iter().any(|dep| {
-                            dep.specifier == import.source
-                                && (dep.target == *path
-                                    || self.reexports_star(&dep.target, path, &mut HashSet::new()))
-                        })
-                    {
-                        names.push(import.imported.clone());
+            if let Some(imported) = self.commonjs_imported_names.get(path) {
+                for name in imported {
+                    if !names.contains(name) {
+                        names.push(name.clone());
                     }
                 }
             }
@@ -3791,7 +4064,7 @@ fn resolve_exports(
     modules: &BTreeMap<PathBuf, ModuleNode>,
     order: &[PathBuf],
 ) -> Result<HashMap<PathBuf, BTreeMap<String, ResolvedExport>>, ModuleGraphError> {
-    let resolver = ExportResolver { modules };
+    let resolver = ExportResolver::new(modules);
     let mut tables: HashMap<PathBuf, BTreeMap<String, ResolvedExport>> = HashMap::new();
     for module_path in order {
         if !modules.contains_key(module_path) {
