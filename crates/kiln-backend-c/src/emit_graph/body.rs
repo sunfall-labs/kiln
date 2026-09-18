@@ -2406,7 +2406,7 @@ fn emit_terminator(
                     }
                     None => output.push_str("    *result = kiln_c99_undefined();\n"),
                 }
-                if !scalar_proto && exports.is_none() {
+                if value.is_some() && !scalar_proto && exports.is_none() {
                     output.push_str(
                         "    if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);\n",
                     );
