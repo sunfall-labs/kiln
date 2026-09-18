@@ -577,6 +577,7 @@ pub fn emit_function_from_graph_with_profile(
 
     let (shared_sites, this_sites) = emit_blocks(
         output,
+        context_start,
         graph,
         proto,
         program,
@@ -707,8 +708,10 @@ pub fn emit_entry_from_graph_with_profile(
             }
         }
     }
+    let entry_start = output.len();
     let (shared_sites, _) = emit_blocks(
         output,
+        entry_start,
         graph,
         proto,
         program,
@@ -741,6 +744,7 @@ pub fn emit_async_entry_body(
     type_profile_record: bool,
     _site_offset: usize,
 ) -> usize {
+    let entry_start = output.len();
     writeln!(
         output,
         "static inline int {symbol}_entry_body(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {{"
@@ -787,6 +791,7 @@ pub fn emit_async_entry_body(
     let array_slots = (0..proto.local_count).collect::<HashSet<u32>>();
     let (shared_sites, _) = emit_blocks(
         output,
+        entry_start,
         graph,
         proto,
         program,
@@ -1116,6 +1121,9 @@ fn emit_block_sequence(
     // has replaced is the common case.
     let mut used: HashSet<ValueId> = HashSet::new();
     for block in &graph.blocks {
+        if block.id != graph.entry_block && block.predecessors.is_empty() {
+            continue;
+        }
         for (vid, op) in &block.operations {
             // A direct call reads its callee value only for the upvalue table it carries: not
             // on a self-call, which has its own, and not into a typed entry that takes none.
@@ -1181,14 +1189,20 @@ fn emit_block_sequence(
                     true
                 }
                 GraphOp::LoadCell(_) | GraphOp::LoadUpvalue(_) => plan.unchecked.contains(&vid),
+                GraphOp::StoreLocal { slot, .. } => !array_slots.contains(slot),
+                GraphOp::CheckTdz { value, .. } => {
+                    graph.scalar_alias_map.contains_key(value)
+                        || numbers.contains(value)
+                        || plan.unchecked.contains(&vid)
+                }
+                GraphOp::MarkUninitialized(slot) => !array_slots.contains(slot),
                 _ => false,
             }
     };
     for block in &graph.blocks {
-        // A restartable body never suspends, so a block nothing jumps to is the code the
-        // compiler leaves after a body's last statement: emitted, it would be a refusal in a
-        // typed entry, and a typed entry with a refusal in it is not restartable.
-        if kind.restarts() && block.id != graph.entry_block && block.predecessors.is_empty() {
+        // A block nothing jumps to is the dead code the compiler leaves after a body's
+        // explicit returns: emitted, it would be an unreachable dead block epilogue.
+        if block.id != graph.entry_block && block.predecessors.is_empty() {
             continue;
         }
         for from in &graph.blocks {
@@ -1349,6 +1363,7 @@ fn emit_block_sequence(
                 spec,
                 boxed.as_ref(),
                 await_resolve_arg,
+                &used,
             );
             if kind.restarts() {
                 op_text = bail_out(op, &op_text, RESTART);
@@ -1470,6 +1485,9 @@ fn boxed_uses(
     // are copies: they read their input boxed only if something reads them boxed.
     let mut phis: Vec<(ValueId, Vec<ValueId>)> = Vec::new();
     for block in &graph.blocks {
+        if block.id != graph.entry_block && block.predecessors.is_empty() {
+            continue;
+        }
         for (vid, op) in &block.operations {
             match op {
                 GraphOp::Phi { inputs } => {
@@ -1625,6 +1643,7 @@ fn boxed_uses(
 #[allow(clippy::too_many_arguments)]
 fn emit_blocks(
     output: &mut String,
+    func_start: usize,
     graph: &FunctionGraph,
     proto: &FunctionProto,
     program: &Program,
@@ -2146,9 +2165,9 @@ fn emit_blocks(
             // labels exist only where the body jumps to them: a body with nothing that throws
             // has no unwind, and no `thrown` to read.
             let fail = typed_fail(kind);
-            let body = &output[body_start..];
-            let unwinds = body.contains("goto kiln_unwind;");
-            let refuses = body_can_refuse(body, plan.compact);
+            let func_text = &output[func_start..];
+            let unwinds = func_text.contains("goto kiln_unwind;");
+            let refuses = body_can_refuse(func_text, plan.compact);
             if unwinds {
                 output.push_str("kiln_unwind:;\n");
                 writeln!(
@@ -2185,9 +2204,9 @@ fn emit_blocks(
             }
         }
         Site::AsyncEntry => {
-            let body = &output[body_start..];
-            let unwinds = body.contains("goto kiln_unwind;");
-            let refuses = body_can_refuse(body, plan.compact);
+            let func_text = &output[func_start..];
+            let unwinds = func_text.contains("goto kiln_unwind;");
+            let refuses = body_can_refuse(func_text, plan.compact);
             if unwinds {
                 output.push_str("kiln_unwind:;\n");
                 output.push_str("    return KILN_C99_THROWN;\n");
@@ -2204,8 +2223,9 @@ fn emit_blocks(
             // Entry unwinds cross either the internal module ABI or the final embedding boundary.
             // Graph module entries preserve the raw language value for dynamic-import rejection;
             // standalone entries format it at their embedding boundary.
-            let unwinds = output[body_start..].contains("goto kiln_unwind;");
-            let refuses = body_can_refuse(&output[body_start..], plan.compact);
+            let func_text = &output[func_start..];
+            let unwinds = func_text.contains("goto kiln_unwind;");
+            let refuses = body_can_refuse(func_text, plan.compact);
             if unwinds {
                 output.push_str("kiln_unwind:;\n");
                 if exports.is_some() {

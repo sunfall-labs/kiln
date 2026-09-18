@@ -6494,7 +6494,7 @@ fn value_graph_lowers_to_c_without_stack_or_sp() {
             Instruction::LoadLocal(1),  // pc = 4
             Instruction::Const(1),      // 10
             Instruction::Binary(BinaryOp::LessThan),
-            Instruction::JumpIfFalse(15),
+            Instruction::JumpIfFalse(17),
             Instruction::LoadLocal(0), // pc = 8
             Instruction::LoadLocal(1),
             Instruction::Binary(BinaryOp::Add),

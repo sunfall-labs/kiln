@@ -48,12 +48,8 @@ kiln_block_0:;
     memcpy(&d2, &v2, sizeof(d2));
     i2 = 3LL;
     kiln_module_a565026db870a77a306e28a6a100fa79_globals[0] = v2;
-    v3 = v2;
-    d3 = d2;
-    i3 = i2;
     { kiln_value built; int status = kiln_c99_make_closure(&built, kiln_module_a565026db870a77a306e28a6a100fa79_fn_0, &kiln_module_a565026db870a77a306e28a6a100fa79_function_name_0, NULL, 0, "kiln_module_a565026db870a77a306e28a6a100fa79", UINT32_C(0), UINT32_C(0), 0, 0, 0, 0, 0, 1, KILN_VAL_UNDEFINED, kiln_val_from_boundary(kiln_c99_new_target), UINT32_C(1), UINT32_C(1), UINT32_C(2), UINT32_C(0), NULL, UINT32_C(0)); if (status != KILN_C99_OK) return status; kiln_c99_closure_of(built)->publishes_frame = 0; v4 = kiln_val_from_boundary(built); }
     locals[1] = v4;
-    v5 = v4;
     *result = kiln_val_to_boundary(v4);
     if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);
     return KILN_C99_OK;

@@ -474,6 +474,17 @@ pub(super) fn emit_set_property(
     let unwind = ctx.unwind;
     let typed = numbers.contains(&vid);
     let typed_int = ints.contains(&vid);
+    let is_used = ctx.used.contains(&vid);
+    let assign_v = if is_used {
+        format!("v{v} = v{val}; ")
+    } else {
+        String::new()
+    };
+    let typed_sync = if is_used && typed {
+        format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+    } else {
+        String::new()
+    };
     let (pc, label) = ctx
         .origins
         .get(&vid)
@@ -501,12 +512,14 @@ pub(super) fn emit_set_property(
                 writeln!(output, "    i{alloc}_f_{field_idx} = 0;").unwrap();
             }
         }
-        writeln!(output, "    v{v} = v{val};").unwrap();
-        if typed {
-            writeln!(output, "    d{v} = d{val};").unwrap();
-        }
-        if typed_int {
-            writeln!(output, "    i{v} = i{val};").unwrap();
+        if is_used {
+            writeln!(output, "    v{v} = v{val};").unwrap();
+            if typed {
+                writeln!(output, "    d{v} = d{val};").unwrap();
+            }
+            if typed_int {
+                writeln!(output, "    i{v} = i{val};").unwrap();
+            }
         }
         return;
     }
@@ -516,27 +529,22 @@ pub(super) fn emit_set_property(
         if crate::compact_diagnostic_site(diagnostic_site) {
             writeln!(
                 output,
-                "    KU_WRITE_PROPERTY(v{o}, {symbol}_key_{name}, v{val}, {strict}, NULL, {pc}, \"{label}\", {unwind}); v{v} = v{val};{typed_sync}",
+                "    KU_WRITE_PROPERTY(v{o}, {symbol}_key_{name}, v{val}, {strict}, NULL, {pc}, \"{label}\", {unwind}); {assign_v}{typed_sync}",
                 o = object.0,
                 val = value.0,
-                typed_sync = if typed {
-                    format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));")
-                } else {
-                    String::new()
-                }
+                assign_v = assign_v.trim_end(),
+                typed_sync = typed_sync,
             )
             .unwrap();
         } else {
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{0}}; int status = kiln_c99_val_write_property_key(host, v{o}, {symbol}_key_{name}, v{val}, {strict}, depth, thrown, &site); {check} v{v} = v{val}; }}{typed_sync}",
+                "    {{ static kiln_c99_site site = {{0}}; int status = kiln_c99_val_write_property_key(host, v{o}, {symbol}_key_{name}, v{val}, {strict}, depth, thrown, &site); {check} {assign_v}}}{typed_sync}",
                 o = object.0,
                 val = value.0,
-                typed_sync = if typed {
-                    format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));")
-                } else {
-                    String::new()
-                }
+                check = check,
+                assign_v = assign_v,
+                typed_sync = typed_sync,
             )
             .unwrap();
         }
@@ -546,7 +554,7 @@ pub(super) fn emit_set_property(
         format!(
             "else if (shape != NULL) {{ \
                 if (ku_pic_poly_write(obj, &site, v{val})) {{ \
-                    v{v} = v{val}; \
+                    {assign_v}\
                     handled = 1; \
                 }} \
             }}"
@@ -562,7 +570,7 @@ pub(super) fn emit_set_property(
                     kiln_c99_prototype_touched(obj); \
                     if (slot < KILN_C99_INLINE_SLOTS) obj->inline_slots[slot] = v{val}; \
                     else obj->slots[slot] = v{val}; \
-                    v{v} = v{val}; \
+                    {assign_v}\
                     handled = 1; \
                 }} \
             }}"
@@ -579,11 +587,11 @@ pub(super) fn emit_set_property(
                         uint32_t s0 = site.entries[0].slot; \
                         if (KILN_LIKELY(s0 < KILN_C99_INLINE_SLOTS && !obj->frozen)) {{ \
                             kiln_c99_prototype_touched(obj); obj->inline_slots[s0] = v{val}; \
-                            v{v} = v{val}; \
+                            {assign_v}\
                             handled = 1; \
                         }} else if (KILN_LIKELY(s0 < obj->slot_capacity && !obj->frozen)) {{ \
                             kiln_c99_prototype_touched(obj); obj->slots[s0] = v{val}; \
-                            v{v} = v{val}; \
+                            {assign_v}\
                             handled = 1; \
                         }} \
                     }} {poly_write} \
@@ -591,12 +599,15 @@ pub(super) fn emit_set_property(
                 if (!handled) {{ \
                     int status = kiln_c99_val_write_property_key(host, v{o}, {symbol}_key_{name}, v{val}, {strict}, depth, thrown, &site); \
                     {check} \
-                    v{v} = v{val}; \
+                    {assign_v}\
                 }} }}\
                 {typed_sync}",
                 o = object.0,
                 val = value.0,
-                typed_sync = if typed { format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));") } else { String::new() }
+                assign_v = assign_v,
+                poly_write = poly_write,
+                check = check,
+                typed_sync = typed_sync,
             )
             .unwrap();
 }
@@ -862,6 +873,7 @@ pub(super) fn emit_set_computed(
     ctx: &OpContext,
 ) {
     let v = vid.0;
+    let val = value.0;
     let graph = ctx.graph;
     let program = ctx.program;
     let diagnostic_site = ctx.diagnostic_site;
@@ -871,6 +883,17 @@ pub(super) fn emit_set_computed(
     let unwind = ctx.unwind;
     let typed = numbers.contains(&vid);
     let typed_int = ints.contains(&vid);
+    let is_used = ctx.used.contains(&vid);
+    let assign_v = if is_used {
+        format!("v{v} = v{val}; ")
+    } else {
+        String::new()
+    };
+    let typed_sync = if is_used && typed {
+        format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+    } else {
+        String::new()
+    };
     let (pc, label) = ctx
         .origins
         .get(&vid)
@@ -899,12 +922,14 @@ pub(super) fn emit_set_computed(
                 writeln!(output, "    i{alloc}_f_{field_idx} = 0;").unwrap();
             }
         }
-        writeln!(output, "    v{v} = v{val};").unwrap();
-        if typed {
-            writeln!(output, "    d{v} = d{val};").unwrap();
-        }
-        if typed_int {
-            writeln!(output, "    i{v} = i{val};").unwrap();
+        if is_used {
+            writeln!(output, "    v{v} = v{val};").unwrap();
+            if typed {
+                writeln!(output, "    d{v} = d{val};").unwrap();
+            }
+            if typed_int {
+                writeln!(output, "    i{v} = i{val};").unwrap();
+            }
         }
         return;
     }
@@ -913,15 +938,13 @@ pub(super) fn emit_set_computed(
     if ctx.plan.generic_only {
         writeln!(
             output,
-            "    {{ int status = kiln_c99_val_write_element(host, v{o}, v{k}, v{val}, {strict}, depth, thrown); {check} v{v} = v{val}; }}{typed_sync}",
+            "    {{ int status = kiln_c99_val_write_element(host, v{o}, v{k}, v{val}, {strict}, depth, thrown); {check} {assign_v}}}{typed_sync}",
             o = object.0,
             k = key.0,
             val = value.0,
-            typed_sync = if typed {
-                format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));")
-            } else {
-                String::new()
-            }
+            check = check,
+            assign_v = assign_v,
+            typed_sync = typed_sync,
         )
         .unwrap();
         return;
@@ -950,16 +973,16 @@ pub(super) fn emit_set_computed(
         };
         (
             format!(
-                "kiln_array *arr = (kiln_array *)ptr; if (KILN_LIKELY({arr_bound} && !arr->frozen)) {{ if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v{val})) arr->is_numeric = 0; arr->elements[i{k}] = v{val}; v{v} = v{val}; handled = 1; }}",
+                "kiln_array *arr = (kiln_array *)ptr; if (KILN_LIKELY({arr_bound} && !arr->frozen)) {{ if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v{val})) arr->is_numeric = 0; arr->elements[i{k}] = v{val}; {assign_v}handled = 1; }}",
                 k = key.0,
                 val = value.0,
-                v = v
+                assign_v = assign_v,
             ),
             format!(
-                "kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY({typed_bound})) {{ {val_d_init} kiln_c99_typed_set(view, (size_t)i{k}, val_d); v{v} = v{val}; handled = 1; }}",
+                "kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY({typed_bound})) {{ {val_d_init} kiln_c99_typed_set(view, (size_t)i{k}, val_d); {assign_v}handled = 1; }}",
                 k = key.0,
-                val = value.0,
-                v = v
+                val_d_init = val_d_init,
+                assign_v = assign_v,
             ),
         )
     } else {
@@ -973,16 +996,16 @@ pub(super) fn emit_set_computed(
         };
         (
             format!(
-                "double idx; memcpy(&idx, &v{k}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_array *arr = (kiln_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && !arr->frozen)) {{ if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v{val})) arr->is_numeric = 0; arr->elements[slot] = v{val}; v{v} = v{val}; handled = 1; }}",
+                "double idx; memcpy(&idx, &v{k}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_array *arr = (kiln_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && !arr->frozen)) {{ if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v{val})) arr->is_numeric = 0; arr->elements[slot] = v{val}; {assign_v}handled = 1; }}",
                 k = key.0,
                 val = value.0,
-                v = v
+                assign_v = assign_v,
             ),
             format!(
-                "double idx; memcpy(&idx, &v{k}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < view->length)) {{ {val_d_init} kiln_c99_typed_set(view, slot, val_d); v{v} = v{val}; handled = 1; }}",
+                "double idx; memcpy(&idx, &v{k}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < view->length)) {{ {val_d_init} kiln_c99_typed_set(view, slot, val_d); {assign_v}handled = 1; }}",
                 k = key.0,
-                val = value.0,
-                v = v
+                val_d_init = val_d_init,
+                assign_v = assign_v,
             ),
         )
     };
@@ -1018,7 +1041,7 @@ pub(super) fn emit_set_computed(
                 if (!handled) {{ \
                     int status = kiln_c99_val_write_element(host, v{o}, {vk}, v{val}, {strict}, depth, thrown); \
                     {check} \
-                    v{v} = v{val}; \
+                    {assign_v}\
                 }} }}\
                 {typed_sync}",
                 o = object.0,
@@ -1028,7 +1051,9 @@ pub(super) fn emit_set_computed(
                 number_guard = number_guard,
                 array_body = array_body,
                 typed_body = typed_body,
-                typed_sync = if typed { format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));") } else { String::new() }
+                check = check,
+                assign_v = assign_v,
+                typed_sync = typed_sync,
             )
             .unwrap();
 }
