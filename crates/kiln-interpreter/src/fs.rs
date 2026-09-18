@@ -103,6 +103,17 @@ pub(crate) fn promises_property(prop: &str) -> Option<Value> {
         "writeFile" => Some(Value::Native(Native::NodeFsWriteFile, RealmId::PRIMARY)),
         "stat" => Some(Value::Native(Native::NodeFsStat, RealmId::PRIMARY)),
         "mkdir" => Some(Value::Native(Native::NodeFsMkdir, RealmId::PRIMARY)),
+        "readdir" => Some(Value::Native(Native::NodeFsReaddir, RealmId::PRIMARY)),
+        "copyFile" => Some(Value::Native(Native::NodeFsCopyFile, RealmId::PRIMARY)),
+        "rename" => Some(Value::Native(Native::NodeFsRename, RealmId::PRIMARY)),
+        "rm" => Some(Value::Native(Native::NodeFsRm, RealmId::PRIMARY)),
+        "unlink" => Some(Value::Native(Native::NodeFsUnlink, RealmId::PRIMARY)),
+        "lstat" => Some(Value::Native(Native::NodeFsLstat, RealmId::PRIMARY)),
+        "realpath" => Some(Value::Native(Native::NodeFsRealpath, RealmId::PRIMARY)),
+        "access" => Some(Value::Native(Native::NodeFsAccess, RealmId::PRIMARY)),
+        "chmod" => Some(Value::Native(Native::NodeFsChmod, RealmId::PRIMARY)),
+        "rmdir" => Some(Value::Native(Native::NodeFsRmdir, RealmId::PRIMARY)),
+        "readlink" => Some(Value::Native(Native::NodeFsReadlink, RealmId::PRIMARY)),
         "constants" => Some(constants_object()),
         "default" => Some(Value::Native(Native::NodeFsPromises, RealmId::PRIMARY)),
         _ => None,
@@ -139,6 +150,17 @@ pub(crate) const fn js_name(native: Native) -> Option<&'static str> {
         Native::NodeFsAppendFile => Some("appendFile"),
         Native::NodeFsStat => Some("stat"),
         Native::NodeFsMkdir => Some("mkdir"),
+        Native::NodeFsReaddir => Some("readdir"),
+        Native::NodeFsCopyFile => Some("copyFile"),
+        Native::NodeFsRename => Some("rename"),
+        Native::NodeFsRm => Some("rm"),
+        Native::NodeFsUnlink => Some("unlink"),
+        Native::NodeFsLstat => Some("lstat"),
+        Native::NodeFsRealpath => Some("realpath"),
+        Native::NodeFsAccess => Some("access"),
+        Native::NodeFsChmod => Some("chmod"),
+        Native::NodeFsRmdir => Some("rmdir"),
+        Native::NodeFsReadlink => Some("readlink"),
         Native::NodeStatIsFile => Some("isFile"),
         Native::NodeStatIsDirectory => Some("isDirectory"),
         Native::NodeStatIsSymbolicLink => Some("isSymbolicLink"),
@@ -174,29 +196,26 @@ fn throw_node_error<H: HostOps + ?Sized>(
     ExecutionError::ThrownAcrossNative
 }
 
-pub(crate) fn stats_object(meta: &std::fs::Metadata) -> Value {
+fn with_fs<H: HostOps + ?Sized, R>(
+    vm: &mut Vm<'_, H>,
+    f: impl FnOnce(&mut dyn kiln_host_abi::FileSystemOps) -> R,
+) -> R {
+    if let Some(fs) = vm.host.fs() {
+        f(fs)
+    } else {
+        f(&mut kiln_host_abi::OsFileSystem)
+    }
+}
+
+pub(crate) fn stats_object(meta: &kiln_host_abi::FsMetadata) -> Value {
     let mut object = ObjectData::default();
-    let is_file = meta.is_file();
-    let is_dir = meta.is_dir();
-    let is_symlink = meta.file_type().is_symlink();
-    let size = meta.len() as f64;
-    let mtime_ms = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0.0, |d| d.as_millis() as f64);
-    let birthtime_ms = meta
-        .created()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(mtime_ms, |d| d.as_millis() as f64);
-    #[cfg(unix)]
-    let mode = {
-        use std::os::unix::fs::PermissionsExt;
-        meta.permissions().mode() as f64
-    };
-    #[cfg(not(unix))]
-    let mode = 0.0;
+    let is_file = meta.is_file;
+    let is_dir = meta.is_dir;
+    let is_symlink = meta.is_symlink;
+    let size = meta.len as f64;
+    let mtime_ms = meta.modified_ms as f64;
+    let birthtime_ms = meta.created_ms as f64;
+    let mode = meta.mode as f64;
 
     object.set("size", Value::Number(size));
     object.set("mtimeMs", Value::Number(mtime_ms));
@@ -238,14 +257,16 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
             let path_str = arguments
                 .first()
                 .map_or_else(String::new, Value::to_display_string);
-            let exists = !path_str.is_empty() && std::path::Path::new(&path_str).exists();
+            let exists = !path_str.is_empty()
+                && with_fs(vm, |fs| fs.exists(std::path::Path::new(&path_str)));
             Ok(Value::Boolean(exists))
         }
         Native::NodeFsReadFileSync => {
             let path_str = arguments
                 .first()
                 .map_or_else(String::new, Value::to_display_string);
-            match std::fs::read(&path_str) {
+            let read_res = with_fs(vm, |fs| fs.read(std::path::Path::new(&path_str)));
+            match read_res {
                 Ok(bytes) => {
                     let is_utf8 = arguments.get(1).map_or(false, |opt| match opt {
                         Value::String(s) => {
@@ -290,9 +311,6 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
                 }
                 None => Vec::new(),
             };
-            if let Err(err) = std::fs::write(&path_str, data) {
-                return Err(throw_node_error(vm, "open", Some(path_str), err));
-            }
             let mode = match arguments.get(2) {
                 Some(Value::Number(n)) => Some(*n as u32),
                 Some(Value::Object(obj)) => obj.borrow().get_own("mode").and_then(|v| match v {
@@ -301,10 +319,16 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
                 }),
                 _ => None,
             };
-            #[cfg(unix)]
-            if let Some(mode) = mode {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&path_str, std::fs::Permissions::from_mode(mode));
+            let write_res = with_fs(vm, |fs| {
+                let path = std::path::Path::new(&path_str);
+                fs.write(path, &data)?;
+                if let Some(mode) = mode {
+                    fs.set_permissions(path, mode)?;
+                }
+                Ok::<(), std::io::Error>(())
+            });
+            if let Err(err) = write_res {
+                return Err(throw_node_error(vm, "open", Some(path_str), err));
             }
             Ok(Value::Undefined)
         }
@@ -325,16 +349,8 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
                 }
                 None => Vec::new(),
             };
-            use std::io::Write;
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path_str);
-            let mut file = match file {
-                Ok(f) => f,
-                Err(err) => return Err(throw_node_error(vm, "open", Some(path_str), err)),
-            };
-            if let Err(err) = file.write_all(&data) {
+            let append_res = with_fs(vm, |fs| fs.append(std::path::Path::new(&path_str), &data));
+            if let Err(err) = append_res {
                 return Err(throw_node_error(vm, "write", Some(path_str), err));
             }
             Ok(Value::Undefined)
@@ -351,11 +367,14 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
                     .map_or(false, Value::is_truthy),
                 _ => false,
             };
-            let res = if recursive {
-                std::fs::create_dir_all(&path_str)
-            } else {
-                std::fs::create_dir(&path_str)
-            };
+            let res = with_fs(vm, |fs| {
+                let path = std::path::Path::new(&path_str);
+                if recursive {
+                    fs.create_dir_all(path)
+                } else {
+                    fs.create_dir(path)
+                }
+            });
             if let Err(err) = res {
                 return Err(throw_node_error(vm, "mkdir", Some(path_str), err));
             }
@@ -374,11 +393,14 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
             };
             let is_lstat = matches!(native, Native::NodeFsLstatSync);
             let syscall = if is_lstat { "lstat" } else { "stat" };
-            let meta_res = if is_lstat {
-                std::fs::symlink_metadata(&path_str)
-            } else {
-                std::fs::metadata(&path_str)
-            };
+            let meta_res = with_fs(vm, |fs| {
+                let path = std::path::Path::new(&path_str);
+                if is_lstat {
+                    fs.symlink_metadata(path)
+                } else {
+                    fs.metadata(path)
+                }
+            });
             let meta = match meta_res {
                 Ok(m) => m,
                 Err(err) => {
@@ -401,7 +423,10 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
                     let meta_res = file.metadata();
                     let _ = file.into_raw_fd();
                     match meta_res {
-                        Ok(meta) => Ok(stats_object(&meta)),
+                        Ok(meta) => {
+                            let fsmeta = kiln_host_abi::FsMetadata::from(&meta);
+                            Ok(stats_object(&fsmeta))
+                        }
                         Err(err) => Err(throw_node_error(vm, "fstat", None, err)),
                     }
                 } else {
@@ -429,27 +454,26 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
                     .map_or(false, Value::is_truthy),
                 _ => false,
             };
-            let read_dir = match std::fs::read_dir(&path_str) {
+            let read_dir_res = with_fs(vm, |fs| fs.read_dir(std::path::Path::new(&path_str)));
+            let entries = match read_dir_res {
                 Ok(rd) => rd,
                 Err(err) => return Err(throw_node_error(vm, "scandir", Some(path_str), err)),
             };
-            let mut entries = Vec::new();
-            for entry in read_dir {
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(err) => return Err(throw_node_error(vm, "scandir", Some(path_str), err)),
-                };
-                let name = entry.file_name().to_string_lossy().into_owned();
+            let mut out = Vec::new();
+            for entry in entries {
+                let name = entry.name;
                 if with_file_types {
-                    let file_type = entry.file_type().ok();
-                    let is_file = file_type.map_or(false, |ft| ft.is_file());
-                    let is_dir = file_type.map_or(false, |ft| ft.is_dir());
-                    let is_symlink = file_type.map_or(false, |ft| ft.is_symlink());
                     let mut dirent = ObjectData::default();
                     dirent.set("name", Value::String(name.into()));
-                    dirent.set_non_enumerable("@@kiln:node:is-file", Value::Boolean(is_file));
-                    dirent.set_non_enumerable("@@kiln:node:is-directory", Value::Boolean(is_dir));
-                    dirent.set_non_enumerable("@@kiln:node:is-symlink", Value::Boolean(is_symlink));
+                    dirent.set_non_enumerable("@@kiln:node:is-file", Value::Boolean(entry.is_file));
+                    dirent.set_non_enumerable(
+                        "@@kiln:node:is-directory",
+                        Value::Boolean(entry.is_directory),
+                    );
+                    dirent.set_non_enumerable(
+                        "@@kiln:node:is-symlink",
+                        Value::Boolean(entry.is_symlink),
+                    );
                     dirent.set(
                         "isFile",
                         Value::Native(Native::NodeStatIsFile, RealmId::PRIMARY),
@@ -462,12 +486,12 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
                         "isSymbolicLink",
                         Value::Native(Native::NodeStatIsSymbolicLink, RealmId::PRIMARY),
                     );
-                    entries.push(Value::Object(Rc::new(RefCell::new(dirent))));
+                    out.push(Value::Object(Rc::new(RefCell::new(dirent))));
                 } else {
-                    entries.push(Value::String(name.into()));
+                    out.push(Value::String(name.into()));
                 }
             }
-            Ok(Value::Array(ArrayData::new(entries)))
+            Ok(Value::Array(ArrayData::new(out)))
         }
         Native::NodeFsRmSync => {
             let path_str = arguments
@@ -488,7 +512,8 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
                 _ => (false, false),
             };
             let path = std::path::Path::new(&path_str);
-            if !path.exists() {
+            let exists = with_fs(vm, |fs| fs.exists(path));
+            if !exists {
                 if force {
                     return Ok(Value::Undefined);
                 }
@@ -496,15 +521,18 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
                     std::io::Error::new(std::io::ErrorKind::NotFound, "no such file or directory");
                 return Err(throw_node_error(vm, "rm", Some(path_str), err));
             }
-            let res = if path.is_dir() {
-                if recursive {
-                    std::fs::remove_dir_all(path)
+            let res = with_fs(vm, |fs| {
+                let is_dir = fs.metadata(path).map(|m| m.is_dir).unwrap_or(false);
+                if is_dir {
+                    if recursive {
+                        fs.remove_dir_all(path)
+                    } else {
+                        fs.remove_dir(path)
+                    }
                 } else {
-                    std::fs::remove_dir(path)
+                    fs.remove_file(path)
                 }
-            } else {
-                std::fs::remove_file(path)
-            };
+            });
             if let Err(err) = res {
                 if force && err.kind() == std::io::ErrorKind::NotFound {
                     return Ok(Value::Undefined);
@@ -517,7 +545,8 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
             let path_str = arguments
                 .first()
                 .map_or_else(String::new, Value::to_display_string);
-            if let Err(err) = std::fs::remove_file(&path_str) {
+            let res = with_fs(vm, |fs| fs.remove_file(std::path::Path::new(&path_str)));
+            if let Err(err) = res {
                 return Err(throw_node_error(vm, "unlink", Some(path_str), err));
             }
             Ok(Value::Undefined)
@@ -526,7 +555,8 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
             let path_str = arguments
                 .first()
                 .map_or_else(String::new, Value::to_display_string);
-            match std::fs::canonicalize(&path_str) {
+            let res = with_fs(vm, |fs| fs.canonicalize(std::path::Path::new(&path_str)));
+            match res {
                 Ok(canon) => Ok(Value::String(canon.to_string_lossy().into_owned().into())),
                 Err(err) => Err(throw_node_error(vm, "realpath", Some(path_str), err)),
             }
@@ -538,7 +568,13 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
             let new_path = arguments
                 .get(1)
                 .map_or_else(String::new, Value::to_display_string);
-            if let Err(err) = std::fs::rename(&old_path, &new_path) {
+            let res = with_fs(vm, |fs| {
+                fs.rename(
+                    std::path::Path::new(&old_path),
+                    std::path::Path::new(&new_path),
+                )
+            });
+            if let Err(err) = res {
                 return Err(throw_node_error(vm, "rename", Some(old_path), err));
             }
             Ok(Value::Undefined)
@@ -550,7 +586,10 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
             let dest = arguments
                 .get(1)
                 .map_or_else(String::new, Value::to_display_string);
-            if let Err(err) = std::fs::copy(&src, &dest) {
+            let res = with_fs(vm, |fs| {
+                fs.copy(std::path::Path::new(&src), std::path::Path::new(&dest))
+            });
+            if let Err(err) = res {
                 return Err(throw_node_error(vm, "copyfile", Some(src), err));
             }
             Ok(Value::Undefined)
@@ -559,7 +598,8 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
             let path_str = arguments
                 .first()
                 .map_or_else(String::new, Value::to_display_string);
-            if !std::path::Path::new(&path_str).exists() {
+            let exists = with_fs(vm, |fs| fs.exists(std::path::Path::new(&path_str)));
+            if !exists {
                 let err =
                     std::io::Error::new(std::io::ErrorKind::NotFound, "no such file or directory");
                 return Err(throw_node_error(vm, "access", Some(path_str), err));
@@ -571,18 +611,11 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
                 .first()
                 .map_or_else(String::new, Value::to_display_string);
             let mode = arguments.get(1).map_or(0.0, Value::as_number) as u32;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Err(err) =
-                    std::fs::set_permissions(&path_str, std::fs::Permissions::from_mode(mode))
-                {
-                    return Err(throw_node_error(vm, "chmod", Some(path_str), err));
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = (path_str, mode);
+            let res = with_fs(vm, |fs| {
+                fs.set_permissions(std::path::Path::new(&path_str), mode)
+            });
+            if let Err(err) = res {
+                return Err(throw_node_error(vm, "chmod", Some(path_str), err));
             }
             Ok(Value::Undefined)
         }
@@ -671,7 +704,8 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
             let path_str = arguments
                 .first()
                 .map_or_else(String::new, Value::to_display_string);
-            match std::fs::read_link(&path_str) {
+            let res = with_fs(vm, |fs| fs.read_link(std::path::Path::new(&path_str)));
+            match res {
                 Ok(target) => Ok(Value::String(target.to_string_lossy().into_owned().into())),
                 Err(err) => Err(throw_node_error(vm, "readlink", Some(path_str), err)),
             }
@@ -686,11 +720,14 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
                     recursive = rec;
                 }
             }
-            let res = if recursive {
-                std::fs::remove_dir_all(&path_str)
-            } else {
-                std::fs::remove_dir(&path_str)
-            };
+            let res = with_fs(vm, |fs| {
+                let path = std::path::Path::new(&path_str);
+                if recursive {
+                    fs.remove_dir_all(path)
+                } else {
+                    fs.remove_dir(path)
+                }
+            });
             if let Err(err) = res {
                 return Err(throw_node_error(vm, "rmdir", Some(path_str), err));
             }

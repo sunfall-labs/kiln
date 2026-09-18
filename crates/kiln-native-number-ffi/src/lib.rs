@@ -339,6 +339,8 @@ mod realm {
     const VALUE_RESOURCE_STATE: u32 = 4;
     const VALUE_ACCEPTED_STREAM: u32 = 5;
     const VALUE_PROCESS_OUTPUT: u32 = 6;
+    const VALUE_STRING: u32 = 7;
+    const VALUE_DIR_ENTRIES: u32 = 8;
 
     const RESOURCE_LISTENER: u32 = 1;
     const RESOURCE_STREAM: u32 = 2;
@@ -662,6 +664,14 @@ mod realm {
                     payload.peer_address = accepted.peer_address.into_bytes();
                     payload.peer_port = u32::from(accepted.peer_port);
                     payload
+                }
+                Ok(AsyncHostValue::String(string)) => {
+                    let mut payload = Self::empty(request, sequence, VALUE_STRING);
+                    payload.bytes = string.into_bytes();
+                    payload
+                }
+                Ok(AsyncHostValue::DirEntries(_)) => {
+                    Self::empty(request, sequence, VALUE_DIR_ENTRIES)
                 }
                 Err(error) => Self::error(
                     request,

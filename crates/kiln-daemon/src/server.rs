@@ -1009,13 +1009,20 @@ fn handle_run<E: QueryEngine>(
             args,
             file,
             revision,
-        }) => PreparedRun::Graph {
-            graph: Ok(graph),
-            path,
-            args,
-            file,
-            revision,
-        },
+        }) => {
+            let overlay = {
+                let guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+                crate::dispatch::build_vfs_overlay(&guard.engine)
+            };
+            PreparedRun::Graph {
+                graph: Ok(graph),
+                path,
+                args,
+                file,
+                revision,
+                overlay,
+            }
+        }
         RunPlan::Graph(GraphRunPlan::Build {
             snapshot,
             key,
@@ -1058,12 +1065,14 @@ fn handle_run<E: QueryEngine>(
                         }
                         None => Arc::new(graph),
                     };
+                    let overlay = crate::dispatch::build_vfs_overlay(&guard.engine);
                     PreparedRun::Graph {
                         graph: Ok(graph),
                         path,
                         args,
                         file,
                         revision,
+                        overlay,
                     }
                 }
                 Err(error) => {
@@ -1076,6 +1085,7 @@ fn handle_run<E: QueryEngine>(
                         args,
                         file,
                         revision,
+                        overlay: std::collections::HashMap::new(),
                     }
                 }
             }

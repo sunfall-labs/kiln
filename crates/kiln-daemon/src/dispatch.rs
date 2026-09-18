@@ -35,6 +35,7 @@ pub(crate) enum PreparedRun {
         args: Vec<String>,
         file: kiln_db::FileId,
         revision: u64,
+        overlay: std::collections::HashMap<std::path::PathBuf, Vec<u8>>,
     },
     Program {
         program: Result<kiln_ir::Program, Vec<kiln_ir::CompileDiagnostic>>,
@@ -42,6 +43,7 @@ pub(crate) enum PreparedRun {
         args: Vec<String>,
         file: kiln_db::FileId,
         revision: u64,
+        overlay: std::collections::HashMap<std::path::PathBuf, Vec<u8>>,
     },
 }
 
@@ -433,6 +435,22 @@ pub(crate) fn prepare_run<E: QueryEngine>(
     prepare_run_with_cache(engine, None, path, args, project_root, resolutions, node)
 }
 
+pub fn build_vfs_overlay<E: QueryEngine>(
+    engine: &E,
+) -> std::collections::HashMap<PathBuf, Vec<u8>> {
+    let mut files = std::collections::HashMap::new();
+    for (id, path_str) in engine.source_files() {
+        if let Some(src) = engine.source(id) {
+            let path = PathBuf::from(&path_str);
+            if let Ok(canon) = std::fs::canonicalize(&path) {
+                files.insert(canon, src.as_bytes().to_vec());
+            }
+            files.insert(path, src.as_bytes().to_vec());
+        }
+    }
+    files
+}
+
 pub(crate) fn prepare_run_with_cache<E: QueryEngine>(
     engine: &mut E,
     cache: Option<&mut GraphCache>,
@@ -442,6 +460,7 @@ pub(crate) fn prepare_run_with_cache<E: QueryEngine>(
     resolutions: Option<&kiln_proto::ResolutionMap>,
     node: bool,
 ) -> Result<PreparedRun, String> {
+    let overlay = build_vfs_overlay(engine);
     let entry = resolve_source_path(&path, &project_root);
     let prepared = if let Some(entry) = entry {
         let file = ensure_canonical_source(engine, &path, &entry, &project_root)?;
@@ -451,6 +470,7 @@ pub(crate) fn prepare_run_with_cache<E: QueryEngine>(
             args,
             file,
             revision: engine.revision().0,
+            overlay,
         }
     } else {
         let file = ensure_source(engine, &path)?;
@@ -460,6 +480,7 @@ pub(crate) fn prepare_run_with_cache<E: QueryEngine>(
             args,
             file,
             revision: engine.revision().0,
+            overlay,
         }
     };
     Ok(prepared)
@@ -770,14 +791,16 @@ pub(crate) fn execute_prepared_run(
             args,
             file,
             revision,
-        } => execute_graph(graph, path, args, file, revision, node, limits),
+            overlay,
+        } => execute_graph(graph, path, args, file, revision, node, limits, overlay),
         PreparedRun::Program {
             program,
             path,
             args,
             file,
             revision,
-        } => execute_program(program, path, args, file, revision, node, limits),
+            overlay,
+        } => execute_program(program, path, args, file, revision, node, limits, overlay),
     }
 }
 
@@ -950,6 +973,7 @@ pub(crate) fn interpreted_argv(path: &str, args: &[String]) -> Vec<String> {
     argv
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_graph(
     graph: Result<Arc<ModuleGraph>, kiln_module_graph::ModuleGraphError>,
     path: String,
@@ -958,10 +982,13 @@ fn execute_graph(
     revision: u64,
     node: bool,
     limits: kiln_interpreter::ExecutionLimits,
+    overlay: std::collections::HashMap<std::path::PathBuf, Vec<u8>>,
 ) -> Response {
     let capabilities =
         kiln_conformance::source_compiler_capability().with_argv(interpreted_argv(&path, &args));
-    let mut host = kiln_runtime::CaptureHost::new();
+    let mut host = kiln_runtime::CaptureHost::new().with_fs(Box::new(
+        kiln_host_abi::OverlayFileSystem::new(kiln_host_abi::OsFileSystem, overlay),
+    ));
     // One shaken graph feeds execution: reduce to the closed-world live
     // subset first, so dead modules never evaluate. Development selection
     // keeps the interpreter conservative; a reduction failure runs the full
@@ -1346,6 +1373,7 @@ pub(crate) fn native_graph_with_cache<E: QueryEngine>(
         .map_err(|error| error.to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_program(
     program: Result<kiln_ir::Program, Vec<kiln_ir::CompileDiagnostic>>,
     path: String,
@@ -1354,6 +1382,7 @@ fn execute_program(
     revision: u64,
     node: bool,
     limits: kiln_interpreter::ExecutionLimits,
+    overlay: std::collections::HashMap<std::path::PathBuf, Vec<u8>>,
 ) -> Response {
     let capabilities =
         kiln_conformance::source_compiler_capability().with_argv(interpreted_argv(&path, &args));
@@ -1384,7 +1413,9 @@ fn execute_program(
         }
     };
 
-    let mut host = kiln_runtime::CaptureHost::new();
+    let mut host = kiln_runtime::CaptureHost::new().with_fs(Box::new(
+        kiln_host_abi::OverlayFileSystem::new(kiln_host_abi::OsFileSystem, overlay),
+    ));
     let result = if node {
         kiln_interpreter::execute_node(std::rc::Rc::new(program), &mut host, limits, capabilities)
     } else {

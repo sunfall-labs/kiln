@@ -7695,6 +7695,7 @@ struct Vm<'host, H: HostOps + ?Sized> {
 enum HostResultConversion {
     Direct,
     Utf8,
+    DirEntries { with_file_types: bool },
 }
 
 struct PendingHostRequest {
@@ -10897,6 +10898,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::NodeFsStat => AsyncHostOp::Stat {
                 path: path.to_lossy_string(),
             },
+            Native::NodeFsLstat => AsyncHostOp::Lstat {
+                path: path.to_lossy_string(),
+            },
             Native::NodeFsMkdir => {
                 let recursive = arguments.get(1).map_or(false, |opt| {
                     if let Value::Object(obj) = opt {
@@ -10914,6 +10918,115 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     recursive,
                 }
             }
+            Native::NodeFsReaddir => {
+                let with_types = arguments.get(1).map_or(false, |opt| {
+                    if let Value::Object(obj) = opt {
+                        obj.borrow()
+                            .get_own("withFileTypes")
+                            .map_or(false, Value::is_truthy)
+                    } else {
+                        false
+                    }
+                });
+                AsyncHostOp::ReadDir {
+                    path: path.to_lossy_string(),
+                    with_types,
+                }
+            }
+            Native::NodeFsCopyFile => {
+                let to = match arguments.get(1) {
+                    Some(Value::String(s)) => s.to_lossy_string(),
+                    val => {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: format!(
+                                "destination path must be a string, received {}",
+                                val.map_or("undefined", Value::type_name)
+                            ),
+                        });
+                    }
+                };
+                AsyncHostOp::CopyFile {
+                    from: path.to_lossy_string(),
+                    to,
+                }
+            }
+            Native::NodeFsRename => {
+                let to = match arguments.get(1) {
+                    Some(Value::String(s)) => s.to_lossy_string(),
+                    val => {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: format!(
+                                "new path must be a string, received {}",
+                                val.map_or("undefined", Value::type_name)
+                            ),
+                        });
+                    }
+                };
+                AsyncHostOp::Rename {
+                    from: path.to_lossy_string(),
+                    to,
+                }
+            }
+            Native::NodeFsRm => {
+                let (recursive, force) = match arguments.get(1) {
+                    Some(Value::Object(obj)) => {
+                        let rec = obj
+                            .borrow()
+                            .get_own("recursive")
+                            .map_or(false, Value::is_truthy);
+                        let frc = obj
+                            .borrow()
+                            .get_own("force")
+                            .map_or(false, Value::is_truthy);
+                        (rec, frc)
+                    }
+                    _ => (false, false),
+                };
+                AsyncHostOp::Rm {
+                    path: path.to_lossy_string(),
+                    recursive,
+                    force,
+                }
+            }
+            Native::NodeFsUnlink => AsyncHostOp::Unlink {
+                path: path.to_lossy_string(),
+            },
+            Native::NodeFsRealpath => AsyncHostOp::Realpath {
+                path: path.to_lossy_string(),
+            },
+            Native::NodeFsReadlink => AsyncHostOp::Readlink {
+                path: path.to_lossy_string(),
+            },
+            Native::NodeFsAccess => {
+                let mode = match arguments.get(1) {
+                    Some(Value::Number(n)) => *n as u32,
+                    _ => 0,
+                };
+                AsyncHostOp::Access {
+                    path: path.to_lossy_string(),
+                    mode,
+                }
+            }
+            Native::NodeFsChmod => {
+                let mode = match arguments.get(1) {
+                    Some(Value::Number(n)) => *n as u32,
+                    val => {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: format!(
+                                "mode must be a number, received {}",
+                                val.map_or("undefined", Value::type_name)
+                            ),
+                        });
+                    }
+                };
+                AsyncHostOp::Chmod {
+                    path: path.to_lossy_string(),
+                    mode,
+                }
+            }
+            Native::NodeFsRmdir => AsyncHostOp::Rmdir {
+                path: path.to_lossy_string(),
+            },
             _ => {
                 return Err(ExecutionError::Host {
                     instruction,
@@ -10933,6 +11046,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let conversion = match native {
             Native::NodeFsReadFile if node_encoding(arguments.get(1))? => {
                 HostResultConversion::Utf8
+            }
+            Native::NodeFsReaddir => {
+                let with_file_types = arguments.get(1).map_or(false, |opt| {
+                    if let Value::Object(obj) = opt {
+                        obj.borrow()
+                            .get_own("withFileTypes")
+                            .map_or(false, Value::is_truthy)
+                    } else {
+                        false
+                    }
+                });
+                HostResultConversion::DirEntries { with_file_types }
             }
             _ => HostResultConversion::Direct,
         };
@@ -11266,6 +11391,47 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Settled::Fulfilled(Value::String(
                     String::from_utf8_lossy(&bytes).into_owned().into(),
                 ))
+            }
+            Ok(AsyncHostValue::DirEntries(entries)) => {
+                let with_file_types = match pending.conversion {
+                    HostResultConversion::DirEntries { with_file_types } => with_file_types,
+                    _ => false,
+                };
+                let mut out = Vec::new();
+                for entry in entries {
+                    if with_file_types {
+                        let mut dirent = ObjectData::default();
+                        dirent.set("name", Value::String(entry.name.into()));
+                        dirent.set_non_enumerable(
+                            "@@kiln:node:is-file",
+                            Value::Boolean(entry.is_file),
+                        );
+                        dirent.set_non_enumerable(
+                            "@@kiln:node:is-directory",
+                            Value::Boolean(entry.is_directory),
+                        );
+                        dirent.set_non_enumerable(
+                            "@@kiln:node:is-symlink",
+                            Value::Boolean(entry.is_symlink),
+                        );
+                        dirent.set(
+                            "isFile",
+                            Value::Native(Native::NodeStatIsFile, RealmId::PRIMARY),
+                        );
+                        dirent.set(
+                            "isDirectory",
+                            Value::Native(Native::NodeStatIsDirectory, RealmId::PRIMARY),
+                        );
+                        dirent.set(
+                            "isSymbolicLink",
+                            Value::Native(Native::NodeStatIsSymbolicLink, RealmId::PRIMARY),
+                        );
+                        out.push(Value::Object(Rc::new(RefCell::new(dirent))));
+                    } else {
+                        out.push(Value::String(entry.name.into()));
+                    }
+                }
+                Settled::Fulfilled(Value::Array(ArrayData::new(out)))
             }
             Ok(value) => Settled::Fulfilled(node_host_value(value)?),
             Err(error) => Settled::Rejected(self.node_error_value(error)),
@@ -14911,7 +15077,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | Native::NodeFsWriteFile
                 | Native::NodeFsAppendFile
                 | Native::NodeFsStat
+                | Native::NodeFsLstat
                 | Native::NodeFsMkdir
+                | Native::NodeFsReaddir
+                | Native::NodeFsCopyFile
+                | Native::NodeFsRename
+                | Native::NodeFsRm
+                | Native::NodeFsUnlink
+                | Native::NodeFsRealpath
+                | Native::NodeFsAccess
+                | Native::NodeFsChmod
+                | Native::NodeFsRmdir
+                | Native::NodeFsReadlink
         ) {
             return self.dispatch_node_native(native, arguments, instruction);
         }
@@ -39197,7 +39374,18 @@ fn call_native(
         | Native::NodeFsWriteFile
         | Native::NodeFsAppendFile
         | Native::NodeFsStat
+        | Native::NodeFsLstat
         | Native::NodeFsMkdir
+        | Native::NodeFsReaddir
+        | Native::NodeFsCopyFile
+        | Native::NodeFsRename
+        | Native::NodeFsRm
+        | Native::NodeFsUnlink
+        | Native::NodeFsRealpath
+        | Native::NodeFsAccess
+        | Native::NodeFsChmod
+        | Native::NodeFsRmdir
+        | Native::NodeFsReadlink
         | Native::NodeStatIsFile
         | Native::NodeStatIsDirectory
         | Native::NodeStatIsSymbolicLink
@@ -39226,6 +39414,14 @@ fn call_native(
 fn node_host_value(value: AsyncHostValue) -> Result<Value, ExecutionError> {
     Ok(match value {
         AsyncHostValue::Undefined => Value::Undefined,
+        AsyncHostValue::String(s) => Value::String(s.into()),
+        AsyncHostValue::DirEntries(entries) => {
+            let mut out = Vec::new();
+            for entry in entries {
+                out.push(Value::String(entry.name.into()));
+            }
+            Value::Array(ArrayData::new(out))
+        }
         AsyncHostValue::Bytes(bytes) => {
             let length = bytes.len();
             Value::TypedArray(Rc::new(TypedArrayData {
@@ -39251,6 +39447,7 @@ fn node_host_value(value: AsyncHostValue) -> Result<Value, ExecutionError> {
                 "@@kiln:node:is-directory",
                 Value::Boolean(stat.is_directory),
             );
+            object.set_non_enumerable("@@kiln:node:is-symlink", Value::Boolean(stat.is_symlink));
             object.set(
                 "isFile",
                 Value::Native(Native::NodeStatIsFile, RealmId::PRIMARY),
@@ -39258,6 +39455,10 @@ fn node_host_value(value: AsyncHostValue) -> Result<Value, ExecutionError> {
             object.set(
                 "isDirectory",
                 Value::Native(Native::NodeStatIsDirectory, RealmId::PRIMARY),
+            );
+            object.set(
+                "isSymbolicLink",
+                Value::Native(Native::NodeStatIsSymbolicLink, RealmId::PRIMARY),
             );
             Value::Object(Rc::new(RefCell::new(object)))
         }

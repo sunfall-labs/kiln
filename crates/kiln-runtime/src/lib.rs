@@ -2317,6 +2317,7 @@ impl TokioHost {
                             size: metadata.len(),
                             is_file: metadata.is_file(),
                             is_directory: metadata.is_dir(),
+                            is_symlink: metadata.file_type().is_symlink(),
                         })
                     })
                     .map_err(|error| io_error("stat", path, error));
@@ -2577,6 +2578,17 @@ impl TokioHost {
                 return request;
             }
             AsyncHostOp::StdinRead { max_bytes } => AsyncHostOp::StdinRead { max_bytes },
+            AsyncHostOp::ReadDir { .. }
+            | AsyncHostOp::CopyFile { .. }
+            | AsyncHostOp::Rename { .. }
+            | AsyncHostOp::Unlink { .. }
+            | AsyncHostOp::Rm { .. }
+            | AsyncHostOp::Realpath { .. }
+            | AsyncHostOp::Readlink { .. }
+            | AsyncHostOp::Lstat { .. }
+            | AsyncHostOp::Access { .. }
+            | AsyncHostOp::Chmod { .. }
+            | AsyncHostOp::Rmdir { .. } => operation,
         };
         self.spawn_task(request, sequence, referenced, async move {
             let result = execute_async_host_op(operation).await;
@@ -3069,9 +3081,21 @@ async fn execute_async_host_op(operation: AsyncHostOp) -> Result<AsyncHostValue,
                     size: metadata.len(),
                     is_file: metadata.is_file(),
                     is_directory: metadata.is_dir(),
+                    is_symlink: metadata.file_type().is_symlink(),
                 })
             })
             .map_err(|error| io_error("stat", path, error)),
+        AsyncHostOp::Lstat { path } => tokio::fs::symlink_metadata(&path)
+            .await
+            .map(|metadata| {
+                AsyncHostValue::FileStat(FileStat {
+                    size: metadata.len(),
+                    is_file: metadata.is_file(),
+                    is_directory: metadata.is_dir(),
+                    is_symlink: metadata.file_type().is_symlink(),
+                })
+            })
+            .map_err(|error| io_error("lstat", path, error)),
         AsyncHostOp::Mkdir { path, recursive } => {
             let res = if recursive {
                 tokio::fs::create_dir_all(&path).await
@@ -3081,6 +3105,106 @@ async fn execute_async_host_op(operation: AsyncHostOp) -> Result<AsyncHostValue,
             res.map(|()| AsyncHostValue::Undefined)
                 .map_err(|error| io_error("mkdir", path, error))
         }
+        AsyncHostOp::ReadDir {
+            path,
+            with_types: _,
+        } => match tokio::fs::read_dir(&path).await {
+            Ok(mut read_dir) => {
+                let mut entries = Vec::new();
+                loop {
+                    match read_dir.next_entry().await {
+                        Ok(Some(entry)) => {
+                            let name = entry.file_name().to_string_lossy().into_owned();
+                            let file_type = entry.file_type().await.ok();
+                            entries.push(kiln_host_abi::DirEntry {
+                                name,
+                                is_file: file_type.as_ref().map_or(false, |ft| ft.is_file()),
+                                is_directory: file_type.as_ref().map_or(false, |ft| ft.is_dir()),
+                                is_symlink: file_type.as_ref().map_or(false, |ft| ft.is_symlink()),
+                            });
+                        }
+                        Ok(None) => break,
+                        Err(error) => return Err(io_error("scandir", path, error)),
+                    }
+                }
+                Ok(AsyncHostValue::DirEntries(entries))
+            }
+            Err(error) => Err(io_error("scandir", path, error)),
+        },
+        AsyncHostOp::CopyFile { from, to } => tokio::fs::copy(&from, &to)
+            .await
+            .map(|_| AsyncHostValue::Undefined)
+            .map_err(|error| io_error("copyfile", from, error)),
+        AsyncHostOp::Rename { from, to } => tokio::fs::rename(&from, &to)
+            .await
+            .map(|()| AsyncHostValue::Undefined)
+            .map_err(|error| io_error("rename", from, error)),
+        AsyncHostOp::Unlink { path } => tokio::fs::remove_file(&path)
+            .await
+            .map(|()| AsyncHostValue::Undefined)
+            .map_err(|error| io_error("unlink", path, error)),
+        AsyncHostOp::Rm {
+            path,
+            recursive,
+            force,
+        } => match tokio::fs::symlink_metadata(&path).await {
+            Ok(meta) => {
+                let res = if meta.is_dir() {
+                    if recursive {
+                        tokio::fs::remove_dir_all(&path).await
+                    } else {
+                        tokio::fs::remove_dir(&path).await
+                    }
+                } else {
+                    tokio::fs::remove_file(&path).await
+                };
+                match res {
+                    Ok(()) => Ok(AsyncHostValue::Undefined),
+                    Err(err) if force && err.kind() == std::io::ErrorKind::NotFound => {
+                        Ok(AsyncHostValue::Undefined)
+                    }
+                    Err(err) => Err(io_error("rm", path, err)),
+                }
+            }
+            Err(err) => {
+                if force && err.kind() == std::io::ErrorKind::NotFound {
+                    Ok(AsyncHostValue::Undefined)
+                } else {
+                    Err(io_error("rm", path, err))
+                }
+            }
+        },
+        AsyncHostOp::Realpath { path } => tokio::fs::canonicalize(&path)
+            .await
+            .map(|p| AsyncHostValue::String(p.to_string_lossy().into_owned()))
+            .map_err(|error| io_error("realpath", path, error)),
+        AsyncHostOp::Readlink { path } => tokio::fs::read_link(&path)
+            .await
+            .map(|p| AsyncHostValue::String(p.to_string_lossy().into_owned()))
+            .map_err(|error| io_error("readlink", path, error)),
+        AsyncHostOp::Access { path, mode: _ } => match tokio::fs::metadata(&path).await {
+            Ok(_) => Ok(AsyncHostValue::Undefined),
+            Err(error) => Err(io_error("access", path, error)),
+        },
+        AsyncHostOp::Chmod { path, mode } => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
+                    .await
+                    .map(|()| AsyncHostValue::Undefined)
+                    .map_err(|error| io_error("chmod", path, error))
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (path, mode);
+                Ok(AsyncHostValue::Undefined)
+            }
+        }
+        AsyncHostOp::Rmdir { path } => tokio::fs::remove_dir(&path)
+            .await
+            .map(|()| AsyncHostValue::Undefined)
+            .map_err(|error| io_error("rmdir", path, error)),
         AsyncHostOp::StdinRead { max_bytes } => {
             let mut bytes = vec![0; max_bytes];
             let length = tokio::io::stdin()
@@ -3656,7 +3780,6 @@ const CAPTURE_HOST_CLOCK_START_MS: f64 = 1_577_836_800_000.0;
 const CAPTURE_HOST_CLOCK_STEP_MS: f64 = 1.0;
 
 /// A deterministic host used by the interpreter, tests, and CLI execution mode.
-#[derive(Debug, Clone, PartialEq)]
 pub struct CaptureHost {
     stdout: String,
     /* Separate from `stdout`, because which stream a line went to is observable: a caller that
@@ -3675,6 +3798,18 @@ pub struct CaptureHost {
     /// value. Monotonic rather than constant because code that waits for the clock to move is
     /// ordinary, and against a constant clock it would wait forever.
     clock_ms: f64,
+    fs: Option<Box<dyn kiln_host_abi::FileSystemOps>>,
+}
+
+impl std::fmt::Debug for CaptureHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CaptureHost")
+            .field("stdout", &self.stdout)
+            .field("stderr", &self.stderr)
+            .field("clock_ms", &self.clock_ms)
+            .field("has_fs", &self.fs.is_some())
+            .finish()
+    }
 }
 
 impl Default for CaptureHost {
@@ -3683,6 +3818,7 @@ impl Default for CaptureHost {
             stdout: String::new(),
             stderr: String::new(),
             clock_ms: CAPTURE_HOST_CLOCK_START_MS,
+            fs: None,
         }
     }
 }
@@ -3690,6 +3826,15 @@ impl Default for CaptureHost {
 impl CaptureHost {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_fs(mut self, fs: Box<dyn kiln_host_abi::FileSystemOps>) -> Self {
+        self.fs = Some(fs);
+        self
+    }
+
+    pub fn set_fs(&mut self, fs: Box<dyn kiln_host_abi::FileSystemOps>) {
+        self.fs = Some(fs);
     }
 
     pub fn stdout(&self) -> &str {
@@ -3750,6 +3895,12 @@ impl HostOps for CaptureHost {
                 "deterministic host does not provide {operation:?}"
             ))),
         }
+    }
+
+    fn fs(&mut self) -> Option<&mut (dyn kiln_host_abi::FileSystemOps + '_)> {
+        self.fs
+            .as_mut()
+            .map(|b| &mut **b as &mut (dyn kiln_host_abi::FileSystemOps + '_))
     }
 }
 
@@ -4258,6 +4409,7 @@ mod tests {
                 size: 4,
                 is_file: true,
                 is_directory: false,
+                is_symlink: false,
             }))
         );
     }
@@ -4300,6 +4452,123 @@ mod tests {
         let completion = next_host_completion(&mut runtime).expect("large read completes");
         assert_eq!(completion.request, read);
         assert_eq!(completion.result, Ok(AsyncHostValue::Bytes(read_data)));
+    }
+
+    #[test]
+    fn tokio_host_executes_extended_filesystem_operations() {
+        let directory = TestDirectory::new("async-extended-fs");
+        let dir_str = directory.0.to_string_lossy().into_owned();
+        let file_a = directory.join("file_a.txt");
+        let file_b = directory.join("file_b.txt");
+        let file_c = directory.join("file_c.txt");
+        let file_a_str = file_a.to_string_lossy().into_owned();
+        let file_b_str = file_b.to_string_lossy().into_owned();
+        let file_c_str = file_c.to_string_lossy().into_owned();
+
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+
+        // Write file_a
+        runtime.start_host_op(
+            AsyncHostOp::WriteFile {
+                path: file_a_str.clone(),
+                data: b"hello world".to_vec(),
+            },
+            true,
+        );
+        let _ = next_host_completion(&mut runtime).expect("write completes");
+
+        // Copy file_a -> file_b
+        runtime.start_host_op(
+            AsyncHostOp::CopyFile {
+                from: file_a_str.clone(),
+                to: file_b_str.clone(),
+            },
+            true,
+        );
+        let res = next_host_completion(&mut runtime)
+            .expect("copy completes")
+            .result;
+        assert_eq!(res, Ok(AsyncHostValue::Undefined));
+
+        // Rename file_b -> file_c
+        runtime.start_host_op(
+            AsyncHostOp::Rename {
+                from: file_b_str.clone(),
+                to: file_c_str.clone(),
+            },
+            true,
+        );
+        let res = next_host_completion(&mut runtime)
+            .expect("rename completes")
+            .result;
+        assert_eq!(res, Ok(AsyncHostValue::Undefined));
+
+        // ReadDir
+        runtime.start_host_op(
+            AsyncHostOp::ReadDir {
+                path: dir_str.clone(),
+                with_types: true,
+            },
+            true,
+        );
+        let res = next_host_completion(&mut runtime)
+            .expect("readdir completes")
+            .result;
+        match res {
+            Ok(AsyncHostValue::DirEntries(entries)) => {
+                let names: Vec<String> = entries.into_iter().map(|e| e.name).collect();
+                assert!(names.contains(&"file_a.txt".to_string()));
+                assert!(names.contains(&"file_c.txt".to_string()));
+                assert!(!names.contains(&"file_b.txt".to_string()));
+            }
+            other => panic!("expected DirEntries, got {other:?}"),
+        }
+
+        // Lstat file_a
+        runtime.start_host_op(
+            AsyncHostOp::Lstat {
+                path: file_a_str.clone(),
+            },
+            true,
+        );
+        let res = next_host_completion(&mut runtime)
+            .expect("lstat completes")
+            .result;
+        assert_eq!(
+            res,
+            Ok(AsyncHostValue::FileStat(FileStat {
+                size: 11,
+                is_file: true,
+                is_directory: false,
+                is_symlink: false,
+            }))
+        );
+
+        // Unlink file_a
+        runtime.start_host_op(
+            AsyncHostOp::Unlink {
+                path: file_a_str.clone(),
+            },
+            true,
+        );
+        let res = next_host_completion(&mut runtime)
+            .expect("unlink completes")
+            .result;
+        assert_eq!(res, Ok(AsyncHostValue::Undefined));
+
+        // Rm file_c
+        runtime.start_host_op(
+            AsyncHostOp::Rm {
+                path: file_c_str.clone(),
+                recursive: false,
+                force: false,
+            },
+            true,
+        );
+        let res = next_host_completion(&mut runtime)
+            .expect("rm completes")
+            .result;
+        assert_eq!(res, Ok(AsyncHostValue::Undefined));
     }
 
     #[test]
