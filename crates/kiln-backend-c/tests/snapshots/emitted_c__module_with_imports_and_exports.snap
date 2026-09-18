@@ -1,6 +1,5 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 1406
 expression: body(&unit)
 ---
 /* Module hash: bb80a9f8a54804e3; bytecode version: 6; imports: 1; exports: 1. */
@@ -9,7 +8,6 @@ static void kiln_module_bb80a9f8a54804e3c5b781bf084479b4_gc_roots(void *heap, vo
 }
 static int kiln_module_bb80a9f8a54804e3c5b781bf084479b4_body(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {
     (void)kiln_realm_gc_register_roots(kiln_module_bb80a9f8a54804e3c5b781bf084479b4_gc_roots, NULL, 0);
-    kiln_val receiver = KILN_VAL_UNDEFINED; (void)receiver;
     int depth = 0;
     kiln_value thrown_value = kiln_c99_undefined();
     kiln_value *thrown = &thrown_value;
@@ -20,7 +18,6 @@ static int kiln_module_bb80a9f8a54804e3c5b781bf084479b4_body(kiln_host *host, ki
     for (size_t slot = 0; slot < (size_t)3; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
     locals[0] = kiln_val_from_boundary(imports[0]);
     if ((locals[0] & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX && kiln_c99_val_make_cell(&locals[0]) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
-    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;
     kiln_val kiln_out = KILN_VAL_UNDEFINED;
     int64_t i4 = 0, i5 = 0;
     double d4 = 0.0, d5 = 0.0;

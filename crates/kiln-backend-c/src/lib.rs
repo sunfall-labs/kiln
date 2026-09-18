@@ -2194,6 +2194,7 @@ fn render_entry(
     if policy.type_profile_record {
         writeln!(output, "    (void)atexit({unit_symbol}_dump_type_profile);").unwrap();
     }
+    let context_start = output.len();
     // A module's `this` is undefined: a module is strict, and strict mode does not substitute
     // the global object. An arrow made here snapshots it, so it is declared for that read too.
     output.push_str("    kiln_val receiver = KILN_VAL_UNDEFINED; (void)receiver;\n");
@@ -2205,6 +2206,10 @@ fn render_entry(
         output.push_str("    kiln_value thrown_value = kiln_c99_undefined();\n");
         output.push_str("    kiln_value *thrown = &thrown_value;\n");
     }
+    output.push_str(
+        "    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;\n",
+    );
+    let context_end = output.len();
     let mut array_slots: HashSet<u32> = if module_scope {
         (0..program.local_count).collect()
     } else {
@@ -2301,6 +2306,7 @@ fn render_entry(
         site_offset,
     );
     output.push_str("}\n");
+    emit_graph::retain_used_entry_context(output, context_start..context_end);
     if policy.compact && shared_sites > 0 {
         output.insert_str(
             entry_start,
@@ -3192,6 +3198,7 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
     let mut has_read_property = false;
     let mut has_write_property = false;
     let mut has_status = false;
+    let mut has_truthy = false;
 
     let check_inst = |inst: &Instruction,
                       has_status: &mut bool,
@@ -3201,7 +3208,8 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
                       has_cell: &mut bool,
                       has_binary: &mut bool,
                       has_read_property: &mut bool,
-                      has_write_property: &mut bool| {
+                      has_write_property: &mut bool,
+                      has_truthy: &mut bool| {
         match inst {
             Instruction::Call { .. } => {
                 *has_call = true;
@@ -3211,6 +3219,7 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
                 *has_call_method = true;
                 *has_read_property = true;
                 *has_status = true;
+                *has_truthy = true;
             }
             Instruction::MakeFunction(_) => *has_closure = true,
             Instruction::LoadCell(_) | Instruction::LoadUpvalue(_) => {
@@ -3229,6 +3238,11 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
                 *has_write_property = true;
                 *has_status = true;
             }
+            Instruction::JumpIfFalse(_)
+            | Instruction::JumpIfTruthy(_)
+            | Instruction::Unary(UnaryOp::Not) => {
+                *has_truthy = true;
+            }
             Instruction::SetComputed
             | Instruction::SetComputedStrict { .. }
             | Instruction::SetPrototype
@@ -3237,7 +3251,6 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
             | Instruction::SetPrivate(_)
             | Instruction::DefineNamedProperty
             | Instruction::Unary(_)
-            | Instruction::HostCall { .. }
             | Instruction::DirectEval(_) => {
                 *has_status = true;
             }
@@ -3256,6 +3269,7 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
             &mut has_binary,
             &mut has_read_property,
             &mut has_write_property,
+            &mut has_truthy,
         );
     }
     for func in &program.functions {
@@ -3270,10 +3284,13 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
                 &mut has_binary,
                 &mut has_read_property,
                 &mut has_write_property,
+                &mut has_truthy,
             );
         }
     }
-    output.push_str("static __attribute__((unused, noinline)) int ku_truthy(kiln_val v) { return kiln_c99_val_truthy(v); }\n#define kiln_c99_val_truthy ku_truthy\n");
+    if has_truthy {
+        output.push_str("static __attribute__((unused, noinline)) int ku_truthy(kiln_val v) { return kiln_c99_val_truthy(v); }\n#define kiln_c99_val_truthy ku_truthy\n");
+    }
     if has_status {
         output.push_str("#define KU_STATUS(PC, OP, UNWIND) do { if (KILN_UNLIKELY(status != KILN_C99_OK)) { if (status == KILN_C99_THROWN) { UNWIND; } if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal(ku_site, (size_t)(PC), (OP), (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } return status; } } while (0)\n");
     }

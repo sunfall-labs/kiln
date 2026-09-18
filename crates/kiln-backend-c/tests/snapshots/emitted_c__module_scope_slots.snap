@@ -1,6 +1,5 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 1471
 expression: body(&unit)
 ---
 /* Program hash: a565026db870a77a; bytecode version: 6. */
@@ -35,15 +34,10 @@ kiln_refusal:;
 }
 static int kiln_module_a565026db870a77a306e28a6a100fa79_body(kiln_host *host, kiln_value *result) {
     (void)kiln_realm_gc_register_roots(kiln_module_a565026db870a77a306e28a6a100fa79_gc_roots, NULL, 0);
-    kiln_val receiver = KILN_VAL_UNDEFINED; (void)receiver;
-    int depth = 0;
-    kiln_value thrown_value = kiln_c99_undefined();
-    kiln_value *thrown = &thrown_value;
     kiln_val *locals = kiln_module_a565026db870a77a306e28a6a100fa79_globals;
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
     for (size_t slot = 0; slot < (size_t)2; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
-    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;
     int64_t i2 = 0, i3 = 0;
     double d2 = 0.0, d3 = 0.0;
     kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED, v4 = KILN_VAL_UNDEFINED, v5 = KILN_VAL_UNDEFINED;

@@ -13,7 +13,7 @@ pub(crate) mod sites;
 
 pub use body::{
     emit_async_entry_body, emit_entry_from_graph, emit_entry_from_graph_with_profile,
-    emit_function_from_graph, emit_function_from_graph_with_profile,
+    emit_function_from_graph, emit_function_from_graph_with_profile, retain_used_entry_context,
 };
 pub use clones::{emit_fast_clone, emit_restartable};
 pub(crate) use sites::{method_candidates, method_candidates_map, this_site_count};
