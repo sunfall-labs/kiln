@@ -52,7 +52,7 @@ fi
 
 # 2. Native number FFI contract
 echo "=== 2/3: Native number FFI contract ==="
-PROVIDER_PATTERN="(crates/kiln-native-number|crates/kiln-number-core|crates/kiln-temporal|crates/kiln-runtime|crates/kiln-node-path|crates/kiln-artifact-cache|crates/kiln-digest|crates/kiln-host-abi|scripts/check-native-number-ffi\.sh|scripts/package-native-number-provider\.sh)"
+PROVIDER_PATTERN="(crates/kiln-native-number|crates/kiln-native-provider|crates/kiln-number-core|crates/kiln-temporal|crates/kiln-runtime|crates/kiln-node-path|crates/kiln-artifact-cache|crates/kiln-digest|crates/kiln-host-abi|scripts/check-native-number-ffi\.sh|scripts/package-native-number-provider\.sh)"
 if matches_pattern "$PROVIDER_PATTERN"; then
 	scripts/check-native-number-ffi.sh
 else

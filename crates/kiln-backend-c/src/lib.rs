@@ -148,6 +148,33 @@ macro_rules! provider_c_declaration {
     ($group:ident, $name:ident, node_path_relative) => {
         concat!("int ", stringify!($name), "(const uint8_t *from, uint64_t from_len, const uint8_t *to, uint64_t to_len, uint8_t *out, uint64_t capacity, uint64_t *out_len);\n")
     };
+    ($group:ident, $name:ident, node_fs_read_file_sync) => {
+        concat!("int ", stringify!($name), "(const uint8_t *path, uint64_t path_len, uint8_t **out_bytes, uint64_t *out_len, int32_t *out_error_code);\n")
+    };
+    ($group:ident, $name:ident, node_fs_free_bytes) => {
+        concat!("void ", stringify!($name), "(uint8_t *bytes, uint64_t len);\n")
+    };
+    ($group:ident, $name:ident, node_fs_write_file_sync) => {
+        concat!("int ", stringify!($name), "(const uint8_t *path, uint64_t path_len, const uint8_t *data, uint64_t data_len, int32_t *out_error_code);\n")
+    };
+    ($group:ident, $name:ident, node_fs_mkdir_sync) => {
+        concat!("int ", stringify!($name), "(const uint8_t *path, uint64_t path_len, int32_t recursive, int32_t *out_error_code);\n")
+    };
+    ($group:ident, $name:ident, node_fs_stat_sync) => {
+        concat!("int ", stringify!($name), "(const uint8_t *path, uint64_t path_len, int32_t follow_symlinks, uint64_t *out_size, uint32_t *out_flags, double *out_mtime_ms, uint32_t *out_mode, int32_t *out_error_code);\n")
+    };
+    ($group:ident, $name:ident, node_fs_readdir_sync) => {
+        concat!("int ", stringify!($name), "(const uint8_t *path, uint64_t path_len, uint8_t **out_entries, uint64_t *out_len, uint64_t *out_count, int32_t *out_error_code);\n")
+    };
+    ($group:ident, $name:ident, node_fs_realpath_sync) => {
+        concat!("int ", stringify!($name), "(const uint8_t *path, uint64_t path_len, uint8_t **out_bytes, uint64_t *out_len, int32_t *out_error_code);\n")
+    };
+    ($group:ident, $name:ident, node_fs_unlink_sync) => {
+        concat!("int ", stringify!($name), "(const uint8_t *path, uint64_t path_len, int32_t *out_error_code);\n")
+    };
+    ($group:ident, $name:ident, node_fs_rmdir_sync) => {
+        concat!("int ", stringify!($name), "(const uint8_t *path, uint64_t path_len, int32_t *out_error_code);\n")
+    };
     ($group:ident, $name:ident, ffi_open) => {
         concat!("int ", stringify!($name), "(const uint8_t *path, uint64_t path_len, uint64_t *out_library);\n")
     };
@@ -260,6 +287,33 @@ macro_rules! provider_c_declaration {
     };
     ($group:ident, $name:ident, realm_value_slot) => {
         concat!("int ", stringify!($name), "(uint32_t key, void **out_slot);\n")
+    };
+    ($group:ident, $name:ident, node_fs_read_file_sync) => {
+        concat!("int ", stringify!($name), "(const uint8_t *path, uint64_t path_len, uint8_t **out_bytes, uint64_t *out_len, int32_t *out_err);\n")
+    };
+    ($group:ident, $name:ident, node_fs_free_bytes) => {
+        concat!("void ", stringify!($name), "(uint8_t *bytes, uint64_t len);\n")
+    };
+    ($group:ident, $name:ident, node_fs_write_file_sync) => {
+        concat!("int ", stringify!($name), "(const uint8_t *path, uint64_t path_len, const uint8_t *bytes, uint64_t len, int32_t *out_err);\n")
+    };
+    ($group:ident, $name:ident, node_fs_mkdir_sync) => {
+        concat!("int ", stringify!($name), "(const uint8_t *path, uint64_t path_len, int32_t recursive, int32_t *out_err);\n")
+    };
+    ($group:ident, $name:ident, node_fs_stat_sync) => {
+        concat!("int ", stringify!($name), "(const uint8_t *path, uint64_t path_len, int32_t follow, uint64_t *out_size, uint32_t *out_flags, double *out_mtime_ms, uint32_t *out_mode, int32_t *out_err);\n")
+    };
+    ($group:ident, $name:ident, node_fs_readdir_sync) => {
+        concat!("int ", stringify!($name), "(const uint8_t *path, uint64_t path_len, uint8_t **out_entries, uint64_t *out_len, uint64_t *out_count, int32_t *out_err);\n")
+    };
+    ($group:ident, $name:ident, node_fs_realpath_sync) => {
+        concat!("int ", stringify!($name), "(const uint8_t *path, uint64_t path_len, uint8_t **out_bytes, uint64_t *out_len, int32_t *out_err);\n")
+    };
+    ($group:ident, $name:ident, node_fs_unlink_sync) => {
+        concat!("int ", stringify!($name), "(const uint8_t *path, uint64_t path_len, int32_t *out_err);\n")
+    };
+    ($group:ident, $name:ident, node_fs_rmdir_sync) => {
+        concat!("int ", stringify!($name), "(const uint8_t *path, uint64_t path_len, int32_t *out_err);\n")
     };
     // A provider entry point the generated C never calls needs no declaration.
     ($group:ident, $name:ident, $signature:ident) => { "" };

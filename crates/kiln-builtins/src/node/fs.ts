@@ -41,7 +41,11 @@ export const readFileSync = unmaterialized("readFileSync");
 export const readSync = unmaterialized("readSync");
 export const readdirSync = unmaterialized("readdirSync");
 export const readlinkSync = unmaterialized("readlinkSync");
-export const realpathSync = unmaterialized("realpathSync");
+const _realpathSync = unmaterialized("realpathSync");
+export function realpathSync(...args: any[]): any {
+  return _realpathSync(...args);
+}
+(realpathSync as any).native = realpathSync;
 export const renameSync = unmaterialized("renameSync");
 export const rmSync = unmaterialized("rmSync");
 export const rmdirSync = unmaterialized("rmdirSync");

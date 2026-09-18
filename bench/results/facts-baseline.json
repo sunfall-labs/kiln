@@ -187773,46 +187773,47 @@
                 {
                   "id": 2,
                   "kind": "MakeFunction",
-                  "detail": "proto #6"
+                  "detail": "proto #3"
                 },
                 {
                   "id": 3,
-                  "kind": "GetProperty",
-                  "detail": "\"__kilnNativeModules\""
+                  "kind": "MakeFunction",
+                  "detail": "proto #7"
                 },
                 {
                   "id": 4,
                   "kind": "GetProperty",
-                  "detail": "\"fs\""
+                  "detail": "\"__kilnNativeModules\""
                 },
                 {
                   "id": 5,
                   "kind": "GetProperty",
-                  "detail": "\"__kilnNativeModules\""
+                  "detail": "\"fs\""
                 },
                 {
                   "id": 6,
                   "kind": "GetProperty",
-                  "detail": "\"fs_promises\""
+                  "detail": "\"__kilnNativeModules\""
                 },
                 {
                   "id": 7,
                   "kind": "GetProperty",
-                  "detail": "\"__kilnNativeModules\""
+                  "detail": "\"fs_promises\""
                 },
                 {
                   "id": 8,
                   "kind": "GetProperty",
-                  "detail": "\"fs\""
+                  "detail": "\"__kilnNativeModules\""
                 },
                 {
                   "id": 9,
                   "kind": "GetProperty",
-                  "detail": "\"promises\""
+                  "detail": "\"fs\""
                 },
                 {
                   "id": 10,
-                  "kind": "Call"
+                  "kind": "GetProperty",
+                  "detail": "\"promises\""
                 },
                 {
                   "id": 11,
@@ -187868,7 +187869,8 @@
                 },
                 {
                   "id": 24,
-                  "kind": "Call"
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"native\""
                 },
                 {
                   "id": 25,
@@ -187944,8 +187946,7 @@
                 },
                 {
                   "id": 43,
-                  "kind": "GetProperty",
-                  "detail": "\"access\""
+                  "kind": "Call"
                 },
                 {
                   "id": 44,
@@ -187954,7 +187955,7 @@
                 {
                   "id": 45,
                   "kind": "GetProperty",
-                  "detail": "\"appendFile\""
+                  "detail": "\"access\""
                 },
                 {
                   "id": 46,
@@ -187963,7 +187964,7 @@
                 {
                   "id": 47,
                   "kind": "GetProperty",
-                  "detail": "\"chmod\""
+                  "detail": "\"appendFile\""
                 },
                 {
                   "id": 48,
@@ -187972,7 +187973,7 @@
                 {
                   "id": 49,
                   "kind": "GetProperty",
-                  "detail": "\"chown\""
+                  "detail": "\"chmod\""
                 },
                 {
                   "id": 50,
@@ -187981,7 +187982,7 @@
                 {
                   "id": 51,
                   "kind": "GetProperty",
-                  "detail": "\"copyFile\""
+                  "detail": "\"chown\""
                 },
                 {
                   "id": 52,
@@ -187990,7 +187991,7 @@
                 {
                   "id": 53,
                   "kind": "GetProperty",
-                  "detail": "\"cp\""
+                  "detail": "\"copyFile\""
                 },
                 {
                   "id": 54,
@@ -187999,7 +188000,7 @@
                 {
                   "id": 55,
                   "kind": "GetProperty",
-                  "detail": "\"glob\""
+                  "detail": "\"cp\""
                 },
                 {
                   "id": 56,
@@ -188008,7 +188009,7 @@
                 {
                   "id": 57,
                   "kind": "GetProperty",
-                  "detail": "\"link\""
+                  "detail": "\"glob\""
                 },
                 {
                   "id": 58,
@@ -188017,7 +188018,7 @@
                 {
                   "id": 59,
                   "kind": "GetProperty",
-                  "detail": "\"lstat\""
+                  "detail": "\"link\""
                 },
                 {
                   "id": 60,
@@ -188026,7 +188027,7 @@
                 {
                   "id": 61,
                   "kind": "GetProperty",
-                  "detail": "\"mkdir\""
+                  "detail": "\"lstat\""
                 },
                 {
                   "id": 62,
@@ -188035,7 +188036,7 @@
                 {
                   "id": 63,
                   "kind": "GetProperty",
-                  "detail": "\"mkdtemp\""
+                  "detail": "\"mkdir\""
                 },
                 {
                   "id": 64,
@@ -188044,7 +188045,7 @@
                 {
                   "id": 65,
                   "kind": "GetProperty",
-                  "detail": "\"readdir\""
+                  "detail": "\"mkdtemp\""
                 },
                 {
                   "id": 66,
@@ -188053,7 +188054,7 @@
                 {
                   "id": 67,
                   "kind": "GetProperty",
-                  "detail": "\"readFile\""
+                  "detail": "\"readdir\""
                 },
                 {
                   "id": 68,
@@ -188062,7 +188063,7 @@
                 {
                   "id": 69,
                   "kind": "GetProperty",
-                  "detail": "\"readlink\""
+                  "detail": "\"readFile\""
                 },
                 {
                   "id": 70,
@@ -188071,7 +188072,7 @@
                 {
                   "id": 71,
                   "kind": "GetProperty",
-                  "detail": "\"realpath\""
+                  "detail": "\"readlink\""
                 },
                 {
                   "id": 72,
@@ -188080,7 +188081,7 @@
                 {
                   "id": 73,
                   "kind": "GetProperty",
-                  "detail": "\"rename\""
+                  "detail": "\"realpath\""
                 },
                 {
                   "id": 74,
@@ -188089,7 +188090,7 @@
                 {
                   "id": 75,
                   "kind": "GetProperty",
-                  "detail": "\"rm\""
+                  "detail": "\"rename\""
                 },
                 {
                   "id": 76,
@@ -188098,7 +188099,7 @@
                 {
                   "id": 77,
                   "kind": "GetProperty",
-                  "detail": "\"rmdir\""
+                  "detail": "\"rm\""
                 },
                 {
                   "id": 78,
@@ -188107,7 +188108,7 @@
                 {
                   "id": 79,
                   "kind": "GetProperty",
-                  "detail": "\"stat\""
+                  "detail": "\"rmdir\""
                 },
                 {
                   "id": 80,
@@ -188116,7 +188117,7 @@
                 {
                   "id": 81,
                   "kind": "GetProperty",
-                  "detail": "\"symlink\""
+                  "detail": "\"stat\""
                 },
                 {
                   "id": 82,
@@ -188125,7 +188126,7 @@
                 {
                   "id": 83,
                   "kind": "GetProperty",
-                  "detail": "\"truncate\""
+                  "detail": "\"symlink\""
                 },
                 {
                   "id": 84,
@@ -188134,7 +188135,7 @@
                 {
                   "id": 85,
                   "kind": "GetProperty",
-                  "detail": "\"unlink\""
+                  "detail": "\"truncate\""
                 },
                 {
                   "id": 86,
@@ -188143,7 +188144,7 @@
                 {
                   "id": 87,
                   "kind": "GetProperty",
-                  "detail": "\"utimes\""
+                  "detail": "\"unlink\""
                 },
                 {
                   "id": 88,
@@ -188152,7 +188153,7 @@
                 {
                   "id": 89,
                   "kind": "GetProperty",
-                  "detail": "\"watch\""
+                  "detail": "\"utimes\""
                 },
                 {
                   "id": 90,
@@ -188161,18 +188162,19 @@
                 {
                   "id": 91,
                   "kind": "GetProperty",
-                  "detail": "\"writeFile\""
+                  "detail": "\"watch\""
                 },
                 {
                   "id": 92,
                   "kind": "Call"
                 },
                 {
-                  "id": 95,
-                  "kind": "Call"
+                  "id": 93,
+                  "kind": "GetProperty",
+                  "detail": "\"writeFile\""
                 },
                 {
-                  "id": 96,
+                  "id": 94,
                   "kind": "Call"
                 },
                 {
@@ -188225,32 +188227,30 @@
                 },
                 {
                   "id": 109,
-                  "kind": "NewArray"
+                  "kind": "Call"
                 },
                 {
                   "id": 110,
-                  "kind": "MakeFunction",
-                  "detail": "proto #7"
+                  "kind": "Call"
                 },
                 {
                   "id": 111,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 112,
+                  "kind": "MakeFunction",
+                  "detail": "proto #8"
+                },
+                {
+                  "id": 113,
                   "kind": "SetPropertyStrict",
                   "detail": "\"@@private:0:%brand\""
                 },
                 {
-                  "id": 112,
-                  "kind": "GetProperty",
-                  "detail": "\"prototype\""
-                },
-                {
-                  "id": 113,
-                  "kind": "GetProperty",
-                  "detail": "\"prototype\""
-                },
-                {
                   "id": 114,
-                  "kind": "MakeFunction",
-                  "detail": "proto #8"
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
                 },
                 {
                   "id": 115,
@@ -188304,7 +188304,8 @@
                 },
                 {
                   "id": 125,
-                  "kind": "NewArray"
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
                 },
                 {
                   "id": 126,
@@ -188313,23 +188314,22 @@
                 },
                 {
                   "id": 127,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 128,
+                  "kind": "MakeFunction",
+                  "detail": "proto #15"
+                },
+                {
+                  "id": 129,
                   "kind": "SetPropertyStrict",
                   "detail": "\"@@private:1:%brand\""
                 },
                 {
-                  "id": 128,
-                  "kind": "GetProperty",
-                  "detail": "\"prototype\""
-                },
-                {
-                  "id": 129,
-                  "kind": "GetProperty",
-                  "detail": "\"prototype\""
-                },
-                {
                   "id": 130,
-                  "kind": "MakeFunction",
-                  "detail": "proto #15"
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
                 },
                 {
                   "id": 131,
@@ -188392,7 +188392,17 @@
                   "detail": "proto #21"
                 },
                 {
+                  "id": 143,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
                   "id": 144,
+                  "kind": "MakeFunction",
+                  "detail": "proto #22"
+                },
+                {
+                  "id": 146,
                   "kind": "SetPropertyStrict",
                   "detail": "\"default\""
                 }
@@ -188463,6 +188473,19 @@
               ]
             },
             {
+              "name": "realpathSync",
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "NewArray"
+                }
+              ]
+            },
+            {
               "return_type": "Unknown",
               "pure": false,
               "can_throw": true,
@@ -188524,7 +188547,7 @@
                 {
                   "id": 5,
                   "kind": "MakeFunction",
-                  "detail": "proto #3"
+                  "detail": "proto #4"
                 },
                 {
                   "id": 6,
@@ -188543,7 +188566,7 @@
                 {
                   "id": 9,
                   "kind": "MakeFunction",
-                  "detail": "proto #4"
+                  "detail": "proto #5"
                 },
                 {
                   "id": 10,
@@ -188572,7 +188595,7 @@
                 {
                   "id": 0,
                   "kind": "MakeFunction",
-                  "detail": "proto #5"
+                  "detail": "proto #6"
                 }
               ]
             },

@@ -5718,7 +5718,34 @@ static int kiln_install_native_modules(kiln_host *host) {
     status = kiln_c99_new_object(&fs_obj);
     if (status != KILN_C99_OK) return status;
     kiln_value fs_exists_sync = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 378 /* KILN_C99_METHOD_NODE_FS_EXISTS_SYNC */ };
+    kiln_value fs_read_file_sync = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 514 /* KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC */ };
+    kiln_value fs_write_file_sync = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 515 /* KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC */ };
+    kiln_value fs_mkdir_sync = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 516 /* KILN_C99_METHOD_NODE_FS_MKDIR_SYNC */ };
+    kiln_value fs_stat_sync = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 517 /* KILN_C99_METHOD_NODE_FS_STAT_SYNC */ };
+    kiln_value fs_lstat_sync = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 518 /* KILN_C99_METHOD_NODE_FS_LSTAT_SYNC */ };
+    kiln_value fs_readdir_sync = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 519 /* KILN_C99_METHOD_NODE_FS_READDIR_SYNC */ };
+    kiln_value fs_realpath_sync = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 520 /* KILN_C99_METHOD_NODE_FS_REALPATH_SYNC */ };
+    kiln_value fs_unlink_sync = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 521 /* KILN_C99_METHOD_NODE_FS_UNLINK_SYNC */ };
+    kiln_value fs_rmdir_sync = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 522 /* KILN_C99_METHOD_NODE_FS_RMDIR_SYNC */ };
     status = kiln_c99_put(host, fs_obj, "existsSync", 10, fs_exists_sync, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, fs_obj, "readFileSync", 12, fs_read_file_sync, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, fs_obj, "writeFileSync", 13, fs_write_file_sync, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, fs_obj, "mkdirSync", 9, fs_mkdir_sync, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, fs_obj, "statSync", 8, fs_stat_sync, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, fs_obj, "lstatSync", 9, fs_lstat_sync, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, fs_obj, "readdirSync", 11, fs_readdir_sync, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, fs_obj, "realpathSync", 12, fs_realpath_sync, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, fs_obj, "unlinkSync", 10, fs_unlink_sync, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, fs_obj, "rmdirSync", 9, fs_rmdir_sync, 0, NULL);
     if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(host, fs_obj, "promises", 8, fsp_obj, 0, NULL);
     if (status != KILN_C99_OK) return status;
@@ -5773,7 +5800,7 @@ static int kiln_graph_enter(void *opaque) {
         .unwrap();
     }
     output.push_str(
-        &r#"
+        r#"
     if (!graph->roots_registered) {
         status = kiln_realm_gc_register_roots(kiln_graph_gc_roots, graph, KILN_GC_ROOT_SURVIVES_TEARDOWN);
         if (status != 0) return status;

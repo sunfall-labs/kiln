@@ -197,6 +197,16 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_PROCESS_NEXT_TICK: return "nextTick";
     case KILN_C99_METHOD_PROCESS_KILL: return "kill";
     case KILN_C99_METHOD_PROCESS_EXIT: return "exit";
+    case KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC: return "readFileSync";
+    case KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC: return "writeFileSync";
+    case KILN_C99_METHOD_NODE_FS_MKDIR_SYNC: return "mkdirSync";
+    case KILN_C99_METHOD_NODE_FS_STAT_SYNC: return "statSync";
+    case KILN_C99_METHOD_NODE_FS_LSTAT_SYNC: return "lstatSync";
+    case KILN_C99_METHOD_NODE_FS_READDIR_SYNC: return "readdirSync";
+    case KILN_C99_METHOD_NODE_FS_REALPATH_SYNC: return "realpathSync";
+    case KILN_C99_METHOD_NODE_FS_UNLINK_SYNC: return "unlinkSync";
+    case KILN_C99_METHOD_NODE_FS_RMDIR_SYNC: return "rmdirSync";
+    case KILN_C99_METHOD_NODE_STAT_IS_SYMBOLIC_LINK: return "isSymbolicLink";
     case KILN_C99_METHOD_PROCESS_START_RAW: return "__kilnHostProcessStart";
     case KILN_C99_METHOD_PROCESS_CANCEL_RAW: return "__kilnHostProcessCancel";
     case KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE: return "__kilnHostModuleCreateRequire";
