@@ -1,6 +1,5 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 1343
 expression: body(&unit)
 ---
 /* Program hash: 42ec9ea3f562544b; bytecode version: 6. */
@@ -59,7 +58,6 @@ kiln_block_0:;
     d6_f_1 = d5;
     i6_f_1 = i5;
     v6 = KILN_VAL_UNDEFINED;
-    v7 = v6;
     v8 = UINT64_C(4607182418800017408);
     memcpy(&d8, &v8, sizeof(d8));
     i8 = 1LL;
@@ -67,7 +65,6 @@ kiln_block_0:;
     memcpy(&d9, &v9, sizeof(d9));
     i9 = 2LL;
     { kiln_value built; int status = kiln_c99_new_array_with_capacity(&built, 2, 1 && KILN_VAL_IS_NUMBER(v8) && KILN_VAL_IS_NUMBER(v9)); if (status != KILN_C99_OK) return status; kiln_array *arr = kiln_c99_array_of(built); arr->elements[0] = v8; arr->elements[1] = v9; arr->count = 2; v10 = kiln_val_from_boundary(built); }
-    v11 = v10;
     v12 = v6_f_0;
     d12 = d6_f_0;
     i12 = i6_f_0;
@@ -81,7 +78,7 @@ kiln_block_0:;
     v16 = UINT64_C(4611686018427387904);
     memcpy(&d16, &v16, sizeof(d16));
     i16 = 2LL;
-    { static kiln_c99_site site = {0}; int handled = 0; kiln_val vk = !handled ? kiln_c99_val_from_double((double)i15) : 0; if (KILN_LIKELY((v10 & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) { void *ptr = KILN_VAL_PTR(v10); if (site.has_cached_method == 1 || kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) { site.has_cached_method = 1; kiln_array *arr = (kiln_array *)ptr; if (KILN_LIKELY(i15 >= 0 && (uint64_t)i15 < arr->count && !arr->frozen)) { if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v16)) arr->is_numeric = 0; arr->elements[i15] = v16; v17 = v16; handled = 1; } } else if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY) { kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY(i15 >= 0 && (uint64_t)i15 < view->length)) { double val_d = d16; kiln_c99_typed_set(view, (size_t)i15, val_d); v17 = v16; handled = 1; } } } if (!handled) { int status = kiln_c99_val_write_element(host, v10, vk, v16, 0, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_unwind; if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal("kiln_module_42ec9ea3f562544b895db789b3681ee2", (size_t)20, "SetComputed", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; v17 = v16; } }
+    { static kiln_c99_site site = {0}; int handled = 0; kiln_val vk = !handled ? kiln_c99_val_from_double((double)i15) : 0; if (KILN_LIKELY((v10 & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) { void *ptr = KILN_VAL_PTR(v10); if (site.has_cached_method == 1 || kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) { site.has_cached_method = 1; kiln_array *arr = (kiln_array *)ptr; if (KILN_LIKELY(i15 >= 0 && (uint64_t)i15 < arr->count && !arr->frozen)) { if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v16)) arr->is_numeric = 0; arr->elements[i15] = v16; handled = 1; } } else if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY) { kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY(i15 >= 0 && (uint64_t)i15 < view->length)) { double val_d = d16; kiln_c99_typed_set(view, (size_t)i15, val_d); handled = 1; } } } if (!handled) { int status = kiln_c99_val_write_element(host, v10, vk, v16, 0, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_unwind; if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal("kiln_module_42ec9ea3f562544b895db789b3681ee2", (size_t)20, "SetComputed", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; } }
     v18 = UINT64_C(4611686018427387904);
     memcpy(&d18, &v18, sizeof(d18));
     i18 = 2LL;

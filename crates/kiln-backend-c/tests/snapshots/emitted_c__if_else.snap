@@ -36,9 +36,6 @@ kiln_block_2:;
         { kiln_val phi_t0 = v4; double phi_td0 = d4; int64_t phi_ti0 = i4; v3 = phi_t0; d3 = phi_td0; i3 = phi_ti0; }
     goto kiln_block_3;
 kiln_block_3:;
-    v5 = v3;
-    d5 = d3;
-    i5 = i3;
     *result = kiln_val_to_boundary(v3);
     return KILN_C99_OK;
 }

@@ -19,9 +19,6 @@ kiln_block_0:;
     v2 = UINT64_C(0);
     memcpy(&d2, &v2, sizeof(d2));
     i2 = 0LL;
-    v3 = v2;
-    d3 = d2;
-    i3 = i2;
     v4 = UINT64_C(4613937818241073152);
     memcpy(&d4, &v4, sizeof(d4));
     i4 = 3LL;
@@ -40,9 +37,6 @@ kiln_block_1:;
     }
 kiln_block_2:;
     i7 = i1 + i6; d7 = (double)i7; v7 = kiln_c99_val_from_double(d7);
-    v8 = v7;
-    d8 = d7;
-    i8 = i7;
         { kiln_val phi_t0 = v7; double phi_td0 = d7; int64_t phi_ti0 = i7; v1 = phi_t0; d1 = phi_td0; i1 = phi_ti0; }
     goto kiln_block_1;
 kiln_block_3:;

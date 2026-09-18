@@ -40,9 +40,6 @@ kiln_block_3:;
     memcpy(&d5, &v5, sizeof(d5));
     i5 = 7LL;
     locals[0] = v5;
-    v6 = v5;
-    d6 = d5;
-    i6 = i5;
     goto kiln_block_4;
 kiln_block_4:;
     goto kiln_block_5;
@@ -52,7 +49,6 @@ kiln_block_5:;
 kiln_block_6:;
     kiln_c99_forget_handled_throw(); v2 = kiln_val_from_boundary(*thrown);
     locals[0] = v2;
-    v7 = v2;
         { kiln_val phi_t0 = v2; v1 = phi_t0; }
     goto kiln_block_7;
 kiln_block_7:;

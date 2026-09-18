@@ -59,6 +59,7 @@ pub(super) struct OpContext<'a> {
     /// The method emitter may feed numeric arguments directly to the existing asynchronous
     /// suspension path; its generated runtime guard retains the generic fallback for other values.
     pub await_resolve_arg: Option<ValueId>,
+    pub used: &'a HashSet<ValueId>,
 }
 
 /// One status check after a runtime call. A throw unwinds; a refusal is attributed to this site
@@ -226,10 +227,12 @@ pub(super) fn emit_graph_op(
     spec: &Speculation,
     boxed: Option<&HashSet<ValueId>>,
     await_resolve_arg: Option<ValueId>,
+    used: &HashSet<ValueId>,
 ) {
     let v = vid.0;
     let typed = numbers.contains(&vid);
     let typed_int = ints.contains(&vid);
+    let is_used = used.contains(&vid);
     let in_array = |slot: &u32| array_slots.contains(slot);
     let (pc, label) = origins
         .get(&vid)
@@ -261,6 +264,7 @@ pub(super) fn emit_graph_op(
         spec,
         boxed,
         await_resolve_arg,
+        used,
     };
     match op {
         GraphOp::Const { index, constant } => match constant {
@@ -338,12 +342,14 @@ pub(super) fn emit_graph_op(
             if in_array(slot) {
                 writeln!(output, "    locals[{slot}] = v{};", value.0).unwrap();
             }
-            writeln!(output, "    v{v} = v{};", value.0).unwrap();
-            if typed {
-                writeln!(output, "    d{v} = d{};", value.0).unwrap();
-            }
-            if typed_int {
-                writeln!(output, "    i{v} = i{};", value.0).unwrap();
+            if is_used {
+                writeln!(output, "    v{v} = v{};", value.0).unwrap();
+                if typed {
+                    writeln!(output, "    d{v} = d{};", value.0).unwrap();
+                }
+                if typed_int {
+                    writeln!(output, "    i{v} = i{};", value.0).unwrap();
+                }
             }
         }
         // A cell is a shared box: the load checks the temporal dead zone and reads through it,
@@ -393,12 +399,14 @@ pub(super) fn emit_graph_op(
                 value.0
             )
             .unwrap();
-            writeln!(output, "    v{v} = v{};", value.0).unwrap();
-            if typed {
-                writeln!(output, "    d{v} = d{};", value.0).unwrap();
-            }
-            if typed_int {
-                writeln!(output, "    i{v} = i{};", value.0).unwrap();
+            if is_used {
+                writeln!(output, "    v{v} = v{};", value.0).unwrap();
+                if typed {
+                    writeln!(output, "    d{v} = d{};", value.0).unwrap();
+                }
+                if typed_int {
+                    writeln!(output, "    i{v} = i{};", value.0).unwrap();
+                }
             }
         }
         // An upvalue is a box the closure was handed; the load checks the temporal dead zone
@@ -426,7 +434,9 @@ pub(super) fn emit_graph_op(
                 value.0
             )
             .unwrap();
-            writeln!(output, "    v{v} = v{};", value.0).unwrap();
+            if is_used {
+                writeln!(output, "    v{v} = v{};", value.0).unwrap();
+            }
         }
         GraphOp::LoadBuiltin(builtin) => match builtin_load(*builtin) {
             // A built-in object or method is a constant in the box, not a boundary value to
@@ -570,19 +580,23 @@ pub(super) fn emit_graph_op(
                 "    {{ int status = kiln_c99_val_make_cell(&locals[{slot}]); if (status != KILN_C99_OK) return status; }}"
             )
             .unwrap();
-            writeln!(output, "    v{v} = locals[{slot}];").unwrap();
+            if is_used {
+                writeln!(output, "    v{v} = locals[{slot}];").unwrap();
+            }
         }
         GraphOp::LoadGlobal(slot) => {
             writeln!(output, "    v{v} = {symbol}_globals[{slot}];").unwrap();
         }
         GraphOp::StoreGlobal { slot, value } => {
             writeln!(output, "    {symbol}_globals[{slot}] = v{};", value.0).unwrap();
-            writeln!(output, "    v{v} = v{};", value.0).unwrap();
-            if typed {
-                writeln!(output, "    d{v} = d{};", value.0).unwrap();
-            }
-            if typed_int {
-                writeln!(output, "    i{v} = i{};", value.0).unwrap();
+            if is_used {
+                writeln!(output, "    v{v} = v{};", value.0).unwrap();
+                if typed {
+                    writeln!(output, "    d{v} = d{};", value.0).unwrap();
+                }
+                if typed_int {
+                    writeln!(output, "    i{v} = i{};", value.0).unwrap();
+                }
             }
         }
         GraphOp::LoadThis => {
@@ -597,7 +611,9 @@ pub(super) fn emit_graph_op(
         }
         GraphOp::MarkUninitialized(slot) if !in_array(slot) => {
             // No array behind this slot: the mark is the SSA value alone.
-            writeln!(output, "    v{v} = KILN_VAL_UNINITIALIZED;").unwrap();
+            if is_used {
+                writeln!(output, "    v{v} = KILN_VAL_UNINITIALIZED;").unwrap();
+            }
         }
         GraphOp::MarkUninitialized(slot) => {
             // A slot that holds a cell is marked through the cell: the binding is captured, and
@@ -608,17 +624,21 @@ pub(super) fn emit_graph_op(
                 "    if ((locals[{slot}] & KILN_TAG_MASK) == KILN_TAG_CELL_PREFIX) {{ *(kiln_val *)KILN_VAL_PTR(locals[{slot}]) = KILN_VAL_UNINITIALIZED; }} else {{ locals[{slot}] = KILN_VAL_UNINITIALIZED; }}"
             )
             .unwrap();
-            writeln!(output, "    v{v} = KILN_VAL_UNINITIALIZED;").unwrap();
+            if is_used {
+                writeln!(output, "    v{v} = KILN_VAL_UNINITIALIZED;").unwrap();
+            }
         }
         GraphOp::CheckTdz { slot: _, value } => {
             // A proven number is initialized by definition: no check, just the copies.
             if graph.scalar_alias_map.contains_key(value) || numbers.contains(value) {
-                writeln!(output, "    v{v} = v{};", value.0).unwrap();
-                if typed {
-                    writeln!(output, "    d{v} = d{};", value.0).unwrap();
-                }
-                if typed_int {
-                    writeln!(output, "    i{v} = i{};", value.0).unwrap();
+                if is_used {
+                    writeln!(output, "    v{v} = v{};", value.0).unwrap();
+                    if typed {
+                        writeln!(output, "    d{v} = d{};", value.0).unwrap();
+                    }
+                    if typed_int {
+                        writeln!(output, "    i{v} = i{};", value.0).unwrap();
+                    }
                 }
                 return;
             }
@@ -629,12 +649,14 @@ pub(super) fn emit_graph_op(
                 value.0
             )
             .unwrap();
-            writeln!(output, "    v{v} = v{};", value.0).unwrap();
-            if typed {
-                writeln!(output, "    d{v} = d{};", value.0).unwrap();
-            }
-            if typed_int {
-                writeln!(output, "    i{v} = i{};", value.0).unwrap();
+            if is_used {
+                writeln!(output, "    v{v} = v{};", value.0).unwrap();
+                if typed {
+                    writeln!(output, "    d{v} = d{};", value.0).unwrap();
+                }
+                if typed_int {
+                    writeln!(output, "    i{v} = i{};", value.0).unwrap();
+                }
             }
         }
         GraphOp::Unary { op, value } if typed_int => {
