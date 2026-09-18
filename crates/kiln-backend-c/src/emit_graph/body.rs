@@ -10,7 +10,7 @@ use crate::graph::{
     proven_ints_with_assumptions, proven_numbers_with_assumptions,
 };
 use crate::prelude::lookup_speculation_invariant;
-use kiln_ir::{BinaryOp, Constant, ExportBinding, FunctionProto, Program, UnaryOp};
+use kiln_ir::{BinaryOp, Constant, ExportBinding, FunctionProto, Instruction, Program, UnaryOp};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
@@ -1362,6 +1362,20 @@ fn emit_block_sequence(
                     " ",
                 );
             }
+            if !used.contains(&vid)
+                && matches!(
+                    op,
+                    GraphOp::Bridge {
+                        instruction: Instruction::HostCall { .. },
+                        ..
+                    }
+                )
+            {
+                op_text = op_text.replace(
+                    &format!(" v{} = kiln_val_from_boundary(host_result);", vid.0),
+                    "",
+                );
+            }
             // The fast clone left this operation to the generic clone: it runs here, on the
             // literal the exit rebuilt.
             if !spec.exits && spec.sinks.contains(&vid) {
@@ -2034,6 +2048,52 @@ fn emit_blocks(
             shared_sites = count;
         }
         _ => {}
+    }
+
+    // 5d. In compact mode, prune SSA value declarations that are never referenced in the body.
+    if plan.compact
+        && graph.next_value_id > 0
+        && graph.next_value_id < COMPACT_INDEXED_VALUE_THRESHOLD
+    {
+        let body = &output[body_start..];
+        if let Some(v_decl_idx) = body.find("    kiln_val v") {
+            let v_decl_end = body[v_decl_idx..]
+                .find(";\n")
+                .map(|p| v_decl_idx + p + 2)
+                .unwrap_or(body.len());
+            let current_decl = &body[v_decl_idx..v_decl_end];
+            let after_decl = &body[v_decl_end..];
+            let mut used_v = HashSet::new();
+            for token in after_decl.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
+                if let Some(rest) = token.strip_prefix('v') {
+                    if let Ok(id) = rest.parse::<u32>() {
+                        if id < graph.next_value_id {
+                            used_v.insert(id);
+                        }
+                    }
+                }
+            }
+            let mut sorted_v: Vec<u32> = used_v.into_iter().collect();
+            sorted_v.sort_unstable();
+            let new_decl = if !sorted_v.is_empty() {
+                let mut s = String::from("    kiln_val ");
+                for (i, vid) in sorted_v.iter().enumerate() {
+                    if i > 0 {
+                        s.push_str(", ");
+                    }
+                    write!(s, "v{vid}").unwrap();
+                }
+                s.push_str(";\n");
+                s
+            } else {
+                String::new()
+            };
+            if new_decl != current_decl {
+                let abs_start = body_start + v_decl_idx;
+                let abs_end = body_start + v_decl_end;
+                output.replace_range(abs_start..abs_end, &new_decl);
+            }
+        }
     }
 
     // 6. Unwind and refusal handlers
