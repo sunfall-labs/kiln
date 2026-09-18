@@ -1315,16 +1315,11 @@ static int kiln_c99_refuse_named_key(const char *lacked, const kiln_string *key)
 static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_t argc,
 static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
 static int kiln_c99_form_decode(const char *bytes, size_t len, kiln_value *out);
-static int kiln_c99_node_querystring_parse(kiln_value *out, const kiln_value *args, size_t argc);
 static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t count);
 static int kiln_c99_buffer_from_bytes(kiln_value *out, const uint8_t *bytes, uint64_t length);
 static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
 static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, kiln_value *thrown);
 static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value receiver,
-static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
-static int kiln_c99_node_diagnostics(kiln_host *host, kiln_value *out, uint64_t code,
-static int kiln_c99_node_dns_lookup(kiln_host *host, kiln_value *out,
-static int kiln_c99_node_path(kiln_value *out, uint64_t code,
 static int kiln_c99_node_ffi(kiln_host *host, kiln_value *out, uint64_t code,
 static int kiln_c99_node_stream(kiln_host *host, kiln_value *out, uint64_t code,
 static kiln_value kiln_c99_copy_text(const char *bytes, size_t len);
@@ -1442,11 +1437,6 @@ static void kiln_c99_node_stdin_pause(kiln_value receiver);
 static int kiln_c99_node_set_raw_mode(int mode);
 static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, size_t len) {
 static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t code,
-#define KILN_C99_NODE_PATH_NORMALIZE 3u
-#define KILN_C99_NODE_PATH_RELATIVE 4u
-static int kiln_c99_node_path_answer(uint32_t part, const uint8_t *first, uint64_t first_len,
-static int kiln_c99_node_path(kiln_value *result, uint64_t code,
-done:
 #define KILN_C99_FFI_DYNAMIC_BASE UINT64_C(0x80000000)
 #define KILN_C99_FFI_DYNAMIC_MASK UINT64_C(0x7fffffff)
 #define KILN_C99_FFI_VOID 0u
@@ -1739,11 +1729,6 @@ static int kiln_c99_buffer_from_bytes(kiln_value *out, const uint8_t *bytes, uin
 static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, kiln_value *thrown) {
 static kiln_typed_array *kiln_c99_val_typed_array(kiln_val value) {
 static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value receiver,
-static int kiln_c99_node_dns_lookup(kiln_host *host, kiln_value *out,
-static int kiln_c99_node_channel(kiln_value *out) {
-static int kiln_c99_node_diagnostics(kiln_host *host, kiln_value *out, uint64_t code,
-static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
-format_oom:
 static int kiln_c99_new_array(kiln_value *out) {
 static int kiln_c99_array_reserve(kiln_array *array, size_t needed) {
 #define KILN_C99_ARRAY_INBLOCK_MAX ((size_t)64)
@@ -1833,9 +1818,6 @@ static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
 #define KILN_QUERY_RETURN(result) do { \
 #undef KILN_QUERY_RETURN
 static int kiln_c99_form_decode(const char *bytes, size_t len, kiln_value *out) {
-static int kiln_c99_node_querystring_parse(kiln_value *out, const kiln_value *args, size_t argc) {
-#define KILN_QUERYSTRING_RETURN(result) do { \
-#undef KILN_QUERYSTRING_RETURN
 static const uint64_t kiln_c99_ryu_pow5_inv[292][2] = {
 static const uint64_t kiln_c99_ryu_pow5[326][2] = {
 static uint32_t kiln_c99_ryu_log10_pow2(uint32_t e) { return (e * UINT32_C(78913)) >> 18; }
@@ -2370,13 +2352,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
 #endif
 #if KILN_RETAIN_GROUP_BUFFER
 #endif
-#if KILN_RETAIN_GROUP_NODE_UTIL
-#endif
-#if KILN_RETAIN_GROUP_NODE_DIAGNOSTICS
-#endif
 #if KILN_RETAIN_GROUP_NODE_STREAM
-#endif
-#if KILN_RETAIN_GROUP_NODE_PATH
 #endif
 #if KILN_RETAIN_GROUP_NODE_EVENT
 #else

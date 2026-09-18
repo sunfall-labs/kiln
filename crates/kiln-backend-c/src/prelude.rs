@@ -2130,16 +2130,6 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
         proved_by: "not a member read at all: an instant with no ISO spelling, whose caller \
                     decides between a throw and a null",
     },
-    AbsentAnswer {
-        function: "kiln_c99_node_diagnostics",
-        sites: 1,
-        proved_by: "not a member read at all: `channel.publish` returns undefined",
-    },
-    AbsentAnswer {
-        function: "kiln_c99_node_util",
-        sites: 1,
-        proved_by: "not a member read at all: the `debuglog` no-op returns undefined",
-    },
 ];
 
 pub const fn absent_answer_sites(rows: &[AbsentAnswer]) -> usize {
@@ -2529,7 +2519,7 @@ const _: () = assert_refusals_name_themselves(
 /// `prefix` (`"get"`/`"set"`/NULL at every caller in values.c): a genuine NUL-terminated
 /// C string literal, previously measured inside `kiln_c99_text_append_c`, now spelled
 /// out at the `kiln_c99_static_text(prefix, strlen(prefix))` call in definitions.c.
-pub const C_STRING_LENGTH_SITES: usize = 79;
+pub const C_STRING_LENGTH_SITES: usize = 78;
 
 /// How far the `strlen(` scan may skip after reading the last byte of its seven-byte window:
 /// the Horspool shift, as `refusal_scan_shift` is for the refusal scan, so the const evaluator

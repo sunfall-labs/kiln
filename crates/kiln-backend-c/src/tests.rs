@@ -560,9 +560,9 @@ int main(void) {{
     if (kiln_c99_make_closure(&child, child_constructor, &child_name, NULL, 0, "<test>", 0, 0, 0, 0, 0, 0, 0,
                               1, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED, 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 34;
-    args[0] = child; args[1] = exports[0];
-    if (kiln_c99_node_util(NULL, &result, KILN_C99_METHOD_NODE_UTIL_INHERITS, args, 2, 0,
-                           &thrown) != KILN_C99_OK) return 35;
+    if (kiln_c99_callable_prototype(child, &child_prototype) != KILN_C99_OK ||
+        kiln_c99_callable_prototype(exports[0], &parent_prototype) != KILN_C99_OK ||
+        kiln_c99_set_prototype(child_prototype, parent_prototype) != KILN_C99_OK) return 35;
     if (kiln_c99_construct(NULL, &child_instance, child, NULL, 0, 0,
                            &thrown) != KILN_C99_OK) return 36;
     if (kiln_c99_get(NULL, child_instance, "on", 2, &inherited, 0,
@@ -625,7 +625,7 @@ int main(void) {
     kiln_value method;
     kiln_value readable_prototype;
     kiln_value emitter_prototype;
-    kiln_value arguments[2];
+    kiln_value child_prototype;
     kiln_value thrown = kiln_c99_undefined();
     if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
     kiln_test_realm_active = 1;
@@ -641,10 +641,8 @@ int main(void) {
     if (kiln_c99_make_closure(&child, readable_child, &readable_child_name, "<test>", 6, "<test>", 0, 0, 0, 0, 0, 0, 0,
                               1, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED, 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 6;
-    arguments[0] = child;
-    arguments[1] = readable;
-    if (kiln_c99_node_util(NULL, &result, KILN_C99_METHOD_NODE_UTIL_INHERITS, arguments, 2, 0,
-                           &thrown) != KILN_C99_OK) return 7;
+    if (kiln_c99_callable_prototype(child, &child_prototype) != KILN_C99_OK ||
+        kiln_c99_set_prototype(child_prototype, readable_prototype) != KILN_C99_OK) return 7;
     if (kiln_c99_construct(NULL, &instance, child, NULL, 0, 0, &thrown) != KILN_C99_OK) return 8;
     if (kiln_c99_get(NULL, instance, "push", 4, &method, 0, &thrown) != KILN_C99_OK ||
         method.tag != KILN_VALUE_METHOD ||
@@ -3696,14 +3694,27 @@ fn executable_array_from_maps_an_array_like_object() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
     let wrapper = r#"
+static int mapper_fn(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
+                     const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {
+    (void)ctx; (void)upvalues; (void)receiver_ptr; (void)args; (void)argc;
+    *result = KILN_VAL_UNDEFINED;
+    return KILN_C99_OK;
+}
+static const kiln_string mapper_name = { 6, KILN_STRING_LATIN1, "mapper" };
 int main(void) {
+    uint64_t realm;
     kiln_value source;
     kiln_value method = kiln_c99_method(KILN_C99_METHOD_ARRAY_FROM);
-    kiln_value mapper = kiln_c99_method(KILN_C99_METHOD_NODE_UTIL_NOOP);
+    kiln_value mapper;
     kiln_value arguments[3];
     kiln_value result;
     kiln_value value;
     kiln_value thrown = kiln_c99_undefined();
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
+    kiln_test_realm_active = 1;
+    if (kiln_c99_make_closure(&mapper, mapper_fn, &mapper_name, NULL, 0, "<test>", 0, 0, 0, 0, 0, 0, 0,
+                              1, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED, 0, 1, 0, 0,
+                              NULL, 0) != KILN_C99_OK) return 1;
     if (kiln_c99_new_object(&source) != KILN_C99_OK) return 1;
     if (kiln_c99_put(NULL, source, "length", 6, kiln_c99_number(2), 0, &thrown) != KILN_C99_OK ||
         kiln_c99_put(NULL, source, "0", 1, kiln_c99_copy_text("a", 1), 0, &thrown) != KILN_C99_OK)
@@ -3718,7 +3729,8 @@ int main(void) {
     if (value.tag != KILN_VALUE_UNDEFINED) return 5;
     value = kiln_val_to_boundary(kiln_c99_array_of(result)->elements[1]);
     if (value.tag != KILN_VALUE_UNDEFINED) return 6;
-    return 0;
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 7;
 }
 "#;
     let run = run_with_main(&generated, wrapper, "array-from-array-like");
@@ -5239,80 +5251,6 @@ fn executable_buffer_reuses_uint8_storage_with_node_semantics() {
     assert!(
         run.status.success(),
         "native Buffer facade failed ({:?}): {}",
-        run.status.code(),
-        String::from_utf8_lossy(&run.stderr)
-    );
-}
-
-#[test]
-fn executable_node_support_facades_are_deterministic_and_callback_driven() {
-    let generated = emit(&program(
-        vec![Constant::Undefined],
-        vec![Instruction::Const(0), Instruction::Return],
-        0,
-    ))
-    .expect("support facade probe emits");
-    let wrapper = r#"
-static int callback(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
-                    const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {
-    (void)ctx; (void)upvalues; (void)receiver_ptr;
-    if (argc == 2 && KILN_VAL_IS_NULL(args[0]) && KILN_VAL_IS_OBJECT(args[1]) &&
-        kiln_c99_array_of(kiln_val_to_boundary(args[1]))->count == 2) {
-        *result = KILN_VAL_TRUE;
-        return KILN_C99_OK;
-    }
-    if (argc == 1 && KILN_VAL_IS_STRING(args[0])) {
-        kiln_value s = kiln_val_to_boundary(args[0]);
-        if (kiln_test_units_equal(s, "forward", 7)) {
-            *result = KILN_VAL_TRUE;
-            return KILN_C99_OK;
-        }
-    }
-    *result = KILN_VAL_FALSE;
-    return KILN_C99_OK;
-}
-static const kiln_string node_callback_name = { 8, KILN_STRING_LATIN1, "callback" };
-int main(void) {
-    uint64_t realm;
-    kiln_value thrown = kiln_c99_undefined();
-    kiln_value result;
-    kiln_value args[4];
-    kiln_value callable;
-    if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
-    kiln_test_realm_active = 1;
-    if (kiln_c99_make_closure(&callable, callback, &node_callback_name, NULL, 0, "<test>", 0, 0, 0, 0, 0, 0, 0,
-                              1, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED, 0, 1, 0, 0,
-                              NULL, 0) != KILN_C99_OK)
-        return 1;
-    args[0] = kiln_c99_copy_text("%s:%d", 5);
-    args[1] = kiln_c99_copy_text("port", 4);
-    args[2] = kiln_c99_number(7.0);
-    if (kiln_c99_node_util(NULL, &result, KILN_C99_METHOD_NODE_UTIL_FORMAT,
-                           args, 3, 0, &thrown) != KILN_C99_OK ||
-        result.tag != KILN_VALUE_STRING ||
-        !kiln_test_units_equal(result, "port:7", 6)) return 2;
-    args[0] = kiln_c99_undefined();
-    args[1] = callable;
-    args[2] = kiln_c99_undefined();
-    args[3] = kiln_c99_copy_text("forward", 7);
-    if (kiln_c99_node_diagnostics(NULL, &result,
-            KILN_C99_METHOD_NODE_DIAGNOSTICS_RUN_STORES, args, 4, 0, &thrown) != KILN_C99_OK ||
-        result.tag != KILN_VALUE_BOOLEAN || !result.bits) return 3;
-    args[0] = kiln_c99_copy_text("localhost", 9);
-    if (kiln_c99_new_object(&args[1]) != KILN_C99_OK ||
-        kiln_c99_put(NULL, args[1], "all", 3, kiln_c99_boolean(1), 0, NULL) != KILN_C99_OK)
-        return 4;
-    args[2] = callable;
-    if (kiln_c99_node_dns_lookup(NULL, &result, args, 3, 0, &thrown) != KILN_C99_OK)
-        return 5;
-    kiln_test_realm_active = 0;
-    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 6;
-}
-"#;
-    let run = run_with_main(&generated, wrapper, "node-support-facades");
-    assert!(
-        run.status.success(),
-        "native Node support facades failed ({:?}): {}",
         run.status.code(),
         String::from_utf8_lossy(&run.stderr)
     );
