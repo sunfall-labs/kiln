@@ -848,6 +848,15 @@ impl RealmRuntime<TokioHost> {
     pub fn with_capabilities(capabilities: RealmCapabilities) -> Result<Self, RuntimeBuildError> {
         Self::with_host_and_capabilities(TokioHost::new(), capabilities)
     }
+
+    pub fn with_fs(mut self, fs: Box<dyn kiln_host_abi::FileSystemOps>) -> Self {
+        self.state.host.set_fs(fs);
+        self
+    }
+
+    pub fn set_fs(&mut self, fs: Box<dyn kiln_host_abi::FileSystemOps>) {
+        self.state.host.set_fs(fs);
+    }
 }
 
 impl<H: RealmHostProvider> RealmRuntime<H> {
@@ -2101,6 +2110,7 @@ pub struct TokioHost {
     completed: Rc<tokio::sync::Notify>,
     failure: Option<RuntimeFailure>,
     shutdown: bool,
+    fs: Option<Box<dyn kiln_host_abi::FileSystemOps>>,
     _not_send: PhantomData<Rc<()>>,
 }
 
@@ -2180,13 +2190,14 @@ impl std::fmt::Debug for TokioHost {
                     .count(),
             )
             .field("ready", &self.ready.len())
+            .field("has_fs", &self.fs.is_some())
             .finish_non_exhaustive()
     }
 }
 
 impl TokioHost {
     /// Builds the request and completion state owned by a [`RealmRuntime`].
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             next_request: 1,
             next_sequence: 0,
@@ -2200,8 +2211,24 @@ impl TokioHost {
             completed: Rc::new(tokio::sync::Notify::new()),
             failure: None,
             shutdown: false,
+            fs: None,
             _not_send: PhantomData,
         }
+    }
+
+    pub fn with_fs(mut self, fs: Box<dyn kiln_host_abi::FileSystemOps>) -> Self {
+        self.fs = Some(fs);
+        self
+    }
+
+    pub fn set_fs(&mut self, fs: Box<dyn kiln_host_abi::FileSystemOps>) {
+        self.fs = Some(fs);
+    }
+
+    pub fn fs(&mut self) -> Option<&mut (dyn kiln_host_abi::FileSystemOps + '_)> {
+        self.fs
+            .as_mut()
+            .map(|b| &mut **b as &mut (dyn kiln_host_abi::FileSystemOps + '_))
     }
 
     fn spawn_task<F>(&mut self, request: RequestId, sequence: u64, referenced: bool, task: F)
@@ -2269,6 +2296,17 @@ impl TokioHost {
                 return request;
             }
             AsyncHostOp::ReadFile { path } => {
+                if let Some(fs) = &mut self.fs {
+                    if let Some(data) = fs.read_in_memory(std::path::Path::new(&path)) {
+                        self.insert_immediate(
+                            request,
+                            sequence,
+                            referenced,
+                            Ok(AsyncHostValue::Bytes(data)),
+                        );
+                        return request;
+                    }
+                }
                 const MAX_REALM_READ_SIZE: u64 = 128 * 1024; // 131,072 bytes
                 match std::fs::File::open(&path) {
                     Ok(mut file) => {
@@ -2311,6 +2349,22 @@ impl TokioHost {
                 AsyncHostOp::ReadFile { path }
             }
             AsyncHostOp::Stat { path } => {
+                if let Some(fs) = &mut self.fs {
+                    if let Some(meta) = fs.metadata_in_memory(std::path::Path::new(&path)) {
+                        self.insert_immediate(
+                            request,
+                            sequence,
+                            referenced,
+                            Ok(AsyncHostValue::FileStat(FileStat {
+                                size: meta.len,
+                                is_file: meta.is_file,
+                                is_directory: meta.is_dir,
+                                is_symlink: meta.is_symlink,
+                            })),
+                        );
+                        return request;
+                    }
+                }
                 let result = std::fs::metadata(&path)
                     .map(|metadata| {
                         AsyncHostValue::FileStat(FileStat {
@@ -2336,6 +2390,18 @@ impl TokioHost {
                 return request;
             }
             AsyncHostOp::WriteFile { path, data } => {
+                if let Some(fs) = &mut self.fs {
+                    if fs.is_in_memory(std::path::Path::new(&path)) {
+                        let _ = fs.write(std::path::Path::new(&path), &data);
+                        self.insert_immediate(
+                            request,
+                            sequence,
+                            referenced,
+                            Ok(AsyncHostValue::Undefined),
+                        );
+                        return request;
+                    }
+                }
                 const MAX_REALM_WRITE_SIZE: usize = 64 * 1024; // 65,536 bytes
                 if data.len() <= MAX_REALM_WRITE_SIZE {
                     let result = std::fs::write(&path, &data)
@@ -2347,6 +2413,18 @@ impl TokioHost {
                 AsyncHostOp::WriteFile { path, data }
             }
             AsyncHostOp::AppendFile { path, data } => {
+                if let Some(fs) = &mut self.fs {
+                    if fs.is_in_memory(std::path::Path::new(&path)) {
+                        let _ = fs.append(std::path::Path::new(&path), &data);
+                        self.insert_immediate(
+                            request,
+                            sequence,
+                            referenced,
+                            Ok(AsyncHostValue::Undefined),
+                        );
+                        return request;
+                    }
+                }
                 const MAX_REALM_WRITE_SIZE: usize = 64 * 1024; // 65,536 bytes
                 if data.len() <= MAX_REALM_WRITE_SIZE {
                     let result = std::fs::OpenOptions::new()
@@ -2578,14 +2656,77 @@ impl TokioHost {
                 return request;
             }
             AsyncHostOp::StdinRead { max_bytes } => AsyncHostOp::StdinRead { max_bytes },
-            AsyncHostOp::ReadDir { .. }
-            | AsyncHostOp::CopyFile { .. }
+            AsyncHostOp::Lstat { path } => {
+                if let Some(fs) = &mut self.fs {
+                    if let Some(meta) = fs.metadata_in_memory(std::path::Path::new(&path)) {
+                        let result = Ok(AsyncHostValue::FileStat(FileStat {
+                            size: meta.len,
+                            is_file: meta.is_file,
+                            is_directory: meta.is_dir,
+                            is_symlink: meta.is_symlink,
+                        }));
+                        self.insert_immediate(request, sequence, referenced, result);
+                        return request;
+                    }
+                }
+                AsyncHostOp::Lstat { path }
+            }
+            AsyncHostOp::ReadDir { path, with_types } => {
+                if let Some(fs) = &mut self.fs {
+                    if let Some(entries) = fs.read_dir_in_memory(std::path::Path::new(&path)) {
+                        self.insert_immediate(
+                            request,
+                            sequence,
+                            referenced,
+                            Ok(AsyncHostValue::DirEntries(entries)),
+                        );
+                        return request;
+                    }
+                }
+                AsyncHostOp::ReadDir { path, with_types }
+            }
+            AsyncHostOp::Unlink { path } => {
+                if let Some(fs) = &mut self.fs {
+                    if fs.is_in_memory(std::path::Path::new(&path)) {
+                        let _ = fs.remove_file(std::path::Path::new(&path));
+                        self.insert_immediate(
+                            request,
+                            sequence,
+                            referenced,
+                            Ok(AsyncHostValue::Undefined),
+                        );
+                        return request;
+                    }
+                }
+                AsyncHostOp::Unlink { path }
+            }
+            AsyncHostOp::Rm {
+                path,
+                recursive,
+                force,
+            } => {
+                if let Some(fs) = &mut self.fs {
+                    if fs.is_in_memory(std::path::Path::new(&path)) {
+                        let _ = fs.remove_file(std::path::Path::new(&path));
+                        self.insert_immediate(
+                            request,
+                            sequence,
+                            referenced,
+                            Ok(AsyncHostValue::Undefined),
+                        );
+                        return request;
+                    }
+                }
+                AsyncHostOp::Rm {
+                    path,
+                    recursive,
+                    force,
+                }
+            }
+            AsyncHostOp::CopyFile { .. }
             | AsyncHostOp::Rename { .. }
-            | AsyncHostOp::Unlink { .. }
-            | AsyncHostOp::Rm { .. }
             | AsyncHostOp::Realpath { .. }
             | AsyncHostOp::Readlink { .. }
-            | AsyncHostOp::Lstat { .. }
             | AsyncHostOp::Access { .. }
             | AsyncHostOp::Chmod { .. }
             | AsyncHostOp::Rmdir { .. } => operation,
@@ -3901,6 +4042,10 @@ impl HostOps for CaptureHost {
         self.fs
             .as_mut()
             .map(|b| &mut **b as &mut (dyn kiln_host_abi::FileSystemOps + '_))
+    }
+
+    fn clone_fs(&self) -> Option<Box<dyn kiln_host_abi::FileSystemOps>> {
+        self.fs.as_ref().and_then(|f| f.clone_box())
     }
 }
 
@@ -7142,5 +7287,98 @@ mod tests {
             runtime.start_host_op(AsyncHostOp::CloseResource { resource }, false);
             next_host_completion(&mut runtime).expect("close completes");
         }
+    }
+
+    #[test]
+    fn tokio_host_intercepts_vfs_overlay_operations_fast_path() {
+        use kiln_host_abi::{DirEntry, FileStat, OverlayFileSystem};
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+
+        let mut overlay = HashMap::new();
+        overlay.insert(
+            PathBuf::from("/vfs/app.js"),
+            b"console.log('hello vfs');".to_vec(),
+        );
+        let vfs = OverlayFileSystem::new(kiln_host_abi::OsFileSystem, overlay);
+
+        let mut host = TokioHost::new().with_fs(Box::new(vfs));
+
+        // 1. ReadFile fast path
+        let req = kiln_host_abi::AsyncHostOps::start(
+            &mut host,
+            AsyncHostOp::ReadFile {
+                path: "/vfs/app.js".to_string(),
+            },
+            true,
+        );
+        // Completed immediately into ready table!
+        let comp = host.next_completion().expect("ready immediately");
+        assert_eq!(comp.request, req);
+        assert_eq!(
+            comp.result,
+            Ok(AsyncHostValue::Bytes(b"console.log('hello vfs');".to_vec()))
+        );
+
+        // 2. Stat fast path
+        let req = kiln_host_abi::AsyncHostOps::start(
+            &mut host,
+            AsyncHostOp::Stat {
+                path: "/vfs/app.js".to_string(),
+            },
+            true,
+        );
+        let comp = host.next_completion().expect("ready immediately");
+        assert_eq!(comp.request, req);
+        assert_eq!(
+            comp.result,
+            Ok(AsyncHostValue::FileStat(FileStat {
+                size: 25,
+                is_file: true,
+                is_directory: false,
+                is_symlink: false,
+            }))
+        );
+
+        // 3. Lstat fast path
+        let req = kiln_host_abi::AsyncHostOps::start(
+            &mut host,
+            AsyncHostOp::Lstat {
+                path: "/vfs/app.js".to_string(),
+            },
+            true,
+        );
+        let comp = host.next_completion().expect("ready immediately");
+        assert_eq!(comp.request, req);
+        assert_eq!(
+            comp.result,
+            Ok(AsyncHostValue::FileStat(FileStat {
+                size: 25,
+                is_file: true,
+                is_directory: false,
+                is_symlink: false,
+            }))
+        );
+
+        // 4. ReadDir fast path
+        let req = kiln_host_abi::AsyncHostOps::start(
+            &mut host,
+            AsyncHostOp::ReadDir {
+                path: "/vfs".to_string(),
+                with_types: false,
+            },
+            true,
+        );
+        let comp = host.next_completion().expect("ready immediately");
+        assert_eq!(comp.request, req);
+        assert_eq!(
+            comp.result,
+            Ok(AsyncHostValue::DirEntries(vec![DirEntry {
+                name: "app.js".to_string(),
+                is_file: true,
+                is_directory: false,
+                is_symlink: false,
+            }]))
+        );
     }
 }

@@ -1885,6 +1885,9 @@ impl ModuleGraph {
                 },
             }
         })?;
+        if let Some(fs) = host.clone_fs() {
+            runtime.set_fs(fs);
+        }
         let mut node_session = node.then(ModuleRealmSession::default);
         let cache_targets = commonjs_cache
             .iter()

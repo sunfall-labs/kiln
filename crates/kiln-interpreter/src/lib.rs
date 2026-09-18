@@ -3244,12 +3244,33 @@ impl PartialEq for TypedArrayData {
 
 impl TypedArrayData {
     /// The raw bytes covered by this view.
-    fn bytes(&self) -> Vec<u8> {
+    pub(crate) fn bytes(&self) -> Vec<u8> {
         if self.out_of_bounds() {
             return Vec::new();
         }
         let length = self.len() * self.kind.width();
         self.buffer.bytes.borrow()[self.offset..self.offset + length].to_vec()
+    }
+
+    /// Writes raw bytes into this typed array's buffer window at the given byte offset.
+    pub(crate) fn write_bytes(&self, offset: usize, src: &[u8]) -> usize {
+        if self.out_of_bounds() {
+            return 0;
+        }
+        let byte_len = self.len() * self.kind.width();
+        if offset >= byte_len {
+            return 0;
+        }
+        let available = byte_len - offset;
+        let to_write = available.min(src.len());
+        let at = self.offset + offset;
+        let mut buffer = self.buffer.bytes.borrow_mut();
+        if at + to_write <= buffer.len() {
+            buffer[at..at + to_write].copy_from_slice(&src[..to_write]);
+            to_write
+        } else {
+            0
+        }
     }
 
     /// Whether the window no longer fits in the buffer.
@@ -6295,6 +6316,9 @@ pub fn execute_node_in_runtime_with_strictness<H: HostOps + ?Sized>(
     runtime: &mut RealmRuntime,
     capabilities: ExecutionCapabilities,
 ) -> Result<ExecutionResult, ExecutionError> {
+    if let Some(fs) = host.clone_fs() {
+        runtime.set_fs(fs);
+    }
     let locals = vec![Value::Undefined; program.local_count as usize];
     let mut vm = Vm::with_entropy_seed(
         program,
@@ -6913,6 +6937,11 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
     // The table comes from the compiler rather than being assumed: an ESM module is strict
     // throughout, but a CommonJS one is a sloppy function body in node, and assuming `always`
     // here is what made `this` in a bare call inside a bundle `undefined`.
+    if session.is_some() {
+        if let Some(fs) = host.clone_fs() {
+            runtime.set_fs(fs);
+        }
+    }
     let program = Rc::new(module.program.clone());
     let strictness = Rc::new(module.strictness.clone());
     let mut vm = Vm::with_entropy_seed(
@@ -7587,6 +7616,8 @@ struct Vm<'host, H: HostOps + ?Sized> {
     async_context: AsyncContext,
     /// The value delivered to a host handler, waiting to be collected by `call_catching`.
     pub(crate) caught: Option<Value>,
+    /// Virtual file descriptor table for Node filesystem operations.
+    pub(crate) fd_table: fs::VirtualFdTable,
     /// A top-level throw captured for the graph loader before it is converted to an execution
     /// report. This remains inside the realm and never crosses the worker error boundary.
     uncaught_value: Option<Value>,
@@ -7812,6 +7843,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             http_runtime: None,
             commonjs_loader: None,
             caught: None,
+            fd_table: fs::VirtualFdTable::new(),
             uncaught_value: None,
             typed_array_method: false,
             unhandled: None,
@@ -15390,18 +15422,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let require = CommonJsRequire::new([]);
                 return Ok(Value::CommonJsRequire(Rc::new(require)));
             }
-            // Thrown as a JavaScript error rather than reported as a host failure, because node
-            // throws from these too -- `ENOENT` and friends are ordinary catchable errors -- and
-            // every library that touches the filesystem wraps the call in a `try`. A host
-            // failure stops the process instead, which turns "this file is not readable" into
-            // "this program cannot run".
-            Native::NodeFsSync => {
-                return Err(ExecutionError::TypeErrorMessage {
-                    message: "node:fs synchronous I/O is unavailable: filesystem I/O is \
-                              Tokio-owned and asynchronous"
-                        .to_owned(),
-                });
-            }
             Native::AbortControllerAbort | Native::AbortSignalAbort => {
                 let reason = arguments.first().cloned();
                 let signal = if matches!(native, Native::AbortSignalAbort) {
@@ -15554,7 +15574,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | Native::NodeFsCloseSync
             | Native::NodeFsReadlinkSync
             | Native::NodeFsRmdirSync
-            | Native::NodeFsUtimesSync => {
+            | Native::NodeFsUtimesSync
+            | Native::NodeFsSync => {
                 return fs::dispatch(self, native, receiver, arguments, instruction);
             }
             Native::NodePathJoin

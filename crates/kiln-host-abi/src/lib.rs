@@ -441,6 +441,11 @@ pub trait HostOps {
     fn fs(&mut self) -> Option<&mut (dyn FileSystemOps + '_)> {
         None
     }
+
+    /// Clone this host's filesystem capability, if present.
+    fn clone_fs(&self) -> Option<Box<dyn FileSystemOps>> {
+        None
+    }
 }
 
 /// Portable metadata about a filesystem entry, usable by both OS and virtual filesystems.
@@ -535,6 +540,31 @@ pub trait FileSystemOps {
     fn copy(&mut self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<u64>;
     fn set_permissions(&mut self, path: &std::path::Path, mode: u32) -> std::io::Result<()>;
     fn read_link(&mut self, path: &std::path::Path) -> std::io::Result<std::path::PathBuf>;
+
+    /// Returns true if the path exists in an in-memory overlay table without syscalls.
+    fn is_in_memory(&self, _path: &std::path::Path) -> bool {
+        false
+    }
+
+    /// Read from an in-memory overlay table without syscalls, if present.
+    fn read_in_memory(&self, _path: &std::path::Path) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Fast-path stat metadata from an in-memory overlay table without syscalls, if present.
+    fn metadata_in_memory(&self, _path: &std::path::Path) -> Option<FsMetadata> {
+        None
+    }
+
+    /// Fast-path directory entries from an in-memory overlay table without syscalls, if present.
+    fn read_dir_in_memory(&self, _path: &std::path::Path) -> Option<Vec<DirEntry>> {
+        None
+    }
+
+    /// Clone this filesystem capability if supported.
+    fn clone_box(&self) -> Option<Box<dyn FileSystemOps>> {
+        None
+    }
 }
 
 /// Standard operating-system filesystem implementation backed by `std::fs`.
@@ -636,6 +666,10 @@ impl FileSystemOps for OsFileSystem {
     fn read_link(&mut self, path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
         std::fs::read_link(path)
     }
+
+    fn clone_box(&self) -> Option<Box<dyn FileSystemOps>> {
+        Some(Box::new(OsFileSystem))
+    }
 }
 
 /// An in-memory filesystem overlay on top of a fallback filesystem provider.
@@ -644,34 +678,56 @@ impl FileSystemOps for OsFileSystem {
 #[derive(Debug, Clone)]
 pub struct OverlayFileSystem<F = OsFileSystem> {
     fallback: F,
-    files: std::collections::HashMap<std::path::PathBuf, Vec<u8>>,
+    files:
+        std::sync::Arc<std::sync::RwLock<std::collections::HashMap<std::path::PathBuf, Vec<u8>>>>,
 }
 
 impl<F: FileSystemOps> OverlayFileSystem<F> {
     pub fn new(fallback: F, files: std::collections::HashMap<std::path::PathBuf, Vec<u8>>) -> Self {
-        Self { fallback, files }
+        Self {
+            fallback,
+            files: std::sync::Arc::new(std::sync::RwLock::new(files)),
+        }
     }
 
     pub fn insert(&mut self, path: impl Into<std::path::PathBuf>, data: Vec<u8>) {
-        self.files.insert(path.into(), data);
+        self.files.write().unwrap().insert(path.into(), data);
     }
 
-    fn lookup(&self, path: &std::path::Path) -> Option<&[u8]> {
-        if let Some(bytes) = self.files.get(path) {
-            return Some(bytes.as_slice());
+    fn lookup(&self, path: &std::path::Path) -> Option<Vec<u8>> {
+        let files = self.files.read().unwrap();
+        if let Some(bytes) = files.get(path) {
+            return Some(bytes.clone());
         }
         if let Ok(stripped) = path.strip_prefix(".") {
-            if let Some(bytes) = self.files.get(stripped) {
-                return Some(bytes.as_slice());
+            if let Some(bytes) = files.get(stripped) {
+                return Some(bytes.clone());
             }
         }
         None
     }
+
+    fn is_in_memory_dir(&self, path: &std::path::Path) -> bool {
+        let files = self.files.read().unwrap();
+        files.keys().any(|k| {
+            if let Ok(rel) = k.strip_prefix(path) {
+                rel != std::path::Path::new("")
+            } else if let Ok(stripped) = k.strip_prefix(".") {
+                if let Ok(rel) = stripped.strip_prefix(path) {
+                    rel != std::path::Path::new("")
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        })
+    }
 }
 
-impl<F: FileSystemOps> FileSystemOps for OverlayFileSystem<F> {
+impl<F: FileSystemOps + Clone + 'static> FileSystemOps for OverlayFileSystem<F> {
     fn exists(&mut self, path: &std::path::Path) -> bool {
-        if self.lookup(path).is_some() {
+        if self.lookup(path).is_some() || self.is_in_memory_dir(path) {
             true
         } else {
             self.fallback.exists(path)
@@ -680,27 +736,36 @@ impl<F: FileSystemOps> FileSystemOps for OverlayFileSystem<F> {
 
     fn read(&mut self, path: &std::path::Path) -> std::io::Result<Vec<u8>> {
         if let Some(bytes) = self.lookup(path) {
-            Ok(bytes.to_vec())
+            Ok(bytes)
         } else {
             self.fallback.read(path)
         }
     }
 
     fn write(&mut self, path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
-        self.files.insert(path.to_path_buf(), data.to_vec());
+        self.files
+            .write()
+            .unwrap()
+            .insert(path.to_path_buf(), data.to_vec());
         self.fallback.write(path, data)
     }
 
     fn append(&mut self, path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
-        if let Some(existing) = self.files.get_mut(path) {
+        let mut files = self.files.write().unwrap();
+        if let Some(existing) = files.get_mut(path) {
             existing.extend_from_slice(data);
+        } else {
+            files.insert(path.to_path_buf(), data.to_vec());
         }
+        drop(files);
         self.fallback.append(path, data)
     }
 
     fn metadata(&mut self, path: &std::path::Path) -> std::io::Result<FsMetadata> {
         if let Some(bytes) = self.lookup(path) {
             Ok(FsMetadata::file(bytes.len() as u64, 0))
+        } else if self.is_in_memory_dir(path) && !self.fallback.exists(path) {
+            Ok(FsMetadata::dir(0))
         } else {
             self.fallback.metadata(path)
         }
@@ -709,6 +774,8 @@ impl<F: FileSystemOps> FileSystemOps for OverlayFileSystem<F> {
     fn symlink_metadata(&mut self, path: &std::path::Path) -> std::io::Result<FsMetadata> {
         if let Some(bytes) = self.lookup(path) {
             Ok(FsMetadata::file(bytes.len() as u64, 0))
+        } else if self.is_in_memory_dir(path) && !self.fallback.exists(path) {
+            Ok(FsMetadata::dir(0))
         } else {
             self.fallback.symlink_metadata(path)
         }
@@ -723,10 +790,12 @@ impl<F: FileSystemOps> FileSystemOps for OverlayFileSystem<F> {
     }
 
     fn remove_file(&mut self, path: &std::path::Path) -> std::io::Result<()> {
-        self.files.remove(path);
+        let mut files = self.files.write().unwrap();
+        files.remove(path);
         if let Ok(stripped) = path.strip_prefix(".") {
-            self.files.remove(stripped);
+            files.remove(stripped);
         }
+        drop(files);
         self.fallback.remove_file(path)
     }
 
@@ -742,8 +811,10 @@ impl<F: FileSystemOps> FileSystemOps for OverlayFileSystem<F> {
         let mut entries = self.fallback.read_dir(path).unwrap_or_default();
         let mut seen: std::collections::HashSet<String> =
             entries.iter().map(|e| e.name.clone()).collect();
-        for file_path in self.files.keys() {
-            if file_path.parent() == Some(path) {
+        let files = self.files.read().unwrap();
+        for file_path in files.keys() {
+            let parent = file_path.parent();
+            if parent == Some(path) || (parent.is_none() && path == std::path::Path::new("")) {
                 if let Some(name) = file_path.file_name().and_then(|n| n.to_str()) {
                     if seen.insert(name.to_owned()) {
                         entries.push(DirEntry {
@@ -760,7 +831,7 @@ impl<F: FileSystemOps> FileSystemOps for OverlayFileSystem<F> {
     }
 
     fn canonicalize(&mut self, path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
-        if self.lookup(path).is_some() {
+        if self.lookup(path).is_some() || self.is_in_memory_dir(path) {
             Ok(path.to_path_buf())
         } else {
             self.fallback.canonicalize(path)
@@ -768,18 +839,20 @@ impl<F: FileSystemOps> FileSystemOps for OverlayFileSystem<F> {
     }
 
     fn rename(&mut self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
-        if let Some(bytes) = self.files.remove(from) {
-            self.files.insert(to.to_path_buf(), bytes);
+        let mut files = self.files.write().unwrap();
+        if let Some(bytes) = files.remove(from) {
+            files.insert(to.to_path_buf(), bytes);
         }
+        drop(files);
         self.fallback.rename(from, to)
     }
 
     fn copy(&mut self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<u64> {
-        let maybe_bytes = self.lookup(from).map(|b| b.to_vec());
+        let maybe_bytes = self.lookup(from);
         if let Some(bytes) = maybe_bytes {
             let len = bytes.len() as u64;
             let _ = self.fallback.write(to, &bytes);
-            self.files.insert(to.to_path_buf(), bytes);
+            self.files.write().unwrap().insert(to.to_path_buf(), bytes);
             Ok(len)
         } else {
             self.fallback.copy(from, to)
@@ -792,6 +865,54 @@ impl<F: FileSystemOps> FileSystemOps for OverlayFileSystem<F> {
 
     fn read_link(&mut self, path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
         self.fallback.read_link(path)
+    }
+
+    fn is_in_memory(&self, path: &std::path::Path) -> bool {
+        self.lookup(path).is_some() || self.is_in_memory_dir(path)
+    }
+
+    fn read_in_memory(&self, path: &std::path::Path) -> Option<Vec<u8>> {
+        self.lookup(path)
+    }
+
+    fn metadata_in_memory(&self, path: &std::path::Path) -> Option<FsMetadata> {
+        if let Some(bytes) = self.lookup(path) {
+            Some(FsMetadata::file(bytes.len() as u64, 0))
+        } else if self.is_in_memory_dir(path) {
+            Some(FsMetadata::dir(0))
+        } else {
+            None
+        }
+    }
+
+    fn read_dir_in_memory(&self, path: &std::path::Path) -> Option<Vec<DirEntry>> {
+        if self.is_in_memory_dir(path) {
+            let files = self.files.read().unwrap();
+            let mut entries = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for file_path in files.keys() {
+                let parent = file_path.parent();
+                if parent == Some(path) || (parent.is_none() && path == std::path::Path::new("")) {
+                    if let Some(name) = file_path.file_name().and_then(|n| n.to_str()) {
+                        if seen.insert(name.to_owned()) {
+                            entries.push(DirEntry {
+                                name: name.to_owned(),
+                                is_file: true,
+                                is_directory: false,
+                                is_symlink: false,
+                            });
+                        }
+                    }
+                }
+            }
+            Some(entries)
+        } else {
+            None
+        }
+    }
+
+    fn clone_box(&self) -> Option<Box<dyn FileSystemOps>> {
+        Some(Box::new(self.clone()))
     }
 }
 
@@ -1002,6 +1123,15 @@ mod tests {
         let mut vfs = OverlayFileSystem::new(OsFileSystem, overlay_map);
 
         assert!(vfs.exists(Path::new("virtual.txt")));
+        assert!(vfs.is_in_memory(Path::new("virtual.txt")));
+        assert_eq!(
+            vfs.read_in_memory(Path::new("virtual.txt")).unwrap(),
+            b"virtual content"
+        );
+        let in_mem_meta = vfs.metadata_in_memory(Path::new("virtual.txt")).unwrap();
+        assert!(in_mem_meta.is_file);
+        assert_eq!(in_mem_meta.len, 15);
+
         assert_eq!(
             vfs.read(Path::new("virtual.txt")).unwrap(),
             b"virtual content"
@@ -1009,5 +1139,12 @@ mod tests {
         let meta = vfs.metadata(Path::new("virtual.txt")).unwrap();
         assert!(meta.is_file);
         assert_eq!(meta.len, 15);
+
+        let cloned = vfs.clone_box().unwrap();
+        assert!(cloned.is_in_memory(Path::new("virtual.txt")));
+        assert_eq!(
+            cloned.read_in_memory(Path::new("virtual.txt")).unwrap(),
+            b"virtual content"
+        );
     }
 }
