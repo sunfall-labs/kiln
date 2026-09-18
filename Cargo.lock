@@ -1371,6 +1371,7 @@ dependencies = [
  "kiln-db",
  "kiln-digest",
  "kiln-hir",
+ "kiln-host-abi",
  "kiln-interpreter",
  "kiln-ir",
  "kiln-liveness",

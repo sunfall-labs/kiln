@@ -140,8 +140,34 @@ pub enum AsyncHostOp {
     AppendFile { path: String, data: Vec<u8> },
     /// Read metadata without opening a persistent file resource.
     Stat { path: String },
+    /// Read metadata without following symbolic links.
+    Lstat { path: String },
     /// Create a directory, optionally recursively.
     Mkdir { path: String, recursive: bool },
+    /// Read directory entries.
+    ReadDir { path: String, with_types: bool },
+    /// Copy a file from source to destination.
+    CopyFile { from: String, to: String },
+    /// Rename a file or directory.
+    Rename { from: String, to: String },
+    /// Remove a file.
+    Unlink { path: String },
+    /// Remove a file or directory with options.
+    Rm {
+        path: String,
+        recursive: bool,
+        force: bool,
+    },
+    /// Resolve canonical path.
+    Realpath { path: String },
+    /// Read link target.
+    Readlink { path: String },
+    /// Test file accessibility.
+    Access { path: String, mode: u32 },
+    /// Change file permissions.
+    Chmod { path: String, mode: u32 },
+    /// Remove a directory.
+    Rmdir { path: String },
     /// Close a persistent host resource.
     CloseResource { resource: ResourceId },
     /// Change whether a persistent resource keeps its realm alive.
@@ -214,7 +240,7 @@ pub struct AcceptedTcpStream {
     pub peer_port: u16,
 }
 
-/// Portable file metadata needed by the first Node filesystem slice.
+/// Portable file metadata needed by Node filesystem slices.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileStat {
     /// File length in bytes.
@@ -223,6 +249,17 @@ pub struct FileStat {
     pub is_file: bool,
     /// Whether the path names a directory.
     pub is_directory: bool,
+    /// Whether the path names a symbolic link.
+    pub is_symlink: bool,
+}
+
+/// Portable directory entry returned by directory reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirEntry {
+    pub name: String,
+    pub is_file: bool,
+    pub is_directory: bool,
+    pub is_symlink: bool,
 }
 
 /// A successful asynchronous host operation.
@@ -234,6 +271,10 @@ pub enum AsyncHostValue {
     Bytes(Vec<u8>),
     /// Portable filesystem metadata.
     FileStat(FileStat),
+    /// Directory entries returned by readdir.
+    DirEntries(Vec<DirEntry>),
+    /// String returned by realpath or readlink.
+    String(String),
     /// A persistent resource inserted into the realm's resource table.
     Resource(ResourceInfo),
     /// Current lifecycle state of a persistent resource.
@@ -395,11 +436,370 @@ pub fn transfer_region_op(ptr: u64) -> Result<HostValue, HostError> {
 /// Host implementation invoked by the interpreter or a future native backend.
 pub trait HostOps {
     fn call(&mut self, operation: HostOp, arguments: &[HostValue]) -> Result<HostValue, HostError>;
+
+    /// Optional synchronous filesystem capability.
+    fn fs(&mut self) -> Option<&mut (dyn FileSystemOps + '_)> {
+        None
+    }
+}
+
+/// Portable metadata about a filesystem entry, usable by both OS and virtual filesystems.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FsMetadata {
+    pub len: u64,
+    pub is_file: bool,
+    pub is_dir: bool,
+    pub is_symlink: bool,
+    pub modified_ms: u64,
+    pub created_ms: u64,
+    pub mode: u32,
+}
+
+impl FsMetadata {
+    pub fn file(len: u64, modified_ms: u64) -> Self {
+        Self {
+            len,
+            is_file: true,
+            is_dir: false,
+            is_symlink: false,
+            modified_ms,
+            created_ms: modified_ms,
+            mode: 0o644,
+        }
+    }
+
+    pub fn dir(modified_ms: u64) -> Self {
+        Self {
+            len: 0,
+            is_file: false,
+            is_dir: true,
+            is_symlink: false,
+            modified_ms,
+            created_ms: modified_ms,
+            mode: 0o755,
+        }
+    }
+}
+
+impl From<&std::fs::Metadata> for FsMetadata {
+    fn from(meta: &std::fs::Metadata) -> Self {
+        let is_file = meta.is_file();
+        let is_dir = meta.is_dir();
+        let is_symlink = meta.file_type().is_symlink();
+        let len = meta.len();
+        let modified_ms = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_millis() as u64);
+        let created_ms = meta
+            .created()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(modified_ms, |d| d.as_millis() as u64);
+        #[cfg(unix)]
+        let mode = {
+            use std::os::unix::fs::PermissionsExt;
+            meta.permissions().mode()
+        };
+        #[cfg(not(unix))]
+        let mode = 0;
+        Self {
+            len,
+            is_file,
+            is_dir,
+            is_symlink,
+            modified_ms,
+            created_ms,
+            mode,
+        }
+    }
+}
+
+/// Synchronous filesystem operations provided by a host capability.
+pub trait FileSystemOps {
+    fn exists(&mut self, path: &std::path::Path) -> bool;
+    fn read(&mut self, path: &std::path::Path) -> std::io::Result<Vec<u8>>;
+    fn write(&mut self, path: &std::path::Path, data: &[u8]) -> std::io::Result<()>;
+    fn append(&mut self, path: &std::path::Path, data: &[u8]) -> std::io::Result<()>;
+    fn metadata(&mut self, path: &std::path::Path) -> std::io::Result<FsMetadata>;
+    fn symlink_metadata(&mut self, path: &std::path::Path) -> std::io::Result<FsMetadata>;
+    fn create_dir(&mut self, path: &std::path::Path) -> std::io::Result<()>;
+    fn create_dir_all(&mut self, path: &std::path::Path) -> std::io::Result<()>;
+    fn remove_file(&mut self, path: &std::path::Path) -> std::io::Result<()>;
+    fn remove_dir(&mut self, path: &std::path::Path) -> std::io::Result<()>;
+    fn remove_dir_all(&mut self, path: &std::path::Path) -> std::io::Result<()>;
+    fn read_dir(&mut self, path: &std::path::Path) -> std::io::Result<Vec<DirEntry>>;
+    fn canonicalize(&mut self, path: &std::path::Path) -> std::io::Result<std::path::PathBuf>;
+    fn rename(&mut self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()>;
+    fn copy(&mut self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<u64>;
+    fn set_permissions(&mut self, path: &std::path::Path, mode: u32) -> std::io::Result<()>;
+    fn read_link(&mut self, path: &std::path::Path) -> std::io::Result<std::path::PathBuf>;
+}
+
+/// Standard operating-system filesystem implementation backed by `std::fs`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct OsFileSystem;
+
+impl FileSystemOps for OsFileSystem {
+    fn exists(&mut self, path: &std::path::Path) -> bool {
+        path.exists()
+    }
+
+    fn read(&mut self, path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+        std::fs::read(path)
+    }
+
+    fn write(&mut self, path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+        std::fs::write(path, data)
+    }
+
+    fn append(&mut self, path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        file.write_all(data)
+    }
+
+    fn metadata(&mut self, path: &std::path::Path) -> std::io::Result<FsMetadata> {
+        std::fs::metadata(path).map(|m| FsMetadata::from(&m))
+    }
+
+    fn symlink_metadata(&mut self, path: &std::path::Path) -> std::io::Result<FsMetadata> {
+        std::fs::symlink_metadata(path).map(|m| FsMetadata::from(&m))
+    }
+
+    fn create_dir(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        std::fs::create_dir(path)
+    }
+
+    fn create_dir_all(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(path)
+    }
+
+    fn remove_file(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        std::fs::remove_file(path)
+    }
+
+    fn remove_dir(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        std::fs::remove_dir(path)
+    }
+
+    fn remove_dir_all(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        std::fs::remove_dir_all(path)
+    }
+
+    fn read_dir(&mut self, path: &std::path::Path) -> std::io::Result<Vec<DirEntry>> {
+        let rd = std::fs::read_dir(path)?;
+        let mut entries = Vec::new();
+        for entry in rd {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let ft = entry.file_type().ok();
+            entries.push(DirEntry {
+                name,
+                is_file: ft.as_ref().map_or(false, |t| t.is_file()),
+                is_directory: ft.as_ref().map_or(false, |t| t.is_dir()),
+                is_symlink: ft.as_ref().map_or(false, |t| t.is_symlink()),
+            });
+        }
+        Ok(entries)
+    }
+
+    fn canonicalize(&mut self, path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+        std::fs::canonicalize(path)
+    }
+
+    fn rename(&mut self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+        std::fs::rename(from, to)
+    }
+
+    fn copy(&mut self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<u64> {
+        std::fs::copy(from, to)
+    }
+
+    fn set_permissions(&mut self, path: &std::path::Path, mode: u32) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (path, mode);
+            Ok(())
+        }
+    }
+
+    fn read_link(&mut self, path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+        std::fs::read_link(path)
+    }
+}
+
+/// An in-memory filesystem overlay on top of a fallback filesystem provider.
+///
+/// In-memory files are served directly with zero syscalls. Fallback handles misses and modifications.
+#[derive(Debug, Clone)]
+pub struct OverlayFileSystem<F = OsFileSystem> {
+    fallback: F,
+    files: std::collections::HashMap<std::path::PathBuf, Vec<u8>>,
+}
+
+impl<F: FileSystemOps> OverlayFileSystem<F> {
+    pub fn new(fallback: F, files: std::collections::HashMap<std::path::PathBuf, Vec<u8>>) -> Self {
+        Self { fallback, files }
+    }
+
+    pub fn insert(&mut self, path: impl Into<std::path::PathBuf>, data: Vec<u8>) {
+        self.files.insert(path.into(), data);
+    }
+
+    fn lookup(&self, path: &std::path::Path) -> Option<&[u8]> {
+        if let Some(bytes) = self.files.get(path) {
+            return Some(bytes.as_slice());
+        }
+        if let Ok(stripped) = path.strip_prefix(".") {
+            if let Some(bytes) = self.files.get(stripped) {
+                return Some(bytes.as_slice());
+            }
+        }
+        None
+    }
+}
+
+impl<F: FileSystemOps> FileSystemOps for OverlayFileSystem<F> {
+    fn exists(&mut self, path: &std::path::Path) -> bool {
+        if self.lookup(path).is_some() {
+            true
+        } else {
+            self.fallback.exists(path)
+        }
+    }
+
+    fn read(&mut self, path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+        if let Some(bytes) = self.lookup(path) {
+            Ok(bytes.to_vec())
+        } else {
+            self.fallback.read(path)
+        }
+    }
+
+    fn write(&mut self, path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+        self.files.insert(path.to_path_buf(), data.to_vec());
+        self.fallback.write(path, data)
+    }
+
+    fn append(&mut self, path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+        if let Some(existing) = self.files.get_mut(path) {
+            existing.extend_from_slice(data);
+        }
+        self.fallback.append(path, data)
+    }
+
+    fn metadata(&mut self, path: &std::path::Path) -> std::io::Result<FsMetadata> {
+        if let Some(bytes) = self.lookup(path) {
+            Ok(FsMetadata::file(bytes.len() as u64, 0))
+        } else {
+            self.fallback.metadata(path)
+        }
+    }
+
+    fn symlink_metadata(&mut self, path: &std::path::Path) -> std::io::Result<FsMetadata> {
+        if let Some(bytes) = self.lookup(path) {
+            Ok(FsMetadata::file(bytes.len() as u64, 0))
+        } else {
+            self.fallback.symlink_metadata(path)
+        }
+    }
+
+    fn create_dir(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        self.fallback.create_dir(path)
+    }
+
+    fn create_dir_all(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        self.fallback.create_dir_all(path)
+    }
+
+    fn remove_file(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        self.files.remove(path);
+        if let Ok(stripped) = path.strip_prefix(".") {
+            self.files.remove(stripped);
+        }
+        self.fallback.remove_file(path)
+    }
+
+    fn remove_dir(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        self.fallback.remove_dir(path)
+    }
+
+    fn remove_dir_all(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        self.fallback.remove_dir_all(path)
+    }
+
+    fn read_dir(&mut self, path: &std::path::Path) -> std::io::Result<Vec<DirEntry>> {
+        let mut entries = self.fallback.read_dir(path).unwrap_or_default();
+        let mut seen: std::collections::HashSet<String> =
+            entries.iter().map(|e| e.name.clone()).collect();
+        for file_path in self.files.keys() {
+            if file_path.parent() == Some(path) {
+                if let Some(name) = file_path.file_name().and_then(|n| n.to_str()) {
+                    if seen.insert(name.to_owned()) {
+                        entries.push(DirEntry {
+                            name: name.to_owned(),
+                            is_file: true,
+                            is_directory: false,
+                            is_symlink: false,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(entries)
+    }
+
+    fn canonicalize(&mut self, path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+        if self.lookup(path).is_some() {
+            Ok(path.to_path_buf())
+        } else {
+            self.fallback.canonicalize(path)
+        }
+    }
+
+    fn rename(&mut self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+        if let Some(bytes) = self.files.remove(from) {
+            self.files.insert(to.to_path_buf(), bytes);
+        }
+        self.fallback.rename(from, to)
+    }
+
+    fn copy(&mut self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<u64> {
+        let maybe_bytes = self.lookup(from).map(|b| b.to_vec());
+        if let Some(bytes) = maybe_bytes {
+            let len = bytes.len() as u64;
+            let _ = self.fallback.write(to, &bytes);
+            self.files.insert(to.to_path_buf(), bytes);
+            Ok(len)
+        } else {
+            self.fallback.copy(from, to)
+        }
+    }
+
+    fn set_permissions(&mut self, path: &std::path::Path, mode: u32) -> std::io::Result<()> {
+        self.fallback.set_permissions(path, mode)
+    }
+
+    fn read_link(&mut self, path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+        self.fallback.read_link(path)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn numbers_round_trip_as_bits() {
@@ -593,5 +993,21 @@ mod tests {
             string_to_number("0xffffffffffffffff"),
             18_446_744_073_709_551_616.0
         );
+    }
+
+    #[test]
+    fn overlay_filesystem_intercepts_memory_files() {
+        let mut overlay_map = HashMap::new();
+        overlay_map.insert(PathBuf::from("virtual.txt"), b"virtual content".to_vec());
+        let mut vfs = OverlayFileSystem::new(OsFileSystem, overlay_map);
+
+        assert!(vfs.exists(Path::new("virtual.txt")));
+        assert_eq!(
+            vfs.read(Path::new("virtual.txt")).unwrap(),
+            b"virtual content"
+        );
+        let meta = vfs.metadata(Path::new("virtual.txt")).unwrap();
+        assert!(meta.is_file);
+        assert_eq!(meta.len, 15);
     }
 }
