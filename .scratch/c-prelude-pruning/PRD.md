@@ -1,6 +1,6 @@
 # PRD: Prune Superseded C Prelude Built-in Implementations
 
-Status: active
+Status: closed
 Feature: c-prelude-pruning
 
 ## Background & Problem Statement
