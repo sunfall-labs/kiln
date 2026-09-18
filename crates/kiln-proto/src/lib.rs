@@ -669,6 +669,7 @@ pub enum NativeProfile {
     Dev,
     Check,
     Release,
+    ReleaseSize,
     /// Release, plus profiler instrumentation. A wire-shape change, so PROTOCOL_VERSION moves.
     Profile,
 }

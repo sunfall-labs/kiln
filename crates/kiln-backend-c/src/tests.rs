@@ -1637,7 +1637,7 @@ fn compact_closure_source_unions_live_ranges_and_remaps_nested_spans() {
     program.functions[1].span = kiln_ir::Span { start: 7, end: 10 };
     program.functions[2].span = kiln_ir::Span { start: 3, end: 4 };
 
-    compact_closure_source(&mut program, None);
+    compact_closure_source(&mut program, None, false);
 
     assert_eq!(&*program.source, "abcdef");
     assert_eq!(
@@ -1652,6 +1652,10 @@ fn compact_closure_source_unions_live_ranges_and_remaps_nested_spans() {
         program.functions[2].span,
         kiln_ir::Span { start: 1, end: 2 }
     );
+
+    compact_closure_source(&mut program, None, true);
+    assert!(program.source.is_empty());
+    assert!(program.functions[0].span.start > program.functions[0].span.end);
 }
 
 /// The engine half of the provider ABI, for tests that link the vendored C number runtime.
@@ -2459,6 +2463,166 @@ fn emitted_closure_names_use_lossless_effective_function_metadata() {
         "static const kiln_string {}_function_name_0 = {{ 7, KILN_STRING_LATIN1",
         written_emitted.symbol
     )));
+}
+
+#[test]
+fn compact_mode_deduplicates_function_names_across_functions() {
+    let mut f0 = function(vec![Instruction::Return]);
+    f0.name = Some("shared".into());
+    let mut f1 = function(vec![Instruction::Return]);
+    f1.name = Some("shared".into());
+    let mut f2 = function(vec![Instruction::Return]);
+    f2.name = Some("distinct".into());
+    let mut prog = program(
+        Vec::new(),
+        vec![
+            Instruction::MakeFunction(0),
+            Instruction::MakeFunction(1),
+            Instruction::MakeFunction(2),
+            Instruction::Return,
+        ],
+        0,
+    );
+    prog.functions = vec![f0, f1, f2];
+    let emitted = emit_with_policy(
+        &prog,
+        EmissionPolicy {
+            compact: true,
+            generic_only: true,
+            ..Default::default()
+        },
+    )
+    .expect("program emits");
+    assert!(emitted.source.contains(&format!(
+        "static const kiln_string {}_fn_name_0 =",
+        emitted.symbol
+    )));
+    assert!(emitted.source.contains(&format!(
+        "static const kiln_string {}_fn_name_1 =",
+        emitted.symbol
+    )));
+    assert!(!emitted.source.contains(&format!(
+        "static const kiln_string {}_fn_name_2 =",
+        emitted.symbol
+    )));
+    let fn0_target = emitted
+        .source
+        .lines()
+        .find(|l| l.starts_with(&format!("#define {}_function_name_0", emitted.symbol)))
+        .unwrap();
+    let fn1_target = emitted
+        .source
+        .lines()
+        .find(|l| l.starts_with(&format!("#define {}_function_name_1", emitted.symbol)))
+        .unwrap();
+    assert_eq!(
+        fn0_target.split_whitespace().last(),
+        fn1_target.split_whitespace().last()
+    );
+}
+
+#[test]
+fn compact_mode_emits_closure_metadata_table_and_compact_call_sites() {
+    let mut f0 = function(vec![Instruction::Return]);
+    f0.name = Some("target".into());
+    let mut prog = program(
+        Vec::new(),
+        vec![Instruction::MakeFunction(0), Instruction::Return],
+        0,
+    );
+    prog.functions = vec![f0];
+    let emitted = emit_with_policy(
+        &prog,
+        EmissionPolicy {
+            compact: true,
+            generic_only: true,
+            ..Default::default()
+        },
+    )
+    .expect("program emits");
+    assert!(
+        emitted
+            .source
+            .contains("static const ku_proto_meta ku_protos[1] = {")
+    );
+    assert!(
+        emitted
+            .source
+            .contains("static __attribute__((unused)) int ku_make_closure(")
+    );
+    assert!(
+        emitted
+            .source
+            .contains("#define KU_CLOSURE(DST, PROTO, RECV, CAP, CAP_CNT)")
+    );
+    assert!(
+        emitted
+            .source
+            .contains("KU_CLOSURE(v0, 0, KILN_VAL_UNDEFINED, NULL, 0);")
+    );
+}
+
+#[test]
+fn executable_compact_closure_executes_correctly() {
+    let bump = FunctionProto {
+        inferred_name: None,
+        prologue_end: 0,
+        local_count: 0,
+        upvalues: vec![Upvalue::ParentLocal(0)],
+        code: vec![
+            Instruction::LoadUpvalue(0),
+            Instruction::Const(1),
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::StoreUpvalue(0),
+            Instruction::LoadUpvalue(0),
+            Instruction::Return,
+        ],
+        ..function(Vec::new())
+    };
+    let generated = emit_with_policy(
+        &Program {
+            source: "".into(),
+            version: BYTECODE_VERSION,
+            constants: vec![
+                Constant::Number(0f64.to_bits()),
+                Constant::Number(1f64.to_bits()),
+            ],
+            code: vec![
+                Instruction::NewCell(0),
+                Instruction::Const(0),
+                Instruction::StoreCell(0),
+                Instruction::MakeFunction(0),
+                Instruction::StoreLocal(1),
+                Instruction::LoadLocal(1),
+                Instruction::Call { argc: 0 },
+                Instruction::Pop,
+                Instruction::LoadLocal(1),
+                Instruction::Call { argc: 0 },
+                Instruction::Pop,
+                Instruction::LoadCell(0),
+                Instruction::Return,
+            ],
+            local_count: 2,
+            functions: vec![bump],
+            template_sites: Vec::new(),
+        },
+        EmissionPolicy {
+            compact: true,
+            generic_only: true,
+            ..Default::default()
+        },
+    )
+    .expect("program emits");
+    let wrapper = format!(
+        "int main(void) {{ kiln_value result; int status = {}(NULL, &result); if (status != 0) return 2; if (result.tag != KILN_VALUE_NUMBER) return 3; return kiln_c99_as_number(result) == 2.0 ? 0 : 4; }}\n",
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "compact-closure-cell");
+    assert!(
+        run.status.success(),
+        "run stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
 }
 
 #[test]
@@ -7671,6 +7835,126 @@ fn executable_native_alu_and_bitwise_operations_execute_correctly() {
         "alu and bitwise optimizations execution failed ({:?}):\nstdout: {}\nstderr: {}",
         run.status.code(),
         String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn compact_module_pools_inline_cache_sites_and_interned_keys_into_dense_tables() {
+    let function = |local_count, code| FunctionProto {
+        inferred_name: None,
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        declared_length: 0,
+        name: None,
+        parameter_count: 0,
+        local_count,
+        code,
+        arrow: false,
+        generator: false,
+        asynchronous: false,
+        async_generator: false,
+        is_method: false,
+        mapped_arguments: false,
+        upvalues: Vec::new(),
+        type_annotations: None,
+    };
+    let module = module(
+        Program {
+            source: "".into(),
+            version: BYTECODE_VERSION,
+            constants: vec![
+                Constant::String("foo".to_owned().into()),
+                Constant::String("bar".to_owned().into()),
+                Constant::Undefined,
+            ],
+            code: vec![
+                Instruction::MakeFunction(0),
+                Instruction::StoreLocal(0),
+                Instruction::LoadLocal(0),
+                Instruction::GetProperty(1),
+                Instruction::Return,
+            ],
+            local_count: 1,
+            functions: vec![function(
+                1,
+                vec![
+                    Instruction::Const(2),
+                    Instruction::GetProperty(0),
+                    Instruction::Return,
+                ],
+            )],
+            template_sites: Vec::new(),
+        },
+        Vec::new(),
+        vec![kiln_ir::ExportBinding {
+            exported: "getFoo".into(),
+            local_slot: 0,
+        }],
+    );
+    let emitted = emit_module_with_logical_path_and_policy(
+        &module,
+        "dense_sites.js",
+        EmissionPolicy {
+            compact: true,
+            ..EmissionPolicy::default()
+        },
+    )
+    .expect("compact module with sites emits");
+
+    // 1. Dense site table at file scope
+    assert!(
+        emitted
+            .source
+            .contains("static kiln_c99_site ku_sites[2] = {0};")
+    );
+    // 2. Function site macro pointing into ku_sites
+    assert!(
+        emitted
+            .source
+            .contains("#define ku_fn_0_site (&ku_sites[0])")
+    );
+    // 3. Entry site macro pointing into ku_sites
+    assert!(
+        emitted
+            .source
+            .contains("#define ku_entry_site (&ku_sites[1])")
+    );
+    // 4. Dense key table array and macros
+    assert!(
+        emitted
+            .source
+            .contains("static const kiln_string *ku_keys[2];")
+    );
+    assert!(emitted.source.contains("#define ku_key_0 (ku_keys[0])"));
+    assert!(emitted.source.contains("#define ku_key_1 (ku_keys[1])"));
+    // 5. No individual scattered site arrays or static key pointers
+    assert!(!emitted.source.contains("static kiln_c99_site ku_fn_0_site"));
+    assert!(
+        !emitted
+            .source
+            .contains("static const kiln_string *ku_key_0;")
+    );
+
+    // 6. Valid C99 compilation and execution
+    let wrapper = r#"
+int main(void) {
+    kiln_host host;
+    memset(&host, 0, sizeof(host));
+    kiln_value result = kiln_c99_undefined();
+    kiln_value exports[1] = { kiln_c99_undefined() };
+    int status = ku_body(&host, &result, NULL, 0, exports, 1);
+    if (status != KILN_C99_OK) return 1;
+    if (ku_keys_ready != 1) return 2;
+    if (ku_keys[0] == NULL || ku_keys[1] == NULL) return 3;
+    return 0;
+}
+"#;
+    let run = run_with_main(&emitted, wrapper, "dense-sites");
+    assert!(
+        run.status.success(),
+        "dense sites executable failed ({:?}): {}",
+        run.status.code(),
         String::from_utf8_lossy(&run.stderr)
     );
 }

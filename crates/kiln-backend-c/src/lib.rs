@@ -94,6 +94,8 @@ pub struct EmissionPolicy {
     pub live_module_slots: Option<Arc<BTreeSet<u32>>>,
     /// Explicit regex matcher compilation setting. If `None`, defaults to `!compact`.
     pub compile_regex: Option<bool>,
+    /// Omit embedded JavaScript source text for closures (Function.prototype.toString returns [native code]).
+    pub omit_source: bool,
 }
 
 impl EmissionPolicy {
@@ -287,6 +289,8 @@ pub struct CModule {
     /// Whether this unit intentionally contains only generic bodies and should favor the
     /// cheapest downstream compilation tier.
     pub generic_only: bool,
+    /// If non-empty, contains multi-chunk C99 sources for parallel compilation.
+    pub chunks: Vec<String>,
 }
 
 /// Backwards-compatible descriptive alias for callers that call an emitted unit a module.
@@ -337,6 +341,7 @@ pub fn emit_with_policy(program: &Program, policy: EmissionPolicy) -> Result<CMo
         source,
         program_hash,
         generic_only: policy.generic_only,
+        chunks: Vec::new(),
     })
 }
 
@@ -370,12 +375,13 @@ pub fn emit_module_with_policy(
     validate_module(module)?;
     let (program_hash, symbol_hash) = hash_module_pair_with_policy(module, &policy);
     let symbol = format!("kiln_module_{program_hash:016x}{symbol_hash:016x}");
-    let source = render_module(module, program_hash, &symbol, &policy, false, &symbol)?;
+    let rendered = render_module(module, program_hash, &symbol, &policy, false, &symbol)?;
     Ok(CModule {
         symbol,
-        source,
+        source: rendered.source,
         program_hash,
         generic_only: policy.generic_only,
+        chunks: rendered.chunks,
     })
 }
 
@@ -401,12 +407,13 @@ pub fn emit_module_with_logical_path_and_policy(
 ) -> Result<CModule, EmitError> {
     let (symbol, program_hash, _) =
         module_identity_with_logical_path_and_policy(module, logical_path, &policy)?;
-    let source = render_module(module, program_hash, &symbol, &policy, false, logical_path)?;
+    let rendered = render_module(module, program_hash, &symbol, &policy, false, logical_path)?;
     Ok(CModule {
         symbol,
-        source,
+        source: rendered.source,
         program_hash,
         generic_only: policy.generic_only,
+        chunks: rendered.chunks,
     })
 }
 
@@ -451,12 +458,13 @@ pub fn emit_commonjs_module_with_logical_path_and_policy(
     let (program_hash, _) = hash_module_pair_with_policy(module, &policy);
     let (path_hash, path_hash_seeded) = hash_logical_path_pair(logical_path);
     let symbol = format!("kiln_module_path_{path_hash:016x}{path_hash_seeded:016x}");
-    let source = render_module(module, program_hash, &symbol, &policy, true, logical_path)?;
+    let rendered = render_module(module, program_hash, &symbol, &policy, true, logical_path)?;
     Ok(CModule {
         symbol,
-        source,
+        source: rendered.source,
         program_hash,
         generic_only: policy.generic_only,
+        chunks: rendered.chunks,
     })
 }
 
@@ -502,6 +510,7 @@ pub fn emit_runtime_module_with_logical_path_and_policy(
         source,
         program_hash,
         generic_only: policy.generic_only,
+        chunks: Vec::new(),
     })
 }
 
@@ -980,7 +989,19 @@ pub(crate) fn closure_construction(
 /// closed-world emission removed. Keeping all of it as one escaped C string makes the C compiler
 /// parse dead JavaScript. Ranges are unioned before copying because nested closures overlap their
 /// parent's source; copying once per function would grow precisely the modules this is for.
-fn compact_closure_source(program: &mut Program, reachable: Option<&HashSet<usize>>) {
+fn compact_closure_source(
+    program: &mut Program,
+    reachable: Option<&HashSet<usize>>,
+    omit_source: bool,
+) {
+    if omit_source {
+        program.source = String::new().into();
+        for function in &mut program.functions {
+            function.span.start = 1;
+            function.span.end = 0;
+        }
+        return;
+    }
     if program.source.is_empty() || program.functions.is_empty() {
         return;
     }
@@ -1038,6 +1059,28 @@ fn compact_closure_source(program: &mut Program, reachable: Option<&HashSet<usiz
     program.source = packed.into();
 }
 
+struct RenderedFunctions {
+    sites: usize,
+    forward_declarations: String,
+}
+
+struct RenderedModule {
+    source: String,
+    chunks: Vec<String>,
+}
+
+fn has_closure_instruction(program: &Program) -> bool {
+    program
+        .code
+        .iter()
+        .any(|i| matches!(i, Instruction::MakeFunction(_)))
+        || program.functions.iter().any(|f| {
+            f.code
+                .iter()
+                .any(|i| matches!(i, Instruction::MakeFunction(_)))
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_functions(
     output: &mut String,
@@ -1050,7 +1093,10 @@ fn render_functions(
     direct: &mut direct::DirectPlan,
     policy: &EmissionPolicy,
     reachable: Option<&HashSet<usize>>,
-) {
+    should_chunk: bool,
+    mut chunked_bodies: Option<&mut Vec<String>>,
+) -> RenderedFunctions {
+    let mut fwd_decls = String::new();
     if policy.type_profile_record {
         output.push_str(
             "static inline uint32_t kiln_profile_tag_of(kiln_val v) {\n\
@@ -1171,6 +1217,7 @@ fn render_functions(
                     kind,
                     func_profile,
                     profiled && policy.type_profile_record,
+                    0,
                 );
             }
         };
@@ -1246,6 +1293,7 @@ fn render_functions(
                 },
                 None,
                 false,
+                0,
             );
         });
         let body = scratch
@@ -1300,28 +1348,65 @@ fn render_functions(
     // before any body: the definitions follow with the boxed clone that owns them.
     for (index, &columns) in receiver_columns.iter().enumerate() {
         if columns > 0 {
+            let linkage = if should_chunk { "" } else { "static " };
             writeln!(
                 output,
-                "static const kiln_shape *{symbol}_fn_{index}_recv_shape[4];\nstatic uint32_t {symbol}_fn_{index}_recv_slot[4][{columns}];\nstatic const kiln_shape *{symbol}_fn_{index}_typed_recv_shape[4];\nstatic uint32_t {symbol}_fn_{index}_typed_recv_slot[4][{columns}];"
+                "{linkage}const kiln_shape *{symbol}_fn_{index}_recv_shape[4];\n{linkage}uint32_t {symbol}_fn_{index}_recv_slot[4][{columns}];\n{linkage}const kiln_shape *{symbol}_fn_{index}_typed_recv_shape[4];\n{linkage}uint32_t {symbol}_fn_{index}_typed_recv_slot[4][{columns}];"
             )
             .unwrap();
+            if should_chunk {
+                writeln!(
+                    fwd_decls,
+                    "extern const kiln_shape *{symbol}_fn_{index}_recv_shape[4];\nextern uint32_t {symbol}_fn_{index}_recv_slot[4][{columns}];\nextern const kiln_shape *{symbol}_fn_{index}_typed_recv_shape[4];\nextern uint32_t {symbol}_fn_{index}_typed_recv_slot[4][{columns}];"
+                )
+                .unwrap();
+            }
         }
     }
     for (index, &has_fast) in fast.iter().enumerate() {
         if reachable.is_some_and(|set| !set.contains(&index)) {
             continue;
         }
-        writeln!(
-            output,
-            "static inline int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);"
-        )
-        .unwrap();
-        if has_fast {
+        let static_kw = if should_chunk { "" } else { "static inline " };
+        if policy.compact {
+            writeln!(output, "{static_kw}int {symbol}_fn_{index}(KU_PARAMS);").unwrap();
+            if has_fast {
+                writeln!(output, "{static_kw}int {symbol}_fn_{index}_f(KU_PARAMS);").unwrap();
+            }
+        } else {
             writeln!(
                 output,
-                "static inline int {symbol}_fn_{index}_f(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);"
+                "{static_kw}int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);"
             )
             .unwrap();
+            if has_fast {
+                writeln!(
+                    output,
+                    "{static_kw}int {symbol}_fn_{index}_f(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);"
+                )
+                .unwrap();
+            }
+        }
+        if should_chunk {
+            if policy.compact {
+                writeln!(fwd_decls, "int {symbol}_fn_{index}(KU_PARAMS);").unwrap();
+                if has_fast {
+                    writeln!(fwd_decls, "int {symbol}_fn_{index}_f(KU_PARAMS);").unwrap();
+                }
+            } else {
+                writeln!(
+                    fwd_decls,
+                    "int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);"
+                )
+                .unwrap();
+                if has_fast {
+                    writeln!(
+                        fwd_decls,
+                        "int {symbol}_fn_{index}_f(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);"
+                    )
+                    .unwrap();
+                }
+            }
         }
         if direct.has_typed_entry(index as u32) {
             let (result, params) = emit_graph::typed_signature(
@@ -1331,25 +1416,46 @@ fn render_functions(
             );
             writeln!(
                 output,
-                "static inline {result} {symbol}_fn_{index}_t({params});"
+                "{static_kw}{result} {symbol}_fn_{index}_t({params});"
             )
             .unwrap();
+            if should_chunk {
+                writeln!(fwd_decls, "{result} {symbol}_fn_{index}_t({params});").unwrap();
+            }
             if direct.parallel_chunk(index as u32) {
+                let pmap_link = if should_chunk { "" } else { "static " };
                 writeln!(
                     output,
-                    "static void {symbol}_pmap_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                     static void {symbol}_pmap_f64_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                     static void {symbol}_pmap_f32_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                     static void {symbol}_pmap_i32_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                     static void {symbol}_pmap_u32_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                     static void {symbol}_pmap_i16_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                     static void {symbol}_pmap_u16_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                     static void {symbol}_pmap_i8_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                     static void {symbol}_pmap_u8_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                     static void {symbol}_pmap_u8c_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                     static void {symbol}_pmap_typed_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);"
+                    "{pmap_link}void {symbol}_pmap_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
+                     {pmap_link}void {symbol}_pmap_f64_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
+                     {pmap_link}void {symbol}_pmap_f32_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
+                     {pmap_link}void {symbol}_pmap_i32_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
+                     {pmap_link}void {symbol}_pmap_u32_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
+                     {pmap_link}void {symbol}_pmap_i16_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
+                     {pmap_link}void {symbol}_pmap_u16_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
+                     {pmap_link}void {symbol}_pmap_i8_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
+                     {pmap_link}void {symbol}_pmap_u8_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
+                     {pmap_link}void {symbol}_pmap_u8c_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
+                     {pmap_link}void {symbol}_pmap_typed_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);"
                 )
                 .unwrap();
+                if should_chunk {
+                    writeln!(
+                        fwd_decls,
+                        "void {symbol}_pmap_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
+                         void {symbol}_pmap_f64_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
+                         void {symbol}_pmap_f32_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
+                         void {symbol}_pmap_i32_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
+                         void {symbol}_pmap_u32_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
+                         void {symbol}_pmap_i16_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
+                         void {symbol}_pmap_u16_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
+                         void {symbol}_pmap_i8_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
+                         void {symbol}_pmap_u8_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
+                         void {symbol}_pmap_u8c_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
+                         void {symbol}_pmap_typed_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);"
+                    )
+                    .unwrap();
+                }
             }
         }
     }
@@ -1367,14 +1473,167 @@ fn render_functions(
         )
         .unwrap();
     }
+    let has_closure = program
+        .code
+        .iter()
+        .any(|i| matches!(i, Instruction::MakeFunction(_)))
+        || program.functions.iter().any(|f| {
+            f.code
+                .iter()
+                .any(|i| matches!(i, Instruction::MakeFunction(_)))
+        });
+    if policy.compact && has_closure && !program.functions.is_empty() {
+        writeln!(
+            output,
+            "typedef struct {{\n\
+             kiln_body_fn body;\n\
+             const kiln_string *name;\n\
+             uint32_t span_start;\n\
+             uint32_t span_len;\n\
+             uint32_t handlers;\n\
+             uint32_t resume;\n\
+             uint16_t arity;\n\
+             uint16_t locals;\n\
+             uint16_t stack;\n\
+             uint8_t flags;\n\
+             uint8_t _pad[1];\n\
+             }} ku_proto_meta;\n\
+             static const ku_proto_meta ku_protos[{}] = {{",
+            program.functions.len()
+        )
+        .unwrap();
+
+        for (index, target) in program.functions.iter().enumerate() {
+            if reachable.is_some_and(|set| !set.contains(&index)) {
+                output.push_str("    { NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, {0} },\n");
+                continue;
+            }
+            let name = target.effective_name_units().map_or_else(
+                || "NULL".to_owned(),
+                |_| format!("&{symbol}_function_name_{index}"),
+            );
+            let span = target.span;
+            let (span_start, span_len) = if program.source.is_empty()
+                || policy.omit_source
+                || span.end as usize > program.source.len()
+                || span.start > span.end
+            {
+                (0u32, 0u32)
+            } else {
+                (span.start, span.end - span.start)
+            };
+            let arity = target.declared_length;
+            let locals = target.local_count.max(1);
+            let stack = plan.functions.get(index).copied().unwrap_or(1).max(1);
+            let handlers = target.code.len().max(1);
+            let resume = if binds_at_call(target) {
+                target.code.len()
+            } else {
+                0
+            };
+            let mut flags: u8 = 0;
+            if target.generator || target.asynchronous {
+                flags |= 1 << 0;
+            }
+            if target.asynchronous {
+                flags |= 1 << 1;
+            }
+            if target.async_generator {
+                flags |= 1 << 2;
+            }
+            if target.is_method {
+                flags |= 1 << 3;
+            }
+            if target.arrow {
+                flags |= 1 << 4;
+            }
+            if strict_functions.get(index).copied().unwrap_or(true) {
+                flags |= 1 << 5;
+            }
+            if direct
+                .entry
+                .publishes_frame
+                .get(index)
+                .copied()
+                .unwrap_or(true)
+            {
+                flags |= 1 << 6;
+            }
+            writeln!(
+                output,
+                "    {{ (kiln_body_fn){symbol}_fn_{index}, {name}, {span_start}, {span_len}, {handlers}, {resume}, {arity}, {locals}, {stack}, {flags}, {{0}} }},"
+            )
+            .unwrap();
+        }
+        writeln!(output, "}};\n").unwrap();
+
+        let source_expr = if !program.source.is_empty() && !policy.omit_source {
+            format!("{symbol}_source")
+        } else {
+            "NULL".to_string()
+        };
+        let closure_linkage = if should_chunk { "" } else { "static " };
+        let closure_fn_name = if should_chunk {
+            format!("{symbol}_make_closure")
+        } else {
+            "ku_make_closure".to_string()
+        };
+        writeln!(
+            output,
+            "{closure_linkage}__attribute__((unused)) int {closure_fn_name}(kiln_val *dst, uint32_t proto, kiln_val receiver, const kiln_val *captured, uint32_t count) {{\n\
+             const ku_proto_meta *m = &ku_protos[proto];\n\
+             kiln_value b;\n\
+             const char *src = m->span_len ? ({source_expr} + m->span_start) : NULL;\n\
+             int status = kiln_c99_make_closure(\n\
+             &b,\n\
+             m->body,\n\
+             m->name,\n\
+             src,\n\
+             (size_t)m->span_len,\n\
+             ku_site,\n\
+             proto,\n\
+             (uint32_t)m->arity,\n\
+             (m->flags & 1) != 0,\n\
+             (m->flags & 2) != 0,\n\
+             (m->flags & 4) != 0,\n\
+             (m->flags & 8) != 0,\n\
+             (m->flags & 16) != 0,\n\
+             (m->flags & 32) != 0,\n\
+             receiver,\n\
+             kiln_val_from_boundary(kiln_c99_new_target),\n\
+             (uint32_t)m->locals,\n\
+             (uint32_t)m->stack,\n\
+             (uint32_t)m->handlers,\n\
+             (uint32_t)m->resume,\n\
+             captured,\n\
+             count\n\
+             );\n\
+             if (KILN_UNLIKELY(status != KILN_C99_OK)) return status;\n\
+             if (!(m->flags & 64)) kiln_c99_closure_of(b)->publishes_frame = 0;\n\
+             *dst = kiln_val_from_boundary(b);\n\
+             return KILN_C99_OK;\n\
+             }}\n"
+        )
+        .unwrap();
+    }
+    if should_chunk {
+        output.push_str("/* KILN_CHUNK_0_FUNCTIONS_PLACEHOLDER */\n");
+    }
+    let mut site_offset = 0usize;
     for (index, proto) in program.functions.iter().enumerate() {
         if reachable.is_some_and(|set| !set.contains(&index)) {
             continue;
         }
+        let mut func_buf = String::new();
+        let target_buf = if should_chunk {
+            &mut func_buf
+        } else {
+            &mut *output
+        };
         let scalar_proto = !proto_produces_references(proto, program);
         let func_profile = policy.type_profile.as_ref().and_then(|p| p.function(index));
-        emit_graph::emit_function_from_graph_with_profile(
-            output,
+        let sites_count = emit_graph::emit_function_from_graph_with_profile(
+            target_buf,
             &graphs[index],
             proto,
             program,
@@ -1388,12 +1647,20 @@ fn render_functions(
             emit_graph::EntryKind::Boxed,
             func_profile,
             policy.type_profile_record,
+            site_offset,
         );
+        site_offset += sites_count;
         if let Some(typed) = &direct.typed[index] {
-            emit_typed(output, index, typed, true);
+            emit_typed(target_buf, index, typed, true);
             if let Some(clone) = &parallel_clones[index] {
-                output.push_str(clone);
-                emit_graph::emit_parallel_chunk(output, symbol, index, proto.parameter_count);
+                target_buf.push_str(clone);
+                emit_graph::emit_parallel_chunk(
+                    target_buf,
+                    symbol,
+                    index,
+                    proto.parameter_count,
+                    should_chunk,
+                );
             }
         }
         // Emitted again now that every plan knows the fast set: a fast clone calls other fast
@@ -1412,7 +1679,12 @@ fn render_functions(
                 &direct.functions[index],
             )
         {
-            output.push_str(&clone);
+            target_buf.push_str(&clone);
+        }
+        if should_chunk {
+            if let Some(ref mut bodies) = chunked_bodies {
+                bodies.push(func_buf);
+            }
         }
     }
     if policy.type_profile_record {
@@ -1485,6 +1757,10 @@ fn render_functions(
         writeln!(output, "    fclose(f);").unwrap();
         writeln!(output, "}}\n").unwrap();
     }
+    RenderedFunctions {
+        sites: site_offset,
+        forward_declarations: fwd_decls,
+    }
 }
 
 /// Whether this body's parameter binding runs during the call rather than at the first
@@ -1494,7 +1770,7 @@ fn render_functions(
 /// and never needs the seam. An async *function* is the one suspending shape that must keep them
 /// together too -- its instantiation failure rejects rather than throwing, and running the
 /// prologue as the first thing its driver does is already exactly that.
-fn binds_at_call(proto: &FunctionProto) -> bool {
+pub(crate) fn binds_at_call(proto: &FunctionProto) -> bool {
     (proto.generator || proto.asynchronous)
         && !(proto.asynchronous && !proto.async_generator)
         && proto.prologue_end > 0
@@ -1661,11 +1937,13 @@ fn render_entry(
     graph: &FunctionGraph,
     calls: &direct::CallPlan,
     policy: &EmissionPolicy,
-) -> Result<(), EmitError> {
+    site_offset: usize,
+) -> Result<usize, EmitError> {
     if body.asynchronous {
+        let entry_start = output.len();
         let entry_name = format!("{unit_symbol}_entry_name");
         render_static_string(output, &entry_name, &kiln_ir::StringUnits::from("<entry>"));
-        emit_graph::emit_async_entry_body(
+        let shared_sites = emit_graph::emit_async_entry_body(
             output,
             graph,
             body,
@@ -1676,7 +1954,16 @@ fn render_entry(
             strict_functions,
             calls,
             policy.type_profile_record,
+            site_offset,
         );
+        if policy.compact && shared_sites > 0 {
+            output.insert_str(
+                entry_start,
+                &format!(
+                    "#define {unit_symbol}_entry_site (&{unit_symbol}_sites[{site_offset}])\n"
+                ),
+            );
+        }
 
         let _callables = true;
         let entry_symbol = format!("{unit_symbol}_body");
@@ -1808,9 +2095,10 @@ fn render_entry(
         }
         output.push_str("    return KILN_C99_OK;\n}\n");
         render_publish_exports(output, public_symbol, unit_symbol, module, true);
-        return Ok(());
+        return Ok(shared_sites);
     }
 
+    let entry_start = output.len();
     let callables = produces_references(program) || (policy.compact && module.is_some());
     let entry_symbol = if callables {
         format!("{unit_symbol}_body")
@@ -1917,7 +2205,7 @@ fn render_entry(
             }
         }
     }
-    emit_graph::emit_entry_from_graph_with_profile(
+    let shared_sites = emit_graph::emit_entry_from_graph_with_profile(
         output,
         graph,
         body,
@@ -1932,10 +2220,17 @@ fn render_entry(
         commonjs,
         calls,
         policy.type_profile_record,
+        site_offset,
     );
     output.push_str("}\n");
+    if policy.compact && shared_sites > 0 {
+        output.insert_str(
+            entry_start,
+            &format!("#define {unit_symbol}_entry_site (&{unit_symbol}_sites[{site_offset}])\n"),
+        );
+    }
     render_publish_exports(output, public_symbol, unit_symbol, module, module_scope);
-    Ok(())
+    Ok(shared_sites)
 }
 
 fn render_publish_exports(
@@ -1971,8 +2266,18 @@ fn render_publish_exports(
 /// from them on first use: parsing is not free and a literal's value never changes, so the unit
 /// pays for it once however often the literal is loaded.
 fn render_static_string(output: &mut String, name: &str, value: &kiln_ir::StringUnits) {
+    render_static_string_with_linkage(output, name, value, false);
+}
+
+fn render_static_string_with_linkage(
+    output: &mut String,
+    name: &str,
+    value: &kiln_ir::StringUnits,
+    external: bool,
+) {
     let units: Vec<u16> = value.units().collect();
     let latin1 = units.iter().all(|unit| *unit <= 0xff);
+    let linkage = if external { "" } else { "static " };
     if latin1 {
         let payload = if units.is_empty() {
             "0".to_owned()
@@ -1991,7 +2296,7 @@ fn render_static_string(output: &mut String, name: &str, value: &kiln_ir::String
         .unwrap();
         writeln!(
             output,
-            "static const kiln_string {name} = {{ {}, KILN_STRING_LATIN1, {name}_data }};",
+            "{linkage}const kiln_string {name} = {{ {}, KILN_STRING_LATIN1, {name}_data }};",
             units.len()
         )
         .unwrap();
@@ -2013,41 +2318,139 @@ fn render_static_string(output: &mut String, name: &str, value: &kiln_ir::String
         .unwrap();
         writeln!(
             output,
-            "static const kiln_string {name} = {{ {}, KILN_STRING_UTF16, {name}_data }};",
+            "{linkage}const kiln_string {name} = {{ {}, KILN_STRING_UTF16, {name}_data }};",
             units.len()
         )
         .unwrap();
     }
 }
 
-fn render_constant_declarations(output: &mut String, program: &Program, symbol: &str) {
+fn render_constant_declarations(
+    output: &mut String,
+    program: &Program,
+    symbol: &str,
+    compact: bool,
+    should_chunk: bool,
+) {
     for (index, constant) in program.constants.iter().enumerate() {
         match constant {
             Constant::String(value) => {
                 let name = format!("{symbol}_string_{index}");
-                render_static_string(output, &name, value);
+                render_static_string_with_linkage(output, &name, value, should_chunk);
                 writeln!(output, "#define {symbol}_constant_{index} (&{name})").unwrap();
             }
             Constant::BigInt(digits) => {
                 // Headed like every other string constant: the digits are ASCII, so the
                 // static lands Latin1 and the keyed parse reads its payload in place.
                 let name = format!("{symbol}_bigint_digits_{index}");
-                render_static_string(output, &name, &kiln_ir::StringUnits::from(digits.as_str()));
+                render_static_string_with_linkage(
+                    output,
+                    &name,
+                    &kiln_ir::StringUnits::from(digits.as_str()),
+                    should_chunk,
+                );
                 writeln!(output, "#define {symbol}_constant_{index} (&{name})").unwrap();
-                writeln!(output, "static void *{symbol}_bigint_{index} = NULL;").unwrap();
+                let linkage = if should_chunk { "" } else { "static " };
+                writeln!(output, "{linkage}void *{symbol}_bigint_{index} = NULL;").unwrap();
             }
             Constant::Undefined | Constant::Null | Constant::Boolean(_) | Constant::Number(_) => {}
         }
     }
-    for (index, function) in program.functions.iter().enumerate() {
-        if let Some(name) = function.effective_name_units() {
-            let symbol_name = format!("{symbol}_function_name_{index}");
-            render_static_string(output, &symbol_name, &name);
+    if compact {
+        let mut unique_names: std::collections::BTreeMap<kiln_ir::StringUnits, usize> =
+            std::collections::BTreeMap::new();
+        let mut fn_ids = Vec::with_capacity(program.functions.len());
+        for function in &program.functions {
+            if let Some(name) = function.effective_name_units() {
+                let next_id = unique_names.len();
+                let id = *unique_names.entry(name).or_insert(next_id);
+                fn_ids.push(Some(id));
+            } else {
+                fn_ids.push(None);
+            }
+        }
+        for (name, id) in &unique_names {
+            let symbol_name = format!("{symbol}_fn_name_{id}");
+            render_static_string_with_linkage(output, &symbol_name, name, should_chunk);
+        }
+        for (index, id) in fn_ids.into_iter().enumerate() {
+            if let Some(id) = id {
+                writeln!(
+                    output,
+                    "#define {symbol}_function_name_{index} ({symbol}_fn_name_{id})"
+                )
+                .unwrap();
+            }
+        }
+    } else {
+        for (index, function) in program.functions.iter().enumerate() {
+            if let Some(name) = function.effective_name_units() {
+                let symbol_name = format!("{symbol}_function_name_{index}");
+                render_static_string(output, &symbol_name, &name);
+            }
         }
     }
 }
 
-fn render_regex_matchers(output: &mut String, program: &Program, symbol: &str) {
+fn render_constant_declarations_extern(
+    output: &mut String,
+    program: &Program,
+    symbol: &str,
+    compact: bool,
+) {
+    for (index, constant) in program.constants.iter().enumerate() {
+        match constant {
+            Constant::String(_) => {
+                let name = format!("{symbol}_string_{index}");
+                writeln!(output, "extern const kiln_string {name};").unwrap();
+                writeln!(output, "#define {symbol}_constant_{index} (&{name})").unwrap();
+            }
+            Constant::BigInt(_) => {
+                let name = format!("{symbol}_bigint_digits_{index}");
+                writeln!(output, "extern const kiln_string {name};").unwrap();
+                writeln!(output, "#define {symbol}_constant_{index} (&{name})").unwrap();
+                writeln!(output, "extern void *{symbol}_bigint_{index};").unwrap();
+            }
+            Constant::Undefined | Constant::Null | Constant::Boolean(_) | Constant::Number(_) => {}
+        }
+    }
+    if compact {
+        let mut unique_names: std::collections::BTreeMap<kiln_ir::StringUnits, usize> =
+            std::collections::BTreeMap::new();
+        let mut fn_ids = Vec::with_capacity(program.functions.len());
+        for function in &program.functions {
+            if let Some(name) = function.effective_name_units() {
+                let next_id = unique_names.len();
+                let id = *unique_names.entry(name).or_insert(next_id);
+                fn_ids.push(Some(id));
+            } else {
+                fn_ids.push(None);
+            }
+        }
+        for (_, id) in &unique_names {
+            let symbol_name = format!("{symbol}_fn_name_{id}");
+            writeln!(output, "extern const kiln_string {symbol_name};").unwrap();
+        }
+        for (index, id) in fn_ids.into_iter().enumerate() {
+            if let Some(id) = id {
+                writeln!(
+                    output,
+                    "#define {symbol}_function_name_{index} ({symbol}_fn_name_{id})"
+                )
+                .unwrap();
+            }
+        }
+    } else {
+        for (index, function) in program.functions.iter().enumerate() {
+            if function.effective_name_units().is_some() {
+                let symbol_name = format!("{symbol}_function_name_{index}");
+                writeln!(output, "extern const kiln_string {symbol_name};").unwrap();
+            }
+        }
+    }
+}
+
+fn render_regex_matchers(output: &mut String, program: &Program, symbol: &str, should_chunk: bool) {
     let mut seen = std::collections::BTreeSet::new();
 
     let emit_if_compiled = |inst: &Instruction,
@@ -2064,7 +2467,44 @@ fn render_regex_matchers(output: &mut String, program: &Program, symbol: &str) {
             && let Some(compiled) = crate::regex::try_compile_regex(&source, &letters)
         {
             let prefix = format!("{symbol}_re_{pattern}_{flags}");
-            crate::regex::emit_regex_matcher(output, &prefix, &compiled);
+            crate::regex::emit_regex_matcher(output, &prefix, &compiled, should_chunk);
+        }
+    };
+
+    for inst in &program.code {
+        emit_if_compiled(inst, &mut seen, output);
+    }
+    for func in &program.functions {
+        for inst in &func.code {
+            emit_if_compiled(inst, &mut seen, output);
+        }
+    }
+}
+
+fn render_regex_matchers_extern(output: &mut String, program: &Program, symbol: &str) {
+    let mut seen = std::collections::BTreeSet::new();
+
+    let emit_if_compiled = |inst: &Instruction,
+                            seen: &mut std::collections::BTreeSet<(u32, u32)>,
+                            output: &mut String| {
+        if let Instruction::NewRegExp { pattern, flags } = inst
+            && seen.insert((*pattern, *flags))
+            && let (Constant::String(source), Constant::String(letters)) = (
+                &program.constants[*pattern as usize],
+                &program.constants[*flags as usize],
+            )
+            && let (Ok(source), Ok(letters)) =
+                (source.to_scalar_string(), letters.to_scalar_string())
+            && let Some(_compiled) = crate::regex::try_compile_regex(&source, &letters)
+        {
+            let prefix = format!("{symbol}_re_{pattern}_{flags}");
+            use std::fmt::Write as _;
+            writeln!(
+                output,
+                "int {prefix}(const uint16_t *units, size_t count, size_t start, int64_t *ranges, size_t capacity, size_t *groups, int *matched);\n\
+                 int {prefix}_ascii(const uint8_t *units, size_t count, size_t start, int64_t *ranges, size_t capacity, size_t *groups, int *matched);"
+            )
+            .unwrap();
         }
     };
 
@@ -2108,32 +2548,75 @@ fn property_key_constants(program: &Program) -> Vec<u32> {
 /// One canonical pointer per key the unit names, filled at the first entry into a realm and
 /// cleared by the unit's `KILN_GC_PHASE_RESET` when that realm is destroyed. Interned as static:
 /// the constant table outlives every heap, so the entry is pinned and nothing is copied.
-fn render_key_table(output: &mut String, program: &Program, symbol: &str, keys: &[u32]) {
+fn render_key_table(
+    output: &mut String,
+    program: &Program,
+    symbol: &str,
+    keys: &[u32],
+    should_chunk: bool,
+) {
     if keys.is_empty() {
         return;
     }
-    for index in keys {
-        writeln!(output, "static const kiln_string *{symbol}_key_{index};").unwrap();
+    let linkage = if should_chunk { "" } else { "static " };
+    if symbol == "ku" {
+        writeln!(
+            output,
+            "{linkage}const kiln_string *ku_keys[{}];",
+            keys.len()
+        )
+        .unwrap();
+        for (i, index) in keys.iter().enumerate() {
+            writeln!(output, "#define ku_key_{index} (ku_keys[{i}])").unwrap();
+        }
+    } else {
+        for index in keys {
+            writeln!(output, "{linkage}const kiln_string *{symbol}_key_{index};").unwrap();
+        }
     }
     writeln!(output, "static int {symbol}_keys_ready;").unwrap();
     writeln!(output, "static int {symbol}_intern_keys(void) {{").unwrap();
-    for index in keys {
+    for (i, index) in keys.iter().enumerate() {
         let Constant::String(_) = &program.constants[*index as usize] else {
             unreachable!("verification rejects a non-string property name before emission")
         };
         // The key store is canonical headed keys now: intern the constant's header
         // directly, in either width. The Latin1 bridge and its UTF-16 refusal are gone.
-        writeln!(
-            output,
-            "    if (({symbol}_key_{index} = kiln_c99_intern_static_key(&{symbol}_string_{index})) == NULL) return KILN_C99_OUT_OF_MEMORY;"
-        )
-        .unwrap();
+        if symbol == "ku" {
+            writeln!(
+                output,
+                "    if ((ku_keys[{i}] = kiln_c99_intern_static_key(&{symbol}_string_{index})) == NULL) return KILN_C99_OUT_OF_MEMORY;"
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                output,
+                "    if (({symbol}_key_{index} = kiln_c99_intern_static_key(&{symbol}_string_{index})) == NULL) return KILN_C99_OUT_OF_MEMORY;"
+            )
+            .unwrap();
+        }
     }
     writeln!(
         output,
         "    {symbol}_keys_ready = 1;\n    return KILN_C99_OK;\n}}"
     )
     .unwrap();
+}
+
+fn render_key_table_extern(output: &mut String, symbol: &str, keys: &[u32]) {
+    if keys.is_empty() {
+        return;
+    }
+    if symbol == "ku" {
+        writeln!(output, "extern const kiln_string *ku_keys[];").unwrap();
+        for (i, index) in keys.iter().enumerate() {
+            writeln!(output, "#define ku_key_{index} (ku_keys[{i}])").unwrap();
+        }
+    } else {
+        for index in keys {
+            writeln!(output, "extern const kiln_string *{symbol}_key_{index};").unwrap();
+        }
+    }
 }
 
 /// The line a unit's entry point runs to canonicalize its keys before the first access. A key
@@ -2151,31 +2634,32 @@ fn render_key_prologue(output: &mut String, symbol: &str, keyed: bool) {
 
 /// The root function this unit registers with the realm (ADR 0041): its module-scope slots,
 /// when it has them, and the prelude statics every unit owns a copy of.
-fn render_template_sites(output: &mut String, program: &Program, symbol: &str) {
+fn render_template_sites(output: &mut String, program: &Program, symbol: &str, should_chunk: bool) {
     if program.template_sites.is_empty() {
         return;
     }
     for (site_idx, site) in program.template_sites.iter().enumerate() {
         for (raw_idx, raw) in site.raw.iter().enumerate() {
             let name = format!("{symbol}_site_{site_idx}_raw_{raw_idx}");
-            render_static_string(output, &name, raw);
+            render_static_string_with_linkage(output, &name, raw, should_chunk);
         }
         for (cooked_idx, cooked) in site.cooked.iter().enumerate() {
             if let Some(text) = cooked {
                 let name = format!("{symbol}_site_{site_idx}_cooked_{cooked_idx}");
-                render_static_string(output, &name, text);
+                render_static_string_with_linkage(output, &name, text, should_chunk);
             }
         }
     }
+    let linkage = if should_chunk { "" } else { "static " };
     writeln!(
         output,
-        "static kiln_val {symbol}_template_sites[{}];",
+        "{linkage}kiln_val {symbol}_template_sites[{}];",
         program.template_sites.len()
     )
     .unwrap();
     writeln!(
         output,
-        "static int {symbol}_materialize_template_site(size_t site) {{"
+        "{linkage}int {symbol}_materialize_template_site(size_t site) {{"
     )
     .unwrap();
     writeln!(output, "    switch (site) {{").unwrap();
@@ -2618,6 +3102,117 @@ fn render_emission_policy(output: &mut String, policy: &EmissionPolicy) {
     }
 }
 
+fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &str) {
+    let mut has_call = false;
+    let mut has_call_method = false;
+    let mut has_closure = false;
+    let mut has_cell = false;
+    let mut has_binary = false;
+    let mut has_read_property = false;
+    let mut has_status = false;
+
+    let check_inst = |inst: &Instruction,
+                      has_status: &mut bool,
+                      has_call: &mut bool,
+                      has_call_method: &mut bool,
+                      has_closure: &mut bool,
+                      has_cell: &mut bool,
+                      has_binary: &mut bool,
+                      has_read_property: &mut bool| {
+        match inst {
+            Instruction::Call { .. } => {
+                *has_call = true;
+                *has_status = true;
+            }
+            Instruction::CallMethod { .. } => {
+                *has_call_method = true;
+                *has_read_property = true;
+                *has_status = true;
+            }
+            Instruction::MakeFunction(_) => *has_closure = true,
+            Instruction::LoadCell(_) | Instruction::LoadUpvalue(_) => {
+                *has_cell = true;
+                *has_status = true;
+            }
+            Instruction::Binary(_) => {
+                *has_binary = true;
+                *has_status = true;
+            }
+            Instruction::GetProperty(_) => {
+                *has_read_property = true;
+                *has_status = true;
+            }
+            Instruction::SetProperty(_)
+            | Instruction::SetPropertyStrict { .. }
+            | Instruction::SetComputed
+            | Instruction::SetComputedStrict { .. }
+            | Instruction::SetPrototype
+            | Instruction::SetSuperPropertyStrict { .. }
+            | Instruction::SetSuperElementStrict { .. }
+            | Instruction::SetPrivate(_)
+            | Instruction::DefineNamedProperty
+            | Instruction::Unary(_)
+            | Instruction::HostCall { .. }
+            | Instruction::DirectEval(_) => {
+                *has_status = true;
+            }
+            _ => {}
+        }
+    };
+
+    for inst in &program.code {
+        check_inst(
+            inst,
+            &mut has_status,
+            &mut has_call,
+            &mut has_call_method,
+            &mut has_closure,
+            &mut has_cell,
+            &mut has_binary,
+            &mut has_read_property,
+        );
+    }
+    for func in &program.functions {
+        for inst in &func.code {
+            check_inst(
+                inst,
+                &mut has_status,
+                &mut has_call,
+                &mut has_call_method,
+                &mut has_closure,
+                &mut has_cell,
+                &mut has_binary,
+                &mut has_read_property,
+            );
+        }
+    }
+    if has_status {
+        output.push_str("#define KU_STATUS(PC, OP, UNWIND) do { if (KILN_UNLIKELY(status != KILN_C99_OK)) { if (status == KILN_C99_THROWN) { UNWIND; } if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal(ku_site, (size_t)(PC), (OP), (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } return status; } } while (0)\n");
+    }
+    if has_cell {
+        output.push_str("#define KU_LOAD_CELL(DST, CELL, THROWN, PC, OP, UNWIND) do { const kiln_val *ku_cell = (const kiln_val *)KILN_VAL_PTR(CELL); int status = kiln_c99_val_check_tdz(*ku_cell, (THROWN)); KU_STATUS((PC), (OP), UNWIND); (DST) = *ku_cell; } while (0)\n");
+    }
+    if has_binary {
+        output.push_str("#define KU_BINARY(DST, CODE, LEFT, RIGHT, PC, OP, UNWIND) do { int status = KILN_C99_OK; (DST) = kiln_c99_val_binary((CODE), host, (LEFT), (RIGHT), &status, depth, thrown); KU_STATUS((PC), (OP), UNWIND); } while (0)\n");
+    }
+    if has_read_property {
+        output.push_str("#define KU_READ_PROPERTY(DST, OBJECT, KEY, KEY_LEN, SITE, PC, OP, UNWIND) do { int status = kiln_c99_val_read_property_key(host, (OBJECT), (KEY), depth, thrown, (SITE), &(DST)); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(OBJECT)); KU_STATUS((PC), (OP), UNWIND); } while (0)\n");
+    }
+    if !program.functions.is_empty() {
+        output.push_str("#define KU_PARAMS kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc\n");
+        output.push_str("#define KU_EPILOGUE() kiln_unwind:; return KILN_C99_THROWN; kiln_refusal:; *result = kiln_val_from_boundary(kiln_c99_control_diagnostic()); return KILN_C99_CONTROL_ERROR;\n");
+    }
+    if has_call {
+        output.push_str("#define KU_CALL(DST, CALLEE, ARGS, ARGC, PC, OP, UNWIND) do { int status = kiln_c99_val_call(host, (CALLEE), (ARGS), (size_t)(ARGC), depth, thrown, ku_site, (size_t)(PC), (OP), &(DST)); KU_STATUS((PC), (OP), UNWIND); } while (0)\n");
+    }
+    if has_call_method {
+        output.push_str("#define KU_CALL_METHOD(DST, OBJ, ARGS, ARGC, KEY, SITE, PC, OP, UNWIND) do { int status = kiln_c99_val_call_method_key(host, (OBJ), (ARGS), (size_t)(ARGC), (KEY), depth, thrown, (SITE), ku_site, (size_t)(PC), (OP), &(DST)); KU_STATUS((PC), (OP), UNWIND); } while (0)\n");
+    }
+    if has_closure {
+        output.push_str(&format!("#define KU_CLOSURE(DST, PROTO, RECV, CAP, CAP_CNT) do {{ int status = {closure_fn}(&(DST), (PROTO), (RECV), (CAP), (CAP_CNT)); if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; }} while (0)\n"));
+    }
+}
+
 fn render(
     program: &Program,
     program_hash: u64,
@@ -2626,9 +3221,9 @@ fn render(
 ) -> Result<String, EmitError> {
     let plan = validate_program(program).expect("render called after validation");
     let mut compacted;
-    let program = if policy.compact {
+    let program = if policy.compact || policy.omit_source {
         compacted = program.clone();
-        compact_closure_source(&mut compacted, None);
+        compact_closure_source(&mut compacted, None, policy.omit_source);
         &compacted
     } else {
         program
@@ -2659,13 +3254,13 @@ fn render(
         "/* Program hash: {program_hash:016x}; bytecode version: {BYTECODE_VERSION}. */"
     )
     .unwrap();
-    render_constant_declarations(&mut output, program, symbol);
+    render_constant_declarations(&mut output, program, symbol, policy.compact, false);
     if policy.should_compile_regex() {
-        render_regex_matchers(&mut output, program, symbol);
+        render_regex_matchers(&mut output, program, symbol, false);
     }
     let keys = property_key_constants(program);
-    render_key_table(&mut output, program, symbol, &keys);
-    render_template_sites(&mut output, program, symbol);
+    render_key_table(&mut output, program, symbol, &keys, false);
+    render_template_sites(&mut output, program, symbol, false);
     if uses_module_scope(program) {
         writeln!(
             output,
@@ -2682,6 +3277,27 @@ fn render(
         !keys.is_empty(),
         program.template_sites.len(),
     );
+    if policy.compact {
+        output.push_str("/* KILN_C99_SITES_PLACEHOLDER */\n");
+    }
+    let emission_diagnostic_site = if policy.compact {
+        writeln!(
+            output,
+            "static const char ku_importer[] = {};",
+            c_string(symbol)
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "static const char ku_site[] = {};",
+            c_string(symbol)
+        )
+        .unwrap();
+        render_compact_macros(&mut output, program, "ku_make_closure");
+        COMPACT_DIAGNOSTIC_SITE
+    } else {
+        symbol
+    };
     let extra_entry_slots = if uses_module_scope(program) {
         Some((0..program.local_count).collect::<HashSet<u32>>())
     } else {
@@ -2689,7 +3305,7 @@ fn render(
     };
     let (graphs, body, entry_graph, mut direct) = plan_unit(
         program,
-        symbol,
+        emission_diagnostic_site,
         policy.compact,
         policy.should_compile_regex(),
         policy.generic_only,
@@ -2701,25 +3317,28 @@ fn render(
             "__attribute__((weak)) int kiln_graph_dynamic_import(kiln_host *host, const char *importer, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {\n    (void)importer; (void)specifier; (void)options;\n    kiln_value err = kiln_c99_undefined();\n    (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, \"no module loader is installed\");\n    return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);\n}\n",
         );
     }
-    render_functions(
+    let rendered_funcs = render_functions(
         &mut output,
         program,
         &plan,
         symbol,
-        symbol,
+        emission_diagnostic_site,
         &strict_functions,
         &graphs,
         &mut direct,
         policy,
         None,
+        false,
+        None,
     );
-    render_entry(
+    let func_sites = rendered_funcs.sites;
+    let entry_sites = render_entry(
         &mut output,
         program,
         &plan,
         symbol,
         symbol,
-        symbol,
+        emission_diagnostic_site,
         &strict_functions,
         !keys.is_empty(),
         None,
@@ -2727,7 +3346,17 @@ fn render(
         &entry_graph,
         &direct.entry,
         policy,
+        func_sites,
     )?;
+    let total_sites = func_sites + entry_sites;
+    if policy.compact {
+        let decl = if total_sites > 0 {
+            format!("static kiln_c99_site {symbol}_sites[{total_sites}] = {{0}};\n")
+        } else {
+            String::new()
+        };
+        output = output.replace("/* KILN_C99_SITES_PLACEHOLDER */\n", &decl);
+    }
     if callables {
         render_scalar_realm_wrapper(&mut output, symbol);
     }
@@ -3251,8 +3880,9 @@ fn render_module(
     policy: &EmissionPolicy,
     commonjs: bool,
     diagnostic_site: &str,
-) -> Result<String, EmitError> {
+) -> Result<RenderedModule, EmitError> {
     let program = &module.program;
+    let should_chunk = policy.compact && program.functions.len() > 500;
     // Compact graph modules are each compiled as their own translation unit. Private identifiers
     // therefore do not need the link-visible content hash; retain it only on exported adapters.
     let unit_symbol = if policy.compact { "ku" } else { symbol };
@@ -3294,6 +3924,11 @@ fn render_module(
         if commonjs { 1 } else { module.exports.len() }
     )
     .unwrap();
+    let closure_fn = if should_chunk {
+        format!("{unit_symbol}_make_closure")
+    } else {
+        "ku_make_closure".to_string()
+    };
     let emission_diagnostic_site = if policy.compact {
         writeln!(
             output,
@@ -3307,25 +3942,29 @@ fn render_module(
             c_string(diagnostic_site)
         )
         .unwrap();
-        output.push_str("#define KU_STATUS(PC, OP, UNWIND) do { if (status == KILN_C99_THROWN) { UNWIND; } if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal(ku_site, (size_t)(PC), (OP), (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; } while (0)\n");
-        output.push_str("#define KU_LOAD_CELL(DST, CELL, THROWN, PC, OP, UNWIND) do { const kiln_val *ku_cell = (const kiln_val *)KILN_VAL_PTR(CELL); int status = kiln_c99_val_check_tdz(*ku_cell, (THROWN)); KU_STATUS((PC), (OP), UNWIND); (DST) = *ku_cell; } while (0)\n");
-        output.push_str("#define KU_BINARY(DST, CODE, LEFT, RIGHT, PC, OP, UNWIND) do { int status = KILN_C99_OK; (DST) = kiln_c99_val_binary((CODE), host, (LEFT), (RIGHT), &status, depth, thrown); KU_STATUS((PC), (OP), UNWIND); } while (0)\n");
-        output.push_str("#define KU_READ_PROPERTY(DST, OBJECT, KEY, KEY_LEN, SITE, PC, OP, UNWIND) do { int status = kiln_c99_val_read_property_key(host, (OBJECT), (KEY), depth, thrown, (SITE), &(DST)); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(OBJECT)); KU_STATUS((PC), (OP), UNWIND); } while (0)\n");
+        render_compact_macros(&mut output, program, &closure_fn);
         COMPACT_DIAGNOSTIC_SITE
     } else {
         diagnostic_site
     };
-    render_constant_declarations(&mut output, program, unit_symbol);
+    render_constant_declarations(
+        &mut output,
+        program,
+        unit_symbol,
+        policy.compact,
+        should_chunk,
+    );
     if policy.should_compile_regex() {
-        render_regex_matchers(&mut output, program, unit_symbol);
+        render_regex_matchers(&mut output, program, unit_symbol, should_chunk);
     }
     let keys = property_key_constants(program);
-    render_key_table(&mut output, program, unit_symbol, &keys);
-    render_template_sites(&mut output, program, unit_symbol);
+    render_key_table(&mut output, program, unit_symbol, &keys, should_chunk);
+    render_template_sites(&mut output, program, unit_symbol, should_chunk);
     if uses_module_scope(program) {
+        let linkage = if should_chunk { "" } else { "static " };
         writeln!(
             output,
-            "static kiln_val {unit_symbol}_globals[{}];",
+            "{linkage}kiln_val {unit_symbol}_globals[{}];",
             usize::try_from(program.local_count).unwrap().max(1)
         )
         .unwrap();
@@ -3338,6 +3977,9 @@ fn render_module(
         !keys.is_empty(),
         program.template_sites.len(),
     );
+    if policy.compact {
+        output.push_str("/* KILN_C99_SITES_PLACEHOLDER */\n");
+    }
     let liveness = policy.live_module_slots.as_ref().map(|demanded| {
         closed_world_function_liveness(
             program,
@@ -3361,13 +4003,14 @@ fn render_module(
             }
         }
     }
-    if policy.compact {
+    if policy.compact || policy.omit_source {
         compact_closure_source(
             &mut pruned,
             liveness.as_ref().map(|(reachable, _, _)| reachable),
+            policy.omit_source,
         );
     }
-    let emitted_program = if policy.compact || liveness.is_some() {
+    let emitted_program = if policy.compact || policy.omit_source || liveness.is_some() {
         &pruned
     } else {
         program
@@ -3392,6 +4035,9 @@ fn render_module(
         policy.speculate,
         Some(&extra_entry_slots),
     )?;
+    if should_chunk {
+        direct.set_should_chunk(true);
+    }
     let reachable = liveness.as_ref().map(|(reachable, _, _)| reachable);
     if let Some(reachable) = reachable {
         let available = (0..emitted_program.functions.len())
@@ -3404,7 +4050,12 @@ fn render_module(
             "__attribute__((weak)) int kiln_graph_dynamic_import(kiln_host *host, const char *importer, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {\n    (void)importer; (void)specifier; (void)options;\n    kiln_value err = kiln_c99_undefined();\n    (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, \"no module loader is installed\");\n    return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);\n}\n",
         );
     }
-    render_functions(
+    let mut chunked_bodies = if should_chunk {
+        Some(Vec::with_capacity(emitted_program.functions.len()))
+    } else {
+        None
+    };
+    let rendered_funcs = render_functions(
         &mut output,
         emitted_program,
         &plan,
@@ -3415,8 +4066,11 @@ fn render_module(
         &mut direct,
         policy,
         reachable,
+        should_chunk,
+        chunked_bodies.as_mut(),
     );
-    render_entry(
+    let func_sites = rendered_funcs.sites;
+    let entry_sites = render_entry(
         &mut output,
         emitted_program,
         &plan,
@@ -3430,7 +4084,18 @@ fn render_module(
         &entry_graph,
         &direct.entry,
         policy,
+        func_sites,
     )?;
+    let total_sites = func_sites + entry_sites;
+    if policy.compact {
+        let decl = if total_sites > 0 {
+            let linkage = if should_chunk { "" } else { "static " };
+            format!("{linkage}kiln_c99_site {unit_symbol}_sites[{total_sites}] = {{0}};\n")
+        } else {
+            String::new()
+        };
+        output = output.replace("/* KILN_C99_SITES_PLACEHOLDER */\n", &decl);
+    }
     if commonjs {
         /* The launcher cannot manufacture native objects without coupling itself to this private
          * value layout. Let the translation unit that owns the layout construct the wrapper
@@ -3446,7 +4111,103 @@ fn render_module(
     if callables {
         render_module_realm_wrapper(&mut output, symbol, unit_symbol);
     }
-    Ok(output)
+    if should_chunk {
+        let function_texts = chunked_bodies.expect("chunked_bodies present when should_chunk");
+        let total_funcs = function_texts.len();
+        let chunk_size = 1000usize;
+        let chunk_0_funcs = chunk_size.min(total_funcs);
+
+        let source = output.replace(
+            "/* KILN_CHUNK_0_FUNCTIONS_PLACEHOLDER */\n",
+            &function_texts.concat(),
+        );
+        let chunk_0 = output.replace(
+            "/* KILN_CHUNK_0_FUNCTIONS_PLACEHOLDER */\n",
+            &function_texts[0..chunk_0_funcs].concat(),
+        );
+
+        let mut chunk_header = String::with_capacity(32 * 1024);
+        render_emission_policy(&mut chunk_header, policy);
+        if policy.decoupled_prelude {
+            writeln!(chunk_header, "#include \"{RUNTIME_PRELUDE_HEADER_NAME}\"").unwrap();
+        } else {
+            chunk_header.push_str(HEADER);
+            chunk_header = chunk_header.replace(
+                "/* KILN_NATIVE_CONSTRUCTOR_TABLE */",
+                &render_native_constructor_table(),
+            );
+        }
+        writeln!(
+            chunk_header,
+            "static const char ku_importer[] = {};",
+            c_string(symbol)
+        )
+        .unwrap();
+        writeln!(
+            chunk_header,
+            "static const char ku_site[] = {};",
+            c_string(diagnostic_site)
+        )
+        .unwrap();
+        render_compact_macros(&mut chunk_header, emitted_program, &closure_fn);
+        render_constant_declarations_extern(
+            &mut chunk_header,
+            emitted_program,
+            unit_symbol,
+            policy.compact,
+        );
+        render_key_table_extern(&mut chunk_header, unit_symbol, &keys);
+        if policy.should_compile_regex() {
+            render_regex_matchers_extern(&mut chunk_header, emitted_program, unit_symbol);
+        }
+        if uses_module_scope(emitted_program) {
+            writeln!(chunk_header, "extern kiln_val {unit_symbol}_globals[];").unwrap();
+        }
+        if total_sites > 0 {
+            writeln!(chunk_header, "extern kiln_c99_site {unit_symbol}_sites[];").unwrap();
+        }
+        let has_closure = has_closure_instruction(emitted_program);
+        if has_closure && !emitted_program.functions.is_empty() {
+            writeln!(
+                chunk_header,
+                "extern int {closure_fn}(kiln_val *dst, uint32_t proto, kiln_val receiver, const kiln_val *captured, uint32_t count);"
+            )
+            .unwrap();
+        }
+        if !emitted_program.template_sites.is_empty() {
+            writeln!(
+                chunk_header,
+                "extern kiln_val {unit_symbol}_template_sites[];"
+            )
+            .unwrap();
+            writeln!(
+                chunk_header,
+                "extern int {unit_symbol}_materialize_template_site(size_t site);"
+            )
+            .unwrap();
+        }
+        chunk_header.push_str(&rendered_funcs.forward_declarations);
+
+        let mut chunks = Vec::new();
+        chunks.push(chunk_0);
+        let mut start = chunk_0_funcs;
+        while start < total_funcs {
+            let end = (start + chunk_size).min(total_funcs);
+            let mut chunk_k = String::with_capacity(chunk_header.len() + (end - start) * 2048);
+            chunk_k.push_str(&chunk_header);
+            for f in &function_texts[start..end] {
+                chunk_k.push_str(f);
+            }
+            chunks.push(chunk_k);
+            start = end;
+        }
+        Ok(RenderedModule { source, chunks })
+    } else {
+        Ok(RenderedModule {
+            source: output,
+            chunks: Vec::new(),
+        })
+    }
 }
 
 fn render_runtime_module(

@@ -91,14 +91,14 @@ pub(super) fn emit_get_property(
         if crate::compact_diagnostic_site(diagnostic_site) {
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; KU_READ_PROPERTY(v{v}, v{o}, {symbol}_key_{name}, {key_len}, &site, {pc}, \"{label}\", {unwind}); /* goto kiln_refusal; */ }}{typed_sync}",
+                "    KU_READ_PROPERTY(v{v}, v{o}, {symbol}_key_{name}, {key_len}, NULL, {pc}, \"{label}\", {unwind});{typed_sync}",
                 o = object.0,
             )
             .unwrap();
         } else {
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_val_read_property_key(host, v{o}, {symbol}_key_{name}, depth, thrown, &site, &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(v{o})); {check} }}{typed_sync}",
+                "    {{ static kiln_c99_site site = {{0}}; int status = kiln_c99_val_read_property_key(host, v{o}, {symbol}_key_{name}, depth, thrown, &site, &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(v{o})); {check} }}{typed_sync}",
                 o = object.0,
             )
             .unwrap();
@@ -478,9 +478,19 @@ pub(super) fn emit_set_property(
     let strict = matches!(op, GraphOp::SetPropertyStrict { strict: true, .. }) as u8;
     let check = status_check(diagnostic_site, pc, label, unwind);
     if ctx.plan.generic_only {
+        let site_expr = if crate::compact_diagnostic_site(diagnostic_site) {
+            "NULL"
+        } else {
+            "&site"
+        };
+        let site_decl = if crate::compact_diagnostic_site(diagnostic_site) {
+            ""
+        } else {
+            "static kiln_c99_site site = {0}; "
+        };
         writeln!(
             output,
-            "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_val_write_property_key(host, v{o}, {symbol}_key_{name}, v{val}, {strict}, depth, thrown, &site); {check} v{v} = v{val}; }}{typed_sync}",
+            "    {{ {site_decl}int status = kiln_c99_val_write_property_key(host, v{o}, {symbol}_key_{name}, v{val}, {strict}, depth, thrown, {site_expr}); {check} v{v} = v{val}; }}{typed_sync}",
             o = object.0,
             val = value.0,
             typed_sync = if typed {

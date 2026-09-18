@@ -187,6 +187,7 @@ pub fn emit_restartable(
         kind,
         None,
         type_profile_record,
+        0,
     );
     const EFFECTS: &[&str] = &[
         "goto kiln_",

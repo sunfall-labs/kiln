@@ -10,6 +10,8 @@ pub enum NativeProfile {
     Dev,
     Check,
     Release,
+    /// Size-optimized release profile.
+    ReleaseSize,
     /// Release, instrumented for `gprof`. See `scripts/profile-native.sh`.
     Profile,
 }
@@ -20,6 +22,7 @@ impl NativeProfile {
             Self::Dev => "native-dev",
             Self::Check => "native-check",
             Self::Release => "native-release",
+            Self::ReleaseSize => "native-release-size",
             Self::Profile => "native-profile",
         }
     }
@@ -29,6 +32,7 @@ impl NativeProfile {
             Self::Dev => CacheProfile::Debug,
             Self::Check => CacheProfile::Check,
             Self::Release => CacheProfile::Release,
+            Self::ReleaseSize => CacheProfile::ReleaseSize,
             // Its own cache bucket: an instrumented object must never satisfy a release build.
             Self::Profile => CacheProfile::Profile,
         }
@@ -39,6 +43,7 @@ impl NativeProfile {
             Self::Dev => ToolchainProfile::NativeDev,
             Self::Check => ToolchainProfile::NativeCheck,
             Self::Release => ToolchainProfile::NativeRelease,
+            Self::ReleaseSize => ToolchainProfile::NativeReleaseSize,
             Self::Profile => ToolchainProfile::NativeProfile,
         }
     }
@@ -196,6 +201,7 @@ impl NativeRealmPolicy {
             type_profile: None,
             live_module_slots: None,
             compile_regex: None,
+            omit_source: false,
         }
     }
 

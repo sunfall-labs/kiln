@@ -32,7 +32,7 @@ use std::collections::{HashMap, HashSet};
 
 use kiln_ir::{Constant, FunctionProto, Instruction, Program, Upvalue};
 
-use crate::emit_graph::method_candidates;
+use crate::emit_graph::method_candidates_map;
 use crate::emit_graph::sites::this_columns;
 use crate::graph::{
     BlockId, FunctionGraph, GraphOp, Proven, Terminator, ValueId, proven_types_with,
@@ -123,6 +123,8 @@ pub struct CallPlan {
     /// instead of recomputing it -- the emitted C's `plain->publishes_frame` runtime flag must
     /// agree with this at every proto, since call sites branch on both.
     pub publishes_frame: Vec<bool>,
+    /// Whether the translation unit is chunked across multiple C files.
+    pub should_chunk: bool,
 }
 
 /// The whole unit's plan: a boxed plan per function, a typed one where the typed entry exists,
@@ -208,11 +210,20 @@ impl DirectPlan {
                     && proto.code.len() <= crate::MAX_SPECIALIZED_INSTRUCTIONS
             })
             .collect();
-        let intrinsics: Vec<HashMap<ValueId, Proven>> = graphs
-            .iter()
-            .map(|g| intrinsic_results(g, program))
-            .collect();
-        let entry_intrinsics = intrinsic_results(entry, program);
+        let has_open_world = program.has_direct_eval() || program.has_dynamic_import();
+        let intrinsics: Vec<HashMap<ValueId, Proven>> = if has_open_world {
+            vec![HashMap::new(); graphs.len()]
+        } else {
+            graphs
+                .iter()
+                .map(|g| intrinsic_results(g, program))
+                .collect()
+        };
+        let entry_intrinsics = if has_open_world {
+            HashMap::new()
+        } else {
+            intrinsic_results(entry, program)
+        };
         let params: Vec<u32> = program
             .functions
             .iter()
@@ -352,6 +363,7 @@ impl DirectPlan {
                 fast: vec![false; graphs.len()],
                 available: vec![true; graphs.len()],
                 publishes_frame: publishes_frame.to_vec(),
+                should_chunk: false,
             }
         };
         let functions: Vec<CallPlan> = graphs
@@ -392,18 +404,29 @@ impl DirectPlan {
         // A method call reaches a typed entry by name when the callee the cache remembers is
         // one of the unit's own methods of that name, so every such method a site could enter
         // typed -- the arguments proven numbers, the count exact -- is referenced.
+        let method_candidates_by_name = if generic_only {
+            HashMap::new()
+        } else {
+            method_candidates_map(program, publishes_frame)
+        };
         let method_targets = |graph: &FunctionGraph, plan: &CallPlan| -> Vec<u32> {
             let mut targets = Vec::new();
+            if plan.generic_only {
+                return targets;
+            }
             for (_, op) in graph.blocks.iter().flat_map(|b| b.operations.iter()) {
                 if let GraphOp::CallMethod { name, args, .. } = op
                     && let Some(Constant::String(key)) = program.constants.get(*name as usize)
                     && args.iter().all(|a| plan.numbers.contains(a))
                 {
-                    targets.extend(
-                        method_candidates(program, key, publishes_frame)
-                            .into_iter()
-                            .filter(|&i| params[i as usize] as usize == args.len()),
-                    );
+                    if let Some(candidates) = method_candidates_by_name.get(key) {
+                        targets.extend(
+                            candidates
+                                .iter()
+                                .copied()
+                                .filter(|&i| params[i as usize] as usize == args.len()),
+                        );
+                    }
                 }
             }
             targets
@@ -418,6 +441,9 @@ impl DirectPlan {
         // by-name candidate.
         let callback_targets = |graph: &FunctionGraph, plan: &CallPlan| -> Vec<u32> {
             let mut targets = Vec::new();
+            if plan.generic_only {
+                return targets;
+            }
             for (_, op) in graph.blocks.iter().flat_map(|b| b.operations.iter()) {
                 if let GraphOp::CallMethod { name, args, .. } = op
                     && let Some(Constant::String(key)) = program.constants.get(*name as usize)
@@ -579,6 +605,17 @@ impl DirectPlan {
         }
     }
 
+    pub fn set_should_chunk(&mut self, should_chunk: bool) {
+        for plan in self
+            .functions
+            .iter_mut()
+            .chain(self.typed.iter_mut().flatten())
+            .chain(std::iter::once(&mut self.entry))
+        {
+            plan.should_chunk = should_chunk;
+        }
+    }
+
     /// The typed entry of `index` may serve as a `parallelMap` chunk worker: it exists, returns a
     /// number, needs nothing but its parameters, and its body passes
     /// [`crate::parallel::parallel_safe`]. Read after `set_typed_needs`, which is what settles
@@ -632,9 +669,6 @@ pub(crate) fn direct_callable(proto: &FunctionProto, publishes_frame: bool) -> b
 /// The proofs are seeds for every plan of the body, so a body that ends in `Math.sqrt(..)`
 /// returns a number wherever its inputs came from.
 fn intrinsic_results(graph: &FunctionGraph, program: &Program) -> HashMap<ValueId, Proven> {
-    if program.has_direct_eval() || program.has_dynamic_import() {
-        return HashMap::new();
-    }
     let math: HashSet<ValueId> = graph
         .blocks
         .iter()

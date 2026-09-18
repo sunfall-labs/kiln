@@ -71,7 +71,7 @@ pub(super) fn status_check(
 ) -> String {
     if compact_diagnostic_site(diagnostic_site) {
         // Body assembly detects this marker to materialize the shared refusal label.
-        return format!("KU_STATUS({pc}, \"{operation}\", {unwind}); /* goto kiln_refusal; */");
+        return format!("KU_STATUS({pc}, \"{operation}\", {unwind});");
     }
     let diagnostic_source = diagnostic_source(diagnostic_site);
     format!(
@@ -86,7 +86,7 @@ fn call_status_check(diagnostic_site: &str, pc: u32, operation: &str, unwind: &s
     );
     if compact_diagnostic_site(diagnostic_site) {
         return format!(
-            "if (status == KILN_C99_THROWN) {{ {note} {unwind} }} KU_STATUS({pc}, \"{operation}\", {unwind}); /* goto kiln_refusal; */"
+            "if (status == KILN_C99_THROWN) {{ {note} {unwind} }} KU_STATUS({pc}, \"{operation}\", {unwind});"
         );
     }
     format!(
@@ -373,7 +373,7 @@ pub(super) fn emit_graph_op(
             if crate::compact_diagnostic_site(diagnostic_site) {
                 writeln!(
                     output,
-                    "    KU_LOAD_CELL(v{v}, locals[{slot}], {thrown}, {pc}, \"{label}\", {unwind}); /* goto kiln_refusal; */"
+                    "    KU_LOAD_CELL(v{v}, locals[{slot}], {thrown}, {pc}, \"{label}\", {unwind});"
                 )
                 .unwrap();
             } else {
@@ -406,7 +406,7 @@ pub(super) fn emit_graph_op(
             if crate::compact_diagnostic_site(diagnostic_site) {
                 writeln!(
                     output,
-                    "    KU_LOAD_CELL(v{v}, upvalues[{index}], thrown, {pc}, \"{label}\", {unwind}); /* goto kiln_refusal; */"
+                    "    KU_LOAD_CELL(v{v}, upvalues[{index}], thrown, {pc}, \"{label}\", {unwind});"
                 )
                 .unwrap();
             } else {
@@ -791,6 +791,26 @@ pub(super) fn emit_graph_op(
                 let sync_number = typed
                     .then(|| format!(" memcpy(&d{v}, &v{v}, sizeof(d{v}));"))
                     .unwrap_or_default();
+                if plan.compact {
+                    let callee_val = callee.0;
+                    if argc == 0 {
+                        writeln!(
+                            output,
+                            "    KU_CALL(v{v}, v{callee_val}, NULL, 0, {pc}, \"{label}\", {unwind});{sync_number}"
+                        )
+                        .unwrap();
+                    } else {
+                        for (i, arg) in args.iter().enumerate() {
+                            writeln!(output, "    ku_args[{i}] = v{};", arg.0).unwrap();
+                        }
+                        writeln!(
+                            output,
+                            "    KU_CALL(v{v}, v{callee_val}, ku_args, {argc}, {pc}, \"{label}\", {unwind});{sync_number}"
+                        )
+                        .unwrap();
+                    }
+                    return;
+                }
                 writeln!(
                     output,
                     "    {{ kiln_val call_stack[{n}] = {{ {init} }}; const kiln_val *call_args = {argc} > 0 ? &call_stack[1] : NULL; int status = kiln_c99_val_call(host, call_stack[0], call_args, (size_t){argc}, depth, thrown, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); {check}{sync_number} }}",
@@ -1006,46 +1026,81 @@ pub(super) fn emit_graph_op(
             } else {
                 "KILN_VAL_UNDEFINED"
             };
-            let mut setup = String::new();
-            let captured = if captures.is_empty() {
-                "NULL"
-            } else {
-                setup.push_str(&format!(" kiln_val captured[{}];", captures.len()));
-                for (position, upvalue) in captures.iter().enumerate() {
-                    match upvalue {
-                        Upvalue::ParentLocal(slot) | Upvalue::NamedParentLocal { slot, .. } => {
-                            setup.push_str(&format!(" captured[{position}] = locals[{slot}];"))
-                        }
-                        Upvalue::ParentUpvalue(slot)
-                        | Upvalue::NamedParentUpvalue { index: slot, .. } => {
-                            setup.push_str(&format!(" captured[{position}] = upvalues[{slot}];"))
+            if plan.compact {
+                let (captured_expr, setup_block) = if captures.is_empty() {
+                    ("NULL".to_string(), String::new())
+                } else {
+                    let mut inits = Vec::with_capacity(captures.len());
+                    for upvalue in captures {
+                        match upvalue {
+                            Upvalue::ParentLocal(slot) | Upvalue::NamedParentLocal { slot, .. } => {
+                                inits.push(format!("locals[{slot}]"));
+                            }
+                            Upvalue::ParentUpvalue(slot)
+                            | Upvalue::NamedParentUpvalue { index: slot, .. } => {
+                                inits.push(format!("upvalues[{slot}]"));
+                            }
                         }
                     }
+                    (
+                        "c".to_string(),
+                        format!(
+                            "kiln_val c[{}] = {{ {} }}; ",
+                            captures.len(),
+                            inits.join(", ")
+                        ),
+                    )
+                };
+                let closure_call = format!(
+                    "KU_CLOSURE(v{v}, {index}, {defining_receiver}, {captured_expr}, {})",
+                    captures.len()
+                );
+                if setup_block.is_empty() {
+                    writeln!(output, "    {closure_call};").unwrap();
+                } else {
+                    writeln!(output, "    {{ {setup_block}{closure_call}; }}").unwrap();
                 }
-                "captured"
-            };
-            let construction = closure_construction(
-                &program.functions,
-                &program.source,
-                frame_stacks,
-                strict_functions,
-                symbol,
-                diagnostic_site,
-                *index,
-                defining_receiver,
-                captured,
-                captures.len(),
-            );
-            let publish = if plan.publishes_frame[*index as usize] {
-                ""
             } else {
-                " kiln_c99_closure_of(built)->publishes_frame = 0;"
-            };
-            writeln!(
-                output,
-                "    {{ kiln_value built;{setup} int status = {construction}; if (status != KILN_C99_OK) return status;{publish} v{v} = kiln_val_from_boundary(built); }}"
-            )
-            .unwrap();
+                let mut setup = String::new();
+                let captured = if captures.is_empty() {
+                    "NULL"
+                } else {
+                    setup.push_str(&format!(" kiln_val captured[{}];", captures.len()));
+                    for (position, upvalue) in captures.iter().enumerate() {
+                        match upvalue {
+                            Upvalue::ParentLocal(slot) | Upvalue::NamedParentLocal { slot, .. } => {
+                                setup.push_str(&format!(" captured[{position}] = locals[{slot}];"))
+                            }
+                            Upvalue::ParentUpvalue(slot)
+                            | Upvalue::NamedParentUpvalue { index: slot, .. } => setup
+                                .push_str(&format!(" captured[{position}] = upvalues[{slot}];")),
+                        }
+                    }
+                    "captured"
+                };
+                let construction = closure_construction(
+                    &program.functions,
+                    &program.source,
+                    frame_stacks,
+                    strict_functions,
+                    symbol,
+                    diagnostic_site,
+                    *index,
+                    defining_receiver,
+                    captured,
+                    captures.len(),
+                );
+                let publish = if plan.publishes_frame[*index as usize] {
+                    ""
+                } else {
+                    " kiln_c99_closure_of(built)->publishes_frame = 0;"
+                };
+                writeln!(
+                    output,
+                    "    {{ kiln_value built;{setup} int status = {construction}; if (status != KILN_C99_OK) return status;{publish} v{v} = kiln_val_from_boundary(built); }}"
+                )
+                .unwrap();
+            }
         }
         GraphOp::NewArray { elements, .. } => {
             let count = elements.len();

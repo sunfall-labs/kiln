@@ -46,7 +46,7 @@ pub(crate) fn emit_tail_instruction(
     } = context;
     let index = pc as usize;
     let before = output.len();
-    let instruction_site = c_string(diagnostic_site);
+    let instruction_site = diagnostic_source(diagnostic_site);
     let instruction_operation = c_string(&instruction_diagnostic(instruction, constants));
     let direct_refusal = format!(
         "kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); return KILN_C99_CONTROL_ERROR;"

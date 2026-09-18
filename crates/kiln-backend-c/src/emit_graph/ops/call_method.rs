@@ -443,9 +443,30 @@ pub(super) fn emit_call_method(
         let sync_number = typed
             .then(|| format!(" memcpy(&d{v}, &v{v}, sizeof(d{v}));"))
             .unwrap_or_default();
+        if plan.compact {
+            let key = format!("{symbol}_key_{name}");
+            let o = object.0;
+            if argc == 0 {
+                writeln!(
+                    output,
+                    "    KU_CALL_METHOD(v{v}, v{o}, NULL, 0, {key}, NULL, {pc}, \"{label}\", {unwind});{sync_number}"
+                )
+                .unwrap();
+            } else {
+                for (i, arg) in args.iter().enumerate() {
+                    writeln!(output, "    ku_args[{i}] = v{};", arg.0).unwrap();
+                }
+                writeln!(
+                    output,
+                    "    KU_CALL_METHOD(v{v}, v{o}, ku_args, {argc}, {key}, NULL, {pc}, \"{label}\", {unwind});{sync_number}"
+                )
+                .unwrap();
+            }
+            return;
+        }
         writeln!(
             output,
-            "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_val call_args[{n}] = {{ {init} }}; int status = kiln_c99_val_call_method_key(host, v{o}, call_args, (size_t){argc}, {symbol}_key_{name}, depth, thrown, &site, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); {check}{sync_number} }}",
+            "    {{ static kiln_c99_site site = {{0}}; kiln_val call_args[{n}] = {{ {init} }}; int status = kiln_c99_val_call_method_key(host, v{o}, call_args, (size_t){argc}, {symbol}_key_{name}, depth, thrown, &site, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); {check}{sync_number} }}",
             o = object.0,
             diagnostic_source = diagnostic_source,
         )

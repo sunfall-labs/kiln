@@ -1295,7 +1295,7 @@ fn live_cache_identity_catalogue_covers_every_stage_and_profile_family() {
     // The ordinary shared-library object and its final link share one toolchain identity by
     // design; identity digests intentionally omit artifact kind and link inputs. Every other
     // catalogued family/profile contributes a distinct identity.
-    assert_eq!(identities.len(), 62);
+    assert_eq!(identities.len(), 73);
 
     let tool = builder.toolchain().identity();
     let target = target_identity(tool);
@@ -6078,6 +6078,7 @@ fn native_dynamic_import_uses_importer_identity_for_relative_modules() {
     for (profile, name) in [
         (NativeProfile::Dev, "dev"),
         (NativeProfile::Release, "release"),
+        (NativeProfile::ReleaseSize, "release-size"),
     ] {
         let report = NativeBuilder::new(
             test_cache(root.path.join(format!("cache-{name}"))),
@@ -6158,6 +6159,7 @@ fn native_dynamic_import_initializes_once_and_stays_lazy() {
     for (profile, name) in [
         (NativeProfile::Dev, "dev"),
         (NativeProfile::Release, "release"),
+        (NativeProfile::ReleaseSize, "release-size"),
     ] {
         let report = NativeBuilder::new(
             test_cache(root.path.join(format!("cache-{name}"))),
@@ -6216,6 +6218,7 @@ fn native_failed_dynamic_dependency_is_cached_with_original_error() {
     for (profile, name) in [
         (NativeProfile::Dev, "dev"),
         (NativeProfile::Release, "release"),
+        (NativeProfile::ReleaseSize, "release-size"),
     ] {
         let report = NativeBuilder::new(
             test_cache(root.path.join(format!("cache-{name}"))),
