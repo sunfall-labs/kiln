@@ -15,7 +15,7 @@
               "name": "<top-level>",
               "return_type": "Undefined",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "sites": [
                 {
@@ -703,7 +703,7 @@
               "name": "<top-level>",
               "return_type": "Undefined",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "sites": [
                 {
@@ -1366,7 +1366,7 @@
               "name": "<top-level>",
               "return_type": "Undefined",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "sites": [
                 {
@@ -2249,7 +2249,7 @@
               "name": "<top-level>",
               "return_type": "Undefined",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "sites": [
                 {
@@ -2839,7 +2839,7 @@
               "name": "<top-level>",
               "return_type": "Undefined",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "sites": [
                 {
@@ -3540,7 +3540,7 @@
               "name": "<top-level>",
               "return_type": "Undefined",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "sites": [
                 {
@@ -4370,7 +4370,7 @@
               "name": "<top-level>",
               "return_type": "Undefined",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "sites": [
                 {
@@ -4960,7 +4960,7 @@
               "name": "<top-level>",
               "return_type": "Undefined",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "sites": [
                 {
@@ -5638,7 +5638,7 @@
               "name": "<top-level>",
               "return_type": "Undefined",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "sites": [
                 {
@@ -6258,7 +6258,7 @@
               "name": "<top-level>",
               "return_type": "Undefined",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "sites": [
                 {
@@ -6906,7 +6906,7 @@
               "name": "<top-level>",
               "return_type": "Undefined",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "sites": [
                 {
@@ -7496,7 +7496,7 @@
               "name": "<top-level>",
               "return_type": "Undefined",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "sites": [
                 {
@@ -8131,7 +8131,7 @@
               "name": "<top-level>",
               "return_type": "Undefined",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "sites": [
                 {
@@ -8761,7 +8761,7 @@
               "name": "<top-level>",
               "return_type": "Undefined",
               "pure": false,
-              "can_throw": true,
+              "can_throw": false,
               "reads_arguments": false,
               "sites": [
                 {
