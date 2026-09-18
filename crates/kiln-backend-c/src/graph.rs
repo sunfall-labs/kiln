@@ -1373,7 +1373,7 @@ pub fn proven_types_with_bounds(
                         }
                         _ => number(&state, value).then_some(Proven::Number),
                     },
-                    GraphOp::NewArray { .. } => Some(Proven::Object),
+                    GraphOp::NewArray { .. } | GraphOp::NewObject { .. } => Some(Proven::Object),
                     GraphOp::MakeFunction { .. } => Some(Proven::Callable),
                     GraphOp::IsReturnSignal(_) => Some(Proven::Boolean),
                     GraphOp::StoreLocal { value, .. }

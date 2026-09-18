@@ -2663,24 +2663,49 @@ fn render_key_table(
     }
     writeln!(output, "static int {symbol}_keys_ready;").unwrap();
     writeln!(output, "static int {symbol}_intern_keys(void) {{").unwrap();
-    for (i, index) in keys.iter().enumerate() {
-        let Constant::String(_) = &program.constants[*index as usize] else {
-            unreachable!("verification rejects a non-string property name before emission")
-        };
-        // The key store is canonical headed keys now: intern the constant's header
-        // directly, in either width. The Latin1 bridge and its UTF-16 refusal are gone.
-        if symbol == "ku" {
-            writeln!(
-                output,
-                "    if ((ku_keys[{i}] = kiln_c99_intern_static_key(&{symbol}_string_{index})) == NULL) return KILN_C99_OUT_OF_MEMORY;"
-            )
-            .unwrap();
-        } else {
-            writeln!(
-                output,
-                "    if (({symbol}_key_{index} = kiln_c99_intern_static_key(&{symbol}_string_{index})) == NULL) return KILN_C99_OUT_OF_MEMORY;"
-            )
-            .unwrap();
+    if symbol == "ku" && keys.len() > 4 {
+        writeln!(
+            output,
+            "    static const kiln_string *const ku_static_keys[{}] = {{",
+            keys.len()
+        )
+        .unwrap();
+        for index in keys {
+            writeln!(output, "        &{symbol}_string_{index},").unwrap();
+        }
+        writeln!(output, "    }};").unwrap();
+        writeln!(
+            output,
+            "    for (size_t i = 0; i < (size_t){}; ++i) {{",
+            keys.len()
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "        if ((ku_keys[i] = kiln_c99_intern_static_key(ku_static_keys[i])) == NULL) return KILN_C99_OUT_OF_MEMORY;"
+        )
+        .unwrap();
+        writeln!(output, "    }}").unwrap();
+    } else {
+        for (i, index) in keys.iter().enumerate() {
+            let Constant::String(_) = &program.constants[*index as usize] else {
+                unreachable!("verification rejects a non-string property name before emission")
+            };
+            // The key store is canonical headed keys now: intern the constant's header
+            // directly, in either width. The Latin1 bridge and its UTF-16 refusal are gone.
+            if symbol == "ku" {
+                writeln!(
+                    output,
+                    "    if ((ku_keys[{i}] = kiln_c99_intern_static_key(&{symbol}_string_{index})) == NULL) return KILN_C99_OUT_OF_MEMORY;"
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    output,
+                    "    if (({symbol}_key_{index} = kiln_c99_intern_static_key(&{symbol}_string_{index})) == NULL) return KILN_C99_OUT_OF_MEMORY;"
+                )
+                .unwrap();
+            }
         }
     }
     writeln!(

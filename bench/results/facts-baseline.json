@@ -13558,7 +13558,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -36547,7 +36547,7 @@
             },
             {
               "name": "next",
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -36570,7 +36570,7 @@
               ]
             },
             {
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": false,
               "reads_arguments": false,
@@ -42378,7 +42378,7 @@
               "reads_arguments": false
             },
             {
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -50408,7 +50408,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -53699,7 +53699,7 @@
             },
             {
               "name": "getRules",
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -55149,7 +55149,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -58427,7 +58427,7 @@
                 "Unknown",
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -67244,7 +67244,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -69574,7 +69574,7 @@
                 "Unknown",
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -70575,7 +70575,7 @@
                 "Unknown",
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -71222,7 +71222,7 @@
                 "Unknown",
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -71548,7 +71548,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -72376,7 +72376,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -91414,7 +91414,7 @@
             },
             {
               "name": "next",
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -104759,7 +104759,7 @@
                 "Unknown",
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -107669,7 +107669,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -108192,7 +108192,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -108338,7 +108338,7 @@
                 "Unknown",
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -118621,7 +118621,7 @@
                 "Unknown",
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -125822,7 +125822,7 @@
                 "Unknown",
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -125973,7 +125973,7 @@
                 "Unknown",
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -126968,7 +126968,7 @@
                 "Unknown",
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -130236,7 +130236,7 @@
                 "Unknown",
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -132051,7 +132051,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -133279,7 +133279,7 @@
             },
             {
               "name": "wrapperNext",
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -138655,7 +138655,7 @@
             },
             {
               "name": "stubObject",
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": false,
               "reads_arguments": false
@@ -150759,7 +150759,7 @@
             },
             {
               "name": "A",
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": false,
               "reads_arguments": false
@@ -154376,7 +154376,7 @@
                 "Unknown",
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -156899,7 +156899,7 @@
               ]
             },
             {
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false
@@ -166908,7 +166908,7 @@
                 "Unknown",
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false
@@ -167269,7 +167269,7 @@
                 "Unknown",
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -167375,7 +167375,7 @@
                 "Unknown",
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false
@@ -167653,7 +167653,7 @@
                 "Unknown",
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -167713,7 +167713,7 @@
                 "Unknown",
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false
@@ -168088,7 +168088,7 @@
                 "Unknown",
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false
@@ -168461,7 +168461,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false
@@ -169205,7 +169205,7 @@
                 "Unknown",
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -181009,7 +181009,7 @@
             },
             {
               "name": "next",
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -181063,7 +181063,7 @@
             },
             {
               "name": "next",
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -182483,7 +182483,7 @@
             },
             {
               "name": "next",
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -182552,7 +182552,7 @@
             },
             {
               "name": "next",
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -184610,7 +184610,7 @@
               ]
             },
             {
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -189479,7 +189479,7 @@
                 "Unknown",
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -189558,7 +189558,7 @@
                 "Unknown",
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -190383,7 +190383,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -191083,7 +191083,7 @@
                 "Unknown",
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -191587,7 +191587,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -194401,7 +194401,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -195039,7 +195039,7 @@
                 "Unknown",
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -199194,7 +199194,7 @@
               ]
             },
             {
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": false,
               "reads_arguments": false,
@@ -199459,7 +199459,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -199598,7 +199598,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -202086,7 +202086,7 @@
               ]
             },
             {
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": false,
               "reads_arguments": false,
@@ -208208,7 +208208,7 @@
             },
             {
               "name": "SourceMapGenerator_toJSON",
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -209235,7 +209235,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -210564,7 +210564,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -210888,7 +210888,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -211304,7 +211304,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -213284,7 +213284,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -215003,7 +215003,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -215249,7 +215249,7 @@
               ]
             },
             {
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -221128,7 +221128,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -223191,7 +223191,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -228228,7 +228228,7 @@
             },
             {
               "name": "plugin2",
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": false,
               "reads_arguments": false,
@@ -229843,7 +229843,7 @@
             },
             {
               "name": "next",
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -230990,7 +230990,7 @@
                 "Unknown",
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": false,
               "reads_arguments": false
@@ -233997,7 +233997,7 @@
               "parameter_types": [
                 "Unknown"
               ],
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
@@ -258544,7 +258544,7 @@
             },
             {
               "name": "next",
-              "return_type": "Unknown",
+              "return_type": "Object",
               "pure": false,
               "can_throw": true,
               "reads_arguments": false,
