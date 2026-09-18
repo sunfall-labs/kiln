@@ -8,6 +8,70 @@ use std::rc::Rc;
 use crate::buffer::node_bytes_value;
 use crate::{ArrayData, ExecutionError, HostOps, Native, ObjectData, RealmId, Value, Vm};
 
+/// An open virtual file handle: either an in-memory buffer or an underlying OS file.
+#[derive(Debug)]
+pub(crate) enum VirtualFile {
+    Memory {
+        path: String,
+        data: Vec<u8>,
+        cursor: usize,
+        readable: bool,
+        writable: bool,
+        #[allow(dead_code)]
+        append: bool,
+    },
+    Os {
+        #[allow(dead_code)]
+        path: String,
+        file: std::fs::File,
+    },
+}
+
+/// A per-VM virtual file descriptor table.
+///
+/// Maps synthetic integer file descriptors to `VirtualFile` handles.
+/// Virtual descriptors eliminate ambient raw OS FD leaks and collisions, allowing in-memory
+/// VFS files to be opened, read, stat-inspected, and closed with synthetic FDs.
+#[derive(Debug)]
+pub(crate) struct VirtualFdTable {
+    entries: std::collections::BTreeMap<u32, VirtualFile>,
+    next_fd: u32,
+}
+
+impl Default for VirtualFdTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl VirtualFdTable {
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: std::collections::BTreeMap::new(),
+            next_fd: 10,
+        }
+    }
+
+    pub(crate) fn insert(&mut self, file: VirtualFile) -> u32 {
+        let fd = self.next_fd;
+        self.next_fd = self.next_fd.checked_add(1).unwrap_or(10);
+        self.entries.insert(fd, file);
+        fd
+    }
+
+    pub(crate) fn get(&self, fd: u32) -> Option<&VirtualFile> {
+        self.entries.get(&fd)
+    }
+
+    pub(crate) fn get_mut(&mut self, fd: u32) -> Option<&mut VirtualFile> {
+        self.entries.get_mut(&fd)
+    }
+
+    pub(crate) fn remove(&mut self, fd: u32) -> Option<VirtualFile> {
+        self.entries.remove(&fd)
+    }
+}
+
 /// Whether a Node read option requests a UTF-8 string rather than a Buffer-like byte view.
 pub(crate) fn node_encoding(option: Option<&Value>) -> Result<bool, ExecutionError> {
     match option {
@@ -164,6 +228,7 @@ pub(crate) const fn js_name(native: Native) -> Option<&'static str> {
         Native::NodeStatIsFile => Some("isFile"),
         Native::NodeStatIsDirectory => Some("isDirectory"),
         Native::NodeStatIsSymbolicLink => Some("isSymbolicLink"),
+        Native::NodeFsSync => Some("readSync"),
         _ => None,
     }
 }
@@ -413,34 +478,24 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
             Ok(stats_object(&meta))
         }
         Native::NodeFsFstatSync => {
-            let fd = arguments.first().map_or(0.0, Value::as_number) as i32;
-            #[cfg(unix)]
-            {
-                use std::os::unix::io::FromRawFd;
-                use std::os::unix::io::IntoRawFd;
-                if fd >= 0 {
-                    let file = unsafe { std::fs::File::from_raw_fd(fd) };
-                    let meta_res = file.metadata();
-                    let _ = file.into_raw_fd();
-                    match meta_res {
+            let fd = arguments.first().map_or(0.0, Value::as_number) as u32;
+            if let Some(vfile) = vm.fd_table.get(fd) {
+                match vfile {
+                    VirtualFile::Memory { data, .. } => {
+                        let fsmeta = kiln_host_abi::FsMetadata::file(data.len() as u64, 0);
+                        Ok(stats_object(&fsmeta))
+                    }
+                    VirtualFile::Os { file, .. } => match file.metadata() {
                         Ok(meta) => {
                             let fsmeta = kiln_host_abi::FsMetadata::from(&meta);
                             Ok(stats_object(&fsmeta))
                         }
                         Err(err) => Err(throw_node_error(vm, "fstat", None, err)),
-                    }
-                } else {
-                    let err = std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "bad file descriptor",
-                    );
-                    Err(throw_node_error(vm, "fstat", None, err))
+                    },
                 }
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = fd;
-                Ok(Value::Undefined)
+            } else {
+                let err = std::io::Error::from_raw_os_error(9);
+                Err(throw_node_error(vm, "fstat", None, err))
             }
         }
         Native::NodeFsReaddirSync => {
@@ -626,41 +681,64 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
             let flags = arguments
                 .get(1)
                 .map_or_else(|| "r".to_string(), Value::to_display_string);
+
+            let (readable, writable, append, create, truncate, create_new) = match flags.as_str() {
+                "r" | "rs" => (true, false, false, false, false, false),
+                "r+" | "rs+" => (true, true, false, false, false, false),
+                "w" => (false, true, false, true, true, false),
+                "wx" | "xw" => (false, true, false, true, false, true),
+                "w+" => (true, true, false, true, true, false),
+                "wx+" | "xw+" => (true, true, false, true, false, true),
+                "a" => (false, true, true, true, false, false),
+                "ax" | "xa" => (false, true, true, true, false, true),
+                "a+" => (true, true, true, true, false, false),
+                "ax+" | "xa+" => (true, true, true, true, false, true),
+                _ => (true, false, false, false, false, false),
+            };
+
+            let is_in_mem = with_fs(vm, |fs| fs.is_in_memory(std::path::Path::new(&path_str)));
+            if is_in_mem {
+                if create_new {
+                    return Err(throw_node_error(
+                        vm,
+                        "open",
+                        Some(path_str),
+                        std::io::Error::from_raw_os_error(17),
+                    ));
+                }
+                let data = if truncate {
+                    let _ = with_fs(vm, |fs| fs.write(std::path::Path::new(&path_str), &[]));
+                    Vec::new()
+                } else {
+                    with_fs(vm, |fs| fs.read(std::path::Path::new(&path_str))).unwrap_or_default()
+                };
+                let cursor = if append { data.len() } else { 0 };
+                let fd = vm.fd_table.insert(VirtualFile::Memory {
+                    path: path_str,
+                    data,
+                    cursor,
+                    readable,
+                    writable,
+                    append,
+                });
+                return Ok(Value::Number(fd as f64));
+            }
+
             let mut opts = std::fs::OpenOptions::new();
-            match flags.as_str() {
-                "r" | "rs" => {
-                    opts.read(true);
-                }
-                "r+" | "rs+" => {
-                    opts.read(true).write(true);
-                }
-                "w" => {
-                    opts.write(true).create(true).truncate(true);
-                }
-                "wx" | "xw" => {
-                    opts.write(true).create_new(true);
-                }
-                "w+" => {
-                    opts.read(true).write(true).create(true).truncate(true);
-                }
-                "wx+" | "xw+" => {
-                    opts.read(true).write(true).create_new(true);
-                }
-                "a" => {
-                    opts.append(true).create(true);
-                }
-                "ax" | "xa" => {
-                    opts.append(true).create_new(true);
-                }
-                "a+" => {
-                    opts.read(true).append(true).create(true);
-                }
-                "ax+" | "xa+" => {
-                    opts.read(true).append(true).create_new(true);
-                }
-                _ => {
-                    opts.read(true);
-                }
+            opts.read(readable);
+            if writable {
+                opts.write(true);
+            }
+            if append {
+                opts.append(true);
+            }
+            if truncate {
+                opts.truncate(true);
+            }
+            if create_new {
+                opts.create_new(true);
+            } else if create {
+                opts.create(true);
             }
             #[cfg(unix)]
             {
@@ -673,32 +751,35 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
                 Ok(f) => f,
                 Err(err) => return Err(throw_node_error(vm, "open", Some(path_str), err)),
             };
-            #[cfg(unix)]
-            {
-                use std::os::unix::io::IntoRawFd;
-                let fd = file.into_raw_fd();
-                Ok(Value::Number(fd as f64))
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = file;
-                Ok(Value::Number(3.0))
-            }
+            let fd = vm.fd_table.insert(VirtualFile::Os {
+                path: path_str,
+                file,
+            });
+            Ok(Value::Number(fd as f64))
         }
         Native::NodeFsCloseSync => {
-            let fd = arguments.first().map_or(0.0, Value::as_number) as i32;
-            #[cfg(unix)]
-            {
-                use std::os::unix::io::FromRawFd;
-                if fd >= 0 {
-                    let _ = unsafe { std::fs::File::from_raw_fd(fd) };
+            let fd = arguments.first().map_or(0.0, Value::as_number) as u32;
+            if let Some(vfile) = vm.fd_table.remove(fd) {
+                match vfile {
+                    VirtualFile::Memory {
+                        path,
+                        data,
+                        writable,
+                        ..
+                    } => {
+                        if writable {
+                            let _ = with_fs(vm, |fs| fs.write(std::path::Path::new(&path), &data));
+                        }
+                    }
+                    VirtualFile::Os { file, .. } => {
+                        drop(file);
+                    }
                 }
+                Ok(Value::Undefined)
+            } else {
+                let err = std::io::Error::from_raw_os_error(9);
+                Err(throw_node_error(vm, "close", None, err))
             }
-            #[cfg(not(unix))]
-            {
-                let _ = fd;
-            }
-            Ok(Value::Undefined)
         }
         Native::NodeFsReadlinkSync => {
             let path_str = arguments
@@ -780,8 +861,384 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
             }
             Ok(Value::Undefined)
         }
+        Native::NodeFsSync => {
+            let fd = arguments.first().map_or(0.0, Value::as_number) as u32;
+            let view = match arguments.get(1) {
+                Some(Value::TypedArray(v)) => Rc::clone(v),
+                other => {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: format!(
+                            "The \"buffer\" argument must be an instance of Buffer or TypedArray, received {}",
+                            other.map_or("undefined", Value::type_name)
+                        ),
+                    });
+                }
+            };
+            let view_len = view.bytes().len();
+            let offset = arguments.get(2).map_or(0.0, Value::as_number).max(0.0) as usize;
+            let default_len = view_len.saturating_sub(offset);
+            let length = arguments
+                .get(3)
+                .map_or(default_len as f64, Value::as_number)
+                .max(0.0) as usize;
+            let position = match arguments.get(4) {
+                Some(Value::Number(n)) if *n >= 0.0 => Some(*n as u64),
+                _ => None,
+            };
+
+            if offset > view_len {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "offset is out of bounds".to_owned(),
+                });
+            }
+
+            let max_read = (view_len - offset).min(length);
+
+            let vfile = match vm.fd_table.get_mut(fd) {
+                Some(f) => f,
+                None => {
+                    let err = std::io::Error::from_raw_os_error(9);
+                    return Err(throw_node_error(vm, "read", None, err));
+                }
+            };
+
+            let bytes_read = match vfile {
+                VirtualFile::Memory {
+                    data,
+                    cursor,
+                    readable,
+                    ..
+                } => {
+                    if !*readable {
+                        let err = std::io::Error::from_raw_os_error(9);
+                        return Err(throw_node_error(vm, "read", None, err));
+                    }
+                    let read_pos = position.unwrap_or(*cursor as u64) as usize;
+                    if read_pos >= data.len() {
+                        0
+                    } else {
+                        let available = &data[read_pos..];
+                        let to_copy = max_read.min(available.len());
+                        let written = view.write_bytes(offset, &available[..to_copy]);
+                        if position.is_none() {
+                            *cursor += written;
+                        }
+                        written
+                    }
+                }
+                VirtualFile::Os { file, .. } => {
+                    use std::io::{Read, Seek, SeekFrom};
+                    if let Some(pos) = position {
+                        if let Err(err) = file.seek(SeekFrom::Start(pos)) {
+                            return Err(throw_node_error(vm, "read", None, err));
+                        }
+                    }
+                    let mut read_buf = vec![0u8; max_read];
+                    let n = match file.read(&mut read_buf) {
+                        Ok(n) => n,
+                        Err(err) => return Err(throw_node_error(vm, "read", None, err)),
+                    };
+                    view.write_bytes(offset, &read_buf[..n])
+                }
+            };
+
+            Ok(Value::Number(bytes_read as f64))
+        }
         _ => Err(ExecutionError::TypeErrorMessage {
             message: "unsupported synchronous fs operation".to_owned(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kiln_host_abi::{FileSystemOps, HostError, HostOp, HostOps, HostValue, OverlayFileSystem};
+    use kiln_ir::Program;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    struct VfsTestHost {
+        fs: OverlayFileSystem,
+    }
+
+    impl HostOps for VfsTestHost {
+        fn call(&mut self, _op: HostOp, _args: &[HostValue]) -> Result<HostValue, HostError> {
+            Ok(HostValue::Undefined)
+        }
+
+        fn fs(&mut self) -> Option<&mut (dyn FileSystemOps + '_)> {
+            Some(&mut self.fs)
+        }
+
+        fn clone_fs(&self) -> Option<Box<dyn FileSystemOps>> {
+            self.fs.clone_box()
+        }
+    }
+
+    #[test]
+    fn test_virtual_fd_table_lifecycle() {
+        let mut table = VirtualFdTable::new();
+        let fd1 = table.insert(VirtualFile::Memory {
+            path: "/virtual/file1.txt".into(),
+            data: b"alpha".to_vec(),
+            cursor: 0,
+            readable: true,
+            writable: false,
+            append: false,
+        });
+        assert!(fd1 >= 10);
+
+        let fd2 = table.insert(VirtualFile::Memory {
+            path: "/virtual/file2.txt".into(),
+            data: b"beta".to_vec(),
+            cursor: 0,
+            readable: true,
+            writable: true,
+            append: false,
+        });
+        assert_eq!(fd2, fd1 + 1);
+
+        assert!(table.get(fd1).is_some());
+        assert!(table.get(fd2).is_some());
+        assert!(table.get(999).is_none());
+
+        if let Some(VirtualFile::Memory { cursor, .. }) = table.get_mut(fd1) {
+            *cursor = 3;
+        }
+        if let Some(VirtualFile::Memory { cursor, .. }) = table.get(fd1) {
+            assert_eq!(*cursor, 3);
+        }
+
+        assert!(table.remove(fd1).is_some());
+        assert!(table.get(fd1).is_none());
+        assert!(table.remove(fd1).is_none());
+    }
+
+    #[test]
+    fn test_node_fs_sync_in_memory_vfs_lifecycle() {
+        let mut files = HashMap::new();
+        let test_path = PathBuf::from("/vfs/sample.txt");
+        let content = b"Hello, Virtual VFS World!".to_vec();
+        files.insert(test_path.clone(), content.clone());
+
+        let overlay = OverlayFileSystem::new(kiln_host_abi::OsFileSystem, files);
+        let mut host = VfsTestHost { fs: overlay };
+
+        let program = Program {
+            source: "".into(),
+            template_sites: Vec::new(),
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: Vec::new(),
+            local_count: 0,
+            functions: Vec::new(),
+        };
+
+        let mut vm = Vm::with_entropy_seed(
+            Rc::new(program.clone()),
+            Rc::new(crate::Strictness::sloppy(&program)),
+            &mut host,
+            vec![],
+            crate::ExecutionLimits::default(),
+            &crate::RealmCapabilities::default(),
+            crate::ExecutionCapabilities::default(),
+        )
+        .expect("vm init");
+
+        // 1. openSync
+        let open_args = vec![
+            Value::String(test_path.to_string_lossy().into_owned().into()),
+            Value::String("r".into()),
+        ];
+        let fd_val = dispatch(
+            &mut vm,
+            Native::NodeFsOpenSync,
+            &Value::Undefined,
+            &open_args,
+            0,
+        )
+        .expect("openSync succeeds");
+        let fd = fd_val.as_number() as u32;
+        assert!(fd >= 10, "synthetic FD should start at 10 or above");
+
+        // 2. fstatSync
+        let fstat_args = vec![Value::Number(fd as f64)];
+        let stat_val = dispatch(
+            &mut vm,
+            Native::NodeFsFstatSync,
+            &Value::Undefined,
+            &fstat_args,
+            0,
+        )
+        .expect("fstatSync succeeds");
+        let Value::Object(stat_obj) = stat_val else {
+            panic!("fstatSync must return an Object");
+        };
+        let size_val = stat_obj.borrow().get("size").expect("size property");
+        assert_eq!(size_val.as_number(), content.len() as f64);
+
+        // 3. readSync chunk 1 (5 bytes)
+        let target_buf = node_bytes_value(vec![0u8; 20]);
+        let read_args1 = vec![
+            Value::Number(fd as f64),
+            target_buf.clone(),
+            Value::Number(0.0), // offset
+            Value::Number(5.0), // length
+            Value::Undefined,   // position (sequential cursor)
+        ];
+        let n1 = dispatch(
+            &mut vm,
+            Native::NodeFsSync,
+            &Value::Undefined,
+            &read_args1,
+            0,
+        )
+        .expect("readSync chunk 1 succeeds");
+        assert_eq!(n1.as_number(), 5.0);
+
+        let Value::TypedArray(ta) = &target_buf else {
+            panic!("must be typed array");
+        };
+        assert_eq!(&ta.buffer.bytes.borrow()[0..5], b"Hello");
+
+        // 4. readSync chunk 2 (8 bytes, continuing cursor)
+        let read_args2 = vec![
+            Value::Number(fd as f64),
+            target_buf.clone(),
+            Value::Number(5.0), // offset in target buffer
+            Value::Number(8.0), // length
+            Value::Undefined,   // continue cursor
+        ];
+        let n2 = dispatch(
+            &mut vm,
+            Native::NodeFsSync,
+            &Value::Undefined,
+            &read_args2,
+            0,
+        )
+        .expect("readSync chunk 2 succeeds");
+        assert_eq!(n2.as_number(), 8.0);
+        assert_eq!(&ta.buffer.bytes.borrow()[5..13], b", Virtua");
+
+        // 5. closeSync
+        let close_args = vec![Value::Number(fd as f64)];
+        let close_res = dispatch(
+            &mut vm,
+            Native::NodeFsCloseSync,
+            &Value::Undefined,
+            &close_args,
+            0,
+        )
+        .expect("closeSync succeeds");
+        assert!(matches!(close_res, Value::Undefined));
+
+        // 6. Second readSync on closed fd should fail with EBADF
+        let err = dispatch(
+            &mut vm,
+            Native::NodeFsSync,
+            &Value::Undefined,
+            &read_args1,
+            0,
+        );
+        assert!(err.is_err(), "reading from closed FD must fail");
+    }
+
+    #[test]
+    fn test_node_fs_sync_os_file_lifecycle() {
+        let temp_dir = std::env::temp_dir();
+        let test_path = temp_dir.join(format!("kiln_test_os_file_{}.txt", std::process::id()));
+        let content = b"OS File Content Test 12345";
+        std::fs::write(&test_path, content).expect("write temp file");
+
+        let files = HashMap::new();
+        let overlay = OverlayFileSystem::new(kiln_host_abi::OsFileSystem, files);
+        let mut host = VfsTestHost { fs: overlay };
+
+        let program = Program {
+            source: "".into(),
+            template_sites: Vec::new(),
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: Vec::new(),
+            local_count: 0,
+            functions: Vec::new(),
+        };
+
+        let mut vm = Vm::with_entropy_seed(
+            Rc::new(program.clone()),
+            Rc::new(crate::Strictness::sloppy(&program)),
+            &mut host,
+            vec![],
+            crate::ExecutionLimits::default(),
+            &crate::RealmCapabilities::default(),
+            crate::ExecutionCapabilities::default(),
+        )
+        .expect("vm init");
+
+        let open_args = vec![
+            Value::String(test_path.to_string_lossy().into_owned().into()),
+            Value::String("r".into()),
+        ];
+        let fd_val = dispatch(
+            &mut vm,
+            Native::NodeFsOpenSync,
+            &Value::Undefined,
+            &open_args,
+            0,
+        )
+        .expect("openSync succeeds for OS file");
+        let fd = fd_val.as_number() as u32;
+        assert!(fd >= 10);
+
+        let fstat_args = vec![Value::Number(fd as f64)];
+        let stat_val = dispatch(
+            &mut vm,
+            Native::NodeFsFstatSync,
+            &Value::Undefined,
+            &fstat_args,
+            0,
+        )
+        .expect("fstatSync succeeds for OS file");
+        let Value::Object(stat_obj) = stat_val else {
+            panic!("fstatSync must return an Object");
+        };
+        let size_val = stat_obj.borrow().get("size").expect("size property");
+        assert_eq!(size_val.as_number(), content.len() as f64);
+
+        let target_buf = node_bytes_value(vec![0u8; 10]);
+        let read_args = vec![
+            Value::Number(fd as f64),
+            target_buf.clone(),
+            Value::Number(0.0),
+            Value::Number(7.0),
+            Value::Undefined,
+        ];
+        let n = dispatch(
+            &mut vm,
+            Native::NodeFsSync,
+            &Value::Undefined,
+            &read_args,
+            0,
+        )
+        .expect("readSync succeeds for OS file");
+        assert_eq!(n.as_number(), 7.0);
+        let Value::TypedArray(ta) = &target_buf else {
+            panic!("typed array");
+        };
+        assert_eq!(&ta.buffer.bytes.borrow()[0..7], b"OS File");
+
+        let close_args = vec![Value::Number(fd as f64)];
+        let close_res = dispatch(
+            &mut vm,
+            Native::NodeFsCloseSync,
+            &Value::Undefined,
+            &close_args,
+            0,
+        )
+        .expect("closeSync succeeds for OS file");
+        assert!(matches!(close_res, Value::Undefined));
+
+        let _ = std::fs::remove_file(&test_path);
     }
 }
