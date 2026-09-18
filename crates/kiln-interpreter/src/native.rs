@@ -2,6 +2,77 @@ use super::*;
 use crate::PrimitiveHint;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebStubKind {
+    ReadableStream,
+    WritableStream,
+    TransformStream,
+    ByteLengthQueuingStrategy,
+    CountQueuingStrategy,
+    Blob,
+    File,
+    FormData,
+    Headers,
+    Request,
+    Response,
+    MessagePort,
+    MessageChannel,
+    BroadcastChannel,
+    URLSearchParams,
+    Event,
+    EventTarget,
+    CustomEvent,
+    DOMException,
+}
+
+impl WebStubKind {
+    pub const ALL: &'static [(Self, &'static str)] = &[
+        (Self::ReadableStream, "ReadableStream"),
+        (Self::WritableStream, "WritableStream"),
+        (Self::TransformStream, "TransformStream"),
+        (Self::ByteLengthQueuingStrategy, "ByteLengthQueuingStrategy"),
+        (Self::CountQueuingStrategy, "CountQueuingStrategy"),
+        (Self::Blob, "Blob"),
+        (Self::File, "File"),
+        (Self::FormData, "FormData"),
+        (Self::Headers, "Headers"),
+        (Self::Request, "Request"),
+        (Self::Response, "Response"),
+        (Self::MessagePort, "MessagePort"),
+        (Self::MessageChannel, "MessageChannel"),
+        (Self::BroadcastChannel, "BroadcastChannel"),
+        (Self::URLSearchParams, "URLSearchParams"),
+        (Self::Event, "Event"),
+        (Self::EventTarget, "EventTarget"),
+        (Self::CustomEvent, "CustomEvent"),
+        (Self::DOMException, "DOMException"),
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::ReadableStream => "ReadableStream",
+            Self::WritableStream => "WritableStream",
+            Self::TransformStream => "TransformStream",
+            Self::ByteLengthQueuingStrategy => "ByteLengthQueuingStrategy",
+            Self::CountQueuingStrategy => "CountQueuingStrategy",
+            Self::Blob => "Blob",
+            Self::File => "File",
+            Self::FormData => "FormData",
+            Self::Headers => "Headers",
+            Self::Request => "Request",
+            Self::Response => "Response",
+            Self::MessagePort => "MessagePort",
+            Self::MessageChannel => "MessageChannel",
+            Self::BroadcastChannel => "BroadcastChannel",
+            Self::URLSearchParams => "URLSearchParams",
+            Self::Event => "Event",
+            Self::EventTarget => "EventTarget",
+            Self::CustomEvent => "CustomEvent",
+            Self::DOMException => "DOMException",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FixedOwnValue {
     Native(Native),
     Symbol(WellKnown),
@@ -63,6 +134,26 @@ pub enum Native {
     NodeFsPromises,
     NodeFs,
     NodeFsExistsSync,
+    NodeFsReadFileSync,
+    NodeFsMkdirSync,
+    NodeFsWriteFileSync,
+    NodeFsStatSync,
+    NodeFsLstatSync,
+    NodeFsFstatSync,
+    NodeFsReaddirSync,
+    NodeFsRmSync,
+    NodeFsUnlinkSync,
+    NodeFsRealpathSync,
+    NodeFsRenameSync,
+    NodeFsCopyFileSync,
+    NodeFsAccessSync,
+    NodeFsAppendFileSync,
+    NodeFsChmodSync,
+    NodeFsOpenSync,
+    NodeFsCloseSync,
+    NodeFsReadlinkSync,
+    NodeFsRmdirSync,
+    NodeFsUtimesSync,
     /// `AbortController`, and the `AbortSignal` namespace its statics hang off.
     AbortControllerConstructor,
     AbortSignalConstructor,
@@ -83,6 +174,7 @@ pub enum Native {
     /// `new TextEncoder().encode(text)`.
     TextEncoderConstructor,
     TextEncoderEncode,
+    StructuredClone,
     /// Any of `node:fs`'s synchronous entry points. One variant because they all end the same
     /// way: this realm's filesystem is Tokio-owned and asynchronous, so none of them can answer,
     /// and which one was asked for adds nothing to that.
@@ -94,6 +186,7 @@ pub enum Native {
     NodeFsMkdir,
     NodeStatIsFile,
     NodeStatIsDirectory,
+    NodeStatIsSymbolicLink,
     NodeEvents,
     NodeDiagnosticsChannel,
     NodeDiagnosticsChannelCreate,
@@ -273,6 +366,7 @@ pub enum Native {
     ProcessHrtimeBigInt,
     ProcessCwd,
     ProcessKill,
+    ProcessExit,
     ProcessStartRaw,
     ProcessCancelRaw,
     ProcessStdinSetRawMode,
@@ -909,6 +1003,8 @@ pub enum Native {
     CallSiteToString,
     /// `Error.prototype.toString`, which renders `name: message`.
     ErrorToString,
+    /// Standard Web/Node globals provided as stubs or baseline classes.
+    WebStub(WebStubKind),
 }
 
 impl Native {
@@ -1262,6 +1358,7 @@ impl Native {
             PrototypeTable::Writable => Self::PrototypeOf(PrototypeTable::EventEmitter)
                 .property(name)
                 .unwrap_or(Value::Undefined),
+            PrototypeTable::WebStub(_) => Value::Undefined,
         }
     }
 
@@ -1302,6 +1399,9 @@ impl Native {
                 ),
             ],
             Self::NodeFsSync => &[("native", FixedOwnValue::Native(Self::NodeFsSync))],
+            Self::NodeFsRealpathSync => {
+                &[("native", FixedOwnValue::Native(Self::NodeFsRealpathSync))]
+            }
             Self::NodeUtilInspect => &[(
                 "custom",
                 FixedOwnValue::Symbol(WellKnown::NodeInspectCustom),
@@ -1382,6 +1482,11 @@ impl Native {
             (Self::NodeBuffer | Self::NodeBufferGlobal, prop) => {
                 crate::buffer::property(self, prop)
             }
+            (Self::WebStub(kind), "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::WebStub(kind)),
+                RealmId::PRIMARY,
+            )),
+            (Self::WebStub(kind), "name") => Some(Value::String(kind.name().to_owned().into())),
             (Self::ConsoleConstructor, prop) => crate::console::constructor_property(prop),
             (Self::PrototypeOf(PrototypeTable::Console), prop) => {
                 crate::console::prototype_property(prop).or_else(|| {
@@ -1753,6 +1858,7 @@ impl Native {
                     PrototypeTable::Console => Self::ConsoleConstructor,
                     PrototypeTable::Readable => Self::NodeReadable,
                     PrototypeTable::Writable => Self::NodeWritable,
+                    PrototypeTable::WebStub(kind) => Self::WebStub(kind),
                 },
                 RealmId::PRIMARY,
             )),

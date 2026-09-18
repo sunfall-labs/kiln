@@ -790,6 +790,15 @@ pub(crate) fn builtin_load(builtin: kiln_ir::Builtin) -> BuiltinLoad {
         kiln_ir::Builtin::AggregateError => {
             BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_AGGREGATE_ERROR)")
         }
+        kiln_ir::Builtin::SuppressedError => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_SUPPRESSED_ERROR)")
+        }
+        kiln_ir::Builtin::DisposableStack => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_DISPOSABLE_STACK)")
+        }
+        kiln_ir::Builtin::AsyncDisposableStack => {
+            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_ASYNC_DISPOSABLE_STACK)")
+        }
         kiln_ir::Builtin::Boolean => {
             BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_BOOLEAN)")
         }

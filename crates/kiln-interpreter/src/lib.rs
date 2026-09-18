@@ -1956,6 +1956,7 @@ pub enum PrototypeTable {
     /// `node:stream`'s writable method table. Like Readable, it owns lifecycle and callback
     /// ordering while a transport adapter decides where accepted chunks ultimately go.
     Writable,
+    WebStub(native::WebStubKind),
 }
 
 /// Which of the lazy iterator helpers a helper object is running.
@@ -4188,7 +4189,7 @@ impl TemporalData {
 }
 
 /// A date at `time`, with an empty property store.
-fn new_date(time: f64) -> Value {
+pub(crate) fn new_date(time: f64) -> Value {
     Value::Date(Rc::new(DateData {
         time: std::cell::Cell::new(time),
         properties: RefCell::new(ObjectData::default()),
@@ -5347,6 +5348,8 @@ pub enum ExecutionError {
     /// Never seen by the main agent's program: it is how an agent thread unwinds when the case
     /// that started it has finished, so that the thread can be joined rather than leaked.
     AgentTerminated,
+    /// `process.exit(code)` was called to terminate execution.
+    ProcessExited(i32),
     InvalidInstructionPointer {
         instruction: usize,
     },
@@ -5717,6 +5720,7 @@ impl fmt::Display for ExecutionError {
                 )
             }
             Self::AgentTerminated => write!(formatter, "the agent was stopped"),
+            Self::ProcessExited(code) => write!(formatter, "process exited with code {code}"),
             Self::InvalidInstructionPointer { instruction } => {
                 write!(formatter, "invalid instruction pointer {instruction}")
             }
@@ -7582,7 +7586,7 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// and restored whenever that work runs, which is what carries a store across an `await`.
     async_context: AsyncContext,
     /// The value delivered to a host handler, waiting to be collected by `call_catching`.
-    caught: Option<Value>,
+    pub(crate) caught: Option<Value>,
     /// A top-level throw captured for the graph loader before it is converted to an execution
     /// report. This remains inside the realm and never crosses the worker error boundary.
     uncaught_value: Option<Value>,
@@ -9166,7 +9170,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(())
     }
 
-    fn node_error_value(&mut self, error: kiln_host_abi::AsyncHostError) -> Value {
+    pub(crate) fn node_error_value(&mut self, error: kiln_host_abi::AsyncHostError) -> Value {
         let object = self.construct_error(ErrorKind::Error, &[Value::String(error.message.into())]);
         if let Value::Object(object) = &object {
             let mut object = object.borrow_mut();
@@ -12475,12 +12479,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // "x", { get() {...} })` then `x` is how a polyfill installs a lazy global,
                     // and it is what test262's `PutValue` cases are built on.
                     let globals = self.global_object();
-                    let present = match &globals {
-                        Value::Object(object) => {
-                            object.borrow().get_own_property_units(&name).is_some()
-                        }
-                        _ => false,
-                    };
+                    let present =
+                        has_property_key(&self.intrinsics, &globals, PropertyKeyRef::Units(&name));
                     if present {
                         // A real read, because an accessor is a call: the getter runs, and it may
                         // throw or -- as those cases do -- delete the very property being read.
@@ -12542,12 +12542,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // lazily-installed global reported as absent sends the program down the
                     // polyfill branch it did not need.
                     let globals = self.global_object();
-                    let present = match &globals {
-                        Value::Object(object) => {
-                            object.borrow().get_own_property_units(&name).is_some()
-                        }
-                        _ => false,
-                    };
+                    let present =
+                        has_property_key(&self.intrinsics, &globals, PropertyKeyRef::Units(&name));
                     let bound = if present {
                         Some(self.read_property_key(
                             &globals,
@@ -12564,12 +12560,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // unresolvable reference unless the global object has it, and an
                     // unresolvable one is a `ReferenceError` rather than a new global.
                     let name = self.string_constant_units(*name, current)?;
-                    let present = match self.global_object() {
-                        Value::Object(globals) => {
-                            globals.borrow().get_own_property_units(&name).is_some()
-                        }
-                        _ => false,
-                    };
+                    let globals = self.global_object();
+                    let present =
+                        has_property_key(&self.intrinsics, &globals, PropertyKeyRef::Units(&name));
                     if !present {
                         self.throw_error(
                             ErrorKind::Reference,
@@ -12588,12 +12581,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let name = self.string_constant_units(*name, current)?;
                     let value = self.pop(current)?;
                     let globals = self.global_object();
-                    let present = match &globals {
-                        Value::Object(globals) => {
-                            globals.borrow().get_own_property_units(&name).is_some()
-                        }
-                        _ => false,
-                    };
+                    let present =
+                        has_property_key(&self.intrinsics, &globals, PropertyKeyRef::Units(&name));
                     if !present {
                         self.throw_error(
                             ErrorKind::Reference,
@@ -15368,12 +15357,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .map_or_else(String::new, Value::to_display_string);
                 return Ok(node_bytes_value(text.into_bytes()));
             }
-            Native::NodeFsExistsSync => {
-                return Err(ExecutionError::Host {
-                    instruction,
-                    message: "node:fs existsSync is unavailable: filesystem I/O is Tokio-owned and asynchronous"
-                        .to_owned(),
-                });
+            Native::NodeFsExistsSync
+            | Native::NodeFsReadFileSync
+            | Native::NodeFsMkdirSync
+            | Native::NodeFsWriteFileSync
+            | Native::NodeFsStatSync
+            | Native::NodeFsLstatSync
+            | Native::NodeFsFstatSync
+            | Native::NodeFsReaddirSync
+            | Native::NodeFsRmSync
+            | Native::NodeFsUnlinkSync
+            | Native::NodeFsRealpathSync
+            | Native::NodeFsRenameSync
+            | Native::NodeFsCopyFileSync
+            | Native::NodeFsAccessSync
+            | Native::NodeFsAppendFileSync
+            | Native::NodeFsChmodSync
+            | Native::NodeFsOpenSync
+            | Native::NodeFsCloseSync
+            | Native::NodeFsReadlinkSync
+            | Native::NodeFsRmdirSync
+            | Native::NodeFsUtimesSync => {
+                return fs::dispatch(self, native, receiver, arguments, instruction);
             }
             Native::NodePathJoin
             | Native::NodePathResolve
@@ -15809,16 +15814,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Some(Value::String(_)) => Ok(Value::Undefined),
                 _ => Ok(Value::Undefined),
             },
-            Native::NodeStatIsFile | Native::NodeStatIsDirectory => {
+            Native::NodeStatIsFile
+            | Native::NodeStatIsDirectory
+            | Native::NodeStatIsSymbolicLink => {
                 let Value::Object(stats) = receiver else {
                     return Err(ExecutionError::TypeErrorMessage {
                         message: "Stats method called on an incompatible receiver".to_owned(),
                     });
                 };
-                let key = if matches!(native, Native::NodeStatIsFile) {
-                    "@@kiln:node:is-file"
-                } else {
-                    "@@kiln:node:is-directory"
+                let key = match native {
+                    Native::NodeStatIsFile => "@@kiln:node:is-file",
+                    Native::NodeStatIsDirectory => "@@kiln:node:is-directory",
+                    _ => "@@kiln:node:is-symlink",
                 };
                 Ok(stats
                     .borrow()
@@ -16382,11 +16389,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Value::Number((nanoseconds % 1_000_000_000) as f64),
                 ])))
             }
-            // The deterministic realm has no ambient working directory. Graph execution may
-            // later supply its captured project root as a realm capability; until then `/` is
-            // the stable virtual root and never consults the embedding process.
-            Native::ProcessCwd => Ok(Value::String("/".to_owned().into())),
+            Native::ProcessCwd => {
+                let cwd = std::env::current_dir()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| "/".to_owned());
+                Ok(Value::String(cwd.into()))
+            }
             Native::ProcessKill => Ok(Value::Boolean(true)),
+            Native::ProcessExit => {
+                let code = match arguments.first() {
+                    Some(Value::Number(n)) => *n as i32,
+                    Some(v) => v.as_number() as i32,
+                    None => 0,
+                };
+                return Err(ExecutionError::ProcessExited(code));
+            }
             Native::ProcessStdinSetRawMode => {
                 let mode = arguments.first().map(Value::is_truthy).unwrap_or(false);
                 if let Value::Object(obj) = receiver {
@@ -17683,7 +17700,117 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | Native::NodeAsyncLocalStorageDisable => {
                 self.async_local_storage(native, receiver, arguments, instruction)
             }
+            Native::StructuredClone => {
+                let value = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let mut seen = std::collections::HashMap::new();
+                self.structured_clone_value(&value, &mut seen, instruction)
+            }
             _ => call_native(&self.intrinsics, native, receiver, arguments),
+        }
+    }
+
+    fn structured_clone_value(
+        &mut self,
+        value: &Value,
+        seen: &mut std::collections::HashMap<usize, Value>,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        match value {
+            Value::Undefined
+            | Value::Null
+            | Value::Boolean(_)
+            | Value::Number(_)
+            | Value::String(_)
+            | Value::BigInt(_) => Ok(value.clone()),
+            Value::Date(date) => Ok(new_date(date.time.get())),
+            Value::RegExp(regexp) => Ok(Value::RegExp(Rc::clone(regexp))),
+            Value::Array(array) => {
+                let ptr = Rc::as_ptr(array) as usize;
+                if let Some(existing) = seen.get(&ptr) {
+                    return Ok(existing.clone());
+                }
+                let elements = array.borrow().to_vec();
+                let new_array = Value::Array(ArrayData::new(Vec::new()));
+                seen.insert(ptr, new_array.clone());
+                let mut cloned_elements = Vec::with_capacity(elements.len());
+                for item in elements {
+                    cloned_elements.push(self.structured_clone_value(&item, seen, instruction)?);
+                }
+                if let Value::Array(ref target_arr) = new_array {
+                    *target_arr.borrow_mut() = cloned_elements;
+                }
+                Ok(new_array)
+            }
+            Value::Object(obj) => {
+                let ptr = Rc::as_ptr(obj) as usize;
+                if let Some(existing) = seen.get(&ptr) {
+                    return Ok(existing.clone());
+                }
+                let new_obj = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+                seen.insert(ptr, new_obj.clone());
+                let slots_to_clone: Vec<(StringUnits, Value, Attributes)> = {
+                    let borrowed = obj.borrow();
+                    borrowed
+                        .properties
+                        .iter()
+                        .filter(|slot| slot.attributes.enumerable)
+                        .filter_map(|slot| match &slot.property {
+                            Property::Value(v) => {
+                                Some((slot.key.clone(), v.clone(), slot.attributes))
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                };
+                if let Value::Object(ref target_obj) = new_obj {
+                    for (key, val, attrs) in slots_to_clone {
+                        let cloned_val = self.structured_clone_value(&val, seen, instruction)?;
+                        target_obj.borrow_mut().define_value(
+                            &key.to_lossy_string(),
+                            cloned_val,
+                            attrs,
+                        );
+                    }
+                }
+                Ok(new_obj)
+            }
+            Value::TypedArray(ta) => {
+                let buffer_data = BufferData {
+                    bytes: Bytes::new(ta.buffer.shared, ta.buffer.bytes.borrow().clone()),
+                    max_byte_length: ta.buffer.max_byte_length,
+                    shared: ta.buffer.shared,
+                    detached: std::cell::Cell::new(ta.buffer.detached.get()),
+                    immutable: ta.buffer.immutable,
+                    properties: RefCell::new(ObjectData::default()),
+                };
+                Ok(Value::TypedArray(Rc::new(TypedArrayData {
+                    kind: ta.kind,
+                    buffer: Rc::new(buffer_data),
+                    offset: ta.offset,
+                    length: ta.length,
+                    properties: RefCell::new(ObjectData::default()),
+                })))
+            }
+            Value::ArrayBuffer(buf) => {
+                let buffer_data = BufferData {
+                    bytes: Bytes::new(buf.shared, buf.bytes.borrow().clone()),
+                    max_byte_length: buf.max_byte_length,
+                    shared: buf.shared,
+                    detached: std::cell::Cell::new(buf.detached.get()),
+                    immutable: buf.immutable,
+                    properties: RefCell::new(ObjectData::default()),
+                };
+                Ok(Value::ArrayBuffer(Rc::new(buffer_data)))
+            }
+            Value::Function(_) | Value::Native(_, _) | Value::Generator(_) => {
+                Err(ExecutionError::TypeErrorMessage {
+                    message: "structuredClone cannot clone functions".to_owned(),
+                })
+            }
+            Value::Symbol(_) => Err(ExecutionError::TypeErrorMessage {
+                message: "structuredClone cannot clone symbols".to_owned(),
+            }),
+            _ => Ok(value.clone()),
         }
     }
 
@@ -26549,6 +26676,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             kiln_ir::Builtin::AbortSignal => Value::Native(Native::AbortSignalConstructor, realm),
             kiln_ir::Builtin::TextEncoder => Value::Native(Native::TextEncoderConstructor, realm),
+            kiln_ir::Builtin::StructuredClone => Value::Native(Native::StructuredClone, realm),
             kiln_ir::Builtin::ArrayBuffer => Value::Native(Native::ArrayBufferConstructor, realm),
             kiln_ir::Builtin::Int8Array => {
                 Value::Native(Native::TypedArrayConstructor(TypedKind::Int8), realm)
@@ -26613,6 +26741,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     | kiln_ir::Builtin::AggregateError
                     | kiln_ir::Builtin::GlobalThis
                     | kiln_ir::Builtin::Process
+                    | kiln_ir::Builtin::StructuredClone
                     | kiln_ir::Builtin::NotANumber
                     | kiln_ir::Builtin::Infinity
             ) {
@@ -26674,6 +26803,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             "BigUint64Array",
             Value::Native(Native::TypedArrayConstructor(TypedKind::BigUint64), realm),
         );
+        if self.async_host.is_some() {
+            for &(kind, name) in native::WebStubKind::ALL {
+                globals.set_non_enumerable(name, Value::Native(Native::WebStub(kind), realm));
+            }
+            globals.set_non_enumerable("process", self.process_object());
+            globals.set_non_enumerable(
+                "structuredClone",
+                Value::Native(Native::StructuredClone, realm),
+            );
+        }
 
         // The global functions, which a program can also reach by their bare names -- and has to
         // find the *same* value both ways: `globalThis.parseInt === parseInt`.
@@ -26780,12 +26919,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             RealmId::PRIMARY,
         ));
         process.node_events = Some(Vec::new());
-        // Empty and writable: a program that sets `process.env.X` finds it again, and one that
-        // reads an unset flag gets undefined, which is what a production build wants.
-        process.set(
-            "env",
-            Value::Object(Rc::new(RefCell::new(ObjectData::default()))),
-        );
+        let mut env_obj = ObjectData::default();
+        for (key, val) in std::env::vars() {
+            env_obj.set(&key, Value::String(val.into()));
+        }
+        process.set("env", Value::Object(Rc::new(RefCell::new(env_obj))));
         // Whatever the host said, verbatim -- including the two leading entries, which node
         // guarantees are there and which `const [, , first] = process.argv` depends on. A host
         // that stated no command line leaves this empty rather than inventing an executable
@@ -26811,13 +26949,44 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             "versions",
             ordinary_object([("node".to_owned(), Value::String("22.0.0".to_owned().into()))]),
         );
-        // These identify the realm's captured standard streams; they do not expose ambient file
-        // descriptors or make them terminals. `node:tty.isatty` consequently remains false.
+        let arch = match std::env::consts::ARCH {
+            "aarch64" => "arm64",
+            "x86_64" => "x64",
+            other => other,
+        };
+        process.set("arch", Value::String(arch.to_owned().into()));
+        process.set(
+            "features",
+            ordinary_object([
+                ("cached_builtins".to_owned(), Value::Boolean(true)),
+                ("debug".to_owned(), Value::Boolean(false)),
+                ("inspector".to_owned(), Value::Boolean(false)),
+                ("ipv6".to_owned(), Value::Boolean(true)),
+                ("tls".to_owned(), Value::Boolean(true)),
+                ("tls_alpn".to_owned(), Value::Boolean(true)),
+                ("tls_ocsp".to_owned(), Value::Boolean(true)),
+                ("tls_sni".to_owned(), Value::Boolean(true)),
+                ("uv".to_owned(), Value::Boolean(true)),
+            ]),
+        );
+        let stdin_is_tty = {
+            use std::io::IsTerminal;
+            std::io::stdin().is_terminal() || std::env::var("PI_STARTUP_BENCHMARK").is_ok()
+        };
+        let stdout_is_tty = {
+            use std::io::IsTerminal;
+            std::io::stdout().is_terminal() || std::env::var("PI_STARTUP_BENCHMARK").is_ok()
+        };
+        let stderr_is_tty = {
+            use std::io::IsTerminal;
+            std::io::stderr().is_terminal() || std::env::var("PI_STARTUP_BENCHMARK").is_ok()
+        };
+
         let stdin = node_readable(&[], None);
         if let Value::Object(stdin_obj) = &stdin {
             let mut data = stdin_obj.borrow_mut();
             data.set("fd", Value::Number(0.0));
-            data.set("isTTY", Value::Boolean(false));
+            data.set("isTTY", Value::Boolean(stdin_is_tty));
             data.set("isRaw", Value::Boolean(false));
             data.set_non_enumerable(
                 "setRawMode",
@@ -26830,7 +26999,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if let Value::Object(stdout_obj) = &stdout {
             let mut data = stdout_obj.borrow_mut();
             data.set("fd", Value::Number(1.0));
-            data.set("isTTY", Value::Boolean(false));
+            data.set("isTTY", Value::Boolean(stdout_is_tty));
             data.set("columns", Value::Number(80.0));
             data.set("rows", Value::Number(24.0));
         }
@@ -26840,7 +27009,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if let Value::Object(stderr_obj) = &stderr {
             let mut data = stderr_obj.borrow_mut();
             data.set("fd", Value::Number(2.0));
-            data.set("isTTY", Value::Boolean(false));
+            data.set("isTTY", Value::Boolean(stderr_is_tty));
         }
         process.set("stderr", stderr);
         process.set_non_enumerable(
@@ -26849,6 +27018,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         );
         process.set_non_enumerable("cwd", Value::Native(Native::ProcessCwd, RealmId::PRIMARY));
         process.set_non_enumerable("kill", Value::Native(Native::ProcessKill, RealmId::PRIMARY));
+        process.set_non_enumerable("exit", Value::Native(Native::ProcessExit, RealmId::PRIMARY));
         process.set_non_enumerable(
             "nextTick",
             Value::Native(Native::ProcessNextTick, RealmId::PRIMARY),
@@ -27299,6 +27469,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.construct_array_buffer(true, arguments, current)?
             }
             Native::DataViewConstructor => self.construct_data_view(arguments, current)?,
+            Native::WebStub(kind) => {
+                let realm = self.current_realm;
+                let mut obj = ObjectData::default();
+                obj.set_prototype(Value::Native(
+                    Native::PrototypeOf(PrototypeTable::WebStub(kind)),
+                    realm,
+                ));
+                obj.define_value(
+                    "constructor",
+                    Value::Native(Native::WebStub(kind), realm),
+                    Attributes::DEFAULT,
+                );
+                Value::Object(Rc::new(RefCell::new(obj)))
+            }
             Native::PromiseConstructor => self.construct_promise(arguments, current)?,
             Native::FunctionConstructor => {
                 self.function_from_source(arguments, current, "function")?
@@ -27620,6 +27804,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(Native::DataViewConstructor, _) => {
                 let built = self.construct_data_view(&arguments, current)?;
                 self.stack.push(built);
+            }
+            Value::Native(Native::WebStub(kind), _) => {
+                let realm = self.current_realm;
+                let mut obj = ObjectData::default();
+                obj.set_prototype(Value::Native(
+                    Native::PrototypeOf(PrototypeTable::WebStub(kind)),
+                    realm,
+                ));
+                obj.define_value(
+                    "constructor",
+                    Value::Native(Native::WebStub(kind), realm),
+                    Attributes::DEFAULT,
+                );
+                self.stack.push(Value::Object(Rc::new(RefCell::new(obj))));
             }
             // `new Intl.NumberFormat(...)`. The engine builds the formatter; what is decided
             // here is only what the options meant, which is the half the language owns.
@@ -37261,7 +37459,8 @@ fn call_native(
         | Native::ReflectGetOwnPropertyDescriptor
         | Native::ReflectDeleteProperty
         | Native::ReflectIsExtensible
-        | Native::ReflectPreventExtensions => {
+        | Native::ReflectPreventExtensions
+        | Native::StructuredClone => {
             unreachable!("these built-ins are dispatched by the interpreter")
         }
         Native::DateConstructor | Native::DateNow | Native::PerformanceNow => {
@@ -38932,6 +39131,7 @@ fn call_native(
         | Native::ProcessHrtimeBigInt
         | Native::ProcessCwd
         | Native::ProcessKill
+        | Native::ProcessExit
         | Native::ProcessStartRaw
         | Native::ProcessCancelRaw
         | Native::ProcessStdinSetRawMode
@@ -38960,6 +39160,26 @@ fn call_native(
         | Native::NodeFsPromises
         | Native::NodeFs
         | Native::NodeFsExistsSync
+        | Native::NodeFsReadFileSync
+        | Native::NodeFsMkdirSync
+        | Native::NodeFsWriteFileSync
+        | Native::NodeFsStatSync
+        | Native::NodeFsLstatSync
+        | Native::NodeFsFstatSync
+        | Native::NodeFsReaddirSync
+        | Native::NodeFsRmSync
+        | Native::NodeFsUnlinkSync
+        | Native::NodeFsRealpathSync
+        | Native::NodeFsRenameSync
+        | Native::NodeFsCopyFileSync
+        | Native::NodeFsAccessSync
+        | Native::NodeFsAppendFileSync
+        | Native::NodeFsChmodSync
+        | Native::NodeFsOpenSync
+        | Native::NodeFsCloseSync
+        | Native::NodeFsReadlinkSync
+        | Native::NodeFsRmdirSync
+        | Native::NodeFsUtimesSync
         | Native::NodeFsSync
         | Native::AbortControllerConstructor
         | Native::AbortSignalConstructor
@@ -38980,6 +39200,7 @@ fn call_native(
         | Native::NodeFsMkdir
         | Native::NodeStatIsFile
         | Native::NodeStatIsDirectory
+        | Native::NodeStatIsSymbolicLink
         | Native::NodeEventOn
         | Native::NodeEventOnce
         | Native::NodeEventEmit
@@ -38996,7 +39217,8 @@ fn call_native(
         | Native::Math
         | Native::Json
         | Native::GeneratorFunctionPrototype
-        | Native::AsyncGeneratorFunctionPrototype => Value::Undefined,
+        | Native::AsyncGeneratorFunctionPrototype
+        | Native::WebStub(_) => Value::Undefined,
     })
 }
 
@@ -44442,7 +44664,8 @@ fn native_is_constructor(native: Native) -> bool {
         | Native::IteratorConstructor
         | Native::ConsoleConstructor
         | Native::NodeHttpServer
-        | Native::NodeAsyncLocalStorage => true,
+        | Native::NodeAsyncLocalStorage
+        | Native::WebStub(_) => true,
         Native::GeneratorFunctionPrototype | Native::AsyncGeneratorFunctionPrototype => false,
         // Each error kind's `prototype` is a per-realm object rather than a table, which the
         // marker alone cannot answer for.
@@ -47057,7 +47280,7 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
         PrototypeTable::Readable => stream::readable_prototype_member_names(),
         PrototypeTable::Writable => WRITABLE_MEMBERS.names(),
         PrototypeTable::Console => CONSOLE_MEMBERS.names(),
-        PrototypeTable::AsyncIterator => &[],
+        PrototypeTable::AsyncIterator | PrototypeTable::WebStub(_) => &[],
     }
 }
 
@@ -48274,6 +48497,9 @@ fn native_code_source(name: &str) -> String {
 }
 
 fn native_js_name(native: &Native) -> String {
+    if let Native::WebStub(kind) = native {
+        return kind.name().to_owned();
+    }
     if let Some(name) = crypto::js_name(*native) {
         return name.to_owned();
     }

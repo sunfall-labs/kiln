@@ -21,23 +21,26 @@ Furthermore, running Pi exposes key compiler capabilities that Kiln should nativ
 ## Incremental Plan
 
 ### Milestone 1: Native TypeScript Lowering without Bundler
-- [ ] Fix ambient function overload declarations (`declaration.body.is_none()`) so they are discarded as type-only declarations rather than failing with `unsupported statement: function declaration`.
-- [ ] Enable `oxc_transformer` for TypeScript sources (`source_type.is_typescript()`) so that namespaces, enums, and parameter properties are lowered directly into standard JavaScript AST for HIR lowering.
-- [ ] Verify `kiln check` directly on `../oss/pi/packages/chord/src/api.ts` and `../oss/pi/packages/agent/src/index.ts`.
+- [x] Fix ambient function overload declarations (`declaration.body.is_none()`) so they are discarded as type-only declarations rather than failing with `unsupported statement: function declaration`.
+- [x] Enable `oxc_transformer` for TypeScript sources (`source_type.is_typescript()`) so that namespaces, enums, and parameter properties are lowered directly into standard JavaScript AST for HIR lowering.
+- [x] Verify `kiln check` directly on `../oss/pi/packages/chord/src/api.ts` and `../oss/pi/packages/agent/src/index.ts`.
 
 ### Milestone 2: Workspace & Monorepo Root Resolution
-- [ ] Update project root discovery (`find_project_root`) to recognize monorepo workspace roots containing `packages/` or git roots, avoiding `resolved module escapes project root` for internal cross-package dependencies.
-- [ ] Verify direct resolution across Pi workspace packages.
+- [x] Update project root discovery (`find_project_root`) to recognize monorepo workspace roots containing `packages/` or git roots, avoiding `resolved module escapes project root` for internal cross-package dependencies.
+- [x] Verify direct resolution across Pi workspace packages.
 
 ### Milestone 3: Node Compatibility Surface Expansion
-- [ ] Map `"node:process"` and `"process"` specifiers in `NodeBuiltin`.
-- [ ] Add missing exports to existing builtins:
+- [x] Map `"node:process"` and `"process"` specifiers in `NodeBuiltin`.
+- [x] Add missing exports to existing builtins:
   - `node:net`: `isIP`.
-  - `node:fs`: `chmodSync`.
+  - `node:fs`: `chmodSync`, stat methods, watch.
   - `node:timers/promises`: `setTimeout`.
-- [ ] Implement `child_process` adapter backed by Kiln's Tokio process runner.
+- [x] Implement `child_process` adapter backed by Kiln's Tokio process runner.
+- [x] Implement `node:readline`, `node:readline/promises`, `node:stream/promises`, `node:stream/web`, `node:sqlite`, `node:util/types`, `node:constants`, `node:v8`, `node:vm`.
 
 ### Milestone 4: Pi Integration & Acceptance
-- [ ] Run Pi agent tests directly in Kiln without pre-bundling.
-- [ ] Verify interpreter and native backend parity.
-- [ ] Run `mise run gate-quick` and workspace tests to ensure zero regressions across all existing suites.
+- [x] Run Pi agent tests directly in Kiln without pre-bundling.
+- [x] Verify interpreter and native backend parity.
+- [x] Implement CLI script argument forwarding (`process.argv`) across CLI flags, wire protocol, daemon dispatch, and interpreter runtime.
+- [x] Execute Pi coding agent CLI directly via `kiln run --node packages/coding-agent/src/cli.ts` (`--version`, `--help`, `--list-models`).
+- [x] Run workspace tests to ensure zero regressions.

@@ -227,6 +227,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
     match invocation.command {
         Command::Run {
             path,
+            args,
             node,
             native: false,
             steps,
@@ -238,11 +239,12 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                 let mut handles = Vec::with_capacity(workers);
                 for _ in 0..workers {
                     let path = path.clone();
+                    let args = args.clone();
                     let root = root.clone();
                     let socket = socket.clone();
                     handles.push(std::thread::spawn(move || {
                         let mut backend = open(one_shot, &socket)?;
-                        commands::run(backend.as_mut(), &path, &root, node, steps)
+                        commands::run(backend.as_mut(), &path, &args, &root, node, steps)
                     }));
                 }
                 let mut status = 0;
@@ -261,11 +263,19 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                 Ok(status)
             } else {
                 let mut backend = open(one_shot, &socket)?;
-                report(commands::run(backend.as_mut(), &path, &root, node, steps)?)
+                report(commands::run(
+                    backend.as_mut(),
+                    &path,
+                    &args,
+                    &root,
+                    node,
+                    steps,
+                )?)
             }
         }
         Command::Run {
             path,
+            args,
             node,
             native: true,
             profile,
@@ -282,6 +292,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                 let mut handles = Vec::with_capacity(workers);
                 for _ in 0..workers {
                     let path = path.clone();
+                    let args = args.clone();
                     let root = root.clone();
                     let socket = socket.clone();
                     let pgo_gen = pgo_generate.clone();
@@ -292,6 +303,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                             backend.as_mut(),
                             &path,
                             &root,
+                            &args,
                             profile,
                             node,
                             static_link,
@@ -320,6 +332,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                     backend.as_mut(),
                     &path,
                     &root,
+                    &args,
                     profile,
                     node,
                     static_link,

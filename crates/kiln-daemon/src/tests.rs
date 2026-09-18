@@ -507,6 +507,7 @@ fn stale_source_operations_are_rejected_after_a_competing_commit() {
                 source_view: old_view,
                 path: "source.js".into(),
                 project_root: fixture.dir.to_string_lossy().into_owned(),
+                args: Vec::new(),
             },
             old_view,
         )
@@ -757,6 +758,7 @@ fn interpreted_run_uses_a_snapshot_without_blocking_other_clients() {
                 source_view: SourceView(0),
                 path: run_path,
                 project_root: run_root,
+                args: Vec::new(),
             })
             .expect("blocked run")
     });
@@ -811,6 +813,7 @@ fn interpreted_run_uses_a_snapshot_without_blocking_other_clients() {
             source_view: SourceView(0),
             path,
             project_root,
+            args: Vec::new(),
         })
         .expect("later run")
     else {
@@ -878,6 +881,7 @@ fn in_flight_graph_run_keeps_old_snapshot_while_a_later_run_patches_it() {
                 source_view: initial_view,
                 path: old_entry,
                 project_root: old_root,
+                args: Vec::new(),
             })
             .expect("blocked graph run")
     });
@@ -899,6 +903,7 @@ fn in_flight_graph_run_keeps_old_snapshot_while_a_later_run_patches_it() {
             source_view: setup.source_view(),
             path: "./snapshot-entry.js".into(),
             project_root: root.clone(),
+            args: Vec::new(),
         })
         .expect("run patched graph")
     else {
@@ -989,6 +994,7 @@ fn graph_preparation_releases_state_lock_and_rejects_stale_snapshot() {
             source_view: initial_view,
             path: run_path,
             project_root: run_root,
+            args: Vec::new(),
         })
     });
     entered_rx
@@ -1036,6 +1042,7 @@ fn graph_preparation_releases_state_lock_and_rejects_stale_snapshot() {
             source_view: updated_view,
             path: entry_path,
             project_root: root.clone(),
+            args: Vec::new(),
         })
         .expect("fresh run")
     else {
@@ -1067,6 +1074,7 @@ fn graph_preparation_releases_state_lock_and_rejects_stale_snapshot() {
                 .to_string_lossy()
                 .into_owned(),
             project_root: root.clone(),
+            args: Vec::new(),
         })
         .expect("partial fresh run")
     else {
@@ -1096,6 +1104,7 @@ fn prepared_single_file_run_keeps_its_program_and_revision_after_an_edit() {
         &mut engine,
         None,
         path,
+        Vec::new(),
         fixture.dir.to_string_lossy().into_owned(),
         false,
     )
@@ -1207,6 +1216,7 @@ fn native_run_round_trips_through_the_daemon_and_reuses_artifacts() {
         static_link: false,
         pgo_generate: None,
         pgo_use: None,
+        args: Vec::new(),
     };
     let first = client.request(&request).expect("first native request");
     let Response::NativeRan(first) = first else {
@@ -1270,6 +1280,7 @@ fn revision_pinned_native_build_rejects_stale_source_before_publication() {
             source_view: SourceView(0),
             path: path.clone(),
             project_root: project_root.clone(),
+            args: Vec::new(),
         })
         .expect("run first source")
     else {
@@ -1290,6 +1301,7 @@ fn revision_pinned_native_build_rejects_stale_source_before_publication() {
             source_view: SourceView(0),
             path: path.clone(),
             project_root: project_root.clone(),
+            args: Vec::new(),
         })
         .expect("run second source")
     else {
@@ -2268,6 +2280,7 @@ fn production_daemon_executes_a_node_builtin_module_with_explicit_capability() {
             path,
             project_root: fixture.dir.to_string_lossy().into_owned(),
             node: true,
+            args: Vec::new(),
         })
         .expect("run Node module");
     let Response::Ran(summary) = response else {
@@ -2275,6 +2288,45 @@ fn production_daemon_executes_a_node_builtin_module_with_explicit_capability() {
     };
     assert!(summary.succeeded, "{:?}", summary.diagnostics);
     assert_eq!(summary.stdout, "function\n");
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("the accept loop must not panic");
+}
+
+#[test]
+fn production_daemon_forwards_run_arguments_to_process_argv() {
+    let fixture = Fixture::empty();
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = Client::connect(&fixture.socket).expect("connect");
+    client.handshake().expect("handshake");
+
+    let path = "argv.mjs".to_owned();
+    let text = "console.log(JSON.stringify(process.argv.slice(2)));\n";
+    std::fs::write(fixture.dir.join(&path), text).expect("write source");
+    client
+        .request(&Request::SetSource {
+            source_view: SourceView(0),
+            path: path.clone(),
+            text: text.into(),
+        })
+        .expect("set source");
+    let response = client
+        .request(&Request::Run {
+            steps: StepBudget::Unmetered,
+            source_view: client.source_view(),
+            path,
+            project_root: fixture.dir.to_string_lossy().into_owned(),
+            node: false,
+            args: vec!["--foo".into(), "bar".into()],
+        })
+        .expect("run module");
+    let Response::Ran(summary) = response else {
+        panic!("expected run response, got {response:?}");
+    };
+    assert!(summary.succeeded, "{:?}", summary.diagnostics);
+    assert_eq!(summary.stdout, "[\"--foo\",\"bar\"]\n");
 
     stop.shutdown();
     within(Duration::from_secs(5), move || serving.join()).expect("the accept loop must not panic");
@@ -2325,6 +2377,7 @@ fn production_daemon_does_not_evaluate_an_unused_side_effect_free_module() {
             source_view: client.source_view(),
             path: entry.to_string_lossy().into_owned(),
             project_root: fixture.dir.to_string_lossy().into_owned(),
+            args: Vec::new(),
         })
         .expect("run shaken graph")
     else {
@@ -2362,6 +2415,7 @@ fn production_daemon_compiles_direct_eval_at_runtime() {
             source_view: client.source_view(),
             path,
             project_root: fixture.dir.to_string_lossy().into_owned(),
+            args: Vec::new(),
         })
         .expect("run eval")
     else {
@@ -2399,6 +2453,7 @@ fn production_daemon_compiles_function_constructor_at_runtime() {
             source_view: client.source_view(),
             path,
             project_root: fixture.dir.to_string_lossy().into_owned(),
+            args: Vec::new(),
         })
         .expect("run Function")
     else {
@@ -2456,6 +2511,7 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
             source_view: SourceView(0),
             path: path.clone(),
             project_root: fixture.dir.to_string_lossy().into_owned(),
+            args: Vec::new(),
         })
         .expect("run")
     else {
@@ -2479,6 +2535,7 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
             source_view: SourceView(0),
             path: path.clone(),
             project_root: fixture.dir.to_string_lossy().into_owned(),
+            args: Vec::new(),
         })
         .expect("warm run")
     else {
@@ -2512,6 +2569,7 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
             source_view: SourceView(0),
             path,
             project_root: fixture.dir.to_string_lossy().into_owned(),
+            args: Vec::new(),
         })
         .expect("compile failure is a response")
     else {
@@ -2601,6 +2659,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
                 .to_string_lossy()
                 .into_owned(),
             project_root: root.clone(),
+            args: Vec::new(),
         })
         .expect("run graph");
     let Response::Ran(first) = response else {
@@ -2636,6 +2695,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
                 .to_string_lossy()
                 .into_owned(),
             project_root: root.clone(),
+            args: Vec::new(),
         })
         .expect("run body-only edit")
     else {
@@ -2673,6 +2733,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
                 .to_string_lossy()
                 .into_owned(),
             project_root: root.clone(),
+            args: Vec::new(),
         })
         .expect("invalid body edit is structured")
     else {
@@ -2711,6 +2772,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
                 .to_string_lossy()
                 .into_owned(),
             project_root: root.clone(),
+            args: Vec::new(),
         })
         .expect("restored body edit")
     else {
@@ -2730,6 +2792,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
                 .to_string_lossy()
                 .into_owned(),
             project_root: root.clone(),
+            args: Vec::new(),
         })
         .expect("warm graph run")
     else {
@@ -2772,6 +2835,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
                 .to_string_lossy()
                 .into_owned(),
             project_root: root,
+            args: Vec::new(),
         })
         .expect("cycle is structured")
     else {
@@ -2852,6 +2916,7 @@ fn production_daemon_sync_removes_omitted_dependency_before_a_warm_run() {
             source_view: SourceView(0),
             path: entry_path.clone(),
             project_root: project_root.clone(),
+            args: Vec::new(),
         })
         .expect("initial run")
     else {
@@ -2888,6 +2953,7 @@ fn production_daemon_sync_removes_omitted_dependency_before_a_warm_run() {
             source_view: SourceView(0),
             path: entry_path,
             project_root,
+            args: Vec::new(),
         })
         .expect("warm run after removal")
     else {
@@ -2949,6 +3015,7 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
                 source_view: SourceView(0),
                 path: canonical_entry.clone(),
                 project_root: root.clone(),
+                args: Vec::new(),
             })
             .expect("run overlay")
         else {
@@ -2983,6 +3050,7 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
                 source_view: SourceView(0),
                 path: "overlay.js".into(),
                 project_root: root.clone(),
+                args: Vec::new(),
             })
             .expect("repeat run without another upload")
         else {
@@ -3009,6 +3077,7 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
             source_view: SourceView(0),
             path: canonical_entry.clone(),
             project_root: root.clone(),
+            args: Vec::new(),
         })
         .expect("run lexical overlay")
     else {
@@ -3046,6 +3115,7 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
             source_view: SourceView(0),
             path: "overlay.js".into(),
             project_root: root,
+            args: Vec::new(),
         })
         .expect("run newest alias")
     else {
@@ -3217,6 +3287,7 @@ fn production_daemon_native_graph_matches_interpreter_order_and_reuses_artifacts
         static_link: false,
         pgo_generate: None,
         pgo_use: None,
+        args: Vec::new(),
     };
     let first = client.request(&request).expect("native graph run");
     let Response::NativeRan(first) = first else {
@@ -3319,8 +3390,17 @@ fn production_daemon_native_graph_matches_interpreter_order_and_reuses_artifacts
 /// shift every position a program reads by one.
 #[test]
 fn interpreted_argv_names_the_interpreter_then_the_entry() {
-    let argv = interpreted_argv("/projects/app/main.mjs");
+    let argv = interpreted_argv("/projects/app/main.mjs", &[]);
     assert_eq!(argv.len(), 2);
     assert!(!argv[0].is_empty());
     assert_eq!(argv[1], "/projects/app/main.mjs");
+
+    let argv_with_args = interpreted_argv(
+        "/projects/app/main.mjs",
+        &["--flag".to_string(), "arg".to_string()],
+    );
+    assert_eq!(argv_with_args.len(), 4);
+    assert_eq!(argv_with_args[1], "/projects/app/main.mjs");
+    assert_eq!(argv_with_args[2], "--flag");
+    assert_eq!(argv_with_args[3], "arg");
 }

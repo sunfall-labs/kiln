@@ -174,6 +174,7 @@ mod tests {
             let output = commands::run(
                 &mut session,
                 &source,
+                &[],
                 &fixture,
                 false,
                 StepBudget::Unmetered,
@@ -184,6 +185,7 @@ mod tests {
             let updated = commands::run(
                 &mut session,
                 &source,
+                &[],
                 &fixture,
                 false,
                 StepBudget::Unmetered,
@@ -214,8 +216,15 @@ mod tests {
 
         let output = {
             let mut session = OneShot::start().expect("start an in-process engine");
-            commands::run(&mut session, &source, &fixture, true, StepBudget::Unmetered)
-                .expect("run Node graph")
+            commands::run(
+                &mut session,
+                &source,
+                &[],
+                &fixture,
+                true,
+                StepBudget::Unmetered,
+            )
+            .expect("run Node graph")
         };
 
         assert_eq!(output.text, "function\n");
@@ -250,6 +259,7 @@ server.listen(0, "127.0.0.1", () => {
                 &mut session,
                 &source,
                 &fixture,
+                &[],
                 kiln_proto::NativeProfile::Dev,
                 true,
                 false,
@@ -282,6 +292,7 @@ server.listen(0, "127.0.0.1", () => {
                 &mut session,
                 &source,
                 &fixture,
+                &[],
                 kiln_proto::NativeProfile::Dev,
                 true,
                 false,
@@ -361,6 +372,7 @@ server.listen(0, "127.0.0.1", () => {
                 &mut session,
                 &source,
                 &fixture,
+                &[],
                 kiln_proto::NativeProfile::Dev,
                 true,
                 false,
@@ -470,8 +482,15 @@ server.listen(0, "127.0.0.1", () => {
 
         let interpreted = {
             let mut session = OneShot::start().expect("start interpreted engine");
-            commands::run(&mut session, &source, &fixture, true, StepBudget::Unmetered)
-                .expect("run interpreted Node request identity fixture")
+            commands::run(
+                &mut session,
+                &source,
+                &[],
+                &fixture,
+                true,
+                StepBudget::Unmetered,
+            )
+            .expect("run interpreted Node request identity fixture")
         };
         assert_eq!(interpreted.text, "/first,/second\n");
         assert_eq!(interpreted.exit_code, 0);
@@ -482,6 +501,7 @@ server.listen(0, "127.0.0.1", () => {
                 &mut session,
                 &source,
                 &fixture,
+                &[],
                 kiln_proto::NativeProfile::Dev,
                 true,
                 false,
@@ -513,8 +533,15 @@ server.listen(0, "127.0.0.1", () => {
 
         let interpreted = {
             let mut session = OneShot::start().expect("start interpreted engine");
-            commands::run(&mut session, &source, &fixture, true, StepBudget::Unmetered)
-                .expect("run interpreted HTTP half-close fixture")
+            commands::run(
+                &mut session,
+                &source,
+                &[],
+                &fixture,
+                true,
+                StepBudget::Unmetered,
+            )
+            .expect("run interpreted HTTP half-close fixture")
         };
         assert_eq!(interpreted.text, "pass\n");
         assert_eq!(interpreted.exit_code, 0);
@@ -525,6 +552,7 @@ server.listen(0, "127.0.0.1", () => {
                 &mut session,
                 &source,
                 &fixture,
+                &[],
                 kiln_proto::NativeProfile::Dev,
                 true,
                 false,
@@ -574,8 +602,15 @@ server.listen(0, "127.0.0.1", () => {
 
         let output = {
             let mut session = OneShot::start().expect("start an in-process engine");
-            commands::run(&mut session, &entry, &fixture, true, StepBudget::Unmetered)
-                .expect("run dual package graph")
+            commands::run(
+                &mut session,
+                &entry,
+                &[],
+                &fixture,
+                true,
+                StepBudget::Unmetered,
+            )
+            .expect("run dual package graph")
         };
 
         assert_eq!(output.text, "import require\n");
@@ -667,6 +702,7 @@ server.listen(0, "127.0.0.1", () => {
             .run_at_view(
                 source_path,
                 root.to_string_lossy().into_owned(),
+                Vec::new(),
                 true,
                 StepBudget::Unmetered,
                 view,

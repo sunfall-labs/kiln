@@ -307,6 +307,9 @@ static int kiln_c99_process_object(kiln_value *out) {
         status = kiln_c99_define_method(*process, "kill", 4,
                                         kiln_c99_method(KILN_C99_METHOD_PROCESS_KILL));
     if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(*process, "exit", 4,
+                                        kiln_c99_method(KILN_C99_METHOD_PROCESS_EXIT));
+    if (status == KILN_C99_OK)
         status = kiln_c99_put(NULL, *process, "__kilnHostProcessStart", 22,
                               kiln_c99_method(KILN_C99_METHOD_PROCESS_START_RAW), 0, NULL);
     if (status == KILN_C99_OK)

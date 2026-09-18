@@ -42,9 +42,48 @@ export const readlinkSync = unmaterialized("readlinkSync");
 export const realpathSync = unmaterialized("realpathSync");
 export const renameSync = unmaterialized("renameSync");
 export const rmSync = unmaterialized("rmSync");
+export const rmdirSync = unmaterialized("rmdirSync");
 export const statSync = unmaterialized("statSync");
 export const unlinkSync = unmaterialized("unlinkSync");
+export const utimesSync = unmaterialized("utimesSync");
 export const writeFileSync = unmaterialized("writeFileSync");
+
+function makeCallback(syncFn: any) {
+  return (...args: any[]) => {
+    const cb = typeof args[args.length - 1] === "function" ? args.pop() : null;
+    try {
+      const res = syncFn(...args);
+      if (cb) {
+        if (typeof process !== "undefined" && typeof process.nextTick === "function") {
+          process.nextTick(() => cb(null, res));
+        } else {
+          cb(null, res);
+        }
+      }
+      return res;
+    } catch (err) {
+      if (cb) {
+        if (typeof process !== "undefined" && typeof process.nextTick === "function") {
+          process.nextTick(() => cb(err));
+        } else {
+          cb(err);
+        }
+      } else {
+        throw err;
+      }
+    }
+  };
+}
+
+export const rmdir = makeCallback(rmdirSync);
+export const utimes = makeCallback(utimesSync);
+export const mkdir = makeCallback(mkdirSync);
+export const stat = makeCallback(statSync);
+export const lstat = makeCallback(lstatSync);
+export const realpath = makeCallback(realpathSync);
+export const readFile = makeCallback(readFileSync);
+export const writeFile = makeCallback(writeFileSync);
+export const unlink = makeCallback(unlinkSync);
 
 export const promises: any = nativePromises || {
   access: unmaterialized("access"),
@@ -52,6 +91,8 @@ export const promises: any = nativePromises || {
   chmod: unmaterialized("chmod"),
   chown: unmaterialized("chown"),
   copyFile: unmaterialized("copyFile"),
+  cp: unmaterialized("cp"),
+  glob: unmaterialized("glob"),
   link: unmaterialized("link"),
   lstat: unmaterialized("lstat"),
   mkdir: unmaterialized("mkdir"),
@@ -69,6 +110,7 @@ export const promises: any = nativePromises || {
   truncate: unmaterialized("truncate"),
   unlink: unmaterialized("unlink"),
   utimes: unmaterialized("utimes"),
+  watch: unmaterialized("watch"),
   writeFile: unmaterialized("writeFile"),
 };
 
@@ -93,6 +135,7 @@ export const constants = {
   O_SYNC: 1052672,
   O_DSYNC: 4096,
   O_NONBLOCK: 2048,
+  O_SYMLINK: 2097152,
   S_IFMT: 61440,
   S_IFREG: 32768,
   S_IFDIR: 16384,
@@ -168,24 +211,35 @@ const fsNamespace = {
   fstatSync,
   glob,
   globSync,
+  lstat,
   lstatSync,
+  mkdir,
   mkdirSync,
   mkdtempSync,
   openSync,
   promises,
+  readFile,
   readFileSync,
   readSync,
   readdirSync,
   readlinkSync,
+  realpath,
   realpathSync,
   renameSync,
   rmSync,
+  rmdir,
+  rmdirSync,
+  stat,
   statSync,
   truncateSync,
+  unlink,
   unlinkSync,
   unwatchFile,
+  utimes,
+  utimesSync,
   watch,
   watchFile,
+  writeFile,
   writeFileSync,
   writeSync,
 };

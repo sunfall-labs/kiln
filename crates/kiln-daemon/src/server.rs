@@ -735,10 +735,11 @@ fn handle<E: QueryEngine>(
         Request::Run {
             path,
             project_root,
+            args,
             node,
             steps,
             source_view,
-        } => handle_run(state, path, project_root, node, steps, source_view),
+        } => handle_run(state, path, project_root, args, node, steps, source_view),
         Request::Test {
             root,
             mode,
@@ -762,11 +763,11 @@ fn handle<E: QueryEngine>(
         Request::NativeBuild {
             path,
             project_root,
-            node,
             output,
             profile,
-            source_view,
+            node,
             explain,
+            source_view,
             static_link,
             pgo_generate,
             pgo_use,
@@ -843,6 +844,7 @@ fn handle<E: QueryEngine>(
         Request::NativeRun {
             path,
             project_root,
+            args: _,
             profile,
             node,
             source_view,
@@ -913,6 +915,7 @@ fn handle_run<E: QueryEngine>(
     state: &Mutex<DaemonState<E>>,
     path: String,
     project_root: String,
+    args: Vec<String>,
     node: bool,
     steps: StepBudget,
     source_view: SourceView,
@@ -954,6 +957,7 @@ fn handle_run<E: QueryEngine>(
                         graph_cache,
                         source_view,
                         path,
+                        args,
                         file,
                         project_root,
                         entry,
@@ -966,6 +970,7 @@ fn handle_run<E: QueryEngine>(
                     &mut guard.engine,
                     None,
                     path,
+                    args,
                     project_root,
                     resolutions.as_ref(),
                     node,
@@ -1001,11 +1006,13 @@ fn handle_run<E: QueryEngine>(
         RunPlan::Graph(GraphRunPlan::Cached {
             graph,
             path,
+            args,
             file,
             revision,
         }) => PreparedRun::Graph {
             graph: Ok(graph),
             path,
+            args,
             file,
             revision,
         },
@@ -1014,6 +1021,7 @@ fn handle_run<E: QueryEngine>(
             key,
             stale,
             path,
+            args,
             file,
             revision,
         }) => {
@@ -1053,6 +1061,7 @@ fn handle_run<E: QueryEngine>(
                     PreparedRun::Graph {
                         graph: Ok(graph),
                         path,
+                        args,
                         file,
                         revision,
                     }
@@ -1064,6 +1073,7 @@ fn handle_run<E: QueryEngine>(
                     PreparedRun::Graph {
                         graph: Err(error),
                         path,
+                        args,
                         file,
                         revision,
                     }

@@ -22,6 +22,8 @@ export const appendFile = unmaterialized("appendFile");
 export const chmod = unmaterialized("chmod");
 export const chown = unmaterialized("chown");
 export const copyFile = unmaterialized("copyFile");
+export const cp = unmaterialized("cp");
+export const glob = unmaterialized("glob");
 export const link = unmaterialized("link");
 export const lstat = unmaterialized("lstat");
 export const mkdir = unmaterialized("mkdir");
@@ -39,6 +41,7 @@ export const symlink = unmaterialized("symlink");
 export const truncate = unmaterialized("truncate");
 export const unlink = unmaterialized("unlink");
 export const utimes = unmaterialized("utimes");
+export const watch = unmaterialized("watch");
 export const writeFile = unmaterialized("writeFile");
 
 const fsPromisesNamespace = {
@@ -47,7 +50,9 @@ const fsPromisesNamespace = {
   chmod,
   chown,
   copyFile,
+  cp,
   default: undefined as any,
+  glob,
   link,
   lstat,
   mkdir,
@@ -65,6 +70,7 @@ const fsPromisesNamespace = {
   truncate,
   unlink,
   utimes,
+  watch,
   writeFile,
 };
 fsPromisesNamespace.default = fsPromisesNamespace;

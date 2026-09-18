@@ -33,7 +33,7 @@ pub enum StepBudget {
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 31;
+pub const PROTOCOL_VERSION: u32 = 32;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -498,6 +498,8 @@ pub enum Request {
         path: String,
         /// Project root used to resolve this module's explicit relative imports.
         project_root: String,
+        #[serde(default)]
+        args: Vec<String>,
         /// Install the explicit Tokio-owned Node Adapter for this execution.
         node: bool,
         /// How long this execution may run. The client decides, because the answer depends on
@@ -559,6 +561,8 @@ pub enum Request {
     NativeRun {
         path: String,
         project_root: String,
+        #[serde(default)]
+        args: Vec<String>,
         profile: NativeProfile,
         /// Enable the typed Node resolver and native runtime-module materializers.
         node: bool,
@@ -795,6 +799,8 @@ pub struct RunSummary {
     pub path: String,
     pub file: FileId,
     pub succeeded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
     pub stdout: String,
     /// The program's own standard error, verbatim. Separate from `diagnostics`, which are the
     /// engine's words about the program: this is the program's words, and it goes to the caller's
@@ -940,7 +946,7 @@ mod tests {
 
     #[test]
     fn current_protocol_run_step_budget_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 31);
+        assert_eq!(PROTOCOL_VERSION, 32);
 
         let requests = [
             (
@@ -995,6 +1001,7 @@ mod tests {
                 Request::Run {
                     path: "main.mjs".to_owned(),
                     project_root: "/project".to_owned(),
+                    args: Vec::new(),
                     node: true,
                     steps: StepBudget::Limited(1_000_000),
                     source_view: SourceView(12),
@@ -1002,6 +1009,7 @@ mod tests {
                 serde_json::json!({"Run": {
                     "path": "main.mjs",
                     "project_root": "/project",
+                    "args": [],
                     "node": true,
                     "steps": {"Limited": 1_000_000},
                     "source_view": 12

@@ -1721,4 +1721,124 @@ mod tests {
         assert!(notes[0].contains("phantom dependency: 'phantom-pkg'"));
         assert!(notes[1].contains("phantom dependency: '@scoped/phantom'"));
     }
+
+    #[test]
+    fn debug_pi_reachable_dependencies() {
+        let root = Path::new("/Users/alee/Developer/Personal/oss/pi");
+        if !root.exists() {
+            return;
+        }
+        let entry = "/Users/alee/Developer/Personal/oss/pi/packages/coding-agent/src/cli.ts";
+        let mut texts = Vec::new();
+        let handle = std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || {
+                let res = include_reachable_dependencies(root, entry, &mut texts, true);
+                if let Err(e) = &res {
+                    eprintln!("DEBUG_PI REACHABLE ERROR: {:?}", e);
+                }
+                let (resolutions, formats) = res.unwrap();
+                eprintln!(
+                    "DEBUG_PI REACHABLE: resolutions={}, formats={}, texts={}",
+                    resolutions.len(),
+                    formats.len(),
+                    texts.len()
+                );
+                let text_map: HashMap<PathBuf, String> = texts
+                    .into_iter()
+                    .map(|(p, t)| (PathBuf::from(p), t))
+                    .collect();
+
+                let entries = resolutions
+                    .into_iter()
+                    .map(|r| {
+                        (
+                            PathBuf::from(r.importer),
+                            r.specifier,
+                            match r.condition {
+                                kiln_proto::NodeRequestKind::Import => {
+                                    kiln_module_resolver::NodeRequestKind::Import
+                                }
+                                kiln_proto::NodeRequestKind::Require => {
+                                    kiln_module_resolver::NodeRequestKind::Require
+                                }
+                            },
+                            PathBuf::from(r.target),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let formats = formats
+                    .into_iter()
+                    .map(|f| {
+                        (
+                            PathBuf::from(f.path),
+                            match f.format {
+                                kiln_proto::NodeModuleFormat::EsModule => {
+                                    kiln_module_resolver::NodeModuleFormat::EsModule
+                                }
+                                kiln_proto::NodeModuleFormat::CommonJs => {
+                                    kiln_module_resolver::NodeModuleFormat::CommonJs
+                                }
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>();
+
+                let resolver = kiln_module_resolver::PinnedPackageResolver::new_with_node_builtins_requests_and_formats(
+                    root,
+                    entries,
+                    formats,
+                ).unwrap();
+
+                let graph_res = kiln_module_graph::ModuleGraph::build_with_typed_policy(
+                    Path::new(entry),
+                    resolver,
+                    |path, source_kind| {
+                        if source_kind == kiln_module_graph::ModuleSource::Asset {
+                            return Ok(kiln_module_graph::ModulePayload::AssetPath(path.to_path_buf()));
+                        }
+                        let text = text_map.get(path).ok_or_else(|| {
+                            kiln_module_graph::ModuleGraphError::Source {
+                                path: path.to_path_buf(),
+                                message: format!("source is not synchronized: {}", path.display()),
+                            }
+                        })?;
+                        if source_kind == kiln_module_graph::ModuleSource::Json {
+                            let json_text = kiln_data_formats::parse_data_to_json(path, text).map_err(|err| {
+                                kiln_module_graph::ModuleGraphError::Source {
+                                    path: path.to_path_buf(),
+                                    message: err.to_string(),
+                                }
+                            })?;
+                            return Ok(kiln_module_graph::ModulePayload::JsonText(json_text));
+                        }
+                        let path_str = path.to_str().unwrap();
+                        if source_kind == kiln_module_graph::ModuleSource::CommonJs {
+                            let (hir, static_requires) =
+                                frontend_oxc::parse_commonjs_with_requires(path_str, text);
+                            let mut program = kiln_ir::compile_commonjs(&hir).map_err(|diagnostics| {
+                                kiln_module_graph::ModuleGraphError::Compile {
+                                    path: path.to_path_buf(),
+                                    diagnostics,
+                                }
+                            })?;
+                            program.dependencies = static_requires;
+                            return Ok(kiln_module_graph::ModulePayload::Program(program));
+                        }
+                        let hir = frontend_oxc::parse(path_str, text);
+                        let program = kiln_ir::compile_module(&hir).map_err(|diagnostics| {
+                            kiln_module_graph::ModuleGraphError::Compile {
+                                path: path.to_path_buf(),
+                                diagnostics,
+                            }
+                        })?;
+                        Ok(kiln_module_graph::ModulePayload::Program(program))
+                    },
+                );
+                eprintln!("DEBUG_PI GRAPH RESULT: {:?}", graph_res.as_ref().err());
+                assert!(graph_res.is_ok());
+            })
+            .unwrap();
+        handle.join().unwrap();
+    }
 }

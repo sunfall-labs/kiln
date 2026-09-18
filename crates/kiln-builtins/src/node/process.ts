@@ -62,5 +62,29 @@ export async function run(command: string, args: string[] = [], options: any = {
   }
 }
 
-const process: any = { run };
+export function exit(code: number = 0): void {
+  if ((globalThis as any).process && typeof (globalThis as any).process.exit === "function") {
+    (globalThis as any).process.exit(code);
+  }
+}
+
+const process: any = (globalThis as any).process || { run, exit };
+if ((globalThis as any).process) {
+  if (!(globalThis as any).process.run) {
+    (globalThis as any).process.run = run;
+  }
+  if (!(globalThis as any).process.features) {
+    (globalThis as any).process.features = {
+      cached_builtins: true,
+      debug: false,
+      inspector: false,
+      ipv6: true,
+      tls: true,
+      tls_alpn: true,
+      tls_ocsp: true,
+      tls_sni: true,
+      uv: true,
+    };
+  }
+}
 export default process;

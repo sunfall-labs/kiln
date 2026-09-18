@@ -57,8 +57,19 @@ pub(crate) fn os_fact(fact: OsFact) -> Value {
         } else {
             "LE"
         }),
-        OsFact::TmpDir => text("/tmp"),
-        OsFact::HomeDir => text("/"),
+        OsFact::TmpDir => {
+            let tmp = std::env::var("TMPDIR")
+                .or_else(|_| std::env::var("TEMP"))
+                .or_else(|_| std::env::var("TMP"))
+                .unwrap_or_else(|_| "/tmp".to_owned());
+            text(&tmp)
+        }
+        OsFact::HomeDir => {
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .unwrap_or_else(|_| "/".to_owned());
+            text(&home)
+        }
         OsFact::Release => text("0.0.0"),
         OsFact::Version => text("kiln"),
         // One, and truthfully so: the realm has one agent (see `Atomics.wait`), so a library
@@ -86,13 +97,21 @@ pub(crate) fn os_fact(fact: OsFact) -> Value {
             Value::Number(0.0),
             Value::Number(0.0),
         ])),
-        OsFact::UserInfo => ordinary_object([
-            ("uid".to_owned(), Value::Number(-1.0)),
-            ("gid".to_owned(), Value::Number(-1.0)),
-            ("username".to_owned(), text("kiln")),
-            ("homedir".to_owned(), text("/")),
-            ("shell".to_owned(), Value::Null),
-        ]),
+        OsFact::UserInfo => {
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .unwrap_or_else(|_| "/".to_owned());
+            let user = std::env::var("USER")
+                .or_else(|_| std::env::var("USERNAME"))
+                .unwrap_or_else(|_| "kiln".to_owned());
+            ordinary_object([
+                ("uid".to_owned(), Value::Number(-1.0)),
+                ("gid".to_owned(), Value::Number(-1.0)),
+                ("username".to_owned(), text(&user)),
+                ("homedir".to_owned(), text(&home)),
+                ("shell".to_owned(), Value::Null),
+            ])
+        }
     }
 }
 
