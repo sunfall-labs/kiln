@@ -7751,19 +7751,24 @@ fn executable_math_and_array_push_optimizations_execute_correctly() {
 #[test]
 fn executable_native_alu_and_bitwise_operations_execute_correctly() {
     let constants = vec![
-        Constant::Number(12.0f64.to_bits()),         // 0: 12
-        Constant::Number(5.0f64.to_bits()),          // 1: 5
-        Constant::Number(2.0f64.to_bits()),          // 2: 2
-        Constant::Number(1.0f64.to_bits()),          // 3: 1
-        Constant::Number((-16.0f64).to_bits()),      // 4: -16
-        Constant::Number(1073741947.0f64.to_bits()), // 5: expected sum
+        Constant::String("imul".into()),             // 0: "imul"
+        Constant::Number(3.0f64.to_bits()),          // 1: 3
+        Constant::Number(4.0f64.to_bits()),          // 2: 4
+        Constant::Number(5.0f64.to_bits()),          // 3: 5
+        Constant::Number(2.0f64.to_bits()),          // 4: 2
+        Constant::Number(1.0f64.to_bits()),          // 5: 1
+        Constant::Number((-16.0f64).to_bits()),      // 6: -16
+        Constant::Number(1073741947.0f64.to_bits()), // 7: expected sum
     ];
 
     let code = vec![
-        // local 0 = 12, local 1 = 5
-        Instruction::Const(0),
-        Instruction::StoreLocal(0),
+        // local 0 = Math.imul(3, 4) (= 12), local 1 = 5
+        Instruction::LoadBuiltin(kiln_ir::Builtin::Math),
         Instruction::Const(1),
+        Instruction::Const(2),
+        Instruction::CallMethod { name: 0, argc: 2 },
+        Instruction::StoreLocal(0),
+        Instruction::Const(3),
         Instruction::StoreLocal(1),
         // (a & b)
         Instruction::LoadLocal(0),
@@ -7781,17 +7786,17 @@ fn executable_native_alu_and_bitwise_operations_execute_correctly() {
         Instruction::Binary(BinaryOp::Add),
         // + (a << 2)
         Instruction::LoadLocal(0),
-        Instruction::Const(2),
+        Instruction::Const(4),
         Instruction::Binary(BinaryOp::ShiftLeft),
         Instruction::Binary(BinaryOp::Add),
         // + (a >> 1)
         Instruction::LoadLocal(0),
-        Instruction::Const(3),
+        Instruction::Const(5),
         Instruction::Binary(BinaryOp::ShiftRight),
         Instruction::Binary(BinaryOp::Add),
         // + ((-16) >>> 2)
+        Instruction::Const(6),
         Instruction::Const(4),
-        Instruction::Const(2),
         Instruction::Binary(BinaryOp::UnsignedShiftRight),
         Instruction::Binary(BinaryOp::Add),
         // + (a * b)
@@ -7804,7 +7809,7 @@ fn executable_native_alu_and_bitwise_operations_execute_correctly() {
         Instruction::Unary(UnaryOp::BitwiseNot),
         Instruction::Binary(BinaryOp::Add),
         // == 1073741947
-        Instruction::Const(5),
+        Instruction::Const(7),
         Instruction::Binary(BinaryOp::StrictEqual),
         Instruction::Return,
     ];

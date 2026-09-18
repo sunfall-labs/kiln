@@ -2892,6 +2892,7 @@ pub fn build_function_graph(
     }
 
     graph.blocks = basic_blocks;
+    fold_constants(&mut graph);
     fold_undefined_returns(&mut graph);
     eliminate_dead_code(&mut graph);
     let has_suspend = graph
@@ -2904,11 +2905,273 @@ pub fn build_function_graph(
         eliminate_common_subexpressions(&mut graph);
     }
     simplify_trivial_phis(&mut graph);
+    fold_constants(&mut graph);
     fold_undefined_returns(&mut graph);
     eliminate_dead_code(&mut graph);
     compact_value_ids(&mut graph);
     graph.mark_non_escaping_objects(program);
     Ok(graph)
+}
+
+fn to_int32(val: f64) -> i32 {
+    if !val.is_finite() || val == 0.0 {
+        0
+    } else {
+        let rem = val.trunc() % 4294967296.0;
+        rem as i64 as i32
+    }
+}
+
+fn to_uint32(val: f64) -> u32 {
+    to_int32(val) as u32
+}
+
+fn constant_truthy(c: &Constant) -> bool {
+    match c {
+        Constant::Undefined | Constant::Null => false,
+        Constant::Boolean(b) => *b,
+        Constant::Number(bits) => {
+            let f = f64::from_bits(*bits);
+            f != 0.0 && !f.is_nan()
+        }
+        Constant::String(s) => !s.is_empty(),
+        Constant::BigInt(s) => s != "0" && !s.is_empty(),
+    }
+}
+
+fn fold_unary(op: UnaryOp, c: &Constant) -> Option<Constant> {
+    match op {
+        UnaryOp::Not => Some(Constant::Boolean(!constant_truthy(c))),
+        UnaryOp::Void => Some(Constant::Undefined),
+        UnaryOp::Negate => match c {
+            Constant::Number(bits) => {
+                let f = -f64::from_bits(*bits);
+                Some(Constant::Number(f.to_bits()))
+            }
+            _ => None,
+        },
+        UnaryOp::Plus => match c {
+            Constant::Number(bits) => Some(Constant::Number(*bits)),
+            Constant::Boolean(b) => {
+                Some(Constant::Number(if *b { 1.0f64 } else { 0.0f64 }.to_bits()))
+            }
+            Constant::Null => Some(Constant::Number(0.0f64.to_bits())),
+            Constant::Undefined => Some(Constant::Number(f64::NAN.to_bits())),
+            _ => None,
+        },
+        UnaryOp::BitwiseNot => match c {
+            Constant::Number(bits) => {
+                let n = to_int32(f64::from_bits(*bits));
+                Some(Constant::Number(((!n) as f64).to_bits()))
+            }
+            Constant::Boolean(b) => {
+                let n = if *b { 1i32 } else { 0i32 };
+                Some(Constant::Number(((!n) as f64).to_bits()))
+            }
+            Constant::Null | Constant::Undefined => Some(Constant::Number((-1.0f64).to_bits())),
+            _ => None,
+        },
+        UnaryOp::ToNumeric => match c {
+            Constant::Number(bits) => Some(Constant::Number(*bits)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn fold_binary(op: BinaryOp, left: &Constant, right: &Constant) -> Option<Constant> {
+    match op {
+        BinaryOp::Add => match (left, right) {
+            (Constant::Number(a), Constant::Number(b)) => {
+                let val = f64::from_bits(*a) + f64::from_bits(*b);
+                Some(Constant::Number(val.to_bits()))
+            }
+            _ => None,
+        },
+        BinaryOp::Subtract => match (left, right) {
+            (Constant::Number(a), Constant::Number(b)) => {
+                let val = f64::from_bits(*a) - f64::from_bits(*b);
+                Some(Constant::Number(val.to_bits()))
+            }
+            _ => None,
+        },
+        BinaryOp::Multiply => match (left, right) {
+            (Constant::Number(a), Constant::Number(b)) => {
+                let val = f64::from_bits(*a) * f64::from_bits(*b);
+                Some(Constant::Number(val.to_bits()))
+            }
+            _ => None,
+        },
+        BinaryOp::Divide => match (left, right) {
+            (Constant::Number(a), Constant::Number(b)) => {
+                let val = f64::from_bits(*a) / f64::from_bits(*b);
+                Some(Constant::Number(val.to_bits()))
+            }
+            _ => None,
+        },
+        BinaryOp::Remainder => match (left, right) {
+            (Constant::Number(a), Constant::Number(b)) => {
+                let val = f64::from_bits(*a) % f64::from_bits(*b);
+                Some(Constant::Number(val.to_bits()))
+            }
+            _ => None,
+        },
+        BinaryOp::Exponentiate => match (left, right) {
+            (Constant::Number(a), Constant::Number(b)) => {
+                let val = f64::from_bits(*a).powf(f64::from_bits(*b));
+                Some(Constant::Number(val.to_bits()))
+            }
+            _ => None,
+        },
+        BinaryOp::BitwiseAnd => match (left, right) {
+            (Constant::Number(a), Constant::Number(b)) => {
+                let val = (to_int32(f64::from_bits(*a)) & to_int32(f64::from_bits(*b))) as f64;
+                Some(Constant::Number(val.to_bits()))
+            }
+            _ => None,
+        },
+        BinaryOp::BitwiseOr => match (left, right) {
+            (Constant::Number(a), Constant::Number(b)) => {
+                let val = (to_int32(f64::from_bits(*a)) | to_int32(f64::from_bits(*b))) as f64;
+                Some(Constant::Number(val.to_bits()))
+            }
+            _ => None,
+        },
+        BinaryOp::BitwiseXor => match (left, right) {
+            (Constant::Number(a), Constant::Number(b)) => {
+                let val = (to_int32(f64::from_bits(*a)) ^ to_int32(f64::from_bits(*b))) as f64;
+                Some(Constant::Number(val.to_bits()))
+            }
+            _ => None,
+        },
+        BinaryOp::ShiftLeft => match (left, right) {
+            (Constant::Number(a), Constant::Number(b)) => {
+                let shift = to_uint32(f64::from_bits(*b)) & 0x1f;
+                let val = (to_int32(f64::from_bits(*a)) << shift) as f64;
+                Some(Constant::Number(val.to_bits()))
+            }
+            _ => None,
+        },
+        BinaryOp::ShiftRight => match (left, right) {
+            (Constant::Number(a), Constant::Number(b)) => {
+                let shift = to_uint32(f64::from_bits(*b)) & 0x1f;
+                let val = (to_int32(f64::from_bits(*a)) >> shift) as f64;
+                Some(Constant::Number(val.to_bits()))
+            }
+            _ => None,
+        },
+        BinaryOp::UnsignedShiftRight => match (left, right) {
+            (Constant::Number(a), Constant::Number(b)) => {
+                let shift = to_uint32(f64::from_bits(*b)) & 0x1f;
+                let val = (to_uint32(f64::from_bits(*a)) >> shift) as f64;
+                Some(Constant::Number(val.to_bits()))
+            }
+            _ => None,
+        },
+        BinaryOp::StrictEqual => match (left, right) {
+            (Constant::Number(a), Constant::Number(b)) => {
+                let fa = f64::from_bits(*a);
+                let fb = f64::from_bits(*b);
+                Some(Constant::Boolean(fa == fb))
+            }
+            (Constant::Boolean(a), Constant::Boolean(b)) => Some(Constant::Boolean(a == b)),
+            (Constant::Null, Constant::Null) => Some(Constant::Boolean(true)),
+            (Constant::Undefined, Constant::Undefined) => Some(Constant::Boolean(true)),
+            (Constant::Null, Constant::Undefined) | (Constant::Undefined, Constant::Null) => {
+                Some(Constant::Boolean(false))
+            }
+            _ => None,
+        },
+        BinaryOp::StrictNotEqual => match fold_binary(BinaryOp::StrictEqual, left, right) {
+            Some(Constant::Boolean(b)) => Some(Constant::Boolean(!b)),
+            _ => None,
+        },
+        BinaryOp::LessThan => match (left, right) {
+            (Constant::Number(a), Constant::Number(b)) => {
+                let fa = f64::from_bits(*a);
+                let fb = f64::from_bits(*b);
+                Some(Constant::Boolean(fa < fb))
+            }
+            _ => None,
+        },
+        BinaryOp::LessThanOrEqual => match (left, right) {
+            (Constant::Number(a), Constant::Number(b)) => {
+                let fa = f64::from_bits(*a);
+                let fb = f64::from_bits(*b);
+                Some(Constant::Boolean(fa <= fb))
+            }
+            _ => None,
+        },
+        BinaryOp::GreaterThan => match (left, right) {
+            (Constant::Number(a), Constant::Number(b)) => {
+                let fa = f64::from_bits(*a);
+                let fb = f64::from_bits(*b);
+                Some(Constant::Boolean(fa > fb))
+            }
+            _ => None,
+        },
+        BinaryOp::GreaterThanOrEqual => match (left, right) {
+            (Constant::Number(a), Constant::Number(b)) => {
+                let fa = f64::from_bits(*a);
+                let fb = f64::from_bits(*b);
+                Some(Constant::Boolean(fa >= fb))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Constant folding pass over the SSA Value Graph.
+/// Evaluates pure operations with known constant operands and replaces them with `GraphOp::Const`.
+pub fn fold_constants(graph: &mut FunctionGraph) {
+    let mut constants: HashMap<ValueId, Constant> = HashMap::new();
+    loop {
+        let mut changed = false;
+        for block in &mut graph.blocks {
+            for (vid, op) in &mut block.operations {
+                match op {
+                    GraphOp::Const { constant, .. } => {
+                        if !constants.contains_key(vid) {
+                            constants.insert(*vid, constant.clone());
+                        }
+                    }
+                    GraphOp::Unary { op: u_op, value } => {
+                        if let Some(c) = constants.get(value) {
+                            if let Some(folded) = fold_unary(*u_op, c) {
+                                *op = GraphOp::Const {
+                                    index: 0,
+                                    constant: folded.clone(),
+                                };
+                                constants.insert(*vid, folded);
+                                changed = true;
+                            }
+                        }
+                    }
+                    GraphOp::Binary {
+                        op: b_op,
+                        left,
+                        right,
+                    } => {
+                        if let (Some(cl), Some(cr)) = (constants.get(left), constants.get(right)) {
+                            if let Some(folded) = fold_binary(*b_op, cl, cr) {
+                                *op = GraphOp::Const {
+                                    index: 0,
+                                    constant: folded.clone(),
+                                };
+                                constants.insert(*vid, folded);
+                                changed = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
 }
 
 /// Normalize returns of constant `undefined` to `Terminator::Return(None)`, allowing dead
@@ -3469,6 +3732,7 @@ enum CseKey {
     Const(Constant),
     Unary(UnaryOp, ValueId),
     Binary(BinaryOp, ValueId, ValueId),
+    Phi(BlockId, Vec<(BlockId, ValueId)>),
     LoadBuiltin(kiln_ir::Builtin),
     LoadThis,
     LoadNewTarget,
@@ -3542,7 +3806,7 @@ fn remap_graph_operands(graph: &mut FunctionGraph, map: impl Fn(ValueId) -> Valu
 
 /// Deduplicate identical pure expressions across dominating basic blocks (Global CSE).
 pub fn eliminate_common_subexpressions(graph: &mut FunctionGraph) {
-    if graph.blocks.len() < 2 {
+    if graph.blocks.is_empty() {
         return;
     }
     let dominators = compute_dominators(graph);
@@ -3562,6 +3826,7 @@ pub fn eliminate_common_subexpressions(graph: &mut FunctionGraph) {
     }
 
     fn to_cse_key(
+        block_id: BlockId,
         op: &GraphOp,
         proven_numbers: &HashSet<ValueId>,
         replacements: &HashMap<ValueId, ValueId>,
@@ -3593,6 +3858,14 @@ pub fn eliminate_common_subexpressions(graph: &mut FunctionGraph) {
                 }
                 Some(CseKey::Binary(*op, l, r))
             }
+            GraphOp::Phi { inputs } => {
+                let mut resolved_inputs: Vec<(BlockId, ValueId)> = inputs
+                    .iter()
+                    .map(|(b, v)| (*b, resolve_alias(replacements, *v)))
+                    .collect();
+                resolved_inputs.sort_by_key(|(b, _)| b.0);
+                Some(CseKey::Phi(block_id, resolved_inputs))
+            }
             GraphOp::LoadBuiltin(b) => Some(CseKey::LoadBuiltin(*b)),
             GraphOp::LoadThis => Some(CseKey::LoadThis),
             GraphOp::LoadNewTarget => Some(CseKey::LoadNewTarget),
@@ -3617,7 +3890,7 @@ pub fn eliminate_common_subexpressions(graph: &mut FunctionGraph) {
         let checkpoint = history.len();
         if let Some(block) = graph.block(block_id) {
             for (vid, op) in &block.operations {
-                if let Some(key) = to_cse_key(op, proven_numbers, replacements) {
+                if let Some(key) = to_cse_key(block_id, op, proven_numbers, replacements) {
                     if let Some(&existing_vid) = available.get(&key) {
                         replacements.insert(*vid, existing_vid);
                         ops_to_remove.insert(*vid);
@@ -5715,5 +5988,542 @@ mod dead_phi_tests {
 
         eliminate_dead_code(&mut graph);
         assert!(graph.blocks[0].operations.is_empty());
+    }
+
+    #[test]
+    fn eliminate_common_subexpressions_works_in_single_block() {
+        let mut graph = FunctionGraph::new(None, 0, 0);
+        graph.next_value_id = 10;
+        graph.blocks = vec![BasicBlock {
+            id: BlockId(0),
+            operations: vec![
+                (
+                    ValueId(0),
+                    GraphOp::Const {
+                        index: 0,
+                        constant: Constant::Number(10),
+                    },
+                ),
+                (
+                    ValueId(1),
+                    GraphOp::Const {
+                        index: 1,
+                        constant: Constant::Number(20),
+                    },
+                ),
+                (
+                    ValueId(2),
+                    GraphOp::Binary {
+                        op: BinaryOp::Add,
+                        left: ValueId(0),
+                        right: ValueId(1),
+                    },
+                ),
+                (
+                    ValueId(3),
+                    GraphOp::Binary {
+                        op: BinaryOp::Add,
+                        left: ValueId(1),
+                        right: ValueId(0),
+                    },
+                ),
+                (
+                    ValueId(4),
+                    GraphOp::Binary {
+                        op: BinaryOp::Multiply,
+                        left: ValueId(3),
+                        right: ValueId(2),
+                    },
+                ),
+            ],
+            terminator: Terminator::Return(Some(ValueId(4))),
+            predecessors: vec![],
+            successors: vec![],
+            exception_handler: None,
+        }];
+
+        eliminate_common_subexpressions(&mut graph);
+
+        let block0 = graph.block(BlockId(0)).unwrap();
+        // v3 should have been eliminated
+        assert!(
+            !block0.operations.iter().any(|(v, _)| *v == ValueId(3)),
+            "v3 should be eliminated in a single-block function"
+        );
+        // v4 should now be v2 * v2
+        let v4_op = block0
+            .operations
+            .iter()
+            .find(|(v, _)| *v == ValueId(4))
+            .map(|(_, op)| op)
+            .unwrap();
+        assert_eq!(
+            v4_op,
+            &GraphOp::Binary {
+                op: BinaryOp::Multiply,
+                left: ValueId(2),
+                right: ValueId(2),
+            }
+        );
+    }
+
+    #[test]
+    fn eliminate_common_subexpressions_deduplicates_identical_phis() {
+        let mut graph = FunctionGraph::new(None, 0, 0);
+        graph.next_value_id = 10;
+        graph.blocks = vec![
+            BasicBlock {
+                id: BlockId(0),
+                operations: vec![
+                    (
+                        ValueId(0),
+                        GraphOp::Const {
+                            index: 0,
+                            constant: Constant::Number(1),
+                        },
+                    ),
+                    (
+                        ValueId(1),
+                        GraphOp::Const {
+                            index: 1,
+                            constant: Constant::Number(2),
+                        },
+                    ),
+                ],
+                terminator: Terminator::Branch {
+                    condition: ValueId(0),
+                    true_block: BlockId(1),
+                    false_block: BlockId(2),
+                },
+                predecessors: vec![],
+                successors: vec![BlockId(1), BlockId(2)],
+                exception_handler: None,
+            },
+            BasicBlock {
+                id: BlockId(1),
+                operations: vec![],
+                terminator: Terminator::Jump(BlockId(3)),
+                predecessors: vec![BlockId(0)],
+                successors: vec![BlockId(3)],
+                exception_handler: None,
+            },
+            BasicBlock {
+                id: BlockId(2),
+                operations: vec![],
+                terminator: Terminator::Jump(BlockId(3)),
+                predecessors: vec![BlockId(0)],
+                successors: vec![BlockId(3)],
+                exception_handler: None,
+            },
+            // Merge block 3 with two identical Phis:
+            // v2 = Phi([(BlockId(1), ValueId(0)), (BlockId(2), ValueId(1))])
+            // v3 = Phi([(BlockId(1), ValueId(0)), (BlockId(2), ValueId(1))])
+            // v4 = v2 + v3
+            BasicBlock {
+                id: BlockId(3),
+                operations: vec![
+                    (
+                        ValueId(2),
+                        GraphOp::Phi {
+                            inputs: vec![(BlockId(1), ValueId(0)), (BlockId(2), ValueId(1))],
+                        },
+                    ),
+                    (
+                        ValueId(3),
+                        GraphOp::Phi {
+                            inputs: vec![(BlockId(1), ValueId(0)), (BlockId(2), ValueId(1))],
+                        },
+                    ),
+                    (
+                        ValueId(4),
+                        GraphOp::Binary {
+                            op: BinaryOp::Add,
+                            left: ValueId(2),
+                            right: ValueId(3),
+                        },
+                    ),
+                ],
+                terminator: Terminator::Return(Some(ValueId(4))),
+                predecessors: vec![BlockId(1), BlockId(2)],
+                successors: vec![],
+                exception_handler: None,
+            },
+        ];
+
+        eliminate_common_subexpressions(&mut graph);
+
+        let block3 = graph.block(BlockId(3)).unwrap();
+        // v3 must be eliminated
+        assert!(
+            !block3.operations.iter().any(|(v, _)| *v == ValueId(3)),
+            "identical Phi v3 must be eliminated"
+        );
+        // v4 should now be v2 + v2
+        let v4_op = block3
+            .operations
+            .iter()
+            .find(|(v, _)| *v == ValueId(4))
+            .map(|(_, op)| op)
+            .unwrap();
+        assert_eq!(
+            v4_op,
+            &GraphOp::Binary {
+                op: BinaryOp::Add,
+                left: ValueId(2),
+                right: ValueId(2),
+            }
+        );
+    }
+
+    #[test]
+    fn fold_constants_evaluates_chained_arithmetic_and_comparisons() {
+        let mut graph = FunctionGraph::new(None, 0, 0);
+        graph.next_value_id = 20;
+        graph.blocks = vec![BasicBlock {
+            id: BlockId(0),
+            operations: vec![
+                (
+                    ValueId(0),
+                    GraphOp::Const {
+                        index: 0,
+                        constant: Constant::Number(10.0f64.to_bits()),
+                    },
+                ),
+                (
+                    ValueId(1),
+                    GraphOp::Const {
+                        index: 1,
+                        constant: Constant::Number(20.0f64.to_bits()),
+                    },
+                ),
+                (
+                    ValueId(2),
+                    GraphOp::Const {
+                        index: 2,
+                        constant: Constant::Number(2.0f64.to_bits()),
+                    },
+                ),
+                // v3 = 10 + 20 (= 30)
+                (
+                    ValueId(3),
+                    GraphOp::Binary {
+                        op: BinaryOp::Add,
+                        left: ValueId(0),
+                        right: ValueId(1),
+                    },
+                ),
+                // v4 = v3 * 2 (= 60)
+                (
+                    ValueId(4),
+                    GraphOp::Binary {
+                        op: BinaryOp::Multiply,
+                        left: ValueId(3),
+                        right: ValueId(2),
+                    },
+                ),
+                // v5 = v4 - 10 (= 50)
+                (
+                    ValueId(5),
+                    GraphOp::Binary {
+                        op: BinaryOp::Subtract,
+                        left: ValueId(4),
+                        right: ValueId(0),
+                    },
+                ),
+                // v6 = -v5 (= -50)
+                (
+                    ValueId(6),
+                    GraphOp::Unary {
+                        op: UnaryOp::Negate,
+                        value: ValueId(5),
+                    },
+                ),
+                // v7 = v6 < 0 (= true)
+                (
+                    ValueId(7),
+                    GraphOp::Binary {
+                        op: BinaryOp::LessThan,
+                        left: ValueId(6),
+                        right: ValueId(0),
+                    },
+                ),
+                // v8 = !v7 (= false)
+                (
+                    ValueId(8),
+                    GraphOp::Unary {
+                        op: UnaryOp::Not,
+                        value: ValueId(7),
+                    },
+                ),
+            ],
+            terminator: Terminator::Return(Some(ValueId(8))),
+            predecessors: vec![],
+            successors: vec![],
+            exception_handler: None,
+        }];
+
+        fold_constants(&mut graph);
+
+        let block0 = graph.block(BlockId(0)).unwrap();
+        // Check v3 folded to 30
+        match &block0
+            .operations
+            .iter()
+            .find(|(v, _)| *v == ValueId(3))
+            .unwrap()
+            .1
+        {
+            GraphOp::Const {
+                constant: Constant::Number(bits),
+                ..
+            } => {
+                assert_eq!(f64::from_bits(*bits), 30.0);
+            }
+            _other => panic!("expected Const 30"),
+        }
+        // Check v4 folded to 60
+        match &block0
+            .operations
+            .iter()
+            .find(|(v, _)| *v == ValueId(4))
+            .unwrap()
+            .1
+        {
+            GraphOp::Const {
+                constant: Constant::Number(bits),
+                ..
+            } => {
+                assert_eq!(f64::from_bits(*bits), 60.0);
+            }
+            _other => panic!("expected Const 60"),
+        }
+        // Check v5 folded to 50
+        match &block0
+            .operations
+            .iter()
+            .find(|(v, _)| *v == ValueId(5))
+            .unwrap()
+            .1
+        {
+            GraphOp::Const {
+                constant: Constant::Number(bits),
+                ..
+            } => {
+                assert_eq!(f64::from_bits(*bits), 50.0);
+            }
+            _other => panic!("expected Const 50"),
+        }
+        // Check v6 folded to -50
+        match &block0
+            .operations
+            .iter()
+            .find(|(v, _)| *v == ValueId(6))
+            .unwrap()
+            .1
+        {
+            GraphOp::Const {
+                constant: Constant::Number(bits),
+                ..
+            } => {
+                assert_eq!(f64::from_bits(*bits), -50.0);
+            }
+            _other => panic!("expected Const -50"),
+        }
+        // Check v7 folded to Boolean(true)
+        match &block0
+            .operations
+            .iter()
+            .find(|(v, _)| *v == ValueId(7))
+            .unwrap()
+            .1
+        {
+            GraphOp::Const {
+                constant: Constant::Boolean(b),
+                ..
+            } => {
+                assert_eq!(*b, true);
+            }
+            _other => panic!("expected Const true"),
+        }
+        // Check v8 folded to Boolean(false)
+        match &block0
+            .operations
+            .iter()
+            .find(|(v, _)| *v == ValueId(8))
+            .unwrap()
+            .1
+        {
+            GraphOp::Const {
+                constant: Constant::Boolean(b),
+                ..
+            } => {
+                assert_eq!(*b, false);
+            }
+            _other => panic!("expected Const false"),
+        }
+    }
+
+    #[test]
+    fn fold_constants_bitwise_and_division() {
+        let mut graph = FunctionGraph::new(None, 0, 0);
+        graph.next_value_id = 20;
+        graph.blocks = vec![BasicBlock {
+            id: BlockId(0),
+            operations: vec![
+                (
+                    ValueId(0),
+                    GraphOp::Const {
+                        index: 0,
+                        constant: Constant::Number(12.0f64.to_bits()),
+                    },
+                ),
+                (
+                    ValueId(1),
+                    GraphOp::Const {
+                        index: 1,
+                        constant: Constant::Number(5.0f64.to_bits()),
+                    },
+                ),
+                (
+                    ValueId(2),
+                    GraphOp::Const {
+                        index: 2,
+                        constant: Constant::Number(0.0f64.to_bits()),
+                    },
+                ),
+                // v3 = 12 & 5 (= 4)
+                (
+                    ValueId(3),
+                    GraphOp::Binary {
+                        op: BinaryOp::BitwiseAnd,
+                        left: ValueId(0),
+                        right: ValueId(1),
+                    },
+                ),
+                // v4 = 12 | 5 (= 13)
+                (
+                    ValueId(4),
+                    GraphOp::Binary {
+                        op: BinaryOp::BitwiseOr,
+                        left: ValueId(0),
+                        right: ValueId(1),
+                    },
+                ),
+                // v5 = 12 ^ 5 (= 9)
+                (
+                    ValueId(5),
+                    GraphOp::Binary {
+                        op: BinaryOp::BitwiseXor,
+                        left: ValueId(0),
+                        right: ValueId(1),
+                    },
+                ),
+                // v6 = ~12 (= -13)
+                (
+                    ValueId(6),
+                    GraphOp::Unary {
+                        op: UnaryOp::BitwiseNot,
+                        value: ValueId(0),
+                    },
+                ),
+                // v7 = 12 / 0 (= Infinity)
+                (
+                    ValueId(7),
+                    GraphOp::Binary {
+                        op: BinaryOp::Divide,
+                        left: ValueId(0),
+                        right: ValueId(2),
+                    },
+                ),
+            ],
+            terminator: Terminator::Return(None),
+            predecessors: vec![],
+            successors: vec![],
+            exception_handler: None,
+        }];
+
+        fold_constants(&mut graph);
+
+        let block0 = graph.block(BlockId(0)).unwrap();
+        // Check v3 folded to 4
+        match &block0
+            .operations
+            .iter()
+            .find(|(v, _)| *v == ValueId(3))
+            .unwrap()
+            .1
+        {
+            GraphOp::Const {
+                constant: Constant::Number(bits),
+                ..
+            } => {
+                assert_eq!(f64::from_bits(*bits), 4.0);
+            }
+            _other => panic!("expected Const 4"),
+        }
+        // Check v4 folded to 13
+        match &block0
+            .operations
+            .iter()
+            .find(|(v, _)| *v == ValueId(4))
+            .unwrap()
+            .1
+        {
+            GraphOp::Const {
+                constant: Constant::Number(bits),
+                ..
+            } => {
+                assert_eq!(f64::from_bits(*bits), 13.0);
+            }
+            _other => panic!("expected Const 13"),
+        }
+        // Check v5 folded to 9
+        match &block0
+            .operations
+            .iter()
+            .find(|(v, _)| *v == ValueId(5))
+            .unwrap()
+            .1
+        {
+            GraphOp::Const {
+                constant: Constant::Number(bits),
+                ..
+            } => {
+                assert_eq!(f64::from_bits(*bits), 9.0);
+            }
+            _other => panic!("expected Const 9"),
+        }
+        // Check v6 folded to -13
+        match &block0
+            .operations
+            .iter()
+            .find(|(v, _)| *v == ValueId(6))
+            .unwrap()
+            .1
+        {
+            GraphOp::Const {
+                constant: Constant::Number(bits),
+                ..
+            } => {
+                assert_eq!(f64::from_bits(*bits), -13.0);
+            }
+            _other => panic!("expected Const -13"),
+        }
+        // Check v7 folded to Infinity
+        match &block0
+            .operations
+            .iter()
+            .find(|(v, _)| *v == ValueId(7))
+            .unwrap()
+            .1
+        {
+            GraphOp::Const {
+                constant: Constant::Number(bits),
+                ..
+            } => {
+                assert!(f64::from_bits(*bits).is_infinite());
+            }
+            _other => panic!("expected Const Infinity"),
+        }
     }
 }
