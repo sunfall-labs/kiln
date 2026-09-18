@@ -1,5 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 1023
 expression: body(&unit)
 ---
 /* Program hash: dc6fca6fab230176; bytecode version: 6. */
@@ -10,9 +11,7 @@ int kiln_module_dc6fca6fab23017614e1054ea9bcc72d(kiln_host *host, kiln_value *re
     (void)kiln_realm_gc_register_roots(kiln_module_dc6fca6fab23017614e1054ea9bcc72d_gc_roots, NULL, 0);
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
-    kiln_val v0 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
-    v0 = KILN_VAL_UNDEFINED;
-    *result = kiln_val_to_boundary(v0);
+    *result = kiln_c99_undefined();
     return KILN_C99_OK;
 }

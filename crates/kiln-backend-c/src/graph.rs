@@ -1803,18 +1803,10 @@ pub fn build_function_graph(
     let code = &proto.code;
     if code.is_empty() {
         let block_id = BlockId(0);
-        let ret_val = graph.alloc_value();
-        let ops = vec![(
-            ret_val,
-            GraphOp::Const {
-                index: 0,
-                constant: Constant::Undefined,
-            },
-        )];
         graph.blocks.push(BasicBlock {
             id: block_id,
-            operations: ops,
-            terminator: Terminator::Return(Some(ret_val)),
+            operations: Vec::new(),
+            terminator: Terminator::Return(None),
             predecessors: Vec::new(),
             successors: Vec::new(),
             exception_handler: None,
@@ -2892,6 +2884,7 @@ pub fn build_function_graph(
     }
 
     graph.blocks = basic_blocks;
+    fold_undefined_returns(&mut graph);
     eliminate_dead_code(&mut graph);
     let has_suspend = graph
         .blocks
@@ -2903,10 +2896,38 @@ pub fn build_function_graph(
         eliminate_common_subexpressions(&mut graph);
     }
     simplify_trivial_phis(&mut graph);
+    fold_undefined_returns(&mut graph);
     eliminate_dead_code(&mut graph);
     compact_value_ids(&mut graph);
     graph.mark_non_escaping_objects(program);
     Ok(graph)
+}
+
+/// Normalize returns of constant `undefined` to `Terminator::Return(None)`, allowing dead
+/// constant definitions to be eliminated and direct undefined return pathways to be emitted.
+pub fn fold_undefined_returns(graph: &mut FunctionGraph) {
+    let mut undefined_values = HashSet::new();
+    for block in &graph.blocks {
+        for (vid, op) in &block.operations {
+            if let GraphOp::Const {
+                constant: Constant::Undefined,
+                ..
+            } = op
+            {
+                undefined_values.insert(*vid);
+            }
+        }
+    }
+    if undefined_values.is_empty() {
+        return;
+    }
+    for block in &mut graph.blocks {
+        if let Terminator::Return(Some(vid)) = &block.terminator
+            && undefined_values.contains(vid)
+        {
+            block.terminator = Terminator::Return(None);
+        }
+    }
 }
 
 /// Alias for dead code elimination preserving existing test entry points.
@@ -5660,5 +5681,31 @@ mod dead_phi_tests {
         assert!(block1.operations.iter().any(|(v, _)| *v == ValueId(2)));
         let block2 = graph.block(BlockId(2)).unwrap();
         assert!(block2.operations.iter().any(|(v, _)| *v == ValueId(3)));
+    }
+
+    #[test]
+    fn fold_undefined_returns_simplifies_terminator_and_dce_prunes_const() {
+        let mut graph = FunctionGraph::new(None, 0, 0);
+        graph.next_value_id = 2;
+        graph.blocks = vec![BasicBlock {
+            id: BlockId(0),
+            operations: vec![(
+                ValueId(0),
+                GraphOp::Const {
+                    index: 0,
+                    constant: Constant::Undefined,
+                },
+            )],
+            terminator: Terminator::Return(Some(ValueId(0))),
+            predecessors: vec![],
+            successors: vec![],
+            exception_handler: None,
+        }];
+
+        fold_undefined_returns(&mut graph);
+        assert_eq!(graph.blocks[0].terminator, Terminator::Return(None));
+
+        eliminate_dead_code(&mut graph);
+        assert!(graph.blocks[0].operations.is_empty());
     }
 }
