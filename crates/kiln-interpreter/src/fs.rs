@@ -153,6 +153,13 @@ pub(crate) fn property(prop: &str) -> Option<Value> {
         "rmdirSync" => Some(Value::Native(Native::NodeFsRmdirSync, RealmId::PRIMARY)),
         "utimesSync" => Some(Value::Native(Native::NodeFsUtimesSync, RealmId::PRIMARY)),
         "readSync" => Some(Value::Native(Native::NodeFsSync, RealmId::PRIMARY)),
+        "writeSync" => Some(Value::Native(Native::NodeFsWriteSync, RealmId::PRIMARY)),
+        "ftruncateSync" | "truncateSync" => {
+            Some(Value::Native(Native::NodeFsFtruncateSync, RealmId::PRIMARY))
+        }
+        "fsyncSync" | "fdatasyncSync" => {
+            Some(Value::Native(Native::NodeFsFsyncSync, RealmId::PRIMARY))
+        }
         "constants" => Some(constants_object()),
         "promises" => Some(Value::Native(Native::NodeFsPromises, RealmId::PRIMARY)),
         "default" => Some(Value::Native(Native::NodeFs, RealmId::PRIMARY)),
@@ -229,6 +236,9 @@ pub(crate) const fn js_name(native: Native) -> Option<&'static str> {
         Native::NodeStatIsDirectory => Some("isDirectory"),
         Native::NodeStatIsSymbolicLink => Some("isSymbolicLink"),
         Native::NodeFsSync => Some("readSync"),
+        Native::NodeFsWriteSync => Some("writeSync"),
+        Native::NodeFsFtruncateSync => Some("ftruncateSync"),
+        Native::NodeFsFsyncSync => Some("fsyncSync"),
         _ => None,
     }
 }
@@ -944,6 +954,184 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
 
             Ok(Value::Number(bytes_read as f64))
         }
+        Native::NodeFsWriteSync => {
+            let fd = arguments.first().map_or(0.0, Value::as_number) as u32;
+            let (to_write_bytes, position) = match arguments.get(1) {
+                Some(Value::String(s)) => {
+                    let bytes = s.to_lossy_string().into_bytes();
+                    let pos = match arguments.get(2) {
+                        Some(Value::Number(n)) if *n >= 0.0 => Some(*n as u64),
+                        _ => None,
+                    };
+                    (bytes, pos)
+                }
+                Some(Value::TypedArray(view)) => {
+                    let view_len = view.bytes().len();
+                    let offset = arguments.get(2).map_or(0.0, Value::as_number).max(0.0) as usize;
+                    let default_len = view_len.saturating_sub(offset);
+                    let length = arguments
+                        .get(3)
+                        .map_or(default_len as f64, Value::as_number)
+                        .max(0.0) as usize;
+                    let pos = match arguments.get(4) {
+                        Some(Value::Number(n)) if *n >= 0.0 => Some(*n as u64),
+                        _ => None,
+                    };
+                    if offset > view_len {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: "offset is out of bounds".to_owned(),
+                        });
+                    }
+                    let max_write = (view_len - offset).min(length);
+                    let bytes = view.bytes()[offset..offset + max_write].to_vec();
+                    (bytes, pos)
+                }
+                other => {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: format!(
+                            "The \"buffer\" argument must be an instance of Buffer or TypedArray, or a string, received {}",
+                            other.map_or("undefined", Value::type_name)
+                        ),
+                    });
+                }
+            };
+
+            let vfile = match vm.fd_table.get_mut(fd) {
+                Some(f) => f,
+                None => {
+                    let err = std::io::Error::from_raw_os_error(9);
+                    return Err(throw_node_error(vm, "write", None, err));
+                }
+            };
+
+            let bytes_written = match vfile {
+                VirtualFile::Memory {
+                    path,
+                    data,
+                    cursor,
+                    writable,
+                    append,
+                    ..
+                } => {
+                    if !*writable {
+                        let err = std::io::Error::from_raw_os_error(9);
+                        return Err(throw_node_error(vm, "write", None, err));
+                    }
+                    let write_pos = if *append {
+                        data.len()
+                    } else if let Some(pos) = position {
+                        pos as usize
+                    } else {
+                        *cursor
+                    };
+                    let needed = write_pos + to_write_bytes.len();
+                    if needed > data.len() {
+                        data.resize(needed, 0);
+                    }
+                    data[write_pos..needed].copy_from_slice(&to_write_bytes);
+                    if position.is_none() {
+                        *cursor = needed;
+                    }
+                    let data_clone = data.clone();
+                    let path_clone = path.clone();
+                    let _ = with_fs(vm, |fs| {
+                        fs.write(std::path::Path::new(&path_clone), &data_clone)
+                    });
+                    to_write_bytes.len()
+                }
+                VirtualFile::Os { file, .. } => {
+                    use std::io::{Seek, SeekFrom, Write};
+                    if let Some(pos) = position {
+                        if let Err(err) = file.seek(SeekFrom::Start(pos)) {
+                            return Err(throw_node_error(vm, "write", None, err));
+                        }
+                    }
+                    match file.write(&to_write_bytes) {
+                        Ok(n) => n,
+                        Err(err) => return Err(throw_node_error(vm, "write", None, err)),
+                    }
+                }
+            };
+
+            Ok(Value::Number(bytes_written as f64))
+        }
+        Native::NodeFsFtruncateSync => {
+            let fd = arguments.first().map_or(0.0, Value::as_number) as u32;
+            let len = arguments.get(1).map_or(0.0, Value::as_number).max(0.0) as usize;
+
+            let vfile = match vm.fd_table.get_mut(fd) {
+                Some(f) => f,
+                None => {
+                    let err = std::io::Error::from_raw_os_error(9);
+                    return Err(throw_node_error(vm, "ftruncate", None, err));
+                }
+            };
+
+            match vfile {
+                VirtualFile::Memory {
+                    path,
+                    data,
+                    cursor,
+                    writable,
+                    ..
+                } => {
+                    if !*writable {
+                        let err = std::io::Error::from_raw_os_error(9);
+                        return Err(throw_node_error(vm, "ftruncate", None, err));
+                    }
+                    data.resize(len, 0);
+                    if *cursor > len {
+                        *cursor = len;
+                    }
+                    let data_clone = data.clone();
+                    let path_clone = path.clone();
+                    let _ = with_fs(vm, |fs| {
+                        fs.write(std::path::Path::new(&path_clone), &data_clone)
+                    });
+                }
+                VirtualFile::Os { file, .. } => {
+                    if let Err(err) = file.set_len(len as u64) {
+                        return Err(throw_node_error(vm, "ftruncate", None, err));
+                    }
+                }
+            }
+
+            Ok(Value::Undefined)
+        }
+        Native::NodeFsFsyncSync => {
+            let fd = arguments.first().map_or(0.0, Value::as_number) as u32;
+            let vfile = match vm.fd_table.get_mut(fd) {
+                Some(f) => f,
+                None => {
+                    let err = std::io::Error::from_raw_os_error(9);
+                    return Err(throw_node_error(vm, "fsync", None, err));
+                }
+            };
+
+            match vfile {
+                VirtualFile::Memory {
+                    path,
+                    data,
+                    writable,
+                    ..
+                } => {
+                    if *writable {
+                        let data_clone = data.clone();
+                        let path_clone = path.clone();
+                        let _ = with_fs(vm, |fs| {
+                            fs.write(std::path::Path::new(&path_clone), &data_clone)
+                        });
+                    }
+                }
+                VirtualFile::Os { file, .. } => {
+                    if let Err(err) = file.sync_all() {
+                        return Err(throw_node_error(vm, "fsync", None, err));
+                    }
+                }
+            }
+
+            Ok(Value::Undefined)
+        }
         _ => Err(ExecutionError::TypeErrorMessage {
             message: "unsupported synchronous fs operation".to_owned(),
         }),
@@ -1240,5 +1428,163 @@ mod tests {
         assert!(matches!(close_res, Value::Undefined));
 
         let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn test_node_fs_sync_write_truncate_sync_lifecycle() {
+        let mut files = HashMap::new();
+        let test_path = PathBuf::from("/vfs/written.txt");
+        files.insert(test_path.clone(), Vec::new());
+
+        let overlay = OverlayFileSystem::new(kiln_host_abi::OsFileSystem, files);
+        let mut host = VfsTestHost { fs: overlay };
+
+        let program = Program {
+            source: "".into(),
+            template_sites: Vec::new(),
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: Vec::new(),
+            local_count: 0,
+            functions: Vec::new(),
+        };
+
+        let mut vm = Vm::with_entropy_seed(
+            Rc::new(program.clone()),
+            Rc::new(crate::Strictness::sloppy(&program)),
+            &mut host,
+            vec![],
+            crate::ExecutionLimits::default(),
+            &crate::RealmCapabilities::default(),
+            crate::ExecutionCapabilities::default(),
+        )
+        .expect("vm init");
+
+        // 1. openSync with 'w+'
+        let open_args = vec![
+            Value::String(test_path.to_string_lossy().into_owned().into()),
+            Value::String("w+".into()),
+        ];
+        let fd_val = dispatch(
+            &mut vm,
+            Native::NodeFsOpenSync,
+            &Value::Undefined,
+            &open_args,
+            0,
+        )
+        .expect("openSync w+ succeeds");
+        let fd = fd_val.as_number() as u32;
+
+        // 2. writeSync string
+        let write_str_args = vec![
+            Value::Number(fd as f64),
+            Value::String("Hello World".to_string().into()),
+        ];
+        let written1 = dispatch(
+            &mut vm,
+            Native::NodeFsWriteSync,
+            &Value::Undefined,
+            &write_str_args,
+            0,
+        )
+        .expect("writeSync string succeeds");
+        assert_eq!(written1.as_number(), 11.0);
+
+        // 3. fstatSync verifies length is 11
+        let fstat_args = vec![Value::Number(fd as f64)];
+        let stat_val = dispatch(
+            &mut vm,
+            Native::NodeFsFstatSync,
+            &Value::Undefined,
+            &fstat_args,
+            0,
+        )
+        .expect("fstatSync succeeds");
+        let Value::Object(stat_obj) = stat_val else {
+            panic!("Object expected");
+        };
+        assert_eq!(stat_obj.borrow().get("size").unwrap().as_number(), 11.0);
+
+        // 4. writeSync buffer appending extra bytes
+        let buf = node_bytes_value(b" extra".to_vec());
+        let write_buf_args = vec![
+            Value::Number(fd as f64),
+            buf,
+            Value::Number(0.0),
+            Value::Number(6.0),
+            Value::Undefined,
+        ];
+        let written2 = dispatch(
+            &mut vm,
+            Native::NodeFsWriteSync,
+            &Value::Undefined,
+            &write_buf_args,
+            0,
+        )
+        .expect("writeSync buffer succeeds");
+        assert_eq!(written2.as_number(), 6.0);
+
+        // 5. ftruncateSync to 5 bytes
+        let trunc_args = vec![Value::Number(fd as f64), Value::Number(5.0)];
+        let trunc_res = dispatch(
+            &mut vm,
+            Native::NodeFsFtruncateSync,
+            &Value::Undefined,
+            &trunc_args,
+            0,
+        )
+        .expect("ftruncateSync succeeds");
+        assert!(matches!(trunc_res, Value::Undefined));
+
+        // 6. readSync to verify content is now exactly "Hello"
+        let read_buf = node_bytes_value(vec![0u8; 10]);
+        let read_args = vec![
+            Value::Number(fd as f64),
+            read_buf.clone(),
+            Value::Number(0.0),
+            Value::Number(10.0),
+            Value::Number(0.0), // explicit position 0
+        ];
+        let n = dispatch(
+            &mut vm,
+            Native::NodeFsSync,
+            &Value::Undefined,
+            &read_args,
+            0,
+        )
+        .expect("readSync after truncate succeeds");
+        assert_eq!(n.as_number(), 5.0);
+        let Value::TypedArray(ta) = &read_buf else {
+            panic!("typed array");
+        };
+        assert_eq!(&ta.buffer.bytes.borrow()[0..5], b"Hello");
+
+        // 7. fsyncSync
+        let sync_args = vec![Value::Number(fd as f64)];
+        let sync_res = dispatch(
+            &mut vm,
+            Native::NodeFsFsyncSync,
+            &Value::Undefined,
+            &sync_args,
+            0,
+        )
+        .expect("fsyncSync succeeds");
+        assert!(matches!(sync_res, Value::Undefined));
+
+        // 8. closeSync
+        let close_args = vec![Value::Number(fd as f64)];
+        let close_res = dispatch(
+            &mut vm,
+            Native::NodeFsCloseSync,
+            &Value::Undefined,
+            &close_args,
+            0,
+        )
+        .expect("closeSync succeeds");
+        assert!(matches!(close_res, Value::Undefined));
+
+        // 9. Check VFS backing has "Hello"
+        let final_bytes = with_fs(&mut vm, |fs| fs.read(&test_path)).expect("vfs read");
+        assert_eq!(final_bytes, b"Hello");
     }
 }

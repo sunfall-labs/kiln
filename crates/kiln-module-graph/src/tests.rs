@@ -2257,6 +2257,52 @@ fn node_builtin_fs_ts_evaluates_and_exports_cleanly() {
 }
 
 #[test]
+fn node_builtin_fs_promises_open_and_file_handle() {
+    let project = TempProject::new();
+    let sample_file = project.write("sample.txt", "hello from handle");
+    let entry = project.write(
+        "main.js",
+        &format!(
+            concat!(
+                "import {{ open, FileHandle }} from 'node:fs/promises';\n",
+                "const handle = await open({:?}, 'r+');\n",
+                "const stat = await handle.stat();\n",
+                "const content = await handle.readFile('utf8');\n",
+                "await handle.truncate(5);\n",
+                "await handle.close();\n",
+                "console.log(typeof FileHandle, typeof handle.fd, stat.size, content);\n",
+            ),
+            sample_file.to_string_lossy()
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build graph with fs/promises open");
+
+    let mut host = TestHost::default();
+    graph
+        .execute(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute fs/promises open");
+    assert_eq!(host.output, ["function number 17 hello from handle"]);
+    let after_trunc = fs::read_to_string(&sample_file).expect("read sample");
+    assert_eq!(after_trunc, "hello");
+}
+
+#[test]
 fn node_builtin_os_ts_evaluates_and_exports_cleanly() {
     let project = TempProject::new();
     let entry = project.write(

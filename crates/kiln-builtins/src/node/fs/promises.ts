@@ -28,7 +28,74 @@ export const link = unmaterialized("link");
 export const lstat = unmaterialized("lstat");
 export const mkdir = unmaterialized("mkdir");
 export const mkdtemp = unmaterialized("mkdtemp");
-export const open = unmaterialized("open");
+
+export class FileHandle {
+  readonly fd: number;
+  constructor(fd: number) {
+    this.fd = fd;
+  }
+  async close(): Promise<void> {
+    const fs = (process as any).__kilnNativeModules?.fs;
+    if (fs && typeof fs.closeSync === "function") {
+      fs.closeSync(this.fd);
+    }
+  }
+  async stat(): Promise<any> {
+    const fs = (process as any).__kilnNativeModules?.fs;
+    if (fs && typeof fs.fstatSync === "function") {
+      return fs.fstatSync(this.fd);
+    }
+  }
+  async readFile(options?: any): Promise<any> {
+    const fs = (process as any).__kilnNativeModules?.fs;
+    const BufferClass = (globalThis as any).Buffer;
+    if (fs && typeof fs.fstatSync === "function" && typeof fs.readSync === "function") {
+      const stats = fs.fstatSync(this.fd);
+      const size = (stats && typeof stats.size === "number") ? stats.size : 0;
+      const buf = BufferClass && typeof BufferClass.alloc === "function" ? BufferClass.alloc(size) : new Uint8Array(size);
+      fs.readSync(this.fd, buf, 0, size, 0);
+      const enc = typeof options === "string" ? options : options?.encoding;
+      if (enc && typeof (buf as any).toString === "function") {
+        return (buf as any).toString(enc);
+      }
+      return buf;
+    }
+  }
+  async writeFile(data: any, options?: any): Promise<void> {
+    const fs = (process as any).__kilnNativeModules?.fs;
+    if (fs && typeof fs.writeSync === "function") {
+      fs.writeSync(this.fd, data);
+    }
+  }
+  async appendFile(data: any, options?: any): Promise<void> {
+    return this.writeFile(data, options);
+  }
+  async truncate(len: number = 0): Promise<void> {
+    const fs = (process as any).__kilnNativeModules?.fs;
+    if (fs && typeof fs.ftruncateSync === "function") {
+      fs.ftruncateSync(this.fd, len);
+    }
+  }
+  async sync(): Promise<void> {
+    const fs = (process as any).__kilnNativeModules?.fs;
+    if (fs && typeof fs.fsyncSync === "function") {
+      fs.fsyncSync(this.fd);
+    }
+  }
+  async datasync(): Promise<void> {
+    return this.sync();
+  }
+}
+
+export async function open(path: string, flags: string = "r", mode?: number): Promise<FileHandle> {
+  const fs = (process as any).__kilnNativeModules?.fs;
+  if (fs && typeof fs.openSync === "function") {
+    const fd = fs.openSync(path, flags, mode);
+    return new FileHandle(fd);
+  }
+  throw new Error("node:fs/promises open requires an FS host capability that this realm does not provide");
+}
+
 export const readdir = unmaterialized("readdir");
 export const readFile = unmaterialized("readFile");
 export const readlink = unmaterialized("readlink");
@@ -45,6 +112,7 @@ export const watch = unmaterialized("watch");
 export const writeFile = unmaterialized("writeFile");
 
 const fsPromisesNamespace = {
+  FileHandle,
   access,
   appendFile,
   chmod,

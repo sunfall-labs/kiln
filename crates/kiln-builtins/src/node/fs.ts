@@ -162,6 +162,9 @@ export const createReadStream = unmaterialized("createReadStream");
 export const createWriteStream = unmaterialized("createWriteStream");
 export const fstatSync = unmaterialized("fstatSync");
 export const glob = unmaterialized("glob");
+export const fdatasyncSync = unmaterialized("fdatasyncSync");
+export const fsyncSync = unmaterialized("fsyncSync");
+export const ftruncateSync = unmaterialized("ftruncateSync");
 export const globSync = unmaterialized("globSync");
 export const mkdtempSync = unmaterialized("mkdtempSync");
 export const truncateSync = unmaterialized("truncateSync");
@@ -208,7 +211,10 @@ const fsNamespace = {
   createWriteStream,
   default: undefined as any,
   existsSync,
+  fdatasyncSync,
   fstatSync,
+  fsyncSync,
+  ftruncateSync,
   glob,
   globSync,
   lstat,

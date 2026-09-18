@@ -15575,7 +15575,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | Native::NodeFsReadlinkSync
             | Native::NodeFsRmdirSync
             | Native::NodeFsUtimesSync
-            | Native::NodeFsSync => {
+            | Native::NodeFsSync
+            | Native::NodeFsWriteSync
+            | Native::NodeFsFtruncateSync
+            | Native::NodeFsFsyncSync => {
                 return fs::dispatch(self, native, receiver, arguments, instruction);
             }
             Native::NodePathJoin
@@ -39379,6 +39382,9 @@ fn call_native(
         | Native::NodeFsRmdirSync
         | Native::NodeFsUtimesSync
         | Native::NodeFsSync
+        | Native::NodeFsWriteSync
+        | Native::NodeFsFtruncateSync
+        | Native::NodeFsFsyncSync
         | Native::AbortControllerConstructor
         | Native::AbortSignalConstructor
         | Native::AbortControllerAbort

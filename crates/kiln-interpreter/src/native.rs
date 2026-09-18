@@ -151,6 +151,9 @@ pub enum Native {
     NodeFsReadlinkSync,
     NodeFsRmdirSync,
     NodeFsUtimesSync,
+    NodeFsWriteSync,
+    NodeFsFtruncateSync,
+    NodeFsFsyncSync,
     /// `AbortController`, and the `AbortSignal` namespace its statics hang off.
     AbortControllerConstructor,
     AbortSignalConstructor,
@@ -1407,6 +1410,7 @@ impl Native {
                 ),
             ],
             Self::NodeFsSync => &[("native", FixedOwnValue::Native(Self::NodeFsSync))],
+            Self::NodeFsWriteSync => &[("native", FixedOwnValue::Native(Self::NodeFsWriteSync))],
             Self::NodeFsRealpathSync => {
                 &[("native", FixedOwnValue::Native(Self::NodeFsRealpathSync))]
             }

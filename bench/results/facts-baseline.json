@@ -188076,32 +188076,29 @@
                 },
                 {
                   "id": 78,
-                  "kind": "NewArray"
+                  "kind": "Call"
                 },
                 {
                   "id": 79,
+                  "kind": "Call"
+                },
+                {
+                  "id": 80,
+                  "kind": "Call"
+                },
+                {
+                  "id": 81,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 82,
                   "kind": "MakeFunction",
                   "detail": "proto #7"
                 },
                 {
-                  "id": 80,
+                  "id": 83,
                   "kind": "SetPropertyStrict",
                   "detail": "\"@@private:0:%brand\""
-                },
-                {
-                  "id": 81,
-                  "kind": "GetProperty",
-                  "detail": "\"prototype\""
-                },
-                {
-                  "id": 82,
-                  "kind": "GetProperty",
-                  "detail": "\"prototype\""
-                },
-                {
-                  "id": 83,
-                  "kind": "MakeFunction",
-                  "detail": "proto #8"
                 },
                 {
                   "id": 84,
@@ -188110,77 +188107,77 @@
                 },
                 {
                   "id": 85,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 86,
+                  "kind": "MakeFunction",
+                  "detail": "proto #8"
+                },
+                {
+                  "id": 87,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 88,
                   "kind": "MakeFunction",
                   "detail": "proto #9"
                 },
                 {
-                  "id": 86,
+                  "id": 89,
                   "kind": "GetProperty",
                   "detail": "\"prototype\""
                 },
                 {
-                  "id": 87,
+                  "id": 90,
                   "kind": "MakeFunction",
                   "detail": "proto #10"
                 },
                 {
-                  "id": 88,
+                  "id": 91,
                   "kind": "GetProperty",
                   "detail": "\"prototype\""
                 },
                 {
-                  "id": 89,
+                  "id": 92,
                   "kind": "MakeFunction",
                   "detail": "proto #11"
                 },
                 {
-                  "id": 90,
+                  "id": 93,
                   "kind": "GetProperty",
                   "detail": "\"prototype\""
                 },
                 {
-                  "id": 91,
+                  "id": 94,
                   "kind": "MakeFunction",
                   "detail": "proto #12"
                 },
                 {
-                  "id": 92,
+                  "id": 95,
                   "kind": "GetProperty",
                   "detail": "\"prototype\""
                 },
                 {
-                  "id": 93,
+                  "id": 96,
                   "kind": "MakeFunction",
                   "detail": "proto #13"
                 },
                 {
-                  "id": 94,
+                  "id": 97,
                   "kind": "NewArray"
                 },
                 {
-                  "id": 95,
+                  "id": 98,
                   "kind": "MakeFunction",
                   "detail": "proto #14"
                 },
                 {
-                  "id": 96,
+                  "id": 99,
                   "kind": "SetPropertyStrict",
                   "detail": "\"@@private:1:%brand\""
-                },
-                {
-                  "id": 97,
-                  "kind": "GetProperty",
-                  "detail": "\"prototype\""
-                },
-                {
-                  "id": 98,
-                  "kind": "GetProperty",
-                  "detail": "\"prototype\""
-                },
-                {
-                  "id": 99,
-                  "kind": "MakeFunction",
-                  "detail": "proto #15"
                 },
                 {
                   "id": 100,
@@ -188189,61 +188186,76 @@
                 },
                 {
                   "id": 101,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 102,
+                  "kind": "MakeFunction",
+                  "detail": "proto #15"
+                },
+                {
+                  "id": 103,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 104,
                   "kind": "MakeFunction",
                   "detail": "proto #16"
                 },
                 {
-                  "id": 102,
+                  "id": 105,
                   "kind": "GetProperty",
                   "detail": "\"prototype\""
                 },
                 {
-                  "id": 103,
+                  "id": 106,
                   "kind": "MakeFunction",
                   "detail": "proto #17"
                 },
                 {
-                  "id": 104,
+                  "id": 107,
                   "kind": "GetProperty",
                   "detail": "\"prototype\""
                 },
                 {
-                  "id": 105,
+                  "id": 108,
                   "kind": "MakeFunction",
                   "detail": "proto #18"
                 },
                 {
-                  "id": 106,
+                  "id": 109,
                   "kind": "GetProperty",
                   "detail": "\"prototype\""
                 },
                 {
-                  "id": 107,
+                  "id": 110,
                   "kind": "MakeFunction",
                   "detail": "proto #19"
                 },
                 {
-                  "id": 108,
+                  "id": 111,
                   "kind": "GetProperty",
                   "detail": "\"prototype\""
                 },
                 {
-                  "id": 109,
+                  "id": 112,
                   "kind": "MakeFunction",
                   "detail": "proto #20"
                 },
                 {
-                  "id": 110,
+                  "id": 113,
                   "kind": "GetProperty",
                   "detail": "\"prototype\""
                 },
                 {
-                  "id": 111,
+                  "id": 114,
                   "kind": "MakeFunction",
                   "detail": "proto #21"
                 },
                 {
-                  "id": 113,
+                  "id": 116,
                   "kind": "SetPropertyStrict",
                   "detail": "\"default\""
                 }
