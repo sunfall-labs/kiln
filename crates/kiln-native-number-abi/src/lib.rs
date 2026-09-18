@@ -138,6 +138,15 @@ macro_rules! provider_abi_registry {
             (realm, kiln_realm_http_response_start_active, realm_http_response_start);
             (realm, kiln_realm_http_response_write_active, realm_http_response_write);
             (realm, kiln_realm_http_response_end_active, realm_http_response_end);
+            (realm, kiln_node_fs_read_file_sync, node_fs_read_file_sync);
+            (realm, kiln_node_fs_free_bytes, node_fs_free_bytes);
+            (realm, kiln_node_fs_write_file_sync, node_fs_write_file_sync);
+            (realm, kiln_node_fs_mkdir_sync, node_fs_mkdir_sync);
+            (realm, kiln_node_fs_stat_sync, node_fs_stat_sync);
+            (realm, kiln_node_fs_readdir_sync, node_fs_readdir_sync);
+            (realm, kiln_node_fs_realpath_sync, node_fs_realpath_sync);
+            (realm, kiln_node_fs_unlink_sync, node_fs_unlink_sync);
+            (realm, kiln_node_fs_rmdir_sync, node_fs_rmdir_sync);
             (root, kiln_number_to_js_string, number_to_js_string);
             (root, kiln_string_to_number, string_to_number);
             (regexp, kiln_regexp_compile, regexp_compile);
@@ -191,7 +200,7 @@ macro_rules! provider_export_names {
 }
 
 /// Version of the private provider ABI represented by [`provider_abi_registry!`].
-pub const PROVIDER_ABI_VERSION: u32 = 37;
+pub const PROVIDER_ABI_VERSION: u32 = 38;
 
 /// Canonical ordered export names required in a packaged provider manifest.
 pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_names);
@@ -227,8 +236,8 @@ mod tests {
         // one realm the other's cache. A shipped archive built before any of these does not export
         // the newer symbol, and the version is how a resolver knows to rebuild rather than to fail
         // at link time.
-        assert_eq!(PROVIDER_ABI_VERSION, 37);
-        assert_eq!(PROVIDER_EXPORTS.len(), 99);
+        assert_eq!(PROVIDER_ABI_VERSION, 38);
+        assert_eq!(PROVIDER_EXPORTS.len(), 108);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_ffi_last_error"));
     }

@@ -410,6 +410,7 @@ static int kiln_c99_is_node_hidden_key(const char *key, size_t key_len) {
     static const char *const names[] = {
         "@@node:socket", "@@node:server", "@@node:client", "@@node:response",
         "@@node:lazy-headers", "@@kiln:node:is-file", "@@kiln:node:is-directory",
+        "@@kiln:node:is-symlink",
     };
     size_t index;
     /* Every reserved name is `@@`-prefixed and nearly every key a program reads is not, so the
@@ -1775,12 +1776,17 @@ static int kiln_c99_node_fs(kiln_host *host, kiln_value *result, uint64_t code,
     int status;
     (void)receiver;
     if (code == KILN_C99_METHOD_NODE_STAT_IS_FILE ||
-        code == KILN_C99_METHOD_NODE_STAT_IS_DIRECTORY) {
+        code == KILN_C99_METHOD_NODE_STAT_IS_DIRECTORY ||
+        code == KILN_C99_METHOD_NODE_STAT_IS_SYMBOLIC_LINK) {
         kiln_property *marker;
         const char *key = code == KILN_C99_METHOD_NODE_STAT_IS_FILE
                               ? "@@kiln:node:is-file"
-                              : "@@kiln:node:is-directory";
-        size_t key_len = code == KILN_C99_METHOD_NODE_STAT_IS_FILE ? 19 : 24;
+                              : (code == KILN_C99_METHOD_NODE_STAT_IS_DIRECTORY
+                                     ? "@@kiln:node:is-directory"
+                                     : "@@kiln:node:is-symlink");
+        size_t key_len = code == KILN_C99_METHOD_NODE_STAT_IS_FILE
+                             ? 19
+                             : (code == KILN_C99_METHOD_NODE_STAT_IS_DIRECTORY ? 24 : 22);
         if (receiver.tag != KILN_VALUE_OBJECT)
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                         "Stats method called on an incompatible receiver");
@@ -1869,6 +1875,375 @@ static int kiln_c99_node_fs(kiln_host *host, kiln_value *result, uint64_t code,
     free(data_owned);
     *result = promise;
     return KILN_C99_OK;
+}
+
+static int kiln_c99_throw_node_fs_error(kiln_value *thrown, const char *syscall, size_t syscall_len,
+                                       const char *path_str, size_t path_len,
+                                       int32_t error_code) {
+    const char *code_str = "EIO";
+    size_t code_len = 3;
+    const char *msg_reason = "input/output error";
+    size_t reason_len = 18;
+    if (error_code == 1) {
+        code_str = "ENOENT";
+        code_len = 6;
+        msg_reason = "no such file or directory";
+        reason_len = 25;
+    } else if (error_code == 2) {
+        code_str = "EEXIST";
+        code_len = 6;
+        msg_reason = "file already exists";
+        reason_len = 19;
+    } else if (error_code == 3) {
+        code_str = "EACCES";
+        code_len = 6;
+        msg_reason = "permission denied";
+        reason_len = 17;
+    }
+    char buf[1024];
+    size_t len = 0;
+    if (code_len + 2 + reason_len + 2 + syscall_len + (path_str != NULL && path_len > 0 ? (3 + path_len) : 0) < sizeof(buf)) {
+        memcpy(buf + len, code_str, code_len); len += code_len;
+        memcpy(buf + len, ": ", 2); len += 2;
+        memcpy(buf + len, msg_reason, reason_len); len += reason_len;
+        memcpy(buf + len, ", ", 2); len += 2;
+        memcpy(buf + len, syscall, syscall_len); len += syscall_len;
+        if (path_str != NULL && path_len > 0) {
+            memcpy(buf + len, " '", 2); len += 2;
+            memcpy(buf + len, path_str, path_len); len += path_len;
+            buf[len++] = '\'';
+        }
+    }
+    kiln_value err_val = kiln_c99_undefined();
+    int status = kiln_c99_new_error(&err_val, KILN_C99_BUILTIN_ERROR,
+                                    kiln_c99_copy_text(buf, len));
+    if (status != KILN_C99_OK) return status;
+    kiln_c99_node_fs_error_property(err_val, "code", 4, (const uint8_t *)code_str, code_len);
+    kiln_c99_node_fs_error_property(err_val, "syscall", 7, (const uint8_t *)syscall, syscall_len);
+    if (path_str != NULL && path_len > 0) {
+        kiln_c99_node_fs_error_property(err_val, "path", 4, (const uint8_t *)path_str, path_len);
+    }
+    if (thrown != NULL) *thrown = err_val;
+    return KILN_C99_THROWN;
+}
+
+static int kiln_c99_node_fs_sync(kiln_host *host, kiln_value *result, uint64_t code,
+                                 kiln_value receiver, const kiln_value *args, size_t argc,
+                                 int depth, kiln_value *thrown) {
+    kiln_value path_val = argc > 0 ? args[0] : kiln_c99_undefined();
+    uint8_t *path_bytes = NULL;
+    size_t path_len = 0;
+    int status;
+    (void)receiver;
+
+    if (code == KILN_C99_METHOD_NODE_STAT_IS_FILE ||
+        code == KILN_C99_METHOD_NODE_STAT_IS_DIRECTORY ||
+        code == KILN_C99_METHOD_NODE_STAT_IS_SYMBOLIC_LINK) {
+        kiln_property *marker;
+        const char *key = code == KILN_C99_METHOD_NODE_STAT_IS_FILE
+                              ? "@@kiln:node:is-file"
+                              : (code == KILN_C99_METHOD_NODE_STAT_IS_DIRECTORY
+                                     ? "@@kiln:node:is-directory"
+                                     : "@@kiln:node:is-symlink");
+        size_t key_len = code == KILN_C99_METHOD_NODE_STAT_IS_FILE
+                             ? 19
+                             : (code == KILN_C99_METHOD_NODE_STAT_IS_DIRECTORY ? 24 : 22);
+        if (receiver.tag != KILN_VALUE_OBJECT)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Stats method called on an incompatible receiver");
+        marker = kiln_c99_own_private(receiver, key, key_len);
+        *result = kiln_c99_boolean(marker != NULL && kiln_c99_truthy(marker->value));
+        return KILN_C99_OK;
+    }
+
+    if (path_val.tag != KILN_VALUE_STRING) {
+        path_val = kiln_c99_text(path_val);
+    }
+    if (path_val.tag != KILN_VALUE_STRING) {
+        return kiln_c99_throw_not_a(thrown, path_val, "string path");
+    }
+    status = kiln_c99_string_to_utf8_lossy(path_val, &path_bytes, &path_len);
+    if (status != KILN_C99_OK) return status;
+
+    if (code == KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC) {
+        int utf8 = 0;
+        uint8_t *out_bytes = NULL;
+        uint64_t out_len = 0;
+        int32_t err_code = 0;
+        if (argc > 1) {
+            status = kiln_c99_node_fs_encoding(host, args[1], &utf8, depth, thrown);
+            if (status != KILN_C99_OK) {
+                free(path_bytes);
+                return status;
+            }
+        }
+        kiln_node_fs_read_file_sync(path_bytes, (uint64_t)path_len, &out_bytes, &out_len, &err_code);
+        if (err_code != 0) {
+            status = kiln_c99_throw_node_fs_error(thrown, "open", 4, (const char *)path_bytes, path_len, err_code);
+            free(path_bytes);
+            return status;
+        }
+        if (utf8) {
+            *result = kiln_c99_copy_text((const char *)out_bytes, (size_t)out_len);
+        } else {
+            status = kiln_c99_buffer_from_bytes(result, out_bytes, out_len);
+        }
+        kiln_node_fs_free_bytes(out_bytes, out_len);
+        free(path_bytes);
+        return status;
+    }
+
+    if (code == KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC) {
+        kiln_value data_val = argc > 1 ? args[1] : kiln_c99_undefined();
+        const uint8_t *bytes = NULL;
+        size_t bytes_len = 0;
+        uint8_t *data_owned = NULL;
+        int32_t err_code = 0;
+
+        if (data_val.tag == KILN_VALUE_STRING) {
+            status = kiln_c99_string_to_utf8_lossy(data_val, &data_owned, &bytes_len);
+            if (status != KILN_C99_OK) {
+                free(path_bytes);
+                return status;
+            }
+            bytes = data_owned;
+        } else if (data_val.tag == KILN_VALUE_TYPED_ARRAY) {
+            kiln_typed_array *view = kiln_c99_typed_array_of(data_val);
+            size_t width = kiln_c99_typed_width(view->kind);
+            if (view->length > SIZE_MAX / width) {
+                free(path_bytes);
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            bytes = view->buffer->bytes + view->byte_offset;
+            bytes_len = view->length * width;
+        } else {
+            free(path_bytes);
+            return kiln_c99_throw_not_a(thrown, data_val, "string or typed array data");
+        }
+
+        kiln_node_fs_write_file_sync(path_bytes, (uint64_t)path_len, bytes, (uint64_t)bytes_len, &err_code);
+        free(data_owned);
+        if (err_code != 0) {
+            status = kiln_c99_throw_node_fs_error(thrown, "open", 4, (const char *)path_bytes, path_len, err_code);
+            free(path_bytes);
+            return status;
+        }
+        free(path_bytes);
+        *result = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+
+    if (code == KILN_C99_METHOD_NODE_FS_MKDIR_SYNC) {
+        int recursive = 0;
+        int32_t err_code = 0;
+        if (argc > 1 && args[1].tag == KILN_VALUE_OBJECT) {
+            kiln_value rec_val;
+            int rec_status = kiln_c99_get(host, args[1], "recursive", 9, &rec_val, depth, thrown);
+            if (rec_status == KILN_C99_OK && kiln_c99_truthy(rec_val)) {
+                recursive = 1;
+            }
+        }
+        kiln_node_fs_mkdir_sync(path_bytes, (uint64_t)path_len, recursive, &err_code);
+        if (err_code != 0) {
+            status = kiln_c99_throw_node_fs_error(thrown, "mkdir", 5, (const char *)path_bytes, path_len, err_code);
+            free(path_bytes);
+            return status;
+        }
+        free(path_bytes);
+        *result = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+
+    if (code == KILN_C99_METHOD_NODE_FS_STAT_SYNC || code == KILN_C99_METHOD_NODE_FS_LSTAT_SYNC) {
+        int follow = (code == KILN_C99_METHOD_NODE_FS_STAT_SYNC);
+        int throw_if_no_entry = 1;
+        uint64_t size = 0;
+        uint32_t flags = 0;
+        double mtime_ms = 0.0;
+        uint32_t mode = 0;
+        int32_t err_code = 0;
+
+        if (argc > 1 && args[1].tag == KILN_VALUE_OBJECT) {
+            kiln_value tne_val;
+            int tne_status = kiln_c99_get(host, args[1], "throwIfNoEntry", 14, &tne_val, depth, thrown);
+            if (tne_status == KILN_C99_OK && !kiln_c99_truthy(tne_val)) {
+                throw_if_no_entry = 0;
+            }
+        }
+
+        kiln_node_fs_stat_sync(path_bytes, (uint64_t)path_len, follow, &size, &flags, &mtime_ms, &mode, &err_code);
+        if (err_code != 0) {
+            if (!throw_if_no_entry && err_code == 1) {
+                free(path_bytes);
+                *result = kiln_c99_undefined();
+                return KILN_C99_OK;
+            }
+            status = kiln_c99_throw_node_fs_error(thrown, follow ? "stat" : "lstat",
+                                                 (size_t)(follow ? 4 : 5),
+                                                 (const char *)path_bytes, path_len, err_code);
+            free(path_bytes);
+            return status;
+        }
+        free(path_bytes);
+
+        kiln_value stat_obj;
+        kiln_property *property;
+        status = kiln_c99_new_object(&stat_obj);
+        if (status != KILN_C99_OK) return status;
+
+        kiln_c99_put(NULL, stat_obj, "size", 4, kiln_c99_number((double)size), 0, NULL);
+        kiln_c99_put(NULL, stat_obj, "mtimeMs", 7, kiln_c99_number(mtime_ms), 0, NULL);
+        kiln_c99_put(NULL, stat_obj, "ctimeMs", 7, kiln_c99_number(mtime_ms), 0, NULL);
+        kiln_c99_put(NULL, stat_obj, "atimeMs", 7, kiln_c99_number(mtime_ms), 0, NULL);
+        kiln_c99_put(NULL, stat_obj, "birthtimeMs", 11, kiln_c99_number(mtime_ms), 0, NULL);
+        kiln_c99_put(NULL, stat_obj, "mode", 4, kiln_c99_number((double)mode), 0, NULL);
+
+        kiln_value date_val;
+        if (kiln_c99_new_date(&date_val, mtime_ms) == KILN_C99_OK) {
+            kiln_c99_put(NULL, stat_obj, "mtime", 5, date_val, 0, NULL);
+            kiln_c99_put(NULL, stat_obj, "ctime", 5, date_val, 0, NULL);
+            kiln_c99_put(NULL, stat_obj, "atime", 5, date_val, 0, NULL);
+            kiln_c99_put(NULL, stat_obj, "birthtime", 9, date_val, 0, NULL);
+        }
+
+        kiln_c99_own_slot(stat_obj, "@@kiln:node:is-file", 19, &property);
+        if (property != NULL) {
+            property->value = kiln_c99_boolean((flags & (UINT32_C(1) << 3)) != 0);
+            property->enumerable = 0; property->writable = 0; property->configurable = 0;
+        }
+        kiln_c99_own_slot(stat_obj, "@@kiln:node:is-directory", 24, &property);
+        if (property != NULL) {
+            property->value = kiln_c99_boolean((flags & (UINT32_C(1) << 4)) != 0);
+            property->enumerable = 0; property->writable = 0; property->configurable = 0;
+        }
+        kiln_c99_own_slot(stat_obj, "@@kiln:node:is-symlink", 22, &property);
+        if (property != NULL) {
+            property->value = kiln_c99_boolean((flags & (UINT32_C(1) << 5)) != 0);
+            property->enumerable = 0; property->writable = 0; property->configurable = 0;
+        }
+        kiln_c99_object_of(stat_obj)->read_only_seen = 1;
+
+        kiln_c99_put(NULL, stat_obj, "isFile", 6, kiln_c99_method(KILN_C99_METHOD_NODE_STAT_IS_FILE), 0, NULL);
+        kiln_c99_put(NULL, stat_obj, "isDirectory", 11, kiln_c99_method(KILN_C99_METHOD_NODE_STAT_IS_DIRECTORY), 0, NULL);
+        kiln_c99_put(NULL, stat_obj, "isSymbolicLink", 14, kiln_c99_method(KILN_C99_METHOD_NODE_STAT_IS_SYMBOLIC_LINK), 0, NULL);
+
+        *result = stat_obj;
+        return KILN_C99_OK;
+    }
+
+    if (code == KILN_C99_METHOD_NODE_FS_READDIR_SYNC) {
+        int with_file_types = 0;
+        uint8_t *entries = NULL;
+        uint64_t entries_len = 0;
+        uint64_t count = 0;
+        int32_t err_code = 0;
+
+        if (argc > 1 && args[1].tag == KILN_VALUE_OBJECT) {
+            kiln_value wft_val;
+            int wft_status = kiln_c99_get(host, args[1], "withFileTypes", 13, &wft_val, depth, thrown);
+            if (wft_status == KILN_C99_OK && kiln_c99_truthy(wft_val)) {
+                with_file_types = 1;
+            }
+        }
+
+        kiln_node_fs_readdir_sync(path_bytes, (uint64_t)path_len, &entries, &entries_len, &count, &err_code);
+        if (err_code != 0) {
+            status = kiln_c99_throw_node_fs_error(thrown, "scandir", 7, (const char *)path_bytes, path_len, err_code);
+            free(path_bytes);
+            return status;
+        }
+        free(path_bytes);
+
+        status = kiln_c99_new_array(result);
+        if (status != KILN_C99_OK) {
+            kiln_node_fs_free_bytes(entries, entries_len);
+            return status;
+        }
+
+        uint8_t *p = entries;
+        for (uint64_t i = 0; i < count; ++i) {
+            uint16_t name_len = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+            uint8_t flags = p[2];
+            const char *name = (const char *)(p + 3);
+            p += 3 + name_len;
+
+            if (!with_file_types) {
+                kiln_c99_array_push(*result, kiln_c99_copy_text(name, name_len));
+            } else {
+                kiln_value dirent;
+                kiln_property *property;
+                kiln_c99_new_object(&dirent);
+                kiln_c99_put(NULL, dirent, "name", 4, kiln_c99_copy_text(name, name_len), 0, NULL);
+                kiln_c99_own_slot(dirent, "@@kiln:node:is-file", 19, &property);
+                if (property != NULL) {
+                    property->value = kiln_c99_boolean((flags & 1) != 0);
+                    property->enumerable = 0; property->writable = 0; property->configurable = 0;
+                }
+                kiln_c99_own_slot(dirent, "@@kiln:node:is-directory", 24, &property);
+                if (property != NULL) {
+                    property->value = kiln_c99_boolean((flags & 2) != 0);
+                    property->enumerable = 0; property->writable = 0; property->configurable = 0;
+                }
+                kiln_c99_own_slot(dirent, "@@kiln:node:is-symlink", 22, &property);
+                if (property != NULL) {
+                    property->value = kiln_c99_boolean((flags & 4) != 0);
+                    property->enumerable = 0; property->writable = 0; property->configurable = 0;
+                }
+                kiln_c99_object_of(dirent)->read_only_seen = 1;
+                kiln_c99_put(NULL, dirent, "isFile", 6, kiln_c99_method(KILN_C99_METHOD_NODE_STAT_IS_FILE), 0, NULL);
+                kiln_c99_put(NULL, dirent, "isDirectory", 11, kiln_c99_method(KILN_C99_METHOD_NODE_STAT_IS_DIRECTORY), 0, NULL);
+                kiln_c99_put(NULL, dirent, "isSymbolicLink", 14, kiln_c99_method(KILN_C99_METHOD_NODE_STAT_IS_SYMBOLIC_LINK), 0, NULL);
+                kiln_c99_array_push(*result, dirent);
+            }
+        }
+        kiln_node_fs_free_bytes(entries, entries_len);
+        return KILN_C99_OK;
+    }
+
+    if (code == KILN_C99_METHOD_NODE_FS_REALPATH_SYNC) {
+        uint8_t *out_bytes = NULL;
+        uint64_t out_len = 0;
+        int32_t err_code = 0;
+        kiln_node_fs_realpath_sync(path_bytes, (uint64_t)path_len, &out_bytes, &out_len, &err_code);
+        if (err_code != 0) {
+            status = kiln_c99_throw_node_fs_error(thrown, "realpath", 8, (const char *)path_bytes, path_len, err_code);
+            free(path_bytes);
+            return status;
+        }
+        *result = kiln_c99_copy_text((const char *)out_bytes, (size_t)out_len);
+        kiln_node_fs_free_bytes(out_bytes, out_len);
+        free(path_bytes);
+        return KILN_C99_OK;
+    }
+
+    if (code == KILN_C99_METHOD_NODE_FS_UNLINK_SYNC) {
+        int32_t err_code = 0;
+        kiln_node_fs_unlink_sync(path_bytes, (uint64_t)path_len, &err_code);
+        if (err_code != 0) {
+            status = kiln_c99_throw_node_fs_error(thrown, "unlink", 6, (const char *)path_bytes, path_len, err_code);
+            free(path_bytes);
+            return status;
+        }
+        free(path_bytes);
+        *result = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+
+    if (code == KILN_C99_METHOD_NODE_FS_RMDIR_SYNC) {
+        int32_t err_code = 0;
+        kiln_node_fs_rmdir_sync(path_bytes, (uint64_t)path_len, &err_code);
+        if (err_code != 0) {
+            status = kiln_c99_throw_node_fs_error(thrown, "rmdir", 5, (const char *)path_bytes, path_len, err_code);
+            free(path_bytes);
+            return status;
+        }
+        free(path_bytes);
+        *result = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+
+    free(path_bytes);
+    return KILN_C99_INVALID_ARGUMENT;
 }
 
 static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,

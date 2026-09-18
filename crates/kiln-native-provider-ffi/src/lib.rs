@@ -1947,6 +1947,400 @@ mod realm {
         0
     }
 
+    unsafe fn borrowed_path<'a>(bytes: *const u8, len: u64) -> Option<&'a std::path::Path> {
+        if bytes.is_null() {
+            return (len == 0).then(|| std::path::Path::new(""));
+        }
+        let len = usize::try_from(len).ok()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let slice = unsafe { std::slice::from_raw_parts(bytes, len) };
+            Some(std::path::Path::new(std::ffi::OsStr::from_bytes(slice)))
+        }
+        #[cfg(not(unix))]
+        {
+            let slice = unsafe { std::slice::from_raw_parts(bytes, len) };
+            let s = std::str::from_utf8(slice).ok()?;
+            Some(std::path::Path::new(s))
+        }
+    }
+
+    fn map_io_error(err: &std::io::Error) -> i32 {
+        match err.kind() {
+            std::io::ErrorKind::NotFound => 1,
+            std::io::ErrorKind::AlreadyExists => 2,
+            std::io::ErrorKind::PermissionDenied => 3,
+            _ => 6,
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_node_fs_read_file_sync(
+        path: *const u8,
+        path_len: u64,
+        out_bytes: *mut *mut u8,
+        out_len: *mut u64,
+        out_error_code: *mut i32,
+    ) -> i32 {
+        ffi(|| {
+            if out_bytes.is_null() || out_len.is_null() || out_error_code.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            let Some(p) = (unsafe { borrowed_path(path, path_len) }) else {
+                unsafe { out_error_code.write(1) };
+                return 0;
+            };
+            match std::fs::read(p) {
+                Ok(data) => {
+                    let len = data.len() as u64;
+                    let mut boxed = data.into_boxed_slice();
+                    let ptr = boxed.as_mut_ptr();
+                    core::mem::forget(boxed);
+                    unsafe {
+                        out_bytes.write(ptr);
+                        out_len.write(len);
+                        out_error_code.write(0);
+                    }
+                    0
+                }
+                Err(err) => {
+                    unsafe {
+                        out_bytes.write(core::ptr::null_mut());
+                        out_len.write(0);
+                        out_error_code.write(map_io_error(&err));
+                    }
+                    0
+                }
+            }
+        })
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_node_fs_free_bytes(bytes: *mut u8, len: u64) {
+        if !bytes.is_null() && len > 0 {
+            if let Ok(len) = usize::try_from(len) {
+                let _ = unsafe { Box::from_raw(core::ptr::slice_from_raw_parts_mut(bytes, len)) };
+            }
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_node_fs_write_file_sync(
+        path: *const u8,
+        path_len: u64,
+        data: *const u8,
+        data_len: u64,
+        out_error_code: *mut i32,
+    ) -> i32 {
+        ffi(|| {
+            if out_error_code.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            let Some(p) = (unsafe { borrowed_path(path, path_len) }) else {
+                unsafe { out_error_code.write(1) };
+                return 0;
+            };
+            let slice = if data.is_null() {
+                &[]
+            } else {
+                let Ok(len) = usize::try_from(data_len) else {
+                    return INVALID_ARGUMENT;
+                };
+                unsafe { std::slice::from_raw_parts(data, len) }
+            };
+            match std::fs::write(p, slice) {
+                Ok(()) => {
+                    unsafe { out_error_code.write(0) };
+                    0
+                }
+                Err(err) => {
+                    unsafe { out_error_code.write(map_io_error(&err)) };
+                    0
+                }
+            }
+        })
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_node_fs_mkdir_sync(
+        path: *const u8,
+        path_len: u64,
+        recursive: i32,
+        out_error_code: *mut i32,
+    ) -> i32 {
+        ffi(|| {
+            if out_error_code.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            let Some(p) = (unsafe { borrowed_path(path, path_len) }) else {
+                unsafe { out_error_code.write(1) };
+                return 0;
+            };
+            let res = if recursive != 0 {
+                std::fs::create_dir_all(p)
+            } else {
+                std::fs::create_dir(p)
+            };
+            match res {
+                Ok(()) => {
+                    unsafe { out_error_code.write(0) };
+                    0
+                }
+                Err(err) => {
+                    unsafe { out_error_code.write(map_io_error(&err)) };
+                    0
+                }
+            }
+        })
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_node_fs_stat_sync(
+        path: *const u8,
+        path_len: u64,
+        follow_symlinks: i32,
+        out_size: *mut u64,
+        out_flags: *mut u32,
+        out_mtime_ms: *mut f64,
+        out_mode: *mut u32,
+        out_error_code: *mut i32,
+    ) -> i32 {
+        ffi(|| {
+            if out_size.is_null()
+                || out_flags.is_null()
+                || out_mtime_ms.is_null()
+                || out_mode.is_null()
+                || out_error_code.is_null()
+            {
+                return INVALID_ARGUMENT;
+            }
+            let Some(p) = (unsafe { borrowed_path(path, path_len) }) else {
+                unsafe { out_error_code.write(1) };
+                return 0;
+            };
+            let res = if follow_symlinks != 0 {
+                std::fs::metadata(p)
+            } else {
+                std::fs::symlink_metadata(p)
+            };
+            match res {
+                Ok(m) => {
+                    let mut flags: u32 = 0;
+                    if m.is_file() {
+                        flags |= 1 << 3;
+                    }
+                    if m.is_dir() {
+                        flags |= 1 << 4;
+                    }
+                    if m.is_symlink() {
+                        flags |= 1 << 5;
+                    }
+                    let mtime_ms = m
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map_or(0.0, |d| {
+                            d.as_secs_f64() * 1000.0 + (d.subsec_nanos() as f64) / 1_000_000.0
+                        });
+                    #[cfg(unix)]
+                    let mode = std::os::unix::fs::MetadataExt::mode(&m);
+                    #[cfg(not(unix))]
+                    let mode = if m.is_dir() { 0o40755 } else { 0o100644 };
+
+                    unsafe {
+                        out_size.write(m.len());
+                        out_flags.write(flags);
+                        out_mtime_ms.write(mtime_ms);
+                        out_mode.write(mode);
+                        out_error_code.write(0);
+                    }
+                    0
+                }
+                Err(err) => {
+                    unsafe { out_error_code.write(map_io_error(&err)) };
+                    0
+                }
+            }
+        })
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_node_fs_readdir_sync(
+        path: *const u8,
+        path_len: u64,
+        out_entries: *mut *mut u8,
+        out_len: *mut u64,
+        out_count: *mut u64,
+        out_error_code: *mut i32,
+    ) -> i32 {
+        ffi(|| {
+            if out_entries.is_null()
+                || out_len.is_null()
+                || out_count.is_null()
+                || out_error_code.is_null()
+            {
+                return INVALID_ARGUMENT;
+            }
+            let Some(p) = (unsafe { borrowed_path(path, path_len) }) else {
+                unsafe { out_error_code.write(1) };
+                return 0;
+            };
+            let dir = match std::fs::read_dir(p) {
+                Ok(d) => d,
+                Err(err) => {
+                    unsafe {
+                        out_entries.write(core::ptr::null_mut());
+                        out_len.write(0);
+                        out_count.write(0);
+                        out_error_code.write(map_io_error(&err));
+                    }
+                    return 0;
+                }
+            };
+            let mut buf: Vec<u8> = Vec::new();
+            let mut count: u64 = 0;
+            for entry in dir {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                let name = entry.file_name();
+                let name_bytes = name.as_encoded_bytes();
+                let ft = entry.file_type().ok();
+                let mut flags: u8 = 0;
+                if let Some(ft) = ft {
+                    if ft.is_file() {
+                        flags |= 1;
+                    }
+                    if ft.is_dir() {
+                        flags |= 2;
+                    }
+                    if ft.is_symlink() {
+                        flags |= 4;
+                    }
+                }
+                let name_len = name_bytes.len().min(u16::MAX as usize);
+                let Ok(name_len_u16) = u16::try_from(name_len) else {
+                    continue;
+                };
+                buf.extend_from_slice(&name_len_u16.to_le_bytes());
+                buf.push(flags);
+                if let Some(sub) = name_bytes.get(..name_len) {
+                    buf.extend_from_slice(sub);
+                }
+                count = count.saturating_add(1);
+            }
+            let len = buf.len() as u64;
+            let mut boxed = buf.into_boxed_slice();
+            let ptr = boxed.as_mut_ptr();
+            core::mem::forget(boxed);
+            unsafe {
+                out_entries.write(ptr);
+                out_len.write(len);
+                out_count.write(count);
+                out_error_code.write(0);
+            }
+            0
+        })
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_node_fs_realpath_sync(
+        path: *const u8,
+        path_len: u64,
+        out_bytes: *mut *mut u8,
+        out_len: *mut u64,
+        out_error_code: *mut i32,
+    ) -> i32 {
+        ffi(|| {
+            if out_bytes.is_null() || out_len.is_null() || out_error_code.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            let Some(p) = (unsafe { borrowed_path(path, path_len) }) else {
+                unsafe { out_error_code.write(1) };
+                return 0;
+            };
+            match std::fs::canonicalize(p) {
+                Ok(canon) => {
+                    let bytes = canon.to_string_lossy().into_owned().into_bytes();
+                    let len = bytes.len() as u64;
+                    let mut boxed = bytes.into_boxed_slice();
+                    let ptr = boxed.as_mut_ptr();
+                    core::mem::forget(boxed);
+                    unsafe {
+                        out_bytes.write(ptr);
+                        out_len.write(len);
+                        out_error_code.write(0);
+                    }
+                    0
+                }
+                Err(err) => {
+                    unsafe {
+                        out_bytes.write(core::ptr::null_mut());
+                        out_len.write(0);
+                        out_error_code.write(map_io_error(&err));
+                    }
+                    0
+                }
+            }
+        })
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_node_fs_unlink_sync(
+        path: *const u8,
+        path_len: u64,
+        out_error_code: *mut i32,
+    ) -> i32 {
+        ffi(|| {
+            if out_error_code.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            let Some(p) = (unsafe { borrowed_path(path, path_len) }) else {
+                unsafe { out_error_code.write(1) };
+                return 0;
+            };
+            match std::fs::remove_file(p) {
+                Ok(()) => {
+                    unsafe { out_error_code.write(0) };
+                    0
+                }
+                Err(err) => {
+                    unsafe { out_error_code.write(map_io_error(&err)) };
+                    0
+                }
+            }
+        })
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_node_fs_rmdir_sync(
+        path: *const u8,
+        path_len: u64,
+        out_error_code: *mut i32,
+    ) -> i32 {
+        ffi(|| {
+            if out_error_code.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            let Some(p) = (unsafe { borrowed_path(path, path_len) }) else {
+                unsafe { out_error_code.write(1) };
+                return 0;
+            };
+            match std::fs::remove_dir(p) {
+                Ok(()) => {
+                    unsafe { out_error_code.write(0) };
+                    0
+                }
+                Err(err) => {
+                    unsafe { out_error_code.write(map_io_error(&err)) };
+                    0
+                }
+            }
+        })
+    }
+
     /// Interns a registered-symbol key in the active Realm. The input is the canonical
     /// code-unit header, not a UTF-8 byte spelling; the returned identity is stable for that
     /// Realm and deliberately meaningless outside it. Generated modules never own registry
@@ -6258,6 +6652,33 @@ mod realm {
         };
         (realm, $name:ident, realm_http_response_write) => {
             const _: unsafe extern "C" fn(u64, u64, *const u8, u64) -> i32 = $name;
+        };
+        (realm, kiln_node_fs_read_file_sync, node_fs_read_file_sync) => {
+            const _: unsafe extern "C" fn(*const u8, u64, *mut *mut u8, *mut u64, *mut i32) -> i32 = kiln_node_fs_read_file_sync;
+        };
+        (realm, kiln_node_fs_free_bytes, node_fs_free_bytes) => {
+            const _: unsafe extern "C" fn(*mut u8, u64) = kiln_node_fs_free_bytes;
+        };
+        (realm, kiln_node_fs_write_file_sync, node_fs_write_file_sync) => {
+            const _: unsafe extern "C" fn(*const u8, u64, *const u8, u64, *mut i32) -> i32 = kiln_node_fs_write_file_sync;
+        };
+        (realm, kiln_node_fs_mkdir_sync, node_fs_mkdir_sync) => {
+            const _: unsafe extern "C" fn(*const u8, u64, i32, *mut i32) -> i32 = kiln_node_fs_mkdir_sync;
+        };
+        (realm, kiln_node_fs_stat_sync, node_fs_stat_sync) => {
+            const _: unsafe extern "C" fn(*const u8, u64, i32, *mut u64, *mut u32, *mut f64, *mut u32, *mut i32) -> i32 = kiln_node_fs_stat_sync;
+        };
+        (realm, kiln_node_fs_readdir_sync, node_fs_readdir_sync) => {
+            const _: unsafe extern "C" fn(*const u8, u64, *mut *mut u8, *mut u64, *mut u64, *mut i32) -> i32 = kiln_node_fs_readdir_sync;
+        };
+        (realm, kiln_node_fs_realpath_sync, node_fs_realpath_sync) => {
+            const _: unsafe extern "C" fn(*const u8, u64, *mut *mut u8, *mut u64, *mut i32) -> i32 = kiln_node_fs_realpath_sync;
+        };
+        (realm, kiln_node_fs_unlink_sync, node_fs_unlink_sync) => {
+            const _: unsafe extern "C" fn(*const u8, u64, *mut i32) -> i32 = kiln_node_fs_unlink_sync;
+        };
+        (realm, kiln_node_fs_rmdir_sync, node_fs_rmdir_sync) => {
+            const _: unsafe extern "C" fn(*const u8, u64, *mut i32) -> i32 = kiln_node_fs_rmdir_sync;
         };
         ($group:ident, $name:ident, $signature:ident) => {};
     }

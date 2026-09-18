@@ -690,6 +690,9 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
 static int kiln_c99_node_fs(kiln_host *host, kiln_value *result, uint64_t code,
                             kiln_value receiver, const kiln_value *args, size_t argc,
                             int depth, kiln_value *thrown);
+static int kiln_c99_node_fs_sync(kiln_host *host, kiln_value *result, uint64_t code,
+                                 kiln_value receiver, const kiln_value *args, size_t argc,
+                                 int depth, kiln_value *thrown);
 static int kiln_c99_iterator_method(kiln_host *host, kiln_value *result, uint64_t code,
                                     kiln_value receiver, const kiln_value *args, size_t argc,
                                     int depth, kiln_value *thrown);

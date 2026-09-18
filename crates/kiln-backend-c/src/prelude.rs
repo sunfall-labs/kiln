@@ -1090,6 +1090,16 @@ method_ids! {
     (KILN_C99_METHOD_UINT8_TO_HEX_RAW, 510, Direct; 0, 0),
     (KILN_C99_METHOD_UINT8_TO_BASE64_RAW, 511, Direct; 0, 0),
     (KILN_C99_METHOD_PROCESS_EXIT, 513, Direct; 0, 0),
+    (KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC, 514, Direct; 0, 0),
+    (KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC, 515, Direct; 0, 0),
+    (KILN_C99_METHOD_NODE_FS_MKDIR_SYNC, 516, Direct; 0, 0),
+    (KILN_C99_METHOD_NODE_FS_STAT_SYNC, 517, Direct; 0, 0),
+    (KILN_C99_METHOD_NODE_FS_LSTAT_SYNC, 518, Direct; 0, 0),
+    (KILN_C99_METHOD_NODE_FS_READDIR_SYNC, 519, Direct; 0, 0),
+    (KILN_C99_METHOD_NODE_FS_REALPATH_SYNC, 520, Direct; 0, 0),
+    (KILN_C99_METHOD_NODE_FS_UNLINK_SYNC, 521, Direct; 0, 0),
+    (KILN_C99_METHOD_NODE_FS_RMDIR_SYNC, 522, Direct; 0, 0),
+    (KILN_C99_METHOD_NODE_STAT_IS_SYMBOLIC_LINK, 523, Direct; 0, 0),
 }
 
 /// The hook a host installs when it lets a program make a second realm.
@@ -3592,6 +3602,16 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_UINT8_TO_HEX_RAW),
     emit_method_define!(KILN_C99_METHOD_UINT8_TO_BASE64_RAW),
     emit_method_define!(KILN_C99_METHOD_PROCESS_EXIT),
+    emit_method_define!(KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC),
+    emit_method_define!(KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC),
+    emit_method_define!(KILN_C99_METHOD_NODE_FS_MKDIR_SYNC),
+    emit_method_define!(KILN_C99_METHOD_NODE_FS_STAT_SYNC),
+    emit_method_define!(KILN_C99_METHOD_NODE_FS_LSTAT_SYNC),
+    emit_method_define!(KILN_C99_METHOD_NODE_FS_READDIR_SYNC),
+    emit_method_define!(KILN_C99_METHOD_NODE_FS_REALPATH_SYNC),
+    emit_method_define!(KILN_C99_METHOD_NODE_FS_UNLINK_SYNC),
+    emit_method_define!(KILN_C99_METHOD_NODE_FS_RMDIR_SYNC),
+    emit_method_define!(KILN_C99_METHOD_NODE_STAT_IS_SYMBOLIC_LINK),
     emit_method_define!(KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE),
     emit_method_define!(KILN_C99_METHOD_NODE_QUERYSTRING_PARSE),
     r#"

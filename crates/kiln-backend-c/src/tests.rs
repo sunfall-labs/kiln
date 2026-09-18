@@ -2262,6 +2262,68 @@ int kiln_realm_http_response_end_active(uint64_t resource, uint64_t id,
                                         const uint8_t *data, uint64_t data_len) {
     (void)resource; (void)id; (void)data; (void)data_len; return KILN_C99_INVALID_ARGUMENT;
 }
+int kiln_node_fs_read_file_sync(const uint8_t *path, uint64_t path_len,
+                               uint8_t **out_bytes, uint64_t *out_len, int32_t *out_err) {
+    (void)path; (void)path_len;
+    if (out_bytes != NULL) *out_bytes = NULL;
+    if (out_len != NULL) *out_len = 0;
+    if (out_err != NULL) *out_err = 1;
+    return 0;
+}
+void kiln_node_fs_free_bytes(uint8_t *bytes, uint64_t len) {
+    (void)bytes; (void)len;
+}
+int kiln_node_fs_write_file_sync(const uint8_t *path, uint64_t path_len,
+                                const uint8_t *bytes, uint64_t len, int32_t *out_err) {
+    (void)path; (void)path_len; (void)bytes; (void)len;
+    if (out_err != NULL) *out_err = 1;
+    return 0;
+}
+int kiln_node_fs_mkdir_sync(const uint8_t *path, uint64_t path_len,
+                           int32_t recursive, int32_t *out_err) {
+    (void)path; (void)path_len; (void)recursive;
+    if (out_err != NULL) *out_err = 1;
+    return 0;
+}
+int kiln_node_fs_stat_sync(const uint8_t *path, uint64_t path_len,
+                          int32_t follow, uint64_t *out_size, uint32_t *out_flags,
+                          double *out_mtime_ms, uint32_t *out_mode, int32_t *out_err) {
+    (void)path; (void)path_len; (void)follow;
+    if (out_size != NULL) *out_size = 0;
+    if (out_flags != NULL) *out_flags = 0;
+    if (out_mtime_ms != NULL) *out_mtime_ms = 0.0;
+    if (out_mode != NULL) *out_mode = 0;
+    if (out_err != NULL) *out_err = 1;
+    return 0;
+}
+int kiln_node_fs_readdir_sync(const uint8_t *path, uint64_t path_len,
+                             uint8_t **out_entries, uint64_t *out_len,
+                             uint64_t *out_count, int32_t *out_err) {
+    (void)path; (void)path_len;
+    if (out_entries != NULL) *out_entries = NULL;
+    if (out_len != NULL) *out_len = 0;
+    if (out_count != NULL) *out_count = 0;
+    if (out_err != NULL) *out_err = 1;
+    return 0;
+}
+int kiln_node_fs_realpath_sync(const uint8_t *path, uint64_t path_len,
+                              uint8_t **out_bytes, uint64_t *out_len, int32_t *out_err) {
+    (void)path; (void)path_len;
+    if (out_bytes != NULL) *out_bytes = NULL;
+    if (out_len != NULL) *out_len = 0;
+    if (out_err != NULL) *out_err = 1;
+    return 0;
+}
+int kiln_node_fs_unlink_sync(const uint8_t *path, uint64_t path_len, int32_t *out_err) {
+    (void)path; (void)path_len;
+    if (out_err != NULL) *out_err = 1;
+    return 0;
+}
+int kiln_node_fs_rmdir_sync(const uint8_t *path, uint64_t path_len, int32_t *out_err) {
+    (void)path; (void)path_len;
+    if (out_err != NULL) *out_err = 1;
+    return 0;
+}
 "#;
 
 /// A real build compiles the vendored number runtime and each emitted unit as separate
