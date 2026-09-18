@@ -23,15 +23,21 @@ const PROVIDER_PROFILE: &str = provider_contract::PROFILE;
 /// link input to *every* artifact: with the regexp engine in it, the difference is 11.7 MiB versus
 /// 8.4 MiB, multiplied by every cached build. Nobody debugs through a private ABI adapter.
 const PROVIDER_RUSTFLAGS: &str = provider_contract::RUSTFLAGS;
-const MANIFEST_ENV: &str = "KILN_NATIVE_NUMBER_PROVIDER_MANIFEST";
+const MANIFEST_ENV: &str = "KILN_NATIVE_PROVIDER_MANIFEST";
+const LEGACY_MANIFEST_ENV: &str = "KILN_NATIVE_NUMBER_PROVIDER_MANIFEST";
 const MANIFEST_FILE: &str = provider_contract::FULL_MANIFEST;
 #[cfg(test)]
 const MANIFEST_SLIM_FILE: &str = provider_contract::SLIM_MANIFEST;
 static PROVIDER_STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+fn manifest_env_var() -> Option<OsString> {
+    env::var_os(MANIFEST_ENV).or_else(|| env::var_os(LEGACY_MANIFEST_ENV))
+}
+
 fn provider_staging_path(build_root: &Path) -> PathBuf {
     build_root.join(format!(
-        ".libkiln_native_number_ffi.a.{}.{}",
+        ".{}.{}.{}",
+        provider_contract::FULL_ARCHIVE,
         std::process::id(),
         PROVIDER_STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed),
     ))
@@ -152,7 +158,7 @@ type ArchiveManifest = provider_contract::ProviderManifest;
 pub(crate) fn producer_identities(
     identity: &ToolIdentity,
 ) -> Result<Vec<(ProviderVariant, String)>, NumberProviderError> {
-    if let Some(path) = env::var_os(MANIFEST_ENV) {
+    if let Some(path) = manifest_env_var() {
         let path = PathBuf::from(path);
         let manifest = read_manifest(&path)?;
         validate_manifest(&path, &manifest, identity, manifest.variant.capabilities())?;
@@ -226,7 +232,7 @@ pub(crate) fn discover_for(
     identity: &ToolIdentity,
     required: ProviderCapabilities,
 ) -> Result<NumberProvider, NumberProviderError> {
-    if let Some(path) = env::var_os(MANIFEST_ENV) {
+    if let Some(path) = manifest_env_var() {
         return load_manifest(&PathBuf::from(path), identity, required);
     }
 
@@ -435,7 +441,7 @@ fn build_from_source(
         .map(Path::to_path_buf)
         .unwrap_or_default();
     if !source_root
-        .join("crates/kiln-native-number-ffi/src/lib.rs")
+        .join(format!("crates/{PROVIDER_NAME}/src/lib.rs"))
         .is_file()
     {
         return Err(NumberProviderError::SourceUnavailable { root: source_root });
@@ -484,11 +490,12 @@ fn build_from_source(
     // no archive, never a partial one, because rename is atomic within a filesystem -- the same
     // reasoning `ArtifactCache::write_atomic` gives for installing a record by hard link. Two
     // finishers racing to publish overwrite identical bytes, so the loser costs nothing.
+    let archive_name = variant.archive();
     let built_path = build_root
         .join(&rust_target)
         .join(PROVIDER_PROFILE)
-        .join("libkiln_native_number_ffi.a");
-    let archive_path = build_root.join("libkiln_native_number_ffi.a");
+        .join(provider_contract::FULL_ARCHIVE);
+    let archive_path = build_root.join(&archive_name);
 
     if !archive_path.is_file() {
         // Every non-full package disables defaults and enables its exact capability feature set;

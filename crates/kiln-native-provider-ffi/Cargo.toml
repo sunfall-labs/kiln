@@ -1,5 +1,5 @@
 [package]
-name = "kiln-native-number-ffi"
+name = "kiln-native-provider-ffi"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

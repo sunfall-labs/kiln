@@ -7,16 +7,16 @@ pub const SOURCE_LIST: &str = include_str!("../../kiln-native/provider-sources.t
 // Schema 4 adds independently packaged Realm-plus-one-engine variants. Old compilers know only
 // common/full and must reject a manifest whose package name they cannot select safely.
 pub const SCHEMA_VERSION: u16 = 4;
-pub const PROVIDER_NAME: &str = "kiln-native-number-ffi";
+pub const PROVIDER_NAME: &str = "kiln-native-provider-ffi";
 pub const PROFILE: &str = "provider";
 pub const RUSTFLAGS: &str =
     "-C panic=unwind -C relocation-model=pic -C target-cpu=generic -C debuginfo=0";
 pub const FULL_FEATURES: &str = "regexp,bigint,temporal,json,intl,parallel,ffi";
 pub const SLIM_FEATURES: &str = "realm,regexp,bigint,json";
-pub const FULL_ARCHIVE: &str = "libkiln_native_number_ffi.a";
-pub const SLIM_ARCHIVE: &str = "libkiln_native_number_ffi.slim.a";
-pub const FULL_MANIFEST: &str = "kiln-native-number-provider.json";
-pub const SLIM_MANIFEST: &str = "kiln-native-number-provider.slim.json";
+pub const FULL_ARCHIVE: &str = "libkiln_native_provider_ffi.a";
+pub const SLIM_ARCHIVE: &str = "libkiln_native_provider_ffi.slim.a";
+pub const FULL_MANIFEST: &str = "kiln-native-provider.json";
+pub const SLIM_MANIFEST: &str = "kiln-native-provider.slim.json";
 
 /// One independently demandable engine behind the private provider ABI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -209,7 +209,7 @@ impl ProviderVariant {
         match self {
             Self::Full => FULL_ARCHIVE.to_owned(),
             Self::Common => SLIM_ARCHIVE.to_owned(),
-            _ => format!("libkiln_native_number_ffi.{}.a", self.as_str()),
+            _ => format!("libkiln_native_provider_ffi.{}.a", self.as_str()),
         }
     }
 
@@ -217,7 +217,7 @@ impl ProviderVariant {
         match self {
             Self::Full => FULL_MANIFEST.to_owned(),
             Self::Common => SLIM_MANIFEST.to_owned(),
-            _ => format!("kiln-native-number-provider.{}.json", self.as_str()),
+            _ => format!("kiln-native-provider.{}.json", self.as_str()),
         }
     }
 

@@ -44,7 +44,7 @@ matches_pattern() {
 
 # 1. HTTP close contract
 echo "=== 1/3: HTTP close contract ==="
-if matches_pattern "(crates/kiln-runtime/|crates/kiln-native-number-ffi/src/realm/|crates/kiln-native/src/.*http|scripts/check-http-close-contract\.sh)"; then
+if matches_pattern "(crates/kiln-runtime/|crates/kiln-native-provider-ffi/src/realm/|crates/kiln-native/src/.*http|scripts/check-http-close-contract\.sh)"; then
 	bash scripts/check-http-close-contract.sh
 else
 	echo "Skipped: no HTTP runtime or close authority changes detected."
