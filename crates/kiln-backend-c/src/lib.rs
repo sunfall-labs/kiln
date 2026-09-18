@@ -1061,7 +1061,7 @@ fn compact_closure_source(
 
 struct RenderedFunctions {
     sites: usize,
-    forward_declarations: String,
+    function_declarations: Vec<String>,
 }
 
 struct RenderedModule {
@@ -1096,7 +1096,7 @@ fn render_functions(
     should_chunk: bool,
     mut chunked_bodies: Option<&mut Vec<String>>,
 ) -> RenderedFunctions {
-    let mut fwd_decls = String::new();
+    let mut fn_declarations: Vec<String> = vec![String::new(); program.functions.len()];
     if policy.type_profile_record {
         output.push_str(
             "static inline uint32_t kiln_profile_tag_of(kiln_val v) {\n\
@@ -1356,7 +1356,7 @@ fn render_functions(
             .unwrap();
             if should_chunk {
                 writeln!(
-                    fwd_decls,
+                    fn_declarations[index],
                     "extern const kiln_shape *{symbol}_fn_{index}_recv_shape[4];\nextern uint32_t {symbol}_fn_{index}_recv_slot[4][{columns}];\nextern const kiln_shape *{symbol}_fn_{index}_typed_recv_shape[4];\nextern uint32_t {symbol}_fn_{index}_typed_recv_slot[4][{columns}];"
                 )
                 .unwrap();
@@ -1389,19 +1389,27 @@ fn render_functions(
         }
         if should_chunk {
             if policy.compact {
-                writeln!(fwd_decls, "int {symbol}_fn_{index}(KU_PARAMS);").unwrap();
+                writeln!(
+                    fn_declarations[index],
+                    "int {symbol}_fn_{index}(KU_PARAMS);"
+                )
+                .unwrap();
                 if has_fast {
-                    writeln!(fwd_decls, "int {symbol}_fn_{index}_f(KU_PARAMS);").unwrap();
+                    writeln!(
+                        fn_declarations[index],
+                        "int {symbol}_fn_{index}_f(KU_PARAMS);"
+                    )
+                    .unwrap();
                 }
             } else {
                 writeln!(
-                    fwd_decls,
+                    fn_declarations[index],
                     "int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);"
                 )
                 .unwrap();
                 if has_fast {
                     writeln!(
-                        fwd_decls,
+                        fn_declarations[index],
                         "int {symbol}_fn_{index}_f(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);"
                     )
                     .unwrap();
@@ -1420,7 +1428,11 @@ fn render_functions(
             )
             .unwrap();
             if should_chunk {
-                writeln!(fwd_decls, "{result} {symbol}_fn_{index}_t({params});").unwrap();
+                writeln!(
+                    fn_declarations[index],
+                    "{result} {symbol}_fn_{index}_t({params});"
+                )
+                .unwrap();
             }
             if direct.parallel_chunk(index as u32) {
                 let pmap_link = if should_chunk { "" } else { "static " };
@@ -1441,7 +1453,7 @@ fn render_functions(
                 .unwrap();
                 if should_chunk {
                     writeln!(
-                        fwd_decls,
+                        fn_declarations[index],
                         "void {symbol}_pmap_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
                          void {symbol}_pmap_f64_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
                          void {symbol}_pmap_f32_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
@@ -1759,7 +1771,7 @@ fn render_functions(
     }
     RenderedFunctions {
         sites: site_offset,
-        forward_declarations: fwd_decls,
+        function_declarations: fn_declarations,
     }
 }
 
@@ -2397,6 +2409,7 @@ fn render_constant_declarations_extern(
     program: &Program,
     symbol: &str,
     compact: bool,
+    include_function_names: bool,
 ) {
     for (index, constant) in program.constants.iter().enumerate() {
         match constant {
@@ -2414,37 +2427,39 @@ fn render_constant_declarations_extern(
             Constant::Undefined | Constant::Null | Constant::Boolean(_) | Constant::Number(_) => {}
         }
     }
-    if compact {
-        let mut unique_names: std::collections::BTreeMap<kiln_ir::StringUnits, usize> =
-            std::collections::BTreeMap::new();
-        let mut fn_ids = Vec::with_capacity(program.functions.len());
-        for function in &program.functions {
-            if let Some(name) = function.effective_name_units() {
-                let next_id = unique_names.len();
-                let id = *unique_names.entry(name).or_insert(next_id);
-                fn_ids.push(Some(id));
-            } else {
-                fn_ids.push(None);
+    if include_function_names {
+        if compact {
+            let mut unique_names: std::collections::BTreeMap<kiln_ir::StringUnits, usize> =
+                std::collections::BTreeMap::new();
+            let mut fn_ids = Vec::with_capacity(program.functions.len());
+            for function in &program.functions {
+                if let Some(name) = function.effective_name_units() {
+                    let next_id = unique_names.len();
+                    let id = *unique_names.entry(name).or_insert(next_id);
+                    fn_ids.push(Some(id));
+                } else {
+                    fn_ids.push(None);
+                }
             }
-        }
-        for (_, id) in &unique_names {
-            let symbol_name = format!("{symbol}_fn_name_{id}");
-            writeln!(output, "extern const kiln_string {symbol_name};").unwrap();
-        }
-        for (index, id) in fn_ids.into_iter().enumerate() {
-            if let Some(id) = id {
-                writeln!(
-                    output,
-                    "#define {symbol}_function_name_{index} ({symbol}_fn_name_{id})"
-                )
-                .unwrap();
-            }
-        }
-    } else {
-        for (index, function) in program.functions.iter().enumerate() {
-            if function.effective_name_units().is_some() {
-                let symbol_name = format!("{symbol}_function_name_{index}");
+            for (_, id) in &unique_names {
+                let symbol_name = format!("{symbol}_fn_name_{id}");
                 writeln!(output, "extern const kiln_string {symbol_name};").unwrap();
+            }
+            for (index, id) in fn_ids.into_iter().enumerate() {
+                if let Some(id) = id {
+                    writeln!(
+                        output,
+                        "#define {symbol}_function_name_{index} ({symbol}_fn_name_{id})"
+                    )
+                    .unwrap();
+                }
+            }
+        } else {
+            for (index, function) in program.functions.iter().enumerate() {
+                if function.effective_name_units().is_some() {
+                    let symbol_name = format!("{symbol}_function_name_{index}");
+                    writeln!(output, "extern const kiln_string {symbol_name};").unwrap();
+                }
             }
         }
     }
@@ -3885,6 +3900,71 @@ pub fn closed_world_namespace_members(
     Some(members)
 }
 
+fn scan_referenced_functions(texts: &[String], symbol: &str, total_funcs: usize) -> Vec<bool> {
+    let mut referenced = vec![false; total_funcs];
+    let prefix = format!("{symbol}_fn_");
+    let pmap_prefix = format!("{symbol}_pmap_");
+    let prefix_bytes = prefix.as_bytes();
+    let pmap_bytes = pmap_prefix.as_bytes();
+    if prefix_bytes.is_empty() {
+        return referenced;
+    }
+    let first_byte = prefix_bytes[0];
+
+    for text in texts {
+        let bytes = text.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let Some(pos) = memchr::memchr(first_byte, &bytes[i..]) else {
+                break;
+            };
+            i += pos;
+            if bytes[i..].starts_with(prefix_bytes) {
+                i += prefix_bytes.len();
+                let mut num = 0usize;
+                let mut has_digit = false;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    has_digit = true;
+                    num = num
+                        .saturating_mul(10)
+                        .saturating_add((bytes[i] - b'0') as usize);
+                    i += 1;
+                }
+                if has_digit && num < total_funcs {
+                    referenced[num] = true;
+                }
+            } else if bytes[i..].starts_with(pmap_bytes) {
+                i += pmap_bytes.len();
+                let mut cursor = i;
+                if cursor < bytes.len() && !bytes[cursor].is_ascii_digit() {
+                    while cursor < bytes.len() && bytes[cursor] != b'_' {
+                        cursor += 1;
+                    }
+                    if cursor < bytes.len() && bytes[cursor] == b'_' {
+                        cursor += 1;
+                    }
+                }
+                let mut num = 0usize;
+                let mut has_digit = false;
+                while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+                    has_digit = true;
+                    num = num
+                        .saturating_mul(10)
+                        .saturating_add((bytes[cursor] - b'0') as usize);
+                    cursor += 1;
+                }
+                if has_digit && num < total_funcs {
+                    referenced[num] = true;
+                }
+                i = cursor;
+            } else {
+                i += 1;
+            }
+        }
+    }
+    referenced
+}
+
 fn render_module(
     module: &ModuleProgram,
     program_hash: u64,
@@ -4126,7 +4206,7 @@ fn render_module(
     if should_chunk {
         let function_texts = chunked_bodies.expect("chunked_bodies present when should_chunk");
         let total_funcs = function_texts.len();
-        let chunk_size = 1000usize;
+        let chunk_size = if total_funcs > 10_000 { 1500 } else { 1000 };
         let chunk_0_funcs = chunk_size.min(total_funcs);
 
         let source = output.replace(
@@ -4167,6 +4247,7 @@ fn render_module(
             emitted_program,
             unit_symbol,
             policy.compact,
+            false,
         );
         render_key_table_extern(&mut chunk_header, unit_symbol, &keys);
         if policy.should_compile_regex() {
@@ -4198,15 +4279,26 @@ fn render_module(
             )
             .unwrap();
         }
-        chunk_header.push_str(&rendered_funcs.forward_declarations);
 
         let mut chunks = Vec::new();
         chunks.push(chunk_0);
         let mut start = chunk_0_funcs;
         while start < total_funcs {
             let end = (start + chunk_size).min(total_funcs);
-            let mut chunk_k = String::with_capacity(chunk_header.len() + (end - start) * 2048);
+            let referenced =
+                scan_referenced_functions(&function_texts[start..end], unit_symbol, total_funcs);
+            let decl_len: usize = (0..total_funcs)
+                .filter(|&i| (i >= start && i < end) || referenced[i])
+                .map(|i| rendered_funcs.function_declarations[i].len())
+                .sum();
+            let bodies_len: usize = function_texts[start..end].iter().map(String::len).sum();
+            let mut chunk_k = String::with_capacity(chunk_header.len() + decl_len + bodies_len);
             chunk_k.push_str(&chunk_header);
+            for i in 0..total_funcs {
+                if (i >= start && i < end) || referenced[i] {
+                    chunk_k.push_str(&rendered_funcs.function_declarations[i]);
+                }
+            }
             for f in &function_texts[start..end] {
                 chunk_k.push_str(f);
             }
