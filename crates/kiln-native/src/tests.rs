@@ -315,6 +315,49 @@ fn executable_module_sizes_reports_retained_and_dropped() {
 }
 
 #[test]
+fn executable_module_sizes_prunes_unused_pure_declarations() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let project = TestDirectory::new("kiln-pure-declarations-pruning");
+    fs::write(
+        project.path.join("package.json"),
+        r#"{"sideEffects": false}"#,
+    )
+    .expect("write package.json");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { a } from './dep.mjs';\nconsole.log(a());\n",
+    )
+    .expect("write entry");
+    fs::write(
+        project.path.join("dep.mjs"),
+        "export function a() { return 1; }\nconst UNUSED_ARR = [1, 2, 3];\nconst UNUSED_OBJ = { x: 10, y: 20 };\nconst UNUSED_NUM = 42;\n",
+    )
+    .expect("write dep");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("sizes graph");
+    let sizes = kiln_liveness::executable_module_sizes(
+        &graph,
+        &kiln_liveness::SelectionOptions::development(),
+    )
+    .expect("module sizes");
+    let dep = sizes
+        .iter()
+        .find(|size| size.path.ends_with("dep.mjs"))
+        .expect("dep reported");
+    assert!(
+        dep.retained_instructions < dep.total_instructions,
+        "unused pure declarations shrink the module: {dep:?}"
+    );
+}
+
+#[test]
 fn executable_demanded_members_names_builtins_and_computed() {
     use kiln_module_resolver::NodeRuntimeResolver;
 

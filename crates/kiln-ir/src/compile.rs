@@ -7686,6 +7686,36 @@ fn removable_class_evaluation(class: &Class) -> bool {
     class.superclass.is_none() && removable_class_structure(class)
 }
 
+fn is_removable_expression(expr: &Expression) -> bool {
+    match &expr.kind {
+        ExpressionKind::Literal(_) => true,
+        ExpressionKind::Function(_) => true,
+        ExpressionKind::Class(class) => removable_class_evaluation(class),
+        ExpressionKind::Unary { operator, argument } => {
+            matches!(
+                operator,
+                UnaryOperator::Plus
+                    | UnaryOperator::Negate
+                    | UnaryOperator::Not
+                    | UnaryOperator::Void
+            ) && is_removable_expression(argument)
+        }
+        ExpressionKind::Array { elements } => elements.iter().all(|elem| match elem {
+            ListElement::Item(e) => is_removable_expression(e),
+            ListElement::Hole => true,
+            ListElement::Spread(_) => false,
+        }),
+        ExpressionKind::Object { members } => members.iter().all(|member| match member {
+            ObjectMember::Property(prop) => match &prop.key {
+                ObjectKey::Static(s) => s != "__proto__" && is_removable_expression(&prop.value),
+                _ => false,
+            },
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
 fn removable_declaration_names(statement: &Statement) -> Option<Vec<String>> {
     match &statement.kind {
         StatementKind::Class(class) if removable_class_evaluation(class) => {
@@ -7697,10 +7727,9 @@ fn removable_declaration_names(statement: &Statement) -> Option<Vec<String>> {
             let mut names = Vec::with_capacity(declarations.len());
             for declaration in declarations {
                 let name = declaration.pattern.as_identifier()?.to_owned();
-                let removable = match declaration.initializer.as_ref().map(|value| &value.kind) {
-                    None | Some(ExpressionKind::Function(_)) => true,
-                    Some(ExpressionKind::Class(class)) => removable_class_evaluation(class),
-                    _ => false,
+                let removable = match &declaration.initializer {
+                    None => true,
+                    Some(expr) => is_removable_expression(expr),
                 };
                 if !removable {
                     return None;
