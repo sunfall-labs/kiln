@@ -24,7 +24,6 @@ static inline int kiln_module_28c488eb61184e73093ffbb78484535e_fn_0(kiln_call_co
     kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED, v4 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
     v0 = (size_t)0 < argc ? args[0] : KILN_VAL_UNDEFINED;
-    v1 = KILN_VAL_UNDEFINED;
     v2 = *(const kiln_val *)KILN_VAL_PTR(upvalues[0]);
     if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v2) && KILN_VAL_IS_NUMBER(v0))) { double a; memcpy(&a, &v2, sizeof(a)); double b; memcpy(&b, &v0, sizeof(b)); v3 = kiln_c99_val_from_double(a + b); } else { int status = KILN_C99_OK; v3 = kiln_c99_val_binary(1, host, v2, v0, &status, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_unwind; if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal("kiln_module_28c488eb61184e73093ffbb78484535e", (size_t)2, "Binary", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; }
     *result = v3; return KILN_C99_OK;
@@ -42,7 +41,6 @@ static inline __attribute__((always_inline)) kiln_val kiln_module_28c488eb61184e
     kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED, v4 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
     d0 = p0; v0 = kiln_c99_val_from_double(p0);
-    v1 = KILN_VAL_UNDEFINED;
     v2 = *(const kiln_val *)KILN_VAL_PTR(upvalues[0]);
     if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v2))) { double a; memcpy(&a, &v2, sizeof(a)); double b = d0; d3 = a + b; v3 = kiln_c99_val_from_double(d3); } else { { kiln_call_context kiln_restart_ctx = { host, thrown, NULL, depth }; kiln_val kiln_restart_args[1] = { kiln_c99_val_from_double(p0) }; kiln_val kiln_restart_out = KILN_VAL_UNDEFINED; int kiln_restart_status = kiln_module_28c488eb61184e73093ffbb78484535e_fn_0(&kiln_restart_ctx, &kiln_restart_out, upvalues, &receiver, kiln_restart_args, (size_t)1); if (KILN_UNLIKELY(kiln_restart_status != KILN_C99_OK)) { kiln_c99_typed_status = kiln_restart_status; if (kiln_restart_status == KILN_C99_THROWN) kiln_c99_typed_thrown = *thrown; return KILN_VAL_TYPED_FAIL; } return kiln_restart_out; } }
     return v3;
@@ -56,7 +54,6 @@ static inline __attribute__((always_inline)) int kiln_module_28c488eb61184e73093
     kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED, v4 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
     v0 = (size_t)0 < argc ? args[0] : KILN_VAL_UNDEFINED;
-    v1 = KILN_VAL_UNDEFINED;
     v2 = *(const kiln_val *)KILN_VAL_PTR(upvalues[0]);
     if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v2) && KILN_VAL_IS_NUMBER(v0))) { double a; memcpy(&a, &v2, sizeof(a)); double b; memcpy(&b, &v0, sizeof(b)); d3 = a + b; v3 = kiln_c99_val_from_double(d3); } else { return kiln_module_28c488eb61184e73093ffbb78484535e_fn_0(ctx, result, upvalues, receiver_ptr, args, argc); }
     *result = v3; return KILN_C99_OK;
@@ -75,8 +72,6 @@ static int kiln_module_28c488eb61184e73093ffbb78484535e_body(kiln_host *host, ki
     double d3 = 0.0, d4 = 0.0, d7 = 0.0;
     kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED, v4 = KILN_VAL_UNDEFINED, v5 = KILN_VAL_UNDEFINED, v6 = KILN_VAL_UNDEFINED, v7 = KILN_VAL_UNDEFINED, v8 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
-    v0 = locals[0];
-    v1 = KILN_VAL_UNDEFINED;
     { int status = kiln_c99_val_make_cell(&locals[0]); if (status != KILN_C99_OK) return status; }
     v3 = UINT64_C(4621819117588971520);
     memcpy(&d3, &v3, sizeof(d3));

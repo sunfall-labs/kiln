@@ -15,7 +15,6 @@ int kiln_module_cc63ac731604078bde44d2124ac359e2(kiln_host *host, kiln_value *re
     double d2 = 0.0, d3 = 0.0, d4 = 0.0, d5 = 0.0;
     kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED, v4 = KILN_VAL_UNDEFINED, v5 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
-    v0 = KILN_VAL_UNDEFINED;
     v1 = KILN_VAL_TRUE;
     b1 = (v1 == KILN_VAL_TRUE);
     if (b1) {

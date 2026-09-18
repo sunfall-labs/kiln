@@ -670,6 +670,14 @@ pub struct BasicBlock {
     pub exception_handler: Option<BlockId>,
 }
 
+impl BasicBlock {
+    /// True if this block is the entry block or has at least one incoming predecessor edge.
+    #[inline]
+    pub fn is_reachable_from_entry(&self, entry: BlockId) -> bool {
+        self.id == entry || !self.predecessors.is_empty()
+    }
+}
+
 /// A statically known, non-escaping object allocation eligible for scalar replacement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScalarObject {

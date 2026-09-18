@@ -23,9 +23,6 @@ static int kiln_module_bb80a9f8a54804e3c5b781bf084479b4_body(kiln_host *host, ki
     double d4 = 0.0, d5 = 0.0;
     kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED, v4 = KILN_VAL_UNDEFINED, v5 = KILN_VAL_UNDEFINED, v6 = KILN_VAL_UNDEFINED, v7 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
-    v0 = locals[0];
-    v1 = KILN_VAL_UNDEFINED;
-    v2 = locals[2];
     { const kiln_val *cell = (const kiln_val *)KILN_VAL_PTR(locals[0]); int status = kiln_c99_val_check_tdz(*cell, thrown); if (status == KILN_C99_THROWN) goto kiln_unwind; if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal("kiln_module_bb80a9f8a54804e3c5b781bf084479b4", (size_t)0, "LoadCell", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; v3 = *cell; }
     v4 = UINT64_C(4607182418800017408);
     memcpy(&d4, &v4, sizeof(d4));

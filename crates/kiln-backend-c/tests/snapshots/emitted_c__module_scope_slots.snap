@@ -42,8 +42,6 @@ static int kiln_module_a565026db870a77a306e28a6a100fa79_body(kiln_host *host, ki
     double d2 = 0.0, d3 = 0.0;
     kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED, v4 = KILN_VAL_UNDEFINED, v5 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
-    v0 = locals[0];
-    v1 = locals[1];
     v2 = UINT64_C(4613937818241073152);
     memcpy(&d2, &v2, sizeof(d2));
     i2 = 3LL;

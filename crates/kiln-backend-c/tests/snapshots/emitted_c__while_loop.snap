@@ -15,7 +15,6 @@ int kiln_module_1c0a89c1a2558c12f27e3d560cac2b27(kiln_host *host, kiln_value *re
     double d1 = 0.0, d2 = 0.0, d3 = 0.0, d4 = 0.0, d6 = 0.0, d7 = 0.0, d8 = 0.0;
     kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED, v4 = KILN_VAL_UNDEFINED, v5 = KILN_VAL_UNDEFINED, v6 = KILN_VAL_UNDEFINED, v7 = KILN_VAL_UNDEFINED, v8 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
-    v0 = KILN_VAL_UNDEFINED;
     v2 = UINT64_C(0);
     memcpy(&d2, &v2, sizeof(d2));
     i2 = 0LL;

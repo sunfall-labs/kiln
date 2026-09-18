@@ -22,7 +22,6 @@ static int kiln_module_2064c19b6f57f0901e70848d80798ed5_body(kiln_host *host, ki
     double d5 = 0.0, d6 = 0.0;
     kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED, v4 = KILN_VAL_UNDEFINED, v5 = KILN_VAL_UNDEFINED, v6 = KILN_VAL_UNDEFINED, v7 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
-    v0 = locals[0];
     goto kiln_block_1;
 kiln_block_1:;
     v3 = KILN_VAL_TRUE;
