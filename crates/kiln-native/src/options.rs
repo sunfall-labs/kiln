@@ -58,6 +58,7 @@ pub struct NativeBuildOptions {
     pub static_link: bool,
     pub pgo_generate: Option<PathBuf>,
     pub pgo_use: Option<PathBuf>,
+    pub node: bool,
 }
 
 impl Default for NativeBuildOptions {
@@ -70,6 +71,7 @@ impl Default for NativeBuildOptions {
             static_link: false,
             pgo_generate: None,
             pgo_use: None,
+            node: false,
         }
     }
 }
@@ -84,6 +86,7 @@ impl NativeBuildOptions {
             static_link: false,
             pgo_generate: None,
             pgo_use: None,
+            node: false,
         }
     }
 
@@ -114,6 +117,11 @@ impl NativeBuildOptions {
 
     pub fn with_type_profile_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.realm.type_profile_path = Some(path.into());
+        self
+    }
+
+    pub fn with_node(mut self, node: bool) -> Self {
+        self.node = node;
         self
     }
 }

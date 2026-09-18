@@ -5322,6 +5322,7 @@ pub struct ModuleRealmSession {
 
 struct ModuleRealmShared {
     realm: Realm<Scheduled, Timer>,
+    global_objects: Vec<Option<Value>>,
     pending_host: Vec<PendingHostRequest>,
     pending_node: Vec<PendingNodeRequest>,
     node_servers: Vec<Rc<RefCell<NodeServerState>>>,
@@ -5339,6 +5340,7 @@ impl Default for ModuleRealmSession {
         Self {
             shared: Rc::new(RefCell::new(ModuleRealmShared {
                 realm: Realm::new(),
+                global_objects: vec![None],
                 pending_host: Vec::new(),
                 pending_node: Vec::new(),
                 node_servers: Vec::new(),
@@ -6967,6 +6969,7 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
     if let Some((session, _)) = session.as_ref() {
         vm.module_realm = Some(Rc::clone(&session.shared));
         vm.intrinsics = Rc::clone(&session.shared.borrow().intrinsics);
+        vm.global_objects = session.shared.borrow().global_objects.clone();
     }
     let execution = match if enter_runtime {
         runtime.enter(|| vm.run_module_body())
@@ -7047,6 +7050,9 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
         .as_ref()
         .map(|module_object| vm.read_property(module_object, "exports", vm.instruction))
         .transpose()?;
+    if let Some((session, _)) = session {
+        session.shared.borrow_mut().global_objects = vm.global_objects.clone();
+    }
     Ok(ModuleExecutionResult {
         execution,
         exports,
@@ -26384,6 +26390,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 message: "too many realms".to_owned(),
             }
         })?);
+        if let Some(shared) = &self.module_realm {
+            shared.borrow_mut().global_objects.push(None);
+        }
         self.global_objects.push(None);
         self.intrinsics.add_realm();
         Ok(realm)
@@ -26919,7 +26928,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// not the same function, so `[] instanceof other.Array` is false while `Array.isArray([])`
     /// stays true.
     fn global_object_in(&mut self, realm: RealmId) -> Value {
-        if let Some(existing) = &self.global_objects[realm.0 as usize] {
+        if let Some(shared) = &self.module_realm {
+            if let Some(Some(existing)) = shared.borrow().global_objects.get(realm.0 as usize) {
+                if self.global_objects.len() <= realm.0 as usize {
+                    self.global_objects.resize(realm.0 as usize + 1, None);
+                }
+                self.global_objects[realm.0 as usize] = Some(existing.clone());
+                return existing.clone();
+            }
+        } else if let Some(existing) = self
+            .global_objects
+            .get(realm.0 as usize)
+            .and_then(|o| o.as_ref())
+        {
             return existing.clone();
         }
         // Every one of these is *non-enumerable*, which is what node does and what stops
@@ -27106,6 +27127,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Value::Native(Native::HostAgent(op), realm),
                 );
             }
+        }
+        if let Some(shared) = &self.module_realm {
+            let mut shared = shared.borrow_mut();
+            if shared.global_objects.len() <= realm.0 as usize {
+                shared.global_objects.resize(realm.0 as usize + 1, None);
+            }
+            shared.global_objects[realm.0 as usize] = Some(value.clone());
+        }
+        if self.global_objects.len() <= realm.0 as usize {
+            self.global_objects.resize(realm.0 as usize + 1, None);
         }
         self.global_objects[realm.0 as usize] = Some(value.clone());
         value

@@ -8,19 +8,12 @@ pub enum WebStubKind {
     TransformStream,
     ByteLengthQueuingStrategy,
     CountQueuingStrategy,
-    Blob,
-    File,
-    FormData,
-    Headers,
-    Request,
-    Response,
     MessagePort,
     MessageChannel,
     BroadcastChannel,
     Event,
     EventTarget,
     CustomEvent,
-    DOMException,
 }
 
 impl WebStubKind {
@@ -30,19 +23,12 @@ impl WebStubKind {
         (Self::TransformStream, "TransformStream"),
         (Self::ByteLengthQueuingStrategy, "ByteLengthQueuingStrategy"),
         (Self::CountQueuingStrategy, "CountQueuingStrategy"),
-        (Self::Blob, "Blob"),
-        (Self::File, "File"),
-        (Self::FormData, "FormData"),
-        (Self::Headers, "Headers"),
-        (Self::Request, "Request"),
-        (Self::Response, "Response"),
         (Self::MessagePort, "MessagePort"),
         (Self::MessageChannel, "MessageChannel"),
         (Self::BroadcastChannel, "BroadcastChannel"),
         (Self::Event, "Event"),
         (Self::EventTarget, "EventTarget"),
         (Self::CustomEvent, "CustomEvent"),
-        (Self::DOMException, "DOMException"),
     ];
 
     pub fn name(self) -> &'static str {
@@ -52,19 +38,12 @@ impl WebStubKind {
             Self::TransformStream => "TransformStream",
             Self::ByteLengthQueuingStrategy => "ByteLengthQueuingStrategy",
             Self::CountQueuingStrategy => "CountQueuingStrategy",
-            Self::Blob => "Blob",
-            Self::File => "File",
-            Self::FormData => "FormData",
-            Self::Headers => "Headers",
-            Self::Request => "Request",
-            Self::Response => "Response",
             Self::MessagePort => "MessagePort",
             Self::MessageChannel => "MessageChannel",
             Self::BroadcastChannel => "BroadcastChannel",
             Self::Event => "Event",
             Self::EventTarget => "EventTarget",
             Self::CustomEvent => "CustomEvent",
-            Self::DOMException => "DOMException",
         }
     }
 }

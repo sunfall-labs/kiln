@@ -1354,7 +1354,6 @@ fn boxed_uses(
     kind: EntryKind,
     spec: &Speculation,
 ) -> HashSet<ValueId> {
-    let closed_world = !program.has_direct_eval() && !program.has_dynamic_import();
     let twin_only = |op: &BinaryOp| {
         matches!(
             op,
@@ -1409,11 +1408,10 @@ fn boxed_uses(
                 GraphOp::CallMethod {
                     object, name, args, ..
                 } => {
-                    let is_math = closed_world
-                        && matches!(
-                            defs.get(object),
-                            Some(GraphOp::LoadBuiltin(kiln_ir::Builtin::Math))
-                        );
+                    let is_math = matches!(
+                        defs.get(object),
+                        Some(GraphOp::LoadBuiltin(kiln_ir::Builtin::Math))
+                    );
                     let key = program.constants.get(*name as usize).and_then(|c| match c {
                         Constant::String(s) => s.to_scalar_string().ok(),
                         _ => None,

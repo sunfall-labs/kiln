@@ -638,6 +638,59 @@ pub fn retained_method_groups(
     mask
 }
 
+/// Conservative capabilities required by a single module program.
+pub fn program_provider_capabilities(
+    module: &kiln_ir::ModuleProgram,
+    demanded: Option<&BTreeSet<u32>>,
+) -> kiln_native_provider_contract::ProviderCapabilities {
+    use kiln_ir::{Builtin, Constant, Instruction};
+    use kiln_native_provider_contract::{ProviderCapabilities, ProviderCapability};
+
+    let program = &module.program;
+    let mut required = ProviderCapabilities::NONE;
+    let mut inspect = |instruction: &Instruction| {
+        required = match instruction {
+            Instruction::NewRegExp { .. } => required.with(ProviderCapability::RegExp),
+            Instruction::LoadBuiltin(Builtin::RegExp) => required.with(ProviderCapability::RegExp),
+            Instruction::LoadBuiltin(Builtin::BigInt) => required.with(ProviderCapability::BigInt),
+            Instruction::LoadBuiltin(Builtin::Json) => required.with(ProviderCapability::Json),
+            Instruction::Const(index)
+                if matches!(
+                    program.constants.get(*index as usize),
+                    Some(Constant::BigInt(_))
+                ) =>
+            {
+                required.with(ProviderCapability::BigInt)
+            }
+            _ => required,
+        };
+        let index = match instruction {
+            Instruction::LoadGlobal(name)
+            | Instruction::LoadGlobalBindingOrUndefined(name)
+            | Instruction::RequireGlobalBinding(name)
+            | Instruction::GetProperty(name)
+            | Instruction::CallMethod { name, .. } => *name,
+            _ => return,
+        };
+        let Some(Constant::String(name)) = program.constants.get(index as usize) else {
+            return;
+        };
+        required = match name.to_scalar_string().ok().as_deref() {
+            Some("RegExp") => required.with(ProviderCapability::RegExp),
+            Some("BigInt") => required.with(ProviderCapability::BigInt),
+            Some("JSON") => required.with(ProviderCapability::Json),
+            Some("Temporal") => required.with(ProviderCapability::Temporal),
+            Some("Intl") => required.with(ProviderCapability::Intl),
+            Some("parallelMap") => required.with(ProviderCapability::Parallel),
+            _ => required,
+        };
+    };
+    for instruction in kiln_backend_c::retained_module_instructions(module, demanded) {
+        inspect(instruction);
+    }
+    required
+}
+
 /// Provider engines reachable from the retained executable graph.
 ///
 /// This is a liveness result, not a packaging choice. It reports individual capabilities even
@@ -648,7 +701,6 @@ pub fn retained_provider_capabilities(
     demand: &LiveDemand,
     members: &kiln_backend_c::facts::DemandedMembers,
 ) -> kiln_native_provider_contract::ProviderCapabilities {
-    use kiln_ir::{Builtin, Constant, Instruction, ModuleProgram};
     use kiln_module_resolver::NodeBuiltin;
     use kiln_native_provider_contract::{ProviderCapabilities, ProviderCapability};
 
@@ -666,61 +718,6 @@ pub fn retained_provider_capabilities(
     }
     if members.names.contains("parallelMap") {
         required = required.with(ProviderCapability::Parallel);
-    }
-
-    // A conservative backstop for aliases that have not yet reached the demanded-member facts.
-    // It is scoped to live modules; dead dependencies no longer inflate the provider plan.
-    fn program_capabilities(
-        module: &ModuleProgram,
-        demanded: Option<&BTreeSet<u32>>,
-    ) -> ProviderCapabilities {
-        let program = &module.program;
-        let mut required = ProviderCapabilities::NONE;
-        let mut inspect = |instruction: &Instruction| {
-            required = match instruction {
-                Instruction::NewRegExp { .. } => required.with(ProviderCapability::RegExp),
-                Instruction::LoadBuiltin(Builtin::RegExp) => {
-                    required.with(ProviderCapability::RegExp)
-                }
-                Instruction::LoadBuiltin(Builtin::BigInt) => {
-                    required.with(ProviderCapability::BigInt)
-                }
-                Instruction::LoadBuiltin(Builtin::Json) => required.with(ProviderCapability::Json),
-                Instruction::Const(index)
-                    if matches!(
-                        program.constants.get(*index as usize),
-                        Some(Constant::BigInt(_))
-                    ) =>
-                {
-                    required.with(ProviderCapability::BigInt)
-                }
-                _ => required,
-            };
-            let index = match instruction {
-                Instruction::LoadGlobal(name)
-                | Instruction::LoadGlobalBindingOrUndefined(name)
-                | Instruction::RequireGlobalBinding(name)
-                | Instruction::GetProperty(name)
-                | Instruction::CallMethod { name, .. } => *name,
-                _ => return,
-            };
-            let Some(Constant::String(name)) = program.constants.get(index as usize) else {
-                return;
-            };
-            required = match name.to_scalar_string().ok().as_deref() {
-                Some("RegExp") => required.with(ProviderCapability::RegExp),
-                Some("BigInt") => required.with(ProviderCapability::BigInt),
-                Some("JSON") => required.with(ProviderCapability::Json),
-                Some("Temporal") => required.with(ProviderCapability::Temporal),
-                Some("Intl") => required.with(ProviderCapability::Intl),
-                Some("parallelMap") => required.with(ProviderCapability::Parallel),
-                _ => required,
-            };
-        };
-        for instruction in kiln_backend_c::retained_module_instructions(module, demanded) {
-            inspect(instruction);
-        }
-        required
     }
 
     let specifier_capability = |specifier: &str| match NodeBuiltin::parse(specifier) {
@@ -745,7 +742,7 @@ pub fn retained_provider_capabilities(
         if matches!(node.source, ModuleSource::Json) {
             required = required.with(ProviderCapability::Json);
         }
-        required = required.union(program_capabilities(
+        required = required.union(program_provider_capabilities(
             &node.program,
             demand.slots.get(&node.path),
         ));
