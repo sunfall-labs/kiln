@@ -3470,6 +3470,9 @@ fn render(
     if callables {
         render_scalar_realm_wrapper(&mut output, symbol);
     }
+    if policy.compact {
+        prune_unused_compact_globals(&mut output, symbol, symbol, symbol, program);
+    }
     Ok(output)
 }
 
@@ -4390,6 +4393,15 @@ fn render_module(
         }
         Ok(RenderedModule { source, chunks })
     } else {
+        if policy.compact {
+            prune_unused_compact_globals(
+                &mut output,
+                symbol,
+                unit_symbol,
+                diagnostic_site,
+                emitted_program,
+            );
+        }
         Ok(RenderedModule {
             source: output,
             chunks: Vec::new(),
@@ -4460,6 +4472,55 @@ fn render_runtime_module(
     render_namespace_wrapper(&mut output, symbol);
     render_module_realm_wrapper(&mut output, symbol, symbol);
     output
+}
+
+fn prune_unused_compact_globals(
+    output: &mut String,
+    symbol: &str,
+    unit_symbol: &str,
+    diagnostic_site: &str,
+    program: &Program,
+) {
+    let importer_decl = format!("static const char ku_importer[] = {};\n", c_string(symbol));
+    if output.matches("ku_importer").count() <= 1 {
+        *output = output.replace(&importer_decl, "");
+    }
+    let site_decl = format!(
+        "static const char ku_site[] = {};\n",
+        c_string(diagnostic_site)
+    );
+    if output.matches("ku_site").count() <= 1 {
+        *output = output.replace(&site_decl, "");
+    }
+    for (index, constant) in program.constants.iter().enumerate() {
+        match constant {
+            Constant::String(_) => {
+                let const_def = format!(
+                    "#define {unit_symbol}_constant_{index} (&{unit_symbol}_string_{index})\n"
+                );
+                if output
+                    .matches(&format!("{unit_symbol}_constant_{index}"))
+                    .count()
+                    <= 1
+                {
+                    *output = output.replace(&const_def, "");
+                }
+            }
+            Constant::BigInt(_) => {
+                let const_def = format!(
+                    "#define {unit_symbol}_constant_{index} (&{unit_symbol}_bigint_digits_{index})\n"
+                );
+                if output
+                    .matches(&format!("{unit_symbol}_constant_{index}"))
+                    .count()
+                    <= 1
+                {
+                    *output = output.replace(&const_def, "");
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 pub(crate) fn instruction_diagnostic(instruction: &Instruction, constants: &[Constant]) -> String {
