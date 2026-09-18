@@ -325,6 +325,30 @@ pub(super) fn emit_get_property(
         }
         return;
     }
+    let poly_read = if ctx.plan.compact {
+        format!(
+            "else if (shape != NULL) {{ \
+                kiln_val poly_v = ku_pic_poly_read(obj, &site); \
+                if (poly_v != KILN_VAL_HOLE) {{ \
+                    v{v} = poly_v; \
+                    handled = 1; \
+                }} \
+            }}"
+        )
+    } else {
+        format!(
+            "else if (shape != NULL) {{ \
+                uint32_t slot = UINT32_MAX; \
+                if (shape == site.entries[1].shape) slot = site.entries[1].slot; \
+                else if (shape == site.entries[2].shape) slot = site.entries[2].slot; \
+                else if (shape == site.entries[3].shape) slot = site.entries[3].slot; \
+                if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity)) {{ \
+                    v{v} = slot < KILN_C99_INLINE_SLOTS ? obj->inline_slots[slot] : obj->slots[slot]; \
+                    handled = 1; \
+                }} \
+            }}"
+        )
+    };
     writeln!(
                 output,
                 "    {{ int handled = 0; {{ static kiln_c99_site site = {{0}}; \
@@ -341,16 +365,7 @@ pub(super) fn emit_get_property(
                             v{v} = obj->slots[s0]; \
                             handled = 1; \
                         }} \
-                    }} else if (shape != NULL) {{ \
-                        uint32_t slot = UINT32_MAX; \
-                        if (shape == site.entries[1].shape) slot = site.entries[1].slot; \
-                        else if (shape == site.entries[2].shape) slot = site.entries[2].slot; \
-                        else if (shape == site.entries[3].shape) slot = site.entries[3].slot; \
-                        if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity)) {{ \
-                            v{v} = slot < KILN_C99_INLINE_SLOTS ? obj->inline_slots[slot] : obj->slots[slot]; \
-                            handled = 1; \
-                        }} \
-                    }} \
+                    }} {poly_read} \
                 }} \
                 if (!handled) {{ \
                     int status = kiln_c99_val_read_property_key(host, v{o}, {symbol}_key_{name}, depth, thrown, &site, &v{v}); \
@@ -431,6 +446,7 @@ pub(super) fn emit_set_property(
     ctx: &OpContext,
 ) {
     let v = vid.0;
+    let val = value.0;
     let graph = ctx.graph;
     let symbol = ctx.symbol;
     let diagnostic_site = ctx.diagnostic_site;
@@ -478,30 +494,61 @@ pub(super) fn emit_set_property(
     let strict = matches!(op, GraphOp::SetPropertyStrict { strict: true, .. }) as u8;
     let check = status_check(diagnostic_site, pc, label, unwind);
     if ctx.plan.generic_only {
-        let site_expr = if crate::compact_diagnostic_site(diagnostic_site) {
-            "NULL"
+        if crate::compact_diagnostic_site(diagnostic_site) {
+            writeln!(
+                output,
+                "    KU_WRITE_PROPERTY(v{o}, {symbol}_key_{name}, v{val}, {strict}, NULL, {pc}, \"{label}\", {unwind}); v{v} = v{val};{typed_sync}",
+                o = object.0,
+                val = value.0,
+                typed_sync = if typed {
+                    format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+                } else {
+                    String::new()
+                }
+            )
+            .unwrap();
         } else {
-            "&site"
-        };
-        let site_decl = if crate::compact_diagnostic_site(diagnostic_site) {
-            ""
-        } else {
-            "static kiln_c99_site site = {0}; "
-        };
-        writeln!(
-            output,
-            "    {{ {site_decl}int status = kiln_c99_val_write_property_key(host, v{o}, {symbol}_key_{name}, v{val}, {strict}, depth, thrown, {site_expr}); {check} v{v} = v{val}; }}{typed_sync}",
-            o = object.0,
-            val = value.0,
-            typed_sync = if typed {
-                format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));")
-            } else {
-                String::new()
-            }
-        )
-        .unwrap();
+            writeln!(
+                output,
+                "    {{ static kiln_c99_site site = {{0}}; int status = kiln_c99_val_write_property_key(host, v{o}, {symbol}_key_{name}, v{val}, {strict}, depth, thrown, &site); {check} v{v} = v{val}; }}{typed_sync}",
+                o = object.0,
+                val = value.0,
+                typed_sync = if typed {
+                    format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+                } else {
+                    String::new()
+                }
+            )
+            .unwrap();
+        }
         return;
     }
+    let poly_write = if ctx.plan.compact {
+        format!(
+            "else if (shape != NULL) {{ \
+                if (ku_pic_poly_write(obj, &site, v{val})) {{ \
+                    v{v} = v{val}; \
+                    handled = 1; \
+                }} \
+            }}"
+        )
+    } else {
+        format!(
+            "else if (shape != NULL) {{ \
+                uint32_t slot = UINT32_MAX; \
+                if (shape == site.entries[1].shape && site.entries[1].transition_to == NULL) slot = site.entries[1].slot; \
+                else if (shape == site.entries[2].shape && site.entries[2].transition_to == NULL) slot = site.entries[2].slot; \
+                else if (shape == site.entries[3].shape && site.entries[3].transition_to == NULL) slot = site.entries[3].slot; \
+                if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity && !obj->frozen)) {{ \
+                    kiln_c99_prototype_touched(obj); \
+                    if (slot < KILN_C99_INLINE_SLOTS) obj->inline_slots[slot] = v{val}; \
+                    else obj->slots[slot] = v{val}; \
+                    v{v} = v{val}; \
+                    handled = 1; \
+                }} \
+            }}"
+        )
+    };
     writeln!(
                 output,
                 "    {{ static kiln_c99_site site = {{0}}; \
@@ -520,19 +567,7 @@ pub(super) fn emit_set_property(
                             v{v} = v{val}; \
                             handled = 1; \
                         }} \
-                    }} else if (shape != NULL) {{ \
-                        uint32_t slot = UINT32_MAX; \
-                        if (shape == site.entries[1].shape && site.entries[1].transition_to == NULL) slot = site.entries[1].slot; \
-                        else if (shape == site.entries[2].shape && site.entries[2].transition_to == NULL) slot = site.entries[2].slot; \
-                        else if (shape == site.entries[3].shape && site.entries[3].transition_to == NULL) slot = site.entries[3].slot; \
-                        if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity && !obj->frozen)) {{ \
-                            kiln_c99_prototype_touched(obj); \
-                            if (slot < KILN_C99_INLINE_SLOTS) obj->inline_slots[slot] = v{val}; \
-                            else obj->slots[slot] = v{val}; \
-                            v{v} = v{val}; \
-                            handled = 1; \
-                        }} \
-                    }} \
+                    }} {poly_write} \
                 }} \
                 if (!handled) {{ \
                     int status = kiln_c99_val_write_property_key(host, v{o}, {symbol}_key_{name}, v{val}, {strict}, depth, thrown, &site); \

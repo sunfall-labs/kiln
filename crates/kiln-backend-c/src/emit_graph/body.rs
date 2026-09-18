@@ -47,6 +47,7 @@ fn retain_used_context(output: &mut String, context: std::ops::Range<usize>) {
     let body = &output[context.end..];
     if body.contains("KU_BINARY(")
         || body.contains("KU_READ_PROPERTY(")
+        || body.contains("KU_WRITE_PROPERTY(")
         || body.contains("KU_CALL(")
         || body.contains("KU_CALL_METHOD(")
     {
@@ -1101,6 +1102,11 @@ fn emit_block_sequence(
         !used.contains(&vid)
             && match op {
                 GraphOp::LoadGlobal(_) | GraphOp::Const { .. } => true,
+                GraphOp::LoadLocal(_) | GraphOp::LoadThis | GraphOp::LoadNewTarget
+                    if plan.compact || plan.generic_only =>
+                {
+                    true
+                }
                 GraphOp::LoadCell(_) | GraphOp::LoadUpvalue(_) => plan.unchecked.contains(&vid),
                 _ => false,
             }
