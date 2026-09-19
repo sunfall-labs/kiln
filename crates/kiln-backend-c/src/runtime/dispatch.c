@@ -4191,7 +4191,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
              * from its kind and asking it for a property would be a conversion the operation does
              * not make. */
             if (receiver.tag == KILN_VALUE_OBJECT) {
-                int status = kiln_c99_get(host, receiver, "@@toStringTag", 13, &custom, depth,
+                int status = kiln_c99_probe_symbol(host, receiver, "@@toStringTag", 13, &custom, depth,
                                           thrown);
                 if (status != KILN_C99_OK) {
                     return status;
@@ -5387,13 +5387,13 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (source.tag == KILN_VALUE_ARRAY || source.tag == KILN_VALUE_STRING ||
                 source.tag == KILN_VALUE_TYPED_ARRAY || source.tag == KILN_VALUE_COLLECTION ||
                 source.tag == KILN_VALUE_GENERATOR) {
-                status = kiln_c99_get(host, source, "@@iterator", 10, &iterator_method, depth,
+                status = kiln_c99_probe_symbol(host, source, "@@iterator", 10, &iterator_method, depth,
                                       thrown);
                 if (status != KILN_C99_OK) return status;
             } else if (source.tag == KILN_VALUE_OBJECT) {
                 /* A plain object is array-like unless it explicitly supplies the iterator
                  * protocol. Unknown ordinary names on objects read as undefined here. */
-                status = kiln_c99_get(host, source, "@@iterator", 10, &iterator_method, depth,
+                status = kiln_c99_probe_symbol(host, source, "@@iterator", 10, &iterator_method, depth,
                                       thrown);
                 if (status == KILN_C99_CONTROL_ERROR) {
                     /* Answered rather than refused, so the refusal's detail must go with it --

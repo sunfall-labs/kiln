@@ -23,6 +23,8 @@ KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_search, "@@search");
 KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_species, "@@species");
 KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_split, "@@split");
 KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_unscopables, "@@unscopables");
+KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_dispose, "@@dispose");
+KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_async_dispose, "@@asyncDispose");
 #undef KILN_C99_STATIC_SYMBOL_KEY
 
 #define KILN_C99_WELL_KNOWN(key, description, description_len) \
@@ -41,6 +43,8 @@ static const kiln_symbol kiln_c99_well_known[] = {
     KILN_C99_WELL_KNOWN(kiln_c99_symbol_key_species, "Symbol.species", 14),
     KILN_C99_WELL_KNOWN(kiln_c99_symbol_key_split, "Symbol.split", 12),
     KILN_C99_WELL_KNOWN(kiln_c99_symbol_key_unscopables, "Symbol.unscopables", 18),
+    KILN_C99_WELL_KNOWN(kiln_c99_symbol_key_dispose, "Symbol.dispose", 14),
+    KILN_C99_WELL_KNOWN(kiln_c99_symbol_key_async_dispose, "Symbol.asyncDispose", 19),
 };
 #undef KILN_C99_WELL_KNOWN
 
@@ -345,6 +349,11 @@ static int kiln_c99_is_namespace(uint64_t builtin) {
      * function from another. `require("node:perf_hooks").performance` is this same value, so the
      * two spellings are one object as they are in node. */
     if (builtin == KILN_C99_BUILTIN_PERFORMANCE) {
+        return 1;
+    }
+    /* `crypto` the same way: an object holding functions, none of which this backend answers
+     * until `node:crypto` is linked. */
+    if (builtin == KILN_C99_BUILTIN_CRYPTO) {
         return 1;
     }
     return builtin == KILN_C99_BUILTIN_MATH || builtin == KILN_C99_BUILTIN_JSON ||

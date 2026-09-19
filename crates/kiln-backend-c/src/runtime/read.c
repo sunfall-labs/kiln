@@ -48,6 +48,35 @@ static kiln_value kiln_c99_stable_key_value(const kiln_string *stable) {
     return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)stable, stable->unit_len);
 }
 
+/* A read the instance path could not answer, tried against the prototype built-in's own store.
+ * That store is where the runtime bootstrap defines the members it writes in TypeScript
+ * (design.md §5): `RegExp.prototype[@@replace]`, `Date.prototype[@@toPrimitive]`,
+ * `Function.prototype[@@hasInstance]`, `Symbol.prototype[@@toPrimitive]`, and it is the same
+ * store the built-in consults first for a read off the prototype object itself, so `re[k]` and
+ * `RegExp.prototype[k]` answer alike. `*found` says whether the store had the key; when it did
+ * not, the caller goes on to its own refusal or absence, whichever the name deserves. */
+static int kiln_c99_prototype_store_read(kiln_host *host, uint64_t prototype,
+                                         const kiln_string *key, const kiln_string *ikey,
+                                         kiln_value *out, int depth, kiln_value *thrown,
+                                         int *found) {
+    kiln_value store;
+    int status = kiln_c99_callable_store(kiln_c99_builtin(prototype), &store, 0);
+    *found = 0;
+    if (status != KILN_C99_OK) return status;
+    if (store.tag == KILN_VALUE_OBJECT) {
+        kiln_object *properties = kiln_c99_object_of(store);
+        size_t index;
+        if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
+        for (index = 0; index < properties->count; ++index) {
+            if (kiln_c99_same_key_view(&properties->properties[index], key)) {
+                *found = 1;
+                return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
+            }
+        }
+    }
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_string *key,
                                  const kiln_string *ikey, kiln_value *out, int depth,
                                  kiln_value *thrown) {
@@ -311,6 +340,14 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 return KILN_C99_OK;
             }
         }
+        /* Own members were answered above; what `Function.prototype` carries in its store comes
+         * next, before the name is called absent. */
+        {
+            int found;
+            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_FUNCTION_PROTOTYPE,
+                                                       key, ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+        }
         if (closure->properties.tag != KILN_VALUE_OBJECT) {
             KILN_C99_ABSENT("a callable with no property store, so it has no own member to "
                             "answer",
@@ -481,6 +518,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 *out = kiln_c99_method(code);
                 return KILN_C99_OK;
             }
+        }
+        {
+            int found;
+            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_REGEXP_PROTOTYPE, key,
+                                                       ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
         }
         KILN_C99_REFUSE("a RegExp.prototype member this backend has not implemented");
     }
@@ -949,6 +992,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 return KILN_C99_OK;
             }
         }
+        {
+            int found;
+            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_DATE_PROTOTYPE, key,
+                                                       ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+        }
         /* Same split as the array above: a member this backend lacks refuses by name, and a name
          * that is not a member at all is undefined. */
         if (!kiln_c99_is_date_member(intrinsic_key, intrinsic_len)) {
@@ -1393,6 +1442,19 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 }
             }
         }
+        /* `Set`, `SharedArrayBuffer` and the typed-array constructors define `@@species` exactly
+         * as `Array` and `Map` do, but none of them is table-driven, so the accessor is answered
+         * here: it reports its receiver. A closure inheriting from one of these answers the same
+         * way on its own read path above. */
+        if (kiln_c99_same_name_key(key, "@@species")) {
+            kiln_typed_kind species_kind;
+            if (target.bits == KILN_C99_BUILTIN_SET ||
+                target.bits == KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER ||
+                kiln_c99_builtin_typed_kind(target.bits, &species_kind)) {
+                *out = target;
+                return KILN_C99_OK;
+            }
+        }
         /* A member whose answer is a value rather than a call -- `Math.PI`, `Number.MAX_VALUE`,
          * `Symbol.iterator`, `Array[Symbol.species]` -- out of the same rows the methods come
          * from. Three separate hand-written lists stood here, one per namespace, which is how
@@ -1499,6 +1561,17 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             KILN_C99_REFUSE("a built-in callable's own `length` or `prototype`, which this "
                             "backend does not model for this built-in");
         }
+        /* A constructor inherits from `Function.prototype`, so what the runtime bootstrap defined
+         * into that store -- `@@hasInstance` -- is read off `Array` and `Map` too, before the
+         * name is called absent. A namespace inherits from `Object.prototype` and has nothing to
+         * find here. */
+        if (!kiln_c99_is_namespace(target.bits) &&
+            target.bits != KILN_C99_BUILTIN_FUNCTION_PROTOTYPE) {
+            int found;
+            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_FUNCTION_PROTOTYPE,
+                                                       key, ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+        }
         {
             /* An absent name on a table-driven built-in is `undefined`, exactly as it is on an
              * object the program built: `Object.nope` is not a gap here, it is what the language
@@ -1547,7 +1620,13 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                                 out);
             }
             if (target.bits == KILN_C99_BUILTIN_ERROR_PROTOTYPE) {
-                KILN_C99_ABSENT("not a member of Error.prototype; Error.prototype only owns name, message, toString, and constructor",
+                /* `toString` and `constructor` are answered above; `name` and `message` are data
+                 * properties the runtime bootstrap defines into this built-in's store, which the
+                 * top of this case consults before anything else. Until 2026-09-19 this site
+                 * named the four and checked none of them, so `Error.prototype.name` -- and
+                 * `.name` on every instance of a `class X extends Error` -- read `undefined`. */
+                KILN_C99_ABSENT("not a member of Error.prototype: toString and constructor are "
+                                "answered above, name and message from the bootstrap-defined store",
                                 out);
             }
 
@@ -1624,6 +1703,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             }
             return KILN_C99_OK;
         }
+        {
+            int found;
+            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_SYMBOL_PROTOTYPE, key,
+                                                       ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+        }
         KILN_C99_ABSENT("not a member of Symbol.prototype", out);
     }
     default:
@@ -1647,11 +1732,33 @@ static int kiln_c99_get_key(kiln_host *host, kiln_value target, const kiln_strin
         if (key_value.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
         return kiln_c99_proxy_get(host, target, key_value, target, out, depth, thrown);
     }
-    status = kiln_c99_get_own_kind(host, target, key, ikey, out, depth, thrown);
-    if (status == KILN_C99_CONTROL_ERROR && kiln_c99_key_is_reserved(key)) {
+    return kiln_c99_get_own_kind(host, target, key, ikey, out, depth, thrown);
+}
+
+/* The machine's own read of a well-known symbol: `kiln_c99_to_primitive` asks every reference for
+ * `@@toPrimitive`, iteration asks for `@@iterator`, `Object.prototype.toString` for
+ * `@@toStringTag`. A receiver that does not carry the symbol answers absent, and a receiver that
+ * carries it but this backend has not wired refuses -- and a probe the *runtime* makes on its own
+ * initiative must not turn that refusal into a stop, because the program named nothing.
+ *
+ * Until 2026-09-19 that rule lived in `kiln_c99_get_key` and so applied to every read, including
+ * the program's own `Map[Symbol.species]` and `RegExp.prototype[Symbol.replace]`: a refusal
+ * became `undefined` for whoever asked, and the inventory measured 35 silent wrong answers behind
+ * it. The comment on the site said as much -- "THIS IS A CATCH-ALL AND NOT A LIST, WHICH MAKES IT
+ * THE ONE ABSENCE HERE THAT CAN LIE" -- and asked for the fix upstream. This is the upstream: the
+ * probes come through here, and a program's read of a symbol the backend has not wired refuses
+ * by name like any other member. */
+static int kiln_c99_probe_symbol(kiln_host *host, kiln_value target, const char *key,
+                                 size_t key_len, kiln_value *out, int depth,
+                                 kiln_value *thrown) {
+    int status = kiln_c99_get_ikey(host, target, key, key_len, NULL, out, depth, thrown);
+    if (status == KILN_C99_CONTROL_ERROR) {
+        /* Nothing refused, so nothing may be left saying it did: the diagnostic keeps the *first*
+         * note for the rest of the run, and a detail left behind here would be reported as the
+         * cause of whatever refuses next. */
         kiln_c99_diagnostic_detail = NULL;
-        KILN_C99_ABSENT("a well-known symbol whose read reached a refusal, which a symbol probe "
-                        "must not turn into a stop",
+        KILN_C99_ABSENT("the machine's own probe for a well-known symbol on a receiver that "
+                        "carries it unwired; the program named no member, so nothing stops",
                         out);
     }
     return status;

@@ -1339,6 +1339,13 @@ builtin_surface! {
     // interpreter, with no refusal in between -- the silent half of the drift, and the exact
     // shape `typeof X === "undefined"` feature-detection walks into.
     (KILN_C99_BUILTIN_ARRAY, "Array", "@@species", ctor(KILN_C99_BUILTIN_ARRAY)),
+    // The same accessor on every other constructor the interpreter defines it for
+    // (`defines_species`). Until 2026-09-19 each of these refused natively and the refusal was
+    // silenced into `undefined` one frame up, in the symbol catch-all `kiln_c99_get_key` held.
+    (KILN_C99_BUILTIN_MAP, "Map", "@@species", ctor(KILN_C99_BUILTIN_MAP)),
+    (KILN_C99_BUILTIN_PROMISE, "Promise", "@@species", ctor(KILN_C99_BUILTIN_PROMISE)),
+    (KILN_C99_BUILTIN_REGEXP, "RegExp", "@@species", ctor(KILN_C99_BUILTIN_REGEXP)),
+    (KILN_C99_BUILTIN_ARRAY_BUFFER, "ArrayBuffer", "@@species", ctor(KILN_C99_BUILTIN_ARRAY_BUFFER)),
 
     (KILN_C99_BUILTIN_STRING, "String", "raw", code(KILN_C99_METHOD_STRING_RAW)),
     (KILN_C99_BUILTIN_STRING, "String", "fromCharCode", code(KILN_C99_METHOD_STRING_FROM_CHAR_CODE)),
@@ -1425,6 +1432,8 @@ builtin_surface! {
     (KILN_C99_BUILTIN_SYMBOL, "Symbol", "toPrimitive", sym("@@toPrimitive")),
     (KILN_C99_BUILTIN_SYMBOL, "Symbol", "toStringTag", sym("@@toStringTag")),
     (KILN_C99_BUILTIN_SYMBOL, "Symbol", "unscopables", sym("@@unscopables")),
+    (KILN_C99_BUILTIN_SYMBOL, "Symbol", "dispose", sym("@@dispose")),
+    (KILN_C99_BUILTIN_SYMBOL, "Symbol", "asyncDispose", sym("@@asyncDispose")),
 
     /* `Iterator.from` is the whole of the constructor's answered surface, and it is the member a
      * bundled `immer` reads. `concat`, `zip` and `zipKeyed` are still backlog below: each builds
@@ -1756,6 +1765,12 @@ builtin_backlog! {
      "not implemented; needs a half-precision round the number provider does not export"),
     ("%TypedArray%", "@@species",
      "not implemented; the intrinsic is not a value this backend hands back"),
+    ("Promise", "allKeyed",
+     "not implemented; a proposal the interpreter carries and node does not, refused by name \
+              rather than read as undefined"),
+    ("Promise", "allSettledKeyed",
+     "not implemented; a proposal the interpreter carries and node does not, refused by name \
+              rather than read as undefined"),
     ("%TypedArrayConstructor%", "of",
      "answered from the receiver's element kind, not from a row"),
     ("%TypedArrayConstructor%", "from",
@@ -2107,16 +2122,21 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     },
     AbsentAnswer {
         function: "kiln_c99_get_key",
-        sites: 2,
-        proved_by: "a hidden runtime slot no program can name, and -- THE WEAKEST ROW HERE -- a \
-                    well-known symbol whose read reached a refusal. That second one is a \
-                    catch-all rather than a list: a symbol probe must not stop a program \
-                    (`kiln_c99_to_primitive` asks every reference for `@@toPrimitive`), so a \
-                    refusal on a `@@` key becomes `undefined`, and a symbol the receiver really \
-                    does own but this backend has not wired is swallowed with it. \
-                    `Array.prototype[Symbol.iterator]` was exactly that until 2026-09-02. Each \
-                    receiver that owns a well-known symbol has to answer it before the read gets \
-                    here; the inventory gate is what finds the ones that do not",
+        sites: 1,
+        proved_by: "a hidden runtime slot no program can name",
+    },
+    AbsentAnswer {
+        function: "kiln_c99_probe_symbol",
+        sites: 1,
+        proved_by: "the caller is the machine, not the program: `kiln_c99_to_primitive` asking \
+                    for `@@toPrimitive`, iteration for `@@iterator`, `Object.prototype.toString` \
+                    for `@@toStringTag`. A receiver that carries the symbol unwired refuses, and \
+                    a probe the program did not write must not stop it on that. Until \
+                    2026-09-19 this rule sat in kiln_c99_get_key and so covered every read, \
+                    program reads included -- the inventory counted 35 silent `undefined`s \
+                    behind it, `Map[Symbol.species]` and `RegExp.prototype[Symbol.replace]` \
+                    among them. A program's read now refuses by name like any other member; \
+                    the seven probe sites are the only callers of this function",
     },
     AbsentAnswer {
         function: "kiln_c99_get_computed",
@@ -3103,6 +3123,13 @@ enum kiln_value_tag {
 #define KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE 97
 #define KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE 98
 #define KILN_C99_BUILTIN_BIGINT_PROTOTYPE 99
+
+/* The global `crypto`, a namespace with no rows of its own: every member refuses by name until
+ * `node:crypto` is linked, at which point that module replaces the global binding with its own
+ * object. It was an empty ordinary object built in `globals.c`, so `crypto.randomUUID` read
+ * `undefined` where the interpreter has a function -- eleven silent wrong answers in the
+ * 2026-09-19 inventory, one of them the member `uuid` feature-detects on. */
+#define KILN_C99_BUILTIN_CRYPTO 100
 
 /* Array methods, part two.
  *

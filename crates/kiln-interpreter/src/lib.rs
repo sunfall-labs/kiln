@@ -46410,6 +46410,13 @@ const fn native_length(native: Native) -> Option<f64> {
         | N::AsyncDisposableStackMove
         | N::AsyncDisposableStackDisposeAsync
         | N::ProxyRevoke
+        // `AbortController()`, `AbortSignal` (never constructed directly), `TextEncoder()` and
+        // `TextDecoder([label[, options]])` declare no required argument; all four fell to the
+        // one-argument default and the native backend, which tabulates them at zero, was right.
+        | N::AbortControllerConstructor
+        | N::AbortSignalConstructor
+        | N::TextEncoderConstructor
+        | N::TextDecoderConstructor
         | N::ConsoleLog
         | N::ConsoleInfo
         | N::ConsoleDebug
@@ -46489,6 +46496,8 @@ const fn native_length(native: Native) -> Option<f64> {
         | N::BigIntAsUintN
         | N::FinalizationRegistryRegister
         | N::ArrayBufferSliceToImmutable
+        // `AggregateError(errors, message)`: the options bag is optional.
+        | N::Error(ErrorKind::Aggregate)
         | N::WeakMapSet => 2.0,
 
         // The three-argument ones.
@@ -46497,6 +46506,8 @@ const fn native_length(native: Native) -> Option<f64> {
         | N::ReflectSet
         | N::ReflectApply
         | N::JsonStringify
+        // `SuppressedError(error, suppressed, message)`.
+        | N::Error(ErrorKind::Suppressed)
         | N::TypedArrayConstructor(_) => 3.0,
 
         // `Date` and `Date.UTC` take year through millisecond.

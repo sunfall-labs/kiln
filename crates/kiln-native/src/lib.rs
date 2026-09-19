@@ -3344,6 +3344,129 @@ if (typeof JSON !== "undefined") {
         return __kilnOriginalStringify(transformed, undefined, space);
     };
 }
+
+// The rest of `console`. The prelude C builds the global with `log`, `info`, `error` and `warn`
+// and nothing else, while the interpreter's carries the twenty-four the language does plus a
+// `Console` prototype. Every other method read `undefined` natively -- and `console.debug("x")`
+// then died three frames later as "undefined is not a function" -- until 2026-09-19. What each
+// does is the interpreter's rule, copied: `debug`, `dir`, `table` print as `log` does; `assert`
+// and `trace` print to stderr under a fixed prefix; the timing, grouping, counting and profiling
+// methods accept their arguments and do nothing, because the realm's clock is virtual
+// (ADR 0044) and there is no debugger to speak to. Written here rather than in C per the
+// Phase 5.1 freeze.
+{
+    const c = globalThis.console;
+    class Console {
+        log(...args) { c.log(...args); }
+        info(...args) { c.info(...args); }
+        debug(...args) { c.log(...args); }
+        dir(...args) { c.log(...args); }
+        table(...args) { c.log(...args); }
+        error(...args) { c.error(...args); }
+        warn(...args) { c.warn(...args); }
+        // The interpreter formats the message first (`util.format`, so `%s` in its first
+        // argument substitutes) and prefixes the result. Folding the prefix into a string first
+        // argument is the same thing; a non-string first argument is inspected either way.
+        assert(value, ...message) {
+            if (value) return;
+            if (message.length === 0) c.error("Assertion failed");
+            else if (typeof message[0] === "string") {
+                c.error("Assertion failed: " + message[0], ...message.slice(1));
+            } else c.error("Assertion failed:", ...message);
+        }
+        trace(...args) {
+            if (args.length === 0) c.error("Trace");
+            else if (typeof args[0] === "string") c.error("Trace: " + args[0], ...args.slice(1));
+            else c.error("Trace:", ...args);
+        }
+        clear() {}
+        count() {}
+        countReset() {}
+        group() {}
+        groupEnd() {}
+        groupCollapsed() {}
+        time() {}
+        timeEnd() {}
+        timeLog() {}
+        dirxml() {}
+        timeStamp() {}
+        profile() {}
+        profileEnd() {}
+    }
+    const proto = Console.prototype;
+    Object.defineProperty(proto, Symbol.toStringTag, { value: "console", configurable: true });
+    const added = ["debug", "dir", "table", "assert", "trace", "clear", "count", "countReset",
+                   "group", "groupEnd", "groupCollapsed", "time", "timeEnd", "timeLog", "dirxml",
+                   "timeStamp", "profile", "profileEnd"];
+    for (let i = 0; i < added.length; i++) {
+        Object.defineProperty(c, added[i], { value: proto[added[i]], writable: true,
+                                             configurable: true, enumerable: false });
+    }
+    Object.defineProperty(c, "Console", { value: Console, writable: true, configurable: true,
+                                          enumerable: false });
+    Object.setPrototypeOf(c, proto);
+}
+
+// Members the prelude C answers `undefined` for off a built-in's prototype, defined into the
+// built-in's own store, which every read consults first. `Error.prototype.name` is the one that
+// matters most: `class X extends Error {}` gives an instance whose chain ends here, so
+// `new X().name` was `undefined` where node says "Error". The `@@`-keyed methods existed in the
+// interpreter and read `undefined` natively for as long as the symbol catch-all stood; with that
+// gone they would refuse, and these are the answers. Each is written the way the specification
+// reduces it, to the ordinary method on the same receiver.
+{
+    const data = (target, key, value, writable) =>
+        Object.defineProperty(target, key, { value, writable: writable === true,
+                                             configurable: true, enumerable: false });
+    data(Error.prototype, "name", "Error", true);
+    data(Error.prototype, "message", "", true);
+    data(AggregateError.prototype, "name", "AggregateError", true);
+    data(AggregateError.prototype, "message", "", true);
+    Object.defineProperty(String.prototype, "length", { value: 0, writable: false,
+                                                        configurable: false, enumerable: false });
+    data(ArrayBuffer.prototype, Symbol.toStringTag, "ArrayBuffer");
+    data(DataView.prototype, Symbol.toStringTag, "DataView");
+    const methods = {
+        [Symbol.match](string) { return String(string).match(this); },
+        [Symbol.matchAll](string) { return String(string).matchAll(this); },
+        [Symbol.replace](string, replacement) { return String(string).replace(this, replacement); },
+        [Symbol.search](string) { return String(string).search(this); },
+        [Symbol.split](string, limit) { return String(string).split(this, limit); },
+    };
+    data(RegExp.prototype, Symbol.match, methods[Symbol.match], true);
+    data(RegExp.prototype, Symbol.matchAll, methods[Symbol.matchAll], true);
+    data(RegExp.prototype, Symbol.replace, methods[Symbol.replace], true);
+    data(RegExp.prototype, Symbol.search, methods[Symbol.search], true);
+    data(RegExp.prototype, Symbol.split, methods[Symbol.split], true);
+    const dateToPrimitive = {
+        [Symbol.toPrimitive](hint) {
+            if (hint === "number") return this.valueOf();
+            if (hint === "string" || hint === "default") return this.toString();
+            throw new TypeError("Invalid hint: " + String(hint));
+        },
+    };
+    data(Date.prototype, Symbol.toPrimitive, dateToPrimitive[Symbol.toPrimitive]);
+    const symbolToPrimitive = {
+        [Symbol.toPrimitive]() { return this.valueOf(); },
+    };
+    data(Symbol.prototype, Symbol.toPrimitive, symbolToPrimitive[Symbol.toPrimitive]);
+    const hasInstance = {
+        [Symbol.hasInstance](value) {
+            if (typeof this !== "function") return false;
+            if (value === null || (typeof value !== "object" && typeof value !== "function")) {
+                return false;
+            }
+            const target = this.prototype;
+            let current = Object.getPrototypeOf(value);
+            while (current !== null) {
+                if (current === target) return true;
+                current = Object.getPrototypeOf(current);
+            }
+            return false;
+        },
+    };
+    data(Function.prototype, Symbol.hasInstance, hasInstance[Symbol.hasInstance]);
+}
 "#;
 
 #[cfg(test)]

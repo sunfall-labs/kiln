@@ -311,6 +311,9 @@ static int kiln_c99_get_ikey(kiln_host *host, kiln_value target, const char *key
 static int kiln_c99_get_key(kiln_host *host, kiln_value target, const kiln_string *view,
                             const kiln_string *canonical, kiln_value *out, int depth,
                             kiln_value *thrown);
+static int kiln_c99_probe_symbol(kiln_host *host, kiln_value target, const char *key,
+                                 size_t key_len, kiln_value *out, int depth,
+                                 kiln_value *thrown);
 static int kiln_c99_get_site(kiln_host *host, kiln_value target, const kiln_string *view,
                              const kiln_string *canonical, kiln_value *out, int depth,
                              kiln_value *thrown, kiln_c99_site *site);
