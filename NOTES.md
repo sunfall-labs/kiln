@@ -5927,3 +5927,55 @@ Full workspace verification completed on clean `main` tree:
   - `collections`: 6.5 ms vs Node 4.6 ms (within 1.4x, `"2499950000"`)
   - `class-poly`: 1.65 ms vs Node 1.09 ms (within 1.5x, `"393540687"`)
 
+
+---
+
+## Default imports from node builtins in `.ts`: detection, not refusal (2026-09-18)
+
+`import fs from "node:fs"` in a `.ts` file answered `undefined` (or `fs is not defined`)
+under `--node`, while the same line in `.mjs` worked. Chain: no `package.json` with
+`"type"` above the file means `node_module_format` defaults to CommonJS, so the file
+compiled with `compile_commonjs`, which never declared static import bindings and dropped
+them from dependencies -- a silent `undefined`, the failure class this repo refuses to
+produce. Same for every static form (named, namespace, side-effect, re-export).
+
+The user asked whether latest node defaults to ESM. Measured on node v26.8.1: ambiguous
+files (no definitive extension, no explicit `"type"`) with ESM syntax RUN as ESM with no
+warning (syntax detection, on by default); explicit `"type": "commonjs"` or `.cjs` with
+`import` is a SyntaxError. The fix mirrors that boundary:
+
+- `compile_commonjs` refuses static module syntax with Node's own wording
+  (`kiln-ir`, choke point for every engine path).
+- Ambiguous files with static syntax retry as ESM in `visit_static` (graph), via a
+  `CjsStaticModuleSyntax` provider signal; explicit-CJS files keep the refusal.
+- `.mts`/`.cts` classify definitively in the resolver, like `.mjs`/`.cjs`.
+- Helper predicates: `Module::has_static_module_syntax` (kiln-hir),
+  `node_format_is_ambiguous` (resolver). `import type` stays legal in CJS.
+
+Tests: ir refusal + type-only allowance, resolver ambiguity + mts/cts, three graph
+tests (ambiguous `.ts` links the builtin, explicit-commonjs refuses, `.mts` under a
+commonjs manifest builds ESM). `bench/realworld/` (starter suite: json-transform,
+template-render, file-cli, http-server vs node/bun/porffor/Hermes) is what exposed it.
+
+---
+
+## Real-world suite: interpreter `charCodeAt` loop gap (2026-09-18)
+
+`bench/realworld/` found it on its first run: a 186K-iteration `charCodeAt` + `Math.imul`
+loop takes the interpreter ~36s against node's 37ms (~1000x), answers identical. Bisected
+to `charCodeAt` itself (`h += s.charCodeAt(i)` alone: ~38s vs 31ms). The suite's
+`template-render.ts` samples its FNV digest at stride 64 until the gap closes; the length
+plus head/tail slices pin the rest. A `charCodeAt`-heavy microbenchmark row or an
+interpreter fast path is the follow-up, not part of this change.
+
+---
+
+## Real-world suite: kiln never invokes the `listen` callback (2026-09-18)
+
+`bench/realworld/programs/http-server.ts` serves both routes correctly under kiln
+(verified with curl: `/hello` text, `/sum?a=2&b=3` JSON), but the
+`server.listen(PORT, HOST, cb)` callback never fires -- node and bun print "listening",
+kiln prints nothing. The suite's first runner gated readiness on that line with an
+unbounded `readline()` and hung forever on the kiln row; readiness is now the open port
+(with a deadline), the missing line is a reported note, and every driven body is still
+verified. The dropped callback itself is engine work, not part of this change.

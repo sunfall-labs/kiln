@@ -6250,3 +6250,82 @@ fn reduce_to_live_retargets_an_import_around_a_dropped_barrel() {
     assert_eq!(entry_node.dependencies[0].target, origin);
     assert_eq!(remapped.live_imports, BTreeSet::from([(entry, 0)]));
 }
+
+/// Node 22+ syntax detection: an ambiguous `.ts` file (no definitive extension, no explicit
+/// `"type"`) carrying static module syntax builds as ESM, so `import fs from "node:fs"`
+/// links instead of compiling to an unbound name.
+#[test]
+fn ambiguous_ts_with_static_imports_builds_as_esm() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.ts",
+        "import fs from \"node:fs\";\nconsole.log(typeof fs.readFileSync);",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        OxcFrontend,
+    )
+    .expect("ambiguous TS with imports builds as ESM");
+    let node = graph.module(&entry).expect("entry node");
+    assert_eq!(node.source, ModuleSource::Source);
+    assert!(
+        node.program
+            .imports
+            .iter()
+            .any(|import| import.source == "node:fs" && import.local == "fs"),
+        "the builtin import survives as a linked binding: {:?}",
+        node.program.imports
+    );
+}
+
+/// An explicit `"type": "commonjs"` manifest keeps static module syntax a refusal, exactly as
+/// Node reports it -- detection never overrides an explicit format.
+#[test]
+fn explicit_commonjs_ts_with_static_imports_refuses() {
+    let project = TempProject::new();
+    project.write("package.json", r#"{"type":"commonjs"}"#);
+    let entry = project.write(
+        "main.ts",
+        "import fs from \"node:fs\";\nconsole.log(typeof fs);",
+    );
+    let error = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        OxcFrontend,
+    )
+    .expect_err("explicit CJS with imports refuses");
+    match error {
+        ModuleGraphError::Compile { diagnostics, .. } => assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("import statement outside a module")),
+            "unexpected diagnostics: {diagnostics:?}",
+        ),
+        error => panic!("expected a compile refusal, got {error:?}"),
+    }
+}
+
+/// `.mts` is definitively ESM even under an explicit CommonJS manifest.
+#[test]
+fn mts_with_static_imports_builds_as_esm_under_commonjs_manifest() {
+    let project = TempProject::new();
+    project.write("package.json", r#"{"type":"commonjs"}"#);
+    let entry = project.write(
+        "main.mts",
+        "import fs from \"node:fs\";\nconsole.log(typeof fs);",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        OxcFrontend,
+    )
+    .expect("mts builds as ESM");
+    assert_eq!(
+        graph.module(&entry).expect("entry node").source,
+        ModuleSource::Source
+    );
+}

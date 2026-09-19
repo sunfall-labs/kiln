@@ -2,8 +2,8 @@ use super::*;
 use kiln_hir::{
     AssignmentOperator, BinaryOperator, CatchClause, Class, ClassField, ClassInitialiser,
     ExportName, ExportOrigin, Expression, ExpressionKind, Function, ImportName, ListElement,
-    Literal, LogicalOperator, Module, ObjectKey, ObjectMember, Pattern, PatternKey, SourceGoal,
-    Statement, StatementKind, SwitchCase, UnaryOperator, VariableKind,
+    Literal, LogicalOperator, Module, ModuleRequestKind, ObjectKey, ObjectMember, Pattern,
+    PatternKey, SourceGoal, Statement, StatementKind, SwitchCase, UnaryOperator, VariableKind,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -398,6 +398,45 @@ enum ParameterStep<'a> {
     Plain(&'a str),
 }
 
+/// Static `import`/`export` syntax with runtime meaning, refused in CommonJS.
+///
+/// Shared by [`compile_commonjs`] and the graph providers, which must report the same
+/// refusal when a CommonJS-classified file is explicit CJS (`.cjs`, `.cts`, or an explicit
+/// `"type": "commonjs"` manifest) rather than syntax-detected as ESM.
+pub fn cjs_static_module_syntax_diagnostics(module: &Module) -> Vec<CompileDiagnostic> {
+    for requested in &module.requested_modules {
+        for occurrence in &requested.occurrences {
+            if occurrence.type_only {
+                continue;
+            }
+            let message = match occurrence.kind {
+                ModuleRequestKind::Import => "Cannot use import statement outside a module",
+                ModuleRequestKind::Export => "Cannot use export statement outside a module",
+            };
+            return vec![CompileDiagnostic {
+                message: message.to_owned(),
+                span: Some(occurrence.statement_span),
+            }];
+        }
+    }
+    // The occurrence walk above covers every statement the frontend records. The two entry
+    // lists are checked too, so hand-built HIR with entries but no occurrences cannot slip
+    // through either.
+    if let Some(import) = module.imports.iter().find(|import| !import.type_only) {
+        return vec![CompileDiagnostic {
+            message: "Cannot use import statement outside a module".to_owned(),
+            span: Some(import.statement_span),
+        }];
+    }
+    if let Some(export) = module.exports.iter().find(|export| !export.type_only) {
+        return vec![CompileDiagnostic {
+            message: "Cannot use export statement outside a module".to_owned(),
+            span: Some(export.statement_span),
+        }];
+    }
+    Vec::new()
+}
+
 /// Compile a CommonJS body with Node's wrapper bindings installed as module-scope cells.
 ///
 /// The graph supplies the five values in this exact order. They are ordinary mutable bindings:
@@ -405,6 +444,15 @@ enum ParameterStep<'a> {
 /// `require`/`exports` through the same cell mechanism as any other module-scope name.
 pub fn compile_commonjs(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagnostic>> {
     const WRAPPER: [&str; 5] = ["exports", "require", "module", "__filename", "__dirname"];
+    // Static module syntax is a SyntaxError in CommonJS, exactly as Node reports it. Without
+    // this the bindings below are never declared and the program fails later with an unbound
+    // name (`fs is not defined`) or a silent `undefined` -- the failure class this repository
+    // refuses to produce. `import type` and `export type` are erased before this point and stay
+    // legal; every other static form is refused at its own statement span, in source order.
+    let syntax_diagnostics = cjs_static_module_syntax_diagnostics(module);
+    if !syntax_diagnostics.is_empty() {
+        return Err(syntax_diagnostics);
+    }
     let mut compiler = Compiler::new(module);
     // Node wraps a CommonJS file in an ordinary function, so the body is *sloppy* unless its own
     // text opens with the directive. That is not a detail: it decides whether `undeclaredGlobal =
