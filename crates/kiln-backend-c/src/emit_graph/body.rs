@@ -1033,6 +1033,8 @@ fn emit_block_sequence(
     kind: EntryKind,
     numbers: &HashSet<ValueId>,
     ints: &HashSet<ValueId>,
+    live_numbers: &HashSet<ValueId>,
+    live_ints: &HashSet<ValueId>,
     booleans: &HashSet<ValueId>,
     defs: &std::collections::HashMap<ValueId, &GraphOp>,
     use_counts: &HashMap<ValueId, usize>,
@@ -1313,9 +1315,14 @@ fn emit_block_sequence(
             let mut materialize_phis = String::new();
             for &(phi_vid, ref op) in &block.operations {
                 if let GraphOp::Phi { .. } = op {
-                    if numbers.contains(&phi_vid) {
+                    if live_numbers.contains(&phi_vid) {
                         materialize_phis.push_str(&format!(
                             " v{} = kiln_c99_val_from_double(d{});",
+                            phi_vid.0, phi_vid.0
+                        ));
+                    } else if live_ints.contains(&phi_vid) {
+                        materialize_phis.push_str(&format!(
+                            " v{} = kiln_c99_val_from_double((double)i{});",
                             phi_vid.0, phi_vid.0
                         ));
                     }
@@ -1351,6 +1358,9 @@ fn emit_block_sequence(
                 scalar_proto,
                 numbers,
                 ints,
+                live_numbers,
+                live_ints,
+                booleans,
                 defs,
                 ivs,
                 array_slots,
@@ -1402,8 +1412,24 @@ fn emit_block_sequence(
             }
             output.push_str(&op_text);
             // A boolean's twin follows from its box: one compare, and a branch or a phi then
-            // reads the twin.
-            if booleans.contains(&vid) && !matches!(op, GraphOp::Phi { .. }) {
+            // reads the twin. Unboxed comparisons already assign the boolean twin directly if needed.
+            let is_unboxed_cmp = matches!(
+                op,
+                GraphOp::Binary { op, left, right }
+                    if matches!(
+                        op,
+                        BinaryOp::StrictEqual
+                            | BinaryOp::LooseEqual
+                            | BinaryOp::StrictNotEqual
+                            | BinaryOp::LooseNotEqual
+                            | BinaryOp::LessThan
+                            | BinaryOp::LessThanOrEqual
+                            | BinaryOp::GreaterThan
+                            | BinaryOp::GreaterThanOrEqual
+                    ) && ((ints.contains(left) && ints.contains(right))
+                        || (numbers.contains(left) && numbers.contains(right)))
+            );
+            if booleans.contains(&vid) && !matches!(op, GraphOp::Phi { .. }) && !is_unboxed_cmp {
                 writeln!(output, "    b{} = (v{} == KILN_VAL_TRUE);", vid.0, vid.0).unwrap();
             }
             if !spec.exits && spec.calls.contains(&vid) {
@@ -1418,6 +1444,8 @@ fn emit_block_sequence(
             &block.terminator,
             numbers,
             ints,
+            live_numbers,
+            live_ints,
             booleans,
             defs,
             &unwind,
@@ -1444,6 +1472,573 @@ fn booleans_with(
         .into_iter()
         .filter_map(|(v, kind)| (kind == Proven::Boolean).then_some(v))
         .collect()
+}
+
+/// The proven boolean values that actually have their unboxed boolean twin `b{v}` read downstream,
+/// either as an out-of-line branch condition or as an input to a boolean phi. Comparisons whose
+/// branch inlines `i{l} < i{r}` or `d{l} < d{r}` do not need a boolean twin variable.
+fn compute_live_booleans(
+    graph: &FunctionGraph,
+    numbers: &HashSet<ValueId>,
+    ints: &HashSet<ValueId>,
+    booleans: &HashSet<ValueId>,
+) -> HashSet<ValueId> {
+    if booleans.is_empty() {
+        return HashSet::new();
+    }
+
+    let defs: std::collections::HashMap<ValueId, &GraphOp> = graph
+        .blocks
+        .iter()
+        .flat_map(|b| b.operations.iter().map(|(v, op)| (*v, op)))
+        .collect();
+
+    let is_inlined_branch_cmp = |v: ValueId| -> bool {
+        match defs.get(&v) {
+            Some(GraphOp::Binary { op, left, right }) => {
+                let is_cmp = matches!(
+                    op,
+                    BinaryOp::LessThan
+                        | BinaryOp::LessThanOrEqual
+                        | BinaryOp::GreaterThan
+                        | BinaryOp::GreaterThanOrEqual
+                        | BinaryOp::StrictEqual
+                        | BinaryOp::StrictNotEqual
+                        | BinaryOp::LooseEqual
+                        | BinaryOp::LooseNotEqual
+                );
+                is_cmp
+                    && ((ints.contains(left) && ints.contains(right))
+                        || (numbers.contains(left) && numbers.contains(right)))
+            }
+            _ => false,
+        }
+    };
+
+    let mut live = HashSet::new();
+    let mut worklist = Vec::new();
+
+    for block in &graph.blocks {
+        if !block.is_reachable_from_entry(graph.entry_block) {
+            continue;
+        }
+        if let Terminator::Branch { condition, .. } = &block.terminator {
+            if booleans.contains(condition) && !is_inlined_branch_cmp(*condition) {
+                if live.insert(*condition) {
+                    worklist.push(*condition);
+                }
+            }
+        }
+    }
+
+    let mut phi_inputs: std::collections::HashMap<ValueId, Vec<ValueId>> =
+        std::collections::HashMap::new();
+    for block in &graph.blocks {
+        if !block.is_reachable_from_entry(graph.entry_block) {
+            continue;
+        }
+        for (vid, op) in &block.operations {
+            if let GraphOp::Phi { inputs } = op {
+                if booleans.contains(vid) {
+                    let ins = inputs.iter().map(|(_, in_v)| *in_v).collect();
+                    phi_inputs.insert(*vid, ins);
+                }
+            }
+        }
+    }
+
+    while let Some(vid) = worklist.pop() {
+        if let Some(inputs) = phi_inputs.get(&vid) {
+            for in_v in inputs {
+                if booleans.contains(in_v) && live.insert(*in_v) {
+                    worklist.push(*in_v);
+                }
+            }
+        }
+    }
+
+    live
+}
+
+/// Values whose double twin `d{v}` or integer twin `i{v}` is actually read downstream.
+/// Computed by backward propagation from consuming operations through phis and copies.
+fn compute_live_twins(
+    graph: &FunctionGraph,
+    _program: &Program,
+    proto: &FunctionProto,
+    numbers: &HashSet<ValueId>,
+    ints: &HashSet<ValueId>,
+    live_booleans: &HashSet<ValueId>,
+    boxed: Option<&HashSet<ValueId>>,
+    array_slots: &HashSet<u32>,
+    kind: EntryKind,
+    plan: &CallPlan,
+    use_counts: &std::collections::HashMap<ValueId, usize>,
+    ivs: &std::collections::HashMap<ValueId, InductionVariable>,
+) -> (HashSet<ValueId>, HashSet<ValueId>) {
+    let mut live_numbers = HashSet::new();
+    let mut live_ints = HashSet::new();
+
+    for &iv in ivs.keys() {
+        live_ints.insert(iv);
+    }
+
+    let defs: std::collections::HashMap<ValueId, &GraphOp> = graph
+        .blocks
+        .iter()
+        .flat_map(|b| b.operations.iter().map(|(v, op)| (*v, op)))
+        .collect();
+
+    let need_box = |v: ValueId| boxed.map_or(true, |b| b.contains(&v));
+
+    let is_dead = |v: &ValueId, op: &GraphOp| {
+        use_counts.get(v).copied().unwrap_or(0) == 0
+            && matches!(
+                op,
+                GraphOp::Const { .. }
+                    | GraphOp::Binary { .. }
+                    | GraphOp::Unary { .. }
+                    | GraphOp::LoadGlobal(_)
+                    | GraphOp::LoadLocal(_)
+                    | GraphOp::LoadThis
+                    | GraphOp::LoadNewTarget
+                    | GraphOp::LoadBuiltin(_)
+                    | GraphOp::IsReturnSignal(_)
+            )
+    };
+
+    // Seed pass: identify operations that demand unboxed twins directly from the environment.
+    for block in &graph.blocks {
+        if !block.is_reachable_from_entry(graph.entry_block) {
+            continue;
+        }
+
+        match &block.terminator {
+            Terminator::Branch { condition, .. } => {
+                if let Some(GraphOp::Binary { op, left, right }) = defs.get(condition) {
+                    let is_cmp = matches!(
+                        op,
+                        BinaryOp::StrictEqual
+                            | BinaryOp::StrictNotEqual
+                            | BinaryOp::LooseEqual
+                            | BinaryOp::LooseNotEqual
+                            | BinaryOp::LessThan
+                            | BinaryOp::LessThanOrEqual
+                            | BinaryOp::GreaterThan
+                            | BinaryOp::GreaterThanOrEqual
+                    );
+                    if is_cmp {
+                        if ints.contains(left) && ints.contains(right) {
+                            live_ints.insert(*left);
+                            live_ints.insert(*right);
+                        } else if numbers.contains(left) && numbers.contains(right) {
+                            if ints.contains(left) {
+                                live_ints.insert(*left);
+                            } else {
+                                live_numbers.insert(*left);
+                            }
+                            if ints.contains(right) {
+                                live_ints.insert(*right);
+                            } else {
+                                live_numbers.insert(*right);
+                            }
+                        }
+                    }
+                }
+            }
+            Terminator::Return(Some(v)) => {
+                if matches!(
+                    kind,
+                    EntryKind::Typed {
+                        returns_number: true,
+                        ..
+                    }
+                ) && numbers.contains(v)
+                {
+                    if ints.contains(v) {
+                        live_ints.insert(*v);
+                    } else {
+                        live_numbers.insert(*v);
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        for (vid, op) in &block.operations {
+            if is_dead(vid, op) {
+                continue;
+            }
+
+            match op {
+                GraphOp::Binary { op, left, right } => {
+                    let is_cmp = matches!(
+                        op,
+                        BinaryOp::StrictEqual
+                            | BinaryOp::StrictNotEqual
+                            | BinaryOp::LooseEqual
+                            | BinaryOp::LooseNotEqual
+                            | BinaryOp::LessThan
+                            | BinaryOp::LessThanOrEqual
+                            | BinaryOp::GreaterThan
+                            | BinaryOp::GreaterThanOrEqual
+                    );
+                    if is_cmp {
+                        if live_booleans.contains(vid)
+                            || need_box(*vid)
+                            || use_counts.get(vid).copied().unwrap_or(0) > 0
+                        {
+                            if ints.contains(left) && ints.contains(right) {
+                                live_ints.insert(*left);
+                                live_ints.insert(*right);
+                            } else if numbers.contains(left) && numbers.contains(right) {
+                                if ints.contains(left) {
+                                    live_ints.insert(*left);
+                                } else {
+                                    live_numbers.insert(*left);
+                                }
+                                if ints.contains(right) {
+                                    live_ints.insert(*right);
+                                } else {
+                                    live_numbers.insert(*right);
+                                }
+                            }
+                        }
+                    } else if ints.contains(left)
+                        && ints.contains(right)
+                        && !matches!(op, BinaryOp::In | BinaryOp::InstanceOf)
+                    {
+                        if matches!(op, BinaryOp::Divide | BinaryOp::Exponentiate) {
+                            live_numbers.insert(*vid);
+                            if ints.contains(vid) {
+                                live_ints.insert(*vid);
+                            }
+                        } else {
+                            live_ints.insert(*vid);
+                        }
+                        live_ints.insert(*left);
+                        live_ints.insert(*right);
+                    } else if numbers.contains(left)
+                        && numbers.contains(right)
+                        && !matches!(op, BinaryOp::In | BinaryOp::InstanceOf)
+                    {
+                        live_numbers.insert(*vid);
+                        if ints.contains(left) {
+                            live_ints.insert(*left);
+                        } else {
+                            live_numbers.insert(*left);
+                        }
+                        if ints.contains(right) {
+                            live_ints.insert(*right);
+                        } else {
+                            live_numbers.insert(*right);
+                        }
+                    } else if !numbers.contains(left) || !numbers.contains(right) {
+                        // Mixed or generic binary op fallback: emit_binary_boxed
+                        if numbers.contains(left) && !ints.contains(left) {
+                            live_numbers.insert(*left);
+                        } else if ints.contains(left) {
+                            live_ints.insert(*left);
+                        }
+                        if numbers.contains(right) && !ints.contains(right) {
+                            live_numbers.insert(*right);
+                        } else if ints.contains(right) {
+                            live_ints.insert(*right);
+                        }
+                    }
+                }
+                GraphOp::Unary { op: _, value } => {
+                    if ints.contains(vid) {
+                        live_ints.insert(*vid);
+                        if ints.contains(value) {
+                            live_ints.insert(*value);
+                        } else if numbers.contains(value) {
+                            live_numbers.insert(*value);
+                        }
+                    } else if numbers.contains(vid) {
+                        live_numbers.insert(*vid);
+                        if ints.contains(value) {
+                            live_ints.insert(*value);
+                        } else if numbers.contains(value) {
+                            live_numbers.insert(*value);
+                        }
+                    }
+                }
+                GraphOp::LoadLocal(slot) => {
+                    if *slot < proto.parameter_count && matches!(kind, EntryKind::Typed { .. }) {
+                        if ints.contains(vid) {
+                            live_ints.insert(*vid);
+                        }
+                        if numbers.contains(vid) {
+                            live_numbers.insert(*vid);
+                        }
+                    }
+                }
+                GraphOp::GetComputed { key, .. } => {
+                    if ints.contains(key) {
+                        live_ints.insert(*key);
+                    }
+                }
+                GraphOp::SetComputed { key, value, .. }
+                | GraphOp::SetComputedStrict { key, value, .. } => {
+                    if ints.contains(key) {
+                        live_ints.insert(*key);
+                    }
+                    if ints.contains(value) {
+                        live_ints.insert(*value);
+                    } else if numbers.contains(value) {
+                        live_numbers.insert(*value);
+                    }
+                }
+                GraphOp::CallMethod { args, .. } => {
+                    for arg in args {
+                        if ints.contains(arg) {
+                            live_ints.insert(*arg);
+                        } else if numbers.contains(arg) {
+                            live_numbers.insert(*arg);
+                        }
+                    }
+                }
+                GraphOp::Call { callee, args, .. } => {
+                    if plan.typed_sites.contains(vid) {
+                        for arg in args {
+                            if ints.contains(arg) {
+                                live_ints.insert(*arg);
+                            } else if numbers.contains(arg) {
+                                live_numbers.insert(*arg);
+                            }
+                        }
+                    }
+                    if let Some(&target) = plan.known.get(callee) {
+                        if plan
+                            .typed_returns
+                            .get(target as usize)
+                            .copied()
+                            .unwrap_or(false)
+                        {
+                            if ints.contains(vid) {
+                                live_ints.insert(*vid);
+                            } else if numbers.contains(vid) {
+                                live_numbers.insert(*vid);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            if !need_box(*vid) {
+                if ints.contains(vid) {
+                    live_ints.insert(*vid);
+                } else if numbers.contains(vid) {
+                    live_numbers.insert(*vid);
+                }
+            }
+        }
+    }
+
+    // Fixpoint propagation loop: pull twin demands backward through operations and phis.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in &graph.blocks {
+            if !block.is_reachable_from_entry(graph.entry_block) {
+                continue;
+            }
+            for (vid, op) in &block.operations {
+                if is_dead(vid, op) {
+                    continue;
+                }
+                if live_ints.contains(vid) {
+                    match op {
+                        GraphOp::Binary { op, left, right } => {
+                            let is_cmp = matches!(
+                                op,
+                                BinaryOp::StrictEqual
+                                    | BinaryOp::StrictNotEqual
+                                    | BinaryOp::LooseEqual
+                                    | BinaryOp::LooseNotEqual
+                                    | BinaryOp::LessThan
+                                    | BinaryOp::LessThanOrEqual
+                                    | BinaryOp::GreaterThan
+                                    | BinaryOp::GreaterThanOrEqual
+                            );
+                            if !is_cmp {
+                                if ints.contains(left) && ints.contains(right) {
+                                    if live_ints.insert(*left) {
+                                        changed = true;
+                                    }
+                                    if live_ints.insert(*right) {
+                                        changed = true;
+                                    }
+                                    if live_ints.insert(*vid) {
+                                        changed = true;
+                                    }
+                                } else {
+                                    if ints.contains(left) {
+                                        if live_ints.insert(*left) {
+                                            changed = true;
+                                        }
+                                    } else if numbers.contains(left) && live_numbers.insert(*left) {
+                                        changed = true;
+                                    }
+                                    if ints.contains(right) {
+                                        if live_ints.insert(*right) {
+                                            changed = true;
+                                        }
+                                    } else if numbers.contains(right) && live_numbers.insert(*right)
+                                    {
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                        GraphOp::Unary { op: _, value } => {
+                            if ints.contains(value) {
+                                if live_ints.insert(*value) {
+                                    changed = true;
+                                }
+                                if ints.contains(vid) && live_ints.insert(*vid) {
+                                    changed = true;
+                                }
+                            } else if numbers.contains(value) && live_numbers.insert(*value) {
+                                changed = true;
+                            }
+                        }
+                        GraphOp::Phi { inputs } => {
+                            for (_, in_v) in inputs {
+                                if ints.contains(in_v) {
+                                    if live_ints.insert(*in_v) {
+                                        changed = true;
+                                    }
+                                } else if numbers.contains(in_v) && live_numbers.insert(*in_v) {
+                                    changed = true;
+                                }
+                            }
+                        }
+                        GraphOp::StoreLocal { slot, value } if !array_slots.contains(slot) => {
+                            if ints.contains(value) {
+                                if live_ints.insert(*value) {
+                                    changed = true;
+                                }
+                            } else if numbers.contains(value) && live_numbers.insert(*value) {
+                                changed = true;
+                            }
+                        }
+                        GraphOp::CheckTdz { value, .. } => {
+                            if ints.contains(value) {
+                                if live_ints.insert(*value) {
+                                    changed = true;
+                                }
+                            } else if numbers.contains(value) && live_numbers.insert(*value) {
+                                changed = true;
+                            }
+                        }
+                        GraphOp::LoadLocal(_) => {
+                            if numbers.contains(vid) && live_numbers.insert(*vid) {
+                                changed = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if live_numbers.contains(vid) {
+                    match op {
+                        GraphOp::Binary { op, left, right } => {
+                            let is_cmp = matches!(
+                                op,
+                                BinaryOp::StrictEqual
+                                    | BinaryOp::StrictNotEqual
+                                    | BinaryOp::LooseEqual
+                                    | BinaryOp::LooseNotEqual
+                                    | BinaryOp::LessThan
+                                    | BinaryOp::LessThanOrEqual
+                                    | BinaryOp::GreaterThan
+                                    | BinaryOp::GreaterThanOrEqual
+                            );
+                            if !is_cmp {
+                                if numbers.contains(left) && numbers.contains(right) {
+                                    if live_numbers.insert(*left) {
+                                        changed = true;
+                                    }
+                                    if live_numbers.insert(*right) {
+                                        changed = true;
+                                    }
+                                } else if ints.contains(left) && ints.contains(right) {
+                                    if live_ints.insert(*left) {
+                                        changed = true;
+                                    }
+                                    if live_ints.insert(*right) {
+                                        changed = true;
+                                    }
+                                } else {
+                                    if numbers.contains(left) && live_numbers.insert(*left) {
+                                        changed = true;
+                                    }
+                                    if ints.contains(left) && live_ints.insert(*left) {
+                                        changed = true;
+                                    }
+                                    if numbers.contains(right) && live_numbers.insert(*right) {
+                                        changed = true;
+                                    }
+                                    if ints.contains(right) && live_ints.insert(*right) {
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                        GraphOp::Unary { value, .. } => {
+                            if numbers.contains(value) && live_numbers.insert(*value) {
+                                changed = true;
+                            } else if ints.contains(value) && live_ints.insert(*value) {
+                                changed = true;
+                            }
+                        }
+                        GraphOp::Phi { inputs } => {
+                            for (_, in_v) in inputs {
+                                if numbers.contains(in_v) && live_numbers.insert(*in_v) {
+                                    changed = true;
+                                } else if ints.contains(in_v) && live_ints.insert(*in_v) {
+                                    changed = true;
+                                }
+                            }
+                        }
+                        GraphOp::StoreLocal { slot, value } if !array_slots.contains(slot) => {
+                            if numbers.contains(value) && live_numbers.insert(*value) {
+                                changed = true;
+                            } else if ints.contains(value) && live_ints.insert(*value) {
+                                changed = true;
+                            }
+                        }
+                        GraphOp::CheckTdz { value, .. } => {
+                            if numbers.contains(value) && live_numbers.insert(*value) {
+                                changed = true;
+                            } else if ints.contains(value) && live_ints.insert(*value) {
+                                changed = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let GraphOp::Phi { inputs } = op {
+                    for (_, in_v) in inputs {
+                        if live_ints.contains(in_v) && ints.contains(vid) {
+                            if live_ints.insert(*vid) {
+                                changed = true;
+                            }
+                        }
+                        if live_numbers.contains(in_v) && numbers.contains(vid) {
+                            if live_numbers.insert(*vid) {
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    (live_numbers, live_ints)
 }
 
 /// The values some operation reads boxed. Arithmetic and comparison on two proven numbers
@@ -1803,6 +2398,8 @@ fn emit_blocks(
     } else {
         booleans_with(graph, &baseline_assumptions)
     };
+    let baseline_live_booleans =
+        compute_live_booleans(graph, baseline_numbers, baseline_ints, &baseline_booleans);
     let defs: std::collections::HashMap<ValueId, &GraphOp> = graph
         .blocks
         .iter()
@@ -1878,12 +2475,28 @@ fn emit_blocks(
         all_ints.extend(&speculative_ints);
 
         let all_booleans = booleans_with(fast_graph, &candidate_assumptions);
+        let all_live_booleans =
+            compute_live_booleans(fast_graph, &all_numbers, &all_ints, &all_booleans);
+        let (all_live_numbers, all_live_ints) = compute_live_twins(
+            fast_graph,
+            program,
+            proto,
+            &all_numbers,
+            &all_ints,
+            &all_live_booleans,
+            None,
+            array_slots,
+            kind,
+            plan,
+            &use_counts,
+            &ivs,
+        );
         emit_ssa_declarations(
             output,
             fast_graph,
-            &all_numbers,
-            &all_ints,
-            &all_booleans,
+            &all_live_numbers,
+            &all_live_ints,
+            &all_live_booleans,
             true,
             false,
         );
@@ -1993,7 +2606,9 @@ fn emit_blocks(
             kind,
             &all_numbers,
             &all_ints,
-            &all_booleans,
+            &all_live_numbers,
+            &all_live_ints,
+            &all_live_booleans,
             &defs,
             &use_counts,
             &ivs,
@@ -2027,7 +2642,9 @@ fn emit_blocks(
             kind,
             baseline_numbers,
             baseline_ints,
-            &baseline_booleans,
+            &all_live_numbers,
+            &all_live_ints,
+            &all_live_booleans,
             &defs,
             &use_counts,
             &ivs,
@@ -2044,12 +2661,40 @@ fn emit_blocks(
             },
         );
     } else {
+        let boxed = if plan.generic_only && baseline_numbers.is_empty() {
+            None
+        } else {
+            Some(boxed_uses(
+                graph,
+                program,
+                baseline_numbers,
+                baseline_ints,
+                &baseline_live_booleans,
+                array_slots,
+                kind,
+                &Speculation::default(),
+            ))
+        };
+        let (live_numbers, live_ints) = compute_live_twins(
+            graph,
+            program,
+            proto,
+            baseline_numbers,
+            baseline_ints,
+            &baseline_live_booleans,
+            boxed.as_ref(),
+            array_slots,
+            kind,
+            plan,
+            &use_counts,
+            &ivs,
+        );
         emit_ssa_declarations(
             output,
             graph,
-            baseline_numbers,
-            baseline_ints,
-            &baseline_booleans,
+            &live_numbers,
+            &live_ints,
+            &baseline_live_booleans,
             false,
             plan.compact,
         );
@@ -2069,7 +2714,9 @@ fn emit_blocks(
             kind,
             baseline_numbers,
             baseline_ints,
-            &baseline_booleans,
+            &live_numbers,
+            &live_ints,
+            &baseline_live_booleans,
             &defs,
             &use_counts,
             &ivs,
@@ -2349,6 +2996,8 @@ fn emit_terminator(
     terminator: &Terminator,
     numbers: &HashSet<ValueId>,
     ints: &HashSet<ValueId>,
+    live_numbers: &HashSet<ValueId>,
+    live_ints: &HashSet<ValueId>,
     booleans: &HashSet<ValueId>,
     defs: &std::collections::HashMap<ValueId, &GraphOp>,
     unwind: &str,
@@ -2378,7 +3027,18 @@ fn emit_terminator(
                 }
                 match value {
                     Some(val) if numbers.contains(val) => {
-                        writeln!(output, "    return d{};", val.0).unwrap();
+                        if live_numbers.contains(val) {
+                            writeln!(output, "    return d{};", val.0).unwrap();
+                        } else if live_ints.contains(val) {
+                            writeln!(output, "    return (double)i{};", val.0).unwrap();
+                        } else {
+                            writeln!(
+                                output,
+                                "    {{ double ret_d; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{}))) memcpy(&ret_d, &v{}, sizeof(ret_d)); else ret_d = kiln_c99_as_number(kiln_val_to_boundary(v{})); return ret_d; }}",
+                                val.0, val.0, val.0
+                            )
+                            .unwrap();
+                        }
                     }
                     // The plan proved every reachable return a number; a return of anything
                     // else is in a block nothing reaches. It answers as a bug would, loudly.
@@ -2481,8 +3141,8 @@ fn emit_terminator(
                 graph,
                 current_block.id,
                 *target,
-                numbers,
-                ints,
+                live_numbers,
+                live_ints,
                 booleans,
                 indexed_values,
                 used,
@@ -2525,7 +3185,21 @@ fn emit_terminator(
                         BinaryOp::StrictNotEqual | BinaryOp::LooseNotEqual => Some("!="),
                         _ => None,
                     };
-                    sym.map(|sym| format!("d{} {sym} d{}", left.0, right.0))
+                    let a = if live_numbers.contains(left) {
+                        format!("d{}", left.0)
+                    } else if live_ints.contains(left) {
+                        format!("(double)i{}", left.0)
+                    } else {
+                        format!("d{}", left.0)
+                    };
+                    let b = if live_numbers.contains(right) {
+                        format!("d{}", right.0)
+                    } else if live_ints.contains(right) {
+                        format!("(double)i{}", right.0)
+                    } else {
+                        format!("d{}", right.0)
+                    };
+                    sym.map(|sym| format!("{a} {sym} {b}"))
                 }
                 // A proven boolean branches on its twin.
                 _ if booleans.contains(condition) => Some(format!("b{}", condition.0)),
@@ -2538,8 +3212,8 @@ fn emit_terminator(
                 graph,
                 current_block.id,
                 *true_block,
-                numbers,
-                ints,
+                live_numbers,
+                live_ints,
                 booleans,
                 indexed_values,
                 used,
@@ -2552,8 +3226,8 @@ fn emit_terminator(
                 graph,
                 current_block.id,
                 *false_block,
-                numbers,
-                ints,
+                live_numbers,
+                live_ints,
                 booleans,
                 indexed_values,
                 used,
@@ -2574,8 +3248,8 @@ fn emit_terminator(
                 graph,
                 current_block.id,
                 *true_block,
-                numbers,
-                ints,
+                live_numbers,
+                live_ints,
                 booleans,
                 indexed_values,
                 used,
@@ -2588,8 +3262,8 @@ fn emit_terminator(
                 graph,
                 current_block.id,
                 *false_block,
-                numbers,
-                ints,
+                live_numbers,
+                live_ints,
                 booleans,
                 indexed_values,
                 used,
@@ -2650,7 +3324,7 @@ fn emit_phi_assignments(
     booleans: &HashSet<ValueId>,
     indexed_values: bool,
     used: &HashSet<ValueId>,
-    _boxed: Option<&HashSet<ValueId>>,
+    boxed: Option<&HashSet<ValueId>>,
 ) {
     // A parallel move: every input is read before any phi is written, so two phis that swap
     // values (`[a, b] = [b, a]` across a back edge) do not clobber each other.
@@ -2744,19 +3418,42 @@ fn emit_phi_assignments(
     }
     output.push_str("        {");
     for (i, &(phi_v, from_v)) in moves.iter().enumerate() {
-        write!(output, " kiln_val phi_t{i} = v{from_v};").unwrap();
+        let need_box = boxed.map_or(true, |b| b.contains(&ValueId(phi_v)));
+        if need_box {
+            write!(output, " kiln_val phi_t{i} = v{from_v};").unwrap();
+        }
         if numbers.contains(&ValueId(phi_v)) {
-            write!(output, " double phi_td{i} = d{from_v};").unwrap();
+            if numbers.contains(&ValueId(from_v)) {
+                write!(output, " double phi_td{i} = d{from_v};").unwrap();
+            } else if ints.contains(&ValueId(from_v)) {
+                write!(output, " double phi_td{i} = (double)i{from_v};").unwrap();
+            } else {
+                write!(output, " double phi_td{i}; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{from_v}))) memcpy(&phi_td{i}, &v{from_v}, sizeof(phi_td{i})); else phi_td{i} = kiln_c99_as_number(kiln_val_to_boundary(v{from_v}));").unwrap();
+            }
         }
         if ints.contains(&ValueId(phi_v)) {
-            write!(output, " int64_t phi_ti{i} = i{from_v};").unwrap();
+            if ints.contains(&ValueId(from_v)) {
+                write!(output, " int64_t phi_ti{i} = i{from_v};").unwrap();
+            } else if numbers.contains(&ValueId(from_v)) {
+                write!(output, " int64_t phi_ti{i} = (int64_t)d{from_v};").unwrap();
+            } else {
+                write!(output, " int64_t phi_ti{i}; {{ double tmp_{i}; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{from_v}))) memcpy(&tmp_{i}, &v{from_v}, sizeof(tmp_{i})); else tmp_{i} = kiln_c99_as_number(kiln_val_to_boundary(v{from_v})); phi_ti{i} = (int64_t)tmp_{i}; }}").unwrap();
+            }
         }
         if booleans.contains(&ValueId(phi_v)) {
-            write!(output, " int phi_tb{i} = b{from_v};").unwrap();
+            let src = if booleans.contains(&ValueId(from_v)) {
+                format!("b{from_v}")
+            } else {
+                format!("(v{from_v} == KILN_VAL_TRUE)")
+            };
+            write!(output, " int phi_tb{i} = {src};").unwrap();
         }
     }
     for (i, &(phi_v, _)) in moves.iter().enumerate() {
-        write!(output, " v{phi_v} = phi_t{i};").unwrap();
+        let need_box = boxed.map_or(true, |b| b.contains(&ValueId(phi_v)));
+        if need_box {
+            write!(output, " v{phi_v} = phi_t{i};").unwrap();
+        }
         if numbers.contains(&ValueId(phi_v)) {
             write!(output, " d{phi_v} = phi_td{i};").unwrap();
         }

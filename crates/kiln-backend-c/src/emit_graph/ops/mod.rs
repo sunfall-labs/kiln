@@ -36,6 +36,9 @@ pub(super) struct OpContext<'a> {
     pub scalar_proto: bool,
     pub numbers: &'a HashSet<ValueId>,
     pub ints: &'a HashSet<ValueId>,
+    pub live_numbers: &'a HashSet<ValueId>,
+    pub live_ints: &'a HashSet<ValueId>,
+    pub booleans: &'a HashSet<ValueId>,
     pub defs: &'a std::collections::HashMap<ValueId, &'a GraphOp>,
     pub ivs: &'a std::collections::HashMap<ValueId, InductionVariable>,
     pub array_slots: &'a HashSet<u32>,
@@ -211,6 +214,9 @@ pub(super) fn emit_graph_op(
     scalar_proto: bool,
     numbers: &HashSet<ValueId>,
     ints: &HashSet<ValueId>,
+    live_numbers: &HashSet<ValueId>,
+    live_ints: &HashSet<ValueId>,
+    booleans: &HashSet<ValueId>,
     defs: &std::collections::HashMap<ValueId, &GraphOp>,
     ivs: &std::collections::HashMap<ValueId, InductionVariable>,
     array_slots: &HashSet<u32>,
@@ -232,6 +238,8 @@ pub(super) fn emit_graph_op(
     let v = vid.0;
     let typed = numbers.contains(&vid);
     let typed_int = ints.contains(&vid);
+    let live_typed = live_numbers.contains(&vid);
+    let live_typed_int = live_ints.contains(&vid);
     let is_used = used.contains(&vid);
     let in_array = |slot: &u32| array_slots.contains(slot);
     let (pc, label) = origins
@@ -247,6 +255,9 @@ pub(super) fn emit_graph_op(
         scalar_proto,
         numbers,
         ints,
+        live_numbers,
+        live_ints,
+        booleans,
         defs,
         ivs,
         array_slots,
@@ -269,11 +280,22 @@ pub(super) fn emit_graph_op(
     match op {
         GraphOp::Const { index, constant } => match constant {
             Constant::Number(bits) => {
-                writeln!(output, "    v{v} = UINT64_C({bits});").unwrap();
-                if typed {
-                    writeln!(output, "    memcpy(&d{v}, &v{v}, sizeof(d{v}));").unwrap();
+                let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+                if need_box {
+                    writeln!(output, "    v{v} = UINT64_C({bits});").unwrap();
                 }
-                if typed_int && let Some(ival) = as_safe_integer(constant) {
+                if live_typed {
+                    if need_box {
+                        writeln!(output, "    memcpy(&d{v}, &v{v}, sizeof(d{v}));").unwrap();
+                    } else {
+                        writeln!(
+                            output,
+                            "    memcpy(&d{v}, &(uint64_t){{ UINT64_C({bits}) }}, sizeof(d{v}));"
+                        )
+                        .unwrap();
+                    }
+                }
+                if live_typed_int && let Some(ival) = as_safe_integer(constant) {
                     writeln!(output, "    i{v} = {ival}LL;").unwrap();
                 }
             }
@@ -284,12 +306,21 @@ pub(super) fn emit_graph_op(
                 writeln!(output, "    v{v} = KILN_VAL_NULL;").unwrap();
             }
             Constant::Boolean(b) => {
+                let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+                let need_bool = ctx.booleans.contains(&vid);
                 let val_str = if *b {
                     "KILN_VAL_TRUE"
                 } else {
                     "KILN_VAL_FALSE"
                 };
-                writeln!(output, "    v{v} = {val_str};").unwrap();
+                let bval = if *b { 1 } else { 0 };
+                if need_bool && need_box {
+                    writeln!(output, "    b{v} = {bval}; v{v} = {val_str};").unwrap();
+                } else if need_bool {
+                    writeln!(output, "    b{v} = {bval};").unwrap();
+                } else if need_box {
+                    writeln!(output, "    v{v} = {val_str};").unwrap();
+                }
             }
             // A NUL-free literal is a tagged pointer to
             // its static bytes; one with a NUL inside goes through the per-unit string cache; a
@@ -316,9 +347,14 @@ pub(super) fn emit_graph_op(
                 // The typed entry's contract: exactly the parameter count of arguments, each a
                 // number, arriving as the double itself. The box is made here and deleted by
                 // the C compiler wherever nothing reads the value untyped.
+                let d_stmt = if live_typed {
+                    format!("d{v} = p{slot}; ")
+                } else {
+                    String::new()
+                };
                 writeln!(
                     output,
-                    "    d{v} = p{slot}; v{v} = kiln_c99_val_from_double(p{slot});"
+                    "    {d_stmt}v{v} = kiln_c99_val_from_double(p{slot});"
                 )
                 .unwrap();
             } else if *slot < proto.parameter_count {
@@ -330,12 +366,19 @@ pub(super) fn emit_graph_op(
             } else {
                 writeln!(output, "    v{v} = KILN_VAL_UNDEFINED;").unwrap();
             }
-            if typed && !(*slot < proto.parameter_count && matches!(kind, EntryKind::Typed { .. }))
+            if live_typed
+                && !(*slot < proto.parameter_count && matches!(kind, EntryKind::Typed { .. }))
             {
                 writeln!(output, "    memcpy(&d{v}, &v{v}, sizeof(d{v}));").unwrap();
             }
-            if typed_int {
-                writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
+            if live_typed_int {
+                if live_typed {
+                    writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
+                } else if *slot < proto.parameter_count && matches!(kind, EntryKind::Typed { .. }) {
+                    writeln!(output, "    i{v} = (int64_t)p{slot};").unwrap();
+                } else {
+                    writeln!(output, "    {{ double tmp_{v}; memcpy(&tmp_{v}, &v{v}, sizeof(tmp_{v})); i{v} = (int64_t)tmp_{v}; }}").unwrap();
+                }
             }
         }
         GraphOp::StoreLocal { slot, value } => {
@@ -344,10 +387,10 @@ pub(super) fn emit_graph_op(
             }
             if is_used {
                 writeln!(output, "    v{v} = v{};", value.0).unwrap();
-                if typed {
+                if live_typed {
                     writeln!(output, "    d{v} = d{};", value.0).unwrap();
                 }
-                if typed_int {
+                if live_typed_int {
                     writeln!(output, "    i{v} = i{};", value.0).unwrap();
                 }
             }
@@ -401,10 +444,10 @@ pub(super) fn emit_graph_op(
             .unwrap();
             if is_used {
                 writeln!(output, "    v{v} = v{};", value.0).unwrap();
-                if typed {
+                if live_typed {
                     writeln!(output, "    d{v} = d{};", value.0).unwrap();
                 }
-                if typed_int {
+                if live_typed_int {
                     writeln!(output, "    i{v} = i{};", value.0).unwrap();
                 }
             }
@@ -595,11 +638,19 @@ pub(super) fn emit_graph_op(
             writeln!(output, "    {symbol}_globals[{slot}] = v{};", value.0).unwrap();
             if is_used {
                 writeln!(output, "    v{v} = v{};", value.0).unwrap();
-                if typed {
-                    writeln!(output, "    d{v} = d{};", value.0).unwrap();
+                if live_typed {
+                    if live_numbers.contains(value) {
+                        writeln!(output, "    d{v} = d{};", value.0).unwrap();
+                    } else if live_ints.contains(value) {
+                        writeln!(output, "    d{v} = (double)i{};", value.0).unwrap();
+                    }
                 }
-                if typed_int {
-                    writeln!(output, "    i{v} = i{};", value.0).unwrap();
+                if live_typed_int {
+                    if live_ints.contains(value) {
+                        writeln!(output, "    i{v} = i{};", value.0).unwrap();
+                    } else if live_numbers.contains(value) {
+                        writeln!(output, "    i{v} = (int64_t)d{};", value.0).unwrap();
+                    }
                 }
             }
         }
@@ -637,10 +688,10 @@ pub(super) fn emit_graph_op(
             if graph.scalar_alias_map.contains_key(value) || numbers.contains(value) {
                 if is_used {
                     writeln!(output, "    v{v} = v{};", value.0).unwrap();
-                    if typed {
+                    if live_typed {
                         writeln!(output, "    d{v} = d{};", value.0).unwrap();
                     }
-                    if typed_int {
+                    if live_typed_int {
                         writeln!(output, "    i{v} = i{};", value.0).unwrap();
                     }
                 }
@@ -655,10 +706,10 @@ pub(super) fn emit_graph_op(
             .unwrap();
             if is_used {
                 writeln!(output, "    v{v} = v{};", value.0).unwrap();
-                if typed {
+                if live_typed {
                     writeln!(output, "    d{v} = d{};", value.0).unwrap();
                 }
-                if typed_int {
+                if live_typed_int {
                     writeln!(output, "    i{v} = i{};", value.0).unwrap();
                 }
             }
@@ -791,7 +842,13 @@ pub(super) fn emit_graph_op(
                     call_args.push_str(", host, thrown");
                 }
                 for a in args {
-                    call_args.push_str(&format!(", d{}", a.0));
+                    if live_numbers.contains(a) {
+                        call_args.push_str(&format!(", d{}", a.0));
+                    } else if live_ints.contains(a) {
+                        call_args.push_str(&format!(", (double)i{}", a.0));
+                    } else {
+                        call_args.push_str(&format!(", d{}", a.0));
+                    }
                 }
                 let recv = if needs.receiver {
                     receiver.as_str()
@@ -814,33 +871,73 @@ pub(super) fn emit_graph_op(
                     )
                 };
                 if plan.typed_returns[target as usize] {
-                    writeln!(
-                        output,
-                        "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow} else {{ {recv} d{v} = {symbol}_fn_{target}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(d{v}))) {failed} v{v} = kiln_c99_val_from_double(d{v}); }}"
-                    )
-                    .unwrap();
+                    if live_typed {
+                        let int_twin = if live_typed_int {
+                            format!(" i{v} = (int64_t)d{v};")
+                        } else {
+                            String::new()
+                        };
+                        writeln!(
+                            output,
+                            "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow} else {{ {recv} d{v} = {symbol}_fn_{target}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(d{v}))) {failed} v{v} = kiln_c99_val_from_double(d{v});{int_twin} }}"
+                        )
+                        .unwrap();
+                    } else {
+                        let int_twin = if live_typed_int {
+                            format!(" i{v} = (int64_t)d_ret_{v};")
+                        } else {
+                            String::new()
+                        };
+                        writeln!(
+                            output,
+                            "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow} else {{ {recv} double d_ret_{v} = {symbol}_fn_{target}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(d_ret_{v}))) {failed} v{v} = kiln_c99_val_from_double(d_ret_{v});{int_twin} }}"
+                        )
+                        .unwrap();
+                    }
                 } else {
-                    let twin = if typed {
+                    let twin = if live_typed {
                         format!(" memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+                    } else {
+                        String::new()
+                    };
+                    let int_twin = if live_typed_int {
+                        if live_typed {
+                            format!(" i{v} = (int64_t)d{v};")
+                        } else {
+                            format!(
+                                " {{ double tmp_{v}; memcpy(&tmp_{v}, &v{v}, sizeof(tmp_{v})); i{v} = (int64_t)tmp_{v}; }}"
+                            )
+                        }
                     } else {
                         String::new()
                     };
                     writeln!(
                         output,
-                        "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow} else {{ {recv} v{v} = {symbol}_fn_{target}_t({call_args}); if (KILN_UNLIKELY(v{v} == KILN_VAL_TYPED_FAIL)) {failed}{twin} }}"
+                        "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow} else {{ {recv} v{v} = {symbol}_fn_{target}_t({call_args}); if (KILN_UNLIKELY(v{v} == KILN_VAL_TYPED_FAIL)) {failed}{twin}{int_twin} }}"
                     )
                     .unwrap();
                 }
             } else {
-                let twin = if typed {
+                let twin = if live_typed {
                     format!(" memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+                } else {
+                    String::new()
+                };
+                let int_twin = if live_typed_int {
+                    if live_typed {
+                        format!(" i{v} = (int64_t)d{v};")
+                    } else {
+                        format!(
+                            " {{ double tmp_{v}; memcpy(&tmp_{v}, &v{v}, sizeof(tmp_{v})); i{v} = (int64_t)tmp_{v}; }}"
+                        )
+                    }
                 } else {
                     String::new()
                 };
                 let check = call_status_check(diagnostic_site, pc, label, unwind);
                 writeln!(
                     output,
-                    "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow} else {{ kiln_val call_args[{n}] = {{ {init} }}; {receiver} kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}{fast}(&ctx_call, &v{v}, {upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc}); {check}{twin} }}",
+                    "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow} else {{ kiln_val call_args[{n}] = {{ {init} }}; {receiver} kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}{fast}(&ctx_call, &v{v}, {upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc}); {check}{twin}{int_twin} }}",
                     fast = if plan.fast.get(target as usize).copied().unwrap_or(false) { "_f" } else { "" },
                     n = argc.max(1)
                 )
@@ -855,9 +952,23 @@ pub(super) fn emit_graph_op(
             }
             if plan.generic_only {
                 let check = status_check(diagnostic_site, pc, label, unwind);
-                let sync_number = typed
-                    .then(|| format!(" memcpy(&d{v}, &v{v}, sizeof(d{v}));"))
-                    .unwrap_or_default();
+                let sync_number = if live_typed {
+                    format!(" memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+                } else {
+                    String::new()
+                };
+                let sync_int = if live_typed_int {
+                    if live_typed {
+                        format!(" i{v} = (int64_t)d{v};")
+                    } else {
+                        format!(
+                            " {{ double tmp_{v}; memcpy(&tmp_{v}, &v{v}, sizeof(tmp_{v})); i{v} = (int64_t)tmp_{v}; }}"
+                        )
+                    }
+                } else {
+                    String::new()
+                };
+                let sync_number = format!("{sync_number}{sync_int}");
                 if plan.compact {
                     let callee_val = callee.0;
                     if argc == 0 {
@@ -990,8 +1101,11 @@ pub(super) fn emit_graph_op(
                     {
                         let val_vid = val.0;
                         writeln!(output, "    v{alloc}_f_{field_idx} = v{val_vid};").unwrap();
-                        if numbers.contains(val) {
+                        if live_numbers.contains(val) {
                             writeln!(output, "    d{alloc}_f_{field_idx} = d{val_vid};").unwrap();
+                        } else if live_ints.contains(val) {
+                            writeln!(output, "    d{alloc}_f_{field_idx} = (double)i{val_vid};")
+                                .unwrap();
                         } else {
                             writeln!(
                                 output,
@@ -999,8 +1113,11 @@ pub(super) fn emit_graph_op(
                             )
                             .unwrap();
                         }
-                        if ints.contains(val) {
+                        if live_ints.contains(val) {
                             writeln!(output, "    i{alloc}_f_{field_idx} = i{val_vid};").unwrap();
+                        } else if live_numbers.contains(val) {
+                            writeln!(output, "    i{alloc}_f_{field_idx} = (int64_t)d{val_vid};")
+                                .unwrap();
                         } else {
                             writeln!(output, "    i{alloc}_f_{field_idx} = 0;").unwrap();
                         }
@@ -1323,13 +1440,15 @@ fn emit_sunk_field_store(
     alloc: u32,
     field_idx: usize,
     value: ValueId,
-    numbers: &HashSet<ValueId>,
-    ints: &HashSet<ValueId>,
+    live_numbers: &HashSet<ValueId>,
+    live_ints: &HashSet<ValueId>,
 ) {
     let val = value.0;
     writeln!(output, "    v{alloc}_f_{field_idx} = v{val};").unwrap();
-    if numbers.contains(&value) {
+    if live_numbers.contains(&value) {
         writeln!(output, "    d{alloc}_f_{field_idx} = d{val};").unwrap();
+    } else if live_ints.contains(&value) {
+        writeln!(output, "    d{alloc}_f_{field_idx} = (double)i{val};").unwrap();
     } else {
         writeln!(
             output,
@@ -1337,8 +1456,10 @@ fn emit_sunk_field_store(
         )
         .unwrap();
     }
-    if ints.contains(&value) {
+    if live_ints.contains(&value) {
         writeln!(output, "    i{alloc}_f_{field_idx} = i{val};").unwrap();
+    } else if live_numbers.contains(&value) {
+        writeln!(output, "    i{alloc}_f_{field_idx} = (int64_t)d{val};").unwrap();
     } else {
         writeln!(output, "    i{alloc}_f_{field_idx} = 0;").unwrap();
     }
@@ -1368,7 +1489,14 @@ fn emit_sunk_bridge(
             let key = resolve_const_string(operands[1], ctx.defs, ctx.program)
                 .expect("a sunk define's key is a constant string: the escape analysis checked");
             if let Some(&field_idx) = scalar_obj.fields.get(&key) {
-                emit_sunk_field_store(output, alloc, field_idx, operands[2], ctx.numbers, ctx.ints);
+                emit_sunk_field_store(
+                    output,
+                    alloc,
+                    field_idx,
+                    operands[2],
+                    ctx.live_numbers,
+                    ctx.live_ints,
+                );
             }
             writeln!(output, "    v{v} = KILN_VAL_UNDEFINED;").unwrap();
         }

@@ -320,6 +320,7 @@ fn emit_reduce_typed(
     typed_failed: &str,
     c: &TypedCallback,
     known_arr: bool,
+    init_dacc: &str,
 ) -> String {
     let (o, a0, a1, v) = site;
     let target = c.target;
@@ -355,7 +356,7 @@ fn emit_reduce_typed(
                  kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
                  if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
                  if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
-                     double dacc = d{a1}; \
+                     double dacc = {init_dacc}; \
                      for (size_t idx = 0; idx < arr->count; ++idx) {{ \
                          double d_elem; memcpy(&d_elem, &arr->elements[idx], sizeof(d_elem)); \
                          double r_acc = {symbol}_fn_{target}_t({call_args}); \
@@ -505,8 +506,25 @@ pub(super) fn emit_call_method(
     {
         // The same expressions the guarded intrinsics below compute, so the clone and the
         // sequential lowering agree bit for bit on every edge (`-0`, NaN, the sign of a zero).
-        let a = format!("d{}", args[0].0);
-        let b = args.get(1).map(|x| format!("d{}", x.0)).unwrap_or_default();
+        let a = if ctx.live_numbers.contains(&args[0]) {
+            format!("d{}", args[0].0)
+        } else if ctx.live_ints.contains(&args[0]) {
+            format!("(double)i{}", args[0].0)
+        } else {
+            format!("d{}", args[0].0)
+        };
+        let b = args
+            .get(1)
+            .map(|x| {
+                if ctx.live_numbers.contains(x) {
+                    format!("d{}", x.0)
+                } else if ctx.live_ints.contains(x) {
+                    format!("(double)i{}", x.0)
+                } else {
+                    format!("d{}", x.0)
+                }
+            })
+            .unwrap_or_default();
         let call = match (key.to_scalar_string().ok().as_deref(), args.len()) {
             (Some("sqrt"), 1) => format!("sqrt({a})"),
             (Some("abs"), 1) => format!("fabs({a})"),
@@ -549,18 +567,38 @@ pub(super) fn emit_call_method(
             (Some("hypot"), 2) => format!("hypot({a}, {b})"),
             _ => unreachable!("PARALLEL_MATH names only these"),
         };
-        writeln!(
-            output,
-            "    d{v} = {call}; v{v} = kiln_c99_val_from_double(d{v});"
-        )
-        .unwrap();
+        let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+        let live_typed = ctx.live_numbers.contains(&vid);
+        let live_typed_int = ctx.live_ints.contains(&vid);
+        if live_typed {
+            let int_stmt = if live_typed_int {
+                format!(" i{v} = (int64_t)d{v};")
+            } else {
+                String::new()
+            };
+            let box_stmt = if need_box {
+                format!(" v{v} = kiln_c99_val_from_double(d{v});")
+            } else {
+                String::new()
+            };
+            writeln!(output, "    d{v} = {call};{int_stmt}{box_stmt}").unwrap();
+        } else if live_typed_int {
+            let box_stmt = if need_box {
+                format!(" v{v} = kiln_c99_val_from_double((double)i{v});")
+            } else {
+                String::new()
+            };
+            writeln!(output, "    i{v} = (int64_t)({call});{box_stmt}").unwrap();
+        } else {
+            writeln!(output, "    v{v} = kiln_c99_val_from_double({call});").unwrap();
+        }
         return;
     }
     let unwind = ctx.unwind;
     let plan = ctx.plan;
     let spec = ctx.spec;
-    let typed = numbers.contains(&vid);
-    let typed_int = ints.contains(&vid);
+    let typed = ctx.live_numbers.contains(&vid);
+    let typed_int = ctx.live_ints.contains(&vid);
     let (pc, label) = ctx
         .origins
         .get(&vid)
@@ -583,9 +621,23 @@ pub(super) fn emit_call_method(
                 .join(", ")
         };
         let check = status_check(diagnostic_site, pc, label, unwind);
-        let sync_number = typed
-            .then(|| format!(" memcpy(&d{v}, &v{v}, sizeof(d{v}));"))
-            .unwrap_or_default();
+        let sync_number = if typed {
+            format!(" memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+        } else {
+            String::new()
+        };
+        let sync_int = if typed_int {
+            if typed {
+                format!(" i{v} = (int64_t)d{v};")
+            } else {
+                format!(
+                    " {{ double tmp_{v}; memcpy(&tmp_{v}, &v{v}, sizeof(tmp_{v})); i{v} = (int64_t)tmp_{v}; }}"
+                )
+            }
+        } else {
+            String::new()
+        };
+        let sync_number = format!("{sync_number}{sync_int}");
         if plan.compact {
             let key = format!("{symbol}_key_{name}");
             let o = object.0;
@@ -695,7 +747,13 @@ pub(super) fn emit_call_method(
                         call_args.push_str(", host, thrown");
                     }
                     for a in args {
-                        call_args.push_str(&format!(", d{}", a.0));
+                        if ctx.live_numbers.contains(a) {
+                            call_args.push_str(&format!(", d{}", a.0));
+                        } else if ctx.live_ints.contains(a) {
+                            call_args.push_str(&format!(", (double)i{}", a.0));
+                        } else {
+                            call_args.push_str(&format!(", d{}", a.0));
+                        }
                     }
                     let failed = format!(
                         "{{ int status = kiln_c99_typed_status; if (status == KILN_C99_THROWN) *thrown = kiln_c99_typed_thrown; {diag} {typed_check} }}"
@@ -710,8 +768,9 @@ pub(super) fn emit_call_method(
                     let box_stmt = if need_box { format!(" v{v} = kiln_c99_val_from_double(kiln_typed_d);") } else { String::new() };
                     if plan.typed_returns[i as usize] {
                         let twin = if typed { format!(" d{v} = kiln_typed_d; kiln_twin = 1;") } else { String::new() };
+                        let int_twin = if typed_int { format!(" i{v} = (int64_t)kiln_typed_d; kiln_twin = 1;") } else { String::new() };
                         format!(
-                            "if ({matched}) {{ double kiln_typed_d = {symbol}_fn_{i}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(kiln_typed_d))) {failed} else {{{box_stmt}{twin}{row_learn} }} handled = 1; }} else "
+                            "if ({matched}) {{ double kiln_typed_d = {symbol}_fn_{i}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(kiln_typed_d))) {failed} else {{{box_stmt}{twin}{int_twin}{row_learn} }} handled = 1; }} else "
                         )
                     } else {
                         format!(
@@ -758,7 +817,13 @@ pub(super) fn emit_call_method(
                 call_args.push_str(", host, thrown");
             }
             for a in args {
-                call_args.push_str(&format!(", d{}", a.0));
+                if ctx.live_numbers.contains(a) {
+                    call_args.push_str(&format!(", d{}", a.0));
+                } else if ctx.live_ints.contains(a) {
+                    call_args.push_str(&format!(", (double)i{}", a.0));
+                } else {
+                    call_args.push_str(&format!(", d{}", a.0));
+                }
             }
             let failed = format!(
                 "{{ int status = kiln_c99_typed_status; if (status == KILN_C99_THROWN) *thrown = kiln_c99_typed_thrown; {diag} {typed_check} }}"
@@ -772,8 +837,9 @@ pub(super) fn emit_call_method(
             let box_stmt = if need_box { format!(" v{v} = kiln_c99_val_from_double(kiln_typed_d);") } else { String::new() };
             if plan.typed_returns[i as usize] {
                 let twin = if typed { format!(" d{v} = kiln_typed_d; kiln_twin = 1;") } else { String::new() };
+                let int_twin = if typed_int { format!(" i{v} = (int64_t)kiln_typed_d; kiln_twin = 1;") } else { String::new() };
                 format!(
-                    "{guard} {{ const uint32_t *__row = {row_var}; if (__row == NULL) __builtin_unreachable(); double kiln_typed_d = {symbol}_fn_{i}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(kiln_typed_d))) {failed} else {{{box_stmt}{twin} }} handled = 1; }} "
+                    "{guard} {{ const uint32_t *__row = {row_var}; if (__row == NULL) __builtin_unreachable(); double kiln_typed_d = {symbol}_fn_{i}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(kiln_typed_d))) {failed} else {{{box_stmt}{twin}{int_twin} }} handled = 1; }} "
                 )
             } else {
                 format!(
@@ -805,8 +871,13 @@ pub(super) fn emit_call_method(
         args.iter()
             .enumerate()
             .map(|(i, a)| {
-                if numbers.contains(a) {
+                if ctx.live_numbers.contains(a) {
                     format!("call_args[{i}] = kiln_c99_val_from_double(d{});", a.0)
+                } else if ctx.live_ints.contains(a) {
+                    format!(
+                        "call_args[{i}] = kiln_c99_val_from_double((double)i{});",
+                        a.0
+                    )
                 } else {
                     format!("call_args[{i}] = v{};", a.0)
                 }
@@ -838,64 +909,42 @@ pub(super) fn emit_call_method(
 
     // 1. Math.* intrinsic
     let math_intrinsic = if await_resolve_intrinsic.is_none() {
-        let arg0_is_num = argc >= 1 && numbers.contains(&args[0]);
-        let (guard0, load0) = if arg0_is_num {
-            (String::new(), format!("double d = d{};", args[0].0))
-        } else if argc >= 1 {
-            (
-                format!("if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a}))) ", a = args[0].0),
-                format!("double d; memcpy(&d, &v{a}, sizeof(d));", a = args[0].0),
-            )
+        let load_arg = |a: ValueId, name: &str| -> (String, String) {
+            if ctx.live_numbers.contains(&a) {
+                (String::new(), format!("double {name} = d{};", a.0))
+            } else if ctx.live_ints.contains(&a) {
+                (String::new(), format!("double {name} = (double)i{};", a.0))
+            } else if numbers.contains(&a) {
+                (
+                    String::new(),
+                    format!("double {name}; memcpy(&{name}, &v{}, sizeof({name}));", a.0),
+                )
+            } else {
+                (
+                    format!("if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{}))) ", a.0),
+                    format!("double {name}; memcpy(&{name}, &v{}, sizeof({name}));", a.0),
+                )
+            }
+        };
+        let (guard0, load0) = if argc >= 1 {
+            load_arg(args[0], "d")
         } else {
             (String::new(), String::new())
         };
-
-        let arg1_is_num = argc >= 2 && numbers.contains(&args[1]);
         let (guard2, load2) = if argc >= 2 {
-            match (arg0_is_num, arg1_is_num) {
-                (true, true) => (
-                    String::new(),
-                    format!(
-                        "double d0 = d{a0}; double d1 = d{a1};",
-                        a0 = args[0].0,
-                        a1 = args[1].0
-                    ),
+            let (g0, l0) = load_arg(args[0], "d0");
+            let (g1, l1) = load_arg(args[1], "d1");
+            let guard = match (g0.is_empty(), g1.is_empty()) {
+                (true, true) => String::new(),
+                (false, true) => g0,
+                (true, false) => g1,
+                (false, false) => format!(
+                    "if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}) && KILN_VAL_IS_NUMBER(v{a1}))) ",
+                    a0 = args[0].0,
+                    a1 = args[1].0
                 ),
-                (true, false) => (
-                    format!(
-                        "if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a1}))) ",
-                        a1 = args[1].0
-                    ),
-                    format!(
-                        "double d0 = d{a0}; double d1; memcpy(&d1, &v{a1}, sizeof(d1));",
-                        a0 = args[0].0,
-                        a1 = args[1].0
-                    ),
-                ),
-                (false, true) => (
-                    format!(
-                        "if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}))) ",
-                        a0 = args[0].0
-                    ),
-                    format!(
-                        "double d0; memcpy(&d0, &v{a0}, sizeof(d0)); double d1 = d{a1};",
-                        a0 = args[0].0,
-                        a1 = args[1].0
-                    ),
-                ),
-                (false, false) => (
-                    format!(
-                        "if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}) && KILN_VAL_IS_NUMBER(v{a1}))) ",
-                        a0 = args[0].0,
-                        a1 = args[1].0
-                    ),
-                    format!(
-                        "double d0, d1; memcpy(&d0, &v{a0}, sizeof(d0)); memcpy(&d1, &v{a1}, sizeof(d1));",
-                        a0 = args[0].0,
-                        a1 = args[1].0
-                    ),
-                ),
-            }
+            };
+            (guard, format!("{l0} {l1}"))
         } else {
             (String::new(), String::new())
         };
@@ -1008,9 +1057,9 @@ pub(super) fn emit_call_method(
             )),
             ("clz32", 1) => {
                 let a0 = args[0].0;
-                let load_u0 = if ints.contains(&args[0]) {
+                let load_u0 = if ctx.live_ints.contains(&args[0]) {
                     format!("uint32_t u0 = (uint32_t)i{a0};")
-                } else if numbers.contains(&args[0]) {
+                } else if ctx.live_numbers.contains(&args[0]) {
                     format!("uint32_t u0 = (uint32_t)(int64_t)d{a0};")
                 } else {
                     format!(
@@ -1043,26 +1092,20 @@ pub(super) fn emit_call_method(
                 v = v
             )),
             ("imul", 2) => {
-                let a0 = args[0].0;
-                let a1 = args[1].0;
-                let load_i0 = if ints.contains(&args[0]) {
-                    format!("int32_t i0 = (int32_t)i{a0};")
-                } else if numbers.contains(&args[0]) {
-                    format!("int32_t i0 = (int32_t)(uint32_t)(int64_t)d{a0};")
-                } else {
-                    format!(
-                        "int32_t i0; {{ double d; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}))) memcpy(&d, &v{a0}, sizeof(d)); else d = kiln_c99_as_number(kiln_val_to_boundary(v{a0})); i0 = (int32_t)(uint32_t)(int64_t)d; }}"
-                    )
+                let load_imul = |a: ValueId, name: &str| -> String {
+                    if ctx.live_ints.contains(&a) {
+                        format!("int32_t {name} = (int32_t)i{};", a.0)
+                    } else if ctx.live_numbers.contains(&a) {
+                        format!("int32_t {name} = (int32_t)(uint32_t)(int64_t)d{};", a.0)
+                    } else {
+                        format!(
+                            "int32_t {name}; {{ double d; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a}))) memcpy(&d, &v{a}, sizeof(d)); else d = kiln_c99_as_number(kiln_val_to_boundary(v{a})); {name} = (int32_t)(uint32_t)(int64_t)d; }}",
+                            a = a.0
+                        )
+                    }
                 };
-                let load_i1 = if ints.contains(&args[1]) {
-                    format!("int32_t i1 = (int32_t)i{a1};")
-                } else if numbers.contains(&args[1]) {
-                    format!("int32_t i1 = (int32_t)(uint32_t)(int64_t)d{a1};")
-                } else {
-                    format!(
-                        "int32_t i1; {{ double d; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a1}))) memcpy(&d, &v{a1}, sizeof(d)); else d = kiln_c99_as_number(kiln_val_to_boundary(v{a1})); i1 = (int32_t)(uint32_t)(int64_t)d; }}"
-                    )
-                };
+                let load_i0 = load_imul(args[0], "i0");
+                let load_i1 = load_imul(args[1], "i1");
                 Some(format!(
                     "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
                          {load_i0} {load_i1} \
@@ -1223,8 +1266,12 @@ pub(super) fn emit_call_method(
             let a0 = args[0].0;
             let check = if ints.contains(&args[0]) {
                 format!("v{v} = KILN_VAL_TRUE; handled = 1;")
-            } else if numbers.contains(&args[0]) {
+            } else if ctx.live_numbers.contains(&args[0]) {
                 format!("v{v} = isfinite(d{a0}) ? KILN_VAL_TRUE : KILN_VAL_FALSE; handled = 1;")
+            } else if numbers.contains(&args[0]) {
+                format!(
+                    "{{ double d; memcpy(&d, &v{a0}, sizeof(d)); v{v} = isfinite(d) ? KILN_VAL_TRUE : KILN_VAL_FALSE; handled = 1; }}"
+                )
             } else {
                 format!(
                     "if (!KILN_VAL_IS_NUMBER(v{a0})) {{ v{v} = KILN_VAL_FALSE; handled = 1; }} \
@@ -1243,8 +1290,12 @@ pub(super) fn emit_call_method(
             let a0 = args[0].0;
             let check = if ints.contains(&args[0]) {
                 format!("v{v} = KILN_VAL_FALSE; handled = 1;")
-            } else if numbers.contains(&args[0]) {
+            } else if ctx.live_numbers.contains(&args[0]) {
                 format!("v{v} = isnan(d{a0}) ? KILN_VAL_TRUE : KILN_VAL_FALSE; handled = 1;")
+            } else if numbers.contains(&args[0]) {
+                format!(
+                    "{{ double d; memcpy(&d, &v{a0}, sizeof(d)); v{v} = isnan(d) ? KILN_VAL_TRUE : KILN_VAL_FALSE; handled = 1; }}"
+                )
             } else {
                 format!(
                     "if (!KILN_VAL_IS_NUMBER(v{a0})) {{ v{v} = KILN_VAL_FALSE; handled = 1; }} \
@@ -1263,9 +1314,13 @@ pub(super) fn emit_call_method(
             let a0 = args[0].0;
             let check = if ints.contains(&args[0]) {
                 format!("v{v} = KILN_VAL_TRUE; handled = 1;")
-            } else if numbers.contains(&args[0]) {
+            } else if ctx.live_numbers.contains(&args[0]) {
                 format!(
                     "v{v} = (isfinite(d{a0}) && floor(d{a0}) == d{a0}) ? KILN_VAL_TRUE : KILN_VAL_FALSE; handled = 1;"
+                )
+            } else if numbers.contains(&args[0]) {
+                format!(
+                    "{{ double d; memcpy(&d, &v{a0}, sizeof(d)); v{v} = (isfinite(d) && floor(d) == d) ? KILN_VAL_TRUE : KILN_VAL_FALSE; handled = 1; }}"
                 )
             } else {
                 format!(
@@ -1285,9 +1340,13 @@ pub(super) fn emit_call_method(
             let a0 = args[0].0;
             let check = if ints.contains(&args[0]) {
                 format!("v{v} = KILN_VAL_TRUE; handled = 1;")
-            } else if numbers.contains(&args[0]) {
+            } else if ctx.live_numbers.contains(&args[0]) {
                 format!(
                     "v{v} = (isfinite(d{a0}) && floor(d{a0}) == d{a0} && fabs(d{a0}) <= 9007199254740991.0) ? KILN_VAL_TRUE : KILN_VAL_FALSE; handled = 1;"
+                )
+            } else if numbers.contains(&args[0]) {
+                format!(
+                    "{{ double d; memcpy(&d, &v{a0}, sizeof(d)); v{v} = (isfinite(d) && floor(d) == d && fabs(d) <= 9007199254740991.0) ? KILN_VAL_TRUE : KILN_VAL_FALSE; handled = 1; }}"
                 )
             } else {
                 format!(
@@ -1316,7 +1375,13 @@ pub(super) fn emit_call_method(
             format!("if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v{a0})) arr->is_numeric = 0; ")
         };
         let push_arg = if is_num && !ctx.boxed.map_or(true, |b| b.contains(&args[0])) {
-            format!("kiln_c99_val_from_double(d{a0})")
+            if ctx.live_numbers.contains(&args[0]) {
+                format!("kiln_c99_val_from_double(d{a0})")
+            } else if ctx.live_ints.contains(&args[0]) {
+                format!("kiln_c99_val_from_double((double)i{a0})")
+            } else {
+                format!("v{a0}")
+            }
         } else {
             format!("v{a0}")
         };
@@ -1335,6 +1400,19 @@ pub(super) fn emit_call_method(
             (
                 format!("d{v} = (double)arr->count;{int_stmt}{box_stmt} kiln_twin = 1;"),
                 format!("memcpy(&d{v}, &v{v}, sizeof(d{v}));{int_stmt}"),
+            )
+        } else if typed_int {
+            let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+            let box_stmt = if need_box {
+                format!(" v{v} = kiln_c99_val_from_double((double)i{v});")
+            } else {
+                String::new()
+            };
+            (
+                format!("i{v} = (int64_t)arr->count;{box_stmt} kiln_twin = 1;"),
+                format!(
+                    "{{ double tmp_{v}; memcpy(&tmp_{v}, &v{v}, sizeof(tmp_{v})); i{v} = (int64_t)tmp_{v}; }}"
+                ),
             )
         } else {
             (
@@ -1768,14 +1846,24 @@ pub(super) fn emit_call_method(
 
     let reduce_intrinsic = if key_str == "reduce" && argc == 2 {
         Some(match &reduce_typed {
-            Some(c) => emit_reduce_typed(
-                symbol,
-                (object.0, args[0].0, args[1].0, v),
-                &check,
-                &typed_failed,
-                c,
-                known_arr,
-            ),
+            Some(c) => {
+                let init_dacc = if ctx.live_numbers.contains(&args[1]) {
+                    format!("d{}", args[1].0)
+                } else if ctx.live_ints.contains(&args[1]) {
+                    format!("(double)i{}", args[1].0)
+                } else {
+                    format!("d{}", args[1].0)
+                };
+                emit_reduce_typed(
+                    symbol,
+                    (object.0, args[0].0, args[1].0, v),
+                    &check,
+                    &typed_failed,
+                    c,
+                    known_arr,
+                    &init_dacc,
+                )
+            }
             None => {
                 let (header, footer) = if known_arr {
                     (
@@ -1839,7 +1927,7 @@ pub(super) fn emit_call_method(
 
     let slice_intrinsic = if key_str == "slice" && argc == 1 {
         let a0 = args[0].0;
-        let (array_body, string_body, guard) = if ints.contains(&args[0]) {
+        let (array_body, string_body, guard) = if ctx.live_ints.contains(&args[0]) {
             (
                 format!(
                     "if (i{a0} >= 0) {{ \
@@ -2119,7 +2207,9 @@ pub(super) fn emit_call_method(
     let substring_intrinsic = if key_str == "substring" && argc == 2 {
         let a0 = args[0].0;
         let a1 = args[1].0;
-        let (guard, check_and_extract) = if ints.contains(&args[0]) && ints.contains(&args[1]) {
+        let (guard, check_and_extract) = if ctx.live_ints.contains(&args[0])
+            && ctx.live_ints.contains(&args[1])
+        {
             (
                 String::new(),
                 format!(
@@ -2525,7 +2615,7 @@ pub(super) fn emit_call_method(
         }
         ("charCodeAt", 1) => {
             let a0 = args[0].0;
-            let a0_is_int = ints.contains(&args[0]);
+            let a0_is_int = ctx.live_ints.contains(&args[0]);
             let a0_non_neg = ctx.ivs.get(&args[0]).map_or(false, |iv| iv.non_negative);
             let idx_bound = if a0_non_neg {
                 format!("(uint64_t)i{a0} < s_recv->unit_len")
@@ -2548,6 +2638,16 @@ pub(super) fn emit_call_method(
                     format!(
                         "uint16_t code = kiln_string_unit_at(s_recv, (size_t)i{a0}); d{v} = (double)code;{int_stmt}{box_stmt} kiln_twin = 1;"
                     )
+                } else if typed_int {
+                    let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+                    let box_stmt = if need_box {
+                        format!(" v{v} = kiln_c99_val_from_double((double)code);")
+                    } else {
+                        String::new()
+                    };
+                    format!(
+                        "uint16_t code = kiln_string_unit_at(s_recv, (size_t)i{a0}); i{v} = (int64_t)code;{box_stmt} kiln_twin = 1;"
+                    )
                 } else {
                     format!(
                         "v{v} = kiln_c99_val_from_double((double)kiln_string_unit_at(s_recv, (size_t)i{a0}));"
@@ -2566,6 +2666,14 @@ pub(super) fn emit_call_method(
                         String::new()
                     };
                     format!("d{v} = NAN;{int_stmt}{box_stmt} kiln_twin = 1;")
+                } else if typed_int {
+                    let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+                    let box_stmt = if need_box {
+                        format!(" v{v} = KILN_QNAN_BASE;")
+                    } else {
+                        String::new()
+                    };
+                    format!("i{v} = 0;{box_stmt} kiln_twin = 1;")
                 } else {
                     format!("v{v} = KILN_QNAN_BASE;")
                 };
@@ -2603,7 +2711,7 @@ pub(super) fn emit_call_method(
         }
         ("charAt", 1) => {
             let a0 = args[0].0;
-            let a0_is_int = ints.contains(&args[0]);
+            let a0_is_int = ctx.live_ints.contains(&args[0]);
             let a0_non_neg = ctx.ivs.get(&args[0]).map_or(false, |iv| iv.non_negative);
             let idx_bound = if a0_non_neg {
                 format!("(uint64_t)i{a0} < s_recv->unit_len")
@@ -2669,7 +2777,9 @@ pub(super) fn emit_call_method(
         ("slice", 2) => {
             let a0 = args[0].0;
             let a1 = args[1].0;
-            let (guard, check_and_extract) = if ints.contains(&args[0]) && ints.contains(&args[1]) {
+            let (guard, check_and_extract) = if ctx.live_ints.contains(&args[0])
+                && ctx.live_ints.contains(&args[1])
+            {
                 (
                     String::new(),
                     format!(
@@ -2738,16 +2848,28 @@ pub(super) fn emit_call_method(
 
     // An argument the plan proved a number needs no test: its twin is the operand.
     let math_intrinsic = math_intrinsic.map(|text| {
-                args.iter().filter(|a| numbers.contains(a)).fold(text, |text, a| {
-                    text.replace(
-                        &format!(
-                            "if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a}))) {{ double d; memcpy(&d, &v{a}, sizeof(d));",
-                            a = a.0
-                        ),
-                        &format!("{{ double d = d{};", a.0),
-                    )
-                })
-            });
+        args.iter().fold(text, |text, a| {
+            if ctx.live_numbers.contains(a) {
+                text.replace(
+                    &format!(
+                        "if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a}))) {{ double d; memcpy(&d, &v{a}, sizeof(d));",
+                        a = a.0
+                    ),
+                    &format!("{{ double d = d{};", a.0),
+                )
+            } else if ctx.live_ints.contains(a) {
+                text.replace(
+                    &format!(
+                        "if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a}))) {{ double d; memcpy(&d, &v{a}, sizeof(d));",
+                        a = a.0
+                    ),
+                    &format!("{{ double d = (double)i{};", a.0),
+                )
+            } else {
+                text
+            }
+        })
+    });
     // A result proven a number is computed as its twin and boxed from it, and the
     // box, when nothing reads it, is not computed; the statement's tail then leaves
     // the twin alone where the intrinsic answered.
@@ -2776,6 +2898,31 @@ pub(super) fn emit_call_method(
                 out.push_str(&rest[..at]);
                 out.push_str(&format!(
                     "d{v} = {expr};{int_stmt}{box_stmt} kiln_twin = 1;"
+                ));
+                rest = &rest[expr_start + end + 2..];
+            }
+            out.push_str(rest);
+            Some(out)
+        }
+        Some(text) if typed_int => {
+            let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+            let box_stmt = if need_box {
+                format!(" v{v} = kiln_c99_val_from_double((double)i{v});")
+            } else {
+                String::new()
+            };
+            let assign = format!("v{v} = kiln_c99_val_from_double(");
+            let mut out = String::with_capacity(text.len());
+            let mut rest = text.as_str();
+            while let Some(at) = rest.find(&assign) {
+                let expr_start = at + assign.len();
+                let Some(end) = rest[expr_start..].find(");") else {
+                    break;
+                };
+                let expr = &rest[expr_start..expr_start + end];
+                out.push_str(&rest[..at]);
+                out.push_str(&format!(
+                    "i{v} = (int64_t)({expr});{box_stmt} kiln_twin = 1;"
                 ));
                 rest = &rest[expr_start + end + 2..];
             }
@@ -2850,6 +2997,18 @@ pub(super) fn emit_call_method(
     } else {
         String::new()
     };
+    let typed_int_sync = if typed_int {
+        if typed {
+            format!(" i{v} = (int64_t)d{v};")
+        } else {
+            format!(
+                " if (!kiln_twin) {{ double tmp_{v}; memcpy(&tmp_{v}, &v{v}, sizeof(tmp_{v})); i{v} = (int64_t)tmp_{v}; }}"
+            )
+        }
+    } else {
+        String::new()
+    };
+    let typed_sync = format!("{typed_sync}{typed_int_sync}");
 
     let in_typed = matches!(ctx.kind, crate::emit_graph::EntryKind::Typed { .. });
     if in_typed && math_intrinsic.is_some() {
