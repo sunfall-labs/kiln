@@ -16,6 +16,11 @@ is the backlog in the order that ADR sets, with the numbers it starts from.
 At `047bc973` (2026-09-19, `scripts/native-surface-inventory.py`): 1721 rows, 1391 implemented
 (80.8%), 313 refused (18.2%), 17 diverged, 0 silent `undefined`.
 
+Against node (v25.9.0), measured the same day once the inventory could ask it: of 2,291 members
+node has on the receivers both share, the interpreter lacks 1,012 and the native backend 1,212,
+and node has 81 receivers (517 members) the interpreter does not publish at all. The near gap
+above is a quarter of the far one.
+
 ## Gate first (issues 01, 02, 03)
 
 1. `native-surface-inventory.py --gate` in `gate-quick`. Two minutes on a warm cache. The class
