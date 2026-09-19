@@ -11,8 +11,10 @@ emit on the day, and neither is any longer a licence to leave one in place.
 
 ## Context
 
-kiln is meant to be a runtime -- the thing a program is shipped on -- not a compiler that handles
-a subset and says so. The native backend's discipline of refusing what it has not built (ADR 0017,
+kiln is meant to be a runtime -- the thing a program is shipped on, in place of node -- not a
+compiler that handles a subset and says so. Node is the target: the thirdparty corpus is held to
+byte-identical output against it, the shared surface table cites its ordering, and a program
+written for node is the program kiln exists to run. The native backend's discipline of refusing what it has not built (ADR 0017,
 ADR 0042, `AGENTS.md`) was adopted for a real reason: an `undefined` where node has a value is a
 wrong answer nothing stops at, and a bundled `postcss` died on one for weeks. A refusal is the
 honest report of a gap. That reasoning is right and stays.
@@ -27,7 +29,9 @@ until the program happens to import `node:crypto` is not a runtime anyone ships 
 clearly it names the member.
 
 The 2026-09-19 inventory (`scripts/native-surface-inventory.py`, at `047bc973`) puts numbers on
-where the native surface stands against the interpreter's:
+where the native surface stands against the interpreter's. That is the *near* gap -- the
+interpreter leads and the native backend follows it -- and it is the one the tool measures today;
+the far gap, either engine against node, is not yet measured by anything but the corpora:
 
 | Class | Rows | Share |
 | --- | ---: | ---: |
@@ -44,7 +48,10 @@ of them is a member the interpreter answers.
 
 Three things the day made plain:
 
-1. **A refusal that stands long enough turns into the wrong answer anyway.** The 09-03 inventory
+1. **A refusal that stands long enough turns into the wrong answer anyway.** And the
+   interpreter is not exempt: it publishes `Promise.allKeyed`, names `%TypedArray%`
+   `"intrinsic"`, and had six constructor arities node does not -- surface node lacks or answers
+   differently, which a program written for node will feel exactly as it feels a refusal. The 09-03 inventory
    had 1 silent `undefined`; by 09-19 it had 111. Thirty-one of them were refusals that had
    *become* `undefined` -- an `Error.prototype` site that named its four members and checked none
    of them, and a catch-all in `kiln_c99_get_key` that converted every refusal on a well-known
@@ -68,18 +75,22 @@ Three things the day made plain:
 
 ## Decision
 
-**1. The native backend converges on the interpreter's full surface. A refusal is a gap with an
-owner and a direction, never a product behaviour.** The interpreter is the oracle (ADR 0020, ADR
-0060): a member it answers is a member the native backend answers, and a refusal is the honest
-report of work not yet done -- honest precisely because it is temporary. `conformance/native/
+**1. Both engines converge on node's surface. A refusal is a gap with an owner and a direction,
+never a product behaviour.** Node is the target; the interpreter is the leading implementation
+and the differential authority for the native backend (ADR 0020, ADR 0060), not the destination.
+A member node answers is a member both engines answer, the same way; a member the interpreter
+answers and node does not is debt on the interpreter's side. A refusal is the honest report of
+work not yet done -- honest precisely because it is temporary. `conformance/native/
 *-refuses.ts` records *that* something refuses today so nobody "fixes" it into an `undefined`;
 it does not record that refusing is the design.
 
-**2. The refused count is a baseline that only goes down.** `scripts/native-surface-inventory.py
---gate` (no silent `undefined`) joins `gate-quick`. The inventory's per-receiver refused counts
-are committed beside the Test262 baseline and compared the same way: a receiver whose refused
-count rises fails the gate and names the receiver, exactly as a Test262 chunk does. Moving a
-number down is the point; moving one up is a diff a reviewer has to accept.
+**2. The refused count is a baseline that only goes down, and the inventory measures against
+node.** `scripts/native-surface-inventory.py --gate` (no silent `undefined`) joins `gate-quick`.
+The inventory gains a node column -- the same enumeration run under the pinned node, so every row
+reads interpreter, native, node -- and its per-receiver counts of refused and of
+differs-from-node are committed beside the Test262 baseline and compared the same way: a receiver
+whose count rises fails the gate and names the receiver, exactly as a Test262 chunk does. Moving
+a number down is the point; moving one up is a diff a reviewer has to accept.
 
 **3. Order by demand.** The thirdparty corpus's refusal distribution first, because a refusal a
 real bundle hits stops a real program; then the inventory's receivers by refused count, largest
@@ -95,7 +106,9 @@ pays only for what it reads. C is for the heap-touching part and nothing else. A
 cost is an argument about *which* of these to use, and a reason to make linkage lazier, not a
 reason to refuse.
 
-**5. Consequently, ADR 0042's deferral is scheduled, not open.** `Intl` links ICU4X on demand.
+**5. Consequently, ADR 0042's deferral is scheduled, not open, and so is the interpreter's own
+drift from node.** `Promise.allKeyed` and its sibling come out or are recorded as a deliberate
+extension with a reason; `%TypedArray%` is named as node names it; an arity is node's arity. `Intl` links ICU4X on demand.
 The measurement in ADR 0042 stands as the reason it must be demand-driven rather than
 unconditional. The same applies to `crypto` (the refusing namespace installed on 2026-09-19 is a
 step on the way, not a destination), to `Temporal` behind its retain group, and to every backlog
