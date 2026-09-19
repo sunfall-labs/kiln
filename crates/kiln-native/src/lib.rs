@@ -590,7 +590,8 @@ fn prelude_object_options_masked(base: Digest, profile: NativeProfile, mask: u32
 /// yields no flags, so fully retained builds compile exactly today's prelude.
 fn prelude_group_defines(mask: u32) -> Vec<std::ffi::OsString> {
     use kiln_backend_c::facts::method_groups as groups;
-    const FLAGS: [(u32, &str); 17] = [
+    const FLAGS: [(u32, &str); 18] = [
+        (groups::URL, "KILN_RETAIN_GROUP_URL"),
         (groups::TEMPORAL, "KILN_RETAIN_GROUP_TEMPORAL"),
         (groups::TEMPORAL_FROM, "KILN_RETAIN_GROUP_TEMPORAL_FROM"),
         (
@@ -2262,8 +2263,11 @@ impl NativeBuilder {
             generated_c_hits.push(generated_c_hit);
             modules.push((node, emitted));
         }
-        let (bootstrap, bootstrap_program) =
-            native_builtin_bootstrap_module(&emission, options.node)?;
+        let (bootstrap, bootstrap_program) = native_builtin_bootstrap_module(
+            &emission,
+            options.node,
+            group_mask & kiln_backend_c::facts::method_groups::URL != 0,
+        )?;
         if !symbols.insert(bootstrap.symbol.clone()) {
             return Err(NativeError::SymbolCollision {
                 symbol: bootstrap.symbol,
@@ -3762,15 +3766,24 @@ fn emit_native_graph_module_with_policy(
 fn native_builtin_bootstrap_module(
     policy: &EmissionPolicy,
     node: bool,
+    retain_url: bool,
 ) -> Result<(kiln_backend_c::CModule, kiln_ir::ModuleProgram), NativeError> {
     const LOGICAL_PATH: &str = "@kiln/runtime-bootstrap.ts";
+    // `URL` rides the retain group liveness computed: a program that names neither it nor
+    // anything built on it gets no class, and the prelude behind it compiled out. `--node`
+    // always has it, because `fetch` is built on it.
+    let url = if retain_url || node {
+        kiln_builtins::URL_BOOTSTRAP_SOURCE
+    } else {
+        ""
+    };
     let source = if node {
         format!(
-            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{}",
+            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{url}\n{}",
             kiln_builtins::WEB_BOOTSTRAP_SOURCE
         )
     } else {
-        NATIVE_BUILTIN_BOOTSTRAP_SOURCE.to_owned()
+        format!("{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{url}")
     };
     let hir = frontend_oxc::parse(LOGICAL_PATH, &source);
     let program = kiln_ir::compile_module(&hir).map_err(|diagnostics| {
@@ -3779,8 +3792,14 @@ fn native_builtin_bootstrap_module(
             diagnostics,
         })
     })?;
+    // The bootstrap is cold code every binary carries -- the console methods, the Set algebra,
+    // the URL class -- and emitted like hot user code, with a fast clone and a typed clone per
+    // function, it put 0.9 MB on a hello world (2.74 MB against 1.83 MB, measured in a clean
+    // cache). The generic path alone is what a program that never calls `console.table` pays for.
+    let mut bootstrap_policy = policy.clone();
+    bootstrap_policy.generic_only = true;
     let c_module =
-        emit_module_with_logical_path_and_policy(&program, LOGICAL_PATH, policy.clone())?;
+        emit_module_with_logical_path_and_policy(&program, LOGICAL_PATH, bootstrap_policy)?;
     Ok((c_module, program))
 }
 

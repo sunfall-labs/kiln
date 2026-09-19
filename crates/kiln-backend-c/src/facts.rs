@@ -307,6 +307,10 @@ pub mod method_groups {
     pub const NODE_STREAM: u32 = 262144;
     pub const NODE_PATH: u32 = 524288;
     pub const MATH_NUMBER: u32 = 1048576;
+    /// `URL` and `URLSearchParams`: the `url` crate through the provider, and the class in the
+    /// runtime bootstrap. Close to a megabyte of `idna` tables, so a program that names
+    /// neither -- and imports nothing that does -- links none of it (ADR 0063 rule 4).
+    pub const URL: u32 = 2097152;
 }
 
 /// Dispatch machinery required by every program regardless of the globals it reaches.
@@ -316,7 +320,8 @@ pub const CORE_METHOD_GROUPS: u32 = method_groups::DIRECT
     | method_groups::GENERIC;
 
 /// Groups the router may drop when no demand implicates them.
-pub const PRUNABLE_METHOD_GROUPS: u32 = method_groups::NODE_EVENT
+pub const PRUNABLE_METHOD_GROUPS: u32 = method_groups::URL
+    | method_groups::NODE_EVENT
     | method_groups::NODE_NET
     | method_groups::NODE_SERVER
     | method_groups::NODE_HTTP

@@ -148,6 +148,12 @@ macro_rules! provider_c_declaration {
     ($group:ident, $name:ident, node_path_relative) => {
         concat!("int ", stringify!($name), "(const uint8_t *from, uint64_t from_len, const uint8_t *to, uint64_t to_len, uint8_t *out, uint64_t capacity, uint64_t *out_len);\n")
     };
+    ($group:ident, $name:ident, url_parse) => {
+        concat!("int ", stringify!($name), "(const uint8_t *input, uint64_t input_len, const uint8_t *base, uint64_t base_len, uint8_t *out, uint64_t capacity, uint64_t *out_len);\n")
+    };
+    ($group:ident, $name:ident, url_set) => {
+        concat!("int ", stringify!($name), "(const uint8_t *href, uint64_t href_len, uint32_t field, const uint8_t *value, uint64_t value_len, uint8_t *out, uint64_t capacity, uint64_t *out_len);\n")
+    };
     ($group:ident, $name:ident, node_fs_read_file_sync) => {
         concat!("int ", stringify!($name), "(const uint8_t *path, uint64_t path_len, uint8_t **out_bytes, uint64_t *out_len, int32_t *out_error_code);\n")
     };
@@ -948,7 +954,9 @@ pub(crate) fn builtin_load(builtin: kiln_ir::Builtin) -> BuiltinLoad {
         kiln_ir::Builtin::Float64Array => {
             BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_FLOAT64_ARRAY)")
         }
-        kiln_ir::Builtin::Url => BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_URL)"),
+        // The class the runtime bootstrap defined (ADR 0063 rule 4), read back from the realm
+        // slot `__kilnUrlAdopt` filled; `KILN_C99_BUILTIN_URL` is no longer a value a program sees.
+        kiln_ir::Builtin::Url => BuiltinLoad::Build("kiln_c99_url_class"),
         kiln_ir::Builtin::Buffer => BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_BUFFER)"),
         kiln_ir::Builtin::NotANumber => BuiltinLoad::Value("kiln_c99_number(0.0 / 0.0)"),
         kiln_ir::Builtin::Infinity => BuiltinLoad::Value("kiln_c99_number(1.0 / 0.0)"),

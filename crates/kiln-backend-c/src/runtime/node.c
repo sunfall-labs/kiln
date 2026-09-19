@@ -1035,7 +1035,9 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
             if (status == KILN_C99_OK)
                 status = kiln_c99_own_data_hot_key(response->object, KILN_C99_HOT_KEY_CONNECTION, socket->object);
             if (status == KILN_C99_OK) {
-                status = kiln_c99_new_object_with_capacity_tenured(&response->url_object, 4);
+                /* Room for `pathname`, `searchParams`, and the `_input`/`_base` the class's
+                 * getters parse from; the params object holds `get` and the raw query twice. */
+                status = kiln_c99_new_object_with_capacity_tenured(&response->url_object, 6);
                 if (status == KILN_C99_OK)
                     status = kiln_c99_new_object_with_capacity_tenured(&response->search_params_object, 4);
                 if (status == KILN_C99_OK)
@@ -1044,6 +1046,20 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                 if (status == KILN_C99_OK)
                     status = kiln_c99_put_hot_key(NULL, response->url_object, KILN_C99_HOT_KEY_SEARCH_PARAMS,
                                                   response->search_params_object, 0, NULL);
+                /* The two are instances of the bootstrap's `URL` and `URLSearchParams`: their
+                 * prototypes come from the realm slots `__kilnUrlAdopt` filled, so the class's
+                 * getters answer for them (`web.c`, `kiln_c99_url_fast_raw`). Two pointer
+                 * stores, no allocation. */
+                if (status == KILN_C99_OK) {
+                    kiln_value *proto;
+                    status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_URL_PROTOTYPE, &proto);
+                    if (status == KILN_C99_OK && proto->tag == KILN_VALUE_OBJECT)
+                        status = kiln_c99_set_prototype(response->url_object, *proto);
+                    if (status == KILN_C99_OK)
+                        status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_URL_SEARCH_PARAMS_PROTOTYPE, &proto);
+                    if (status == KILN_C99_OK && proto->tag == KILN_VALUE_OBJECT)
+                        status = kiln_c99_set_prototype(response->search_params_object, *proto);
+                }
             }
         }
         if (status != KILN_C99_OK) return status;

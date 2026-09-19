@@ -89,6 +89,8 @@ macro_rules! provider_abi_registry {
             (realm, kiln_realm_diagnostic_render, realm_diagnostic_render);
             (realm, kiln_node_path_part, node_path_part);
             (realm, kiln_node_path_relative, node_path_relative);
+            (realm, kiln_url_parse, url_parse);
+            (realm, kiln_url_set, url_set);
             (realm, kiln_realm_symbol_for, realm_symbol_for);
             (realm, kiln_realm_symbol_key_for, realm_symbol_key_for);
             (realm, kiln_realm_callable_store, realm_callable_store);
@@ -200,7 +202,7 @@ macro_rules! provider_export_names {
 }
 
 /// Version of the private provider ABI represented by [`provider_abi_registry!`].
-pub const PROVIDER_ABI_VERSION: u32 = 38;
+pub const PROVIDER_ABI_VERSION: u32 = 39;
 
 /// Canonical ordered export names required in a packaged provider manifest.
 pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_names);
@@ -236,8 +238,8 @@ mod tests {
         // one realm the other's cache. A shipped archive built before any of these does not export
         // the newer symbol, and the version is how a resolver knows to rebuild rather than to fail
         // at link time.
-        assert_eq!(PROVIDER_ABI_VERSION, 38);
-        assert_eq!(PROVIDER_EXPORTS.len(), 108);
+        assert_eq!(PROVIDER_ABI_VERSION, 39);
+        assert_eq!(PROVIDER_EXPORTS.len(), 110);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_ffi_last_error"));
     }

@@ -103,146 +103,243 @@ static int kiln_c99_valid_utf8(const char *bytes, size_t len) {
 
 static kiln_node_response *kiln_c99_active_http_response = NULL;
 
-/* The URL subset shared with the interpreter today: absolute HTTP-like input, or a path against
- * an absolute base; pathname and query lookup are the public state. Keeping that advertised
- * subset identical is better than a broader native parser that disagrees in corners. */
-static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_t argc,
+/* The prototypes the runtime bootstrap's `URL` and `URLSearchParams` classes carry, kept in
+ * realm slots so the request fast path below can hand out an object that *is* a `URL` -- one
+ * the class's getters answer for -- without the class constructing it. Set once per realm by
+ * `__kilnUrlAdopt`, before user code. */
+#define KILN_C99_REALM_SLOT_URL_PROTOTYPE UINT32_C(6)
+#define KILN_C99_REALM_SLOT_URL_SEARCH_PARAMS_PROTOTYPE UINT32_C(7)
+#define KILN_C99_REALM_SLOT_URL_CLASS UINT32_C(8)
+
+/* `__kilnUrlAdopt(URL, URL.prototype, URLSearchParams.prototype)`. */
+static int kiln_c99_url_adopt_raw(kiln_value *out, const kiln_value *args, size_t argc) {
+    kiln_value *slot;
+    int status;
+    if (argc < 3 || args[1].tag != KILN_VALUE_OBJECT || args[2].tag != KILN_VALUE_OBJECT)
+        return KILN_C99_INVALID_ARGUMENT;
+    status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_URL_CLASS, &slot);
+    if (status != KILN_C99_OK) return status;
+    *slot = args[0];
+    status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_URL_PROTOTYPE, &slot);
+    if (status != KILN_C99_OK) return status;
+    *slot = args[1];
+    status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_URL_SEARCH_PARAMS_PROTOTYPE, &slot);
+    if (status != KILN_C99_OK) return status;
+    *slot = args[2];
+    /* Not a member read: the intrinsic's own answer, which is nothing. */
+    *out = kiln_c99_value(KILN_VALUE_UNDEFINED, 0, NULL, 0);
+    return KILN_C99_OK;
+}
+
+/* What a program's `URL` names: the bootstrap's class, which ran before any module body. */
+static int kiln_c99_url_class(kiln_value *out) {
+    kiln_value *slot;
+    int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_URL_CLASS, &slot);
+    if (status != KILN_C99_OK) return status;
+    if (slot->tag != KILN_VALUE_FUNCTION) {
+        KILN_C99_REFUSE("URL before the runtime bootstrap defined it");
+    }
+    *out = *slot;
+    return KILN_C99_OK;
+}
+
+/* The `url` crate's answer, spilled into a buffer sized by asking. A record is at most a few
+ * copies of its input plus an origin, so the first guess is generous and the retry is rare.
+ *
+ * Behind the URL retain group: a program that names neither `URL` nor anything built on it
+ * links none of the crate -- the two provider symbols below are its only references -- and the
+ * bootstrap that would call this is left out of that program too. */
+#if KILN_RETAIN_GROUP_URL
+static int kiln_c99_url_record(kiln_value *out, int set, const uint8_t *a, size_t a_len,
+                               uint32_t field, const uint8_t *b, size_t b_len,
+                               kiln_value *thrown) {
+    uint64_t capacity = (uint64_t)(a_len + b_len) * 4 + 64;
+    uint64_t len = 0;
+    uint8_t *buffer = malloc((size_t)capacity);
+    int status;
+    if (buffer == NULL) return KILN_C99_OUT_OF_MEMORY;
+    status = set ? kiln_url_set(a, (uint64_t)a_len, field, b, (uint64_t)b_len, buffer, capacity, &len)
+                 : kiln_url_parse(a, (uint64_t)a_len, b, (uint64_t)b_len, buffer, capacity, &len);
+    if (status == KILN_C99_INVALID_ARGUMENT && len > capacity) {
+        uint8_t *bigger = realloc(buffer, (size_t)len);
+        if (bigger == NULL) { free(buffer); return KILN_C99_OUT_OF_MEMORY; }
+        buffer = bigger;
+        capacity = len;
+        status = set ? kiln_url_set(a, (uint64_t)a_len, field, b, (uint64_t)b_len, buffer, capacity, &len)
+                     : kiln_url_parse(a, (uint64_t)a_len, b, (uint64_t)b_len, buffer, capacity, &len);
+    }
+    if (status == 2 /* URL_INVALID, the provider's own code for input that is not a URL */) {
+        free(buffer);
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "Invalid URL");
+    }
+    if (status != KILN_C99_OK) { free(buffer); return status; }
+    *out = kiln_c99_copy_text((const char *)buffer, (size_t)len);
+    free(buffer);
+    return out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+}
+#else
+static int kiln_c99_url_record(kiln_value *out, int set, const uint8_t *a, size_t a_len,
+                               uint32_t field, const uint8_t *b, size_t b_len,
+                               kiln_value *thrown) {
+    (void)out; (void)set; (void)a; (void)a_len; (void)field; (void)b; (void)b_len; (void)thrown;
+    KILN_C99_REFUSE("URL, which this executable did not retain");
+}
+#endif
+
+/* `__kilnUrlParse(input, base)`: the eleven components of the URL, NUL-separated, from the
+ * provider (ADR 0025, ADR 0063 rule 4). The `URL` class in the runtime bootstrap is the only
+ * caller; it splits the record and holds the pieces. A string that is not a URL throws the
+ * class's `TypeError` from here. */
+static int kiln_c99_url_parse_raw(kiln_value *out, const kiln_value *args, size_t argc,
                                   kiln_value *thrown) {
     kiln_value input = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
-    kiln_value base = kiln_c99_text(argc > 1 ? args[1] : kiln_c99_undefined());
-    const char *start;
-    const char *end;
-    const char *query;
-    const char *fragment;
-    const char *scheme;
-    kiln_value params;
+    kiln_value base = argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED ? kiln_c99_text(args[1])
+                                                                         : kiln_c99_static_text("", 0);
     uint8_t *input_owned = NULL;
     uint8_t *base_owned = NULL;
-    static const char empty[] = "";
-    int status;
-    if (input.tag != KILN_VALUE_STRING || base.tag != KILN_VALUE_STRING) {
-        return KILN_C99_OUT_OF_MEMORY;
-    }
     size_t input_len = 0;
     size_t base_len = 0;
+    int status;
+    if (input.tag != KILN_VALUE_STRING || base.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
     if (kiln_c99_string_to_utf8_lossy(input, &input_owned, &input_len) != KILN_C99_OK ||
         kiln_c99_string_to_utf8_lossy(base, &base_owned, &base_len) != KILN_C99_OK) {
         free(input_owned);
         free(base_owned);
         return KILN_C99_OUT_OF_MEMORY;
     }
-    const char *input_bytes = input_len == 0 ? empty : (const char *)input_owned;
-    const char *base_bytes = base_len == 0 ? empty : (const char *)base_owned;
-#define KILN_WEB_RETURN(result) do { \
-        free(input_owned); \
-        free(base_owned); \
-        return (result); \
-    } while (0)
-    scheme = NULL;
-    {
-        size_t index;
-        for (index = 0; index + 2 < input_len; ++index) {
-            if (input_bytes[index] == ':' && input_bytes[index + 1] == '/' &&
-                input_bytes[index + 2] == '/') {
-                scheme = input_bytes + index;
-                break;
-            }
-        }
+    status = kiln_c99_url_record(out, 0, input_owned == NULL ? (const uint8_t *)"" : input_owned,
+                                 input_len, 0, base_owned == NULL ? (const uint8_t *)"" : base_owned,
+                                 base_len, thrown);
+    free(input_owned);
+    free(base_owned);
+    return status;
+}
+
+/* `__kilnUrlSet(href, field, value)`: the record after one setter, from the same crate. */
+static int kiln_c99_url_set_raw(kiln_value *out, const kiln_value *args, size_t argc,
+                                kiln_value *thrown) {
+    kiln_value href = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
+    kiln_value value = kiln_c99_text(argc > 2 ? args[2] : kiln_c99_undefined());
+    uint32_t field = argc > 1 ? (uint32_t)kiln_c99_as_number(args[1]) : 0;
+    uint8_t *href_owned = NULL;
+    uint8_t *value_owned = NULL;
+    size_t href_len = 0;
+    size_t value_len = 0;
+    int status;
+    if (href.tag != KILN_VALUE_STRING || value.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+    if (kiln_c99_string_to_utf8_lossy(href, &href_owned, &href_len) != KILN_C99_OK ||
+        kiln_c99_string_to_utf8_lossy(value, &value_owned, &value_len) != KILN_C99_OK) {
+        free(href_owned);
+        free(value_owned);
+        return KILN_C99_OUT_OF_MEMORY;
     }
-    if (scheme != NULL) {
-        start = scheme + 3;
-        end = input_bytes + input_len;
-        while (start < end && *start != '/' && *start != '?' && *start != '#') ++start;
-        if (start == end || *start != '/') start = "/";
-    } else {
-        int valid_base = 0;
-        size_t index;
-        for (index = 0; index + 2 < base_len; ++index) {
-            if (base_bytes[index] == ':' && base_bytes[index + 1] == '/' &&
-                base_bytes[index + 2] == '/') {
-                valid_base = 1;
-                break;
-            }
-        }
-        if (!valid_base) {
-            KILN_WEB_RETURN(kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
-                                                 "Invalid base URL"));
-        }
-        start = input_len == 0 ? "/" : input_bytes;
-        end = input_bytes + input_len;
+    status = kiln_c99_url_record(out, 1, href_owned == NULL ? (const uint8_t *)"" : href_owned,
+                                 href_len, field, value_owned == NULL ? (const uint8_t *)"" : value_owned,
+                                 value_len, thrown);
+    free(href_owned);
+    free(value_owned);
+    return status;
+}
+
+/* `__kilnUrlFast(input, base)`: the request fast path (plan step B.3). Inside a `node:http`
+ * handler, the first `new URL(req.url, ...)` is answered with an object the runtime built once
+ * for this response and refills per request -- `pathname` and a `searchParams` whose `get` reads
+ * the raw query -- so a handler that touches the URL lightly allocates nothing. The object
+ * carries the bootstrap's `URL.prototype`, and `_input`/`_base` for the class's other getters
+ * to parse from on first use; its `searchParams` carries `URLSearchParams.prototype` and
+ * `_query` the same way. Anything else answers `undefined` and the class parses. */
+static int kiln_c99_url_fast_raw(kiln_value *out, const kiln_value *args, size_t argc,
+                                 kiln_value *thrown) {
+    kiln_value input = argc > 0 ? args[0] : kiln_c99_undefined();
+    kiln_value base = argc > 1 ? args[1] : kiln_c99_undefined();
+    kiln_node_response *resp = kiln_c99_active_http_response;
+    uint8_t *input_owned = NULL;
+    size_t input_len = 0;
+    const char *input_bytes;
+    const char *start;
+    const char *end;
+    const char *query;
+    const char *fragment;
+    int status;
+    (void)thrown;
+    /* Not a member read: "no fast object for this call" is the intrinsic's own answer, and the
+     * class then parses. */
+    *out = kiln_c99_value(KILN_VALUE_UNDEFINED, 0, NULL, 0);
+    if (resp == NULL || resp->url_used || input.tag != KILN_VALUE_STRING) return KILN_C99_OK;
+    if (kiln_c99_string_to_utf8_lossy(input, &input_owned, &input_len) != KILN_C99_OK)
+        return KILN_C99_OUT_OF_MEMORY;
+    input_bytes = input_len == 0 ? "" : (const char *)input_owned;
+    if (resp->target_ptr == NULL || resp->target_len != input_len ||
+        memcmp(resp->target_ptr, input_bytes, input_len) != 0) {
+        free(input_owned);
+        return KILN_C99_OK;
     }
-    if (start == input_bytes || (start >= input_bytes && start <= input_bytes + input_len)) {
-        end = input_bytes + input_len;
-    } else {
-        end = start + 1;
-    }
+#define KILN_WEB_RETURN(result) do { free(input_owned); return (result); } while (0)
+    resp->url_used = 1;
+    start = input_len == 0 ? "/" : input_bytes;
+    end = input_bytes + input_len;
+    if (input_len == 0) end = start + 1;
     query = memchr(start, '?', (size_t)(end - start));
     fragment = memchr(start, '#', (size_t)(end - start));
     if (fragment != NULL && (query == NULL || fragment < query)) query = NULL;
-
-    if (kiln_c99_active_http_response != NULL && !kiln_c99_active_http_response->url_used) {
-        kiln_node_response *resp = kiln_c99_active_http_response;
-        if (resp->target_ptr != NULL && resp->target_len == input_len &&
-            memcmp(resp->target_ptr, input_bytes, input_len) == 0) {
-            resp->url_used = 1;
-            if (resp->url_object.tag != KILN_VALUE_OBJECT) {
-                status = kiln_c99_new_object_with_capacity_tenured(&resp->url_object, 6);
-                if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
-                status = kiln_c99_new_object_with_capacity_tenured(&resp->search_params_object, 4);
-                if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
-                status = kiln_c99_put_hot_key(NULL, resp->search_params_object, KILN_C99_HOT_KEY_GET,
-                                              kiln_c99_method(KILN_C99_METHOD_URL_SEARCH_PARAMS_GET), 0, NULL);
-                if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
-                status = kiln_c99_put_hot_key(NULL, resp->url_object, KILN_C99_HOT_KEY_SEARCH_PARAMS,
-                                              resp->search_params_object, 0, NULL);
-                if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
-                status = kiln_c99_put(NULL, resp->url_object, "@@url", 5, kiln_c99_boolean(1), 0, NULL);
-                if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
-            }
-            size_t path_len = (size_t)((query != NULL ? query :
-                                (fragment != NULL ? fragment : end)) - start);
-            resp->pathname_val = kiln_c99_copy_text(start, path_len);
-            if (resp->pathname_val.tag != KILN_VALUE_STRING) KILN_WEB_RETURN(KILN_C99_OUT_OF_MEMORY);
-            resp->pathname_cap = path_len + 1;
-            status = kiln_c99_put_hot_key(NULL, resp->url_object, KILN_C99_HOT_KEY_PATHNAME,
-                                          resp->pathname_val, 0, NULL);
-            if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
-            size_t q_len = query != NULL ? (size_t)((fragment != NULL ? fragment : end) - query - 1) : 0;
-            if (query == NULL || q_len == 0) {
-                status = kiln_c99_put(NULL, resp->search_params_object, "@@url:query", 11,
-                                      kiln_c99_static_text("", 0), 0, NULL);
-            } else {
-                resp->query_val = kiln_c99_copy_text(query + 1, q_len);
-                if (resp->query_val.tag != KILN_VALUE_STRING) KILN_WEB_RETURN(KILN_C99_OUT_OF_MEMORY);
-                resp->query_cap = q_len + 1;
-                status = kiln_c99_put(NULL, resp->search_params_object, "@@url:query", 11,
-                                      resp->query_val, 0, NULL);
-            }
-            if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
-            *out = resp->url_object;
-            KILN_WEB_RETURN(KILN_C99_OK);
-        }
+    if (resp->url_object.tag != KILN_VALUE_OBJECT) {
+        kiln_value *proto;
+        status = kiln_c99_new_object_with_capacity_tenured(&resp->url_object, 8);
+        if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
+        status = kiln_c99_new_object_with_capacity_tenured(&resp->search_params_object, 6);
+        if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
+        status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_URL_PROTOTYPE, &proto);
+        if (status == KILN_C99_OK && proto->tag == KILN_VALUE_OBJECT)
+            status = kiln_c99_set_prototype(resp->url_object, *proto);
+        if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
+        status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_URL_SEARCH_PARAMS_PROTOTYPE, &proto);
+        if (status == KILN_C99_OK && proto->tag == KILN_VALUE_OBJECT)
+            status = kiln_c99_set_prototype(resp->search_params_object, *proto);
+        if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
+        status = kiln_c99_put_hot_key(NULL, resp->search_params_object, KILN_C99_HOT_KEY_GET,
+                                      kiln_c99_method(KILN_C99_METHOD_URL_SEARCH_PARAMS_GET), 0, NULL);
+        if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
+        status = kiln_c99_put_hot_key(NULL, resp->url_object, KILN_C99_HOT_KEY_SEARCH_PARAMS,
+                                      resp->search_params_object, 0, NULL);
+        if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
+        status = kiln_c99_put(NULL, resp->url_object, "@@url", 5, kiln_c99_boolean(1), 0, NULL);
+        if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
     }
-
-    status = kiln_c99_new_object(out);
+    {
+        size_t path_len = (size_t)((query != NULL ? query : (fragment != NULL ? fragment : end)) - start);
+        resp->pathname_val = kiln_c99_copy_text(start, path_len);
+        if (resp->pathname_val.tag != KILN_VALUE_STRING) KILN_WEB_RETURN(KILN_C99_OUT_OF_MEMORY);
+        resp->pathname_cap = path_len + 1;
+        /* Own data, not a put: the object's prototype is the class's, whose `pathname` is a
+         * setter, and a put would run it. */
+        status = kiln_c99_own_data_hot_key(resp->url_object, KILN_C99_HOT_KEY_PATHNAME,
+                                           resp->pathname_val);
+        if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
+    }
+    {
+        size_t q_len = query != NULL ? (size_t)((fragment != NULL ? fragment : end) - query - 1) : 0;
+        kiln_value query_val;
+        if (query == NULL || q_len == 0) {
+            query_val = kiln_c99_static_text("", 0);
+        } else {
+            resp->query_val = kiln_c99_copy_text(query + 1, q_len);
+            if (resp->query_val.tag != KILN_VALUE_STRING) KILN_WEB_RETURN(KILN_C99_OUT_OF_MEMORY);
+            resp->query_cap = q_len + 1;
+            query_val = resp->query_val;
+        }
+        status = kiln_c99_own_data(resp->search_params_object, "@@url:query", 11, query_val);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_own_data(resp->search_params_object, "_query", 6, query_val);
+        if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
+    }
+    /* The class's other getters parse from these on first use; the values already exist. The
+     * objects outlive one request -- a keep-alive socket's response is refilled -- and the class
+     * notices: its cached state records the `_input` and `_query` it was built from. */
+    status = kiln_c99_own_data(resp->url_object, "_input", 6, input);
+    if (status == KILN_C99_OK) status = kiln_c99_own_data(resp->url_object, "_base", 5, base);
     if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
-    status = kiln_c99_put_hot_key(NULL, *out, KILN_C99_HOT_KEY_PATHNAME,
-                          kiln_c99_copy_text(start, (size_t)((query != NULL ? query :
-                              (fragment != NULL ? fragment : end)) - start)), 0, NULL);
-    if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
-    status = kiln_c99_new_object(&params);
-    if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
-    status = kiln_c99_put(NULL, params, "@@url:query", 11,
-                          query == NULL ? kiln_c99_copy_text("", 0) :
-                          kiln_c99_copy_text(query + 1, (size_t)((fragment != NULL ? fragment : end) - query - 1)),
-                          0, NULL);
-    if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
-    status = kiln_c99_put_hot_key(NULL, params, KILN_C99_HOT_KEY_GET,
-                          kiln_c99_method(KILN_C99_METHOD_URL_SEARCH_PARAMS_GET), 0, NULL);
-    if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
-    status = kiln_c99_put_hot_key(NULL, *out, KILN_C99_HOT_KEY_SEARCH_PARAMS, params, 0, NULL);
-    if (status != KILN_C99_OK) KILN_WEB_RETURN(status);
-    KILN_WEB_RETURN(kiln_c99_put(NULL, *out, "@@url", 5, kiln_c99_boolean(1), 0, NULL));
+    *out = resp->url_object;
+    KILN_WEB_RETURN(KILN_C99_OK);
 #undef KILN_WEB_RETURN
 }
 

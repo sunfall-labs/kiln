@@ -1323,6 +1323,14 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         return kiln_c99_uint8_to_hex_raw(result, args, argc, thrown);
     if (code == KILN_C99_METHOD_UINT8_TO_BASE64_RAW)
         return kiln_c99_uint8_to_base64_raw(result, args, argc, thrown);
+    if (code == KILN_C99_METHOD_URL_PARSE_RAW)
+        return kiln_c99_url_parse_raw(result, args, argc, thrown);
+    if (code == KILN_C99_METHOD_URL_SET_RAW)
+        return kiln_c99_url_set_raw(result, args, argc, thrown);
+    if (code == KILN_C99_METHOD_URL_FAST_RAW)
+        return kiln_c99_url_fast_raw(result, args, argc, thrown);
+    if (code == KILN_C99_METHOD_URL_ADOPT_RAW)
+        return kiln_c99_url_adopt_raw(result, args, argc);
     if ((code & KILN_C99_FFI_DYNAMIC_BASE) != 0 ||
         code == KILN_C99_METHOD_NODE_FFI_DLOPEN ||
         code == KILN_C99_METHOD_NODE_FFI_GET_RAW_POINTER ||
