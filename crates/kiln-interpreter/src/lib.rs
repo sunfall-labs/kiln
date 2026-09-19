@@ -6992,6 +6992,7 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
     // owns the VM, program and locals needed by `Sink::ModuleAwait`; keep that VM alive and drain
     // it now, rather than letting the entry VM try to resume a continuation whose owner is gone.
     let suspended_module = vm.module_suspension.is_some();
+    vm.esm_body_pending_checkpoint = commonjs_module.is_none();
     // Exports are read before the event loop runs: they are the module's interface, and a timer
     // that mutates a binding afterwards has not changed what the module exported.
     if enter_runtime {
@@ -7620,6 +7621,11 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// Realm state that follows *control*, not the frame: it is captured whenever work is queued
     /// and restored whenever that work runs, which is what carries a store across an `await`.
     async_context: AsyncContext,
+    /// The body of an ES module just ran. Node evaluates one from inside a promise job (the
+    /// loader awaits `module.evaluate()`), so the microtask checkpoint that follows the body
+    /// is already in progress: promise jobs queued by the body run before any `nextTick` it
+    /// queued. A CommonJS body runs from the top of a macrotask and its ticks go first.
+    esm_body_pending_checkpoint: bool,
     /// The value delivered to a host handler, waiting to be collected by `call_catching`.
     pub(crate) caught: Option<Value>,
     /// Virtual file descriptor table for Node filesystem operations.
@@ -7811,6 +7817,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             mapped_arguments: false,
             current_realm: RealmId::PRIMARY,
             async_context: AsyncContext::default(),
+            esm_body_pending_checkpoint: false,
             this_value: Value::Undefined,
             new_target: Value::Undefined,
             suspended_awaiting: false,
@@ -24452,6 +24459,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// before it, and `Promise.resolve().then(f).then(g)` with an `f` that calls `nextTick`
     /// printed the tick between `f` and `g` where node prints it after both.
     fn drain_microtask_jobs(&mut self) -> Result<(), ExecutionError> {
+        if std::mem::take(&mut self.esm_body_pending_checkpoint) {
+            // Still inside the job that evaluated the module: finish that checkpoint first.
+            while let Some(scheduled) = self.with_realm_mut(|realm| realm.pop_microtask()) {
+                self.run_scheduled_job(scheduled)?;
+            }
+        }
         loop {
             let mut ran = false;
             while let Some(scheduled) = self.with_realm_mut(|realm| realm.pop_next_tick()) {
@@ -38873,24 +38886,22 @@ fn call_native(
                         std::cmp::Ordering::Greater => 1.0,
                     })
                 }
-                // No normalisation tables, so this is the identity. Honest for text that is
-                // already normalised, which is what a bundler emits, and wrong for text that is
-                // not -- which is why it is called out here rather than left to be discovered.
+                // The tables are ICU4X's, shared with the collator (`kiln_intl::normalize`).
+                // This was the identity until 2026-09-19, which was honest for text a bundler
+                // emits and wrong for `ﬁ` and every combining sequence a form tool produces.
                 Native::StringNormalize => {
-                    // The form is checked even though the normalisation is not performed: a
-                    // form outside the four the specification names is a `RangeError`, and
+                    // A form outside the four the specification names is a `RangeError`:
                     // answering the string for `normalize("XYZ")` told the caller its text was
-                    // normalised into a form that does not exist. The no-op above is a separate
-                    // and larger gap -- it needs Unicode data this crate does not carry -- and
-                    // is left as it was rather than papered over here.
+                    // normalised into a form that does not exist.
                     let form = match arguments.first() {
                         None | Some(Value::Undefined) => "NFC".to_owned(),
                         Some(value) => value.to_display_string(),
                     };
-                    if !matches!(form.as_str(), "NFC" | "NFD" | "NFKC" | "NFKD") {
+                    let units: Vec<u16> = text.units().collect();
+                    let Some(normalized) = kiln_intl::normalize::normalize(&units, &form) else {
                         return Err(ExecutionError::RadixOutOfRange);
-                    }
-                    Value::String(text.clone().into())
+                    };
+                    Value::String(StringUnits::from_units(&normalized))
                 }
                 Native::StringTrimStart => {
                     Value::String(string_trim_units(text, true, false))
@@ -42660,7 +42671,13 @@ fn regexp_search(regexp: &RegExpData, subject: &[u16], start: usize) -> Option<R
     if start > subject.len() {
         return None;
     }
-    let found = regexp.compiled.find_from_utf16(subject, start).next()?;
+    // Without `u` the language matches code units, so a surrogate pair is two characters
+    // (`/^.$/.test("\u{1F600}")` is false); with it, one code point.
+    let found = if regexp.flags.contains('u') || regexp.flags.contains('v') {
+        regexp.compiled.find_from_utf16(subject, start).next()?
+    } else {
+        regexp.compiled.find_from_ucs2(subject, start).next()?
+    };
     // A sticky pattern must match exactly at the cursor, not merely at or after it.
     if regexp.sticky && found.range().start != start {
         return None;

@@ -1466,6 +1466,7 @@ dependencies = [
  "icu_list",
  "icu_locale",
  "icu_locale_core",
+ "icu_normalizer",
  "icu_plurals",
  "icu_segmenter",
  "icu_time",

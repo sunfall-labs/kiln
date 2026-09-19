@@ -764,6 +764,31 @@ pub fn emit_async_entry_body(
     );
     output.push_str("    (void)receiver_ptr; (void)upvalues; (void)args; (void)argc;\n");
     output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
+    // The same callee-cache declarations the synchronous entry makes (`emit_module_body`): a
+    // module with a top-level `await` is an entry like any other, and its devirtualized sites
+    // name `{symbol}_fn_entry_v{v}_t_{i}` statics that nothing declared here -- a build failure
+    // on the first such module that called a typed method (`ticker.start(3)`).
+    for (vid, typed_candidates) in
+        sites::collect_typed_call_sites(graph, program, plan, &plan.numbers)
+    {
+        for i in typed_candidates {
+            let pfx = format!("{}_fn_entry_v{}_t_{}", symbol, vid.0, i);
+            if plan.typed_needs[i as usize].row {
+                writeln!(
+                    output,
+                    "    static kiln_val {pfx}_fn = 0; static const kiln_shape *{pfx}_shape = NULL; static const uint32_t *{pfx}_row = NULL; static uint64_t {pfx}_proto = 0; static uint64_t {pfx}_epoch = UINT64_MAX; static kiln_val *{pfx}_upvalues = NULL;"
+                )
+                .unwrap();
+                writeln!(
+                    output,
+                    "    if (KILN_UNLIKELY({pfx}_epoch != kiln_c99_proto_epoch)) {pfx}_shape = NULL;"
+                )
+                .unwrap();
+            } else {
+                writeln!(output, "    static kiln_val {pfx}_fn = 0;").unwrap();
+            }
+        }
+    }
     writeln!(output, "    kiln_val *locals = {symbol}_globals;").unwrap();
     output.push_str("    if (frame->started) {\n        switch (frame->resume) {\n");
     for block in &graph.blocks {

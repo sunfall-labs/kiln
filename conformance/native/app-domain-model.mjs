@@ -1,0 +1,15 @@
+// A class-heavy module: private fields, static, getters/setters, inheritance, iterators, toJSON, Proxy, WeakMap, Symbol keys.
+const registry = new WeakMap();
+class Money { #cents; static #zero = new Money(0); constructor(cents) { this.#cents = Math.trunc(cents); registry.set(this, "money"); } static zero() { return Money.#zero; } static of(units, cents = 0) { return new Money(units * 100 + cents); } get cents() { return this.#cents; } plus(o) { return new Money(this.#cents + o.cents); } times(n) { return new Money(this.#cents * n); } toString() { return `$${(this.#cents / 100).toFixed(2)}`; } toJSON() { return this.toString(); } [Symbol.toPrimitive](hint) { return hint === "number" ? this.#cents : this.toString(); } }
+class Line { constructor(sku, qty, price) { Object.assign(this, { sku, qty, price }); } get total() { return this.price.times(this.qty); } }
+class Order { #lines = []; #status = "open"; add(...ls) { this.#lines.push(...ls); return this; } get total() { return this.#lines.reduce((s, l) => s.plus(l.total), Money.zero()); } *[Symbol.iterator]() { yield* this.#lines; } get status() { return this.#status; } set status(v) { if (!["open", "paid"].includes(v)) throw new RangeError(`bad status ${v}`); this.#status = v; } static from(json) { const o = new Order(); for (const l of json.lines) o.add(new Line(l.sku, l.qty, Money.of(l.price))); return o; } }
+class RushOrder extends Order { get total() { return super.total.plus(Money.of(5)); } toString() { return `Rush(${this.total})`; } }
+const o = RushOrder.from({ lines: [{ sku: "a", qty: 2, price: 3 }, { sku: "b", qty: 1, price: 10 }] });
+console.log(String(o), +o.total, [...o].map((l) => l.sku).join(""), JSON.stringify({ t: o.total }), registry.get(o.total), o instanceof Order, Object.getPrototypeOf(RushOrder) === Order);
+try { o.status = "lost"; } catch (e) { console.log(e.constructor.name, e.message, e instanceof RangeError); }
+o.status = "paid"; console.log(o.status, Object.keys(o).length, o.hasOwnProperty("status"), "status" in o, typeof Order.prototype.add);
+const audited = new Proxy({ a: 1 }, { get(t, k, r) { return k === "missing" ? "default" : Reflect.get(t, k, r); }, set(t, k, v) { t[k] = v * 2; return true; }, has(t, k) { return k !== "hidden"; } });
+audited.b = 5; console.log(audited.a, audited.b, audited.missing, "hidden" in audited, "a" in audited, Object.keys(audited).join(","));
+const sym = Symbol("tag"); const tagged = { [sym]: 1, plain: 2 }; console.log(Object.getOwnPropertySymbols(tagged).length, tagged[sym], JSON.stringify(tagged), Reflect.ownKeys(tagged).length);
+class Temp { static #count = 0; static make() { Temp.#count++; return new Temp(); } static get count() { return Temp.#count; } } Temp.make(); Temp.make(); console.log("static private:", Temp.count);
+console.log([1, 2, 3].at(-1), Object.fromEntries([["x", 1]]).x, structuredClone({ d: new Date(0), m: new Map([[1, 2]]) }).m.get(1), Array.from({ length: 3 }, (_, i) => i * i).join(","), "abc".replaceAll("b", "B"), [3, 1, 2].toSorted().join(""), Number.parseFloat("1.5e2"), (123.456).toFixed(1), BigInt(2) ** 64n);

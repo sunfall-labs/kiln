@@ -54,6 +54,27 @@ Demand first: whatever `scripts/thirdparty.sh`'s refusal distribution names, as 
 Each row lands with its receiver's baseline number moved down in the same diff, the way a
 Test262 chunk does.
 
+## What app-shaped programs hit (2026-09-19)
+
+Five twenty-line programs, each what a real project does in its first minute, run under node,
+the interpreter and native (`.scratch/full-runtime/probes/`, the green ones now in
+`conformance/native/app-*`). Everything they exposed was fixed the same day except two:
+
+* `Buffer.prototype` in neither engine (issue 08) -- `events-streams.mjs` is node-identical
+  on every other line.
+* The interpreter exits 0 on an unsettled top-level await where node exits 13 (issue 09).
+
+Fixed from the same probes: `Readable.from` never flowed and `Transform` never ended;
+`events.once`/`on`; `fs.rmSync`/`mkdtempSync` composed in TypeScript when the host lacks
+them; the native `u` flag (the literal compiler compiled `\p{L}` as the letter `p`) and both
+engines' non-`u` `.` matching a surrogate pair as one character; `normalize()` the identity in
+both engines and `localeCompare` code units natively (now ICU4X through `kiln-intl` for
+both); `toUpperCase` beyond ASCII natively; `["é"].join("")` natively (Latin-1 bytes copied
+into a UTF-8 builder); `nextTick` ordering after an ES module body (node runs the body inside
+a promise job, so the promise queue drains before the tick lane); `structuredClone`,
+`Object.groupBy`, `Map.groupBy`; a typed-site declaration missing from modules with
+top-level await; the overlay host's `rmSync` leaving in-memory entries behind.
+
 ## The interpreter's own drift from node (issues 05, 13)
 
 Surface the interpreter has and node does not, or answers differently, is the same debt on the

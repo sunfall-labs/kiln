@@ -690,6 +690,9 @@ pub fn program_provider_capabilities(
             Some("JSON") => required.with(ProviderCapability::Json),
             Some("Temporal") => required.with(ProviderCapability::Temporal),
             Some("Intl") => required.with(ProviderCapability::Intl),
+            // Two `String.prototype` methods answer from the Intl engine's tables (collation and
+            // normalization are ICU4X data), so a program that calls either demands it by name.
+            Some("localeCompare" | "normalize") => required.with(ProviderCapability::Intl),
             Some("parallelMap") => required.with(ProviderCapability::Parallel),
             _ => required,
         };
@@ -727,6 +730,9 @@ pub fn retained_provider_capabilities(
     }
     if members.names.contains("parallelMap") {
         required = required.with(ProviderCapability::Parallel);
+    }
+    if members.names.contains("localeCompare") || members.names.contains("normalize") {
+        required = required.with(ProviderCapability::Intl);
     }
 
     let specifier_capability = |specifier: &str| match NodeBuiltin::parse(specifier) {

@@ -102,7 +102,9 @@ run_probe() {
 	local name
 	name="$(basename -- "$probe")"
 	local adapter=""
-	if [[ $name == *.cjs ]]; then
+	# `.mjs` too: an application-shaped ES module imports `node:` builtins, and only the adapter
+	# resolves those. Two such probes sat here unrun from 2026-09-19 until the glob below grew.
+	if [[ $name == *.cjs || $name == *.mjs ]]; then
 		adapter="--node"
 	fi
 	name="${name%.*}"
@@ -178,7 +180,7 @@ run_probe() {
 # stays what it says it is.
 shopt -s nullglob
 running=0
-for probe in "$PROBES"/*.ts "$PROBES"/*.js "$PROBES"/*.cjs; do
+for probe in "$PROBES"/*.ts "$PROBES"/*.js "$PROBES"/*.cjs "$PROBES"/*.mjs; do
 	run_probe "$probe" &
 	running=$((running + 1))
 	if (( running >= JOBS )); then
@@ -188,7 +190,7 @@ for probe in "$PROBES"/*.ts "$PROBES"/*.js "$PROBES"/*.cjs; do
 done
 wait || true
 
-for probe in "$PROBES"/*.ts "$PROBES"/*.js "$PROBES"/*.cjs; do
+for probe in "$PROBES"/*.ts "$PROBES"/*.js "$PROBES"/*.cjs "$PROBES"/*.mjs; do
 	name="$(basename -- "$probe")"
 	name="${name%.*}"
 	if [[ -f "$WORK_DIR/$name.failed" ]]; then

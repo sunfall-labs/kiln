@@ -2946,6 +2946,12 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     }
                     arr->match_index = ranges[0];
                     arr->match_input = subject;
+                    status = kiln_c99_match_groups(regexp, arr, groups);
+                    if (status != KILN_C99_OK) {
+                        if (ranges != stack_ranges) free(ranges);
+                        if (units != NULL && !stack_used) free(units);
+                        return status;
+                    }
                 }
                 if (ranges != stack_ranges) {
                     free(ranges);
@@ -6220,9 +6226,11 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (KILN_VAL_IS_STRING(element)) {
                 const kiln_string *s = (const kiln_string *)KILN_VAL_PTR(element);
                 if (s != NULL && s->unit_len > 0) {
-                    if (kiln_string_is_utf16(s)) {
-                        /* UTF-16 values are rendered through their scalar UTF-8 form at this
-                         * host-facing text builder boundary. */
+                    /* The builder holds UTF-8, so only ASCII bytes can be copied as they are:
+                     * a Latin-1 `é` is one byte 0xE9 here and two in UTF-8, and copying it raw
+                     * put U+FFFD in every `["é"].join("")` until 2026-09-19. */
+                    if (kiln_string_is_utf16(s) ||
+                        !kiln_c99_string_is_ascii(kiln_val_to_boundary(element))) {
                         kiln_value shown = kiln_c99_text(kiln_val_to_boundary(element));
                         if (shown.tag != KILN_VALUE_STRING ||
                             kiln_c99_text_append_string(&joined, shown) != KILN_C99_OK) {

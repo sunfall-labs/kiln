@@ -1,0 +1,4 @@
+ticks: 1,2,3,done | listeners: 1 | names: tick
+once: 42
+pipeline: "AB\nCDE\nFGH\n"
+buf: 13 68c3a96c aMOpbGxvIHfDtnJsZA== hé! true 2 26819 111

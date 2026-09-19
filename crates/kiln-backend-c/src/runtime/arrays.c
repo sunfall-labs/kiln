@@ -22,6 +22,7 @@ static int kiln_c99_new_array(kiln_value *out) {
     array->not_extensible = 0;
     array->match_index = -1;
     array->match_input = kiln_c99_undefined();
+    array->match_groups = kiln_c99_undefined();
     array->is_numeric = 1;
     *out = kiln_c99_value(KILN_VALUE_ARRAY, (uint64_t)(uintptr_t)array, NULL, 0);
     return KILN_C99_OK;
@@ -111,6 +112,7 @@ static int kiln_c99_new_array_with_capacity(kiln_value *out, size_t capacity, in
     array->not_extensible = 0;
     array->match_index = -1;
     array->match_input = kiln_c99_undefined();
+    array->match_groups = kiln_c99_undefined();
     array->is_numeric = is_numeric;
     if (in_block > 0) {
         array->elements = (kiln_val *)(array + 1);

@@ -151,6 +151,15 @@ macro_rules! provider_c_declaration {
     ($group:ident, $name:ident, url_parse) => {
         concat!("int ", stringify!($name), "(const uint8_t *input, uint64_t input_len, const uint8_t *base, uint64_t base_len, uint8_t *out, uint64_t capacity, uint64_t *out_len);\n")
     };
+    ($group:ident, $name:ident, string_case) => {
+        concat!("int ", stringify!($name), "(const uint16_t *units, uint64_t count, uint32_t upper, uint16_t *out, uint64_t capacity, uint64_t *out_len);\n")
+    };
+    ($group:ident, $name:ident, string_normalize) => {
+        concat!("int ", stringify!($name), "(const uint16_t *units, uint64_t count, uint32_t form, uint16_t *out, uint64_t capacity, uint64_t *out_len);\n")
+    };
+    ($group:ident, $name:ident, intl_collate) => {
+        concat!("int ", stringify!($name), "(const uint16_t *left, uint64_t left_len, const uint16_t *right, uint64_t right_len, const uint8_t *spec, uint64_t spec_len, int32_t *out_order);\n")
+    };
     ($group:ident, $name:ident, url_set) => {
         concat!("int ", stringify!($name), "(const uint8_t *href, uint64_t href_len, uint32_t field, const uint8_t *value, uint64_t value_len, uint8_t *out, uint64_t capacity, uint64_t *out_len);\n")
     };
@@ -803,6 +812,9 @@ pub(crate) enum BuiltinLoad {
     Value(&'static str),
     /// A C function `int f(kiln_value *out)`.
     Build(&'static str),
+    /// A global the runtime bootstrap defines in TypeScript (ADR 0005, ADR 0063 rule 4), read
+    /// by name from the global object; a refusal names it if the bootstrap has not run.
+    Global(&'static str),
 }
 
 pub(crate) fn builtin_load(builtin: kiln_ir::Builtin) -> BuiltinLoad {
@@ -975,6 +987,7 @@ pub(crate) fn builtin_load(builtin: kiln_ir::Builtin) -> BuiltinLoad {
         kiln_ir::Builtin::Performance => {
             BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_PERFORMANCE)")
         }
+        kiln_ir::Builtin::StructuredClone => BuiltinLoad::Global("structuredClone"),
         #[allow(unreachable_patterns)]
         _ => unreachable!("verification rejects every other builtin before emission"),
     }

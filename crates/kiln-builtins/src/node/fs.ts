@@ -47,7 +47,36 @@ export function realpathSync(...args: any[]): any {
 }
 (realpathSync as any).native = realpathSync;
 export const renameSync = unmaterialized("renameSync");
-export const rmSync = unmaterialized("rmSync");
+// Composed from the host's primitives when the host has no `rmSync` of its own: a directory is
+// emptied through `readdirSync` and dropped with `rmdirSync`, anything else through
+// `unlinkSync`; `force` swallows a missing path, `recursive` is what makes a directory legal.
+export const rmSync =
+  nativeModule && typeof nativeModule.rmSync === "function"
+    ? nativeModule.rmSync
+    : function rmSync(target: any, options?: any): void {
+        const path = String(target);
+        const recursive = !!(options && options.recursive);
+        const force = !!(options && options.force);
+        let stat: any;
+        try {
+          stat = lstatSync(path);
+        } catch (e: any) {
+          if (force) return;
+          throw e;
+        }
+        if (stat.isDirectory()) {
+          if (!recursive) {
+            const err: any = new Error(`Path is a directory: rm returned EISDIR (is a directory) ${path}`);
+            err.code = "ERR_FS_EISDIR";
+            err.path = path;
+            throw err;
+          }
+          for (const entry of readdirSync(path)) rmSync(path + "/" + String(entry), { recursive: true, force });
+          rmdirSync(path);
+        } else {
+          unlinkSync(path);
+        }
+      };
 export const rmdirSync = unmaterialized("rmdirSync");
 export const statSync = unmaterialized("statSync");
 export const unlinkSync = unmaterialized("unlinkSync");
@@ -177,7 +206,22 @@ export const fdatasyncSync = unmaterialized("fdatasyncSync");
 export const fsyncSync = unmaterialized("fsyncSync");
 export const ftruncateSync = unmaterialized("ftruncateSync");
 export const globSync = unmaterialized("globSync");
-export const mkdtempSync = unmaterialized("mkdtempSync");
+// `prefix` plus six characters of `[a-z0-9]`, retried while the directory already exists.
+export const mkdtempSync =
+  nativeModule && typeof nativeModule.mkdtempSync === "function"
+    ? nativeModule.mkdtempSync
+    : function mkdtempSync(prefix: any): string {
+        const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
+        for (let attempt = 0; attempt < 100; attempt++) {
+          let suffix = "";
+          for (let i = 0; i < 6; i++) suffix += alphabet[Math.floor(Math.random() * alphabet.length)];
+          const path = String(prefix) + suffix;
+          if (existsSync(path)) continue;
+          mkdirSync(path);
+          return path;
+        }
+        throw new Error(`mkdtemp: could not find a free name for ${String(prefix)}`);
+      };
 export const truncateSync = unmaterialized("truncateSync");
 export const unwatchFile = unmaterialized("unwatchFile");
 export const watch = unmaterialized("watch");

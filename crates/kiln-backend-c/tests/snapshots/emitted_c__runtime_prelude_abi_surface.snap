@@ -1044,6 +1044,7 @@ int kiln_node_path_part(uint32_t part, const uint8_t *path, uint64_t path_len, c
 int kiln_node_path_relative(const uint8_t *from, uint64_t from_len, const uint8_t *to, uint64_t to_len, uint8_t *out, uint64_t capacity, uint64_t *out_len);
 int kiln_url_parse(const uint8_t *input, uint64_t input_len, const uint8_t *base, uint64_t base_len, uint8_t *out, uint64_t capacity, uint64_t *out_len);
 int kiln_url_set(const uint8_t *href, uint64_t href_len, uint32_t field, const uint8_t *value, uint64_t value_len, uint8_t *out, uint64_t capacity, uint64_t *out_len);
+int kiln_string_case(const uint16_t *units, uint64_t count, uint32_t upper, uint16_t *out, uint64_t capacity, uint64_t *out_len);
 int kiln_realm_symbol_for(const kiln_string *key, uint64_t *out_id);
 int kiln_realm_symbol_key_for(uint64_t id, kiln_string *out_key);
 int kiln_realm_value_slot(uint32_t key, void **out_slot);
@@ -1080,6 +1081,8 @@ int kiln_node_fs_readdir_sync(const uint8_t *path, uint64_t path_len, uint8_t **
 int kiln_node_fs_realpath_sync(const uint8_t *path, uint64_t path_len, uint8_t **out_bytes, uint64_t *out_len, int32_t *out_error_code);
 int kiln_node_fs_unlink_sync(const uint8_t *path, uint64_t path_len, int32_t *out_error_code);
 int kiln_node_fs_rmdir_sync(const uint8_t *path, uint64_t path_len, int32_t *out_error_code);
+int kiln_string_normalize(const uint16_t *units, uint64_t count, uint32_t form, uint16_t *out, uint64_t capacity, uint64_t *out_len);
+int kiln_intl_collate(const uint16_t *left, uint64_t left_len, const uint16_t *right, uint64_t right_len, const uint8_t *spec, uint64_t spec_len, int32_t *out_order);
 int kiln_ffi_open(const uint8_t *path, uint64_t path_len, uint64_t *out_library);
 int kiln_ffi_close(uint64_t library);
 int kiln_ffi_prepare(uint64_t library, const uint8_t *symbol, uint64_t symbol_len, const uint32_t *argument_types, uint64_t argument_count, uint32_t result_type, uint64_t *out_function);
@@ -1149,6 +1152,7 @@ static kiln_value kiln_c99_number(double value);
 static kiln_value kiln_c99_uninitialized(void);
 static kiln_value kiln_c99_builtin(uint64_t code);
 static int kiln_c99_global_binding(kiln_value *out, const char *name, size_t name_len, int *found);
+int kiln_c99_bootstrap_global(kiln_value *out, const char *name, size_t name_len);
 static int kiln_c99_global_binding_key(kiln_value *out, const kiln_string *name, int *found);
 static int kiln_c99_declare_global_key(const kiln_string *name, int configurable);
 static kiln_value kiln_c99_temporal_value(void *handle);
@@ -1363,6 +1367,7 @@ static int kiln_c99_define_private(kiln_value target, const char *key, size_t ke
 static int kiln_c99_define_private_key(kiln_value target, const kiln_string *key,
 static int kiln_c99_is_node_hidden_key(const char *key, size_t key_len);
 static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype);
+static int kiln_c99_match_groups(kiln_regexp *regexp, kiln_array *arr, size_t groups);
 static int kiln_c99_realm_value_slot(uint32_t key, kiln_value **out);
 static int kiln_c99_url_parse_raw(kiln_value *out, const kiln_value *args, size_t argc,
 static int kiln_c99_url_set_raw(kiln_value *out, const kiln_value *args, size_t argc,
@@ -1930,6 +1935,7 @@ static int kiln_c99_global_object(kiln_value *out) {
 #if KILN_RETAIN_GROUP_TEMPORAL
 #endif
 static int kiln_c99_global_object_val(kiln_val *out) {
+int kiln_c99_bootstrap_global(kiln_value *out, const char *name, size_t name_len) {
 static int kiln_c99_global_binding(kiln_value *out, const char *name, size_t name_len, int *found) {
 static int kiln_c99_global_binding_key(kiln_value *out, const kiln_string *name, int *found) {
 static int kiln_c99_declare_global(const char *name, size_t name_len, int configurable) {
@@ -1953,6 +1959,7 @@ static kiln_regexp *kiln_c99_regexp_of(kiln_value value) {
 static int kiln_c99_new_regexp(kiln_value *out, const kiln_string *source,
 static int kiln_c99_new_regexp_matcher(kiln_value *out, const kiln_string *source,
 static void kiln_c99_materialize_match_properties(kiln_array *arr) {
+static int kiln_c99_match_groups(kiln_regexp *regexp, kiln_array *arr, size_t groups) {
 static int kiln_c99_regexp_find(kiln_regexp *regexp, const uint16_t *units, size_t count,
 static kiln_symbol *kiln_c99_symbol_of(kiln_value value) {
 #define KILN_C99_STATIC_SYMBOL_KEY(name, text) \
@@ -2559,6 +2566,7 @@ static void kiln_c99_publish_turn_refusal(int status, kiln_value produced, kiln_
 static int kiln_c99_run_job(kiln_microtask *task, kiln_host *host, kiln_value *thrown) {
 static int kiln_c99_promise_jobs_pending(void *context) {
 static int kiln_c99_run_promise_jobs(void *context, void *host_pointer, void *thrown_pointer) {
+int kiln_c99_finish_module_checkpoint(kiln_host *host, kiln_value *thrown) {
 static void kiln_c99_drop_next_tick(void *work) {
 static int kiln_c99_run_next_tick(void *work, void *host_pointer, void *thrown_pointer) {
 static void kiln_c99_drop_timer(void *work) {

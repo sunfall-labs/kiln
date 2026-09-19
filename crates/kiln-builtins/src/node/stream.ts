@@ -175,6 +175,7 @@ export class Readable extends Stream {
     destroyed: boolean;
     highWaterMark: number;
     encoding: string | null;
+    objectMode: boolean;
   };
   readable: boolean;
   readableEnded: boolean;
@@ -195,7 +196,9 @@ export class Readable extends Stream {
       destroyed: false,
       highWaterMark: hwm,
       encoding: enc,
+      objectMode: !!(options && (options.objectMode || options.readableObjectMode)),
     };
+    (this as any).readableObjectMode = this._readableState.objectMode;
     this.readable = true;
     this.readableEnded = false;
     this.destroyed = false;
@@ -206,6 +209,11 @@ export class Readable extends Stream {
 
   addListener(event: string | symbol, listener: Function): this {
     super.addListener(event, listener);
+    if (event === "data") {
+      // A `data` listener puts the stream in flowing mode, as in node: `resume()` starts the
+      // reads, and each chunk goes to the listeners instead of the buffer.
+      if (this._readableState.flowing !== false) this.resume();
+    }
     if (event === "readable") {
       const state = this._readableState;
       if (state.length > 0 || state.ended) {
@@ -297,8 +305,9 @@ export class Readable extends Stream {
       this.emit("readable");
       return false;
     }
-    if (typeof chunk === "string" && state.encoding) {
-      // Keep string if encoding configured
+    if (state.objectMode || (typeof chunk === "string" && state.encoding)) {
+      // An object-mode stream carries values as they are; a string stays a string under an
+      // encoding.
     } else if (typeof chunk === "string" && typeof (globalThis as any).Buffer !== "undefined") {
       chunk = (globalThis as any).Buffer.from(chunk, encoding);
     }
@@ -317,6 +326,25 @@ export class Readable extends Stream {
       }
       return state.length < state.highWaterMark;
     }
+    if (state.flowing && state.buffer.length === 0) {
+      // Flowing: the chunk goes straight to the listeners and is not buffered, so `push(null)`
+      // afterwards finds nothing pending and ends the stream. The source is asked again on the
+      // next tick, the way node's `maybeReadMore` does, unless it is already reading.
+      state.reading = false;
+      this.emit("data", chunk);
+      if (!state.ended && state.flowing && !state.reading) {
+        state.reading = true;
+        const again = () => {
+          state.reading = false;
+          if (this.destroyed || state.ended || !state.flowing) return;
+          state.reading = true;
+          this._read(state.highWaterMark);
+        };
+        if (typeof process !== "undefined" && typeof process.nextTick === "function") process.nextTick(again);
+        else setTimeout(again, 0);
+      }
+      return true;
+    }
     state.buffer.push(chunk);
     state.length += (chunk && chunk.length) || 0;
     state.reading = state.length < state.highWaterMark;
@@ -332,14 +360,77 @@ export class Readable extends Stream {
   }
 
   resume(): this {
-    this._readableState.flowing = true;
+    const state = this._readableState;
+    state.flowing = true;
     this.emit("resume");
+    // Buffered chunks go out first, then the source is asked for more.
+    const schedule = (fn: () => void) => {
+      if (typeof process !== "undefined" && typeof process.nextTick === "function") process.nextTick(fn);
+      else setTimeout(fn, 0);
+    };
+    schedule(() => {
+      if (this.destroyed || !state.flowing) return;
+      while (state.flowing && state.buffer.length) {
+        const chunk = state.buffer.shift();
+        state.length -= (chunk && chunk.length) || 0;
+        this.emit("data", chunk);
+      }
+      if (state.ended) {
+        if (!state.endEmitted && state.buffer.length === 0) {
+          state.endEmitted = true;
+          this.readableEnded = true;
+          this.emit("end");
+        }
+        return;
+      }
+      if (!state.reading) {
+        state.reading = true;
+        this._read(state.highWaterMark);
+      }
+    });
     return this;
   }
 
   setEncoding(enc: string): this {
     this._readableState.encoding = enc;
     return this;
+  }
+
+  // `for await (const chunk of readable)`: node's Readable is async-iterable, delivering each
+  // `data` chunk in order and finishing on `end`; an `error` rejects the pending read, and a
+  // consumer that returns early destroys the stream.
+  [Symbol.asyncIterator](): AsyncIterableIterator<any> {
+    const stream: any = this;
+    const queue: any[] = [];
+    const waiters: Array<[(v: any) => void, (e: any) => void]> = [];
+    let ended = false;
+    let failure: any = null;
+    const settle = () => {
+      while (waiters.length && (queue.length || ended || failure)) {
+        const [resolve, reject] = waiters.shift()!;
+        if (queue.length) resolve({ value: queue.shift(), done: false });
+        else if (failure) { const e = failure; failure = null; reject(e); }
+        else resolve({ value: undefined, done: true });
+      }
+    };
+    stream.on("data", (chunk: any) => { queue.push(chunk); settle(); });
+    stream.on("end", () => { ended = true; settle(); });
+    stream.on("error", (err: any) => { failure = err; settle(); });
+    if (typeof stream.resume === "function") stream.resume();
+    const iterator: any = {
+      next() {
+        return new Promise((resolve, reject) => { waiters.push([resolve, reject]); settle(); });
+      },
+      return() {
+        ended = true;
+        if (typeof stream.destroy === "function") stream.destroy();
+        settle();
+        return Promise.resolve({ value: undefined, done: true });
+      },
+      throw(err: any) { ended = true; if (typeof stream.destroy === "function") stream.destroy(err); return Promise.reject(err); },
+      [Symbol.asyncIterator]() { return iterator; },
+    };
+    return iterator;
   }
 
   destroy(error?: any): this {
@@ -495,6 +586,9 @@ export class Transform extends Duplex {
     if (options && typeof options.transform === "function") {
       (this as any)._transform = options.transform;
     }
+    if (options && typeof options.flush === "function") {
+      (this as any)._flush = options.flush;
+    }
   }
 
   _transform(chunk: any, encoding: string, callback: (error?: any, data?: any) => void): void {
@@ -512,6 +606,43 @@ export class Transform extends Duplex {
       }
       callback();
     });
+  }
+
+  // Ending the writable side flushes and then ends the readable side: without the `push(null)`
+  // a `Transform` in a `pipe` chain never ended, and nothing downstream ever finished.
+  end(chunk?: any, encoding?: any, callback?: any): this {
+    if (typeof chunk === "function") {
+      callback = chunk;
+      chunk = undefined;
+    } else if (typeof encoding === "function") {
+      callback = encoding;
+      encoding = undefined;
+    }
+    if (chunk !== undefined && chunk !== null) this.write(chunk, encoding);
+    const state = this._writableState;
+    if (state.ended) {
+      if (callback) callback();
+      return this;
+    }
+    state.ended = true;
+    this.writableEnded = true;
+    const done = (err?: any, data?: any) => {
+      if (err) {
+        this.emit("error", err);
+        if (callback) callback(err);
+        return;
+      }
+      if (data !== undefined && data !== null) this.push(data);
+      this.push(null);
+      state.finished = true;
+      this.writableFinished = true;
+      this.emit("finish");
+      if (callback) callback();
+    };
+    const flush = (this as any)._flush;
+    if (typeof flush === "function") flush.call(this, done);
+    else done();
+    return this;
   }
 }
 
@@ -597,6 +728,42 @@ export const promises = {
       });
     });
   },
+};
+
+// `Readable.from(iterable[, options])`: a readable that pulls from an iterable or async
+// iterable, in object mode unless told otherwise (a string or Buffer is one chunk, as in node).
+(Readable as any).from = function from(iterable: any, options?: any): Readable {
+  const opts = Object.assign({ objectMode: true }, options || {});
+  if (typeof iterable === "string" || (typeof Buffer !== "undefined" && Buffer.isBuffer(iterable))) {
+    const single = new Readable(Object.assign({}, opts, { read() { this.push(iterable); this.push(null); } }));
+    return single;
+  }
+  let iterator: any = null;
+  let reading = false;
+  const readable = new Readable(Object.assign({}, opts, {
+    read() {
+      if (reading) return;
+      reading = true;
+      if (iterator === null) {
+        if (iterable && typeof iterable[Symbol.asyncIterator] === "function") iterator = iterable[Symbol.asyncIterator]();
+        else if (iterable && typeof iterable[Symbol.iterator] === "function") iterator = iterable[Symbol.iterator]();
+        else throw new TypeError("The \"iterable\" argument must be an instance of Iterable or AsyncIterable");
+      }
+      const step = () => {
+        let result: any;
+        try { result = iterator.next(); } catch (err) { readable.destroy(err); return; }
+        Promise.resolve(result).then((r: any) => {
+          if (r.done) { reading = false; readable.push(null); return; }
+          Promise.resolve(r.value).then((value: any) => {
+            reading = false;
+            if (readable.push(value)) { reading = true; step(); }
+          }, (err: any) => readable.destroy(err));
+        }, (err: any) => readable.destroy(err));
+      };
+      step();
+    },
+  }));
+  return readable;
 };
 
 Stream.Readable = Readable;

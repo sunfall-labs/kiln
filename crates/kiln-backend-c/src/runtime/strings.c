@@ -727,22 +727,153 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
         break;
     }
     case KILN_C99_METHOD_STRING_TO_STRING:
-    case KILN_C99_METHOD_STRING_NORMALIZE:
     case KILN_C99_METHOD_STRING_VALUE_OF:
-        /* `normalize` has no normalisation tables behind it on either side, so it is the
-         * identity: honest for text that is already normalised, which is what a bundler emits,
-         * and wrong for text that is not -- which is why it is said here rather than left to be
-         * discovered. */
         *result = receiver;
         break;
-    case KILN_C99_METHOD_STRING_LOCALE_COMPARE: {
-        /* No collation tables either, so this compares code units -- which is a valid locale
-         * ordering and is the one both engines use. */
-        kiln_value other = argc > 0 ? kiln_c99_text(args[0]) : kiln_c99_from_units(NULL, 0);
-        if (other.tag != KILN_VALUE_STRING) {
-            return KILN_C99_OUT_OF_MEMORY;
+    case KILN_C99_METHOD_STRING_NORMALIZE: {
+        /* The tables are ICU4X's, through the provider (`kiln_string_normalize`), the same ones
+         * the interpreter answers from. This was the identity until 2026-09-19, which was
+         * honest for a bundler's output and wrong for `ﬁ` and every combining sequence. */
+        uint32_t form = 0;
+        if (argc > 0 && args[0].tag != KILN_VALUE_UNDEFINED) {
+            static const char *const forms[] = {"NFC", "NFD", "NFKC", "NFKD"};
+            uint32_t which;
+            for (which = 0; which < 4; ++which) {
+                size_t len = strlen(forms[which]);
+                size_t at;
+                if (needle == NULL || needle_count != len) continue;
+                for (at = 0; at < len && needle[at] == (uint16_t)forms[which][at]; ++at) {}
+                if (at == len) break;
+            }
+            if (which == 4) {
+                status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                              "The normalization form should be one of NFC, NFD, NFKC, NFKD.");
+                break;
+            }
+            form = which;
         }
-        *result = kiln_c99_number((double)kiln_c99_string_compare(receiver, other));
+        if (count == 0) {
+            *result = receiver;
+            break;
+        }
+        {
+            uint64_t need = 0;
+            uint64_t cap = (uint64_t)count * 3 + 8;
+            uint16_t *mapped = (uint16_t *)malloc((size_t)cap * sizeof *mapped);
+            int rc;
+            if (mapped == NULL) {
+                status = KILN_C99_OUT_OF_MEMORY;
+                break;
+            }
+            rc = kiln_string_normalize(units, (uint64_t)count, form, mapped, cap, &need);
+            if (rc == KILN_C99_INVALID_ARGUMENT && need > cap) {
+                uint16_t *bigger = (uint16_t *)realloc(mapped, (size_t)need * sizeof *mapped);
+                if (bigger == NULL) {
+                    free(mapped);
+                    status = KILN_C99_OUT_OF_MEMORY;
+                    break;
+                }
+                mapped = bigger;
+                cap = need;
+                rc = kiln_string_normalize(units, (uint64_t)count, form, mapped, cap, &need);
+            }
+            if (rc != KILN_C99_OK) {
+                free(mapped);
+                free(units);
+                free(needle);
+                KILN_C99_REFUSE("the provider would not normalize this string");
+            }
+            *result = kiln_c99_from_units(mapped, (size_t)need);
+            free(mapped);
+        }
+        break;
+    }
+    case KILN_C99_METHOD_STRING_LOCALE_COMPARE: {
+        /* Collation is ICU4X's through the provider (`kiln_intl_collate`), the collator the
+         * interpreter's `Intl.Collator` is built on. The spec is the seven fields the provider
+         * documents, U+001F between them, and doubles as its cache key; until 2026-09-19 this
+         * compared code units, which put `C` before `a` in a sort node did not. */
+        uint8_t spec[1024];
+        size_t spec_len = 0;
+        int spec_ok = 1;
+        int32_t order = 0;
+        int rc;
+        kiln_value locales = argc > 1 ? args[1] : kiln_c99_undefined();
+        kiln_value options = argc > 2 ? args[2] : kiln_c99_undefined();
+        static const struct { const char *name; size_t len; int boolean; } option_names[] = {
+            {"usage", 5, 0},      {"sensitivity", 11, 0},       {"numeric", 7, 1},
+            {"caseFirst", 9, 0},  {"ignorePunctuation", 17, 1}, {"collation", 9, 0},
+        };
+        size_t which;
+        if (locales.tag == KILN_VALUE_ARRAY) {
+            const kiln_array *list = (const kiln_array *)locales.ptr;
+            locales = list != NULL && list->count > 0 ? kiln_val_to_boundary(list->elements[0])
+                                                        : kiln_c99_undefined();
+        }
+        if (locales.tag != KILN_VALUE_UNDEFINED) {
+            uint8_t *tag = NULL;
+            size_t tag_len = 0;
+            kiln_value shown = kiln_c99_text(locales);
+            if (shown.tag != KILN_VALUE_STRING ||
+                kiln_c99_string_to_utf8_lossy(shown, &tag, &tag_len) != KILN_C99_OK) {
+                status = KILN_C99_OUT_OF_MEMORY;
+                break;
+            }
+            if (tag_len < sizeof spec) {
+                memcpy(spec, tag, tag_len);
+                spec_len = tag_len;
+            } else {
+                spec_ok = 0;
+            }
+            free(tag);
+        }
+        for (which = 0; which < 6 && spec_ok; ++which) {
+            kiln_value option = kiln_c99_undefined();
+            spec[spec_len++] = 0x1F;
+            if (options.tag != KILN_VALUE_OBJECT) continue;
+            status = kiln_c99_get(host, options, option_names[which].name, option_names[which].len,
+                                  &option, depth, thrown);
+            if (status != KILN_C99_OK) break;
+            if (option.tag == KILN_VALUE_UNDEFINED) continue;
+            if (option_names[which].boolean) {
+                const char *word = kiln_c99_truthy(option) ? "true" : "false";
+                size_t len = strlen(word);
+                if (spec_len + len >= sizeof spec) { spec_ok = 0; break; }
+                memcpy(spec + spec_len, word, len);
+                spec_len += len;
+            } else {
+                uint8_t *text = NULL;
+                size_t text_len = 0;
+                kiln_value shown = kiln_c99_text(option);
+                if (shown.tag != KILN_VALUE_STRING ||
+                    kiln_c99_string_to_utf8_lossy(shown, &text, &text_len) != KILN_C99_OK) {
+                    status = KILN_C99_OUT_OF_MEMORY;
+                    break;
+                }
+                if (spec_len + text_len >= sizeof spec) {
+                    spec_ok = 0;
+                } else {
+                    memcpy(spec + spec_len, text, text_len);
+                    spec_len += text_len;
+                }
+                free(text);
+            }
+        }
+        if (status != KILN_C99_OK) break;
+        rc = spec_ok ? kiln_intl_collate(units, (uint64_t)count, needle, (uint64_t)needle_count,
+                                         spec, (uint64_t)spec_len, &order)
+                     : -1;
+        if (rc == -1) {
+            status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                          "Incorrect locale information provided");
+            break;
+        }
+        if (rc != KILN_C99_OK) {
+            free(units);
+            free(needle);
+            KILN_C99_REFUSE("the provider would not collate these strings");
+        }
+        *result = kiln_c99_number((double)order);
         break;
     }
     case KILN_C99_METHOD_STRING_CODE_POINT_AT: {
@@ -918,14 +1049,40 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
         }
         for (index = 0; index < count; ++index) {
             uint16_t unit = units[index];
-            /* Case mapping outside ASCII needs Unicode tables this unit does not carry, and
-             * guessing would disagree with the interpreter silently. */
             if (unit >= 0x80) {
+                /* Beyond ASCII the mapping is Unicode's, which is Rust's own and comes through
+                 * the provider (ADR 0025): one call for the whole string, sized by asking, and
+                 * `ß` really does become `SS`. This refused until 2026-09-19. */
+                uint64_t need = 0;
+                uint64_t cap = (uint64_t)count * 3 + 8;
+                uint16_t *mapped = (uint16_t *)malloc((size_t)cap * sizeof *mapped);
+                int rc;
                 free(cased);
-                free(units);
-                free(needle);
-                KILN_C99_REFUSE("case mapping outside ASCII needs Unicode tables this unit does "
-                                "not carry");
+                if (mapped == NULL) {
+                    status = KILN_C99_OUT_OF_MEMORY;
+                    goto case_done;
+                }
+                rc = kiln_string_case(units, (uint64_t)count, code == KILN_C99_METHOD_TO_UPPER_CASE, mapped, cap, &need);
+                if (rc == KILN_C99_INVALID_ARGUMENT && need > cap) {
+                    uint16_t *bigger = (uint16_t *)realloc(mapped, (size_t)need * sizeof *mapped);
+                    if (bigger == NULL) {
+                        free(mapped);
+                        status = KILN_C99_OUT_OF_MEMORY;
+                        goto case_done;
+                    }
+                    mapped = bigger;
+                    cap = need;
+                    rc = kiln_string_case(units, (uint64_t)count, code == KILN_C99_METHOD_TO_UPPER_CASE, mapped, cap, &need);
+                }
+                if (rc != KILN_C99_OK) {
+                    free(mapped);
+                    free(units);
+                    free(needle);
+                    KILN_C99_REFUSE("the provider would not case-map this string");
+                }
+                *result = kiln_c99_from_units(mapped, (size_t)need);
+                free(mapped);
+                goto case_done;
             }
             cased[index] = code == KILN_C99_METHOD_TO_UPPER_CASE
                                ? (uint16_t)toupper((int)unit)
@@ -933,6 +1090,8 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
         }
         *result = kiln_c99_from_units(cased, count);
         free(cased);
+        break;
+    case_done:
         break;
     }
     case KILN_C99_METHOD_REPLACE:
@@ -958,7 +1117,7 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
             ranges[1] = (int64_t)at + (int64_t)needle_count;
             if (kiln_c99_text_append_string(&built, head) != KILN_C99_OK ||
                 kiln_c99_expand_replacement(&built, replacement, replacement_count, units, count,
-                                            ranges, 1) != KILN_C99_OK) {
+                                            ranges, 1, NULL) != KILN_C99_OK) {
                 status = KILN_C99_OUT_OF_MEMORY;
                 break;
             }
@@ -1024,7 +1183,7 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
 /* One `exec`-shaped array: the match, then each group, with `index`, `input` and `groups`. */
 static int kiln_c99_match_result(kiln_host *host, kiln_value *out, const uint16_t *units,
                                  size_t count, const int64_t *ranges, size_t groups, int depth,
-                                 kiln_value *thrown) {
+                                 kiln_value *thrown, kiln_regexp *regexp) {
     kiln_value built;
     size_t group;
     int status = kiln_c99_new_array(&built);
@@ -1043,8 +1202,11 @@ static int kiln_c99_match_result(kiln_host *host, kiln_value *out, const uint16_
         status = kiln_c99_put(host, built, "input", 5, kiln_c99_from_units(units, count), depth,
                               thrown);
     }
+    if (status == KILN_C99_OK && regexp != NULL) {
+        status = kiln_c99_match_groups(regexp, kiln_c99_array_of(built), groups);
+    }
     if (status == KILN_C99_OK) {
-        status = kiln_c99_put(host, built, "groups", 6, kiln_c99_undefined(), depth, thrown);
+        status = kiln_c99_put(host, built, "groups", 6, kiln_c99_array_of(built)->match_groups, depth, thrown);
     }
     *out = built;
     return status;
@@ -1174,7 +1336,7 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
         }
         if (code == KILN_C99_METHOD_STRING_MATCH && !regexp->global) {
             status = kiln_c99_match_result(host, result, units, count, ranges, groups, depth,
-                                           thrown);
+                                           thrown, regexp);
             if (ranges != stack_ranges) {
                 free(ranges);
             }
@@ -1191,7 +1353,7 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
         } else if (code == KILN_C99_METHOD_STRING_MATCH_ALL) {
             kiln_value entry;
             status = kiln_c99_match_result(host, &entry, units, count, ranges, groups, depth,
-                                           thrown);
+                                           thrown, regexp);
             if (status == KILN_C99_OK) {
                 status = kiln_c99_array_push(collected, entry);
             }
@@ -1255,7 +1417,7 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
                 }
             } else {
                 status = kiln_c99_expand_replacement(&built, replacement, replacement_count, units,
-                                                     count, ranges, groups);
+                                                     count, ranges, groups, regexp);
             }
             from = (size_t)ranges[1];
         }

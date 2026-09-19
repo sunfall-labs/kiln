@@ -3578,6 +3578,109 @@ if (typeof JSON !== "undefined") {
                                                      configurable: true, enumerable: false });
     }
 }
+
+// `structuredClone`, the HTML structured clone over the values this runtime has: primitives,
+// Date, RegExp, Boolean/Number/String objects, Error, ArrayBuffer and the typed arrays, Map,
+// Set, arrays and plain objects, with cycles preserved. A function, a symbol, a WeakMap or a
+// Proxy is a DataCloneError, as in node. The interpreter has its own in Rust; the emitter reads
+// this one by name (`BuiltinLoad::Global`).
+{
+    const isTypedArray = (v) => ArrayBuffer.isView(v) && !(v instanceof DataView);
+    function DataCloneError(message) {
+        const err = new Error(message);
+        err.name = "DataCloneError";
+        err.code = 25;
+        return err;
+    }
+    function clone(value, seen) {
+        if (value === null || (typeof value !== "object" && typeof value !== "function")) {
+            if (typeof value === "symbol") throw DataCloneError(String(value) + " could not be cloned.");
+            return value;
+        }
+        if (typeof value === "function") throw DataCloneError(String(value).split("\n")[0] + " could not be cloned.");
+        if (seen.has(value)) return seen.get(value);
+        let out;
+        if (value instanceof Date) { out = new Date(value.getTime()); seen.set(value, out); return out; }
+        if (value instanceof RegExp) { out = new RegExp(value.source, value.flags); seen.set(value, out); return out; }
+        if (value instanceof Boolean || value instanceof Number || value instanceof String) {
+            out = Object(value.valueOf()); seen.set(value, out); return out;
+        }
+        if (value instanceof Error) {
+            const ctor = { EvalError, RangeError, ReferenceError, SyntaxError, TypeError, URIError }[value.name] || Error;
+            out = new ctor(value.message);
+            seen.set(value, out);
+            if ("stack" in value) out.stack = value.stack;
+            if ("cause" in value) out.cause = clone(value.cause, seen);
+            return out;
+        }
+        if (value instanceof ArrayBuffer) { out = value.slice(0); seen.set(value, out); return out; }
+        if (isTypedArray(value)) {
+            out = new value.constructor(value); seen.set(value, out); return out;
+        }
+        if (value instanceof DataView) {
+            out = new DataView(value.buffer.slice(0), value.byteOffset, value.byteLength); seen.set(value, out); return out;
+        }
+        if (value instanceof Map) {
+            out = new Map(); seen.set(value, out);
+            for (const [k, v] of value) out.set(clone(k, seen), clone(v, seen));
+            return out;
+        }
+        if (value instanceof Set) {
+            out = new Set(); seen.set(value, out);
+            for (const v of value) out.add(clone(v, seen));
+            return out;
+        }
+        if (Array.isArray(value)) {
+            out = new Array(value.length); seen.set(value, out);
+            for (let i = 0; i < value.length; i++) if (i in value) out[i] = clone(value[i], seen);
+            return out;
+        }
+        if (value instanceof WeakMap || value instanceof WeakSet || value instanceof Promise) {
+            throw DataCloneError('#<' + value.constructor.name + "> could not be cloned.");
+        }
+        out = {}; seen.set(value, out);
+        for (const key of Object.keys(value)) out[key] = clone(value[key], seen);
+        return out;
+    }
+    function structuredClone(value) {
+        if (arguments.length === 0) throw new TypeError("The \"value\" argument must be specified");
+        return clone(value, new Map());
+    }
+    Object.defineProperty(globalThis, "structuredClone", { value: structuredClone, writable: true, configurable: true, enumerable: true });
+}
+
+// `Object.groupBy` and `Map.groupBy` (ES2024), over the iteration protocol; both refused by
+// name natively until 2026-09-19. Defined into the constructors' stores, which every read of a
+// built-in consults first.
+{
+    const data = (target, key, value) =>
+        Object.defineProperty(target, key, { value, writable: true, configurable: true, enumerable: false });
+    data(Object, "groupBy", function groupBy(items, callback) {
+        if (typeof callback !== "function") throw new TypeError(String(callback) + " is not a function");
+        const out = Object.create(null);
+        let k = 0;
+        for (const item of items) {
+            const key = callback(item, k++);
+            const name = typeof key === "symbol" ? key : String(key);
+            if (!(name in out)) out[name] = [];
+            out[name].push(item);
+        }
+        return out;
+    });
+    data(Map, "groupBy", function groupBy(items, callback) {
+        if (typeof callback !== "function") throw new TypeError(String(callback) + " is not a function");
+        const out = new Map();
+        let k = 0;
+        for (const item of items) {
+            let key = callback(item, k++);
+            if (key === 0) key = 0;
+            const list = out.get(key);
+            if (list === undefined) out.set(key, [item]);
+            else list.push(item);
+        }
+        return out;
+    });
+}
 "#;
 
 #[cfg(test)]
@@ -4792,6 +4895,7 @@ static int kiln_graph_ensure_module(kiln_graph_context *graph, size_t index);
 static kiln_value *kiln_graph_module_promise(kiln_graph_context *graph, size_t index);
 int kiln_graph_module_completion(kiln_host *host, uint32_t index, int rejected, const kiln_value *value, kiln_value *result, int depth, kiln_value *thrown);
 extern int kiln_c99_module_completion(kiln_host *, kiln_value, uint32_t, kiln_value *, int, kiln_value *);
+extern int kiln_c99_finish_module_checkpoint(kiln_host *, kiln_value *);
 #define KILN_C99_METHOD_THEN 107
 extern int kiln_c99_validate_dynamic_import_options(kiln_host *, kiln_value, int, kiln_value *, int *);
 int kiln_graph_dynamic_import(kiln_host *host, const char *importer, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {
@@ -5524,6 +5628,7 @@ extern int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
                          kiln_value receiver, const kiln_value *args, size_t argc,
                          int depth, kiln_value *thrown);
 extern int kiln_c99_module_completion(kiln_host *, kiln_value, uint32_t, kiln_value *, int, kiln_value *);
+extern int kiln_c99_finish_module_checkpoint(kiln_host *, kiln_value *);
 #define KILN_C99_OK 0
 #define KILN_C99_METHOD_PROMISE_RESOLVE 110
 #define KILN_C99_METHOD_PROMISE_REJECT 111
@@ -6304,7 +6409,7 @@ static int kiln_graph_enter(void *opaque) {
         )
         .unwrap();
         evaluation.push_str(
-            "            state->body_started = 1;\n            status = context.module(context.host, context.result, context.imports, context.import_count, context.exports, context.export_count);\n",
+            "            state->body_started = 1;\n            status = context.module(context.host, context.result, context.imports, context.import_count, context.exports, context.export_count);\n            if (status == 0) status = kiln_c99_finish_module_checkpoint(host, result);\n",
         );
         writeln!(
             evaluation,
@@ -7089,6 +7194,7 @@ extern int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                                   kiln_value receiver, const kiln_value *args, size_t argc,
                                   int depth, kiln_value *thrown);
 extern int kiln_c99_module_completion(kiln_host *, kiln_value, uint32_t, kiln_value *, int, kiln_value *);
+extern int kiln_c99_finish_module_checkpoint(kiln_host *, kiln_value *);
 #define KILN_C99_OK 0
 #define KILN_C99_METHOD_PROMISE_RESOLVE 110
 #define KILN_C99_METHOD_PROMISE_REJECT 111
