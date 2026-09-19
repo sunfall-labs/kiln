@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted.
+Accepted; amended by ADR 0063 (2026-09-19). The measurement below still decides that ICU4X
+links on demand rather than into every artifact (ADR 0062). It no longer decides whether `Intl`
+answers: it does, and the refusal is scheduled debt.
 
 `typeof Intl` now answers `"object"` under `--native`, as it does in the interpreter, and every
 member behind it refuses by name. Linking ICU4X into the provider archive is deferred, not

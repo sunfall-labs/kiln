@@ -80,6 +80,13 @@ backlog, sorted by how many bundles each refusal unblocks; that order, not bench
 decides what the runtime builds next. `check-silent-undefined.sh` runs before a bundle is called
 passing, because an `undefined` where node has a value is the failure that costs weeks.
 
+Decided 2026-09-19 (ADR 0063): a refusal is a debt, not an end state. The native surface
+inventory's refused count per receiver is a baseline beside Test262's, `--gate` (no silent
+`undefined`) joins `gate-quick`, and the backlog order is the thirdparty refusal distribution
+first, then the inventory's receivers by refused count. At `047bc973`: 313 refused of 1721 rows;
+`Date.prototype` 33, the typed-array prototype 41, `String.prototype` 15, `Intl` 12, `crypto` 12,
+`RegExp.prototype` 11, the `DisposableStack` prototypes 11 each, `globalThis` 11.
+
 ## Start: this week
 
 Phase 0 and B.0 are independent, days each, and they are the scoreboard: nothing after them can

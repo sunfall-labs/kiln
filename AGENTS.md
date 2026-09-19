@@ -223,6 +223,13 @@ non-zero on this class alone. It costs several hundred native compiles, so it is
 `scripts/native.sh` is, and `conformance/native/*-refuses.ts` is where a decision to keep refusing
 gets written down so that the next person does not "fix" it into an `undefined`.
 
+A refusal is the cheap answer *for today*, not the destination. kiln is a runtime, and ADR 0063
+makes every refusal a debt: the interpreter's surface is the target, the inventory's refused
+count per receiver is a baseline that only goes down, and an artifact-size argument chooses how a
+member gets linked (demand-driven, ADR 0062), never whether it exists. A refusal that stands long
+enough becomes the `undefined` above -- thirty-one did between 2026-09-03 and 09-19 -- so "refuses
+by name" is a state to leave, in the order the thirdparty corpus and the inventory give.
+
 ## Editing the C prelude and native caches
 
 Native generated-C, object, runtime and link keys include the content digests of the prelude

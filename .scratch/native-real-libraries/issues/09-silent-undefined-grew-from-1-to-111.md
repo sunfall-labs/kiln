@@ -151,7 +151,7 @@ All three causes landed on `alee/status-check-0918`, plus two things found on th
   use site emits the typed chain for a zero-argument call regardless; the runtime bootstrap's
   `console.clear()` then referenced a callee cache nothing declared. Fixed in `sites.rs`.
 
-Left as they are, and why:
+Left as they are on the day, and why -- each is backlog under ADR 0063 and `.scratch/full-runtime/PRD.md`, not a closed question:
 
 - `TypeError.prototype.name` and the other five subclass prototypes answer `"Error"` natively:
   the native model has one `Error.prototype` for every kind but `AggregateError`, so the store

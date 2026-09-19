@@ -59,7 +59,9 @@ contract remains shared even though its storage is not.
 differential authority and deletion condition. It is debt with an exit, not an ownership model.
 
 **Refusal** — A source-attributed stop for unsupported semantics. Refusal is a deliberate answer;
-absence or silent `undefined` is not.
+absence or silent `undefined` is not. It is also a debt: kiln is a runtime, so every refusal is a
+member the interpreter answers and the native backend has not yet, with a place in the backlog
+and a baseline that only goes down (ADR 0063).
 
 **Native provider** — The private, statically linked Rust archive exposed through the registry in
 `kiln-native-number-abi`, packaged through `kiln-native-provider-contract`, and implemented by
