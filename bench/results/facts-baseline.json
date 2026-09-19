@@ -191095,22 +191095,23 @@
                 },
                 {
                   "id": 40,
-                  "kind": "NewArray"
+                  "kind": "GetProperty",
+                  "detail": "\"URL\""
                 },
                 {
                   "id": 41,
-                  "kind": "MakeFunction",
-                  "detail": "proto #25"
+                  "kind": "GetProperty",
+                  "detail": "\"URL\""
                 },
                 {
                   "id": 42,
-                  "kind": "SetPropertyStrict",
-                  "detail": "\"@@private:1:%brand\""
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
                 },
                 {
                   "id": 43,
                   "kind": "GetProperty",
-                  "detail": "\"prototype\""
+                  "detail": "\"URL\""
                 },
                 {
                   "id": 44,
@@ -191119,56 +191120,90 @@
                 },
                 {
                   "id": 45,
-                  "kind": "MakeFunction",
-                  "detail": "proto #26"
+                  "kind": "GetProperty",
+                  "detail": "\"URL\""
                 },
                 {
-                  "id": 46,
+                  "id": 47,
+                  "kind": "GetProperty",
+                  "detail": "\"searchParams\""
+                },
+                {
+                  "id": 48,
+                  "kind": "GetProperty",
+                  "detail": "\"constructor\""
+                },
+                {
+                  "id": 49,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 50,
+                  "kind": "MakeFunction",
+                  "detail": "proto #25"
+                },
+                {
+                  "id": 51,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"@@private:1:%brand\""
+                },
+                {
+                  "id": 52,
                   "kind": "GetProperty",
                   "detail": "\"prototype\""
                 },
                 {
-                  "id": 47,
+                  "id": 53,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 54,
+                  "kind": "MakeFunction",
+                  "detail": "proto #26"
+                },
+                {
+                  "id": 55,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 56,
                   "kind": "MakeFunction",
                   "detail": "proto #27"
                 },
                 {
-                  "id": 49,
+                  "id": 57,
+                  "kind": "GetProperty",
+                  "detail": "\"URL\""
+                },
+                {
+                  "id": 58,
+                  "kind": "GetProperty",
+                  "detail": "\"URL\""
+                },
+                {
+                  "id": 60,
                   "kind": "SetPropertyStrict",
                   "detail": "\"default\""
                 },
                 {
-                  "id": 50,
+                  "id": 61,
                   "kind": "GetProperty",
                   "detail": "\"URL\""
                 },
                 {
-                  "id": 51,
-                  "kind": "GetProperty",
-                  "detail": "\"URL\""
-                },
-                {
-                  "id": 53,
-                  "kind": "GetProperty",
-                  "detail": "\"protocol\""
-                },
-                {
-                  "id": 54,
+                  "id": 62,
                   "kind": "SetPropertyStrict",
                   "detail": "\"URL\""
                 },
                 {
-                  "id": 55,
-                  "kind": "SetPropertyStrict",
-                  "detail": "\"URL\""
-                },
-                {
-                  "id": 56,
+                  "id": 63,
                   "kind": "GetProperty",
                   "detail": "\"URLSearchParams\""
                 },
                 {
-                  "id": 57,
+                  "id": 64,
                   "kind": "SetPropertyStrict",
                   "detail": "\"URLSearchParams\""
                 }
@@ -192909,7 +192944,7 @@
               ]
             },
             {
-              "name": "URL",
+              "name": "URLPolyfill",
               "parameter_types": [
                 "Unknown",
                 "Unknown"
