@@ -6,7 +6,9 @@ ADR 0005 (built-ins in TypeScript), ADR 0025 (engines are linked)
 
 ## Why
 
-kiln is a runtime. A program that stops at `Intl.NumberFormat`, `crypto.randomUUID` or
+kiln is a runtime in place of node, and node is the target of both engines; the interpreter
+leads the native backend and is its differential authority, not the destination. A program that
+stops at `Intl.NumberFormat`, `crypto.randomUUID` or
 `date.toLocaleDateString()` with a message naming the member is not running, however honest the
 message. ADR 0063 makes every native refusal a debt with a baseline that only goes down. This PRD
 is the backlog in the order that ADR sets, with the numbers it starts from.
@@ -14,7 +16,7 @@ is the backlog in the order that ADR sets, with the numbers it starts from.
 At `047bc973` (2026-09-19, `scripts/native-surface-inventory.py`): 1721 rows, 1391 implemented
 (80.8%), 313 refused (18.2%), 17 diverged, 0 silent `undefined`.
 
-## Gate first (issues 01, 02)
+## Gate first (issues 01, 02, 03)
 
 1. `native-surface-inventory.py --gate` in `gate-quick`. Two minutes on a warm cache. The class
    it fails on -- `undefined` where the interpreter has a value -- is the one that costs weeks,
@@ -22,6 +24,9 @@ At `047bc973` (2026-09-19, `scripts/native-surface-inventory.py`): 1721 rows, 13
 2. A per-receiver refused-count baseline, committed beside `conformance/test262-baseline.json`
    and compared the same way: a receiver whose count rises fails the gate and names itself. The
    whole-corpus number hides a receiver gaining ten while another loses ten.
+3. A node column in the inventory: the same enumeration run under the pinned node, so every row
+   reads interpreter / native / node, and "differs from node" is counted per receiver beside
+   "refused". Without it the tool measures the near gap only.
 
 ## The backlog, in order
 
@@ -44,7 +49,9 @@ Demand first: whatever `scripts/thirdparty.sh`'s refusal distribution names, as 
 Each row lands with its receiver's baseline number moved down in the same diff, the way a
 Test262 chunk does.
 
-## Not in scope
+## The interpreter's own drift from node (issue 13)
 
-Interpreter-invented surface (`Promise.allKeyed`, `%TypedArray%.name === "intrinsic"`) is an
-interpreter question, filed separately; the native backend does not chase it.
+Surface the interpreter has and node does not, or answers differently, is the same debt on the
+other engine: `Promise.allKeyed` / `allSettledKeyed`, `%TypedArray%.name === "intrinsic"`, the
+`Console` prototype shape, `console.table` printing as `log`. Issue 03's node column is what
+makes this measurable rather than noticed one member at a time.
