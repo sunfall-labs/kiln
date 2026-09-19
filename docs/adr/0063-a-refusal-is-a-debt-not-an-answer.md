@@ -13,11 +13,11 @@ emit on the day, and neither is any longer a licence to leave one in place.
 
 kiln is meant to be a runtime -- the thing a program is shipped on, in place of node -- not a
 compiler that handles a subset and says so. Node is the target: the thirdparty corpus is held to
-byte-identical output against it, the shared surface table cites its ordering, and a program
-written for node is the program kiln exists to run. The native backend's discipline of refusing what it has not built (ADR 0017,
-ADR 0042, `AGENTS.md`) was adopted for a real reason: an `undefined` where node has a value is a
-wrong answer nothing stops at, and a bundled `postcss` died on one for weeks. A refusal is the
-honest report of a gap. That reasoning is right and stays.
+byte-identical output against it, the shared surface table cites its ordering, and a program written
+for node is the program kiln exists to run. The native backend's discipline of refusing what it has
+not built (ADR 0017, ADR 0042, `AGENTS.md`) was adopted for a real reason: an `undefined` where node
+has a value is a wrong answer nothing stops at, and a bundled `postcss` died on one for weeks. A
+refusal is the honest report of a gap. That reasoning is right and stays.
 
 What drifted is what a refusal was allowed to *mean*. ADR 0042 argues that "refusing is not the
 same as being absent ... neither is a wrong answer", and concludes that turning a refusal into an
@@ -48,17 +48,17 @@ of them is a member the interpreter answers.
 
 Three things the day made plain:
 
-1. **A refusal that stands long enough turns into the wrong answer anyway.** And the
-   interpreter is not exempt: it publishes `Promise.allKeyed`, names `%TypedArray%`
-   `"intrinsic"`, and had six constructor arities node does not -- surface node lacks or answers
-   differently, which a program written for node will feel exactly as it feels a refusal. The 09-03 inventory
-   had 1 silent `undefined`; by 09-19 it had 111. Thirty-one of them were refusals that had
-   *become* `undefined` -- an `Error.prototype` site that named its four members and checked none
-   of them, and a catch-all in `kiln_c99_get_key` that converted every refusal on a well-known
-   symbol into `undefined` so the runtime's own probes would not stop. The catch-all's original
-   comment said "THIS IS A CATCH-ALL AND NOT A LIST, WHICH MAKES IT THE ONE ABSENCE HERE THAT CAN
-   LIE" and asked for the fix upstream; the comment was lost in a rewrite and the lie stayed.
-   A refusal is honest on the day it is written. Left in place, it is one refactor from silence.
+1. **A refusal that stands long enough turns into the wrong answer anyway.** And the interpreter is
+   not exempt: it publishes `Promise.allKeyed`, names `%TypedArray%` `"intrinsic"`, and had six
+   constructor arities node does not -- surface node lacks or answers differently, which a program
+   written for node will feel exactly as it feels a refusal. The 09-03 inventory had 1 silent
+   `undefined`; by 09-19 it had 111. Thirty-one of them were refusals that had *become* `undefined`
+   -- an `Error.prototype` site that named its four members and checked none of them, and a catch-
+   all in `kiln_c99_get_key` that converted every refusal on a well-known symbol into `undefined` so
+   the runtime's own probes would not stop. The catch-all's original comment said "THIS IS A CATCH-
+   ALL AND NOT A LIST, WHICH MAKES IT THE ONE ABSENCE HERE THAT CAN LIE" and asked for the fix
+   upstream; the comment was lost in a rewrite and the lie stayed. A refusal is honest on the day it
+   is written. Left in place, it is one refactor from silence.
 
 2. **The size argument decides the mechanism, not the surface.** ADR 0042's 23 MiB is a cost of
    linking ICU4X into *every* artifact. ADR 0062 has since made provider capabilities a typed set
@@ -106,12 +106,12 @@ pays only for what it reads. C is for the heap-touching part and nothing else. A
 cost is an argument about *which* of these to use, and a reason to make linkage lazier, not a
 reason to refuse.
 
-**5. Consequently, ADR 0042's deferral is scheduled, not open, and so is the interpreter's own
-drift from node.** `Promise.allKeyed` and its sibling come out or are recorded as a deliberate
-extension with a reason; `%TypedArray%` is named as node names it; an arity is node's arity. `Intl` links ICU4X on demand.
-The measurement in ADR 0042 stands as the reason it must be demand-driven rather than
-unconditional. The same applies to `crypto` (the refusing namespace installed on 2026-09-19 is a
-step on the way, not a destination), to `Temporal` behind its retain group, and to every backlog
+**5. Consequently, ADR 0042's deferral is scheduled, not open, and so is the interpreter's own drift
+from node.** `Promise.allKeyed` and its sibling come out or are recorded as a deliberate extension
+with a reason; `%TypedArray%` is named as node names it; an arity is node's arity. `Intl` links
+ICU4X on demand. The measurement in ADR 0042 stands as the reason it must be demand-driven rather
+than unconditional. The same applies to `crypto` (the refusing namespace installed on 2026-09-19 is
+a step on the way, not a destination), to `Temporal` behind its retain group, and to every backlog
 row in `BUILTIN_SURFACE_BACKLOG` whose reason begins "not implemented".
 
 ## Consequences
