@@ -2122,8 +2122,13 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     },
     AbsentAnswer {
         function: "kiln_c99_get_key",
-        sites: 1,
-        proved_by: "a hidden runtime slot no program can name",
+        sites: 2,
+        proved_by: "a hidden runtime slot no program can name, and a symbol the program made \
+                    (`@@symbol:` and `@@symbol-for:` keys, kiln_c99_key_is_program_symbol) that \
+                    reached a refusal: a built-in or exotic value carries such a symbol only \
+                    through the property store every read consults first, so a refusal from the \
+                    tables below it is absence. Well-known symbols are not in this row; a \
+                    refusal on one stands",
     },
     AbsentAnswer {
         function: "kiln_c99_probe_symbol",

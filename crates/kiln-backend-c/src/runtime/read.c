@@ -1732,7 +1732,20 @@ static int kiln_c99_get_key(kiln_host *host, kiln_value target, const kiln_strin
         if (key_value.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
         return kiln_c99_proxy_get(host, target, key_value, target, out, depth, thrown);
     }
-    return kiln_c99_get_own_kind(host, target, key, ikey, out, depth, thrown);
+    status = kiln_c99_get_own_kind(host, target, key, ikey, out, depth, thrown);
+    if (status == KILN_C99_CONTROL_ERROR && kiln_c99_key_is_program_symbol(key)) {
+        /* `Boolean[Symbol.for("immer-draftable")]`, which a bundled `immer` reads off every
+         * value's constructor. A built-in carries a program's symbol only through the store the
+         * read consulted first, so the refusal the tables raised for an unknown `@@` name is
+         * answered as the absence it is. A *well-known* symbol is not answered here: the
+         * language may put one on this receiver, and refusing is the honest report until the
+         * backend wires it. */
+        kiln_c99_diagnostic_detail = NULL;
+        KILN_C99_ABSENT("a symbol the program made, which a built-in can only carry through the "
+                        "store already consulted",
+                        out);
+    }
+    return status;
 }
 
 /* The machine's own read of a well-known symbol: `kiln_c99_to_primitive` asks every reference for

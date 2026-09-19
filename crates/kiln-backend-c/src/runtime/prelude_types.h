@@ -4,6 +4,25 @@ static inline int kiln_c99_key_is_reserved(const kiln_string *key) {
            kiln_string_unit_at(key, 1) == '@';
 }
 
+/* A symbol the program made -- `Symbol()` is stored as `@@symbol:<n>`, `Symbol.for(k)` as
+ * `@@symbol-for:<k>` -- as opposed to a well-known symbol (`@@iterator`) or one of the runtime's
+ * own slots (`@@state`). A built-in can carry one of these only through its property store, so
+ * a read that the store did not answer is absent by construction, never a member unbuilt. */
+static inline int kiln_c99_key_has_prefix(const kiln_string *key, const char *prefix) {
+    size_t at;
+    for (at = 0; prefix[at] != '\0'; ++at) {
+        if (at >= key->unit_len || kiln_string_unit_at(key, at) != (unsigned char)prefix[at]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static inline int kiln_c99_key_is_program_symbol(const kiln_string *key) {
+    return key != NULL && (kiln_c99_key_has_prefix(key, "@@symbol:") ||
+                           kiln_c99_key_has_prefix(key, "@@symbol-for:"));
+}
+
 /* =========================================================================
  * ADR 0053: 64-Bit Quiet-NaN Boxed Internal Value Representation
  * ========================================================================= */

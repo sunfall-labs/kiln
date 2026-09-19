@@ -1,6 +1,5 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 804
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -230,6 +229,7 @@ KILN_VALUE_RETURN_SIGNAL = 28
 #define KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE 97
 #define KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE 98
 #define KILN_C99_BUILTIN_BIGINT_PROTOTYPE 99
+#define KILN_C99_BUILTIN_CRYPTO 100
 #define KILN_C99_METHOD_ARRAY_AT 200
 #define KILN_C99_METHOD_ARRAY_FIND 201
 #define KILN_C99_METHOD_ARRAY_FIND_INDEX 202
@@ -780,6 +780,8 @@ _Static_assert(offsetof(kiln_value, ptr) == 8, "kiln_value.ptr shares the payloa
 _Static_assert(sizeof(kiln_value) == 16, "kiln_value fits the AAPCS64 register threshold");
 #endif
 static inline int kiln_c99_key_is_reserved(const kiln_string *key) {
+static inline int kiln_c99_key_has_prefix(const kiln_string *key, const char *prefix) {
+static inline int kiln_c99_key_is_program_symbol(const kiln_string *key) {
 typedef uint64_t kiln_val;
 #define KILN_QNAN_BASE          UINT64_C(0x7FF8000000000000)
 #define KILN_TAG_MASK           UINT64_C(0xFFFF000000000000)
@@ -1228,6 +1230,7 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
 static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_get_ikey(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_get_key(kiln_host *host, kiln_value target, const kiln_string *view,
+static int kiln_c99_probe_symbol(kiln_host *host, kiln_value target, const char *key,
 static int kiln_c99_get_site(kiln_host *host, kiln_value target, const kiln_string *view,
 static int kiln_c99_put_site_key(kiln_host *host, kiln_value target, const kiln_string *view,
 static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_string *view,
@@ -1939,6 +1942,8 @@ KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_search, "@@search");
 KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_species, "@@species");
 KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_split, "@@split");
 KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_unscopables, "@@unscopables");
+KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_dispose, "@@dispose");
+KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_async_dispose, "@@asyncDispose");
 #undef KILN_C99_STATIC_SYMBOL_KEY
 #define KILN_C99_WELL_KNOWN(key, description, description_len) \
 static const kiln_symbol kiln_c99_well_known[] = {
@@ -2135,6 +2140,7 @@ static int kiln_c99_intrinsic_ascii_view(const kiln_string *key, char buffer[256
 static kiln_value kiln_c99_key_value(const kiln_string *view, const kiln_string **canonical) {
 #include <assert.h>
 static kiln_value kiln_c99_stable_key_value(const kiln_string *stable) {
+static int kiln_c99_prototype_store_read(kiln_host *host, uint64_t prototype,
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_string *key,
 #if KILN_RETAIN_GROUP_NODE_HTTP
 #endif
@@ -2143,6 +2149,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
 #if KILN_RETAIN_GROUP_TEMPORAL
 #endif
 static int kiln_c99_get_key(kiln_host *host, kiln_value target, const kiln_string *key,
+static int kiln_c99_probe_symbol(kiln_host *host, kiln_value target, const char *key,
 static int kiln_c99_get_ikey(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object,
