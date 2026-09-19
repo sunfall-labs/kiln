@@ -421,6 +421,11 @@ pub struct ObjectData {
     /// Interpreter-owned Node server/socket/request/response state. Runtime drivers remain
     /// executor- and JavaScript-independent; this slot only ties one JS object to its adapter.
     node_object: Option<NodeObject>,
+    /// The Buffer brand on a `Uint8Array`'s slot: what `Buffer.isBuffer` answers and what
+    /// routes a member read through `Buffer.prototype` (the object the shared bootstrap assigns,
+    /// see `buffer_prototype`) before `Uint8Array.prototype`. Native keeps the same bit as
+    /// `is_buffer` on the view. Until 2026-09-19 every `Uint8Array` here was a Buffer.
+    buffer_brand: bool,
     /// `[[ShadowRealm]]`: the realm a `ShadowRealm` instance evaluates in.
     ///
     /// An internal slot rather than a property, because a program must not be able to read the
@@ -458,6 +463,7 @@ impl Default for ObjectData {
             properties: Vec::new(),
             error_brand: false,
             arguments_brand: false,
+            buffer_brand: false,
             // Objects start open; closing one is always something a program asked for.
             extensible: true,
             frozen: false,
@@ -6998,6 +7004,13 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
     if enter_runtime {
         if suspended_module {
             vm.run_node_event_loop_until_module(runtime)?;
+            // The entry is the module the loop is for: once its await has settled, whatever the
+            // continuation armed -- a timer, a server -- still has to run. Stopping here left
+            // `await x; setTimeout(f)` with `f` never called (fixed 2026-09-19); a dependency
+            // returns to its importer instead, which is what `until_module` is for.
+            if drain {
+                vm.run_node_event_loop(runtime)?;
+            }
         } else if drain {
             vm.run_node_event_loop(runtime)?;
         } else if vm.async_host.is_none() {
@@ -7021,6 +7034,25 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
             error_constructor: vm.error_constructor(&reason),
             trace,
         });
+    }
+    // The entry awaited something that never settled and the loop has nothing left that could
+    // settle it: a forgotten `resolve`, a server closed before the await. Node warns and exits
+    // 13; exiting 0 here read as success to every shell and CI until 2026-09-19 (issue 09 of
+    // `.scratch/full-runtime`). A dependency in that state is its importer's to report.
+    if suspended_module
+        && enter_runtime
+        && (drain || vm.async_host.is_none())
+        && vm.module_outcome().is_none()
+    {
+        let _ = host.call(
+            HostOp::WriteStderr,
+            &[HostValue::from(Value::String(
+                "Warning: Detected unsettled top-level await"
+                    .to_owned()
+                    .into(),
+            ))],
+        );
+        return Err(ExecutionError::ProcessExited(13));
     }
     // The loop refreshes before each instruction, so the body's *last* store is not in the
     // namespace yet. Nothing in this module can see the difference -- it has stopped running --
@@ -15565,7 +15597,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let text = arguments
                     .first()
                     .map_or_else(String::new, Value::to_display_string);
-                return Ok(node_bytes_value(text.into_bytes()));
+                return Ok(buffer::plain_bytes_value(text.into_bytes()));
             }
             Native::NodeFsExistsSync
             | Native::NodeFsReadFileSync
@@ -16529,6 +16561,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         // *or a BigInt* -- the one primitive in the list, and the reason a
                         // program can make its BigInts serialisable at all. Leaving it out meant
                         // `JSON.stringify(1n)` refused before the hook it was told to call.
+                        // A typed array is an object too; the one that carries a `toJSON`
+                        // is a Buffer, through `Buffer.prototype`.
                         if !matches!(
                             receiver,
                             Value::Object(_)
@@ -16537,6 +16571,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                 | Value::Temporal(_)
                                 | Value::Proxy(_)
                                 | Value::BigInt(_)
+                                | Value::TypedArray(_)
                         ) {
                             return Ok(receiver.clone());
                         }
@@ -22545,6 +22580,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     instruction,
                 );
             }
+            // A Buffer's chain reaches `Buffer.prototype` once the bootstrap has assigned it;
+            // before that the brand is the answer.
+            Value::Native(Native::NodeBufferGlobal, _) => match buffer_prototype() {
+                Some(prototype) => prototype,
+                None => {
+                    return Ok(matches!(value, Value::TypedArray(view) if is_buffer_view(view)));
+                }
+            },
             Value::Native(native, _) => match native.property("prototype") {
                 Some(prototype) => prototype,
                 None => return Ok(false),
@@ -27011,6 +27054,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             "__kilnHostModuleCreateRequire",
             Value::Native(Native::NodeModuleCreateRequire, realm),
         );
+        // Captured and deleted by the shared Buffer bootstrap (`kiln-builtins/src/buffer.ts`)
+        // in Node mode; published in every realm so the two engines' global surfaces agree.
+        globals.set_non_enumerable(
+            "__kilnBufferToString",
+            Value::Native(Native::NodeBufferToString, realm),
+        );
         globals.set_non_enumerable(
             "Intl",
             Value::Native(Native::Intl(intl::Op::Namespace), realm),
@@ -29957,7 +30006,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // its own primitive is what made `date + date` add two instants.
                 | Value::Date(_)
                 | Value::RegExp(_)
-        ) {
+        ) && !matches!(value, Value::TypedArray(view) if is_buffer_view(view))
+        {
+            // A typed array reduces to its element list without a call -- except a Buffer,
+            // whose `toString` is the decoder on `Buffer.prototype`: `String(buf)`, a template
+            // and `[buf].join()` all read the text, as node does.
             return Ok(value.clone());
         }
         // `@@toPrimitive` overrides both and is told which hint it is answering. The hint spelling
@@ -30006,9 +30059,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 continue;
             }
             let result = self.call_value(&method, value.clone(), Vec::new(), instruction)?;
+            // A `valueOf` that hands back the receiver -- `Object.prototype.valueOf` on a
+            // typed array -- has not answered; the walk goes on to `toString`.
             if !matches!(
                 result,
-                Value::Object(_) | Value::Function(_) | Value::Array(_)
+                Value::Object(_) | Value::Function(_) | Value::Array(_) | Value::TypedArray(_)
             ) {
                 return Ok(result);
             }
@@ -31906,6 +31961,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 method => method,
             },
+            // A Buffer reads its members off `Buffer.prototype` first; `length` and the rest
+            // of the view's own accessors are below and the prototype defines none of them.
+            Value::TypedArray(view)
+                if is_buffer_view(view) && buffer_prototype_own(name).is_some() =>
+            {
+                buffer_prototype_own(name).unwrap_or(Value::Undefined)
+            }
             Value::TypedArray(view) => match name {
                 "length" => builtin_accessor_slot(BuiltinAccessor::TypedArrayLength, target),
                 "byteLength" => {
@@ -31925,7 +31987,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 key if key == WellKnown::ToStringTag.property_key() => {
                     Value::String(view.kind.name().to_owned().into())
                 }
-                "toString" if view.kind == TypedKind::Uint8 => {
+                "toString" if view.kind == TypedKind::Uint8 && is_buffer_view(view) => {
                     Value::Native(Native::NodeBufferToString, RealmId::PRIMARY)
                 }
                 // The chain a view actually has, walked in the order it has it:
@@ -39740,6 +39802,12 @@ fn instance_of(value: &Value, constructor: &Value, error_prototype: Option<&Valu
         {
             return true;
         }
+        // A Buffer is a branded view, and `Buffer.prototype` -- when the bootstrap has assigned
+        // one -- is what the chain reaches; a `Uint8Array` without the brand is not one.
+        Value::Native(Native::NodeBufferGlobal, _) => match buffer_prototype() {
+            Some(prototype) => prototype,
+            None => return matches!(value, Value::TypedArray(view) if is_buffer_view(view)),
+        },
         // A Set or Map is an object carrying reserved state, so the test is for that state
         // rather than for a prototype the realm does not yet have as an object.
         Value::Native(kind @ (Native::SetConstructor | Native::MapConstructor), _) => {
@@ -39821,6 +39889,32 @@ fn in_realm(value: Value, realm: RealmId) -> Value {
         Value::Callback(method, RealmId::PRIMARY) => Value::Callback(method, realm),
         other => other,
     }
+}
+
+thread_local! {
+    /// `Buffer.prototype`: the object the shared bootstrap (`kiln-builtins/src/buffer.ts`)
+    /// assigns to the `Buffer` built-in's store. Held here as well because the two places that
+    /// need it -- a branded view's member read and `Object.getPrototypeOf` of one -- are free
+    /// functions of the value, with no store in hand. Written by `Intrinsics::install_key`.
+    static BUFFER_PROTOTYPE: RefCell<Option<Value>> = const { RefCell::new(None) };
+}
+
+/// The current `Buffer.prototype`, if a bootstrap has assigned one.
+fn buffer_prototype() -> Option<Value> {
+    BUFFER_PROTOTYPE.with(|slot| slot.borrow().clone())
+}
+
+/// An own property of `Buffer.prototype` by name, for a branded view's read.
+fn buffer_prototype_own(name: &str) -> Option<Value> {
+    match buffer_prototype()? {
+        Value::Object(object) => object.borrow().get_own(name).cloned(),
+        _ => None,
+    }
+}
+
+/// Whether a view carries the Buffer brand.
+fn is_buffer_view(view: &TypedArrayData) -> bool {
+    view.properties.borrow().buffer_brand
 }
 
 fn prototype_of(value: &Value) -> Value {
@@ -39972,6 +40066,9 @@ fn prototype_of(value: &Value) -> Value {
             realm,
         ),
         Value::DataView(_) => Value::Native(Native::PrototypeOf(PrototypeTable::DataView), realm),
+        Value::TypedArray(view) if is_buffer_view(view) && buffer_prototype().is_some() => {
+            buffer_prototype().unwrap_or(Value::Null)
+        }
         Value::TypedArray(view) => Value::Native(
             Native::PrototypeOf(PrototypeTable::TypedArrayFor(view.kind)),
             realm,
@@ -46867,6 +46964,12 @@ impl Intrinsics {
         };
         if matches!(property, Property::Accessor { .. }) {
             self.accessors.set(true);
+        }
+        if matches!(target, Value::Native(Native::NodeBufferGlobal, _))
+            && key.matches_ascii("prototype")
+            && let Property::Value(prototype) = &property
+        {
+            BUFFER_PROTOTYPE.with(|slot| *slot.borrow_mut() = Some(prototype.clone()));
         }
         self.materialize(target);
         let mut entries = self.entries.borrow_mut();

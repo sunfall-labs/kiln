@@ -58,8 +58,8 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
      * dispatch block. */
 #if KILN_RETAIN_GROUP_BUFFER
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_BUFFER) {
-        return kiln_c99_buffer_from(result,
-                                    argc > 0 ? args[0] : kiln_c99_number(0.0), thrown);
+        return kiln_c99_buffer_from(result, argc > 0 ? args[0] : kiln_c99_number(0.0), args,
+                                    argc, thrown);
     }
 #endif
     if (callee.tag == KILN_VALUE_PROXY) {

@@ -644,6 +644,13 @@ pub fn retained_method_groups(
     if members.has_open_world {
         return FULL;
     }
+    // `Buffer.prototype` is the shared TypeScript (`kiln-builtins/src/buffer.ts`), and its
+    // readers and writers truncate and range-check through `Math` and `Number`; a program that
+    // reaches Buffer -- by the global or through `fs`, a stream or a server -- reaches those,
+    // whether or not it spells them itself.
+    if mask & groups::BUFFER != 0 {
+        mask |= groups::MATH_NUMBER;
+    }
     mask
 }
 

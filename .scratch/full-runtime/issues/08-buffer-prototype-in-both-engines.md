@@ -1,6 +1,6 @@
 # Issue 08: `Buffer.prototype` exists in neither engine
 
-Status: open
+Status: fixed 2026-09-19
 Feature: full-runtime
 
 Found by the app-shaped probe `events-streams.mjs` (2026-09-19): every other line of an
@@ -55,6 +55,29 @@ What each engine needs underneath:
 `class B extends Uint8Array` is not the route: natively a subclass instance is an object
 (tag 9) and `subarray` on it refuses as "an array method this backend has not implemented",
 which is its own bug and a smaller one than this.
+
+## What landed
+
+`crates/kiln-builtins/src/buffer.ts`, appended to `WEB_BOOTSTRAP_SOURCE` so both engines run it
+in Node mode: `Buffer.prototype = Object.create(Uint8Array.prototype)` with the sixty-odd
+members, the hex/base64/latin1/utf16le codecs in TypeScript, and `from`/`alloc`/`concat`/
+`byteLength`/`compare`/`isEncoding`/`copyBytesFrom` over the engines' statics. The decoder is
+captured from `__kilnBufferToString` without a call, so a Node-mode program that never
+reaches Buffer boots with the group pruned; a program that does retains `Math`/`Number` too
+(`kiln-liveness`).
+
+Interpreter: `ObjectData.buffer_brand` on the view's slot (`node_bytes_value` sets it;
+`TextEncoder.encode` answers a plain `Uint8Array`), `Buffer.isBuffer` reads it, a branded
+view's member read and `Object.getPrototypeOf`/`instanceof` go through `Buffer.prototype`
+(recorded when the store write lands), `JSON.stringify` and `ToPrimitive` reach its `toJSON`
+and `toString`, and `Buffer.from(arrayBuffer, offset, length)` shares bytes.
+
+Native: `kiln_c99_buffer_prototype` reads the store; the `KILN_VALUE_TYPED_ARRAY` read arm,
+`getPrototypeOf`, `JSON.stringify` and `Array.prototype.join` consult it for `is_buffer` views;
+`Buffer.from` takes the ArrayBuffer window; `Buffer.byteLength` counts UTF-8 bytes.
+
+Probes: `conformance/native/buffer-prototype.mjs`, `buffer-edges.mjs`, `app-events-streams.mjs`,
+all node-identical in both engines.
 
 ## Acceptance
 

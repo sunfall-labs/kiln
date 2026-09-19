@@ -57,12 +57,12 @@ Test262 chunk does.
 ## What app-shaped programs hit (2026-09-19)
 
 Five twenty-line programs, each what a real project does in its first minute, run under node,
-the interpreter and native (`.scratch/full-runtime/probes/`, the green ones now in
-`conformance/native/app-*`). Everything they exposed was fixed the same day except two:
+the interpreter and native (`.scratch/full-runtime/probes/`, all five now in
+`conformance/native/app-*`). Everything they exposed was fixed the same day, including the
+exit status on an unsettled top-level await (issue 09: node's warning and 13, in both engines).
 
-* `Buffer.prototype` in neither engine (issue 08) -- `events-streams.mjs` is node-identical
-  on every other line.
-* The interpreter exits 0 on an unsettled top-level await where node exits 13 (issue 09).
+`Buffer.prototype` (issue 08) followed the same day: one TypeScript prototype for both engines
+over each engine's branded `Uint8Array`, and all five programs are node-identical in both.
 
 Fixed from the same probes: `Readable.from` never flowed and `Transform` never ended;
 `events.once`/`on`; `fs.rmSync`/`mkdtempSync` composed in TypeScript when the host lacks

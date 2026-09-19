@@ -1288,7 +1288,7 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             kiln_value bytes = kiln_c99_copy_text((const char *)completion->bytes,
                                                   (size_t)completion->bytes_len);
             kiln_value data;
-            int status = kiln_c99_buffer_from(&data, bytes, exception);
+            int status = kiln_c99_buffer_from(&data, bytes, NULL, 0, exception);
             if (status != KILN_C99_OK) return status;
             status = kiln_c99_node_emit((kiln_host *)host, stdin_stream, "data", data, 1, 0, exception);
             if (status != KILN_C99_OK) return status;

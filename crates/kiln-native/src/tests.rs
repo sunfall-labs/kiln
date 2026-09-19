@@ -3944,7 +3944,9 @@ setTimeout(function () { console.log(order.join(",")); }, 0);
     assert_eq!(run.exit_code, Some(0));
     assert_eq!(
         run.stdout,
-        b"true:true,a:2:true,nested,promise,micro,micro-from-tick\n"
+        // An ES module body runs inside a promise job, so the promise queue it filled drains
+        // before its ticks (node prints the same); a CommonJS body would put the ticks first.
+        b"true:true,promise,micro,a:2:true,nested,micro-from-tick\n"
     );
     assert!(run.stderr.is_empty());
 }

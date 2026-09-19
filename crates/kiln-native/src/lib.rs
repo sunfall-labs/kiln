@@ -5584,6 +5584,7 @@ extern int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
                               const kiln_value *arguments, kiln_value *result);
 extern int kiln_cli_write_result(kiln_value value);
 extern void kiln_cli_report_failure_in(int status, kiln_value value, const char *phase);
+extern void kiln_cli_warn(const char *message);
 extern kiln_value kiln_cli_last_host_error;
 extern kiln_value kiln_cli_describe_error(kiln_value value);
 extern int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
@@ -5859,6 +5860,8 @@ struct kiln_graph_context {
     kiln_graph_module_state module_states[MODULE_COUNT];
     size_t current_module;
     int roots_registered;
+    /* The entry's top-level await never settled with the loop out of work (node: warn, exit 13). */
+    int unsettled_entry;
     struct kiln_graph_require_context require_contexts[{runtime_context_count}];
 };
 
@@ -6276,12 +6279,17 @@ static int kiln_graph_enter(void *opaque) {
                     }}
                     if (promise->state == 0 /* KILN_C99_PENDING */) {{
                         *result = kiln_graph_diagnostic("top-level await", "unsettled");
-                        return KILN_C99_CONTROL_ERROR;
+                        {mark_unsettled}return KILN_C99_CONTROL_ERROR;
                     }}
                 }}
                 {}_publish_exports({exports});
                 state->phase = KILN_MODULE_EVALUATED;"#,
-                module.symbol
+                module.symbol,
+                mark_unsettled = if node.path == graph.entry() {
+                    "graph->unsettled_entry = 1;\n                        "
+                } else {
+                    ""
+                }
             )
             .unwrap();
             if node.path == graph.entry() {
@@ -6409,8 +6417,16 @@ static int kiln_graph_enter(void *opaque) {
         )
         .unwrap();
         evaluation.push_str(
-            "            state->body_started = 1;\n            status = context.module(context.host, context.result, context.imports, context.import_count, context.exports, context.export_count);\n            if (status == 0) status = kiln_c99_finish_module_checkpoint(host, result);\n",
+            "            state->body_started = 1;\n            status = context.module(context.host, context.result, context.imports, context.import_count, context.exports, context.export_count);\n",
         );
+        if node.path == graph.entry() && !is_async {
+            // The whole graph evaluates inside one job (a dependency's body runs synchronously
+            // before the entry's), so the checkpoint that follows is the entry's, once. An entry
+            // with a top-level await takes it below, once its completion is attached.
+            evaluation.push_str(
+                "            if (status == 0) status = kiln_c99_finish_module_checkpoint(host, result);\n",
+            );
+        }
         writeln!(
             evaluation,
             "            if (status != 0) {{ if (status != KILN_C99_THROWN && result->tag == KILN_VALUE_UNDEFINED) {{ if (status == KILN_C99_HOST_ERROR && kiln_cli_last_host_error.tag == KILN_VALUE_STRING && kiln_cli_last_host_error.len != 0) *result = kiln_cli_last_host_error; else *result = kiln_graph_diagnostic(\"module-enter\", {}); }} return status; }}",
@@ -6429,7 +6445,7 @@ static int kiln_graph_enter(void *opaque) {
                     status = kiln_c99_module_completion(host, *result, (uint32_t){index}, &continuation_promise, 1, NULL);
                     if (status != KILN_C99_OK) return status;
                     state->module_settling = 1;
-                    return 0;
+                    {checkpoint}return 0;
                 }}
                 if (promise != NULL && promise->state == 2 /* KILN_C99_REJECTED */) {{
                     *result = promise->value;
@@ -6438,7 +6454,15 @@ static int kiln_graph_enter(void *opaque) {
                 {}_publish_exports({exports});
                 state->phase = KILN_MODULE_EVALUATED;
             }}"#,
-                module.symbol
+                module.symbol,
+                // The entry's body suspended inside the evaluation job; the checkpoint that
+                // follows -- the promise queue before the tick lane -- runs once its completion
+                // is attached, so a rejection of the module promise is seen the ordinary way.
+                checkpoint = if node.path == graph.entry() {
+                    "status = kiln_c99_finish_module_checkpoint(host, result);\n                    if (status != KILN_C99_OK) return status;\n                    "
+                } else {
+                    ""
+                }
             )
             .unwrap();
         }
@@ -6577,6 +6601,7 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
     const char *phase = "realm creation";
     int status;
     int destroy_status;
+    int unsettled_entry = 0;
     graph.result.tag = KILN_VALUE_UNDEFINED;
     graph.entry_result.tag = KILN_VALUE_UNDEFINED;
     graph.host.call = kiln_graph_host_call;
@@ -6623,6 +6648,7 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
             } else if (promise->state == 0 /* KILN_C99_PENDING */) {
                 status = KILN_C99_CONTROL_ERROR;
                 phase = "the turn loop";
+                unsettled_entry = 1;
                 graph.result = kiln_graph_diagnostic("top-level await", "unsettled");
             } else if (promise->state == 1 /* KILN_C99_FULFILLED */) {
                 graph.entry_result = promise->value;
@@ -6647,6 +6673,15 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
         } else {
             graph.result = message;
         }
+    }
+    /* An entry whose top-level await never settled, with the loop out of work: node's answer is a
+     * warning and status 13 rather than a refusal, and both engines give that one. */
+    if (status == KILN_C99_CONTROL_ERROR && (unsettled_entry || graph.unsettled_entry)) {
+        kiln_cli_warn("Warning: Detected unsettled top-level await");
+        (void)kiln_realm_destroy(realm);
+        /* `main` folds every failure to 1, the way it does a refusal; this is the one status
+         * a program's caller is told apart by, as `process.exit(code)` is. */
+        exit(13);
     }
     if (status != 0) kiln_cli_report_failure_in(status, graph.result, phase);
     if (writes_result && status == 0 && kiln_cli_write_result(graph.entry_result) != 0) {

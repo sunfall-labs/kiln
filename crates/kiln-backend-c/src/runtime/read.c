@@ -639,6 +639,26 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                                                     : kiln_c99_typed_constructor(view->kind));
             return KILN_C99_OK;
         }
+        if (view->is_buffer) {
+            /* `Buffer.prototype` -- the object the shared bootstrap assigned to the `Buffer`
+             * built-in's store (kiln-builtins/src/buffer.ts) -- comes before the typed-array
+             * chain, and before the one C method below, which the bootstrap captured for its own
+             * `toString` before it assigned the prototype. An own member there is the answer;
+             * anything else falls through to what a `Uint8Array` has. */
+            kiln_value proto;
+            int proto_status = kiln_c99_buffer_prototype(host, &proto, depth, thrown);
+            if (proto_status != KILN_C99_OK) return proto_status;
+            if (proto.tag == KILN_VALUE_OBJECT) {
+                kiln_object *properties = kiln_c99_object_of(proto);
+                size_t pidx;
+                if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
+                for (pidx = 0; pidx < properties->count; ++pidx) {
+                    if (kiln_c99_same_key_view(&properties->properties[pidx], key)) {
+                        return kiln_c99_get_key(host, proto, key, ikey, out, depth, thrown);
+                    }
+                }
+            }
+        }
         if (view->is_buffer && kiln_c99_same_name_key(key, "toString")) {
             *out = kiln_c99_method(KILN_C99_METHOD_BUFFER_TO_STRING);
             return KILN_C99_OK;
