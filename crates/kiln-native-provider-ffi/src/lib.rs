@@ -1924,17 +1924,9 @@ mod realm {
                     None => return INVALID_ARGUMENT,
                 }
             };
-            let parsed = match base {
-                Some(base) => match url::Url::parse(base) {
-                    Ok(base) => base.join(input),
-                    Err(_) => return URL_INVALID,
-                },
-                None => url::Url::parse(input),
-            };
-            let Ok(parsed) = parsed else {
+            let Ok(record) = kiln_url::record(input, base) else {
                 return URL_INVALID;
             };
-            let record = url_record(&parsed);
             unsafe { spill(record.as_bytes(), out, capacity, out_len) }
         })
     }
@@ -1962,76 +1954,9 @@ mod realm {
             let Some(value) = (unsafe { borrowed_str(value, value_len) }) else {
                 return INVALID_ARGUMENT;
             };
-            let Ok(mut parsed) = url::Url::parse(href) else {
+            let Ok(record) = kiln_url::set(href, field, value) else {
                 return URL_INVALID;
             };
-            match field {
-                0 => match url::Url::parse(value) {
-                    Ok(next) => parsed = next,
-                    Err(_) => return URL_INVALID,
-                },
-                1 => {
-                    let scheme = value.split(':').next().unwrap_or("");
-                    let _ = parsed.set_scheme(scheme);
-                }
-                2 => {
-                    let _ = parsed.set_username(value);
-                }
-                3 => {
-                    let _ = parsed.set_password(if value.is_empty() { None } else { Some(value) });
-                }
-                4 => {
-                    // `host` takes `hostname[:port]`; a bare hostname leaves the port alone.
-                    let (hostname, port) = match value.rsplit_once(':') {
-                        Some((h, p))
-                            if !p.is_empty()
-                                && p.bytes().all(|b| b.is_ascii_digit())
-                                && !h.ends_with(']')
-                                || (h.contains('[') && h.ends_with(']')) =>
-                        {
-                            (h, Some(p))
-                        }
-                        _ => (value, None),
-                    };
-                    if parsed.set_host(Some(hostname)).is_ok() {
-                        if let Some(port) = port {
-                            let _ = parsed.set_port(port.parse::<u16>().ok());
-                        }
-                    }
-                }
-                5 => {
-                    let _ = parsed.set_host(Some(value));
-                }
-                6 => {
-                    let digits: String = value.chars().take_while(char::is_ascii_digit).collect();
-                    if digits.is_empty() {
-                        if value.is_empty() {
-                            let _ = parsed.set_port(None);
-                        }
-                    } else if let Ok(port) = digits.parse::<u16>() {
-                        let _ = parsed.set_port(Some(port));
-                    }
-                }
-                7 => {
-                    if !parsed.cannot_be_a_base() {
-                        parsed.set_path(value);
-                    }
-                }
-                8 => {
-                    let query = value.strip_prefix('?').unwrap_or(value);
-                    parsed.set_query(if query.is_empty() { None } else { Some(query) });
-                }
-                9 => {
-                    let fragment = value.strip_prefix('#').unwrap_or(value);
-                    parsed.set_fragment(if fragment.is_empty() {
-                        None
-                    } else {
-                        Some(fragment)
-                    });
-                }
-                _ => return INVALID_ARGUMENT,
-            }
-            let record = url_record(&parsed);
             unsafe { spill(record.as_bytes(), out, capacity, out_len) }
         })
     }
@@ -2097,34 +2022,6 @@ mod realm {
     /// The input did not parse as a URL: the constructor's `TypeError`, kept apart from the
     /// ABI's own statuses so the caller can throw rather than refuse.
     pub const URL_INVALID: i32 = 2;
-
-    fn url_record(parsed: &url::Url) -> String {
-        use url::Position;
-        let host = &parsed[Position::BeforeHost..Position::AfterPort];
-        let port = parsed.port().map(|p| p.to_string()).unwrap_or_default();
-        let search = match parsed.query() {
-            Some(q) if !q.is_empty() => format!("?{q}"),
-            _ => String::new(),
-        };
-        let hash = match parsed.fragment() {
-            Some(f) if !f.is_empty() => format!("#{f}"),
-            _ => String::new(),
-        };
-        [
-            parsed.as_str(),
-            &parsed.origin().ascii_serialization(),
-            &format!("{}:", parsed.scheme()),
-            parsed.username(),
-            parsed.password().unwrap_or(""),
-            host,
-            parsed.host_str().unwrap_or(""),
-            &port,
-            parsed.path(),
-            &search,
-            &hash,
-        ]
-        .join("\0")
-    }
 
     /// `path.relative(from, to)`, from the same shared implementation.
     ///

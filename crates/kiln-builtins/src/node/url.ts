@@ -127,7 +127,9 @@ class URLSearchParamsPolyfill {
 export const URLSearchParams: any =
   typeof (globalThis as any).URLSearchParams !== "undefined"
     ? (globalThis as any).URLSearchParams
-    : URLSearchParamsPolyfill;
+    : typeof (globalThis as any).URL === "function" && (globalThis as any).URL.prototype && "searchParams" in (globalThis as any).URL.prototype
+      ? new (globalThis as any).URL("http://localhost/").searchParams.constructor
+      : URLSearchParamsPolyfill;
 
 
 export function fileURLToPath(url: any): string {
@@ -258,7 +260,7 @@ export function parse(
   return result;
 }
 
-export class URL {
+class URLPolyfill {
   href: string;
   origin: string;
   protocol: string;
@@ -337,6 +339,12 @@ export class URL {
     return this.href;
   }
 }
+
+// `require("node:url").URL` is the global `URL` in node, one object under both names; the
+// shared TypeScript class (`kiln-builtins/src/url.ts`) publishes it in both engines before this
+// module runs. The polyfill above stands in only where no global exists.
+export const URL: any =
+  typeof (globalThis as any).URL === "function" ? (globalThis as any).URL : URLPolyfill;
 
 export function format(urlObj: any): string {
   if (typeof urlObj === "string") {
@@ -434,14 +442,7 @@ const urlModule = {
 };
 urlModule.default = urlModule;
 
-try {
-  if (
-    typeof (globalThis as any).URL === "undefined" ||
-    !(new (globalThis as any).URL("http://localhost").protocol)
-  ) {
-    (globalThis as any).URL = URL;
-  }
-} catch (_) {
+if (typeof (globalThis as any).URL !== "function") {
   (globalThis as any).URL = URL;
 }
 if (typeof (globalThis as any).URLSearchParams === "undefined") {

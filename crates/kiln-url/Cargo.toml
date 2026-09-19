@@ -1,0 +1,12 @@
+[package]
+name = "kiln-url"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# `new URL(input, base)` and the URL setters over the `url` crate, as the record the shared
+# TypeScript `URL` (`kiln-builtins/src/url.ts`) reads: one implementation beneath the interpreter
+# and the native provider, for the reason `kiln-node-path` sits there (ADR 0004, ADR 0063 rule 4).
+[dependencies]
+url = { workspace = true }

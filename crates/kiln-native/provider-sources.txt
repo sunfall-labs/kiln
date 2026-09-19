@@ -54,3 +54,5 @@ crates/kiln-native-provider-contract/Cargo.toml
 crates/kiln-native-provider-contract/src/lib.rs
 crates/kiln-native-provider-contract/src/main.rs
 crates/kiln-native/Cargo.toml
+crates/kiln-url/Cargo.toml
+crates/kiln-url/src/lib.rs
