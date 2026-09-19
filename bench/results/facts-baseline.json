@@ -187874,15 +187874,18 @@
                 },
                 {
                   "id": 26,
-                  "kind": "Call"
+                  "kind": "GetProperty",
+                  "detail": "\"rmSync\""
                 },
                 {
                   "id": 27,
-                  "kind": "Call"
+                  "kind": "GetProperty",
+                  "detail": "\"rmSync\""
                 },
                 {
                   "id": 28,
-                  "kind": "Call"
+                  "kind": "MakeFunction",
+                  "detail": "proto #8"
                 },
                 {
                   "id": 29,
@@ -187950,8 +187953,7 @@
                 },
                 {
                   "id": 45,
-                  "kind": "GetProperty",
-                  "detail": "\"access\""
+                  "kind": "Call"
                 },
                 {
                   "id": 46,
@@ -187960,7 +187962,7 @@
                 {
                   "id": 47,
                   "kind": "GetProperty",
-                  "detail": "\"appendFile\""
+                  "detail": "\"access\""
                 },
                 {
                   "id": 48,
@@ -187969,7 +187971,7 @@
                 {
                   "id": 49,
                   "kind": "GetProperty",
-                  "detail": "\"chmod\""
+                  "detail": "\"appendFile\""
                 },
                 {
                   "id": 50,
@@ -187978,7 +187980,7 @@
                 {
                   "id": 51,
                   "kind": "GetProperty",
-                  "detail": "\"chown\""
+                  "detail": "\"chmod\""
                 },
                 {
                   "id": 52,
@@ -187987,7 +187989,7 @@
                 {
                   "id": 53,
                   "kind": "GetProperty",
-                  "detail": "\"copyFile\""
+                  "detail": "\"chown\""
                 },
                 {
                   "id": 54,
@@ -187996,7 +187998,7 @@
                 {
                   "id": 55,
                   "kind": "GetProperty",
-                  "detail": "\"cp\""
+                  "detail": "\"copyFile\""
                 },
                 {
                   "id": 56,
@@ -188005,7 +188007,7 @@
                 {
                   "id": 57,
                   "kind": "GetProperty",
-                  "detail": "\"glob\""
+                  "detail": "\"cp\""
                 },
                 {
                   "id": 58,
@@ -188014,7 +188016,7 @@
                 {
                   "id": 59,
                   "kind": "GetProperty",
-                  "detail": "\"link\""
+                  "detail": "\"glob\""
                 },
                 {
                   "id": 60,
@@ -188023,7 +188025,7 @@
                 {
                   "id": 61,
                   "kind": "GetProperty",
-                  "detail": "\"lstat\""
+                  "detail": "\"link\""
                 },
                 {
                   "id": 62,
@@ -188032,7 +188034,7 @@
                 {
                   "id": 63,
                   "kind": "GetProperty",
-                  "detail": "\"mkdir\""
+                  "detail": "\"lstat\""
                 },
                 {
                   "id": 64,
@@ -188041,7 +188043,7 @@
                 {
                   "id": 65,
                   "kind": "GetProperty",
-                  "detail": "\"mkdtemp\""
+                  "detail": "\"mkdir\""
                 },
                 {
                   "id": 66,
@@ -188050,7 +188052,7 @@
                 {
                   "id": 67,
                   "kind": "GetProperty",
-                  "detail": "\"readdir\""
+                  "detail": "\"mkdtemp\""
                 },
                 {
                   "id": 68,
@@ -188059,7 +188061,7 @@
                 {
                   "id": 69,
                   "kind": "GetProperty",
-                  "detail": "\"readFile\""
+                  "detail": "\"readdir\""
                 },
                 {
                   "id": 70,
@@ -188068,7 +188070,7 @@
                 {
                   "id": 71,
                   "kind": "GetProperty",
-                  "detail": "\"readlink\""
+                  "detail": "\"readFile\""
                 },
                 {
                   "id": 72,
@@ -188077,7 +188079,7 @@
                 {
                   "id": 73,
                   "kind": "GetProperty",
-                  "detail": "\"realpath\""
+                  "detail": "\"readlink\""
                 },
                 {
                   "id": 74,
@@ -188086,7 +188088,7 @@
                 {
                   "id": 75,
                   "kind": "GetProperty",
-                  "detail": "\"rename\""
+                  "detail": "\"realpath\""
                 },
                 {
                   "id": 76,
@@ -188095,7 +188097,7 @@
                 {
                   "id": 77,
                   "kind": "GetProperty",
-                  "detail": "\"rm\""
+                  "detail": "\"rename\""
                 },
                 {
                   "id": 78,
@@ -188104,7 +188106,7 @@
                 {
                   "id": 79,
                   "kind": "GetProperty",
-                  "detail": "\"rmdir\""
+                  "detail": "\"rm\""
                 },
                 {
                   "id": 80,
@@ -188113,7 +188115,7 @@
                 {
                   "id": 81,
                   "kind": "GetProperty",
-                  "detail": "\"stat\""
+                  "detail": "\"rmdir\""
                 },
                 {
                   "id": 82,
@@ -188122,7 +188124,7 @@
                 {
                   "id": 83,
                   "kind": "GetProperty",
-                  "detail": "\"symlink\""
+                  "detail": "\"stat\""
                 },
                 {
                   "id": 84,
@@ -188131,7 +188133,7 @@
                 {
                   "id": 85,
                   "kind": "GetProperty",
-                  "detail": "\"truncate\""
+                  "detail": "\"symlink\""
                 },
                 {
                   "id": 86,
@@ -188140,7 +188142,7 @@
                 {
                   "id": 87,
                   "kind": "GetProperty",
-                  "detail": "\"unlink\""
+                  "detail": "\"truncate\""
                 },
                 {
                   "id": 88,
@@ -188149,7 +188151,7 @@
                 {
                   "id": 89,
                   "kind": "GetProperty",
-                  "detail": "\"utimes\""
+                  "detail": "\"unlink\""
                 },
                 {
                   "id": 90,
@@ -188158,7 +188160,7 @@
                 {
                   "id": 91,
                   "kind": "GetProperty",
-                  "detail": "\"watch\""
+                  "detail": "\"utimes\""
                 },
                 {
                   "id": 92,
@@ -188167,18 +188169,19 @@
                 {
                   "id": 93,
                   "kind": "GetProperty",
-                  "detail": "\"writeFile\""
+                  "detail": "\"watch\""
                 },
                 {
                   "id": 94,
                   "kind": "Call"
                 },
                 {
-                  "id": 97,
-                  "kind": "Call"
+                  "id": 95,
+                  "kind": "GetProperty",
+                  "detail": "\"writeFile\""
                 },
                 {
-                  "id": 98,
+                  "id": 96,
                   "kind": "Call"
                 },
                 {
@@ -188215,15 +188218,18 @@
                 },
                 {
                   "id": 107,
-                  "kind": "Call"
+                  "kind": "GetProperty",
+                  "detail": "\"mkdtempSync\""
                 },
                 {
                   "id": 108,
-                  "kind": "Call"
+                  "kind": "GetProperty",
+                  "detail": "\"mkdtempSync\""
                 },
                 {
                   "id": 109,
-                  "kind": "Call"
+                  "kind": "MakeFunction",
+                  "detail": "proto #9"
                 },
                 {
                   "id": 110,
@@ -188231,42 +188237,38 @@
                 },
                 {
                   "id": 111,
-                  "kind": "NewArray"
+                  "kind": "Call"
                 },
                 {
                   "id": 112,
-                  "kind": "MakeFunction",
-                  "detail": "proto #8"
+                  "kind": "Call"
                 },
                 {
                   "id": 113,
-                  "kind": "SetPropertyStrict",
-                  "detail": "\"@@private:0:%brand\""
+                  "kind": "Call"
                 },
                 {
                   "id": 114,
-                  "kind": "GetProperty",
-                  "detail": "\"prototype\""
+                  "kind": "Call"
                 },
                 {
                   "id": 115,
-                  "kind": "GetProperty",
-                  "detail": "\"prototype\""
+                  "kind": "NewArray"
                 },
                 {
                   "id": 116,
                   "kind": "MakeFunction",
-                  "detail": "proto #9"
+                  "detail": "proto #10"
                 },
                 {
                   "id": 117,
-                  "kind": "GetProperty",
-                  "detail": "\"prototype\""
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"@@private:0:%brand\""
                 },
                 {
                   "id": 118,
-                  "kind": "MakeFunction",
-                  "detail": "proto #10"
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
                 },
                 {
                   "id": 119,
@@ -188310,7 +188312,8 @@
                 },
                 {
                   "id": 127,
-                  "kind": "NewArray"
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
                 },
                 {
                   "id": 128,
@@ -188319,33 +188322,32 @@
                 },
                 {
                   "id": 129,
-                  "kind": "SetPropertyStrict",
-                  "detail": "\"@@private:1:%brand\""
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
                 },
                 {
                   "id": 130,
-                  "kind": "GetProperty",
-                  "detail": "\"prototype\""
-                },
-                {
-                  "id": 131,
-                  "kind": "GetProperty",
-                  "detail": "\"prototype\""
-                },
-                {
-                  "id": 132,
                   "kind": "MakeFunction",
                   "detail": "proto #16"
                 },
                 {
+                  "id": 131,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 132,
+                  "kind": "MakeFunction",
+                  "detail": "proto #17"
+                },
+                {
                   "id": 133,
-                  "kind": "GetProperty",
-                  "detail": "\"prototype\""
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"@@private:1:%brand\""
                 },
                 {
                   "id": 134,
-                  "kind": "MakeFunction",
-                  "detail": "proto #17"
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
                 },
                 {
                   "id": 135,
@@ -188398,7 +188400,27 @@
                   "detail": "proto #22"
                 },
                 {
+                  "id": 145,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
                   "id": 146,
+                  "kind": "MakeFunction",
+                  "detail": "proto #23"
+                },
+                {
+                  "id": 147,
+                  "kind": "GetProperty",
+                  "detail": "\"prototype\""
+                },
+                {
+                  "id": 148,
+                  "kind": "MakeFunction",
+                  "detail": "proto #24"
+                },
+                {
+                  "id": 150,
                   "kind": "SetPropertyStrict",
                   "detail": "\"default\""
                 }
@@ -188592,6 +188614,161 @@
                   "id": 0,
                   "kind": "MakeFunction",
                   "detail": "proto #6"
+                }
+              ]
+            },
+            {
+              "name": "rmSync",
+              "parameter_types": [
+                "Unknown",
+                "Unknown"
+              ],
+              "return_type": "Undefined",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "Call"
+                },
+                {
+                  "id": 1,
+                  "kind": "GetProperty",
+                  "detail": "\"recursive\""
+                },
+                {
+                  "id": 2,
+                  "kind": "GetProperty",
+                  "detail": "\"force\""
+                },
+                {
+                  "id": 3,
+                  "kind": "Call"
+                },
+                {
+                  "id": 4,
+                  "kind": "CallMethod",
+                  "detail": "\"isDirectory\""
+                },
+                {
+                  "id": 5,
+                  "kind": "Call"
+                },
+                {
+                  "id": 7,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"code\""
+                },
+                {
+                  "id": 8,
+                  "kind": "SetPropertyStrict",
+                  "detail": "\"path\""
+                },
+                {
+                  "id": 9,
+                  "kind": "Call"
+                },
+                {
+                  "id": 10,
+                  "kind": "CallMethod",
+                  "detail": "\"@@iterator\""
+                },
+                {
+                  "id": 11,
+                  "kind": "GetProperty",
+                  "detail": "\"next\""
+                },
+                {
+                  "id": 12,
+                  "kind": "NewArray"
+                },
+                {
+                  "id": 15,
+                  "kind": "GetProperty",
+                  "detail": "\"done\""
+                },
+                {
+                  "id": 16,
+                  "kind": "GetProperty",
+                  "detail": "\"value\""
+                },
+                {
+                  "id": 17,
+                  "kind": "Call"
+                },
+                {
+                  "id": 19,
+                  "kind": "Call"
+                },
+                {
+                  "id": 20,
+                  "kind": "GetProperty",
+                  "detail": "\"return\""
+                },
+                {
+                  "id": 21,
+                  "kind": "CallMethod",
+                  "detail": "\"return\""
+                },
+                {
+                  "id": 22,
+                  "kind": "Call"
+                },
+                {
+                  "id": 23,
+                  "kind": "Call"
+                }
+              ]
+            },
+            {
+              "name": "mkdtempSync",
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": false,
+              "can_throw": true,
+              "reads_arguments": false,
+              "sites": [
+                {
+                  "id": 0,
+                  "kind": "CallMethod",
+                  "detail": "\"random\""
+                },
+                {
+                  "id": 1,
+                  "kind": "GetProperty",
+                  "detail": "\"length\""
+                },
+                {
+                  "id": 2,
+                  "kind": "CallMethod",
+                  "detail": "\"floor\""
+                },
+                {
+                  "id": 3,
+                  "kind": "GetComputed"
+                },
+                {
+                  "id": 4,
+                  "kind": "Call"
+                },
+                {
+                  "id": 5,
+                  "kind": "Call"
+                },
+                {
+                  "id": 6,
+                  "kind": "Call"
+                },
+                {
+                  "id": 7,
+                  "kind": "Call"
+                },
+                {
+                  "id": 8,
+                  "kind": "Call"
                 }
               ]
             },

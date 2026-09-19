@@ -1,6 +1,6 @@
 {
  "errors": [],
- "native_runs": 926,
+ "native_runs": 925,
  "node_version": "v25.9.0",
  "receivers": {
   "AbortController": {
@@ -4222,6 +4222,7 @@
    "kind": "static",
    "native": {
     "@@species": "function",
+    "groupBy": "function",
     "length": "number 0",
     "name": "string \"Map\"",
     "prototype": "object"
@@ -4245,9 +4246,7 @@
     "prototype"
    ],
    "node_only": false,
-   "refused": {
-    "groupBy": "refusal: instruction=128 operation=GetProperty(groupBy) detail=a member the language puts on this built-in and this backend has not built function=Map receiver_tag=8"
-   },
+   "refused": {},
    "self_description": null,
    "self_interpreted": {
     "(itself)": "function",
@@ -5066,6 +5065,7 @@
     "getOwnPropertyNames": "function",
     "getOwnPropertySymbols": "function",
     "getPrototypeOf": "function",
+    "groupBy": "function",
     "hasOwn": "function",
     "is": "function",
     "isExtensible": "function",
@@ -5160,8 +5160,7 @@
    ],
    "node_only": false,
    "refused": {
-    "groupBy": "refusal: instruction=620 operation=GetProperty(groupBy) detail=a member the language puts on this built-in and this backend has not built function=Object receiver_tag=8",
-    "isSealed": "refusal: instruction=48 operation=GetProperty(isSealed) detail=a member the language puts on this built-in and this backend has not built function=Object receiver_tag=8",
+    "isSealed": "refusal: instruction=646 operation=GetProperty(isSealed) detail=a member the language puts on this built-in and this backend has not built function=Object receiver_tag=8",
     "seal": "refusal: instruction=74 operation=GetProperty(seal) detail=a member the language puts on this built-in and this backend has not built function=Object receiver_tag=8"
    },
    "self_description": null,
@@ -10853,6 +10852,7 @@
     "setImmediate": "function",
     "setInterval": "function",
     "setTimeout": "function",
+    "structuredClone": "function",
     "undefined": "undefined",
     "unescape": "function"
    },
@@ -10942,6 +10942,7 @@
     "setImmediate": "function",
     "setInterval": "function",
     "setTimeout": "function",
+    "structuredClone": "function",
     "undefined": "undefined",
     "unescape": "function"
    },
@@ -11031,6 +11032,7 @@
     "setImmediate",
     "setInterval",
     "setTimeout",
+    "structuredClone",
     "undefined",
     "unescape"
    ],
@@ -11320,16 +11322,16 @@
    ],
    "node_only": false,
    "refused": {
-    "$262AgentBroadcast": "emission failed: unsupported native emission: host realm facility $262AgentBroadcast at instruction 2283",
-    "$262AgentGetReport": "emission failed: unsupported native emission: host realm facility $262AgentGetReport at instruction 2283",
-    "$262AgentLeaving": "emission failed: unsupported native emission: host realm facility $262AgentLeaving at instruction 2283",
-    "$262AgentMonotonicNow": "emission failed: unsupported native emission: host realm facility $262AgentMonotonicNow at instruction 2283",
-    "$262AgentReceiveBroadcast": "emission failed: unsupported native emission: host realm facility $262AgentReceiveBroadcast at instruction 2283",
-    "$262AgentReport": "emission failed: unsupported native emission: host realm facility $262AgentReport at instruction 2283",
-    "$262AgentSleep": "emission failed: unsupported native emission: host realm facility $262AgentSleep at instruction 2283",
-    "$262AgentStart": "emission failed: unsupported native emission: host realm facility $262AgentStart at instruction 2283",
-    "$262CreateRealm": "emission failed: unsupported native emission: host realm facility $262CreateRealm at instruction 2283",
-    "$262EvalScript": "emission failed: unsupported native emission: host realm facility $262EvalScript at instruction 2283",
+    "$262AgentBroadcast": "emission failed: unsupported native emission: host realm facility $262AgentBroadcast at instruction 2309",
+    "$262AgentGetReport": "emission failed: unsupported native emission: host realm facility $262AgentGetReport at instruction 2309",
+    "$262AgentLeaving": "emission failed: unsupported native emission: host realm facility $262AgentLeaving at instruction 2309",
+    "$262AgentMonotonicNow": "emission failed: unsupported native emission: host realm facility $262AgentMonotonicNow at instruction 2309",
+    "$262AgentReceiveBroadcast": "emission failed: unsupported native emission: host realm facility $262AgentReceiveBroadcast at instruction 2309",
+    "$262AgentReport": "emission failed: unsupported native emission: host realm facility $262AgentReport at instruction 2309",
+    "$262AgentSleep": "emission failed: unsupported native emission: host realm facility $262AgentSleep at instruction 2309",
+    "$262AgentStart": "emission failed: unsupported native emission: host realm facility $262AgentStart at instruction 2309",
+    "$262CreateRealm": "emission failed: unsupported native emission: host realm facility $262CreateRealm at instruction 2309",
+    "$262EvalScript": "emission failed: unsupported native emission: host realm facility $262EvalScript at instruction 2309",
     "ShadowRealm": "emission failed: unsupported native emission: host realm facility ShadowRealm at instruction 1113"
    },
    "self_description": null,
@@ -12341,6 +12343,8 @@
     "length": "number 0",
     "listenerCount": "function",
     "name": "string \"EventEmitter\"",
+    "on": "function",
+    "once": "function",
     "prototype": "object",
     "setMaxListeners": "function"
    },
@@ -12358,6 +12362,8 @@
     "length": "number 0",
     "listenerCount": "function",
     "name": "string \"EventEmitter\"",
+    "on": "function",
+    "once": "function",
     "prototype": "object",
     "setMaxListeners": "function"
    },
@@ -12372,6 +12378,8 @@
     "getMaxListeners",
     "init",
     "listenerCount",
+    "on",
+    "once",
     "setMaxListeners"
    ],
    "node": {
@@ -15329,12 +15337,56 @@
    },
    "unreachable": null
   },
+  "structuredClone": {
+   "expr": "globalThis.structuredClone",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"structuredClone\""
+   },
+   "kind": "static",
+   "native": {
+    "length": "number 1",
+    "name": "string \"structuredClone\""
+   },
+   "native_names": [],
+   "node": {
+    "length": "number 2",
+    "name": "string \"structuredClone\"",
+    "prototype": "object"
+   },
+   "node_names": [
+    "length",
+    "name",
+    "prototype"
+   ],
+   "node_only": false,
+   "refused": {},
+   "self_description": null,
+   "self_interpreted": {
+    "(itself)": "function",
+    "(itself).name": "string \"structuredClone\""
+   },
+   "self_native": {
+    "(itself)": "function",
+    "(itself).name": "string \"structuredClone\""
+   },
+   "self_node": {
+    "(itself)": "function",
+    "(itself).name": "string \"structuredClone\""
+   },
+   "self_refused": {},
+   "unreachable": null
+  },
   "structuredClone.prototype": {
    "expr": "globalThis.structuredClone.prototype",
    "interpreted": {},
    "kind": "prototype",
-   "native": {},
-   "native_names": null,
+   "native": {
+    "constructor": "function"
+   },
+   "native_names": [
+    "constructor"
+   ],
    "node": {
     "constructor": "function"
    },
@@ -15343,17 +15395,18 @@
    ],
    "node_only": true,
    "refused": {},
-   "self_description": "the receiver is absent natively",
+   "self_description": null,
    "self_interpreted": {},
    "self_native": {
-    "(itself)": "undefined"
+    "(itself)": "object",
+    "(itself).name": "undefined"
    },
    "self_node": {
     "(itself)": "object",
     "(itself).name": "undefined"
    },
    "self_refused": {},
-   "unreachable": "native: receiver is undefined"
+   "unreachable": null
   },
   "unescape": {
    "expr": "globalThis.unescape",
