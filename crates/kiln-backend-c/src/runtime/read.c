@@ -930,6 +930,14 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
              * `m.forEach(f)` into "undefined is not a function" three frames from the cause, so
              * it says so here -- but only for a name the language actually puts on this
              * collection's prototype. Anything else is absent, and absent is undefined. */
+            if (!collection->is_weak) {
+                int in_store;
+                status = kiln_c99_prototype_store_read(
+                    host,
+                    collection->is_map ? KILN_C99_BUILTIN_MAP_PROTOTYPE : KILN_C99_BUILTIN_SET_PROTOTYPE,
+                    key, ikey, out, depth, thrown, &in_store);
+                if (status != KILN_C99_OK || in_store) return status;
+            }
             if (!kiln_c99_is_collection_member(collection, intrinsic_key, intrinsic_len)) {
                 KILN_C99_ABSENT("not a member of this collection's prototype; "
                                 "kiln_c99_is_collection_member holds the ones that are",
@@ -955,12 +963,13 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             {"getUTCMinutes", KILN_C99_METHOD_GET_MINUTES},
             {"getUTCSeconds", KILN_C99_METHOD_GET_SECONDS},
             {"getUTCMilliseconds", KILN_C99_METHOD_GET_MILLISECONDS},
-            {"toUTCString", KILN_C99_METHOD_DATE_TO_STRING},
-            {"toLocaleString", KILN_C99_METHOD_DATE_TO_STRING},
-            {"toLocaleDateString", KILN_C99_METHOD_DATE_TO_STRING},
-            {"toLocaleTimeString", KILN_C99_METHOD_DATE_TO_STRING},
-            {"toDateString", KILN_C99_METHOD_DATE_TO_STRING},
-            {"toTimeString", KILN_C99_METHOD_DATE_TO_STRING},
+            /* `toUTCString`, `toDateString` and `toTimeString` were aliased to `toString` here
+             * and answered its whole spelling for all three -- `Sat Sep 19 2026 00:00:00 GMT+0000
+             * (Coordinated Universal Time)` where node says `Sat, 19 Sep 2026 00:00:00 GMT` -- a
+             * plausible wrong string. They are answered from the prototype's store now, where the
+             * runtime bootstrap defines them. The three `toLocale*` spellings were aliased the
+             * same way and now refuse: their answer needs locale data, which is `Intl`'s to link
+             * (ADR 0063 rule 5). */
             /* The local writers are the UTC writers, for the same reason the local readers are
              * the UTC readers: the realm has one zone and its offset is zero. */
             {"setFullYear", KILN_C99_METHOD_SET_FULL_YEAR},

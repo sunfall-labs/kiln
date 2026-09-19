@@ -3354,7 +3354,13 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
     if has_truthy {
         output.push_str("static __attribute__((unused, noinline)) int ku_truthy(kiln_val v) { return kiln_c99_val_truthy(v); }\n#define kiln_c99_val_truthy ku_truthy\n");
     }
-    if has_status {
+    // Unconditional: the instruction scan above decides the other macros, but every runtime
+    // call the ops emit ends in `KU_STATUS`, and the scan is a hand list -- `New` was not on it,
+    // so a promise executor whose only operation was `new TypeError(..)` referenced a macro the
+    // unit never defined. An unused `#define` costs nothing; a missing one is a build failure
+    // in the program that happens to hit the next instruction the list forgot.
+    let _ = has_status;
+    {
         output.push_str("#define KU_STATUS(PC, OP, UNWIND) do { if (KILN_UNLIKELY(status != KILN_C99_OK)) { if (status == KILN_C99_THROWN) { UNWIND; } if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_note_refusal(ku_site, (size_t)(PC), (OP), (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } return status; } } while (0)\n");
     }
     if has_cell {

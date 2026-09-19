@@ -173,23 +173,56 @@ pub(crate) type HttpRequestArguments = (String, u16, String, String, Vec<(String
 pub(crate) fn node_http_request_arguments(
     arguments: &[Value],
 ) -> Result<HttpRequestArguments, ExecutionError> {
-    let options = arguments
-        .first()
-        .ok_or_else(|| ExecutionError::TypeErrorMessage {
-            message: "HTTP request options must be an object".into(),
+    // `http.request(url[, options][, callback])`: a string first argument is a URL whose host,
+    // port and path the options object -- if there is one -- overrides. `node/http.ts` reduces
+    // the same three spellings for the native backend; this is the interpreter's copy of the rule,
+    // because its `node:http` dispatches here without passing through that module.
+    let mut from_url: Option<(String, f64, String)> = None;
+    let mut at = 0;
+    if let Some(Value::String(text)) = arguments.first() {
+        let parsed = ::url::Url::parse(&text.to_lossy_string()).map_err(|_| {
+            ExecutionError::TypeErrorMessage {
+                message: format!("Invalid URL: {}", text.to_lossy_string()),
+            }
         })?;
-    let Value::Object(options) = options else {
-        return Err(ExecutionError::TypeErrorMessage {
-            message: "HTTP request options must be an object".into(),
-        });
+        if parsed.scheme() != "http" && parsed.scheme() != "https" {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!(
+                    "Protocol \"{}:\" not supported. Expected \"http:\"",
+                    parsed.scheme()
+                ),
+            });
+        }
+        let host = parsed.host_str().unwrap_or("localhost").to_owned();
+        let port = f64::from(parsed.port_or_known_default().unwrap_or(80));
+        let mut path = parsed.path().to_owned();
+        if let Some(query) = parsed.query() {
+            path.push('?');
+            path.push_str(query);
+        }
+        from_url = Some((host, port, path));
+        at = 1;
+    }
+    let options = match arguments.get(at) {
+        Some(Value::Object(options)) => Some(options.borrow()),
+        _ if from_url.is_some() => None,
+        _ => {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "HTTP request options must be an object".into(),
+            });
+        }
     };
-    let options = options.borrow();
-    let own = |name: &str| options.get_own(name);
+    let own = |name: &str| options.as_ref().and_then(|options| options.get_own(name));
+    let (url_host, url_port, url_path) = from_url
+        .clone()
+        .unwrap_or_else(|| ("localhost".into(), 80.0, "/".into()));
     let host = own("host")
         .or_else(|| own("hostname"))
         .map(|value| value.to_display_string())
-        .unwrap_or_else(|| "localhost".into());
-    let port = own("port").map(|value| value.as_number()).unwrap_or(80.0);
+        .unwrap_or(url_host);
+    let port = own("port")
+        .map(|value| value.as_number())
+        .unwrap_or(url_port);
     if !port.is_finite() || port.fract() != 0.0 || !(1.0..=65535.0).contains(&port) {
         return Err(ExecutionError::InvalidPort);
     }
@@ -198,7 +231,7 @@ pub(crate) fn node_http_request_arguments(
         .unwrap_or_else(|| "GET".into());
     let path = own("path")
         .map(|value| value.to_display_string())
-        .unwrap_or_else(|| "/".into());
+        .unwrap_or(url_path);
     let mut headers = Vec::new();
     if let Some(Value::Object(header_object)) = own("headers") {
         let header_object = header_object.borrow();
@@ -212,8 +245,9 @@ pub(crate) fn node_http_request_arguments(
             }
         }
     }
+    let callback_at = if options.is_some() { at + 1 } else { at };
     let callback = arguments
-        .get(1)
+        .get(callback_at)
         .cloned()
         .filter(is_callable)
         .unwrap_or(Value::Undefined);

@@ -1700,19 +1700,19 @@ builtin_backlog! {
     ("Set.prototype", "size",
      "Set.prototype.size accessor is evaluated on instances in C99 runtime rather than prototype"),
     ("Set.prototype", "union",
-     "Set methods (ES2025) not yet implemented in C99"),
+     "answered by the runtime bootstrap in TypeScript, from the prototype's store; no row"),
     ("Set.prototype", "intersection",
-     "Set methods (ES2025) not yet implemented in C99"),
+     "answered by the runtime bootstrap in TypeScript, from the prototype's store; no row"),
     ("Set.prototype", "difference",
-     "Set methods (ES2025) not yet implemented in C99"),
+     "answered by the runtime bootstrap in TypeScript, from the prototype's store; no row"),
     ("Set.prototype", "symmetricDifference",
-     "Set methods (ES2025) not yet implemented in C99"),
+     "answered by the runtime bootstrap in TypeScript, from the prototype's store; no row"),
     ("Set.prototype", "isSubsetOf",
-     "Set methods (ES2025) not yet implemented in C99"),
+     "answered by the runtime bootstrap in TypeScript, from the prototype's store; no row"),
     ("Set.prototype", "isSupersetOf",
-     "Set methods (ES2025) not yet implemented in C99"),
+     "answered by the runtime bootstrap in TypeScript, from the prototype's store; no row"),
     ("Set.prototype", "isDisjointFrom",
-     "Set methods (ES2025) not yet implemented in C99"),
+     "answered by the runtime bootstrap in TypeScript, from the prototype's store; no row"),
     ("WeakMap.prototype", "getOrInsert",
      "getOrInsert Stage 3 method not yet implemented in C99"),
     ("WeakMap.prototype", "getOrInsertComputed",
@@ -4239,10 +4239,20 @@ static int kiln_c99_collection_kind_member(int is_map, int is_weak, const char *
     return !is_weak && kiln_c99_same_name(key, key_len, "@@iterator");
 }
 
-/* The same question asked of a live collection, which is the only caller that has one. */
+/* The same question asked of a live collection, which is the only caller that has one.
+ *
+ * The backlog is consulted too: a `Set.prototype` member the surface table declares and this
+ * backend has not built is a member, whatever the hand list above says. `s.union(x)` read
+ * `undefined` off an instance for as long as the list was the only answer, while
+ * `Set.prototype.union` refused honestly one path over -- the two paths now agree. */
 static int kiln_c99_is_collection_member(const kiln_collection *collection, const char *key,
                                          size_t key_len) {
-    return kiln_c99_collection_kind_member(collection->is_map, collection->is_weak, key, key_len);
+    if (kiln_c99_collection_kind_member(collection->is_map, collection->is_weak, key, key_len)) {
+        return 1;
+    }
+    return !collection->is_weak &&
+           kiln_c99_backlog_names(collection->is_map ? "Map.prototype" : "Set.prototype", key,
+                                  key_len);
 }
 
 /* Whether a name is a member of `String.prototype` *in the language*, which is a different
