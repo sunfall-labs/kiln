@@ -1919,6 +1919,21 @@ int kiln_node_path_part(uint32_t part, const uint8_t *path, uint64_t path_len,
     *out_len = 0;
     return KILN_C99_INVALID_ARGUMENT;
 }
+int kiln_url_parse(const uint8_t *input, uint64_t input_len, const uint8_t *base,
+                   uint64_t base_len, uint8_t *out, uint64_t capacity, uint64_t *out_len) {
+    (void)input; (void)input_len; (void)base; (void)base_len; (void)out; (void)capacity;
+    if (out_len == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *out_len = 0;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_url_set(const uint8_t *href, uint64_t href_len, uint32_t field, const uint8_t *value,
+                 uint64_t value_len, uint8_t *out, uint64_t capacity, uint64_t *out_len) {
+    (void)href; (void)href_len; (void)field; (void)value; (void)value_len; (void)out;
+    (void)capacity;
+    if (out_len == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *out_len = 0;
+    return KILN_C99_INVALID_ARGUMENT;
+}
 int kiln_node_path_relative(const uint8_t *from, uint64_t from_len, const uint8_t *to,
                             uint64_t to_len, uint8_t *out, uint64_t capacity, uint64_t *out_len) {
     (void)from; (void)from_len; (void)to; (void)to_len; (void)out; (void)capacity;

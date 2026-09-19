@@ -1089,6 +1089,12 @@ method_ids! {
     // Captured and deleted by the compiled builtin bootstrap before user code runs.
     (KILN_C99_METHOD_UINT8_TO_HEX_RAW, 510, Direct; 0, 0),
     (KILN_C99_METHOD_UINT8_TO_BASE64_RAW, 511, Direct; 0, 0),
+    // Private bootstrap bridges for `URL` (ADR 0063 rule 4): the `url` crate's parse and set
+    // through the provider, the request fast path, and the prototypes the fast path hands out.
+    (KILN_C99_METHOD_URL_PARSE_RAW, 524, Direct; 0, 0),
+    (KILN_C99_METHOD_URL_SET_RAW, 525, Direct; 0, 0),
+    (KILN_C99_METHOD_URL_FAST_RAW, 526, Direct; 0, 0),
+    (KILN_C99_METHOD_URL_ADOPT_RAW, 527, Direct; 0, 0),
     (KILN_C99_METHOD_PROCESS_EXIT, 513, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC, 514, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC, 515, Direct; 0, 0),
@@ -2699,6 +2705,9 @@ macro_rules! header_prefix {
 #ifndef KILN_RETAIN_GROUP_NODE_PATH
 #define KILN_RETAIN_GROUP_NODE_PATH 1
 #endif
+#ifndef KILN_RETAIN_GROUP_URL
+#define KILN_RETAIN_GROUP_URL 1
+#endif
 #ifndef KILN_RETAIN_GROUP_TEMPORAL
 #define KILN_RETAIN_GROUP_TEMPORAL 1
 #endif
@@ -3623,6 +3632,10 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_NODE_FS_MKDIR),
     emit_method_define!(KILN_C99_METHOD_UINT8_TO_HEX_RAW),
     emit_method_define!(KILN_C99_METHOD_UINT8_TO_BASE64_RAW),
+    emit_method_define!(KILN_C99_METHOD_URL_PARSE_RAW),
+    emit_method_define!(KILN_C99_METHOD_URL_SET_RAW),
+    emit_method_define!(KILN_C99_METHOD_URL_FAST_RAW),
+    emit_method_define!(KILN_C99_METHOD_URL_ADOPT_RAW),
     emit_method_define!(KILN_C99_METHOD_PROCESS_EXIT),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC),

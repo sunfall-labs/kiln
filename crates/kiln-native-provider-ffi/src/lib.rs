@@ -1894,6 +1894,180 @@ mod realm {
         })
     }
 
+    /// `new URL(input[, base])`, answered by the `url` crate the interpreter links (ADR 0025,
+    /// ADR 0063 rule 4): the eleven WHATWG components -- href, origin, protocol, username,
+    /// password, host, hostname, port, pathname, search, hash -- NUL-separated in that order,
+    /// spilled into the caller's buffer. `URL_INVALID` says the input does not parse, which is
+    /// the `TypeError` the constructor throws; the other statuses are the ABI's. A component's
+    /// spelling follows node: `search` and `hash` are empty rather than `?` or `#` when there is
+    /// nothing after the mark, `port` is empty for the scheme's default, `origin` is `null` for
+    /// an opaque origin.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_url_parse(
+        input: *const u8,
+        input_len: u64,
+        base: *const u8,
+        base_len: u64,
+        out: *mut u8,
+        capacity: u64,
+        out_len: *mut u64,
+    ) -> i32 {
+        ffi(|| {
+            let Some(input) = (unsafe { borrowed_str(input, input_len) }) else {
+                return INVALID_ARGUMENT;
+            };
+            let base = if base.is_null() || base_len == 0 {
+                None
+            } else {
+                match unsafe { borrowed_str(base, base_len) } {
+                    Some(base) => Some(base),
+                    None => return INVALID_ARGUMENT,
+                }
+            };
+            let parsed = match base {
+                Some(base) => match url::Url::parse(base) {
+                    Ok(base) => base.join(input),
+                    Err(_) => return URL_INVALID,
+                },
+                None => url::Url::parse(input),
+            };
+            let Ok(parsed) = parsed else {
+                return URL_INVALID;
+            };
+            let record = url_record(&parsed);
+            unsafe { spill(record.as_bytes(), out, capacity, out_len) }
+        })
+    }
+
+    /// A URL setter: `field` names the component (0 href, 1 protocol, 2 username, 3 password,
+    /// 4 host, 5 hostname, 6 port, 7 pathname, 8 search, 9 hash), the answer is the new href
+    /// record in the same shape `kiln_url_parse` spills. A setter the specification ignores --
+    /// a scheme change from special to non-special, a port on a URL with no host -- leaves the
+    /// URL as it was, which is what node does; `href` itself must parse or `URL_INVALID` says so.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_url_set(
+        href: *const u8,
+        href_len: u64,
+        field: u32,
+        value: *const u8,
+        value_len: u64,
+        out: *mut u8,
+        capacity: u64,
+        out_len: *mut u64,
+    ) -> i32 {
+        ffi(|| {
+            let Some(href) = (unsafe { borrowed_str(href, href_len) }) else {
+                return INVALID_ARGUMENT;
+            };
+            let Some(value) = (unsafe { borrowed_str(value, value_len) }) else {
+                return INVALID_ARGUMENT;
+            };
+            let Ok(mut parsed) = url::Url::parse(href) else {
+                return URL_INVALID;
+            };
+            match field {
+                0 => match url::Url::parse(value) {
+                    Ok(next) => parsed = next,
+                    Err(_) => return URL_INVALID,
+                },
+                1 => {
+                    let scheme = value.split(':').next().unwrap_or("");
+                    let _ = parsed.set_scheme(scheme);
+                }
+                2 => {
+                    let _ = parsed.set_username(value);
+                }
+                3 => {
+                    let _ = parsed.set_password(if value.is_empty() { None } else { Some(value) });
+                }
+                4 => {
+                    // `host` takes `hostname[:port]`; a bare hostname leaves the port alone.
+                    let (hostname, port) = match value.rsplit_once(':') {
+                        Some((h, p))
+                            if !p.is_empty()
+                                && p.bytes().all(|b| b.is_ascii_digit())
+                                && !h.ends_with(']')
+                                || (h.contains('[') && h.ends_with(']')) =>
+                        {
+                            (h, Some(p))
+                        }
+                        _ => (value, None),
+                    };
+                    if parsed.set_host(Some(hostname)).is_ok() {
+                        if let Some(port) = port {
+                            let _ = parsed.set_port(port.parse::<u16>().ok());
+                        }
+                    }
+                }
+                5 => {
+                    let _ = parsed.set_host(Some(value));
+                }
+                6 => {
+                    let digits: String = value.chars().take_while(char::is_ascii_digit).collect();
+                    if digits.is_empty() {
+                        if value.is_empty() {
+                            let _ = parsed.set_port(None);
+                        }
+                    } else if let Ok(port) = digits.parse::<u16>() {
+                        let _ = parsed.set_port(Some(port));
+                    }
+                }
+                7 => {
+                    if !parsed.cannot_be_a_base() {
+                        parsed.set_path(value);
+                    }
+                }
+                8 => {
+                    let query = value.strip_prefix('?').unwrap_or(value);
+                    parsed.set_query(if query.is_empty() { None } else { Some(query) });
+                }
+                9 => {
+                    let fragment = value.strip_prefix('#').unwrap_or(value);
+                    parsed.set_fragment(if fragment.is_empty() {
+                        None
+                    } else {
+                        Some(fragment)
+                    });
+                }
+                _ => return INVALID_ARGUMENT,
+            }
+            let record = url_record(&parsed);
+            unsafe { spill(record.as_bytes(), out, capacity, out_len) }
+        })
+    }
+
+    /// The input did not parse as a URL: the constructor's `TypeError`, kept apart from the
+    /// ABI's own statuses so the caller can throw rather than refuse.
+    pub const URL_INVALID: i32 = 2;
+
+    fn url_record(parsed: &url::Url) -> String {
+        use url::Position;
+        let host = &parsed[Position::BeforeHost..Position::AfterPort];
+        let port = parsed.port().map(|p| p.to_string()).unwrap_or_default();
+        let search = match parsed.query() {
+            Some(q) if !q.is_empty() => format!("?{q}"),
+            _ => String::new(),
+        };
+        let hash = match parsed.fragment() {
+            Some(f) if !f.is_empty() => format!("#{f}"),
+            _ => String::new(),
+        };
+        [
+            parsed.as_str(),
+            &parsed.origin().ascii_serialization(),
+            &format!("{}:", parsed.scheme()),
+            parsed.username(),
+            parsed.password().unwrap_or(""),
+            host,
+            parsed.host_str().unwrap_or(""),
+            &port,
+            parsed.path(),
+            &search,
+            &hash,
+        ]
+        .join("\0")
+    }
+
     /// `path.relative(from, to)`, from the same shared implementation.
     ///
     /// Unlike the decompositions this one can be longer than either input -- every component of
@@ -6517,6 +6691,12 @@ mod realm {
         };
         (realm, kiln_node_path_relative, node_path_relative) => {
             const _: unsafe extern "C" fn(*const u8, u64, *const u8, u64, *mut u8, u64, *mut u64) -> i32 = kiln_node_path_relative;
+        };
+        (realm, kiln_url_parse, url_parse) => {
+            const _: unsafe extern "C" fn(*const u8, u64, *const u8, u64, *mut u8, u64, *mut u64) -> i32 = kiln_url_parse;
+        };
+        (realm, kiln_url_set, url_set) => {
+            const _: unsafe extern "C" fn(*const u8, u64, u32, *const u8, u64, *mut u8, u64, *mut u64) -> i32 = kiln_url_set;
         };
         (realm, kiln_realm_symbol_for, realm_symbol_for) => {
             const _: unsafe extern "C" fn(*const super::KilnString, *mut u64) -> i32 =

@@ -732,7 +732,7 @@ pub(super) fn emit_call_method(
                     // callee's own table after the first call, so the callee does no lookup.
                     let (row_arg, row_learn) = if needs.row {
                         let columns = plan.receiver_columns.get(i as usize).copied().unwrap_or(0);
-                        call_args.push_str(&format!(", obj->shape == {shape_var} ? {row_var} : NULL"));
+                        call_args.push_str(&format!(", obj->shape != NULL && obj->shape == {shape_var} ? {row_var} : NULL"));
                         (
                             String::new(),
                             format!(
@@ -828,10 +828,14 @@ pub(super) fn emit_call_method(
             let failed = format!(
                 "{{ int status = kiln_c99_typed_status; if (status == KILN_C99_THROWN) *thrown = kiln_c99_typed_thrown; {diag} {typed_check} }}"
             );
+            // `{shape_var}` starts NULL and is reset to NULL on a prototype epoch change, and an
+            // object in dictionary mode has a NULL shape: without the first test the two matched,
+            // the NULL row went to `__builtin_unreachable()`, and a class getter calling a method
+            // on `this` crashed the program (`get href() { return this._components()[0]; }`).
             let guard = if k == 0 {
-                format!("if (obj->shape == {shape_var})")
+                format!("if (obj->shape != NULL && obj->shape == {shape_var})")
             } else {
-                format!("else if (obj->shape == {shape_var})")
+                format!("else if (obj->shape != NULL && obj->shape == {shape_var})")
             };
             let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
             let box_stmt = if need_box { format!(" v{v} = kiln_c99_val_from_double(kiln_typed_d);") } else { String::new() };

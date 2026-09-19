@@ -477,8 +477,6 @@ static int kiln_c99_refuse_named_key(const char *lacked, const kiln_string *key)
     free(encoded);
     return status;
 }
-static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_t argc,
-                                  kiln_value *thrown);
 static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
                                           const kiln_value *args, size_t argc,
                                           kiln_value *thrown);
@@ -533,6 +531,15 @@ static int kiln_c99_define_private_key(kiln_value target, const kiln_string *key
                                        kiln_value function, int kind);
 static int kiln_c99_is_node_hidden_key(const char *key, size_t key_len);
 static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype);
+static int kiln_c99_realm_value_slot(uint32_t key, kiln_value **out);
+static int kiln_c99_url_parse_raw(kiln_value *out, const kiln_value *args, size_t argc,
+                                  kiln_value *thrown);
+static int kiln_c99_url_set_raw(kiln_value *out, const kiln_value *args, size_t argc,
+                                kiln_value *thrown);
+static int kiln_c99_url_fast_raw(kiln_value *out, const kiln_value *args, size_t argc,
+                                 kiln_value *thrown);
+static int kiln_c99_url_adopt_raw(kiln_value *out, const kiln_value *args, size_t argc);
+static int kiln_c99_url_class(kiln_value *out);
 static int kiln_c99_can_be_prototype(kiln_value value);
 static int kiln_c99_new_promise(kiln_value *out);
 static kiln_promise *kiln_c99_promise_of(kiln_value value);

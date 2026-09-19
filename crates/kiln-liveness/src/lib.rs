@@ -522,6 +522,13 @@ pub fn retained_method_groups(
         .iter()
         .any(|name| name.as_str() == "GlobalThis");
     let uses_temporal = members.globals.iter().any(|name| name == "Temporal");
+    // `URL` is a builtin the emitter loads by name, `URLSearchParams` a global the bootstrap
+    // defines; `fetch`, `Request` and `Response` are built on them under `--node`, and every
+    // `node:` module that takes a URL string reduces it through `new URL`.
+    let uses_url = members.builtins.iter().any(|name| name == "Url")
+        || members.globals.iter().any(|name| {
+            name == "URLSearchParams" || name == "fetch" || name == "Request" || name == "Response"
+        });
     let uses_date = members.builtins.iter().any(|name| name == "Date");
     let uses_math_number = members
         .builtins
@@ -535,7 +542,8 @@ pub fn retained_method_groups(
         use NodeBuiltin::*;
         Some(match builtin {
             Http | Https | Http2 => {
-                groups::NODE_HTTP
+                groups::URL
+                    | groups::NODE_HTTP
                     | groups::NODE_RESPONSE
                     | groups::NODE_SERVER
                     | groups::NODE_NET
@@ -557,8 +565,9 @@ pub fn retained_method_groups(
             Buffer => groups::BUFFER,
             Fs | FsPromises => groups::NODE_STREAM | groups::NODE_EVENT | groups::BUFFER,
             // Audited `Direct`-only (see phase1-PRD): no groups implicated.
+            Url => groups::URL,
             Assert | Console | Crypto | Dns | Module | Os | Process | Tty | Zlib
-            | StringDecoder | QueryString | Url | WorkerThreads | PerfHooks | AsyncHooks
+            | StringDecoder | QueryString | WorkerThreads | PerfHooks | AsyncHooks
             | ChildProcess | Timers | TimersPromises | Readline | ReadlinePromises | Sqlite
             | Constants | V8 | Vm | Path | Util | UtilTypes | DiagnosticsChannel => 0,
             // `dlopen` hands out raw pointers: anything is reachable.
@@ -569,6 +578,9 @@ pub fn retained_method_groups(
     let mut mask = CORE_METHOD_GROUPS;
     if reaches_global_object {
         return FULL;
+    }
+    if uses_url || dynamic {
+        mask |= groups::URL;
     }
     if uses_temporal {
         mask |= groups::TEMPORAL

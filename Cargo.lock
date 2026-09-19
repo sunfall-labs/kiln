@@ -1598,6 +1598,7 @@ dependencies = [
  "rayon",
  "regress",
  "tokio",
+ "url",
 ]
 
 [[package]]

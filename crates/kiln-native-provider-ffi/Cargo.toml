@@ -42,6 +42,7 @@ parallel = ["dep:rayon"]
 ffi = ["dep:libc", "dep:libffi"]
 
 [dependencies]
+url = { workspace = true }
 kiln-native-number-abi = { workspace = true }
 kiln-number-core = { workspace = true }
 kiln-host-abi = { workspace = true }

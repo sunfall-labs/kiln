@@ -49,7 +49,7 @@ Demand first: whatever `scripts/thirdparty.sh`'s refusal distribution names, as 
 Each row lands with its receiver's baseline number moved down in the same diff, the way a
 Test262 chunk does.
 
-## The interpreter's own drift from node (issue 13)
+## The interpreter's own drift from node (issues 05, 13)
 
 Surface the interpreter has and node does not, or answers differently, is the same debt on the
 other engine: `Promise.allKeyed` / `allSettledKeyed`, `%TypedArray%.name === "intrinsic"`, the

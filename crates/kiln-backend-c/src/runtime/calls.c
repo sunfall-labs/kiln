@@ -12,6 +12,26 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_FUNCTION) {
         return kiln_c99_dynamic_new_function(host, result, args, argc, depth, thrown);
     }
+    /* The request fast path (plan step B.3), ahead of construction: inside a `node:http`
+     * handler the first `new URL(req.url, ...)` is answered with the object the runtime built
+     * for the response, and not even the instance the constructor would have thrown away is
+     * allocated. The class itself makes the same call, so a URL of anything else is its
+     * business; this is only the case where the answer already exists. */
+    if (callee.tag == KILN_VALUE_FUNCTION && kiln_c99_active_http_response != NULL &&
+        !kiln_c99_active_http_response->url_used) {
+        kiln_value *url_class;
+        if (kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_URL_CLASS, &url_class) == KILN_C99_OK &&
+            url_class->tag == KILN_VALUE_FUNCTION &&
+            kiln_c99_closure_of(*url_class) == kiln_c99_closure_of(callee)) {
+            kiln_value fast;
+            int status = kiln_c99_url_fast_raw(&fast, args, argc, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (fast.tag == KILN_VALUE_OBJECT) {
+                *result = fast;
+                return KILN_C99_OK;
+            }
+        }
+    }
     /* `new 5` is a TypeError the program can catch, not a fault that stops it. Reaching the
      * prototype lookup below with a non-callable answered "a method this backend does not have"
      * instead, which exits the process: ordinary code like `try { new Thing() } catch {}` --
@@ -23,9 +43,6 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
          * is the `construct` trap below. */
         return kiln_c99_new_proxy(result, argc > 0 ? args[0] : kiln_c99_undefined(),
                                   argc > 1 ? args[1] : kiln_c99_undefined());
-    }
-    if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_URL) {
-        return kiln_c99_url_construct(result, args, argc, thrown);
     }
 #if KILN_RETAIN_GROUP_TEMPORAL
     if (callee.tag == KILN_VALUE_BUILTIN &&

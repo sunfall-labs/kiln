@@ -1236,9 +1236,22 @@ declare_ts_builtins! {
 
 pub const WEB_BOOTSTRAP_SOURCE: &str = include_str!("web.ts");
 
+/// `URL` and `URLSearchParams` over the host's `__kilnUrl*` intrinsics (ADR 0063 rule 4). Part
+/// of every native realm's bootstrap, not only `--node`'s: `URL` is an ECMAScript-adjacent global
+/// a plain module reaches for.
+pub const URL_BOOTSTRAP_SOURCE: &str = include_str!("url.ts");
+
 #[cfg(test)]
 mod web_tests {
     use super::*;
+
+    #[test]
+    fn url_bootstrap_compiles_cleanly() {
+        let hir = frontend_oxc::parse("@kiln/url-bootstrap.ts", URL_BOOTSTRAP_SOURCE);
+        let program = kiln_ir::compile_module(&hir)
+            .expect("url bootstrap should compile to IR without error");
+        assert!(!program.program.code.is_empty());
+    }
 
     #[test]
     fn web_bootstrap_compiles_cleanly() {

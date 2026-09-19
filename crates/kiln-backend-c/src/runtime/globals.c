@@ -369,7 +369,6 @@ static int kiln_c99_global_object(kiln_value *out) {
                         {"DataView", KILN_C99_BUILTIN_DATA_VIEW},
                         {"WeakMap", KILN_C99_BUILTIN_WEAK_MAP},
                         {"WeakSet", KILN_C99_BUILTIN_WEAK_SET},
-                        {"URL", KILN_C99_BUILTIN_URL},
                         {"Buffer", KILN_C99_BUILTIN_BUFFER},
                         {"Int8Array", KILN_C99_BUILTIN_INT8_ARRAY},
                         {"Uint8Array", KILN_C99_BUILTIN_UINT8_ARRAY},
@@ -426,7 +425,11 @@ static int kiln_c99_global_object(kiln_value *out) {
                      /* Captured and deleted by the compiled builtin bootstrap before user code. */
                      {"__kilnIntlSegment", KILN_C99_METHOD_INTL_SEGMENT_RAW},
                      {"__kilnUint8ToHex", KILN_C99_METHOD_UINT8_TO_HEX_RAW},
-                     {"__kilnUint8ToBase64", KILN_C99_METHOD_UINT8_TO_BASE64_RAW}};
+                     {"__kilnUint8ToBase64", KILN_C99_METHOD_UINT8_TO_BASE64_RAW},
+                     {"__kilnUrlParse", KILN_C99_METHOD_URL_PARSE_RAW},
+                     {"__kilnUrlSet", KILN_C99_METHOD_URL_SET_RAW},
+                     {"__kilnUrlFast", KILN_C99_METHOD_URL_FAST_RAW},
+                     {"__kilnUrlAdopt", KILN_C99_METHOD_URL_ADOPT_RAW}};
     size_t index;
     int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_GLOBALS, &globals);
     if (status != KILN_C99_OK) return status;
