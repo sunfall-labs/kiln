@@ -14,10 +14,6 @@ int kiln_module_c5f5386408ed495d3a2dbd10ae063118(kiln_host *host, kiln_value *re
     double d0 = 0.0;
     kiln_val v0 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
-    goto kiln_block_1;
-kiln_block_1:;
-    goto kiln_block_2;
-kiln_block_2:;
     v0 = UINT64_C(4607182418800017408);
     memcpy(&d0, &v0, sizeof(d0));
     i0 = 1LL;
