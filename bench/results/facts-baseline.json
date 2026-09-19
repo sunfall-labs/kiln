@@ -119424,10 +119424,6 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 11,
-                  "kind": "Call"
-                },
-                {
                   "id": 12,
                   "kind": "Call"
                 },
@@ -229965,11 +229961,6 @@
                   "detail": "\"call\""
                 },
                 {
-                  "id": 11,
-                  "kind": "GetProperty",
-                  "detail": "\"error\""
-                },
-                {
                   "id": 12,
                   "kind": "GetProperty",
                   "detail": "\"error\""
@@ -231716,7 +231707,6 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                7,
                 10,
                 14,
                 16,
@@ -231762,10 +231752,6 @@
                   "id": 6,
                   "kind": "SetPropertyStrict",
                   "detail": "\"label\""
-                },
-                {
-                  "id": 7,
-                  "kind": "NewArray"
                 },
                 {
                   "id": 8,
@@ -232246,11 +232232,6 @@
                   "detail": "\"call\""
                 },
                 {
-                  "id": 9,
-                  "kind": "GetProperty",
-                  "detail": "\"error\""
-                },
-                {
                   "id": 10,
                   "kind": "GetProperty",
                   "detail": "\"error\""
@@ -232274,11 +232255,6 @@
                   "id": 14,
                   "kind": "CallMethod",
                   "detail": "\"call\""
-                },
-                {
-                  "id": 15,
-                  "kind": "GetProperty",
-                  "detail": "\"error\""
                 },
                 {
                   "id": 16,
@@ -237774,11 +237750,6 @@
                   "detail": "\"call\""
                 },
                 {
-                  "id": 14,
-                  "kind": "GetProperty",
-                  "detail": "\"error\""
-                },
-                {
                   "id": 15,
                   "kind": "GetProperty",
                   "detail": "\"error\""
@@ -240194,11 +240165,6 @@
                   "id": 15,
                   "kind": "CallMethod",
                   "detail": "\"call\""
-                },
-                {
-                  "id": 16,
-                  "kind": "GetProperty",
-                  "detail": "\"error\""
                 },
                 {
                   "id": 17,

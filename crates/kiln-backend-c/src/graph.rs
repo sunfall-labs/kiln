@@ -2893,6 +2893,8 @@ pub fn build_function_graph(
 
     graph.blocks = basic_blocks;
     fold_constants(&mut graph);
+    fold_conditional_branches(&mut graph);
+    simplify_trivial_phis(&mut graph);
     fold_undefined_returns(&mut graph);
     eliminate_dead_code(&mut graph);
     let has_suspend = graph
@@ -2906,6 +2908,8 @@ pub fn build_function_graph(
     }
     simplify_trivial_phis(&mut graph);
     fold_constants(&mut graph);
+    fold_conditional_branches(&mut graph);
+    simplify_trivial_phis(&mut graph);
     fold_undefined_returns(&mut graph);
     eliminate_dead_code(&mut graph);
     compact_value_ids(&mut graph);
@@ -3199,6 +3203,170 @@ pub fn fold_undefined_returns(graph: &mut FunctionGraph) {
             block.terminator = Terminator::Return(None);
         }
     }
+}
+
+/// Prune unreachable basic blocks from the CFG, updating predecessors and Phi inputs in surviving blocks.
+pub fn prune_unreachable_blocks(graph: &mut FunctionGraph) {
+    if graph.blocks.is_empty() {
+        return;
+    }
+
+    let mut reachable = HashSet::new();
+    let mut queue = std::collections::VecDeque::new();
+
+    reachable.insert(graph.entry_block);
+    queue.push_back(graph.entry_block);
+
+    if let Some(seam) = graph.seam_block {
+        if reachable.insert(seam) {
+            queue.push_back(seam);
+        }
+    }
+
+    let block_map: HashMap<BlockId, &BasicBlock> = graph.blocks.iter().map(|b| (b.id, b)).collect();
+
+    while let Some(bid) = queue.pop_front() {
+        if let Some(b) = block_map.get(&bid) {
+            for &succ in &b.successors {
+                if reachable.insert(succ) {
+                    queue.push_back(succ);
+                }
+            }
+            if let Some(handler) = b.exception_handler {
+                if reachable.insert(handler) {
+                    queue.push_back(handler);
+                }
+            }
+            if let Terminator::Suspend {
+                resume, delegate, ..
+            } = &b.terminator
+            {
+                if reachable.insert(*resume) {
+                    queue.push_back(*resume);
+                }
+                if let Some((_, exit, _)) = delegate
+                    && reachable.insert(*exit)
+                {
+                    queue.push_back(*exit);
+                }
+            }
+        }
+    }
+
+    if reachable.len() == graph.blocks.len() {
+        return;
+    }
+
+    // Filter predecessors and Phi inputs in surviving blocks
+    for block in &mut graph.blocks {
+        if reachable.contains(&block.id) {
+            block.predecessors.retain(|p| reachable.contains(p));
+            for (_, op) in &mut block.operations {
+                if let GraphOp::Phi { inputs } = op {
+                    inputs.retain(|(p, _)| reachable.contains(p));
+                }
+            }
+        }
+    }
+
+    // Prune unreachable blocks
+    graph.blocks.retain(|b| reachable.contains(&b.id));
+}
+
+/// Fold conditional branches whose condition is statically known to a constant truthy/falsy value
+/// or whose true and false targets are identical into unconditional jumps, and prune newly unreachable blocks.
+pub fn fold_conditional_branches(graph: &mut FunctionGraph) -> bool {
+    let mut constants: HashMap<ValueId, Constant> = HashMap::new();
+    for block in &graph.blocks {
+        for (vid, op) in &block.operations {
+            if let GraphOp::Const { constant, .. } = op {
+                constants.insert(*vid, constant.clone());
+            }
+        }
+    }
+
+    let mut changed = false;
+    let mut eliminated_edges: Vec<(BlockId, BlockId)> = Vec::new();
+
+    for block in &mut graph.blocks {
+        let replacement = match &block.terminator {
+            Terminator::Branch {
+                condition,
+                true_block,
+                false_block,
+            } => {
+                if true_block == false_block {
+                    Some((*true_block, None))
+                } else if let Some(c) = constants.get(condition) {
+                    if constant_truthy(c) {
+                        Some((*true_block, Some(*false_block)))
+                    } else {
+                        Some((*false_block, Some(*true_block)))
+                    }
+                } else {
+                    None
+                }
+            }
+            Terminator::BranchNotNullish {
+                condition,
+                true_block,
+                false_block,
+            } => {
+                if true_block == false_block {
+                    Some((*true_block, None))
+                } else if let Some(c) = constants.get(condition) {
+                    let nullish = matches!(c, Constant::Null | Constant::Undefined);
+                    if !nullish {
+                        Some((*true_block, Some(*false_block)))
+                    } else {
+                        Some((*false_block, Some(*true_block)))
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        if let Some((target, eliminated_target)) = replacement {
+            block.terminator = Terminator::Jump(target);
+            let mut successors = vec![target];
+            if let Some(handler) = block.exception_handler
+                && !successors.contains(&handler)
+            {
+                successors.push(handler);
+            }
+            block.successors = successors;
+            if let Some(elim) = eliminated_target {
+                eliminated_edges.push((block.id, elim));
+            }
+            changed = true;
+        }
+    }
+
+    if !changed {
+        return false;
+    }
+
+    // Update predecessors and Phis in eliminated target blocks
+    for (from_block, to_block) in eliminated_edges {
+        if let Some(from_b) = graph.blocks.iter().find(|b| b.id == from_block)
+            && from_b.successors.contains(&to_block)
+        {
+            continue;
+        }
+        if let Some(b) = graph.blocks.iter_mut().find(|b| b.id == to_block) {
+            b.predecessors.retain(|&p| p != from_block);
+            for (_, op) in &mut b.operations {
+                if let GraphOp::Phi { inputs } = op {
+                    inputs.retain(|(p, _)| *p != from_block);
+                }
+            }
+        }
+    }
+
+    prune_unreachable_blocks(graph);
+    true
 }
 
 /// Alias for dead code elimination preserving existing test entry points.
@@ -6525,5 +6693,280 @@ mod dead_phi_tests {
             }
             _other => panic!("expected Const Infinity"),
         }
+    }
+
+    #[test]
+    fn fold_conditional_branches_truthy_prunes_false_block() {
+        let mut graph = FunctionGraph::new(None, 0, 0);
+        graph.next_value_id = 10;
+        graph.blocks = vec![
+            BasicBlock {
+                id: BlockId(0),
+                operations: vec![(
+                    ValueId(0),
+                    GraphOp::Const {
+                        index: 0,
+                        constant: Constant::Boolean(true),
+                    },
+                )],
+                terminator: Terminator::Branch {
+                    condition: ValueId(0),
+                    true_block: BlockId(1),
+                    false_block: BlockId(2),
+                },
+                predecessors: vec![],
+                successors: vec![BlockId(1), BlockId(2)],
+                exception_handler: None,
+            },
+            BasicBlock {
+                id: BlockId(1),
+                operations: vec![(
+                    ValueId(1),
+                    GraphOp::Const {
+                        index: 1,
+                        constant: Constant::Number(42.0f64.to_bits()),
+                    },
+                )],
+                terminator: Terminator::Jump(BlockId(3)),
+                predecessors: vec![BlockId(0)],
+                successors: vec![BlockId(3)],
+                exception_handler: None,
+            },
+            BasicBlock {
+                id: BlockId(2),
+                operations: vec![(
+                    ValueId(2),
+                    GraphOp::Const {
+                        index: 2,
+                        constant: Constant::Number(99.0f64.to_bits()),
+                    },
+                )],
+                terminator: Terminator::Jump(BlockId(3)),
+                predecessors: vec![BlockId(0)],
+                successors: vec![BlockId(3)],
+                exception_handler: None,
+            },
+            BasicBlock {
+                id: BlockId(3),
+                operations: vec![(
+                    ValueId(3),
+                    GraphOp::Phi {
+                        inputs: vec![(BlockId(1), ValueId(1)), (BlockId(2), ValueId(2))],
+                    },
+                )],
+                terminator: Terminator::Return(Some(ValueId(3))),
+                predecessors: vec![BlockId(1), BlockId(2)],
+                successors: vec![],
+                exception_handler: None,
+            },
+        ];
+
+        let changed = fold_conditional_branches(&mut graph);
+        assert!(changed);
+
+        // Block 0 should now Jump(BlockId(1))
+        assert_eq!(graph.blocks[0].terminator, Terminator::Jump(BlockId(1)));
+        assert_eq!(graph.blocks[0].successors, vec![BlockId(1)]);
+
+        // Block 2 should be completely pruned!
+        assert!(
+            !graph.blocks.iter().any(|b| b.id == BlockId(2)),
+            "Block 2 must be pruned as unreachable"
+        );
+
+        // Block 3 should only have Block 1 as predecessor
+        let block3 = graph.block(BlockId(3)).unwrap();
+        assert_eq!(block3.predecessors, vec![BlockId(1)]);
+
+        // Block 3's phi should only have input from Block 1
+        if let GraphOp::Phi { inputs } = &block3.operations[0].1 {
+            assert_eq!(inputs.len(), 1);
+            assert_eq!(inputs[0].0, BlockId(1));
+        } else {
+            panic!("expected Phi");
+        }
+
+        // Must pass graph verification!
+        crate::verifier::verify_function_graph(&graph).expect("graph verifies");
+
+        // Simplifying trivial phis should resolve the phi to v1
+        simplify_trivial_phis(&mut graph);
+        eliminate_dead_code(&mut graph);
+
+        let block3 = graph.block(BlockId(3)).unwrap();
+        // Phi should be eliminated and terminator should return v1
+        assert!(block3.operations.is_empty());
+        assert_eq!(block3.terminator, Terminator::Return(Some(ValueId(1))));
+
+        crate::verifier::verify_function_graph(&graph).expect("verified after phi simplification");
+    }
+
+    #[test]
+    fn fold_conditional_branches_falsy_prunes_true_block() {
+        let mut graph = FunctionGraph::new(None, 0, 0);
+        graph.next_value_id = 10;
+        graph.blocks = vec![
+            BasicBlock {
+                id: BlockId(0),
+                operations: vec![(
+                    ValueId(0),
+                    GraphOp::Const {
+                        index: 0,
+                        constant: Constant::Boolean(false),
+                    },
+                )],
+                terminator: Terminator::Branch {
+                    condition: ValueId(0),
+                    true_block: BlockId(1),
+                    false_block: BlockId(2),
+                },
+                predecessors: vec![],
+                successors: vec![BlockId(1), BlockId(2)],
+                exception_handler: None,
+            },
+            BasicBlock {
+                id: BlockId(1),
+                operations: vec![],
+                terminator: Terminator::Jump(BlockId(3)),
+                predecessors: vec![BlockId(0)],
+                successors: vec![BlockId(3)],
+                exception_handler: None,
+            },
+            BasicBlock {
+                id: BlockId(2),
+                operations: vec![(
+                    ValueId(2),
+                    GraphOp::Const {
+                        index: 2,
+                        constant: Constant::Number(99.0f64.to_bits()),
+                    },
+                )],
+                terminator: Terminator::Jump(BlockId(3)),
+                predecessors: vec![BlockId(0)],
+                successors: vec![BlockId(3)],
+                exception_handler: None,
+            },
+            BasicBlock {
+                id: BlockId(3),
+                operations: vec![(
+                    ValueId(3),
+                    GraphOp::Phi {
+                        inputs: vec![(BlockId(1), ValueId(0)), (BlockId(2), ValueId(2))],
+                    },
+                )],
+                terminator: Terminator::Return(Some(ValueId(3))),
+                predecessors: vec![BlockId(1), BlockId(2)],
+                successors: vec![],
+                exception_handler: None,
+            },
+        ];
+
+        let changed = fold_conditional_branches(&mut graph);
+        assert!(changed);
+
+        // Block 0 should now Jump(BlockId(2))
+        assert_eq!(graph.blocks[0].terminator, Terminator::Jump(BlockId(2)));
+
+        // Block 1 should be completely pruned
+        assert!(
+            !graph.blocks.iter().any(|b| b.id == BlockId(1)),
+            "Block 1 must be pruned"
+        );
+
+        // Block 3 should only have Block 2 as predecessor
+        let block3 = graph.block(BlockId(3)).unwrap();
+        assert_eq!(block3.predecessors, vec![BlockId(2)]);
+
+        crate::verifier::verify_function_graph(&graph).expect("graph verifies");
+    }
+
+    #[test]
+    fn fold_conditional_branches_nullish_semantics() {
+        let mut graph = FunctionGraph::new(None, 0, 0);
+        graph.next_value_id = 10;
+        // Test BranchNotNullish on 0: in JS, 0 is NOT nullish, so it takes true_block!
+        graph.blocks = vec![
+            BasicBlock {
+                id: BlockId(0),
+                operations: vec![(
+                    ValueId(0),
+                    GraphOp::Const {
+                        index: 0,
+                        constant: Constant::Number(0.0f64.to_bits()),
+                    },
+                )],
+                terminator: Terminator::BranchNotNullish {
+                    condition: ValueId(0),
+                    true_block: BlockId(1),
+                    false_block: BlockId(2),
+                },
+                predecessors: vec![],
+                successors: vec![BlockId(1), BlockId(2)],
+                exception_handler: None,
+            },
+            BasicBlock {
+                id: BlockId(1),
+                operations: vec![],
+                terminator: Terminator::Return(None),
+                predecessors: vec![BlockId(0)],
+                successors: vec![],
+                exception_handler: None,
+            },
+            BasicBlock {
+                id: BlockId(2),
+                operations: vec![],
+                terminator: Terminator::Return(None),
+                predecessors: vec![BlockId(0)],
+                successors: vec![],
+                exception_handler: None,
+            },
+        ];
+
+        let changed = fold_conditional_branches(&mut graph);
+        assert!(changed);
+
+        // 0 is not nullish -> Jump(BlockId(1))
+        assert_eq!(graph.blocks[0].terminator, Terminator::Jump(BlockId(1)));
+        assert!(!graph.blocks.iter().any(|b| b.id == BlockId(2)));
+        crate::verifier::verify_function_graph(&graph).expect("graph verifies");
+    }
+
+    #[test]
+    fn prune_unreachable_blocks_preserves_exception_handlers() {
+        let mut graph = FunctionGraph::new(None, 0, 0);
+        graph.next_value_id = 10;
+        graph.blocks = vec![
+            BasicBlock {
+                id: BlockId(0),
+                operations: vec![],
+                terminator: Terminator::Return(None),
+                predecessors: vec![],
+                successors: vec![],
+                exception_handler: Some(BlockId(1)),
+            },
+            BasicBlock {
+                id: BlockId(1),
+                operations: vec![],
+                terminator: Terminator::Return(None),
+                predecessors: vec![],
+                successors: vec![],
+                exception_handler: None,
+            },
+            BasicBlock {
+                id: BlockId(2), // Completely unreachable
+                operations: vec![],
+                terminator: Terminator::Return(None),
+                predecessors: vec![],
+                successors: vec![],
+                exception_handler: None,
+            },
+        ];
+
+        prune_unreachable_blocks(&mut graph);
+
+        // Block 1 should be preserved because it is an exception handler
+        assert!(graph.blocks.iter().any(|b| b.id == BlockId(1)));
+        // Block 2 should be pruned
+        assert!(!graph.blocks.iter().any(|b| b.id == BlockId(2)));
     }
 }

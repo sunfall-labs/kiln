@@ -17,38 +17,17 @@ static int kiln_module_2064c19b6f57f0901e70848d80798ed5_body(kiln_host *host, ki
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
     for (size_t slot = 0; slot < (size_t)1; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
-    int b3 = 0;
-    int64_t i5 = 0, i6 = 0;
-    double d5 = 0.0, d6 = 0.0;
-    kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED, v4 = KILN_VAL_UNDEFINED, v5 = KILN_VAL_UNDEFINED, v6 = KILN_VAL_UNDEFINED, v7 = KILN_VAL_UNDEFINED;
+    kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
     goto kiln_block_1;
 kiln_block_1:;
-    v3 = KILN_VAL_TRUE;
-    b3 = (v3 == KILN_VAL_TRUE);
-    if (b3) {
-        goto kiln_block_2;
-    } else {
-        goto kiln_block_3;
-    }
+    goto kiln_block_2;
 kiln_block_2:;
-    v4 = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_module_2064c19b6f57f0901e70848d80798ed5_string_1);
-    *thrown = kiln_val_to_boundary(v4); goto kiln_block_6;
-kiln_block_3:;
-    v5 = UINT64_C(4619567317775286272);
-    memcpy(&d5, &v5, sizeof(d5));
-    i5 = 7LL;
-    locals[0] = v5;
-    goto kiln_block_4;
-kiln_block_4:;
-    goto kiln_block_5;
-kiln_block_5:;
-        { kiln_val phi_t0 = v5; v1 = phi_t0; }
-    goto kiln_block_7;
+    v2 = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_module_2064c19b6f57f0901e70848d80798ed5_string_1);
+    *thrown = kiln_val_to_boundary(v2); goto kiln_block_6;
 kiln_block_6:;
-    kiln_c99_forget_handled_throw(); v2 = kiln_val_from_boundary(*thrown);
-    locals[0] = v2;
-        { kiln_val phi_t0 = v2; v1 = phi_t0; }
+    kiln_c99_forget_handled_throw(); v1 = kiln_val_from_boundary(*thrown);
+    locals[0] = v1;
     goto kiln_block_7;
 kiln_block_7:;
     *result = kiln_val_to_boundary(v1);
