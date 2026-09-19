@@ -165,3 +165,13 @@ Left as they are, and why:
   not; an interpreter question.
 - `Promise.allKeyed`/`allSettledKeyed` refuse natively now (backlog rows) rather than reading
   `undefined`; whether the interpreter should carry a proposal node lacks is a separate question.
+
+Measured again at `047bc973` after the fixes (617 native runs): diverged 117 -> 17, silent
+`undefined` 111 -> 0 unexplained (`--gate` passes, 5 accepted `BigInt64Array^` rows), refused
+299 -> 313, implemented 1304 -> 1391. The 17 diverged are the 5 accepted rows and the twelve
+subclass-prototype `name` rows answering "Error". `mise run gate` at `047bc973`: crate tests
+1945/1954, native parity, thirdparty 17/17, facts 31/31, node 36/36, regress 15/15, server 6/8
+(two skips), Test262 no chunk regression. The thirdparty timing baseline flagged `ms` at
++164% -- measured at a load average of 18, alongside `acorn` and `postcss` reading 33% *faster*;
+a clock reading by this repository's own rule, to be re-run on a quiet machine before it is
+believed either way.

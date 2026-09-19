@@ -1,6 +1,6 @@
 {
  "errors": [],
- "native_runs": 615,
+ "native_runs": 608,
  "receivers": {
   "AbortController": {
    "expr": "globalThis.AbortController",
