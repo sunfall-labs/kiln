@@ -1,6 +1,6 @@
 {
  "errors": [],
- "native_runs": 608,
+ "native_runs": 614,
  "receivers": {
   "AbortController": {
    "expr": "globalThis.AbortController",
@@ -1193,9 +1193,12 @@
     "getSeconds": "function",
     "getTime": "function",
     "getTimezoneOffset": "function",
+    "toDateString": "function",
     "toISOString": "function",
     "toJSON": "function",
     "toString": "function",
+    "toTimeString": "function",
+    "toUTCString": "function",
     "valueOf": "function"
    },
    "native_names": [
@@ -1240,13 +1243,10 @@
     "setUTCMonth": "refusal: instruction=49 operation=GetProperty(setUTCMonth) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
     "setUTCSeconds": "refusal: instruction=49 operation=GetProperty(setUTCSeconds) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
     "setYear": "refusal: instruction=49 operation=GetProperty(setYear) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
-    "toDateString": "refusal: instruction=49 operation=GetProperty(toDateString) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
-    "toGMTString": "refusal: instruction=49 operation=GetProperty(toGMTString) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "toGMTString": "refusal: instruction=75 operation=GetProperty(toGMTString) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
     "toLocaleDateString": "refusal: instruction=49 operation=GetProperty(toLocaleDateString) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
     "toLocaleString": "refusal: instruction=49 operation=GetProperty(toLocaleString) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
-    "toLocaleTimeString": "refusal: instruction=49 operation=GetProperty(toLocaleTimeString) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
-    "toTimeString": "refusal: instruction=49 operation=GetProperty(toTimeString) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
-    "toUTCString": "refusal: instruction=49 operation=GetProperty(toUTCString) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8"
+    "toLocaleTimeString": "refusal: instruction=49 operation=GetProperty(toLocaleTimeString) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8"
    },
    "self_description": null,
    "self_interpreted": {
@@ -3145,10 +3145,17 @@
     "clear": "function",
     "constructor": "function",
     "delete": "function",
+    "difference": "function",
     "entries": "function",
     "forEach": "function",
     "has": "function",
+    "intersection": "function",
+    "isDisjointFrom": "function",
+    "isSubsetOf": "function",
+    "isSupersetOf": "function",
     "keys": "function",
+    "symmetricDifference": "function",
+    "union": "function",
     "values": "function"
    },
    "native_names": [
@@ -3163,14 +3170,7 @@
     "values"
    ],
    "refused": {
-    "difference": "refusal: instruction=339 operation=GetProperty(difference) detail=a member the language puts on this built-in and this backend has not built function=Set receiver_tag=8",
-    "intersection": "refusal: instruction=49 operation=GetProperty(intersection) detail=a member the language puts on this built-in and this backend has not built function=Set receiver_tag=8",
-    "isDisjointFrom": "refusal: instruction=49 operation=GetProperty(isDisjointFrom) detail=a member the language puts on this built-in and this backend has not built function=Set receiver_tag=8",
-    "isSubsetOf": "refusal: instruction=49 operation=GetProperty(isSubsetOf) detail=a member the language puts on this built-in and this backend has not built function=Set receiver_tag=8",
-    "isSupersetOf": "refusal: instruction=49 operation=GetProperty(isSupersetOf) detail=a member the language puts on this built-in and this backend has not built function=Set receiver_tag=8",
-    "size": "refusal: instruction=49 operation=GetProperty(size) detail=a member the language puts on this built-in and this backend has not built function=Set receiver_tag=8",
-    "symmetricDifference": "refusal: instruction=49 operation=GetProperty(symmetricDifference) detail=a member the language puts on this built-in and this backend has not built function=Set receiver_tag=8",
-    "union": "refusal: instruction=49 operation=GetProperty(union) detail=a member the language puts on this built-in and this backend has not built function=Set receiver_tag=8"
+    "size": "refusal: instruction=469 operation=GetProperty(size) detail=a member the language puts on this built-in and this backend has not built function=Set receiver_tag=8"
    },
    "self_description": null,
    "self_interpreted": {
