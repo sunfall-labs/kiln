@@ -929,6 +929,12 @@ kiln_value kiln_cli_describe_error(kiln_value value) {
 
 kiln_value kiln_cli_last_host_error = { .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };
 
+/* A line on stderr from the launcher, which has no stdio of its own. */
+void kiln_cli_warn(const char *message) {
+    fputs(message, stderr);
+    fputc('\n', stderr);
+}
+
 void kiln_cli_report_failure_in(int status, kiln_value value, const char *phase) {
     value = kiln_cli_describe_error(value);
     value.flags = 0;

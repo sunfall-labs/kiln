@@ -4874,6 +4874,15 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 return KILN_C99_OK;
             }
             if (subject.tag == KILN_VALUE_TYPED_ARRAY) {
+                if (kiln_c99_typed_array_of(subject)->is_buffer) {
+                    kiln_value proto;
+                    int proto_status = kiln_c99_buffer_prototype(host, &proto, depth, thrown);
+                    if (proto_status != KILN_C99_OK) return proto_status;
+                    if (proto.tag == KILN_VALUE_OBJECT) {
+                        *result = proto;
+                        return KILN_C99_OK;
+                    }
+                }
                 *result = kiln_c99_builtin(
                     kiln_c99_typed_prototype(kiln_c99_typed_array_of(subject)->kind));
                 return KILN_C99_OK;
@@ -6245,7 +6254,21 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 continue;
             }
             {
-                kiln_value shown = kiln_c99_text(kiln_val_to_boundary(element));
+                kiln_value boundary = kiln_val_to_boundary(element);
+                kiln_value shown;
+                /* A Buffer element reads as its text through `Buffer.prototype.toString`,
+                 * which is a call; every other element converts without one. */
+                if (boundary.tag == KILN_VALUE_TYPED_ARRAY &&
+                    kiln_c99_typed_array_of(boundary)->is_buffer) {
+                    kiln_value primitive;
+                    int prim_status = kiln_c99_to_primitive(host, boundary, 1, &primitive, depth, thrown);
+                    if (prim_status != KILN_C99_OK) {
+                        free(joined.bytes);
+                        return prim_status;
+                    }
+                    boundary = primitive;
+                }
+                shown = kiln_c99_text(boundary);
                 if (shown.tag != KILN_VALUE_STRING ||
                     kiln_c99_text_append_string(&joined, shown) != KILN_C99_OK) {
                     free(joined.bytes);

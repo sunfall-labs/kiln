@@ -15,9 +15,31 @@ static int kiln_c99_buffer_from_bytes(kiln_value *out, const uint8_t *bytes, uin
     return KILN_C99_OK;
 }
 
-static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, kiln_value *thrown) {
+static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, const kiln_value *args,
+                                size_t argc, kiln_value *thrown) {
     kiln_value built;
     int status;
+    if (source.tag == KILN_VALUE_ARRAY_BUFFER) {
+        /* `Buffer.from(arrayBuffer, byteOffset, length)` shares the bytes, which is what makes
+         * the shared prototype's `subarray` and `slice` windows rather than copies. */
+        size_t offset = 0;
+        size_t length = 0;
+        int has_length = argc > 2 && args[2].tag != KILN_VALUE_UNDEFINED;
+        if (argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED) {
+            status = kiln_c99_to_index(args[1], &offset, thrown);
+            if (status != KILN_C99_OK) return status;
+        }
+        if (has_length) {
+            status = kiln_c99_to_index(args[2], &length, thrown);
+            if (status != KILN_C99_OK) return status;
+        }
+        status = kiln_c99_new_typed_array(&built, KILN_TYPED_UINT8, source, offset, length,
+                                          has_length, thrown);
+        if (status != KILN_C99_OK) return status;
+        kiln_c99_typed_array_of(built)->is_buffer = 1;
+        *out = built;
+        return KILN_C99_OK;
+    }
     if (source.tag == KILN_VALUE_STRING) {
         uint8_t *encoded = NULL;
         size_t encoded_len = 0;
@@ -38,6 +60,18 @@ static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, kiln_value *
     return KILN_C99_OK;
 }
 
+/* `Buffer.prototype`: the object the runtime bootstrap assigned to the `Buffer` built-in's
+ * store, or undefined before it has (and in a realm without the Node bootstrap). Reads on a
+ * Buffer consult it first and `Object.getPrototypeOf` answers it. */
+int kiln_c99_buffer_prototype(kiln_host *host, kiln_value *out, int depth, kiln_value *thrown) {
+    kiln_value store;
+    int status = kiln_c99_callable_store(kiln_c99_builtin(KILN_C99_BUILTIN_BUFFER), &store, 0);
+    *out = kiln_c99_undefined();
+    if (status != KILN_C99_OK) return status;
+    if (store.tag != KILN_VALUE_OBJECT) return KILN_C99_OK;
+    return kiln_c99_get(host, store, "prototype", 9, out, depth, thrown);
+}
+
 /* The typed array a boxed value names, or NULL when it names something else. */
 static kiln_typed_array *kiln_c99_val_typed_array(kiln_val value) {
     void *ptr;
@@ -50,7 +84,7 @@ static kiln_typed_array *kiln_c99_val_typed_array(kiln_val value) {
 static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value receiver,
                                   const kiln_value *args, size_t argc, kiln_value *thrown) {
     kiln_value first = argc > 0 ? args[0] : kiln_c99_undefined();
-    if (code == KILN_C99_METHOD_BUFFER_FROM) return kiln_c99_buffer_from(out, first, thrown);
+    if (code == KILN_C99_METHOD_BUFFER_FROM) return kiln_c99_buffer_from(out, first, args, argc, thrown);
     if (code == KILN_C99_METHOD_BUFFER_ALLOC) {
         size_t length;
         int status = kiln_c99_to_index(first, &length, thrown);
@@ -65,6 +99,16 @@ static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value rec
         return KILN_C99_OK;
     }
     if (code == KILN_C99_METHOD_BUFFER_BYTE_LENGTH) {
+        if (first.tag == KILN_VALUE_STRING) {
+            /* UTF-8 bytes, not code units: `Buffer.byteLength("é")` is 2. */
+            uint8_t *encoded = NULL;
+            size_t encoded_len = 0;
+            int status = kiln_c99_string_to_utf8_lossy(first, &encoded, &encoded_len);
+            if (status != KILN_C99_OK) return status;
+            free(encoded);
+            *out = kiln_c99_number((double)encoded_len);
+            return KILN_C99_OK;
+        }
         *out = kiln_c99_number(first.tag == KILN_VALUE_STRING ? (double)first.len :
             first.tag == KILN_VALUE_TYPED_ARRAY ?
                 (double)(kiln_c99_typed_array_of(first)->length *
@@ -124,7 +168,7 @@ static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value rec
         kiln_c99_typed_array_of(*out)->is_buffer = 1;
         return KILN_C99_OK;
     }
-    if (code == KILN_C99_METHOD_BUFFER_TO_STRING) {
+    if (code == KILN_C99_METHOD_BUFFER_TO_STRING || code == KILN_C99_METHOD_BUFFER_TO_STRING_RAW) {
         kiln_typed_array *view;
         kiln_value encoding = (argc > 0 && args[0].tag != KILN_VALUE_UNDEFINED)
             ? kiln_c99_text(args[0])

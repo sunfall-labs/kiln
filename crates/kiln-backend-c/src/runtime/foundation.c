@@ -486,7 +486,8 @@ static int kiln_c99_buffer_from_bytes(kiln_value *out, const uint8_t *bytes, uin
 static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
                                     kiln_value source, size_t byte_offset, size_t length,
                                     int has_length, kiln_value *thrown);
-static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, kiln_value *thrown);
+static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, const kiln_value *args,
+                                size_t argc, kiln_value *thrown);
 static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value receiver,
                                   const kiln_value *args, size_t argc, kiln_value *thrown);
 static int kiln_c99_node_ffi(kiln_host *host, kiln_value *out, uint64_t code,

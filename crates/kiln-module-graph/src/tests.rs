@@ -1107,13 +1107,15 @@ fn node_modules_share_one_next_tick_and_promise_checkpoint() {
         .expect("execute shared-realm graph");
     assert_eq!(
         host.output,
+        // The whole graph evaluates inside one promise job, so its promise queue drains before
+        // the ticks either module queued -- node's order for these two files exactly.
         [
             "dep-body",
             "1",
-            "dep-tick",
-            "entry-tick",
             "dep-promise",
             "entry-promise",
+            "dep-tick",
+            "entry-tick",
         ]
     );
 }

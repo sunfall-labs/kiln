@@ -1,7 +1,9 @@
 //! `node:buffer` and global `Buffer` implementation.
 //!
-//! Provides `Buffer` constructor, statics (`from`, `alloc`, `isBuffer`, etc.),
-//! and Uint8Array `toString` encoding conversions.
+//! Provides the `Buffer` constructor, its statics (`from`, `alloc`, `isBuffer`, etc.) and the
+//! `toString` encoding conversions; a Buffer is a `Uint8Array` carrying the brand in its slot,
+//! and `Buffer.prototype` -- everything else on an instance -- is the shared TypeScript in
+//! `kiln-builtins/src/buffer.ts`, which both engines run in Node mode.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -15,12 +17,36 @@ use crate::{
 pub(crate) fn node_bytes_value(bytes: Vec<u8>) -> Value {
     let length = bytes.len();
     let buffer = BufferData::owned(bytes);
+    branded_view(buffer, 0, length)
+}
+
+/// A plain `Uint8Array` over owned bytes: what `TextEncoder.encode` answers, which node does
+/// not brand.
+pub(crate) fn plain_bytes_value(bytes: Vec<u8>) -> Value {
+    let length = bytes.len();
     Value::TypedArray(Rc::new(TypedArrayData {
-        buffer,
+        buffer: BufferData::owned(bytes),
         offset: 0,
         length: Some(length),
         kind: TypedKind::Uint8,
         properties: RefCell::new(ObjectData::default()),
+    }))
+}
+
+/// A Buffer over `buffer` from `offset` for `length` bytes, sharing the allocation. The brand
+/// is what tells it apart from a `Uint8Array`: `Buffer.isBuffer` reads it, and a member read
+/// goes through `Buffer.prototype` first.
+fn branded_view(buffer: Rc<BufferData>, offset: usize, length: usize) -> Value {
+    let properties = ObjectData {
+        buffer_brand: true,
+        ..ObjectData::default()
+    };
+    Value::TypedArray(Rc::new(TypedArrayData {
+        buffer,
+        offset,
+        length: Some(length),
+        kind: TypedKind::Uint8,
+        properties: RefCell::new(properties),
     }))
 }
 
@@ -69,6 +95,32 @@ pub(crate) fn dispatch(
                         message: "Buffer.from string contains a lone surrogate".to_owned(),
                     })?,
                 Value::TypedArray(view) => view.bytes(),
+                // `Buffer.from(arrayBuffer, byteOffset, length)` shares the bytes, which is
+                // what makes `subarray` and `slice` windows rather than copies.
+                Value::ArrayBuffer(buffer) => {
+                    let total = buffer.byte_length();
+                    let offset = arguments.get(1).map_or(0.0, Value::as_number);
+                    let offset = if offset.is_nan() {
+                        0
+                    } else {
+                        offset.max(0.0) as usize
+                    };
+                    if offset > total {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: "\"offset\" is outside of buffer bounds".to_owned(),
+                        });
+                    }
+                    let length = match arguments.get(2) {
+                        None | Some(Value::Undefined) => total - offset,
+                        Some(value) => value.as_number().max(0.0) as usize,
+                    };
+                    if offset + length > total {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: "\"length\" is outside of buffer bounds".to_owned(),
+                        });
+                    }
+                    return Ok(branded_view(Rc::clone(buffer), offset, length));
+                }
                 Value::Array(items) => items
                     .borrow()
                     .iter()
@@ -95,11 +147,13 @@ pub(crate) fn dispatch(
         }
         Native::NodeBufferIsBuffer => Ok(Value::Boolean(matches!(
             arguments.first(),
-            Some(Value::TypedArray(view)) if view.kind == TypedKind::Uint8
+            Some(Value::TypedArray(view)) if view.properties.borrow().buffer_brand
         ))),
         Native::NodeBufferByteLength => {
             let length = match arguments.first().unwrap_or(&Value::Undefined) {
-                Value::String(text) => text.len(),
+                // UTF-8 bytes, not code units: `Buffer.byteLength("é")` is 2. A lone surrogate
+                // encodes as the three bytes of U+FFFD, which is what node writes for it.
+                Value::String(text) => text.to_lossy_string().len(),
                 Value::TypedArray(view) => view.bytes().len(),
                 Value::ArrayBuffer(buffer) => buffer.byte_length(),
                 value => value.to_display_string().len(),

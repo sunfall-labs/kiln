@@ -874,6 +874,9 @@ method_ids! {
     (KILN_C99_METHOD_BUFFER_BYTE_LENGTH, 343, Buffer; 0, 0),
     (KILN_C99_METHOD_BUFFER_CONCAT, 344, Buffer; 0, 0),
     (KILN_C99_METHOD_BUFFER_TO_STRING, 345, Buffer; 0, 0),
+    // The same decoder under the name the shared Buffer bootstrap captures it by
+    // (`__kilnBufferToString`), so `Buffer.prototype.toString.name` stays "toString".
+    (KILN_C99_METHOD_BUFFER_TO_STRING_RAW, 528, Buffer; 0, 0),
     (KILN_C99_METHOD_NODE_UTIL_DEBUGLOG, 346, NodeUtil; 0, 0),
     (KILN_C99_METHOD_NODE_UTIL_NOOP, 347, NodeUtil; 0, 0),
     (KILN_C99_METHOD_NODE_UTIL_DEPRECATE, 348, NodeUtil; 0, 0),
@@ -3772,6 +3775,7 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_BUFFER_BYTE_LENGTH),
     emit_method_define!(KILN_C99_METHOD_BUFFER_CONCAT),
     emit_method_define!(KILN_C99_METHOD_BUFFER_TO_STRING),
+    emit_method_define!(KILN_C99_METHOD_BUFFER_TO_STRING_RAW),
     emit_method_define!(KILN_C99_METHOD_NODE_UTIL_DEBUGLOG),
     emit_method_define!(KILN_C99_METHOD_NODE_UTIL_NOOP),
     emit_method_define!(KILN_C99_METHOD_NODE_UTIL_DEPRECATE),

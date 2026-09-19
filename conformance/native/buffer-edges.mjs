@@ -1,0 +1,16 @@
+// Buffer edge cases: encodings, errors and their codes, overlapping copy, swaps, variable-width
+// integers, floats, BigInt64, species, and string coercion through Buffer.prototype.toString.
+const codes = (f) => { try { f(); return "ok"; } catch (e) { return `${e.constructor.name}:${e.code}`; } };
+const b = Buffer.from("hello world");
+console.log(b.toString("utf8", 6), b.toString("ascii", 0, 5), b.toString("utf16le").length, Buffer.from("héllo", "latin1").toString("latin1"), Buffer.from("hé", "utf16le").toString("utf16le"), Buffer.from("SGVsbG8", "base64url").toString(), Buffer.from("zz", "hex").length);
+console.log(b.lastIndexOf("o"), b.indexOf("o", 5), b.indexOf(111), b.indexOf(Buffer.from("wor")), b.indexOf("o", -3), b.includes("world", 7), b.lastIndexOf("l", 5));
+console.log(codes(() => b.readUInt32BE(9)), codes(() => b.readUInt8(-1)), codes(() => b.writeUInt8(256, 0)), codes(() => b.readInt8("x")), codes(() => Buffer.from(5)), codes(() => Buffer.alloc("3")), codes(() => b.fill("")), codes(() => b.equals(1)));
+const c = Buffer.alloc(6); console.log(b.copy(c, 1, 0, 3), c.toString("hex"), Buffer.from("abcdef").copy(c), c.toString(), b.copy(b, 1, 0, 4), b.toString());
+const d = Buffer.from("abcdefgh"); console.log(d.swap16().toString(), d.swap32().toString(), d.swap64().toString(), codes(() => Buffer.from("abc").swap16()));
+const e = Buffer.alloc(6); console.log(e.writeUIntBE(0x123456, 0, 3), e.readUIntBE(0, 3).toString(16), e.writeIntLE(-2, 3, 3), e.readIntLE(3, 3), e.readUIntLE(3, 3), e.toString("hex"));
+console.log(Buffer.from("€").toString("hex"), Buffer.byteLength("€"), Buffer.byteLength("aa", "hex"), Buffer.byteLength("aGk=", "base64"), Buffer.byteLength("ab", "utf16le"), Buffer.byteLength(new Uint16Array(2)), Buffer.from("€").write("ab", 1), Buffer.alloc(3).write("€"));
+console.log(b.slice(-5).toString(), b.subarray(3, -2).toString(), b.slice(20).length, Buffer.compare(b, b), [Buffer.from("b"), Buffer.from("a")].sort(Buffer.compare).join(), b.toJSON().type, Buffer.from({ type: "Buffer", data: [104, 105] }).toString(), Buffer.from(Buffer.from("x").buffer).length >= 1);
+console.log(Object.keys(Buffer.from("ab")).join(), Object.getOwnPropertyNames(Buffer.prototype).length > 60, Buffer.prototype.readUint16BE === Buffer.prototype.readUInt16BE, typeof Buffer.poolSize, Buffer.name, Buffer.concat([]).length, Buffer.concat([Buffer.from("ab"), Buffer.from("cd")], 3).toString(), Buffer.alloc(4, "ab").toString(), Buffer.alloc(3, "ab", "hex").toString("hex"));
+const fl = Buffer.alloc(4); fl.writeFloatBE(-0.5); console.log(fl.readFloatBE(0), fl.toString("hex"), fl.readFloatLE(0) !== -0.5, Buffer.from([255]).readInt8(0), Buffer.from([0x80, 0]).readInt16LE(0), Buffer.from([0x80, 0, 0, 0]).readInt32BE(0));
+const big = Buffer.alloc(8); big.writeBigInt64LE(-1n); console.log(big.readBigUInt64LE(), big.readBigInt64BE(), codes(() => big.writeBigUInt64LE(-1n)), codes(() => big.writeBigInt64LE(1)));
+console.log(String(Buffer.from("hi")), `${Buffer.from("hi")}`, Buffer.from("hi") + "", [...Buffer.from("hi")].join(), Buffer.from("hi").map((x) => x + 1).constructor === Uint8Array, Buffer.from("hi").every((x) => x > 0), Array.from(Buffer.from("hi")).length, Buffer.from("hi").at(-1), Buffer.from("hi").reverse().toString());

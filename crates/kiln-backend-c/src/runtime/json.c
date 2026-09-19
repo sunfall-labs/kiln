@@ -354,6 +354,8 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
     if (value.tag == KILN_VALUE_DATE || value.tag == KILN_VALUE_TEMPORAL ||
         (value.tag == KILN_VALUE_PROXY &&
          kiln_c99_proxy_inner(value).tag == KILN_VALUE_OBJECT) ||
+        /* A Buffer carries one through `Buffer.prototype`: `{ type: "Buffer", data }`. */
+        (value.tag == KILN_VALUE_TYPED_ARRAY && kiln_c99_typed_array_of(value)->is_buffer) ||
         (value.tag == KILN_VALUE_OBJECT && !kiln_c99_json_lacks_tojson(value))) {
         kiln_value method;
         status = kiln_c99_get(host, value, "toJSON", 6, &method, depth, thrown);

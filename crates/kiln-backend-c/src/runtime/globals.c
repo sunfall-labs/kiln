@@ -429,7 +429,12 @@ static int kiln_c99_global_object(kiln_value *out) {
                      {"__kilnUrlParse", KILN_C99_METHOD_URL_PARSE_RAW},
                      {"__kilnUrlSet", KILN_C99_METHOD_URL_SET_RAW},
                      {"__kilnUrlFast", KILN_C99_METHOD_URL_FAST_RAW},
-                     {"__kilnUrlAdopt", KILN_C99_METHOD_URL_ADOPT_RAW}};
+                     {"__kilnUrlAdopt", KILN_C99_METHOD_URL_ADOPT_RAW},
+                     /* `Buffer.prototype.toString`'s decoder, captured by the shared Buffer
+                      * bootstrap (kiln-builtins/src/buffer.ts) without a call: the bootstrap
+                      * runs in every Node-mode program, and a call into the Buffer group would
+                      * refuse in one that never reaches Buffer. */
+                     {"__kilnBufferToString", KILN_C99_METHOD_BUFFER_TO_STRING_RAW}};
     size_t index;
     int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_GLOBALS, &globals);
     if (status != KILN_C99_OK) return status;

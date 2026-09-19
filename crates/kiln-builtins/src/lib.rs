@@ -1237,7 +1237,10 @@ declare_ts_builtins! {
     },
 }
 
-pub const WEB_BOOTSTRAP_SOURCE: &str = include_str!("web.ts");
+/// The Node-mode bootstrap both engines run before user code: the WHATWG web classes, then
+/// `Buffer.prototype` over each engine's branded `Uint8Array` (issue 08 of `.scratch/full-runtime`).
+pub const WEB_BOOTSTRAP_SOURCE: &str =
+    concat!(include_str!("web.ts"), "\n", include_str!("buffer.ts"));
 
 /// `URL` and `URLSearchParams` over the host's `__kilnUrl*` intrinsics (ADR 0063 rule 4). Part
 /// of every native realm's bootstrap, not only `--node`'s: `URL` is an ECMAScript-adjacent global
