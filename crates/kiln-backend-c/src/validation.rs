@@ -366,7 +366,8 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::AbortSignal
             | kiln_ir::Builtin::TextEncoder
             | kiln_ir::Builtin::TextDecoder
-            | kiln_ir::Builtin::Performance,
+            | kiln_ir::Builtin::Performance
+            | kiln_ir::Builtin::StructuredClone,
         ) => Ok(()),
         Instruction::LoadBuiltin(builtin) => Err(EmitError::Unsupported {
             feature: format!("the `{builtin:?}` builtin in the native backend"),

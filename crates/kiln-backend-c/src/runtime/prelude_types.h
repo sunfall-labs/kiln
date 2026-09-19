@@ -1141,6 +1141,9 @@ typedef struct kiln_array {
     int not_extensible;
     int64_t match_index;
     kiln_value match_input;
+    /* The `groups` object of a match with named captures, built when the match is; undefined
+     * for a pattern with none, which is what `m.groups` answers then. */
+    kiln_value match_groups;
     kiln_val inline_elements[8];
     /* Whether this array is proven to contain only numbers (dense double backing, no holes). */
     int is_numeric;
@@ -1338,6 +1341,9 @@ typedef struct kiln_regexp {
     size_t cached_subject_len;
     int cached_is_ascii;
     size_t cached_group_count;
+    /* Whether the pattern has named capture groups: 0 not yet asked, 1 none, 2 some. Asked of
+     * the provider once, after the first match, so an unnamed pattern pays one call. */
+    int named_groups;
     int64_t cached_ranges[64];
     kiln_val cached_elements[32];
 } kiln_regexp;

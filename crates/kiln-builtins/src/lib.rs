@@ -156,6 +156,9 @@ declare_ts_builtins! {
         compilation_test: events_builtin_compiles_cleanly,
         exports: [
             "EventEmitter",
+            "once",
+            "on",
+            "getEventListeners",
             "default",
         ],
     },

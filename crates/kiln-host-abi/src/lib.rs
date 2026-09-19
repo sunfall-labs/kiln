@@ -804,6 +804,17 @@ impl<F: FileSystemOps + Clone + 'static> FileSystemOps for OverlayFileSystem<F> 
     }
 
     fn remove_dir_all(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        // `write` records every file here as well as on disk, so a directory removed on disk
+        // alone still "exists" through `is_in_memory_dir`: `fs.rmSync(dir, { recursive: true })`
+        // followed by `fs.existsSync(dir)` answered true. The overlay forgets what was under it.
+        {
+            let mut files = self.files.write().unwrap();
+            files.retain(|k, _| {
+                !(k.starts_with(path)
+                    || k.strip_prefix(".")
+                        .map_or(false, |stripped| stripped.starts_with(path)))
+            });
+        }
         self.fallback.remove_dir_all(path)
     }
 

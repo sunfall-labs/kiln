@@ -95,6 +95,11 @@ icu_decimal = { version = "2.3", default-features = false, features = ["compiled
 icu_plurals = { version = "2.3", default-features = false, features = ["compiled_data", "unstable"] }
 icu_list = { version = "2.3", default-features = false, features = ["compiled_data", "alloc"] }
 icu_collator = { version = "2.3", default-features = false, features = ["compiled_data"] }
+# `String.prototype.normalize`. Not an `Intl` member, but the same data family: `icu_collator`
+# already carries the canonical decompositions, so linking the normalizer adds the compatibility
+# table and nothing else. A normalizer that answered the identity was wrong for `ﬁ` and every
+# combining sequence a form tool emits (fixed 2026-09-19).
+icu_normalizer = { version = "2.3", default-features = false, features = ["compiled_data"] }
 icu_segmenter = { version = "2.3", default-features = false, features = ["compiled_data", "auto"] }
 # `Intl.DateTimeFormat`. This is the one formatter whose data is a *pattern* rather than a table:
 # which fields a locale shows, in what order, with which separators and in which calendar is CLDR

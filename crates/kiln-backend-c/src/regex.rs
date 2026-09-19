@@ -686,6 +686,13 @@ impl<'a> Parser<'a> {
 
 pub fn try_compile_regex(pattern: &str, flags_str: &str) -> Option<CompiledRegex> {
     let flags = RegexFlags::parse(flags_str)?;
+    // The literal compiler matches UTF-16 code units. Under `u`/`v` the pattern is
+    // code-point based (`.` spans a surrogate pair, `\p{..}` is a property, `\u{..}`
+    // may be astral), and an astral character in the pattern source is two units
+    // even without the flag; both belong to the engine.
+    if flags.unicode || pattern.chars().any(|c| c as u32 > 0xFFFF) {
+        return None;
+    }
     let chars: Vec<char> = pattern.chars().collect();
     let mut parser = Parser::new(&chars, flags.clone());
     let mut branches = parser.parse_disjunction()?;
@@ -1312,6 +1319,9 @@ mod tests {
     fn falls_back_on_complex_constructs() {
         // Backreference \1
         assert!(try_compile_regex(r"(\w)\1", "").is_none());
+        assert!(try_compile_regex(r"\p{L}", "u").is_none());
+        assert!(try_compile_regex(r".", "u").is_none());
+        assert!(try_compile_regex("\u{1F600}", "").is_none());
         // Lookaround (?<=...)
         assert!(try_compile_regex(r"(?<=a)b", "").is_none());
         // Lookahead (?!)

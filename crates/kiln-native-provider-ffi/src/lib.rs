@@ -2036,6 +2036,64 @@ mod realm {
         })
     }
 
+    /// `String.prototype.toUpperCase` / `toLowerCase` beyond ASCII: the full Unicode mapping,
+    /// which is Rust's own (`char::to_uppercase`, including the one-to-many cases -- `ß` to
+    /// `SS`), over UTF-16 in and out. A lone surrogate passes through unchanged. Spilled the way
+    /// the other string exports are: `out_len` is the answer's length whether or not it fitted.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_string_case(
+        units: *const u16,
+        count: u64,
+        upper: u32,
+        out: *mut u16,
+        capacity: u64,
+        out_len: *mut u64,
+    ) -> i32 {
+        ffi(|| {
+            if out_len.is_null() || (units.is_null() && count != 0) {
+                return INVALID_ARGUMENT;
+            }
+            let Ok(count) = usize::try_from(count) else {
+                return INVALID_ARGUMENT;
+            };
+            let input = if count == 0 {
+                &[][..]
+            } else {
+                unsafe { std::slice::from_raw_parts(units, count) }
+            };
+            let mut answer: Vec<u16> = Vec::with_capacity(count);
+            for decoded in char::decode_utf16(input.iter().copied()) {
+                match decoded {
+                    Ok(c) => {
+                        if upper != 0 {
+                            for mapped in c.to_uppercase() {
+                                let mut buf = [0u16; 2];
+                                answer.extend_from_slice(mapped.encode_utf16(&mut buf));
+                            }
+                        } else {
+                            for mapped in c.to_lowercase() {
+                                let mut buf = [0u16; 2];
+                                answer.extend_from_slice(mapped.encode_utf16(&mut buf));
+                            }
+                        }
+                    }
+                    Err(lone) => answer.push(lone.unpaired_surrogate()),
+                }
+            }
+            unsafe { out_len.write(answer.len() as u64) };
+            if capacity < answer.len() as u64 {
+                return INVALID_ARGUMENT;
+            }
+            if !answer.is_empty() {
+                if out.is_null() {
+                    return INVALID_ARGUMENT;
+                }
+                unsafe { std::ptr::copy_nonoverlapping(answer.as_ptr(), out, answer.len()) };
+            }
+            0
+        })
+    }
+
     /// The input did not parse as a URL: the constructor's `TypeError`, kept apart from the
     /// ABI's own statuses so the caller can throw rather than refuse.
     pub const URL_INVALID: i32 = 2;
@@ -6698,6 +6756,9 @@ mod realm {
         (realm, kiln_url_set, url_set) => {
             const _: unsafe extern "C" fn(*const u8, u64, u32, *const u8, u64, *mut u8, u64, *mut u64) -> i32 = kiln_url_set;
         };
+        (realm, kiln_string_case, string_case) => {
+            const _: unsafe extern "C" fn(*const u16, u64, u32, *mut u16, u64, *mut u64) -> i32 = kiln_string_case;
+        };
         (realm, kiln_realm_symbol_for, realm_symbol_for) => {
             const _: unsafe extern "C" fn(*const super::KilnString, *mut u64) -> i32 =
                 kiln_realm_symbol_for;
@@ -7130,6 +7191,39 @@ pub unsafe extern "C" fn kiln_json_parse(
 ///
 /// This disabled feature stub does not dereference its arguments.
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_string_normalize(
+    _units: *const u16,
+    _count: u64,
+    _form: u32,
+    _out: *mut u16,
+    _capacity: u64,
+    _out_len: *mut u64,
+) -> i32 {
+    INVALID_ARGUMENT
+}
+
+#[cfg(not(feature = "intl"))]
+/// # Safety
+///
+/// This disabled feature stub does not dereference its arguments.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_intl_collate(
+    _left: *const u16,
+    _left_len: u64,
+    _right: *const u16,
+    _right_len: u64,
+    _spec: *const u8,
+    _spec_len: u64,
+    _out_order: *mut i32,
+) -> i32 {
+    INVALID_ARGUMENT
+}
+
+#[cfg(not(feature = "intl"))]
+/// # Safety
+///
+/// This disabled feature stub does not dereference its arguments.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_intl_segment(
     _bytes: *const u8,
     _len: usize,
@@ -7205,6 +7299,8 @@ mod regexp {
     /// structure across the boundary.
     pub struct KilnRegex {
         compiled: regress::Regex,
+        /// The `u`/`v` flag: code-point matching rather than code-unit matching.
+        unicode: bool,
         last: Option<regress::Match>,
         latin1_subject: Vec<u16>,
     }
@@ -7245,8 +7341,10 @@ mod regexp {
         let Ok(compiled) = regress::Regex::from_unicode(pattern.into_iter(), flags.as_str()) else {
             return INVALID_ARGUMENT;
         };
+        let unicode = flags.contains('u') || flags.contains('v');
         let handle = alloc::boxed::Box::new(KilnRegex {
             compiled,
+            unicode,
             last: None,
             latin1_subject: Vec::new(),
         });
@@ -7312,7 +7410,14 @@ mod regexp {
             state.last = None;
             return 0;
         }
-        let Some(found) = state.compiled.find_from_utf16(units, start).next() else {
+        // Without `u` the language matches code units, so a surrogate pair is two
+        // characters (`/^.$/.test("\u{1F600}")` is false); with it, one code point.
+        let found = if state.unicode {
+            state.compiled.find_from_utf16(units, start).next()
+        } else {
+            state.compiled.find_from_ucs2(units, start).next()
+        };
+        let Some(found) = found else {
             state.last = None;
             return 0;
         };
@@ -9467,12 +9572,224 @@ mod intl {
         })
     }
 
+    /// Copy `answer` into `out`, reporting its length either way: the caller sizes a retry
+    /// from `out_len` when `capacity` was short, the same protocol as `kiln_string_case`.
+    unsafe fn spill_units(answer: &[u16], out: *mut u16, capacity: u64, out_len: *mut u64) -> i32 {
+        unsafe { out_len.write(answer.len() as u64) };
+        if capacity < answer.len() as u64 {
+            return INVALID_ARGUMENT;
+        }
+        if !answer.is_empty() {
+            if out.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            unsafe { std::ptr::copy_nonoverlapping(answer.as_ptr(), out, answer.len()) };
+        }
+        0
+    }
+
+    /// `String.prototype.normalize`: `form` is 0 `NFC`, 1 `NFD`, 2 `NFKC`, 3 `NFKD`. The tables
+    /// are ICU4X's, shared with the interpreter through `kiln_intl::normalize`; the form is
+    /// validated by the caller, which owns the `RangeError`.
+    ///
+    /// # Safety
+    ///
+    /// `units` must be readable for `count` units (null only for an empty string), `out`
+    /// writable for `capacity` units, and `out_len` a writable slot.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_string_normalize(
+        units: *const u16,
+        count: u64,
+        form: u32,
+        out: *mut u16,
+        capacity: u64,
+        out_len: *mut u64,
+    ) -> i32 {
+        if out_len.is_null() || (units.is_null() && count != 0) {
+            return INVALID_ARGUMENT;
+        }
+        let Ok(count) = usize::try_from(count) else {
+            return INVALID_ARGUMENT;
+        };
+        let form = match form {
+            0 => "NFC",
+            1 => "NFD",
+            2 => "NFKC",
+            3 => "NFKD",
+            _ => return INVALID_ARGUMENT,
+        };
+        // SAFETY: the caller contract guarantees this readable span.
+        let input = if count == 0 {
+            &[][..]
+        } else {
+            unsafe { core::slice::from_raw_parts(units, count) }
+        };
+        let normalized = catch_unwind(AssertUnwindSafe(|| {
+            kiln_intl::normalize::normalize(input, form)
+        }));
+        let Ok(Some(answer)) = normalized else {
+            return -2;
+        };
+        // SAFETY: `out` and `out_len` are what the caller contract says they are.
+        unsafe { spill_units(&answer, out, capacity, out_len) }
+    }
+
+    thread_local! {
+        /// The collator the last `kiln_intl_collate` built, keyed by its spec. A sort calls
+        /// `localeCompare` O(n log n) times with the same locale and options, and building an
+        /// ICU4X collator per call is the whole cost.
+        static COLLATOR: RefCell<Option<(Vec<u8>, kiln_intl::collator::Collator)>> =
+            const { RefCell::new(None) };
+    }
+
+    /// The collator a `spec` names, or `None` for a locale or option value the collator
+    /// rejects.
+    ///
+    /// The spec is seven UTF-8 fields separated by U+001F, each empty when the program did not
+    /// say: `locale`, `usage`, `sensitivity`, `numeric` (`true`/`false`), `caseFirst`,
+    /// `ignorePunctuation` (`true`/`false`), `collation`. A flat string rather than a struct
+    /// because it is also the cache key.
+    fn build_collator(spec: &str) -> Option<kiln_intl::collator::Collator> {
+        let mut fields = spec.split('\u{1f}');
+        let mut next = || fields.next().unwrap_or("").to_owned();
+        let locale = next();
+        let usage = next();
+        let sensitivity = next();
+        let numeric = next();
+        let case_first = next();
+        let ignore_punctuation = next();
+        let collation = next();
+        let flag = |text: String| match text.as_str() {
+            "" => Some(None),
+            "true" => Some(Some(true)),
+            "false" => Some(Some(false)),
+            _ => None,
+        };
+        let options = kiln_intl::collator::Options {
+            usage: if usage.is_empty() {
+                "sort".to_owned()
+            } else {
+                usage
+            },
+            collation: (!collation.is_empty()).then_some(collation),
+            numeric: flag(numeric)?,
+            case_first: (!case_first.is_empty()).then_some(case_first),
+            sensitivity: (!sensitivity.is_empty()).then_some(sensitivity),
+            ignore_punctuation: flag(ignore_punctuation)?,
+        };
+        // The constructor resolves a tag it was handed; the `RangeError` for a malformed one is
+        // `CanonicalizeLocaleList`'s, which the interpreter runs first and this runs here.
+        let requested: Vec<String> = if locale.is_empty() {
+            Vec::new()
+        } else {
+            vec![kiln_intl::locale::canonicalize(&locale).ok()?]
+        };
+        if !kiln_intl::collator::USAGES.contains(&options.usage.as_str())
+            || options
+                .sensitivity
+                .as_deref()
+                .is_some_and(|s| !kiln_intl::collator::SENSITIVITIES.contains(&s))
+            || options
+                .case_first
+                .as_deref()
+                .is_some_and(|c| !kiln_intl::collator::CASE_FIRSTS.contains(&c))
+        {
+            return None;
+        }
+        kiln_intl::collator::Collator::new(&requested, options).ok()
+    }
+
+    /// `String.prototype.localeCompare` and `Intl.Collator.prototype.compare`: `out_order` is
+    /// -1, 0 or 1. Returns -1 for a spec the collator rejects (the caller's `RangeError`) and
+    /// -2 when the engine failed.
+    ///
+    /// # Safety
+    ///
+    /// `left`, `right` and `spec` must be readable for their lengths (null only when the
+    /// length is zero), and `out_order` must be a writable slot.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_intl_collate(
+        left: *const u16,
+        left_len: u64,
+        right: *const u16,
+        right_len: u64,
+        spec: *const u8,
+        spec_len: u64,
+        out_order: *mut i32,
+    ) -> i32 {
+        if out_order.is_null()
+            || (left.is_null() && left_len != 0)
+            || (right.is_null() && right_len != 0)
+            || (spec.is_null() && spec_len != 0)
+        {
+            return INVALID_ARGUMENT;
+        }
+        let (Ok(left_len), Ok(right_len), Ok(spec_len)) = (
+            usize::try_from(left_len),
+            usize::try_from(right_len),
+            usize::try_from(spec_len),
+        ) else {
+            return INVALID_ARGUMENT;
+        };
+        // SAFETY: the caller contract guarantees these readable spans.
+        let left = if left_len == 0 {
+            &[][..]
+        } else {
+            unsafe { core::slice::from_raw_parts(left, left_len) }
+        };
+        let right = if right_len == 0 {
+            &[][..]
+        } else {
+            unsafe { core::slice::from_raw_parts(right, right_len) }
+        };
+        let spec = if spec_len == 0 {
+            &[][..]
+        } else {
+            unsafe { core::slice::from_raw_parts(spec, spec_len) }
+        };
+        let Ok(spec_text) = core::str::from_utf8(spec) else {
+            return INVALID_ARGUMENT;
+        };
+        let compared = catch_unwind(AssertUnwindSafe(|| {
+            COLLATOR.with(|slot| {
+                let mut slot = slot.borrow_mut();
+                let cached = matches!(slot.as_ref(), Some((key, _)) if key.as_slice() == spec);
+                if !cached {
+                    let built = build_collator(spec_text)?;
+                    *slot = Some((spec.to_vec(), built));
+                }
+                let (_, collator) = slot.as_ref()?;
+                Some(collator.compare(left, right))
+            })
+        }));
+        match compared {
+            Ok(Some(order)) => {
+                let order = match order {
+                    core::cmp::Ordering::Less => -1,
+                    core::cmp::Ordering::Equal => 0,
+                    core::cmp::Ordering::Greater => 1,
+                };
+                // SAFETY: `out_order` is a writable slot by the caller contract.
+                unsafe { out_order.write(order) };
+                0
+            }
+            Ok(None) => -1,
+            Err(_) => -2,
+        }
+    }
+
     macro_rules! assert_provider_export {
         ($(($group:ident, $name:ident, $signature:ident);)*) => {
             $(assert_provider_export!($group, $name, $signature);)*
         };
         (intl, kiln_intl_segment, intl_segment) => {
             const _: unsafe extern "C" fn(*const u8, usize, u32, *mut *const u32, *mut usize) -> i32 = kiln_intl_segment;
+        };
+        (intl, kiln_string_normalize, string_normalize) => {
+            const _: unsafe extern "C" fn(*const u16, u64, u32, *mut u16, u64, *mut u64) -> i32 = kiln_string_normalize;
+        };
+        (intl, kiln_intl_collate, intl_collate) => {
+            const _: unsafe extern "C" fn(*const u16, u64, *const u16, u64, *const u8, u64, *mut i32) -> i32 = kiln_intl_collate;
         };
         ($group:ident, $name:ident, $signature:ident) => {};
     }
@@ -9500,6 +9817,55 @@ mod intl {
             assert_eq!(status, 0);
             let records = unsafe { core::slice::from_raw_parts(records, count * 4) };
             assert_eq!(records, &[0, 2, 0, 0, 2, 3, 0, 0, 3, 5, 0, 0]);
+        }
+
+        #[test]
+        fn normalizes_and_reports_the_length_when_short() {
+            let ligature: Vec<u16> = "\u{fb01}".encode_utf16().collect();
+            let mut out = [0u16; 1];
+            let mut len = 0u64;
+            let status = unsafe {
+                kiln_string_normalize(ligature.as_ptr(), 1, 2, out.as_mut_ptr(), 1, &raw mut len)
+            };
+            assert_eq!((status, len), (INVALID_ARGUMENT, 2));
+            let mut out = [0u16; 2];
+            let status = unsafe {
+                kiln_string_normalize(ligature.as_ptr(), 1, 2, out.as_mut_ptr(), 2, &raw mut len)
+            };
+            assert_eq!((status, len, out), (0, 2, [b'f' as u16, b'i' as u16]));
+        }
+
+        #[test]
+        fn collates_by_spec() {
+            let a: Vec<u16> = "a".encode_utf16().collect();
+            let big_c: Vec<u16> = "C".encode_utf16().collect();
+            let mut order = 9i32;
+            let spec = "en\u{1f}\u{1f}base\u{1f}\u{1f}\u{1f}\u{1f}";
+            let status = unsafe {
+                kiln_intl_collate(
+                    a.as_ptr(),
+                    1,
+                    big_c.as_ptr(),
+                    1,
+                    spec.as_ptr(),
+                    spec.len() as u64,
+                    &raw mut order,
+                )
+            };
+            assert_eq!((status, order), (0, -1));
+            let bad = "not a tag!\u{1f}\u{1f}\u{1f}\u{1f}\u{1f}\u{1f}";
+            let status = unsafe {
+                kiln_intl_collate(
+                    a.as_ptr(),
+                    1,
+                    big_c.as_ptr(),
+                    1,
+                    bad.as_ptr(),
+                    bad.len() as u64,
+                    &raw mut order,
+                )
+            };
+            assert_eq!(status, -1);
         }
     }
 }

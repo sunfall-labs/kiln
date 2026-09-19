@@ -243,6 +243,13 @@ pub(crate) fn collect_typed_call_sites(
                     .into_iter()
                     .filter(|&index| plan.available.get(index as usize).copied().unwrap_or(true))
                     .collect::<Vec<_>>();
+                // Not filtered by which arguments are proven numbers: the use site in
+                // `call_method.rs` decides that against the set emission works with, which is
+                // the plan's numbers *plus* what guarded speculation proves on the fast clone,
+                // and a site this pass left undeclared on the narrower set was a build failure
+                // (`ku_fn_entry_v89_t_1_fn`, from `ticker.start(3)`). A declared cache nothing
+                // uses is a static that costs nothing.
+                let _ = numbers;
                 let typed_candidates: Vec<u32> = candidates
                     .iter()
                     .copied()
@@ -251,7 +258,6 @@ pub(crate) fn collect_typed_call_sites(
                         plan.typed_entries.get(i as usize).copied().unwrap_or(false)
                             && !callee.arrow
                             && callee.parameter_count as usize == argc
-                            && args.iter().all(|a| numbers.contains(a))
                     })
                     .collect();
                 if !typed_candidates.is_empty() {

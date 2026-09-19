@@ -41,6 +41,7 @@ pub mod displaynames;
 pub mod duration;
 pub mod list;
 pub mod locale;
+pub mod normalize;
 pub mod number;
 mod parts;
 pub mod plurals;

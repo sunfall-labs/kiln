@@ -1919,6 +1919,27 @@ int kiln_node_path_part(uint32_t part, const uint8_t *path, uint64_t path_len,
     *out_len = 0;
     return KILN_C99_INVALID_ARGUMENT;
 }
+int kiln_string_case(const uint16_t *units, uint64_t count, uint32_t upper, uint16_t *out,
+                     uint64_t capacity, uint64_t *out_len) {
+    (void)units; (void)count; (void)upper; (void)out; (void)capacity;
+    if (out_len == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *out_len = 0;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_string_normalize(const uint16_t *units, uint64_t count, uint32_t form, uint16_t *out,
+                          uint64_t capacity, uint64_t *out_len) {
+    (void)units; (void)count; (void)form; (void)out; (void)capacity;
+    if (out_len == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *out_len = 0;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_intl_collate(const uint16_t *left, uint64_t left_len, const uint16_t *right,
+                      uint64_t right_len, const uint8_t *spec, uint64_t spec_len,
+                      int32_t *out_order) {
+    (void)left; (void)left_len; (void)right; (void)right_len; (void)spec; (void)spec_len;
+    (void)out_order;
+    return KILN_C99_INVALID_ARGUMENT;
+}
 int kiln_url_parse(const uint8_t *input, uint64_t input_len, const uint8_t *base,
                    uint64_t base_len, uint8_t *out, uint64_t capacity, uint64_t *out_len) {
     (void)input; (void)input_len; (void)base; (void)base_len; (void)out; (void)capacity;

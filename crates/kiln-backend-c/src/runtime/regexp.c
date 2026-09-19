@@ -34,6 +34,7 @@ static int kiln_c99_new_regexp(kiln_value *out, const kiln_string *source,
     regexp->cached_subject_len = 0;
     regexp->cached_is_ascii = 0;
     regexp->cached_group_count = 0;
+    regexp->named_groups = 0;
     for (index = 0; flags != NULL && index < flags->unit_len; ++index) {
         uint32_t flag = kiln_string_unit_at(flags, index);
         if (flag == 'g') {
@@ -95,8 +96,38 @@ static void kiln_c99_materialize_match_properties(kiln_array *arr) {
     }
     kiln_c99_put_mode(NULL, props, "index", 5, kiln_c99_number((double)arr->match_index), 0, 0, NULL);
     kiln_c99_put_mode(NULL, props, "input", 5, arr->match_input, 0, 0, NULL);
-    kiln_c99_put_mode(NULL, props, "groups", 6, kiln_c99_undefined(), 0, 0, NULL);
+    kiln_c99_put_mode(NULL, props, "groups", 6, arr->match_groups, 0, 0, NULL);
     arr->properties = props;
+}
+
+/* The `groups` of a match: one property per named capture, holding that group's element, on
+ * an object with a null prototype -- which is what `m.groups.y` reads for `(?<y>\d{4})`. Built
+ * right after the match, while the provider's `last` is this one; a pattern with no names is
+ * asked once and never again. `groups` here counts the whole match as group zero, and so does
+ * the provider. */
+static int kiln_c99_match_groups(kiln_regexp *regexp, kiln_array *arr, size_t groups) {
+    unsigned char name[256];
+    size_t g;
+    int found = 0;
+    if (regexp->named_groups == 1 || regexp->handle == NULL) return KILN_C99_OK;
+    for (g = 1; g < groups; ++g) {
+        int32_t len = kiln_regexp_group_name(regexp->handle, g, name, sizeof name);
+        if (len <= 0) continue;
+        if (!found) {
+            int status = kiln_c99_new_object(&arr->match_groups);
+            if (status != KILN_C99_OK) return status;
+            status = kiln_c99_set_prototype(arr->match_groups, kiln_c99_null());
+            if (status != KILN_C99_OK) return status;
+            found = 1;
+        }
+        {
+            kiln_value element = g < arr->count ? kiln_val_to_boundary(arr->elements[g]) : kiln_c99_undefined();
+            int status = kiln_c99_put_mode(NULL, arr->match_groups, (const char *)name, (size_t)len, element, 0, 0, NULL);
+            if (status != KILN_C99_OK) return status;
+        }
+    }
+    regexp->named_groups = found ? 2 : 1;
+    return KILN_C99_OK;
 }
 
 /* One search, and the match it found.

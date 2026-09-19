@@ -215,7 +215,7 @@ static int kiln_c99_builtin_length(uint64_t builtin, double *out) {
 static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
                                        size_t pattern_count, const uint16_t *subject,
                                        size_t subject_count, const int64_t *ranges,
-                                       size_t groups) {
+                                       size_t groups, kiln_regexp *regexp) {
     size_t at = 0;
     while (at < pattern_count) {
         uint16_t unit = pattern[at];
@@ -239,6 +239,44 @@ static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
                 piece = subject + (size_t)ranges[1];
                 piece_count = subject_count - (size_t)ranges[1];
                 taken = 2;
+            } else if (next == (uint16_t)'<' && regexp != NULL && regexp->handle != NULL &&
+                       regexp->named_groups != 1) {
+                /* `$<name>`: the named group, or nothing for a name the pattern does not have
+                 * -- but only when the pattern has named groups at all; otherwise the text
+                 * stands for itself, which is what the specification says and what `$<` in a
+                 * template meant before named groups existed. */
+                size_t close = at + 2;
+                while (close < pattern_count && pattern[close] != (uint16_t)'>') ++close;
+                if (close < pattern_count) {
+                    size_t group;
+                    int any_named = 0;
+                    size_t name_len = close - (at + 2);
+                    piece = subject;
+                    piece_count = 0;
+                    for (group = 1; group < groups; ++group) {
+                        unsigned char name[256];
+                        int32_t len = kiln_regexp_group_name(regexp->handle, group, name, sizeof name);
+                        size_t k;
+                        if (len <= 0) continue;
+                        any_named = 1;
+                        if ((size_t)len != name_len) continue;
+                        for (k = 0; k < name_len; ++k) {
+                            if (pattern[at + 2 + k] != (uint16_t)name[k]) break;
+                        }
+                        if (k != name_len) continue;
+                        if (ranges[group * 2] >= 0) {
+                            piece = subject + (size_t)ranges[group * 2];
+                            piece_count = (size_t)(ranges[group * 2 + 1] - ranges[group * 2]);
+                        }
+                        break;
+                    }
+                    if (any_named) {
+                        taken = close + 1 - at;
+                    } else {
+                        regexp->named_groups = 1;
+                        piece = NULL;
+                    }
+                }
             } else if (next >= (uint16_t)'0' && next <= (uint16_t)'9') {
                 /* Two digits when two would name a group that exists, one otherwise -- so `$12`
                  * is group 12 in a pattern with twelve and group 1 followed by a `2` in one

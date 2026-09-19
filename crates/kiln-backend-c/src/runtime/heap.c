@@ -2458,6 +2458,7 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         kiln_c99_gc_mark_vals(heap, array->elements, array->count);
         kiln_c99_gc_mark_value(heap, &array->properties);
         kiln_c99_gc_mark_value(heap, &array->match_input);
+        kiln_c99_gc_mark_value(heap, &array->match_groups);
         break;
     }
     case KILN_GC_GENERATOR: {

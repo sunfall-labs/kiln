@@ -460,6 +460,16 @@ static int kiln_c99_run_promise_jobs(void *context, void *host_pointer, void *th
     return KILN_C99_OK;
 }
 
+/* The end of an ES module body. Node evaluates one from inside a promise job (the loader awaits
+ * `module.evaluate()`), so the checkpoint that follows the body is already in progress and the
+ * promise jobs the body queued run before any `process.nextTick` it queued. The launcher calls
+ * this after the body and before the turn loop, which puts the tick lane first the way a
+ * CommonJS body -- which runs from the top of a macrotask -- has it. Until 2026-09-19 an ES
+ * module printed `tick` before `then` where node prints it after. */
+int kiln_c99_finish_module_checkpoint(kiln_host *host, kiln_value *thrown) {
+    return kiln_c99_run_promise_jobs(kiln_c99_gc_heap(), host, thrown);
+}
+
 /* The finaliser frees `args`, so the release below must not free it a second time. */
 static void kiln_c99_drop_next_tick(void *work) {
     kiln_c99_gc_release(work);

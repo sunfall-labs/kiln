@@ -353,4 +353,86 @@ function _listeners(
   return copy;
 }
 
+// `events.once(emitter, name[, { signal }])`: a promise for the next emission's arguments,
+// rejected by the first `error` in the meantime (unless `error` is what is awaited) or by the
+// signal's abort. Written here rather than in either host because it is nothing but the
+// emitter's own `on`/`off`.
+export function once(emitter: any, name: any, options?: any): Promise<any[]> {
+  const signal = options && options.signal;
+  return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) {
+      reject(abortError(signal));
+      return;
+    }
+    const cleanup = () => {
+      emitter.removeListener(name, onEvent);
+      if (name !== "error") emitter.removeListener("error", onError);
+      if (signal) signal.removeEventListener("abort", onAbort);
+    };
+    const onEvent = (...args: any[]) => { cleanup(); resolve(args); };
+    const onError = (err: any) => { cleanup(); reject(err); };
+    const onAbort = () => { cleanup(); reject(abortError(signal)); };
+    emitter.on(name, onEvent);
+    if (name !== "error") emitter.on("error", onError);
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function abortError(signal: any): any {
+  const err: any = new Error("The operation was aborted");
+  err.name = "AbortError";
+  err.code = "ABORT_ERR";
+  err.cause = signal.reason;
+  return err;
+}
+
+// `events.on(emitter, name)`: an async iterator over emissions, ended by `error` or a close.
+export function on(emitter: any, name: any, options?: any): AsyncIterableIterator<any[]> {
+  const queue: any[][] = [];
+  const waiters: Array<[(v: any) => void, (e: any) => void]> = [];
+  let error: any = null;
+  let done = false;
+  const onEvent = (...args: any[]) => {
+    const waiter = waiters.shift();
+    if (waiter) waiter[0]({ value: args, done: false });
+    else queue.push(args);
+  };
+  const onError = (err: any) => {
+    error = err;
+    const waiter = waiters.shift();
+    if (waiter) waiter[1](err);
+  };
+  emitter.on(name, onEvent);
+  if (name !== "error") emitter.on("error", onError);
+  const finish = () => {
+    if (done) return;
+    done = true;
+    emitter.removeListener(name, onEvent);
+    if (name !== "error") emitter.removeListener("error", onError);
+    for (const [resolve] of waiters.splice(0)) resolve({ value: undefined, done: true });
+  };
+  const iterator: any = {
+    next() {
+      if (queue.length) return Promise.resolve({ value: queue.shift(), done: false });
+      if (error) { const e = error; error = null; return Promise.reject(e); }
+      if (done) return Promise.resolve({ value: undefined, done: true });
+      return new Promise((resolve, reject) => waiters.push([resolve, reject]));
+    },
+    return() { finish(); return Promise.resolve({ value: undefined, done: true }); },
+    throw(err: any) { finish(); return Promise.reject(err); },
+    [Symbol.asyncIterator]() { return iterator; },
+  };
+  if (options && options.signal) {
+    options.signal.addEventListener("abort", () => { error = abortError(options.signal); finish(); }, { once: true });
+  }
+  return iterator;
+}
+
+export const getEventListeners = (emitter: any, name: any): Function[] =>
+  typeof emitter.listeners === "function" ? emitter.listeners(name) : [];
+
+(EventEmitter as any).once = once;
+(EventEmitter as any).on = on;
+(EventEmitter as any).getEventListeners = getEventListeners;
+
 export default EventEmitter;
