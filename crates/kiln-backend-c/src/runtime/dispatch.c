@@ -4295,6 +4295,13 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                             "Cannot convert undefined or null to object");
             }
+            /* A number's `toLocaleString` is `Intl.NumberFormat` -- `1,234,567.891` for
+             * `en-US` -- and answering `toString` printed `1234567.891`, a plausible wrong
+             * string. It refuses until `Intl` links on demand (ADR 0063 rule 5); an object's
+             * really is `toString`, per the specification. */
+            if (receiver.tag == KILN_VALUE_NUMBER || receiver.tag == KILN_VALUE_BIGINT) {
+                KILN_C99_REFUSE("Number.prototype.toLocaleString, whose answer is Intl's");
+            }
             status = kiln_c99_get(host, receiver, "toString", 8, &method, depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;

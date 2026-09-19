@@ -3427,6 +3427,32 @@ if (typeof JSON !== "undefined") {
         },
     };
     data(Date.prototype, Symbol.toPrimitive, dateToPrimitive[Symbol.toPrimitive]);
+    // The three date spellings that need no locale: the realm's clock is UTC (ADR 0015), so the
+    // local fields are the UTC fields and the zone text is fixed.
+    const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const two = (n) => String(n).padStart(2, "0");
+    const year = (d) => {
+        const y = d.getUTCFullYear();
+        return y < 0 ? "-" + String(-y).padStart(4, "0") : String(y).padStart(4, "0");
+    };
+    const dateMethods = {
+        toDateString() {
+            if (Number.isNaN(this.getTime())) return "Invalid Date";
+            return `${DAYS[this.getUTCDay()]} ${MONTHS[this.getUTCMonth()]} ${two(this.getUTCDate())} ${year(this)}`;
+        },
+        toTimeString() {
+            if (Number.isNaN(this.getTime())) return "Invalid Date";
+            return `${two(this.getUTCHours())}:${two(this.getUTCMinutes())}:${two(this.getUTCSeconds())} GMT+0000 (Coordinated Universal Time)`;
+        },
+        toUTCString() {
+            if (Number.isNaN(this.getTime())) return "Invalid Date";
+            return `${DAYS[this.getUTCDay()]}, ${two(this.getUTCDate())} ${MONTHS[this.getUTCMonth()]} ${year(this)} ${two(this.getUTCHours())}:${two(this.getUTCMinutes())}:${two(this.getUTCSeconds())} GMT`;
+        },
+    };
+    data(Date.prototype, "toDateString", dateMethods.toDateString, true);
+    data(Date.prototype, "toTimeString", dateMethods.toTimeString, true);
+    data(Date.prototype, "toUTCString", dateMethods.toUTCString, true);
     const symbolToPrimitive = {
         [Symbol.toPrimitive]() { return this.valueOf(); },
     };
@@ -3447,6 +3473,106 @@ if (typeof JSON !== "undefined") {
         },
     };
     data(Function.prototype, Symbol.hasInstance, hasInstance[Symbol.hasInstance]);
+}
+
+// The ES2025 Set methods, over the Set intrinsics. `other` is a set-like: anything with a
+// numeric `size`, a callable `has` and a callable `keys` (GetSetRecord), which is what lets a
+// Map stand in for a Set of its keys. Each method reads `this` through `has`/`keys` and never
+// through the other side's `has` when the specification says to iterate instead, because the
+// argument's `has` can lie and the result must be what the specification says, not what the
+// argument claims.
+{
+    const setRecord = (other) => {
+        if (other === null || (typeof other !== "object" && typeof other !== "function")) {
+            throw new TypeError("The \"other\" argument must be set-like");
+        }
+        const rawSize = other.size;
+        const size = Number(rawSize);
+        if (rawSize === undefined || Number.isNaN(size)) {
+            throw new TypeError("The \"other\" argument must have a numeric \"size\" property");
+        }
+        if (typeof other.has !== "function") {
+            throw new TypeError("The \"other\" argument must have a callable \"has\" method");
+        }
+        if (typeof other.keys !== "function") {
+            throw new TypeError("The \"other\" argument must have a callable \"keys\" method");
+        }
+        return { set: other, size: Math.trunc(size), has: other.has, keys: other.keys };
+    };
+    const requireSet = (value, name) => {
+        if (!(value instanceof Set)) {
+            throw new TypeError(`Method Set.prototype.${name} called on incompatible receiver`);
+        }
+    };
+    const methods = {
+        union(other) {
+            requireSet(this, "union");
+            const record = setRecord(other);
+            const result = new Set(this);
+            for (const value of record.keys.call(record.set)) result.add(value);
+            return result;
+        },
+        intersection(other) {
+            requireSet(this, "intersection");
+            const record = setRecord(other);
+            const result = new Set();
+            if (this.size <= record.size) {
+                for (const value of this) if (record.has.call(record.set, value)) result.add(value);
+            } else {
+                for (const value of record.keys.call(record.set)) if (this.has(value)) result.add(value);
+            }
+            return result;
+        },
+        difference(other) {
+            requireSet(this, "difference");
+            const record = setRecord(other);
+            const result = new Set(this);
+            if (this.size <= record.size) {
+                for (const value of this) if (record.has.call(record.set, value)) result.delete(value);
+            } else {
+                for (const value of record.keys.call(record.set)) result.delete(value);
+            }
+            return result;
+        },
+        symmetricDifference(other) {
+            requireSet(this, "symmetricDifference");
+            const record = setRecord(other);
+            const result = new Set(this);
+            for (const value of record.keys.call(record.set)) {
+                if (this.has(value)) result.delete(value);
+                else result.add(value);
+            }
+            return result;
+        },
+        isSubsetOf(other) {
+            requireSet(this, "isSubsetOf");
+            const record = setRecord(other);
+            if (this.size > record.size) return false;
+            for (const value of this) if (!record.has.call(record.set, value)) return false;
+            return true;
+        },
+        isSupersetOf(other) {
+            requireSet(this, "isSupersetOf");
+            const record = setRecord(other);
+            if (this.size < record.size) return false;
+            for (const value of record.keys.call(record.set)) if (!this.has(value)) return false;
+            return true;
+        },
+        isDisjointFrom(other) {
+            requireSet(this, "isDisjointFrom");
+            const record = setRecord(other);
+            if (this.size <= record.size) {
+                for (const value of this) if (record.has.call(record.set, value)) return false;
+            } else {
+                for (const value of record.keys.call(record.set)) if (this.has(value)) return false;
+            }
+            return true;
+        },
+    };
+    for (const name of Object.keys(methods)) {
+        Object.defineProperty(Set.prototype, name, { value: methods[name], writable: true,
+                                                     configurable: true, enumerable: false });
+    }
 }
 "#;
 
@@ -5162,6 +5288,9 @@ fn graph_launcher_source(
     graph_launcher_source_with_imports(graph, modules, policy, None, None, None, None, None, None)
 }
 
+/// What a startup module's completion handler does with a rejection nobody awaits.
+const FATAL_UNHANDLED_REJECTION: &str = r#"/* A startup module has no importer waiting on it, so its rejection is unhandled and, as in node, fatal. This runs as a `then` reaction, so a thrown status would only reject the derived promise; and the launcher reads the entry promise only once the turn loop is quiescent, which a listening server never lets it be -- a rejected top-level await beside a live server hung the process here. */ { kiln_cli_report_failure_in(KILN_C99_THROWN, kiln_cli_describe_error(*value), "module body"); exit(1); }"#;
+
 fn graph_launcher_source_with_imports(
     graph: &ModuleGraph,
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
@@ -6227,9 +6356,15 @@ static int kiln_graph_enter(void *opaque) {
     }
     helper_defs.push_str("int kiln_graph_module_completion(kiln_host *host, uint32_t index, int rejected, const kiln_value *value, kiln_value *result, int depth, kiln_value *thrown) {\n    kiln_graph_context *graph = (kiln_graph_context *)host->context;\n    int status = KILN_C99_OK;\n    (void)depth; (void)thrown;\n    if (graph == NULL || result == NULL || value == NULL) return KILN_C99_CONTROL_ERROR;\n    switch (index) {\n");
     for (index, (node, module)) in modules.iter().enumerate() {
+        let fatal = if startup_indices.contains(&index) {
+            FATAL_UNHANDLED_REJECTION
+        } else {
+            ""
+        };
         helper_defs.push_str(&format!(
-            "        case {index}: {{\n            kiln_graph_module_state *state = &graph->module_states[{index}];\n            kiln_value settled = kiln_c99_undefined();\n            if (rejected) {{ state->result = *value; state->phase = KILN_MODULE_FAILED; state->failure_status = KILN_C99_THROWN; state->module_settling = 0; *result = *value; if (state->completion_reject.tag != KILN_VALUE_UNDEFINED) {{ status = kiln_c99_call(host, &settled, state->completion_reject, kiln_c99_undefined(), value, 1, depth, thrown); if (status != KILN_C99_OK) return status; }} return KILN_C99_OK; }}\n            if (!state->body_started) {{ state->module_settling = 0; status = kiln_graph_eval_module_{index}(graph); if (status != KILN_C99_OK) {{ state->phase = KILN_MODULE_FAILED; state->failure_status = status; *result = state->result; if (state->completion_reject.tag != KILN_VALUE_UNDEFINED) {{ status = kiln_c99_call(host, &settled, state->completion_reject, kiln_c99_undefined(), &state->result, 1, depth, thrown); if (status != KILN_C99_OK) return status; }} return KILN_C99_OK; }} *result = kiln_c99_undefined(); return KILN_C99_OK; }}\n            if (state->phase == KILN_MODULE_EVALUATED) {{ *result = kiln_namespaces[{index}]; return KILN_C99_OK; }}\n",
-            index = index
+            "        case {index}: {{\n            kiln_graph_module_state *state = &graph->module_states[{index}];\n            kiln_value settled = kiln_c99_undefined();\n            if (rejected) {{ state->result = *value; state->phase = KILN_MODULE_FAILED; state->failure_status = KILN_C99_THROWN; state->module_settling = 0; *result = *value; if (state->completion_reject.tag != KILN_VALUE_UNDEFINED) {{ status = kiln_c99_call(host, &settled, state->completion_reject, kiln_c99_undefined(), value, 1, depth, thrown); if (status != KILN_C99_OK) return status; }} {fatal} return KILN_C99_OK; }}\n            if (!state->body_started) {{ state->module_settling = 0; status = kiln_graph_eval_module_{index}(graph); if (status != KILN_C99_OK) {{ state->phase = KILN_MODULE_FAILED; state->failure_status = status; *result = state->result; if (state->completion_reject.tag != KILN_VALUE_UNDEFINED) {{ status = kiln_c99_call(host, &settled, state->completion_reject, kiln_c99_undefined(), &state->result, 1, depth, thrown); if (status != KILN_C99_OK) return status; }} return KILN_C99_OK; }} *result = kiln_c99_undefined(); return KILN_C99_OK; }}\n            if (state->phase == KILN_MODULE_EVALUATED) {{ *result = kiln_namespaces[{index}]; return KILN_C99_OK; }}\n",
+            index = index,
+            fatal = fatal
         ));
         let is_async = node
             .program

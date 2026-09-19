@@ -907,6 +907,72 @@ fn run_native_failure_fixture(name: &str, source: &str) -> Option<String> {
     Some(String::from_utf8(output.stderr).expect("diagnostic output is UTF-8"))
 }
 
+/// A rejected top-level await while a handle keeps the loop alive. The launcher used to read the
+/// entry promise only after the turn loop went quiescent, which a timer or a listening server
+/// never lets it do, so the process hung where node exits with the error. Bounded wait, because
+/// the regression *is* a hang.
+#[test]
+fn native_unhandled_top_level_rejection_exits_with_a_live_handle() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native rejection fixture: no C compiler found");
+        return;
+    };
+    let project = TestDirectory::new("native-unhandled-top-level-rejection-live-handle");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "setInterval(() => {}, 50);\nconsole.log(\"armed\");\nawait Promise.reject(new TypeError(\"unhandled on purpose\"));\n",
+    )
+    .expect("write fixture");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("fixture compiles");
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: project.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("fixture builds");
+    let mut child = Command::new(&report.output)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn fixture");
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll fixture") {
+            break status;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the fixture is still running after 20s: an unhandled rejection with a live timer hung"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let output = child.wait_with_output().expect("collect fixture output");
+    assert!(
+        !status.success(),
+        "an unhandled rejection must exit non-zero"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unhandled on purpose"), "{stderr}");
+}
+
 fn run_native_failure_fixture_with_dependency(
     name: &str,
     source: &str,
