@@ -6676,20 +6676,18 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
     }
     /* An entry whose top-level await never settled, with the loop out of work: node's answer is a
      * warning and status 13 rather than a refusal, and both engines give that one. */
-    if (status == KILN_C99_CONTROL_ERROR && (unsettled_entry || graph.unsettled_entry)) {
-        kiln_cli_warn("Warning: Detected unsettled top-level await");
-        (void)kiln_realm_destroy(realm);
-        /* `main` folds every failure to 1, the way it does a refusal; this is the one status
-         * a program's caller is told apart by, as `process.exit(code)` is. */
-        exit(13);
-    }
-    if (status != 0) kiln_cli_report_failure_in(status, graph.result, phase);
+    unsettled_entry = status == KILN_C99_CONTROL_ERROR && (unsettled_entry || graph.unsettled_entry);
+    if (unsettled_entry) kiln_cli_warn("Warning: Detected unsettled top-level await");
+    else if (status != 0) kiln_cli_report_failure_in(status, graph.result, phase);
     if (writes_result && status == 0 && kiln_cli_write_result(graph.entry_result) != 0) {
         static const kiln_string refusal_str = { 17, 0, "filesystem access" };
         kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 17, .ptr = (const char *)&refusal_str }, "result write");
         status = 1;
     }
     destroy_status = kiln_realm_destroy(realm);
+    /* `main` folds every failure to 1, the way it does a refusal; this is the one status a
+     * program's caller is told apart by, as `process.exit(code)` is. */
+    if (unsettled_entry) exit(13);
     if (status == 0) status = destroy_status;
     return status == 0 ? 0 : 1;
 }

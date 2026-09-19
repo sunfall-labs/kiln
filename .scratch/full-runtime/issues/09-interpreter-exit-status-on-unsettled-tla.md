@@ -28,5 +28,7 @@ Both engines print node's warning and exit 13: the interpreter from
 module unsettled, the native launcher from `kiln_cli_run_realm` (`graph->unsettled_entry`).
 Found beside it: the interpreter stopped the entry's loop the moment its top-level await
 settled, so a timer armed by the continuation never ran; it now keeps draining.
-`conformance/native/unsettled-top-level-await.mjs` and `timer-after-top-level-await.mjs` pin
-both.
+`conformance/native/timer-after-top-level-await.mjs` pins the timer; the exit status is pinned
+by `native_unsettled_top_level_await_warns_and_exits_13` (kiln-native) and
+`node_entry_with_an_unsettled_top_level_await_exits_13` (kiln-module-graph), because
+`native.sh` counts an interpreter run that exits non-zero as a probe nobody can run.

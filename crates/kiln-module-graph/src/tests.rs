@@ -1120,6 +1120,44 @@ fn node_modules_share_one_next_tick_and_promise_checkpoint() {
     );
 }
 
+#[test]
+fn node_entry_with_an_unsettled_top_level_await_exits_13() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        "console.log('before');\nawait new Promise(() => {});\nconsole.log('never');\n",
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build unsettled graph");
+
+    let mut host = TestHost::default();
+    let outcome = graph.execute_node(
+        &mut host,
+        ExecutionLimits::default(),
+        ExecutionCapabilities::default(),
+    );
+    // Node's answer (issue 09 of `.scratch/full-runtime`): the warning and status 13, where
+    // this exited 0 and read as success to every shell.
+    assert!(
+        matches!(
+            outcome,
+            Err(ModuleGraphError::Execution {
+                error: kiln_interpreter::ExecutionError::ProcessExited(13),
+                ..
+            })
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(host.output, ["before"]);
+    assert_eq!(host.errors, ["Warning: Detected unsettled top-level await"]);
+}
+
 struct OxcFrontend;
 
 impl Frontend for OxcFrontend {
@@ -1943,10 +1981,21 @@ impl Drop for TempProject {
 #[derive(Default)]
 struct TestHost {
     output: Vec<String>,
+    errors: Vec<String>,
 }
 
 impl HostOps for TestHost {
     fn call(&mut self, operation: HostOp, arguments: &[HostValue]) -> Result<HostValue, HostError> {
+        if operation == HostOp::WriteStderr {
+            self.errors.push(
+                arguments
+                    .iter()
+                    .map(HostValue::to_js_string)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+            return Ok(HostValue::Undefined);
+        }
         assert_eq!(operation, HostOp::WriteStdout);
         self.output.push(
             arguments

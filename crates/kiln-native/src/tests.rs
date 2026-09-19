@@ -973,6 +973,53 @@ fn native_unhandled_top_level_rejection_exits_with_a_live_handle() {
     assert!(stderr.contains("unhandled on purpose"), "{stderr}");
 }
 
+#[test]
+fn native_unsettled_top_level_await_warns_and_exits_13() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    use std::process::Command;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native unsettled top-level await fixture: no C compiler found");
+        return;
+    };
+    let project = TestDirectory::new("native-unsettled-top-level-await");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "console.log(\"before\");\nawait new Promise(() => {});\nconsole.log(\"never\");\n",
+    )
+    .expect("write fixture");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("fixture compiles");
+    let report = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: project.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("fixture builds");
+    let output = Command::new(&report.output).output().expect("run fixture");
+    // Node's answer, and the interpreter's (issue 09 of `.scratch/full-runtime`): the warning
+    // and status 13, which is the one status `main` does not fold to 1.
+    assert_eq!(output.status.code(), Some(13));
+    assert_eq!(output.stdout, b"before\n");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr).trim(),
+        "Warning: Detected unsettled top-level await"
+    );
+}
+
 fn run_native_failure_fixture_with_dependency(
     name: &str,
     source: &str,
