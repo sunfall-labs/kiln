@@ -466,12 +466,14 @@ static int kiln_c99_global_object(kiln_value *out) {
             status = kiln_c99_put(NULL, *globals, "console", 7, built, 0, NULL);
         }
     }
+    /* `crypto` is a namespace built-in with no rows, so a member read refuses by name rather than
+     * reading `undefined` off an empty object, which is what stood here. `node:crypto`, when it
+     * is linked, replaces this binding with its own object (see the tail of `node/crypto.ts`);
+     * it replaces rather than patches because a write into a built-in's store bumps
+     * `kiln_c99_builtin_store_epoch` and would switch off built-in speculation for the program. */
     if (status == KILN_C99_OK) {
-        kiln_value built;
-        status = kiln_c99_new_object(&built);
-        if (status == KILN_C99_OK) {
-            status = kiln_c99_put(NULL, *globals, "crypto", 6, built, 0, NULL);
-        }
+        status = kiln_c99_put(NULL, *globals, "crypto", 6, kiln_c99_builtin(KILN_C99_BUILTIN_CRYPTO), 0,
+                              NULL);
     }
     /* The three value properties of the global object are the only ones the specification locks
      * on every axis: `{ writable: false, enumerable: false, configurable: false }`. An ordinary

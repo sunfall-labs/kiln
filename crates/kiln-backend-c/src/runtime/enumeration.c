@@ -104,7 +104,7 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
         iterator = source;
     } else {
         kiln_value method;
-        status = kiln_c99_get(host, source, "@@iterator", 10, &method, depth, thrown);
+        status = kiln_c99_probe_symbol(host, source, "@@iterator", 10, &method, depth, thrown);
         if (status != KILN_C99_OK) {
             return status;
         }

@@ -386,7 +386,7 @@ static int kiln_c99_iterator_from(kiln_host *host, kiln_value *result, kiln_valu
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                     "Iterator.from called on a value that is not iterable");
     }
-    status = kiln_c99_get(host, value, "@@iterator", 10, &method, depth, thrown);
+    status = kiln_c99_probe_symbol(host, value, "@@iterator", 10, &method, depth, thrown);
     if (status != KILN_C99_OK) {
         return status;
     }
@@ -562,7 +562,7 @@ static int kiln_c99_iterator_helper_next(kiln_host *host, kiln_value *result, ki
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                             "Method called on an incompatible receiver");
             }
-            status = kiln_c99_get(host, produced, "@@iterator", 10, &inner_method, depth, thrown);
+            status = kiln_c99_probe_symbol(host, produced, "@@iterator", 10, &inner_method, depth, thrown);
             if (status == KILN_C99_OK) {
                 if (inner_method.tag == KILN_VALUE_UNDEFINED ||
                     inner_method.tag == KILN_VALUE_NULL) {

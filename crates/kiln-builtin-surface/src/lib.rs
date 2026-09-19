@@ -162,6 +162,9 @@ pub const SURFACE: &[Builtin] = &[
             "any",
             "withResolvers",
             "try",
+            "allKeyed",
+            "allSettledKeyed",
+            "@@species",
         ],
     },
     Builtin {
@@ -199,11 +202,11 @@ pub const SURFACE: &[Builtin] = &[
     },
     Builtin {
         global: "ArrayBuffer",
-        members: &["isView"],
+        members: &["isView", "@@species"],
     },
     Builtin {
         global: "RegExp",
-        members: &["escape"],
+        members: &["escape", "@@species"],
     },
     Builtin {
         global: "Error",
@@ -215,7 +218,7 @@ pub const SURFACE: &[Builtin] = &[
     },
     Builtin {
         global: "Map",
-        members: &["groupBy"],
+        members: &["groupBy", "@@species"],
     },
     Builtin {
         global: "Symbol",
@@ -235,6 +238,8 @@ pub const SURFACE: &[Builtin] = &[
             "toPrimitive",
             "toStringTag",
             "unscopables",
+            "dispose",
+            "asyncDispose",
         ],
     },
     Builtin {

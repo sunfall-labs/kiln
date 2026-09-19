@@ -24,6 +24,7 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     /* Lower-case because that is what the language calls it: `performance` is an object a
      * program reads `now` from, not a constructor it names. */
     case KILN_C99_BUILTIN_PERFORMANCE: return "performance";
+    case KILN_C99_BUILTIN_CRYPTO: return "crypto";
     case KILN_C99_BUILTIN_STRING: return "String";
     case KILN_C99_BUILTIN_MATH: return "Math";
     case KILN_C99_BUILTIN_NUMBER: return "Number";
@@ -167,7 +168,6 @@ static int kiln_c99_builtin_length(uint64_t builtin, double *out) {
     case KILN_C99_BUILTIN_REGEXP:
     case KILN_C99_BUILTIN_PROXY:
     case KILN_C99_BUILTIN_AGGREGATE_ERROR:
-    case KILN_C99_BUILTIN_SUPPRESSED_ERROR:
     case KILN_C99_BUILTIN_TEMPORAL_PLAIN_YEAR_MONTH:
     case KILN_C99_BUILTIN_TEMPORAL_PLAIN_MONTH_DAY:
     case KILN_C99_BUILTIN_TEMPORAL_ZONED_DATE_TIME:
@@ -186,6 +186,9 @@ static int kiln_c99_builtin_length(uint64_t builtin, double *out) {
     case KILN_C99_BUILTIN_FLOAT64_ARRAY:
     case KILN_C99_BUILTIN_BIG_INT64_ARRAY:
     case KILN_C99_BUILTIN_BIG_UINT64_ARRAY:
+    /* `SuppressedError(error, suppressed, message)`: three, as node answers; it sat in the
+     * two-group beside `AggregateError` and no test read it. */
+    case KILN_C99_BUILTIN_SUPPRESSED_ERROR:
     case KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE:
     case KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE_TIME:
         *out = 3.0;

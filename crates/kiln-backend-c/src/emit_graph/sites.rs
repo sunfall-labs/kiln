@@ -223,7 +223,11 @@ pub(crate) fn collect_typed_call_sites(
     plan: &CallPlan,
     numbers: &HashSet<ValueId>,
 ) -> Vec<(ValueId, Vec<u32>)> {
-    if plan.generic_only || numbers.is_empty() || !plan.typed_entries.iter().any(|&e| e) {
+    // Not `numbers.is_empty()`: a site with no arguments proves "every argument is a number"
+    // vacuously, and the use site in `call_method.rs` emits the typed chain for it whether or
+    // not this function proved a single number. Returning early here left `console.clear()`
+    // inside the runtime bootstrap referencing a `_t_` callee cache nothing had declared.
+    if plan.generic_only || !plan.typed_entries.iter().any(|&e| e) {
         return Vec::new();
     }
     let mut sites = Vec::new();

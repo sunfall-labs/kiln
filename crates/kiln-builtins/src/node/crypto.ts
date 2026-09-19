@@ -488,16 +488,6 @@ export function timingSafeEqual(a: any, b: any): boolean {
   return out === 0;
 }
 
-// Populate globalThis.crypto if absent
-if (typeof globalThis !== 'undefined' && globalThis.crypto) {
-  if (typeof globalThis.crypto.randomUUID !== 'function') {
-    (globalThis.crypto as any).randomUUID = randomUUID;
-  }
-  if (typeof globalThis.crypto.getRandomValues !== 'function') {
-    (globalThis.crypto as any).getRandomValues = getRandomValues;
-  }
-}
-
 const cryptoDefault = {
   Hash,
   Hmac,
@@ -510,5 +500,18 @@ const cryptoDefault = {
   randomUUID,
   timingSafeEqual,
 };
+
+// The global `crypto`. The interpreter installs its own, which already carries every one of
+// these; the native backend installs a namespace that refuses every member by name until this
+// module is linked, and this is where it gets linked. The binding is *replaced* rather than
+// patched: a write into a native built-in's store bumps `kiln_c99_builtin_store_epoch` and
+// switches built-in speculation off for the whole program, and a plain object costs nothing.
+// `globalThis.crypto === require("node:crypto")` is false in node too. The test is `in` rather
+// than a read, because a read of an unlinked member on the native namespace refuses -- that is
+// the point of it -- while `in` answers false.
+if (typeof globalThis !== 'undefined' && globalThis.crypto &&
+    !('createHash' in (globalThis as any).crypto)) {
+  (globalThis as any).crypto = { ...cryptoDefault, default: cryptoDefault };
+}
 
 export default cryptoDefault;

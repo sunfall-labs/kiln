@@ -1698,6 +1698,44 @@ fn render_functions(
         };
         let scalar_proto = !proto_produces_references(proto, program);
         let func_profile = policy.type_profile.as_ref().and_then(|p| p.function(index));
+        // The boxed entry declares the callee caches its own plan's typed sites need. The typed
+        // clone below is emitted from a different plan (`direct.typed`), whose typed entries can
+        // include a candidate the boxed plan's do not, and it names the same
+        // `{symbol}_fn_{index}_v{v}_t_{i}` statics. Declare the difference here, ahead of both,
+        // so a clone never references a cache only the other plan would have declared.
+        if let Some(typed) = &direct.typed[index] {
+            let boxed_sites = emit_graph::sites::collect_typed_call_sites(
+                &graphs[index],
+                program,
+                &direct.functions[index],
+                &direct.functions[index].numbers,
+            );
+            for (vid, candidates) in emit_graph::sites::collect_typed_call_sites(
+                &graphs[index],
+                program,
+                typed,
+                &typed.numbers,
+            ) {
+                for i in candidates {
+                    let declared = boxed_sites
+                        .iter()
+                        .any(|(v, cs)| *v == vid && cs.contains(&i));
+                    if declared {
+                        continue;
+                    }
+                    let pfx = format!("{symbol}_fn_{index}_v{}_t_{i}", vid.0);
+                    if typed.typed_needs[i as usize].row {
+                        writeln!(
+                            target_buf,
+                            "static kiln_val {pfx}_fn = 0;\nstatic const kiln_shape *{pfx}_shape = NULL;\nstatic const uint32_t *{pfx}_row = NULL;\nstatic uint64_t {pfx}_proto = 0;\nstatic uint64_t {pfx}_epoch = UINT64_MAX;\nstatic kiln_val *{pfx}_upvalues = NULL;"
+                        )
+                        .unwrap();
+                    } else {
+                        writeln!(target_buf, "static kiln_val {pfx}_fn = 0;").unwrap();
+                    }
+                }
+            }
+        }
         let sites_count = emit_graph::emit_function_from_graph_with_profile(
             target_buf,
             &graphs[index],

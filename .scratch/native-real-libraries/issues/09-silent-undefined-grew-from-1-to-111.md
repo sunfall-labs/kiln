@@ -1,6 +1,6 @@
 # Silent `undefined` grew from 1 row to 111 between `616f9b6f` and `740f4fb4`
 
-Status: ready
+Status: fixed (2026-09-19, see Outcome)
 Feature: native-real-libraries
 Governing ADR: ADR 0005, ADR 0043
 Blocks: nothing named; this is the class `AGENTS.md` calls the expensive one
@@ -96,21 +96,27 @@ Decision: `name` and `message` become data properties on `Error.prototype` and t
 prototypes (the seven `(itself).name` rows come with them), and the two absent sites test the key
 before answering.
 
-### 3. Symbol-keyed members are outside the ADR 0043 seam (35 rows)
+### 3. A catch-all turned every refusal on a well-known symbol into `undefined` (35 rows)
 
 `@@species` on 20 constructors, `@@toStringTag` on `ArrayBuffer.prototype` and
 `DataView.prototype`, `@@toPrimitive` on `Date.prototype` and `Symbol.prototype`,
 `@@hasInstance` on `Function.prototype`, `@@match`/`@@matchAll`/`@@replace`/`@@search`/`@@split`
 on `RegExp.prototype`, and `Symbol.dispose`/`Symbol.asyncDispose`.
 
-These go through `read.c:1515`: the receiver is table-driven (`owned`), the name is not in
-`BUILTIN_SURFACE` and not in the backlog, so it is answered absent. ADR 0043's `const` assertion
-is supposed to fail the build when the two engines' tables drift; it did not, because the shared
-table holds string keys and these are symbols. That is a hole in the seam, not a gap in the
-backend, and it will keep reopening until the table carries symbol keys.
+Not a seam hole: the shared table carries `@@` keys, several of these were in the native
+backlog, and the backlog refuses -- honestly. The refusal then reached `kiln_c99_get_key`
+(`read.c:1651`), which converted *any* refusal on a reserved key into `undefined`, for the
+runtime's own probes (`kiln_c99_to_primitive` asking every reference for `@@toPrimitive`) and
+program reads alike. The comment that explained it was lost in `062567fb` (2026-09-14); the
+original (`500b727c`) said: "THIS IS A CATCH-ALL AND NOT A LIST, WHICH MAKES IT THE ONE ABSENCE
+HERE THAT CAN LIE ... The fix is always upstream."
 
-Decision: `BUILTIN_SURFACE` gains symbol-keyed rows, the assertion covers them, and each of these
-either lands or goes in the backlog and refuses.
+Decision: the seven machine probes get their own tolerant entry (`kiln_c99_probe_symbol`), the
+catch-all comes out of the program path, and the members get answered: `@@species` from surface
+rows for the table-driven constructors and from the receiver for the rest, the prototype methods
+from the runtime bootstrap in TypeScript, the two symbols as well-known rows. The interpreter's
+`defines_species` list is the one hand list left; the table now names the same constructors, so
+drift between them is a compile error on the native side.
 
 ### Not native's fault (8 rows)
 
@@ -133,3 +139,29 @@ exists for the rows that are right.
 `probe1.mjs` (the snippet above, with `console.log` of each `typeof`) under
 `kiln run` and `kiln --one-shot build --profile native-release`; the two outputs differ on every
 line but the last three. `scripts/native-surface-inventory.py --gate` exits non-zero.
+
+## Outcome (2026-09-19)
+
+All three causes landed on `alee/status-check-0918`, plus two things found on the way:
+
+- `Object.defineProperty` on a built-in value refused ("a property definition on a value with
+  no property store") while assignment landed in the callable store; definitions now land in the
+  same store. A library installing a symbol hook on `Map.prototype` hit this.
+- `collect_typed_call_sites` returned nothing when a function had proved no numbers, while the
+  use site emits the typed chain for a zero-argument call regardless; the runtime bootstrap's
+  `console.clear()` then referenced a callee cache nothing declared. Fixed in `sites.rs`.
+
+Left as they are, and why:
+
+- `TypeError.prototype.name` and the other five subclass prototypes answer `"Error"` natively:
+  the native model has one `Error.prototype` for every kind but `AggregateError`, so the store
+  can hold one name. Not `undefined` any more; a distinct prototype per kind is its own change.
+- `crypto.randomUUID` and the rest refuse by name until `node:crypto` is linked, and that module
+  now replaces the global with the full surface. Always linking it costs every binary the SHA
+  code; tracked here rather than done.
+- `console.log("a %s", "b")` prints `a %s b` natively and `a b` interpreted: native's console
+  has no `util.format`. Pre-existing, and `assert`/`trace` inherit it.
+- `BigInt64Array^` (5 rows): the interpreter names `%TypedArray%` `"intrinsic"`, which node does
+  not; an interpreter question.
+- `Promise.allKeyed`/`allSettledKeyed` refuse natively now (backlog rows) rather than reading
+  `undefined`; whether the interpreter should carry a proposal node lacks is a separate question.

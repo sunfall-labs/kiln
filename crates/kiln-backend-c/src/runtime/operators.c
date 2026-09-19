@@ -206,7 +206,7 @@ static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int hint,
     {
         /* `@@toPrimitive` overrides both, and is told which hint it is answering. */
         kiln_value exotic;
-        int status = kiln_c99_get(host, value, "@@toPrimitive", 13, &exotic, depth, thrown);
+        int status = kiln_c99_probe_symbol(host, value, "@@toPrimitive", 13, &exotic, depth, thrown);
         if (status == KILN_C99_THROWN) {
             return status;
         }

@@ -94,6 +94,15 @@ static int kiln_c99_definition_store(kiln_value target, kiln_value *out) {
     if (target.tag == KILN_VALUE_FUNCTION) {
         return kiln_c99_function_store(target, out);
     }
+    /* A built-in and a method value keep their own properties in the callable store that every
+     * read of them consults first (`read.c`, the top of the built-in case), so a definition on
+     * one lands where the read will look. Assignment already went there; `defineProperty` refused,
+     * which is what a library installing a symbol hook on `Map.prototype` hit, and what the
+     * runtime bootstrap hits defining `Error.prototype.name` non-enumerable. */
+    if (target.tag == KILN_VALUE_BUILTIN || target.tag == KILN_VALUE_METHOD ||
+        target.tag == KILN_VALUE_BOUND) {
+        return kiln_c99_callable_store(target, out, 1);
+    }
     {
         kiln_value *slot = kiln_c99_exotic_store(target);
         if (slot != NULL) {
@@ -173,7 +182,8 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
         return kiln_c99_proxy_define(host, target, key_value, descriptor, depth, thrown);
     }
     if (target.tag != KILN_VALUE_OBJECT && target.tag != KILN_VALUE_FUNCTION &&
-        kiln_c99_exotic_store(target) == NULL) {
+        target.tag != KILN_VALUE_BUILTIN && target.tag != KILN_VALUE_METHOD &&
+        target.tag != KILN_VALUE_BOUND && kiln_c99_exotic_store(target) == NULL) {
         /* References with an own-property store are valid targets. Their intrinsic names still
          * need specialised descriptor handling, but an unrelated key must land in the same store
          * ordinary reads already consult. This is what permits libraries to install a symbol
