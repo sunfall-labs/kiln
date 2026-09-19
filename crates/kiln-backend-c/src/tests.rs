@@ -5158,58 +5158,10 @@ int main(void) {{
     );
 }
 
-#[test]
-fn executable_url_constructs_path_and_decodes_query_values() {
-    let generated = emit(&program(
-        vec![
-            Constant::String("/echo?q=one%20two".into()),
-            Constant::String("http://127.0.0.1".into()),
-            Constant::String("pathname".into()),
-            Constant::String("/echo".into()),
-            Constant::String("searchParams".into()),
-            Constant::String("get".into()),
-            Constant::String("q".into()),
-            Constant::String("one two".into()),
-            Constant::Boolean(false),
-        ],
-        vec![
-            Instruction::LoadBuiltin(kiln_ir::Builtin::Url),
-            Instruction::Const(0),
-            Instruction::Const(1),
-            Instruction::New { argc: 2 },
-            Instruction::StoreLocal(0),
-            Instruction::LoadLocal(0),
-            Instruction::GetProperty(2),
-            Instruction::Const(3),
-            Instruction::Binary(BinaryOp::StrictEqual),
-            Instruction::JumpIfFalse(20),
-            Instruction::LoadLocal(0),
-            Instruction::GetProperty(4),
-            Instruction::Const(6),
-            Instruction::CallMethod { name: 5, argc: 1 },
-            Instruction::Const(7),
-            Instruction::Binary(BinaryOp::StrictEqual),
-            Instruction::Return,
-            Instruction::Const(8),
-            Instruction::Return,
-            Instruction::Const(8),
-            Instruction::Return,
-        ],
-        1,
-    ))
-    .expect("URL probe emits");
-    let wrapper = format!(
-        "int main(void) {{ kiln_value result; if ({}(NULL, &result) != KILN_C99_OK) return 2; return result.tag == KILN_VALUE_BOOLEAN && result.bits ? 0 : 3; }}\n",
-        generated.symbol
-    );
-    let run = run_with_main(&generated, &wrapper, "url-routing");
-    assert!(
-        run.status.success(),
-        "native URL path/query behavior failed ({:?}): {}",
-        run.status.code(),
-        String::from_utf8_lossy(&run.stderr)
-    );
-}
+// `URL` was a C constructor here and had a test that built one in this host; it is the `url`
+// crate through the provider and a class in the runtime bootstrap now (full-runtime/04), and
+// neither is linked into this host -- the same reason the `node:path` shim above refuses.
+// `conformance/native/url-surface.mjs` and `app-http-client-url.mjs` hold both engines to node.
 
 #[test]
 fn executable_buffer_reuses_uint8_storage_with_node_semantics() {
