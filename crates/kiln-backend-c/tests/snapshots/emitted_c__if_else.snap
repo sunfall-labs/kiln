@@ -14,13 +14,9 @@ int kiln_module_cc63ac731604078bde44d2124ac359e2(kiln_host *host, kiln_value *re
     double d1 = 0.0, d2 = 0.0;
     kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
-    goto kiln_block_1;
-kiln_block_1:;
     v1 = UINT64_C(4607182418800017408);
     memcpy(&d1, &v1, sizeof(d1));
     i1 = 1LL;
-    goto kiln_block_3;
-kiln_block_3:;
     *result = kiln_val_to_boundary(v1);
     return KILN_C99_OK;
 }

@@ -2912,6 +2912,10 @@ pub fn build_function_graph(
     simplify_trivial_phis(&mut graph);
     fold_undefined_returns(&mut graph);
     eliminate_dead_code(&mut graph);
+    if merge_basic_blocks(&mut graph) {
+        simplify_trivial_phis(&mut graph);
+        eliminate_dead_code(&mut graph);
+    }
     compact_value_ids(&mut graph);
     graph.mark_non_escaping_objects(program);
     Ok(graph)
@@ -3367,6 +3371,99 @@ pub fn fold_conditional_branches(graph: &mut FunctionGraph) -> bool {
 
     prune_unreachable_blocks(graph);
     true
+}
+
+/// Merge sequential basic blocks where block A unconditionally jumps to block B,
+/// B has A as its only predecessor, exception handling scopes match, and B is not
+/// a protected entry, seam, exception handler, or coroutine resume target.
+pub fn merge_basic_blocks(graph: &mut FunctionGraph) -> bool {
+    if graph.blocks.len() < 2 {
+        return false;
+    }
+
+    let mut protected_targets = HashSet::new();
+    protected_targets.insert(graph.entry_block);
+    if let Some(seam) = graph.seam_block {
+        protected_targets.insert(seam);
+    }
+    for block in &graph.blocks {
+        if let Some(h) = block.exception_handler {
+            protected_targets.insert(h);
+        }
+        if let Terminator::Suspend {
+            resume, delegate, ..
+        } = &block.terminator
+        {
+            protected_targets.insert(*resume);
+            if let Some((_, exit, _)) = delegate {
+                protected_targets.insert(*exit);
+            }
+        }
+    }
+
+    let mut changed = false;
+    loop {
+        let mut merge_candidate: Option<(BlockId, BlockId)> = None;
+
+        for block in &graph.blocks {
+            if let Terminator::Jump(target) = block.terminator
+                && target != block.id
+                && !protected_targets.contains(&target)
+                && let Some(target_block) = graph.blocks.iter().find(|b| b.id == target)
+                && target_block.predecessors.len() == 1
+                && target_block.predecessors[0] == block.id
+                && block.exception_handler == target_block.exception_handler
+                && !matches!(target_block.terminator, Terminator::Suspend { .. })
+                && !target_block
+                    .operations
+                    .iter()
+                    .any(|(_, op)| matches!(op, GraphOp::Phi { .. }))
+            {
+                merge_candidate = Some((block.id, target));
+                break;
+            }
+        }
+
+        let Some((a_id, b_id)) = merge_candidate else {
+            break;
+        };
+
+        let b_idx = graph.blocks.iter().position(|b| b.id == b_id).unwrap();
+        let b_block = graph.blocks.remove(b_idx);
+
+        let a_block = graph.blocks.iter_mut().find(|b| b.id == a_id).unwrap();
+        a_block.operations.extend(b_block.operations);
+        a_block.terminator = b_block.terminator;
+        a_block.successors = b_block.successors.clone();
+
+        for succ_id in &b_block.successors {
+            if let Some(succ_block) = graph.blocks.iter_mut().find(|b| b.id == *succ_id) {
+                if succ_block.predecessors.contains(&a_id) {
+                    succ_block.predecessors.retain(|&p| p != b_id);
+                } else {
+                    for p in &mut succ_block.predecessors {
+                        if *p == b_id {
+                            *p = a_id;
+                        }
+                    }
+                }
+
+                for (_, op) in &mut succ_block.operations {
+                    if let GraphOp::Phi { inputs } = op {
+                        for (p, _) in inputs {
+                            if *p == b_id {
+                                *p = a_id;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        changed = true;
+    }
+
+    changed
 }
 
 /// Alias for dead code elimination preserving existing test entry points.
@@ -6968,5 +7065,147 @@ mod dead_phi_tests {
         assert!(graph.blocks.iter().any(|b| b.id == BlockId(1)));
         // Block 2 should be pruned
         assert!(!graph.blocks.iter().any(|b| b.id == BlockId(2)));
+    }
+
+    #[test]
+    fn merge_basic_blocks_simple_chain() {
+        let mut graph = FunctionGraph::new(None, 0, 0);
+        let v0 = ValueId(0);
+        graph.next_value_id = 1;
+        graph.blocks = vec![
+            BasicBlock {
+                id: BlockId(0),
+                operations: vec![(
+                    v0,
+                    GraphOp::Const {
+                        index: 0,
+                        constant: Constant::Number(42.0f64.to_bits()),
+                    },
+                )],
+                terminator: Terminator::Jump(BlockId(1)),
+                predecessors: vec![],
+                successors: vec![BlockId(1)],
+                exception_handler: None,
+            },
+            BasicBlock {
+                id: BlockId(1),
+                operations: vec![],
+                terminator: Terminator::Return(Some(v0)),
+                predecessors: vec![BlockId(0)],
+                successors: vec![],
+                exception_handler: None,
+            },
+        ];
+
+        let changed = merge_basic_blocks(&mut graph);
+        assert!(changed);
+        assert_eq!(graph.blocks.len(), 1);
+        assert_eq!(graph.blocks[0].id, BlockId(0));
+        assert_eq!(graph.blocks[0].terminator, Terminator::Return(Some(v0)));
+        assert_eq!(graph.blocks[0].operations.len(), 1);
+        crate::verifier::verify_function_graph(&graph).expect("merged graph verifies");
+    }
+
+    #[test]
+    fn merge_basic_blocks_multi_block_chain() {
+        let mut graph = FunctionGraph::new(None, 0, 0);
+        let v0 = ValueId(0);
+        let v1 = ValueId(1);
+        graph.next_value_id = 2;
+        graph.blocks = vec![
+            BasicBlock {
+                id: BlockId(0),
+                operations: vec![(
+                    v0,
+                    GraphOp::Const {
+                        index: 0,
+                        constant: Constant::Number(10.0f64.to_bits()),
+                    },
+                )],
+                terminator: Terminator::Jump(BlockId(1)),
+                predecessors: vec![],
+                successors: vec![BlockId(1)],
+                exception_handler: None,
+            },
+            BasicBlock {
+                id: BlockId(1),
+                operations: vec![(
+                    v1,
+                    GraphOp::Const {
+                        index: 1,
+                        constant: Constant::Number(20.0f64.to_bits()),
+                    },
+                )],
+                terminator: Terminator::Jump(BlockId(2)),
+                predecessors: vec![BlockId(0)],
+                successors: vec![BlockId(2)],
+                exception_handler: None,
+            },
+            BasicBlock {
+                id: BlockId(2),
+                operations: vec![],
+                terminator: Terminator::Return(Some(v1)),
+                predecessors: vec![BlockId(1)],
+                successors: vec![],
+                exception_handler: None,
+            },
+        ];
+
+        let changed = merge_basic_blocks(&mut graph);
+        assert!(changed);
+        assert_eq!(graph.blocks.len(), 1);
+        assert_eq!(graph.blocks[0].id, BlockId(0));
+        assert_eq!(graph.blocks[0].terminator, Terminator::Return(Some(v1)));
+        assert_eq!(graph.blocks[0].operations.len(), 2);
+        crate::verifier::verify_function_graph(&graph).expect("merged multi-chain verifies");
+    }
+
+    #[test]
+    fn merge_basic_blocks_preserves_branch_and_protected_targets() {
+        let mut graph = FunctionGraph::new(None, 0, 0);
+        let v_cond = ValueId(0);
+        graph.next_value_id = 1;
+        graph.blocks = vec![
+            BasicBlock {
+                id: BlockId(0),
+                operations: vec![(
+                    v_cond,
+                    GraphOp::Const {
+                        index: 0,
+                        constant: Constant::Boolean(true),
+                    },
+                )],
+                terminator: Terminator::Branch {
+                    condition: v_cond,
+                    true_block: BlockId(1),
+                    false_block: BlockId(2),
+                },
+                predecessors: vec![],
+                successors: vec![BlockId(1), BlockId(2)],
+                exception_handler: None,
+            },
+            BasicBlock {
+                id: BlockId(1),
+                operations: vec![],
+                terminator: Terminator::Return(None),
+                predecessors: vec![BlockId(0)],
+                successors: vec![],
+                exception_handler: None,
+            },
+            BasicBlock {
+                id: BlockId(2),
+                operations: vec![],
+                terminator: Terminator::Return(None),
+                predecessors: vec![BlockId(0)],
+                successors: vec![],
+                exception_handler: None,
+            },
+        ];
+
+        // Block 0 ends in Branch, so neither Block 1 nor Block 2 should merge into Block 0.
+        let changed = merge_basic_blocks(&mut graph);
+        assert!(!changed);
+        assert_eq!(graph.blocks.len(), 3);
+        crate::verifier::verify_function_graph(&graph).expect("graph verifies");
     }
 }

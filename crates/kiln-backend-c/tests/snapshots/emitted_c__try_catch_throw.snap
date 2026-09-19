@@ -19,17 +19,11 @@ static int kiln_module_2064c19b6f57f0901e70848d80798ed5_body(kiln_host *host, ki
     for (size_t slot = 0; slot < (size_t)1; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
     kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
-    goto kiln_block_1;
-kiln_block_1:;
-    goto kiln_block_2;
-kiln_block_2:;
     v2 = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_module_2064c19b6f57f0901e70848d80798ed5_string_1);
     *thrown = kiln_val_to_boundary(v2); goto kiln_block_6;
 kiln_block_6:;
     kiln_c99_forget_handled_throw(); v1 = kiln_val_from_boundary(*thrown);
     locals[0] = v1;
-    goto kiln_block_7;
-kiln_block_7:;
     *result = kiln_val_to_boundary(v1);
     if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);
     return KILN_C99_OK;
