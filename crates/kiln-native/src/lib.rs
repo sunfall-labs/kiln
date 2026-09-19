@@ -3152,52 +3152,6 @@ Segmenter.supportedLocalesOf = function (locales) {
 
 Intl.Segmenter = Segmenter;
 
-function Console(stdout, stderr) {
-    let out = stdout;
-    let err = stderr;
-    if (out && typeof out === "object" && out.stdout) {
-        err = out.stderr || out.stdout;
-        out = out.stdout;
-    }
-    this._stdout = out;
-    this._stderr = err || out;
-    this._colorMode = true;
-}
-
-Console.prototype.log = function (...args) {
-    if (this._stdout && typeof this._stdout.write === "function") {
-        this._stdout.write(args.map(String).join(" ") + "\n");
-    } else if (typeof console !== "undefined" && typeof console.log === "function") {
-        console.log(...args);
-    }
-};
-Console.prototype.info = Console.prototype.log;
-Console.prototype.debug = Console.prototype.log;
-Console.prototype.warn = function (...args) {
-    if (this._stderr && typeof this._stderr.write === "function") {
-        this._stderr.write(args.map(String).join(" ") + "\n");
-    } else if (typeof console !== "undefined" && typeof console.warn === "function") {
-        console.warn(...args);
-    }
-};
-Console.prototype.error = Console.prototype.warn;
-Console.prototype.dir = Console.prototype.log;
-Console.prototype.clear = function () {
-    if (typeof console !== "undefined" && typeof console.clear === "function") {
-        console.clear();
-    }
-};
-Console.prototype.trace = Console.prototype.error;
-Console.prototype.assert = function (condition, ...args) {
-    if (!condition) {
-        this.error("Assertion failed:", ...args);
-    }
-};
-Console.prototype.Console = Console;
-
-if (typeof console !== "undefined") {
-    console.Console = Console;
-}
 
 const __kilnUint8ToHex = globalThis.__kilnUint8ToHex;
 delete globalThis.__kilnUint8ToHex;
@@ -3356,28 +3310,54 @@ if (typeof JSON !== "undefined") {
 // Phase 5.1 freeze.
 {
     const c = globalThis.console;
+    // An instance made with `new Console(stdout[, stderr])` writes to those streams, as the
+    // interpreter's does; the global `console` carries no streams and reaches the prelude's
+    // `log` and `error`, which is where every method here ends up for it.
+    const out = (self, stderr, args) => {
+        const stream = stderr ? self._stderr : self._stdout;
+        if (stream && typeof stream.write === "function") {
+            stream.write(args.map(String).join(" ") + "\n");
+        } else if (stderr) {
+            c.error(...args);
+        } else {
+            c.log(...args);
+        }
+    };
     class Console {
-        log(...args) { c.log(...args); }
-        info(...args) { c.info(...args); }
-        debug(...args) { c.log(...args); }
-        dir(...args) { c.log(...args); }
-        table(...args) { c.log(...args); }
-        error(...args) { c.error(...args); }
-        warn(...args) { c.warn(...args); }
+        constructor(stdout, stderr) {
+            let o = stdout;
+            let e = stderr;
+            if (o && typeof o === "object" && o.stdout) {
+                e = o.stderr || o.stdout;
+                o = o.stdout;
+            }
+            if (o === undefined) {
+                throw new TypeError("Console expects a writable stream instance for stdout");
+            }
+            this._stdout = o;
+            this._stderr = e || o;
+        }
+        log(...args) { out(this, false, args); }
+        info(...args) { out(this, false, args); }
+        debug(...args) { out(this, false, args); }
+        dir(...args) { out(this, false, args); }
+        table(...args) { out(this, false, args); }
+        error(...args) { out(this, true, args); }
+        warn(...args) { out(this, true, args); }
         // The interpreter formats the message first (`util.format`, so `%s` in its first
         // argument substitutes) and prefixes the result. Folding the prefix into a string first
         // argument is the same thing; a non-string first argument is inspected either way.
         assert(value, ...message) {
             if (value) return;
-            if (message.length === 0) c.error("Assertion failed");
+            if (message.length === 0) out(this, true, ["Assertion failed"]);
             else if (typeof message[0] === "string") {
-                c.error("Assertion failed: " + message[0], ...message.slice(1));
-            } else c.error("Assertion failed:", ...message);
+                out(this, true, ["Assertion failed: " + message[0], ...message.slice(1)]);
+            } else out(this, true, ["Assertion failed:", ...message]);
         }
         trace(...args) {
-            if (args.length === 0) c.error("Trace");
-            else if (typeof args[0] === "string") c.error("Trace: " + args[0], ...args.slice(1));
-            else c.error("Trace:", ...args);
+            if (args.length === 0) out(this, true, ["Trace"]);
+            else if (typeof args[0] === "string") out(this, true, ["Trace: " + args[0], ...args.slice(1)]);
+            else out(this, true, ["Trace:", ...args]);
         }
         clear() {}
         count() {}
@@ -3395,6 +3375,7 @@ if (typeof JSON !== "undefined") {
     }
     const proto = Console.prototype;
     Object.defineProperty(proto, Symbol.toStringTag, { value: "console", configurable: true });
+    proto.Console = Console;
     const added = ["debug", "dir", "table", "assert", "trace", "clear", "count", "countReset",
                    "group", "groupEnd", "groupCollapsed", "time", "timeEnd", "timeLog", "dirxml",
                    "timeStamp", "profile", "profileEnd"];

@@ -815,6 +815,34 @@ SILENT_UNDEFINED_ACCEPTED: dict[tuple[str, str], str] = {
         "`Function.prototype` natively, and `Function.prototype[Symbol.species]` really is "
         "undefined. The gap is the missing intrinsic in the prototype graph, not this member"
     ),
+    ("BigInt64Array^", "(itself).name"): (
+        "the receiver is not the same object in the two engines. `Object.getPrototypeOf("
+        "BigInt64Array)` is the %TypedArray% constructor intrinsic in the interpreter and "
+        "`Function.prototype` natively, which really has no own `(itself).name`. The gap is the missing "
+        "intrinsic in the prototype graph, not this member; and the interpreter's `name` for it, "
+        "\"intrinsic\", is not node's \"TypedArray\" either"
+    ),
+    ("BigInt64Array^", "length"): (
+        "the receiver is not the same object in the two engines. `Object.getPrototypeOf("
+        "BigInt64Array)` is the %TypedArray% constructor intrinsic in the interpreter and "
+        "`Function.prototype` natively, which really has no own `length`. The gap is the missing "
+        "intrinsic in the prototype graph, not this member; and the interpreter's `name` for it, "
+        "\"intrinsic\", is not node's \"TypedArray\" either"
+    ),
+    ("BigInt64Array^", "name"): (
+        "the receiver is not the same object in the two engines. `Object.getPrototypeOf("
+        "BigInt64Array)` is the %TypedArray% constructor intrinsic in the interpreter and "
+        "`Function.prototype` natively, which really has no own `name`. The gap is the missing "
+        "intrinsic in the prototype graph, not this member; and the interpreter's `name` for it, "
+        "\"intrinsic\", is not node's \"TypedArray\" either"
+    ),
+    ("BigInt64Array^", "prototype"): (
+        "the receiver is not the same object in the two engines. `Object.getPrototypeOf("
+        "BigInt64Array)` is the %TypedArray% constructor intrinsic in the interpreter and "
+        "`Function.prototype` natively, which really has no own `prototype`. The gap is the missing "
+        "intrinsic in the prototype graph, not this member; and the interpreter's `name` for it, "
+        "\"intrinsic\", is not node's \"TypedArray\" either"
+    ),
 }
 
 
