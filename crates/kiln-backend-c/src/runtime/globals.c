@@ -185,11 +185,22 @@ static int kiln_c99_process_object(kiln_value *out) {
 #endif
         status = kiln_c99_put(NULL, *process, "arch", 4, arch, 0, NULL);
     }
+    /* The node this runtime targets (ADR 0063), spelled the way node spells it: a library reads
+     * `process.version.slice(1)` and `process.release.name === "node"` to decide what it may
+     * use, and "kiln" here sent every one of them down its oldest path. */
     if (status == KILN_C99_OK)
         status = kiln_c99_put(NULL, *process, "version", 7,
-                              kiln_c99_copy_text("kiln", 4), 0, NULL);
+                              kiln_c99_copy_text("v22.0.0", 7), 0, NULL);
     if (status == KILN_C99_OK)
         status = kiln_c99_put(NULL, *process, "versions", 8, versions, 0, NULL);
+    if (status == KILN_C99_OK) {
+        kiln_value release;
+        status = kiln_c99_new_object(&release);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, release, "name", 4, kiln_c99_copy_text("node", 4), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, *process, "release", 7, release, 0, NULL);
+    }
     if (status == KILN_C99_OK)
         status = kiln_c99_put(NULL, *process, "pid", 3,
                               kiln_c99_number(1.0), 0, NULL);

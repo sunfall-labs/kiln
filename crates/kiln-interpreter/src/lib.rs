@@ -27244,13 +27244,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if let Some(executable) = self.argv.first() {
             process.set("execPath", Value::String(executable.clone().into()));
         }
-        // Not "darwin" or "linux": this realm is not either of them, and claiming to be one
-        // invites a program to take a path nothing here implements.
-        process.set("platform", Value::String("kiln".to_owned().into()));
-        process.set("version", Value::String("kiln".to_owned().into()));
+        // The host's platform and the node this runtime targets (ADR 0063), spelled the way
+        // node spells them. This answered "kiln" for both until 2026-09-19 -- on the theory that
+        // claiming to be darwin invites a path nothing here implements -- and every library
+        // that reads `process.platform` for a path separator or `process.version.slice(1)` for
+        // a feature took its oldest branch instead. The native backend answered "darwin".
+        let platform = match std::env::consts::OS {
+            "macos" => "darwin",
+            "windows" => "win32",
+            other => other,
+        };
+        process.set("platform", Value::String(platform.to_owned().into()));
+        process.set("version", Value::String("v22.0.0".to_owned().into()));
         process.set(
             "versions",
             ordinary_object([("node".to_owned(), Value::String("22.0.0".to_owned().into()))]),
+        );
+        process.set(
+            "release",
+            ordinary_object([("name".to_owned(), Value::String("node".to_owned().into()))]),
         );
         let arch = match std::env::consts::ARCH {
             "aarch64" => "arm64",
