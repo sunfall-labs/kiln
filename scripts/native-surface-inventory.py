@@ -237,6 +237,16 @@ class Receiver:
     self_interpreted: dict[str, str] = field(default_factory=dict)
     self_native: dict[str, str] = field(default_factory=dict)
     self_refused: dict[str, str] = field(default_factory=dict)
+    # Node's answers, from the same enumeration run under the pinned `node`. Node is the target
+    # of both engines (ADR 0063); the interpreter-versus-native reading above is the near gap,
+    # and this column is what turns the far gap into a number instead of a surprise. `node_names`
+    # is None for a receiver node does not have at all.
+    node: dict[str, str] = field(default_factory=dict)
+    node_names: list[str] | None = None
+    self_node: dict[str, str] = field(default_factory=dict)
+    # A receiver node has and neither engine publishes. It is never probed natively -- there is
+    # nothing to probe -- and counts as missing in both engines, every member of it.
+    node_only: bool = False
 
 
 class Runner:
@@ -270,6 +280,27 @@ class Runner:
         # looked like a refusal to the caller, and two members of a thousand is small enough that
         # nobody would have caught it by reading.
         return lines, f"not probed: {refusal}"
+
+    def run_under_node(self, source: str, *, tag: str) -> list[str]:
+        """The same generated program under the reference runtime. Node is not measured for
+        refusals; a failure here is a failure of the tool, and says so."""
+        path = self.workdir / f"{tag}.node.cjs"
+        path.write_text(source)
+        try:
+            proc = subprocess.run(
+                # Reading a getter off a prototype (`ReadableStreamBYOBReader.prototype.closed`)
+                # hands back a rejected promise, which node otherwise treats as fatal.
+                ["node", "--unhandled-rejections=none", str(path)],
+                cwd=self.root, capture_output=True, text=True,
+                timeout=self.timeout,
+            )
+        except FileNotFoundError:
+            sys.exit("no `node` on PATH: the inventory measures both engines against it")
+        except subprocess.TimeoutExpired:
+            sys.exit(f"node timed out enumerating its own surface ({tag})")
+        if proc.returncode != 0:
+            sys.exit(f"node could not enumerate its own surface ({tag}): {proc.stderr.strip()[:400]}")
+        return proc.stdout.splitlines()
 
     def _attempt(
         self, source: str, *, native: bool, node: bool, tag: str
@@ -387,8 +418,9 @@ function report(key, v) {
 ENUMERATE_GLOBALS = """
 %(collect)s
 var hostHook = %(hook)s;
+var skip = %(skip)s;
 var globals = Object.getOwnPropertyNames(globalThis).filter(function (n) {
-  return n.indexOf(hostHook) !== 0;
+  return n.indexOf(hostHook) !== 0 && skip.indexOf(n) === -1;
 }).sort();
 push("globalThis", globalThis);
 for (var i = 0; i < globals.length; i++) {
@@ -447,7 +479,7 @@ def enumerate_interpreter(runner: Runner) -> dict[str, Receiver]:
             rec.interpreted[name] = value
 
     collect = COLLECT % {"describe": DESCRIBE}
-    source = ENUMERATE_GLOBALS % {"collect": collect, "hook": js_string(HOST_HOOK_PREFIX)}
+    source = ENUMERATE_GLOBALS % {"collect": collect, "hook": js_string(HOST_HOOK_PREFIX), "skip": "[]"}
     lines, refusal = runner.run(source, native=False, node=False, tag="enumerate-globals")
     if refusal is not None:
         sys.exit(f"the interpreter could not enumerate its own globals: {refusal}")
@@ -471,6 +503,105 @@ def enumerate_interpreter(runner: Runner) -> dict[str, Receiver]:
     for rec in receivers.values():
         rec.names = sorted(set(rec.names))
     return receivers
+
+
+def node_version() -> str:
+    try:
+        return subprocess.run(["node", "--version"], capture_output=True, text=True, timeout=20).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+
+
+def enumerate_node(runner: Runner, receivers: dict[str, Receiver]) -> None:
+    """Node's own answers for every receiver, and the receivers only node has.
+
+    The globals are compared against what the interpreter publishes *with* the node adapter, so
+    `process`, `Buffer` and `fetch` do not read as node-only merely because the interpreter's own
+    list above was taken without `--node`; a receiver the interpreter has only under the adapter
+    is still a receiver it has.
+    """
+    collect = COLLECT % {"describe": DESCRIBE}
+    source = ENUMERATE_GLOBALS % {"collect": collect, "hook": js_string(HOST_HOOK_PREFIX), "skip": "[]"}
+    under_adapter: set[str] = set()
+    lines, refusal = runner.run(source, native=False, node=True, tag="enumerate-globals-node-adapter")
+    if refusal is None:
+        for line in lines:
+            parts = line.split("\t")
+            if len(parts) == 4 and parts[0] in ("S", "M"):
+                under_adapter.add(parts[1])
+
+    def ingest(lines: list[str]) -> None:
+        for line in lines:
+            parts = line.split("\t")
+            if len(parts) != 4 or parts[0] not in ("S", "M"):
+                continue
+            _, key, a, b = parts
+            rec = receivers.get(key)
+            if rec is None:
+                if key in under_adapter:
+                    continue
+                kind, expr = receiver_expression(key)
+                rec = Receiver(key, kind, expr, key.startswith("node:"))
+                rec.node_only = True
+                receivers[key] = rec
+            if rec.node_names is None:
+                rec.node_names = []
+            if parts[0] == "S":
+                rec.self_node[SELF_TYPEOF] = a
+                rec.self_node[SELF_NAME] = b
+            else:
+                rec.node_names.append(a)
+                rec.node[a] = b
+
+    # Node v25 dies with a bus error reading `Storage.prototype`'s accessors off the prototype
+    # (Web Storage); the walk cannot catch a crash, so those three are left out of node's list.
+    node_source = ENUMERATE_GLOBALS % {
+        "collect": collect,
+        "hook": js_string(HOST_HOOK_PREFIX),
+        "skip": '["Storage", "localStorage", "sessionStorage"]',
+    }
+    ingest(runner.run_under_node(node_source, tag="enumerate-globals"))
+    requires = "\n".join(
+        f"try {{ push({js_string(spec)}, require({js_string(spec)})); }} catch (e) {{}}"
+        for spec in NODE_SPECIFIERS
+    )
+    source = ENUMERATE_NAMESPACES % {"collect": collect, "requires": requires}
+    ingest(runner.run_under_node(source, tag="enumerate-namespaces"))
+    for rec in receivers.values():
+        if rec.node_names is not None:
+            rec.node_names = sorted(set(rec.node_names))
+
+
+def against_node(rec: Receiver) -> dict[str, dict[str, list[str]]]:
+    """Each engine against node, per member: `missing` (node has it, the engine does not --
+    for the native backend a refusal or an `undefined` both count), `differs` (both answer,
+    differently), `extra` (the engine has it and node does not). A node-only receiver is missing
+    in both engines, whole."""
+    out = {
+        "interpreter": {"missing": [], "differs": [], "extra": []},
+        "native": {"missing": [], "differs": [], "extra": []},
+    }
+    if rec.node_names is None:
+        return out
+    node_names = set(rec.node_names)
+    for name in sorted(node_names):
+        want = rec.node[name]
+        got = rec.interpreted.get(name)
+        if got is None:
+            out["interpreter"]["missing"].append(name)
+        elif got != want and not (got == "throws" and want == "throws"):
+            out["interpreter"]["differs"].append(name)
+        native = rec.native.get(name)
+        if native is None or native == "undefined" and want != "undefined":
+            out["native"]["missing"].append(name)
+        elif native != want:
+            out["native"]["differs"].append(name)
+    for name in sorted(set(rec.interpreted) - node_names):
+        out["interpreter"]["extra"].append(name)
+    for name in sorted(set(rec.native) - node_names):
+        if rec.native[name] != "undefined":
+            out["native"]["extra"].append(name)
+    return out
 
 
 # --------------------------------------------------------------------------------------------
@@ -530,6 +661,18 @@ def probe_published(runner: Runner, rec: Receiver) -> None:
             rec.self_native[SELF_NAME] = line[2:]
         elif line.startswith("P\t"):
             published = sorted(n for n in line[2:].split(",") if n)
+    if rec.self_native.get(SELF_TYPEOF) in ("undefined", "null"):
+        # The receiver is not there natively -- `globalThis.CloseEvent` is `undefined` -- which
+        # is the measurement, whole: every member of it is missing and there is nothing to read
+        # `.name` or the key list off. The TypeError the rest of this compile then raised was
+        # being retried three times and filed as a run that was not a measurement.
+        rec.unreachable = f"native: receiver is {rec.self_native[SELF_TYPEOF]}"
+        rec.native_names = None
+        rec.self_description = "the receiver is absent natively"
+        for tag in list(runner.errors):
+            if tag.startswith(f"published-{safe_tag(rec.key)}:"):
+                runner.errors.remove(tag)
+        return
     if published is not None:
         rec.native_names = published
     else:
@@ -572,7 +715,18 @@ def probe_values(runner: Runner, rec: Receiver, max_rounds: int) -> None:
     answer; the refusal names what it refused, and the next round asks for the rest. This is the
     only shape that works, because a refusal is not catchable and takes the process with it.
     """
-    pending = list(rec.names)
+    # The union of what the interpreter and node publish: a member only node has is put to the
+    # native backend too, so "missing against node" is a measurement and not an inference from
+    # the interpreter's list. `classify` still reads the interpreter's names; a native answer for
+    # a name the interpreter lacks is *invented* there and *present* against node.
+    if (rec.unreachable or "").startswith("native: receiver is"):
+        return
+    node_only_names = set(rec.node_names or []) - set(rec.names)
+    if rec.native_names is not None:
+        # A refusal costs one compile per name, and a receiver that can list its own keys has
+        # already said which of node's names it lacks: only the ones it claims are read.
+        node_only_names &= set(rec.native_names)
+    pending = sorted(set(rec.names) | node_only_names)
     if rec.native_names:
         # Ask for what native publishes first. Those reads answer, so one round harvests all of
         # them and the rounds that follow are spent only on names that are actually missing.
@@ -935,6 +1089,10 @@ def main() -> int:
             rec.self_native = row.get("self_native", {})
             rec.self_refused = row.get("self_refused", {})
             rec.unreachable = row["unreachable"]
+            rec.node = row.get("node", {})
+            rec.node_names = row.get("node_names")
+            rec.self_node = row.get("self_node", {})
+            rec.node_only = row.get("node_only", False)
             receivers[key] = rec
         runner = Runner(kiln, root, root, args.timeout)
         runner.errors = saved.get("errors", [])
@@ -949,6 +1107,8 @@ def main() -> int:
         runner = Runner(kiln, root, Path(tmp), args.timeout)
         print("enumerating the interpreter's surface ...", file=sys.stderr)
         receivers = enumerate_interpreter(runner)
+        print(f"enumerating node's ({node_version()}) ...", file=sys.stderr)
+        enumerate_node(runner, receivers)
         order = sorted(receivers)
         if args.only:
             order = [k for k in order if args.only in k]
@@ -959,6 +1119,8 @@ def main() -> int:
                 print(f"{key}\t{len(receivers[key].names)}")
             return 0
 
+        # Node-only receivers are probed too: the interpreter not publishing `URL.prototype` says
+        # nothing about whether the native backend does.
         todo = [receivers[k] for k in order if receivers[k].unreachable is None]
         print(f"asking native what it publishes ({len(todo)} runs) ...", file=sys.stderr)
         guard_disk(root, args.disk_floor_gib, args.disk_stop_gib)
@@ -994,12 +1156,17 @@ def main() -> int:
             "self_interpreted": receivers[key].self_interpreted,
             "self_native": receivers[key].self_native,
             "self_refused": receivers[key].self_refused,
+            "node": receivers[key].node,
+            "node_names": receivers[key].node_names,
+            "self_node": receivers[key].self_node,
+            "node_only": receivers[key].node_only,
         }
         for key in order
     }
     (outdir / f"{stem}.json").write_text(
         json.dumps(
-            {"receivers": data, "errors": runner.errors, "native_runs": runner.native_runs},
+            {"receivers": data, "errors": runner.errors, "native_runs": runner.native_runs,
+             "node_version": node_version()},
             indent=1,
             sort_keys=True,
         )
@@ -1074,6 +1241,60 @@ def render(receivers: dict[str, Receiver], order: list[str], runner: Runner) -> 
         f"{runner.native_runs} native compiles."
     )
     add("")
+    # ---- the far gap: each engine against node --------------------------------------------
+    versus = {key: against_node(receivers[key]) for key in order}
+    measured = [key for key in order if receivers[key].node_names is not None]
+    node_only = [key for key in order if receivers[key].node_only]
+    node_members = sum(len(receivers[key].node_names or []) for key in measured)
+    node_only_members = sum(len(receivers[key].node_names or []) for key in node_only)
+    add("## Against node")
+    add("")
+    add(
+        f"Node ({node_version()}) is the target of both engines (ADR 0063); the classes above "
+        "compare the two engines with each other, which is the near gap. This is the far one: "
+        "the same enumeration run under node, and each engine held to it. *Missing* is a member "
+        "node has and the engine does not (natively, a refusal or an `undefined` both count); "
+        "*differs* is both answering and not alike; *extra* is a member the engine publishes and "
+        "node does not."
+    )
+    add("")
+    add("| | Interpreter | Native |")
+    add("| --- | ---: | ---: |")
+    for cls, label in (("missing", "missing (node has it)"), ("differs", "differs from node"), ("extra", "extra (node lacks it)")):
+        i = sum(len(versus[k]["interpreter"][cls]) for k in measured)
+        n = sum(len(versus[k]["native"][cls]) for k in measured)
+        add(f"| {label} | {i} | {n} |")
+    add(f"| node members on shared receivers | {node_members} | {node_members} |")
+    add(f"| receivers the interpreter does not publish | {len(node_only)} ({node_only_members} members) | measured above |")
+    add("")
+    add("Farthest from node, by members missing or differing; the interpreter leads and the native backend follows it, so a row where native is farther is a member native has not built yet, and a row where they are equal is the interpreter's own gap.")
+    add("")
+    add("| Receiver | Node members | Interpreter missing | Interpreter differs | Native missing | Native differs |")
+    add("| --- | ---: | ---: | ---: | ---: | ---: |")
+    ranked = sorted(
+        measured,
+        key=lambda k: (-(len(versus[k]["interpreter"]["missing"]) + len(versus[k]["interpreter"]["differs"]) + len(versus[k]["native"]["missing"]) + len(versus[k]["native"]["differs"])), k),
+    )
+    shown = 0
+    for key in ranked:
+        v = versus[key]
+        total = sum(len(v[e][c]) for e in ("interpreter", "native") for c in ("missing", "differs"))
+        if total == 0 or shown >= 30:
+            break
+        shown += 1
+        add(f"| `{key}` | {len(receivers[key].node_names or [])} | {len(v['interpreter']['missing'])} | {len(v['interpreter']['differs'])} | {len(v['native']['missing'])} | {len(v['native']['differs'])} |")
+    add("")
+    if node_only:
+        add("Receivers node has and the interpreter does not publish (its list taken with the node adapter too), with node's member counts; the native backend was asked about each, and its answers are in the table above:")
+        add("")
+        add(", ".join(f"`{key}` ({len(receivers[key].node_names or [])})" for key in node_only))
+        add("")
+    extra_i = [(k, n) for k in measured for n in versus[k]["interpreter"]["extra"]]
+    if extra_i:
+        add("Members the interpreter publishes and node does not (node is the target; each of these is either a deliberate extension with a reason, or debt):")
+        add("")
+        add(", ".join(f"`{k}.{n}`" for k, n in extra_i[:60]) + (" ..." if len(extra_i) > 60 else ""))
+        add("")
     add(
         "A receiver key is the path the walk took. `Array.prototype` is what it says; a trailing "
         "`^` means *the object this one inherits from*, which is the only way the shared "
