@@ -27054,12 +27054,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             "__kilnHostModuleCreateRequire",
             Value::Native(Native::NodeModuleCreateRequire, realm),
         );
-        // Captured and deleted by the shared Buffer bootstrap (`kiln-builtins/src/buffer.ts`)
-        // in Node mode; published in every realm so the two engines' global surfaces agree.
-        globals.set_non_enumerable(
-            "__kilnBufferToString",
-            Value::Native(Native::NodeBufferToString, realm),
-        );
+
         globals.set_non_enumerable(
             "Intl",
             Value::Native(Native::Intl(intl::Op::Namespace), realm),
@@ -27094,6 +27089,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 globals.set_non_enumerable(name, Value::Native(Native::WebStub(kind), realm));
             }
             globals.set_non_enumerable("process", self.process_object());
+            // Captured and deleted by the shared Buffer bootstrap (`kiln-builtins/src/buffer.ts`),
+            // which runs in Node mode only -- so it is published in Node mode only, and neither
+            // engine's global surface carries it afterwards.
+            globals.set_non_enumerable(
+                "__kilnBufferToString",
+                Value::Native(Native::NodeBufferToString, realm),
+            );
         }
         // Published in every realm, not only a Node one: it is a WHATWG global every host has,
         // the bare name already resolved everywhere, and the native runtime's bootstrap defines
