@@ -1,6 +1,6 @@
 {
  "errors": [],
- "native_runs": 603,
+ "native_runs": 601,
  "receivers": {
   "AbortController": {
    "expr": "globalThis.AbortController",
@@ -5215,7 +5215,6 @@
     "TypeError",
     "URIError",
     "URL",
-    "URLSearchParams",
     "Uint16Array",
     "Uint32Array",
     "Uint8Array",
