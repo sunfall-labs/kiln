@@ -75,6 +75,27 @@ a promise job, so the promise queue drains before the tick lane); `structuredClo
 `Object.groupBy`, `Map.groupBy`; a typed-site declaration missing from modules with
 top-level await; the overlay host's `rmSync` leaving in-memory entries behind.
 
+## Where the measurement stands (2026-09-19, evening)
+
+The inventory now probes every receiver under the Node adapter (what a program runs with, and
+what node is); measured without it, the far gap had counted `process` and `fetch` as missing
+on `globalThis` and never seen `Buffer.prototype`. Against node v25: interpreter 982 members
+missing / 62 differing, native 1217 / 43, of 2660 members on shared receivers. The same day
+also closed, in both engines: the eleven WHATWG classes the interpreter had as hollow stubs
+(Event, EventTarget, MessageChannel, BroadcastChannel, the streams and their controllers, now
+`kiln-builtins/src/web_events_streams.ts`); `Request.body`/`Response.body` as streams;
+`globalThis.process`; `process.platform`/`version`/`release` spelled as node spells them; the
+interpreter's `URL` from the shared TypeScript (issue 05).
+
+What the inventory names next, by members missing in both engines: `node:zlib` (111),
+`node:crypto` (63), `node:fs` (53 -- `Dir`, `Dirent`, streams, `open`/`read`/`write`,
+`cp`, `statfs`), `node:module` (27), `node:util` (21 -- `parseArgs`, `isDeepStrictEqual`,
+`MIMEType`), `RegExp` legacy statics (19), `Date.prototype` natively (29: the UTC getters,
+every setter, `toLocale*`), `String.prototype` natively (17: the HTML methods,
+`isWellFormed`/`toWellFormed`, `toLocale*Case`), `node:http` (14), `node:stream` (13),
+`console` (9). The `differs` column is mostly `.length` of functions with optional
+parameters and prototype getters that node brand-checks.
+
 ## The interpreter's own drift from node (issues 05, 13)
 
 Surface the interpreter has and node does not, or answers differently, is the same debt on the

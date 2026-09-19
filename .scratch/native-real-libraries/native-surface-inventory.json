@@ -1,6 +1,6 @@
 {
  "errors": [],
- "native_runs": 922,
+ "native_runs": 926,
  "node_version": "v25.9.0",
  "receivers": {
   "AbortController": {
@@ -10897,15 +10897,19 @@
   "URL": {
    "expr": "globalThis.URL",
    "interpreted": {
-    "length": "number 1",
-    "name": "string \"URL\""
+    "canParse": "function",
+    "length": "number 2",
+    "name": "string \"URL\"",
+    "parse": "function",
+    "prototype": "object"
    },
    "kind": "static",
    "native": {
     "canParse": "function",
     "length": "number 2",
     "name": "string \"URL\"",
-    "parse": "function"
+    "parse": "function",
+    "prototype": "object"
    },
    "native_names": [
     "canParse",
@@ -10949,9 +10953,27 @@
   },
   "URL.prototype": {
    "expr": "globalThis.URL.prototype",
-   "interpreted": {},
+   "interpreted": {
+    "@@toStringTag": "string \"URL\"",
+    "constructor": "function",
+    "hash": "throws",
+    "host": "throws",
+    "hostname": "throws",
+    "href": "throws",
+    "origin": "throws",
+    "password": "throws",
+    "pathname": "throws",
+    "port": "throws",
+    "protocol": "throws",
+    "search": "throws",
+    "searchParams": "throws",
+    "toJSON": "function",
+    "toString": "function",
+    "username": "throws"
+   },
    "kind": "prototype",
    "native": {
+    "@@toStringTag": "string \"URL\"",
     "constructor": "function",
     "hash": "throws",
     "host": "throws",
@@ -11021,10 +11043,13 @@
     "toString",
     "username"
    ],
-   "node_only": true,
+   "node_only": false,
    "refused": {},
    "self_description": null,
-   "self_interpreted": {},
+   "self_interpreted": {
+    "(itself)": "object",
+    "(itself).name": "undefined"
+   },
    "self_native": {
     "(itself)": "object",
     "(itself).name": "undefined"
@@ -17827,7 +17852,7 @@
     "cwd": "function",
     "env": "object",
     "execArgv": "object",
-    "execPath": "string \"/private/var/folders/k0/vy4_6md56y17lf_dj2stmjk80000gn/T/kiln-native-27974-0-1789854038149823000/run-graph\"",
+    "execPath": "string \"/private/var/folders/k0/vy4_6md56y17lf_dj2stmjk80000gn/T/kiln-native-350-0-1789855827493311000/run-graph\"",
     "exit": "function",
     "features": "object",
     "hrtime": "function",
@@ -17927,9 +17952,9 @@
     "moduleLoadList": "object",
     "nextTick": "function",
     "openStdin": "function",
-    "pid": "number 13880",
+    "pid": "number 81451",
     "platform": "string \"darwin\"",
-    "ppid": "number 13863",
+    "ppid": "number 81447",
     "reallyExit": "function",
     "ref": "function",
     "release": "object",
