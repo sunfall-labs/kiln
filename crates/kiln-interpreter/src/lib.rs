@@ -27045,11 +27045,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 globals.set_non_enumerable(name, Value::Native(Native::WebStub(kind), realm));
             }
             globals.set_non_enumerable("process", self.process_object());
-            globals.set_non_enumerable(
-                "structuredClone",
-                Value::Native(Native::StructuredClone, realm),
-            );
         }
+        // Published in every realm, not only a Node one: it is a WHATWG global every host has,
+        // the bare name already resolved everywhere, and the native runtime's bootstrap defines
+        // it unconditionally -- so until 2026-09-19 `"structuredClone" in globalThis` was the one
+        // global the two engines disagreed on outside `--node`.
+        globals.set_non_enumerable(
+            "structuredClone",
+            Value::Native(Native::StructuredClone, realm),
+        );
 
         // The global functions, which a program can also reach by their bare names -- and has to
         // find the *same* value both ways: `globalThis.parseInt === parseInt`.
@@ -42620,9 +42624,14 @@ fn build_regexp(pattern: &StringUnits, flags: &str) -> Option<Value> {
     let units = pattern.to_units();
     let mut codepoints = Vec::with_capacity(units.len());
     let mut index = 0;
+    // Without `u` the pattern is code units like the subject: an astral literal is a pair of
+    // surrogates that match a pair in the input one unit at a time. Only under `u` does a
+    // surrogate pair in the pattern mean the one code point.
+    let unicode = flags.contains('u') || flags.contains('v');
     while index < units.len() {
         let unit = units[index];
-        if (0xd800..=0xdbff).contains(&unit)
+        if unicode
+            && (0xd800..=0xdbff).contains(&unit)
             && units
                 .get(index + 1)
                 .is_some_and(|next| (0xdc00..=0xdfff).contains(next))

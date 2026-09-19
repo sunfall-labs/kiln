@@ -7332,16 +7332,24 @@ mod regexp {
         }) else {
             return INVALID_ARGUMENT;
         };
-        let Some(pattern) = view_to_unicode(pattern) else {
+        let Some(flags) = view_to_flags(flags) else {
             return INVALID_ARGUMENT;
         };
-        let Some(flags) = view_to_flags(flags) else {
+        let unicode = flags.contains('u') || flags.contains('v');
+        // Without `u` the pattern is code units like the subject: an astral literal is a pair
+        // of surrogates that match a pair in the input one unit at a time. Only under `u` does
+        // a surrogate pair in the pattern mean the one code point.
+        let pattern = if unicode {
+            view_to_unicode(pattern)
+        } else {
+            view_to_units(pattern)
+        };
+        let Some(pattern) = pattern else {
             return INVALID_ARGUMENT;
         };
         let Ok(compiled) = regress::Regex::from_unicode(pattern.into_iter(), flags.as_str()) else {
             return INVALID_ARGUMENT;
         };
-        let unicode = flags.contains('u') || flags.contains('v');
         let handle = alloc::boxed::Box::new(KilnRegex {
             compiled,
             unicode,
@@ -7522,6 +7530,18 @@ mod regexp {
                     })
                     .collect(),
             ),
+        }
+    }
+
+    /// Every UTF-16 unit as its own value, surrogates included.
+    fn view_to_units(view: super::StringView<'_>) -> Option<Vec<u32>> {
+        match view {
+            super::StringView::Latin1(bytes) => {
+                Some(bytes.iter().map(|&byte| u32::from(byte)).collect())
+            }
+            super::StringView::Utf16(units) => {
+                Some(units.iter().map(|&unit| u32::from(unit)).collect())
+            }
         }
     }
 
