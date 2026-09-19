@@ -1,6 +1,6 @@
 {
  "errors": [],
- "native_runs": 864,
+ "native_runs": 862,
  "node_version": "v25.9.0",
  "receivers": {
   "AbortController": {

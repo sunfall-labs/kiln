@@ -3886,7 +3886,11 @@ fn native_builtin_bootstrap_module(
             kiln_builtins::WEB_BOOTSTRAP_SOURCE
         )
     } else {
-        format!("{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{url}")
+        // The Buffer bootstrap (Node mode) captures and deletes this bridge; without it the
+        // bridge would be the one global node does not have, so it goes here instead.
+        format!(
+            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{url}\ndelete globalThis.__kilnBufferToString;\n"
+        )
     };
     let hir = frontend_oxc::parse(LOGICAL_PATH, &source);
     let program = kiln_ir::compile_module(&hir).map_err(|diagnostics| {
