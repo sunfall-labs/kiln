@@ -1,6 +1,6 @@
 {
  "errors": [],
- "native_runs": 614,
+ "native_runs": 603,
  "receivers": {
   "AbortController": {
    "expr": "globalThis.AbortController",
@@ -3958,12 +3958,15 @@
    },
    "kind": "static",
    "native": {
-    "length": "number 1",
+    "length": "number 2",
     "name": "string \"URL\""
    },
-   "native_names": null,
+   "native_names": [
+    "canParse",
+    "parse"
+   ],
    "refused": {},
-   "self_description": "refusal: instruction=32 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
+   "self_description": null,
    "self_interpreted": {
     "(itself)": "function",
     "(itself).name": "string \"URL\""
@@ -5212,6 +5215,7 @@
     "TypeError",
     "URIError",
     "URL",
+    "URLSearchParams",
     "Uint16Array",
     "Uint32Array",
     "Uint8Array",

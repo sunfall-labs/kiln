@@ -13,6 +13,9 @@ debt the native side just paid, and the payment is the same file: `crates/kiln-b
 over two intrinsics the interpreter exposes from its own `url` crate the way the native backend
 does from the provider.
 
+The `URLSearchParams` global is held back natively until then, so the two engines' global
+lists stay equal; `url.ts` publishes it in one line once the interpreter can too.
+
 Done when the interpreter evaluates `url.ts` at realm setup with `__kilnUrlParse`/`__kilnUrlSet`
 answered from `crates/kiln-interpreter/src/url.rs`, `probes/url2.mjs` matches node under
 `kiln run`, and `conformance/native/url-surface.mjs` grows the setter and iteration lines back.

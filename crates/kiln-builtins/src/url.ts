@@ -342,4 +342,7 @@ Object.defineProperty(URL.prototype, Symbol.toStringTag, { value: "URL", configu
 
 __urlAdopt(URL, URL.prototype, URLSearchParams.prototype);
 (globalThis as any).URL = URL;
-(globalThis as any).URLSearchParams = URLSearchParams;
+// `URLSearchParams` is a global in node and is not yet one in the interpreter, which has no
+// constructor for it; `conformance/native/global-callable-names` holds the two engines to the
+// same list, so the global appears in both together (full-runtime/05). The class is reachable
+// as `url.searchParams` meanwhile.
