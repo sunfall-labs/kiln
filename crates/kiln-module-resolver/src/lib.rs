@@ -304,14 +304,15 @@ pub enum NodeRequestKind {
 }
 
 /// Classify from explicit extension and the nearest package manifest selected by resolution.
-/// `.mjs`/`.cjs` are definitive; `.js` follows `type`, defaulting to CommonJS as Node does.
+/// `.mjs`/`.mts` are ESM and `.cjs`/`.cts` are CommonJS, definitively; `.js`/`.jsx`/`.ts`/`.tsx`
+/// follow `type`, defaulting to CommonJS as Node does.
 pub fn node_module_format(
     path: &Path,
     package_json: Option<&Path>,
 ) -> Result<NodeModuleFormat, ResolveError> {
     match path.extension().and_then(|extension| extension.to_str()) {
-        Some("mjs") => return Ok(NodeModuleFormat::EsModule),
-        Some("cjs") => return Ok(NodeModuleFormat::CommonJs),
+        Some("mjs" | "mts") => return Ok(NodeModuleFormat::EsModule),
+        Some("cjs" | "cts") => return Ok(NodeModuleFormat::CommonJs),
         _ => {}
     }
     let Some(manifest) = package_json else {
@@ -954,7 +955,7 @@ impl ResolutionPolicy for NodeRuntimeResolver {
 fn node_module_format_for_path(path: &Path) -> Result<NodeModuleFormat, ResolveError> {
     if matches!(
         path.extension().and_then(|value| value.to_str()),
-        Some("mjs" | "cjs")
+        Some("mjs" | "mts" | "cjs" | "cts")
     ) {
         return node_module_format(path, None);
     }
@@ -967,6 +968,39 @@ fn node_module_format_for_path(path: &Path) -> Result<NodeModuleFormat, ResolveE
         directory = current.parent();
     }
     node_module_format(path, None)
+}
+
+/// Whether Node leaves this path's module format to syntax detection.
+///
+/// Definitive extensions (`.mjs`/`.mts` ESM, `.cjs`/`.cts` CommonJS) and manifests with an
+/// explicit `"type"` field decide the format up front. Anything else is ambiguous, and Node
+/// 22+ runs ESM syntax found in it as ESM (`--experimental-detect-module`, on by default)
+/// rather than failing it as CommonJS. A manifest without a `"type"` field is ambiguous too.
+pub fn node_format_is_ambiguous(path: &Path) -> bool {
+    if matches!(
+        path.extension().and_then(|value| value.to_str()),
+        Some("mjs" | "mts" | "cjs" | "cts")
+    ) {
+        return false;
+    }
+    let mut directory = path.parent();
+    while let Some(current) = directory {
+        let manifest = current.join("package.json");
+        if manifest.is_file() {
+            let explicit = fs::read(&manifest)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|value| {
+                    value
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                });
+            return explicit.is_none();
+        }
+        directory = current.parent();
+    }
+    true
 }
 
 /// Replays package decisions captured by a client-side [`NodePackageResolver`].
@@ -2260,6 +2294,27 @@ mod tests {
     }
 
     #[test]
+    fn node_format_ambiguity_marks_only_undetectable_paths() {
+        let project = TempProject::new();
+        // No manifest anywhere above: ambiguous whatever the (non-definitive) extension.
+        assert!(node_format_is_ambiguous(Path::new("script.ts")));
+        assert!(node_format_is_ambiguous(Path::new("script.js")));
+        // Definitive extensions are never ambiguous, manifest or not.
+        for name in ["a.mjs", "a.mts", "a.cjs", "a.cts"] {
+            assert!(!node_format_is_ambiguous(Path::new(name)));
+        }
+        // A manifest without a "type" field leaves every ordinary file ambiguous.
+        let typeless = project.write("plain/package.json", r#"{"name":"x"}"#);
+        let typeless_js = typeless.with_file_name("app.js");
+        assert!(node_format_is_ambiguous(&typeless_js));
+        // An explicit "type" field decides the format: nothing to detect.
+        let common = project.write("cjs/package.json", r#"{"type":"commonjs"}"#);
+        assert!(!node_format_is_ambiguous(&common.with_file_name("app.ts")));
+        let module = project.write("esm/package.json", r#"{"type":"module"}"#);
+        assert!(!node_format_is_ambiguous(&module.with_file_name("app.ts")));
+    }
+
+    #[test]
     fn node_format_uses_definitive_extensions_and_package_type() {
         let project = TempProject::new();
         let common_manifest = project.write("cjs/package.json", r#"{"type":"commonjs"}"#);
@@ -2270,6 +2325,16 @@ mod tests {
         );
         assert_eq!(
             node_module_format(Path::new("x.mjs"), Some(&common_manifest)).unwrap(),
+            NodeModuleFormat::EsModule
+        );
+        // TypeScript twin extensions are definitive like their JavaScript sides: Node
+        // type-stripping always runs `.mts` as ESM and `.cts` as CommonJS.
+        assert_eq!(
+            node_module_format(Path::new("x.cts"), Some(&module_manifest)).unwrap(),
+            NodeModuleFormat::CommonJs
+        );
+        assert_eq!(
+            node_module_format(Path::new("x.mts"), Some(&common_manifest)).unwrap(),
             NodeModuleFormat::EsModule
         );
         assert_eq!(

@@ -726,6 +726,12 @@ fn snapshot_module_payload(
     if source_kind == kiln_module_graph::ModuleSource::CommonJs {
         let (hir, static_requires) =
             frontend_oxc::parse_commonjs_with_requires(path_string, &source.text);
+        if hir.has_static_module_syntax() {
+            return Err(kiln_module_graph::ModuleGraphError::CjsStaticModuleSyntax {
+                path: path.to_path_buf(),
+                diagnostics: kiln_ir::cjs_static_module_syntax_diagnostics(&hir),
+            });
+        }
         let mut program = kiln_ir::compile_commonjs(&hir).map_err(|diagnostics| {
             kiln_module_graph::ModuleGraphError::Compile {
                 path: path.to_path_buf(),
@@ -1173,6 +1179,12 @@ fn module_payload<E: QueryEngine>(
         let source = engine.source(module_file).expect("source checked above");
         let (hir, static_requires) =
             frontend_oxc::parse_commonjs_with_requires(module_path_string, source);
+        if hir.has_static_module_syntax() {
+            return Err(kiln_module_graph::ModuleGraphError::CjsStaticModuleSyntax {
+                path: module_path.to_path_buf(),
+                diagnostics: kiln_ir::cjs_static_module_syntax_diagnostics(&hir),
+            });
+        }
         let mut program = kiln_ir::compile_commonjs(&hir).map_err(|diagnostics| {
             kiln_module_graph::ModuleGraphError::Compile {
                 path: module_path.to_path_buf(),
@@ -1330,7 +1342,11 @@ fn module_graph_diagnostics(error: kiln_module_graph::ModuleGraphError) -> Vec<D
                 | ModuleGraphError::AmbiguousExport { importer, .. } => Some(importer),
                 ModuleGraphError::DuplicateExport { module, .. }
                 | ModuleGraphError::Execution { module, .. } => Some(module),
-                ModuleGraphError::Compile { .. } | ModuleGraphError::StepOverflow => None,
+                // The signal never escapes graph construction (it becomes a retry or a
+                // `Compile`), so this arm is unreachable; it renders through `Display`.
+                ModuleGraphError::Compile { .. }
+                | ModuleGraphError::CjsStaticModuleSyntax { .. }
+                | ModuleGraphError::StepOverflow => None,
             }
             .map(|path| path.to_string_lossy().into_owned());
             vec![Diagnostic {

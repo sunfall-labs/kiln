@@ -1816,6 +1816,15 @@ mod tests {
                         if source_kind == kiln_module_graph::ModuleSource::CommonJs {
                             let (hir, static_requires) =
                                 frontend_oxc::parse_commonjs_with_requires(path_str, text);
+                            if hir.has_static_module_syntax() {
+                                return Err(
+                                    kiln_module_graph::ModuleGraphError::CjsStaticModuleSyntax {
+                                        path: path.to_path_buf(),
+                                        diagnostics:
+                                            kiln_ir::cjs_static_module_syntax_diagnostics(&hir),
+                                    },
+                                );
+                            }
                             let mut program = kiln_ir::compile_commonjs(&hir).map_err(|diagnostics| {
                                 kiln_module_graph::ModuleGraphError::Compile {
                                     path: path.to_path_buf(),

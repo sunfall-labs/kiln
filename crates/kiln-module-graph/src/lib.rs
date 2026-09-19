@@ -25,11 +25,12 @@ use kiln_interpreter::{
 };
 use kiln_ir::{
     BYTECODE_VERSION, CompileDiagnostic, ExportBinding, Instruction, ModuleProgram, Program,
-    compile_commonjs, compile_module,
+    cjs_static_module_syntax_diagnostics, compile_commonjs, compile_module,
 };
 use kiln_module_resolver::{
     ModuleResolver, NodeBuiltin, NodeModuleFormat, NodeRequestKind, PathRole, ResolutionKind,
     ResolutionPolicy, ResolvedModule, SUPPORTED_EXTENSIONS, is_asset_extension,
+    node_format_is_ambiguous,
 };
 use kiln_runtime::{ClockCapability, RealmCapabilities, RealmRuntime};
 
@@ -367,6 +368,15 @@ pub enum ModuleGraphError {
         path: PathBuf,
         diagnostics: Vec<CompileDiagnostic>,
     },
+    /// Static module syntax reached a CommonJS-classified file.
+    ///
+    /// Never surfaces directly: [`Builder::visit_static`] retries ambiguous files as ESM
+    /// (Node 22+ syntax detection) and converts explicit-CJS ones into [`Self::Compile`].
+    /// Providers return this instead of compiling so the retry decision stays in one place.
+    CjsStaticModuleSyntax {
+        path: PathBuf,
+        diagnostics: Vec<CompileDiagnostic>,
+    },
     Resolve {
         importer: PathBuf,
         specifier: String,
@@ -416,6 +426,13 @@ impl fmt::Display for ModuleGraphError {
                 write!(f, "module path is not valid UTF-8: {}", path.display())
             }
             Self::Compile { path, diagnostics } => {
+                write!(f, "could not compile module {}", path.display())?;
+                for diagnostic in diagnostics {
+                    write!(f, ": {}", diagnostic.message)?;
+                }
+                Ok(())
+            }
+            Self::CjsStaticModuleSyntax { path, diagnostics } => {
                 write!(f, "could not compile module {}", path.display())?;
                 for diagnostic in diagnostics {
                     write!(f, ": {}", diagnostic.message)?;
@@ -682,6 +699,12 @@ impl ModuleGraph {
                 || frontend.parse(path_string, &source),
                 |parsed| parsed.module.clone(),
             );
+            if source_kind == ModuleSource::CommonJs && hir.has_static_module_syntax() {
+                return Err(ModuleGraphError::CjsStaticModuleSyntax {
+                    path: path.to_path_buf(),
+                    diagnostics: cjs_static_module_syntax_diagnostics(&hir),
+                });
+            }
             let mut program = if source_kind == ModuleSource::CommonJs {
                 compile_commonjs(&hir)
             } else {
@@ -3337,11 +3360,41 @@ where
                         };
                         self.record_state(&path);
                         self.stack.push(path.clone());
+                        // Node 22+ syntax detection: a CommonJS-classified file that is
+                        // ambiguous (no definitive extension, no explicit `"type"`) and
+                        // carries static module syntax runs as ESM. The provider signals
+                        // the syntax instead of compiling so this retry stays in one
+                        // place; explicit-CJS files keep the compile refusal. The retry
+                        // cannot loop: ESM requests never produce the signal.
+                        let mut source = source;
                         let (program, data) = match source {
                             ModuleSource::Source | ModuleSource::CommonJs => {
-                                let ModulePayload::Program(program) =
-                                    (self.provider)(&path, source)?
-                                else {
+                                let payload = loop {
+                                    match (self.provider)(&path, source) {
+                                        Err(ModuleGraphError::CjsStaticModuleSyntax {
+                                            diagnostics,
+                                            ..
+                                        }) if source == ModuleSource::CommonJs
+                                            && node_format_is_ambiguous(&path) =>
+                                        {
+                                            source = ModuleSource::Source;
+                                            continue;
+                                        }
+                                        Err(ModuleGraphError::CjsStaticModuleSyntax {
+                                            path,
+                                            diagnostics,
+                                        }) => {
+                                            return Err(ModuleGraphError::Compile {
+                                                path,
+                                                diagnostics,
+                                            });
+                                        }
+                                        result => {
+                                            break result?;
+                                        }
+                                    }
+                                };
+                                let ModulePayload::Program(program) = payload else {
                                     return Err(ModuleGraphError::Source {
                                         path: path.clone(),
                                         message: "code module provider returned JSON text"

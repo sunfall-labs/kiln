@@ -1692,6 +1692,23 @@ pub struct Export {
     pub statement_span: Span,
 }
 
+impl Module {
+    /// Whether the module uses static `import`/`export` syntax with runtime meaning.
+    ///
+    /// `import type` and `export type` are erased before lowering and do not count: a
+    /// CommonJS file may carry them and stay CommonJS. Everything else static is a
+    /// SyntaxError in CommonJS and, in an ambiguous file, what syntax detection keys on.
+    pub fn has_static_module_syntax(&self) -> bool {
+        self.requested_modules.iter().any(|requested| {
+            requested
+                .occurrences
+                .iter()
+                .any(|occurrence| !occurrence.type_only)
+        }) || self.imports.iter().any(|import| !import.type_only)
+            || self.exports.iter().any(|export| !export.type_only)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

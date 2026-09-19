@@ -329,6 +329,92 @@ fn commonjs_var_may_redeclare_a_wrapper_parameter() {
     assert!(program.program.code.contains(&Instruction::StoreCell(2)));
 }
 
+/// Static module syntax is a SyntaxError in CommonJS, not a silent unbound name.
+///
+/// `import fs from "node:fs"` in a `.ts` file with no `"type": "module"` manifest used to
+/// compile cleanly and then fail at runtime with `fs is not defined` (or answer `undefined`),
+/// because `compile_commonjs` never declared the import binding. Every static form is refused
+/// here at its own span; `import type` stays legal because it is erased before this point.
+#[test]
+fn commonjs_refuses_static_module_syntax() {
+    fn occurrence(kind: ModuleRequestKind) -> RequestedModule {
+        RequestedModule {
+            specifier: "node:fs".into(),
+            occurrences: vec![ModuleRequestOccurrence {
+                statement_span: Span::new(0, 27),
+                specifier_span: Span::new(15, 24),
+                type_only: false,
+                kind,
+            }],
+        }
+    }
+
+    // Side-effect import, recorded only as a requested module.
+    let mut fixture = module(Vec::new());
+    fixture
+        .requested_modules
+        .push(occurrence(ModuleRequestKind::Import));
+    let diagnostics = compile_commonjs(&fixture).expect_err("a static import is refused");
+    assert_eq!(diagnostics.len(), 1);
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("import statement outside a module")
+    );
+    assert_eq!(diagnostics[0].span, Some(Span::new(0, 27)));
+
+    // Default import entry without an occurrence (hand-built HIR cannot slip through either).
+    let mut fixture = module(Vec::new());
+    fixture.imports.push(Import {
+        source: "node:fs".into(),
+        imported: ImportName::Default,
+        local: "fs".into(),
+        type_only: false,
+        span: Span::new(7, 9),
+        statement_span: Span::new(0, 27),
+    });
+    let diagnostics = compile_commonjs(&fixture).expect_err("a default import is refused");
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("import statement outside a module")
+    );
+    assert_eq!(diagnostics[0].span, Some(Span::new(0, 27)));
+
+    // Re-export occurrence.
+    let mut fixture = module(Vec::new());
+    fixture
+        .requested_modules
+        .push(occurrence(ModuleRequestKind::Export));
+    let diagnostics = compile_commonjs(&fixture).expect_err("a static export is refused");
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("export statement outside a module")
+    );
+
+    // A type-only import is erased and stays legal.
+    let mut fixture = module(vec![declaration(VariableKind::Var, "x", Some(number(1.0)))]);
+    fixture.requested_modules.push(RequestedModule {
+        specifier: "node:fs".into(),
+        occurrences: vec![ModuleRequestOccurrence {
+            statement_span: Span::new(0, 27),
+            specifier_span: Span::new(15, 24),
+            type_only: true,
+            kind: ModuleRequestKind::Import,
+        }],
+    });
+    fixture.imports.push(Import {
+        source: "node:fs".into(),
+        imported: ImportName::Name("Stats".into()),
+        local: "Stats".into(),
+        type_only: true,
+        span: Span::new(7, 12),
+        statement_span: Span::new(0, 27),
+    });
+    compile_commonjs(&fixture).expect("a type-only import compiles");
+}
+
 /// Strictness decides whose binding a `var` in eval code is.
 ///
 /// A sloppy direct eval declares into the caller's variable environment, so `var x` over a
