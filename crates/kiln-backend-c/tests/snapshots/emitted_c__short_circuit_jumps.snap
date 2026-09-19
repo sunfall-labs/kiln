@@ -10,13 +10,9 @@ int kiln_module_c5f5386408ed495d3a2dbd10ae063118(kiln_host *host, kiln_value *re
     (void)kiln_realm_gc_register_roots(kiln_module_c5f5386408ed495d3a2dbd10ae063118_gc_roots, NULL, 0);
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
-    int64_t i0 = 0;
-    double d0 = 0.0;
     kiln_val v0 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
     v0 = UINT64_C(4607182418800017408);
-    memcpy(&d0, &v0, sizeof(d0));
-    i0 = 1LL;
     *result = kiln_val_to_boundary(v0);
     return KILN_C99_OK;
 }

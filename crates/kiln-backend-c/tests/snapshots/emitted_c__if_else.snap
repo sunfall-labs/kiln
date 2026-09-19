@@ -11,11 +11,9 @@ int kiln_module_cc63ac731604078bde44d2124ac359e2(kiln_host *host, kiln_value *re
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
     int64_t i1 = 0, i2 = 0;
-    double d1 = 0.0, d2 = 0.0;
     kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
     v1 = UINT64_C(4607182418800017408);
-    memcpy(&d1, &v1, sizeof(d1));
     i1 = 1LL;
     *result = kiln_val_to_boundary(v1);
     return KILN_C99_OK;

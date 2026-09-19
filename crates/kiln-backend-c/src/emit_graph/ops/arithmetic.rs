@@ -18,8 +18,13 @@ pub(super) fn emit_unary_int(
     let ints = ctx.ints;
     let ivs = ctx.ivs;
     let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+    let need_double = ctx.live_numbers.contains(&vid);
     let box_stmt = if need_box {
-        format!(" v{v} = kiln_c99_val_from_double(d{v});")
+        if need_double {
+            format!(" v{v} = kiln_c99_val_from_double(d{v});")
+        } else {
+            format!(" v{v} = kiln_c99_val_from_double((double)i{v});")
+        }
     } else {
         String::new()
     };
@@ -29,53 +34,122 @@ pub(super) fn emit_unary_int(
         String::new()
     };
 
+    let double_assign = if need_double {
+        format!(" d{v} = (double)i{v};")
+    } else {
+        String::new()
+    };
+
     let x = value.0;
     match op {
         UnaryOp::Plus | UnaryOp::ToNumeric => {
             if ints.contains(value) {
-                writeln!(output, "    i{v} = i{x}; d{v} = d{x};{copy_box}").unwrap();
+                let d_stmt = if need_double {
+                    format!(" d{v} = (double)i{x};")
+                } else {
+                    String::new()
+                };
+                writeln!(output, "    i{v} = i{x};{d_stmt}{copy_box}").unwrap();
             } else {
-                writeln!(output, "    d{v} = d{x}; i{v} = (int64_t)d{v};{copy_box}").unwrap();
+                let src_d = if ctx.live_numbers.contains(value) {
+                    format!("d{x}")
+                } else if ctx.live_ints.contains(value) {
+                    format!("(double)i{x}")
+                } else {
+                    format!("d{x}")
+                };
+                let d_stmt = if need_double {
+                    format!(" d{v} = {src_d};")
+                } else {
+                    String::new()
+                };
+                writeln!(output, "   {d_stmt} i{v} = (int64_t){src_d};{copy_box}").unwrap();
             }
         }
         UnaryOp::Increment => {
             if ivs.contains_key(&vid) {
-                writeln!(
-                    output,
-                    "    i{v} = i{x} + 1LL; d{v} = (double)i{v};{box_stmt}"
-                )
-                .unwrap();
+                writeln!(output, "    i{v} = i{x} + 1LL;{double_assign}{box_stmt}").unwrap();
             } else if ints.contains(value) {
+                let (d_assign_res, slow_calc) = if need_double {
+                    (
+                        format!(" d{v} = (double)res;"),
+                        format!(
+                            " d{v} = kiln_c99_int_slow((double)i{x} + 1.0); i{v} = (int64_t)d{v};"
+                        ),
+                    )
+                } else {
+                    (
+                        String::new(),
+                        format!(
+                            " {{ double d_tmp = kiln_c99_int_slow((double)i{x} + 1.0); i{v} = (int64_t)d_tmp; }}"
+                        ),
+                    )
+                };
                 writeln!(
                     output,
-                    "    {{ int64_t res; if (KILN_LIKELY(!__builtin_add_overflow(i{x}, 1LL, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL)) {{ i{v} = res; d{v} = (double)res; }} else {{ d{v} = kiln_c99_int_slow((double)i{x} + 1.0); i{v} = (int64_t)d{v}; }}{box_stmt} }}"
+                    "    {{ int64_t res; if (KILN_LIKELY(!__builtin_add_overflow(i{x}, 1LL, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL)) {{ i{v} = res;{d_assign_res} }} else {{{slow_calc} }}{box_stmt} }}"
                 )
                 .unwrap();
             } else {
+                let src_d = if ctx.live_numbers.contains(value) {
+                    format!("d{x}")
+                } else if ctx.live_ints.contains(value) {
+                    format!("(double)i{x}")
+                } else {
+                    format!("d{x}")
+                };
+                let d_stmt = if need_double {
+                    format!(" d{v} = {src_d} + 1.0;")
+                } else {
+                    String::new()
+                };
                 writeln!(
                     output,
-                    "    d{v} = d{x} + 1.0; i{v} = (int64_t)d{v};{box_stmt}"
+                    "   {d_stmt} i{v} = (int64_t)({src_d} + 1.0);{box_stmt}"
                 )
                 .unwrap();
             }
         }
         UnaryOp::Decrement => {
             if ivs.contains_key(&vid) {
-                writeln!(
-                    output,
-                    "    i{v} = i{x} - 1LL; d{v} = (double)i{v};{box_stmt}"
-                )
-                .unwrap();
+                writeln!(output, "    i{v} = i{x} - 1LL;{double_assign}{box_stmt}").unwrap();
             } else if ints.contains(value) {
+                let (d_assign_res, slow_calc) = if need_double {
+                    (
+                        format!(" d{v} = (double)res;"),
+                        format!(
+                            " d{v} = kiln_c99_int_slow((double)i{x} - 1.0); i{v} = (int64_t)d{v};"
+                        ),
+                    )
+                } else {
+                    (
+                        String::new(),
+                        format!(
+                            " {{ double d_tmp = kiln_c99_int_slow((double)i{x} - 1.0); i{v} = (int64_t)d_tmp; }}"
+                        ),
+                    )
+                };
                 writeln!(
                     output,
-                    "    {{ int64_t res; if (KILN_LIKELY(!__builtin_sub_overflow(i{x}, 1LL, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL)) {{ i{v} = res; d{v} = (double)res; }} else {{ d{v} = kiln_c99_int_slow((double)i{x} - 1.0); i{v} = (int64_t)d{v}; }}{box_stmt} }}"
+                    "    {{ int64_t res; if (KILN_LIKELY(!__builtin_sub_overflow(i{x}, 1LL, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL)) {{ i{v} = res;{d_assign_res} }} else {{{slow_calc} }}{box_stmt} }}"
                 )
                 .unwrap();
             } else {
+                let src_d = if ctx.live_numbers.contains(value) {
+                    format!("d{x}")
+                } else if ctx.live_ints.contains(value) {
+                    format!("(double)i{x}")
+                } else {
+                    format!("d{x}")
+                };
+                let d_stmt = if need_double {
+                    format!(" d{v} = {src_d} - 1.0;")
+                } else {
+                    String::new()
+                };
                 writeln!(
                     output,
-                    "    d{v} = d{x} - 1.0; i{v} = (int64_t)d{v};{box_stmt}"
+                    "   {d_stmt} i{v} = (int64_t)({src_d} - 1.0);{box_stmt}"
                 )
                 .unwrap();
             }
@@ -84,24 +158,43 @@ pub(super) fn emit_unary_int(
             if ints.contains(value) {
                 writeln!(
                     output,
-                    "    i{v} = (int64_t)(~(int32_t)i{x}); d{v} = (double)i{v};{box_stmt}"
+                    "    i{v} = (int64_t)(~(int32_t)i{x});{double_assign}{box_stmt}"
                 )
                 .unwrap();
             } else {
+                let sync_d = if need_double {
+                    format!(" memcpy(&d{v}, &v{v}, sizeof(d{v})); i{v} = (int64_t)d{v};")
+                } else {
+                    format!(
+                        " {{ double tmp; memcpy(&tmp, &v{v}, sizeof(tmp)); i{v} = (int64_t)tmp; }}"
+                    )
+                };
                 writeln!(
                     output,
-                    "    v{v} = kiln_c99_val_unary_fast(5, v{x}); memcpy(&d{v}, &v{v}, sizeof(d{v})); i{v} = (int64_t)d{v};"
+                    "    v{v} = kiln_c99_val_unary_fast(5, v{x});{sync_d}"
                 )
                 .unwrap();
             }
         }
         _ => {
+            let src_d = if ctx.live_numbers.contains(value) {
+                format!("d{x}")
+            } else if ctx.live_ints.contains(value) {
+                format!("(double)i{x}")
+            } else {
+                format!("d{x}")
+            };
             let fast = unary_fast_body(*op)
                 .expect("a proven-int unary has a numeric body")
                 .replace("value", &format!("v{x}"))
                 .replace("kiln_c99_val_from_double(", "(");
-            let expr = fast.replace('a', &format!("d{x}"));
-            writeln!(output, "    d{v} = {expr}; i{v} = (int64_t)d{v};{box_stmt}").unwrap();
+            let expr = fast.replace('a', &src_d);
+            let d_stmt = if need_double {
+                format!(" d{v} = {expr};")
+            } else {
+                String::new()
+            };
+            writeln!(output, "   {d_stmt} i{v} = (int64_t)({expr});{box_stmt}").unwrap();
         }
     }
 }
@@ -116,8 +209,13 @@ pub(super) fn emit_unary_typed(
 ) {
     let v = vid.0;
     let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+    let need_double = ctx.live_numbers.contains(&vid);
     let box_stmt = if need_box {
-        format!(" v{v} = kiln_c99_val_from_double(d{v});")
+        if need_double {
+            format!(" v{v} = kiln_c99_val_from_double(d{v});")
+        } else {
+            String::new()
+        }
     } else {
         String::new()
     };
@@ -129,24 +227,43 @@ pub(super) fn emit_unary_typed(
 
     // Proven number in, proven number out: the double is computed directly.
     let x = value.0;
+    let src_d = if ctx.live_numbers.contains(value) {
+        format!("d{x}")
+    } else if ctx.live_ints.contains(value) {
+        format!("(double)i{x}")
+    } else {
+        format!("d{x}")
+    };
     let fast = unary_fast_body(*op)
         .expect("a proven-number unary has a numeric body")
         .replace("value", &format!("v{x}"))
         .replace("kiln_c99_val_from_double(", "(");
     match op {
         UnaryOp::Plus | UnaryOp::ToNumeric => {
-            writeln!(output, "    d{v} = d{x};{copy_box}").unwrap();
+            if need_double {
+                writeln!(output, "    d{v} = {src_d};{copy_box}").unwrap();
+            } else if need_box {
+                writeln!(output, "    v{v} = v{x};").unwrap();
+            }
         }
         UnaryOp::BitwiseNot => {
-            writeln!(
-                output,
-                "    v{v} = kiln_c99_val_unary_fast(5, v{x}); memcpy(&d{v}, &v{v}, sizeof(d{v}));{box_stmt}"
-            )
-            .unwrap();
+            if need_double {
+                writeln!(
+                    output,
+                    "    v{v} = kiln_c99_val_unary_fast(5, v{x}); memcpy(&d{v}, &v{v}, sizeof(d{v}));{box_stmt}"
+                )
+                .unwrap();
+            } else {
+                writeln!(output, "    v{v} = kiln_c99_val_unary_fast(5, v{x});").unwrap();
+            }
         }
         _ => {
-            let expr = fast.replace('a', &format!("d{x}"));
-            writeln!(output, "    d{v} = {expr};{box_stmt}").unwrap();
+            let expr = fast.replace('a', &src_d);
+            if need_double {
+                writeln!(output, "    d{v} = {expr};{box_stmt}").unwrap();
+            } else if need_box {
+                writeln!(output, "    v{v} = kiln_c99_val_from_double({expr});").unwrap();
+            }
         }
     }
 }
@@ -231,73 +348,81 @@ pub(super) fn emit_binary_ints(
     let ivs = ctx.ivs;
     let typed_int = ctx.ints.contains(&vid);
     let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+    let need_double = ctx.live_numbers.contains(&vid);
     let box_stmt = if need_box {
-        format!(" v{v} = kiln_c99_val_from_double(d{v});")
+        if need_double {
+            format!(" v{v} = kiln_c99_val_from_double(d{v});")
+        } else {
+            format!(" v{v} = kiln_c99_val_from_double((double)i{v});")
+        }
+    } else {
+        String::new()
+    };
+    let double_assign = if need_double {
+        format!(" d{v} = (double)i{v};")
     } else {
         String::new()
     };
 
     let (l, r) = (left.0, right.0);
+    let need_bool = ctx.booleans.contains(&vid);
+    let sym = match op {
+        BinaryOp::StrictEqual | BinaryOp::LooseEqual => Some("=="),
+        BinaryOp::StrictNotEqual | BinaryOp::LooseNotEqual => Some("!="),
+        BinaryOp::LessThan => Some("<"),
+        BinaryOp::LessThanOrEqual => Some("<="),
+        BinaryOp::GreaterThan => Some(">"),
+        BinaryOp::GreaterThanOrEqual => Some(">="),
+        _ => None,
+    };
+    if let Some(sym) = sym {
+        if need_bool && need_box {
+            writeln!(
+                output,
+                "    b{v} = (i{l} {sym} i{r}); v{v} = b{v} ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
+            )
+            .unwrap();
+        } else if need_bool {
+            writeln!(output, "    b{v} = (i{l} {sym} i{r});").unwrap();
+        } else if need_box {
+            writeln!(
+                output,
+                "    v{v} = (i{l} {sym} i{r}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
+            )
+            .unwrap();
+        }
+        return;
+    }
     match op {
-        BinaryOp::StrictEqual | BinaryOp::LooseEqual => {
-            writeln!(
-                output,
-                "    v{v} = (i{l} == i{r}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
-            )
-            .unwrap();
-        }
-        BinaryOp::StrictNotEqual | BinaryOp::LooseNotEqual => {
-            writeln!(
-                output,
-                "    v{v} = (i{l} != i{r}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
-            )
-            .unwrap();
-        }
-        BinaryOp::LessThan => {
-            writeln!(
-                output,
-                "    v{v} = (i{l} < i{r}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
-            )
-            .unwrap();
-        }
-        BinaryOp::LessThanOrEqual => {
-            writeln!(
-                output,
-                "    v{v} = (i{l} <= i{r}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
-            )
-            .unwrap();
-        }
-        BinaryOp::GreaterThan => {
-            writeln!(
-                output,
-                "    v{v} = (i{l} > i{r}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
-            )
-            .unwrap();
-        }
-        BinaryOp::GreaterThanOrEqual => {
-            writeln!(
-                output,
-                "    v{v} = (i{l} >= i{r}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
-            )
-            .unwrap();
-        }
         BinaryOp::BitwiseAnd => {
-            writeln!(output, "    i{v} = (int64_t)((int32_t)i{l} & (int32_t)i{r}); d{v} = (double)i{v};{box_stmt}").unwrap();
+            writeln!(
+                output,
+                "    i{v} = (int64_t)((int32_t)i{l} & (int32_t)i{r});{double_assign}{box_stmt}"
+            )
+            .unwrap();
         }
         BinaryOp::BitwiseOr => {
-            writeln!(output, "    i{v} = (int64_t)((int32_t)i{l} | (int32_t)i{r}); d{v} = (double)i{v};{box_stmt}").unwrap();
+            writeln!(
+                output,
+                "    i{v} = (int64_t)((int32_t)i{l} | (int32_t)i{r});{double_assign}{box_stmt}"
+            )
+            .unwrap();
         }
         BinaryOp::BitwiseXor => {
-            writeln!(output, "    i{v} = (int64_t)((int32_t)i{l} ^ (int32_t)i{r}); d{v} = (double)i{v};{box_stmt}").unwrap();
+            writeln!(
+                output,
+                "    i{v} = (int64_t)((int32_t)i{l} ^ (int32_t)i{r});{double_assign}{box_stmt}"
+            )
+            .unwrap();
         }
         BinaryOp::ShiftLeft => {
-            writeln!(output, "    i{v} = (int64_t)(int32_t)((uint32_t)i{l} << ((uint32_t)i{r} & 31)); d{v} = (double)i{v};{box_stmt}").unwrap();
+            writeln!(output, "    i{v} = (int64_t)(int32_t)((uint32_t)i{l} << ((uint32_t)i{r} & 31));{double_assign}{box_stmt}").unwrap();
         }
         BinaryOp::ShiftRight => {
-            writeln!(output, "    i{v} = (int64_t)((int32_t)i{l} >> ((uint32_t)i{r} & 31)); d{v} = (double)i{v};{box_stmt}").unwrap();
+            writeln!(output, "    i{v} = (int64_t)((int32_t)i{l} >> ((uint32_t)i{r} & 31));{double_assign}{box_stmt}").unwrap();
         }
         BinaryOp::UnsignedShiftRight => {
-            writeln!(output, "    i{v} = (int64_t)((uint32_t)i{l} >> ((uint32_t)i{r} & 31)); d{v} = (double)i{v};{box_stmt}").unwrap();
+            writeln!(output, "    i{v} = (int64_t)((uint32_t)i{l} >> ((uint32_t)i{r} & 31));{double_assign}{box_stmt}").unwrap();
         }
         BinaryOp::Remainder => {
             let is_const_nonzero = defs.get(right).is_some_and(|op| match op {
@@ -309,29 +434,51 @@ pub(super) fn emit_binary_ints(
             let non_negative = ivs.get(left).is_some_and(|iv| iv.non_negative);
             if is_const_nonzero {
                 if non_negative {
-                    writeln!(
-                        output,
-                        "    i{v} = i{l} % i{r}; d{v} = (double)i{v};{box_stmt}"
-                    )
-                    .unwrap();
+                    writeln!(output, "    i{v} = i{l} % i{r};{double_assign}{box_stmt}").unwrap();
                 } else {
-                    writeln!(output, "    i{v} = i{l} % i{r}; d{v} = (i{v} == 0 && i{l} < 0) ? -0.0 : (double)i{v};{box_stmt}").unwrap();
+                    let d_rem = if need_double {
+                        format!(" d{v} = (i{v} == 0 && i{l} < 0) ? -0.0 : (double)i{v};")
+                    } else {
+                        String::new()
+                    };
+                    writeln!(output, "    i{v} = i{l} % i{r};{d_rem}{box_stmt}").unwrap();
                 }
             } else {
-                writeln!(output, "    if (KILN_LIKELY(i{r} != 0)) {{ i{v} = i{l} % i{r}; d{v} = (i{v} == 0 && i{l} < 0) ? -0.0 : (double)i{v}; }} else {{ d{v} = NAN; i{v} = 0; }}{box_stmt}").unwrap();
+                let d_rem = if need_double {
+                    format!(" d{v} = (i{v} == 0 && i{l} < 0) ? -0.0 : (double)i{v};")
+                } else {
+                    String::new()
+                };
+                let d_nan = if need_double {
+                    format!(" d{v} = NAN;")
+                } else {
+                    String::new()
+                };
+                writeln!(output, "    if (KILN_LIKELY(i{r} != 0)) {{ i{v} = i{l} % i{r};{d_rem} }} else {{{d_nan} i{v} = 0; }}{box_stmt}").unwrap();
             }
         }
         BinaryOp::Add => {
             if ivs.contains_key(&vid) {
-                writeln!(
-                    output,
-                    "    i{v} = i{l} + i{r}; d{v} = (double)i{v};{box_stmt}"
-                )
-                .unwrap();
+                writeln!(output, "    i{v} = i{l} + i{r};{double_assign}{box_stmt}").unwrap();
             } else if typed_int {
+                let (d_assign_res, slow_calc) = if need_double {
+                    (
+                        format!(" d{v} = (double)res;"),
+                        format!(
+                            " d{v} = kiln_c99_int_slow((double)i{l} + (double)i{r}); i{v} = isfinite(d{v}) ? (int64_t)d{v} : 0;"
+                        ),
+                    )
+                } else {
+                    (
+                        String::new(),
+                        format!(
+                            " {{ double d_tmp = kiln_c99_int_slow((double)i{l} + (double)i{r}); i{v} = isfinite(d_tmp) ? (int64_t)d_tmp : 0; }}"
+                        ),
+                    )
+                };
                 writeln!(
                     output,
-                    "    {{ int64_t res; if (KILN_LIKELY(!__builtin_add_overflow(i{l}, i{r}, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL)) {{ i{v} = res; d{v} = (double)res; }} else {{ d{v} = kiln_c99_int_slow((double)i{l} + (double)i{r}); i{v} = isfinite(d{v}) ? (int64_t)d{v} : 0; }}{box_stmt} }}"
+                    "    {{ int64_t res; if (KILN_LIKELY(!__builtin_add_overflow(i{l}, i{r}, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL)) {{ i{v} = res;{d_assign_res} }} else {{{slow_calc} }}{box_stmt} }}"
                 ).unwrap();
             } else {
                 writeln!(output, "    d{v} = (double)i{l} + (double)i{r};{box_stmt}").unwrap();
@@ -339,15 +486,26 @@ pub(super) fn emit_binary_ints(
         }
         BinaryOp::Subtract => {
             if ivs.contains_key(&vid) {
-                writeln!(
-                    output,
-                    "    i{v} = i{l} - i{r}; d{v} = (double)i{v};{box_stmt}"
-                )
-                .unwrap();
+                writeln!(output, "    i{v} = i{l} - i{r};{double_assign}{box_stmt}").unwrap();
             } else if typed_int {
+                let (d_assign_res, slow_calc) = if need_double {
+                    (
+                        format!(" d{v} = (double)res;"),
+                        format!(
+                            " d{v} = kiln_c99_int_slow((double)i{l} - (double)i{r}); i{v} = isfinite(d{v}) ? (int64_t)d{v} : 0;"
+                        ),
+                    )
+                } else {
+                    (
+                        String::new(),
+                        format!(
+                            " {{ double d_tmp = kiln_c99_int_slow((double)i{l} - (double)i{r}); i{v} = isfinite(d_tmp) ? (int64_t)d_tmp : 0; }}"
+                        ),
+                    )
+                };
                 writeln!(
                     output,
-                    "    {{ int64_t res; if (KILN_LIKELY(!__builtin_sub_overflow(i{l}, i{r}, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL)) {{ i{v} = res; d{v} = (double)res; }} else {{ d{v} = kiln_c99_int_slow((double)i{l} - (double)i{r}); i{v} = isfinite(d{v}) ? (int64_t)d{v} : 0; }}{box_stmt} }}"
+                    "    {{ int64_t res; if (KILN_LIKELY(!__builtin_sub_overflow(i{l}, i{r}, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL)) {{ i{v} = res;{d_assign_res} }} else {{{slow_calc} }}{box_stmt} }}"
                 ).unwrap();
             } else {
                 writeln!(output, "    d{v} = (double)i{l} - (double)i{r};{box_stmt}").unwrap();
@@ -355,9 +513,24 @@ pub(super) fn emit_binary_ints(
         }
         BinaryOp::Multiply => {
             if typed_int {
+                let (d_assign_res, slow_calc) = if need_double {
+                    (
+                        format!(" d{v} = (double)res;"),
+                        format!(
+                            " d{v} = (double)i{l} * (double)i{r}; i{v} = isfinite(d{v}) ? (int64_t)d{v} : 0;"
+                        ),
+                    )
+                } else {
+                    (
+                        String::new(),
+                        format!(
+                            " {{ double d_tmp = (double)i{l} * (double)i{r}; i{v} = isfinite(d_tmp) ? (int64_t)d_tmp : 0; }}"
+                        ),
+                    )
+                };
                 writeln!(
                     output,
-                    "    {{ int64_t res; if (KILN_LIKELY(!__builtin_mul_overflow(i{l}, i{r}, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL && (res != 0 || (i{l} >= 0 && i{r} >= 0) || (i{l} < 0 && i{r} < 0)))) {{ i{v} = res; d{v} = (double)res; }} else {{ d{v} = (double)i{l} * (double)i{r}; i{v} = isfinite(d{v}) ? (int64_t)d{v} : 0; }}{box_stmt} }}"
+                    "    {{ int64_t res; if (KILN_LIKELY(!__builtin_mul_overflow(i{l}, i{r}, &res) && res >= -9007199254740991LL && res <= 9007199254740991LL && (res != 0 || (i{l} >= 0 && i{r} >= 0) || (i{l} < 0 && i{r} < 0)))) {{ i{v} = res;{d_assign_res} }} else {{{slow_calc} }}{box_stmt} }}"
                 ).unwrap();
             } else {
                 writeln!(
@@ -385,6 +558,7 @@ pub(super) fn emit_binary_ints(
         BinaryOp::In | BinaryOp::InstanceOf => {
             unreachable!("`in` and `instanceof` take the generic lowering")
         }
+        _ => unreachable!("comparisons handled above"),
     }
 }
 
@@ -399,10 +573,15 @@ pub(super) fn emit_binary_numbers(
     ctx: &OpContext,
 ) {
     let v = vid.0;
-    let typed_int = ctx.ints.contains(&vid);
+    let typed_int = ctx.live_ints.contains(&vid);
     let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+    let need_double = ctx.live_numbers.contains(&vid);
     let box_stmt = if need_box {
-        format!(" v{v} = kiln_c99_val_from_double(d{v});")
+        if need_double {
+            format!(" v{v} = kiln_c99_val_from_double(d{v});")
+        } else {
+            String::new()
+        }
     } else {
         String::new()
     };
@@ -411,88 +590,108 @@ pub(super) fn emit_binary_numbers(
     // boolean directly; arithmetic computes the double twin and boxes it. `in` and
     // `instanceof` on two numbers are a `TypeError` the generic lowering throws.
     let (l, r) = (left.0, right.0);
-    let (a, b) = (format!("d{l}"), format!("d{r}"));
+    let a = if ctx.live_numbers.contains(left) {
+        format!("d{l}")
+    } else if ctx.live_ints.contains(left) {
+        format!("(double)i{l}")
+    } else {
+        format!("d{l}")
+    };
+    let b = if ctx.live_numbers.contains(right) {
+        format!("d{r}")
+    } else if ctx.live_ints.contains(right) {
+        format!("(double)i{r}")
+    } else {
+        format!("d{r}")
+    };
+    let need_bool = ctx.booleans.contains(&vid);
+    let sym = match op {
+        BinaryOp::StrictEqual | BinaryOp::LooseEqual => Some("=="),
+        BinaryOp::StrictNotEqual | BinaryOp::LooseNotEqual => Some("!="),
+        BinaryOp::LessThan => Some("<"),
+        BinaryOp::LessThanOrEqual => Some("<="),
+        BinaryOp::GreaterThan => Some(">"),
+        BinaryOp::GreaterThanOrEqual => Some(">="),
+        _ => None,
+    };
+    if let Some(sym) = sym {
+        if need_bool && need_box {
+            writeln!(
+                output,
+                "    b{v} = ({a} {sym} {b}); v{v} = b{v} ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
+            )
+            .unwrap();
+        } else if need_bool {
+            writeln!(output, "    b{v} = ({a} {sym} {b});").unwrap();
+        } else if need_box {
+            writeln!(
+                output,
+                "    v{v} = ({a} {sym} {b}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
+            )
+            .unwrap();
+        }
+        return;
+    }
+    let emit_arith = |output: &mut String, expr: &str| {
+        if need_double {
+            writeln!(output, "    d{v} = {expr};{box_stmt}").unwrap();
+            if typed_int {
+                writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
+            }
+        } else {
+            if need_box {
+                writeln!(output, "    v{v} = kiln_c99_val_from_double({expr});").unwrap();
+            }
+            if typed_int {
+                writeln!(output, "    i{v} = (int64_t)({expr});").unwrap();
+            }
+        }
+    };
     match op {
-        BinaryOp::StrictEqual | BinaryOp::LooseEqual => writeln!(
+        BinaryOp::Add => emit_arith(output, &format!("{a} + {b}")),
+        BinaryOp::Subtract => emit_arith(output, &format!("{a} - {b}")),
+        BinaryOp::Multiply => emit_arith(output, &format!("{a} * {b}")),
+        BinaryOp::Divide => emit_arith(output, &format!("{a} / {b}")),
+        BinaryOp::Exponentiate => emit_arith(output, &format!("pow({a}, {b})")),
+        BinaryOp::Remainder => emit_arith(
             output,
-            "    v{v} = ({a} == {b}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
-        )
-        .unwrap(),
-        BinaryOp::StrictNotEqual | BinaryOp::LooseNotEqual => writeln!(
-            output,
-            "    v{v} = ({a} != {b}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
-        )
-        .unwrap(),
-        BinaryOp::LessThan => writeln!(
-            output,
-            "    v{v} = ({a} < {b}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
-        )
-        .unwrap(),
-        BinaryOp::LessThanOrEqual => writeln!(
-            output,
-            "    v{v} = ({a} <= {b}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
-        )
-        .unwrap(),
-        BinaryOp::GreaterThan => writeln!(
-            output,
-            "    v{v} = ({a} > {b}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
-        )
-        .unwrap(),
-        BinaryOp::GreaterThanOrEqual => writeln!(
-            output,
-            "    v{v} = ({a} >= {b}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
-        )
-        .unwrap(),
-        BinaryOp::Add => {
-            writeln!(output, "    d{v} = {a} + {b};{box_stmt}").unwrap();
-            if typed_int {
-                writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
-            }
-        }
-        BinaryOp::Subtract => {
-            writeln!(output, "    d{v} = {a} - {b};{box_stmt}").unwrap();
-            if typed_int {
-                writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
-            }
-        }
-        BinaryOp::Multiply => {
-            writeln!(output, "    d{v} = {a} * {b};{box_stmt}").unwrap();
-            if typed_int {
-                writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
-            }
-        }
-        BinaryOp::Divide => {
-            writeln!(output, "    d{v} = {a} / {b};{box_stmt}").unwrap();
-            if typed_int {
-                writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
-            }
-        }
-        BinaryOp::Exponentiate => {
-            writeln!(output, "    d{v} = pow({a}, {b});{box_stmt}").unwrap();
-            if typed_int {
-                writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
-            }
-        }
-        BinaryOp::Remainder => {
-            writeln!(output, "    d{v} = ({b} > 0.0 && {b} <= 9007199254740992.0 && {a} >= 0.0 && {a} <= 9007199254740992.0 && {a} == (double)(int64_t){a} && {b} == (double)(int64_t){b}) ? (double)((int64_t){a} % (int64_t){b}) : fmod({a}, {b});{box_stmt}").unwrap();
-            if typed_int {
-                writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
-            }
-        }
+            &format!(
+                "({b} > 0.0 && {b} <= 9007199254740992.0 && {a} >= 0.0 && {a} <= 9007199254740992.0 && {a} == (double)(int64_t){a} && {b} == (double)(int64_t){b}) ? (double)((int64_t){a} % (int64_t){b}) : fmod({a}, {b})"
+            ),
+        ),
         BinaryOp::BitwiseAnd
         | BinaryOp::BitwiseOr
         | BinaryOp::BitwiseXor
         | BinaryOp::ShiftLeft
         | BinaryOp::ShiftRight
         | BinaryOp::UnsignedShiftRight => {
-            writeln!(output, "    v{v} = kiln_c99_val_binary_fast({}, v{l}, v{r}); memcpy(&d{v}, &v{v}, sizeof(d{v}));", binary_code(*op)).unwrap();
-            if typed_int {
-                writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
-            }
+            let sync_d = if need_double {
+                format!(" memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+            } else {
+                String::new()
+            };
+            let sync_i = if typed_int {
+                if need_double {
+                    format!(" i{v} = (int64_t)d{v};")
+                } else {
+                    format!(
+                        " {{ double tmp_{v}; memcpy(&tmp_{v}, &v{v}, sizeof(tmp_{v})); i{v} = (int64_t)tmp_{v}; }}"
+                    )
+                }
+            } else {
+                String::new()
+            };
+            writeln!(
+                output,
+                "    v{v} = kiln_c99_val_binary_fast({}, v{l}, v{r});{sync_d}{sync_i}",
+                binary_code(*op)
+            )
+            .unwrap();
         }
         BinaryOp::In | BinaryOp::InstanceOf => {
             unreachable!("`in` and `instanceof` take the generic lowering")
         }
+        _ => unreachable!("comparisons handled above"),
     }
 }
 
@@ -609,36 +808,71 @@ pub(super) fn emit_binary_boxed(
     } else {
         tests.join(" && ")
     };
+    let l_twin = ctx.live_numbers.contains(left);
+    let r_twin = ctx.live_numbers.contains(right);
     let bind = format!(
         "{} {}",
-        if l_proven {
+        if l_proven && l_twin {
             format!("double a = d{l};")
+        } else if ctx.live_ints.contains(left) {
+            format!("double a = (double)i{l};")
         } else {
             format!("double a; memcpy(&a, &v{l}, sizeof(a));")
         },
-        if r_proven {
+        if r_proven && r_twin {
             format!("double b = d{r};")
+        } else if ctx.live_ints.contains(right) {
+            format!("double b = (double)i{r};")
         } else {
             format!("double b; memcpy(&b, &v{r}, sizeof(b));")
         }
     );
+    let live_d = ctx.live_numbers.contains(&vid);
+    let live_i = ctx.live_ints.contains(&vid);
     match (fast, raw) {
-                (Some(_), Some(raw)) => writeln!(
+        (Some(_), Some(raw)) => {
+            if live_d {
+                writeln!(
                     output,
                     "    if (KILN_LIKELY({guard})) {{ {bind} d{v} = {raw}; v{v} = kiln_c99_val_from_double(d{v}); }} else {{ {slow} memcpy(&d{v}, &v{v}, sizeof(d{v})); }}"
                 )
-                .unwrap(),
-                (Some(fast), None) => writeln!(
+                .unwrap();
+            } else {
+                writeln!(
                     output,
-                    "    if (KILN_LIKELY({guard})) {{ {bind} v{v} = {fast}; }} else {{ {slow} }}"
+                    "    if (KILN_LIKELY({guard})) {{ {bind} v{v} = kiln_c99_val_from_double({raw}); }} else {{ {slow} }}"
                 )
-                .unwrap(),
-                (None, _) => writeln!(output, "    {{ {slow} }}").unwrap(),
+                .unwrap();
             }
-    if typed_int {
-        writeln!(output, "    if (KILN_VAL_IS_NUMBER(v{v})) {{ memcpy(&d{v}, &v{v}, sizeof(d{v})); i{v} = (int64_t)d{v}; }}").unwrap();
-    } else if typed && raw.is_none() {
-        // Proven a number by a restart: the guarded form ran, so the twin is the bits.
-        writeln!(output, "    memcpy(&d{v}, &v{v}, sizeof(d{v}));").unwrap();
+        }
+        (Some(fast), None) => writeln!(
+            output,
+            "    if (KILN_LIKELY({guard})) {{ {bind} v{v} = {fast}; }} else {{ {slow} }}"
+        )
+        .unwrap(),
+        (None, _) => writeln!(output, "    {{ {slow} }}").unwrap(),
+    }
+    if live_d {
+        if typed_int {
+            writeln!(
+                output,
+                "    if (KILN_VAL_IS_NUMBER(v{v})) {{ memcpy(&d{v}, &v{v}, sizeof(d{v})); }}"
+            )
+            .unwrap();
+        } else if typed && raw.is_none() {
+            // Proven a number by a restart: the guarded form ran, so the twin is the bits.
+            writeln!(output, "    memcpy(&d{v}, &v{v}, sizeof(d{v}));").unwrap();
+        }
+    }
+    if live_i && typed_int {
+        if live_d {
+            writeln!(
+                output,
+                "    if (KILN_VAL_IS_NUMBER(v{v})) {{ i{v} = (int64_t)d{v}; }}"
+            )
+            .unwrap();
+        } else {
+            writeln!(output, "    if (KILN_VAL_IS_NUMBER(v{v})) {{ double tmp_{v}; memcpy(&tmp_{v}, &v{v}, sizeof(tmp_{v})); i{v} = (int64_t)tmp_{v}; }}").unwrap();
+        }
     }
 }

@@ -22,8 +22,8 @@ pub(super) fn emit_get_property(
     let self_index = ctx.self_index;
     let this_site = ctx.this_site;
     let spec = ctx.spec;
-    let typed = ctx.numbers.contains(&vid);
-    let typed_int = ctx.ints.contains(&vid);
+    let typed = ctx.live_numbers.contains(&vid);
+    let typed_int = ctx.live_ints.contains(&vid);
     let (pc, label) = ctx
         .origins
         .get(&vid)
@@ -81,8 +81,12 @@ pub(super) fn emit_get_property(
     let key_len = key_str.len();
     let check = status_check(diagnostic_site, pc, label, unwind);
     if ctx.plan.generic_only {
-        let typed_sync = if typed_int {
+        let typed_sync = if typed_int && typed {
             format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v})); i{v} = (int64_t)d{v};")
+        } else if typed_int {
+            format!(
+                "\n    {{ double tmp_{v}; memcpy(&tmp_{v}, &v{v}, sizeof(tmp_{v})); i{v} = (int64_t)tmp_{v}; }}"
+            )
         } else if typed {
             format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));")
         } else {
@@ -430,16 +434,28 @@ pub(super) fn emit_get_property(
                     } else {
                         String::new()
                     };
-                    let memcpy_load = if skip_fast {
-                        format!("if (!handled) memcpy(&d{v}, &v{v}, sizeof(d{v}));")
-                    } else {
-                        format!("memcpy(&d{v}, &v{v}, sizeof(d{v}));")
-                    };
-                    if ctx.ints.contains(&vid) {
-                        let int_load = if is_length {
-                            format!("if (!handled) i{v} = (int64_t)d{v};")
+                    let memcpy_load = if typed {
+                        if skip_fast {
+                            format!("if (!handled) memcpy(&d{v}, &v{v}, sizeof(d{v}));")
                         } else {
-                            format!("i{v} = (int64_t)d{v};")
+                            format!("memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+                        }
+                    } else {
+                        String::new()
+                    };
+                    if typed_int {
+                        let int_load = if typed {
+                            if is_length {
+                                format!("if (!handled) i{v} = (int64_t)d{v};")
+                            } else {
+                                format!("i{v} = (int64_t)d{v};")
+                            }
+                        } else {
+                            if is_length {
+                                format!("if (!handled) {{ double tmp; memcpy(&tmp, &v{v}, sizeof(tmp)); i{v} = (int64_t)tmp; }}")
+                            } else {
+                                format!("double tmp; memcpy(&tmp, &v{v}, sizeof(tmp)); i{v} = (int64_t)tmp;")
+                            }
                         };
                         // An array's length, proven an integer: exact below 2^53, so the cast is the value.
                         format!("{checked}{restart_checked}\n    {memcpy_load} {int_load}")
@@ -469,11 +485,9 @@ pub(super) fn emit_set_property(
     let graph = ctx.graph;
     let symbol = ctx.symbol;
     let diagnostic_site = ctx.diagnostic_site;
-    let numbers = ctx.numbers;
-    let ints = ctx.ints;
     let unwind = ctx.unwind;
-    let typed = numbers.contains(&vid);
-    let typed_int = ints.contains(&vid);
+    let typed = ctx.live_numbers.contains(&vid);
+    let typed_int = ctx.live_ints.contains(&vid);
     let is_used = ctx.used.contains(&vid);
     let assign_v = if is_used {
         format!("v{v} = v{val}; ")
@@ -497,8 +511,10 @@ pub(super) fn emit_set_property(
         let val = value.0;
         if let Some(&field_idx) = scalar_obj.field_by_name_index.get(name) {
             writeln!(output, "    v{alloc}_f_{field_idx} = v{val};").unwrap();
-            if numbers.contains(value) {
+            if ctx.live_numbers.contains(value) {
                 writeln!(output, "    d{alloc}_f_{field_idx} = d{val};").unwrap();
+            } else if ctx.live_ints.contains(value) {
+                writeln!(output, "    d{alloc}_f_{field_idx} = (double)i{val};").unwrap();
             } else {
                 writeln!(
                     output,
@@ -506,8 +522,10 @@ pub(super) fn emit_set_property(
                 )
                 .unwrap();
             }
-            if ints.contains(value) {
+            if ctx.live_ints.contains(value) {
                 writeln!(output, "    i{alloc}_f_{field_idx} = i{val};").unwrap();
+            } else if ctx.live_numbers.contains(value) {
+                writeln!(output, "    i{alloc}_f_{field_idx} = (int64_t)d{val};").unwrap();
             } else {
                 writeln!(output, "    i{alloc}_f_{field_idx} = 0;").unwrap();
             }
@@ -515,10 +533,18 @@ pub(super) fn emit_set_property(
         if is_used {
             writeln!(output, "    v{v} = v{val};").unwrap();
             if typed {
-                writeln!(output, "    d{v} = d{val};").unwrap();
+                if ctx.live_numbers.contains(value) {
+                    writeln!(output, "    d{v} = d{val};").unwrap();
+                } else if ctx.live_ints.contains(value) {
+                    writeln!(output, "    d{v} = (double)i{val};").unwrap();
+                }
             }
             if typed_int {
-                writeln!(output, "    i{v} = i{val};").unwrap();
+                if ctx.live_ints.contains(value) {
+                    writeln!(output, "    i{v} = i{val};").unwrap();
+                } else if ctx.live_numbers.contains(value) {
+                    writeln!(output, "    i{v} = (int64_t)d{val};").unwrap();
+                }
             }
         }
         return;
@@ -628,8 +654,8 @@ pub(super) fn emit_get_computed(
     let defs = ctx.defs;
     let unwind = ctx.unwind;
     let spec = ctx.spec;
-    let typed = ctx.numbers.contains(&vid);
-    let typed_int = ints.contains(&vid);
+    let typed = ctx.live_numbers.contains(&vid);
+    let typed_int = ctx.live_ints.contains(&vid);
     let (pc, label) = ctx
         .origins
         .get(&vid)
@@ -877,12 +903,11 @@ pub(super) fn emit_set_computed(
     let graph = ctx.graph;
     let program = ctx.program;
     let diagnostic_site = ctx.diagnostic_site;
-    let numbers = ctx.numbers;
     let ints = ctx.ints;
     let defs = ctx.defs;
     let unwind = ctx.unwind;
-    let typed = numbers.contains(&vid);
-    let typed_int = ints.contains(&vid);
+    let typed = ctx.live_numbers.contains(&vid);
+    let typed_int = ctx.live_ints.contains(&vid);
     let is_used = ctx.used.contains(&vid);
     let assign_v = if is_used {
         format!("v{v} = v{val}; ")
@@ -907,8 +932,10 @@ pub(super) fn emit_set_computed(
         let val = value.0;
         if let Some(&field_idx) = scalar_obj.fields.get(&key_str) {
             writeln!(output, "    v{alloc}_f_{field_idx} = v{val};").unwrap();
-            if numbers.contains(value) {
+            if ctx.live_numbers.contains(value) {
                 writeln!(output, "    d{alloc}_f_{field_idx} = d{val};").unwrap();
+            } else if ctx.live_ints.contains(value) {
+                writeln!(output, "    d{alloc}_f_{field_idx} = (double)i{val};").unwrap();
             } else {
                 writeln!(
                     output,
@@ -916,8 +943,10 @@ pub(super) fn emit_set_computed(
                 )
                 .unwrap();
             }
-            if ints.contains(value) {
+            if ctx.live_ints.contains(value) {
                 writeln!(output, "    i{alloc}_f_{field_idx} = i{val};").unwrap();
+            } else if ctx.live_numbers.contains(value) {
+                writeln!(output, "    i{alloc}_f_{field_idx} = (int64_t)d{val};").unwrap();
             } else {
                 writeln!(output, "    i{alloc}_f_{field_idx} = 0;").unwrap();
             }
@@ -925,10 +954,18 @@ pub(super) fn emit_set_computed(
         if is_used {
             writeln!(output, "    v{v} = v{val};").unwrap();
             if typed {
-                writeln!(output, "    d{v} = d{val};").unwrap();
+                if ctx.live_numbers.contains(value) {
+                    writeln!(output, "    d{v} = d{val};").unwrap();
+                } else if ctx.live_ints.contains(value) {
+                    writeln!(output, "    d{v} = (double)i{val};").unwrap();
+                }
             }
             if typed_int {
-                writeln!(output, "    i{v} = i{val};").unwrap();
+                if ctx.live_ints.contains(value) {
+                    writeln!(output, "    i{v} = i{val};").unwrap();
+                } else if ctx.live_numbers.contains(value) {
+                    writeln!(output, "    i{v} = (int64_t)d{val};").unwrap();
+                }
             }
         }
         return;
@@ -951,7 +988,6 @@ pub(super) fn emit_set_computed(
     }
     let key_is_int = ints.contains(key);
     let key_non_neg = ctx.ivs.get(key).map_or(false, |iv| iv.non_negative);
-    let val_is_num = numbers.contains(value);
     let (array_body, typed_body) = if key_is_int {
         let arr_bound = if key_non_neg {
             format!("(uint64_t)i{k} < arr->count", k = key.0)
@@ -963,8 +999,10 @@ pub(super) fn emit_set_computed(
         } else {
             format!("i{k} >= 0 && (uint64_t)i{k} < view->length", k = key.0)
         };
-        let val_d_init = if val_is_num {
+        let val_d_init = if ctx.live_numbers.contains(value) {
             format!("double val_d = d{val};", val = value.0)
+        } else if ctx.live_ints.contains(value) {
+            format!("double val_d = (double)i{val};", val = value.0)
         } else {
             format!(
                 "double val_d; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{val}))) memcpy(&val_d, &v{val}, sizeof(val_d)); else val_d = kiln_c99_as_number(kiln_val_to_boundary(v{val}));",
@@ -986,8 +1024,10 @@ pub(super) fn emit_set_computed(
             ),
         )
     } else {
-        let val_d_init = if val_is_num {
+        let val_d_init = if ctx.live_numbers.contains(value) {
             format!("double val_d = d{val};", val = value.0)
+        } else if ctx.live_ints.contains(value) {
+            format!("double val_d = (double)i{val};", val = value.0)
         } else {
             format!(
                 "double val_d; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{val}))) memcpy(&val_d, &v{val}, sizeof(val_d)); else val_d = kiln_c99_as_number(kiln_val_to_boundary(v{val}));",
