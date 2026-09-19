@@ -1,5 +1,7 @@
 # PRD: Open-World Speculation & SSA Unboxing Completeness
 
+Status: closed (landed 2026-09-18: `05e05bd9`, `64974705`; issues 01-03 closed)
+
 ## Problem Statement
 In open-world execution (modules with dynamic imports, `eval`, or external dependencies), Kiln cannot assume closed-world whole-program facts. However, standard JavaScript applications spend significant CPU cycles in:
 1. Mathematical computations (`Math.*`) and bitwise operations (`|`, `&`, `^`, `<<`, `>>`, `>>>`) that are forced to box intermediate variables into 64-bit `Value` structs.

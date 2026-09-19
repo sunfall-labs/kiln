@@ -1,5 +1,7 @@
 # PRD: Phase 0 — binary size visibility
 
+Status: closed (Phase 0 accepted 2026-09-12 on `work/sizes`; see `phase1-PRD.md` for the phase that followed)
+
 ## Problem
 
 `kiln build` reports only aggregate bytes (generated C, objects, executable).

@@ -1,5 +1,7 @@
 # PRD: Phase 2 — shared-graph shaking (one shaken graph feeds both engines)
 
+Status: closed (landed 2026-09-13: `1ede4122`, merged via PR #3)
+
 ## Problem
 
 Closed-world liveness lives only in the native backend

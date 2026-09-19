@@ -1,6 +1,6 @@
 # Run Pi in Kiln
 
-Status: ready-for-agent
+Status: closed (landed 2026-09-17: `2fb5a7f9`, `36f876da`)
 
 ## Why
 

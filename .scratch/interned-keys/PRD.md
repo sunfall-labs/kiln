@@ -1,6 +1,6 @@
 # Interned property keys and per-site inline caches in the C backend
 
-Status: in-progress
+Status: closed (landed on main: `5a072e20`, `0c7366dd`, `1c49e1f9`; ADR 0047 records the pre-interned static per prelude key as the next step)
 Branch: `perf/interned-keys` (worktree `.claude/worktrees/agent-a762689d8490dad38`)
 Owner: Claude (session 016duSRiZ6duBoS1bmWq7Yd1), 2026-09-02
 

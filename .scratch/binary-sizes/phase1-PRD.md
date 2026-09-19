@@ -1,5 +1,7 @@
 # PRD: Phase 1 — floor diet (demand-driven prelude)
 
+Status: closed (steps 1-3 landed; step 3 router `a675fac8`, 2026-09-12)
+
 ## Key finding (design driver)
 
 Release builds already compile every TU with `-ffunction-sections
