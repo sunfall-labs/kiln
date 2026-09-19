@@ -1,6 +1,6 @@
 {
  "errors": [],
- "native_runs": 617,
+ "native_runs": 615,
  "receivers": {
   "AbortController": {
    "expr": "globalThis.AbortController",
@@ -4729,6 +4729,7 @@
     "warn": "function"
    },
    "native_names": [
+    "Console",
     "assert",
     "clear",
     "constructor",
