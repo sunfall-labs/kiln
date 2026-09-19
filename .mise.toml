@@ -31,6 +31,10 @@ run = "./scripts/test262-fetch.sh"
 description = "Every microbenchmark under bench/, under kiln, node and bun"
 run = "./bench/compare.sh"
 
+[tasks.realworld]
+description = "Real-world TypeScript programs under kiln, node, bun, porffor and Hermes"
+run = "./bench/realworld/compare.sh"
+
 [tasks.native]
 description = "Native backend against node, probe by probe"
 run = "./scripts/native.sh"

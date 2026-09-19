@@ -39,6 +39,10 @@ node_modules/
 # Native test harness scratch: PID-named, written beside the fixture it compiles.
 .kiln-native-*.mjs
 
+# Real-world suite competitor toolchains (npm-installed porffor); the Hermes
+# checkout lives in ~/.cache/kiln, never in the tree.
+/bench/realworld/.toolchains/
+
 # Ad-hoc differential probes written while chasing a bug. The filings under `.scratch/<feature>/`
 # are deliberate and tracked; these are the scratch paper beside them.
 .scratch/es/
