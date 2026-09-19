@@ -375,6 +375,7 @@ class Response {
   readonly type: string;
   readonly url: string;
   bodyUsed: boolean = false;
+  _bodyStream: any = undefined;
   private _rawBytes: Uint8Array | null;
   private _rawText: string | null;
 
@@ -391,8 +392,26 @@ class Response {
     this._rawText = extracted.text;
   }
 
+  // A stream over the bytes, made once: node's `body` is a `ReadableStream` of `Uint8Array`
+  // chunks and reading it is what marks the body used. It answered `null` until 2026-09-19.
   get body(): any {
-    return null;
+    if (this._bodyStream !== undefined) return this._bodyStream;
+    if (this._rawBytes === null && this._rawText === null) {
+      this._bodyStream = null;
+      return null;
+    }
+    const RS = (globalThis as any).ReadableStream;
+    if (typeof RS !== "function") return null;
+    const self = this;
+    this._bodyStream = new RS({
+      pull(controller: any) {
+        self.bodyUsed = true;
+        const bytes = self._rawBytes !== null ? self._rawBytes : new TextEncoder().encode(self._rawText || "");
+        if (bytes.length > 0) controller.enqueue(bytes);
+        controller.close();
+      },
+    });
+    return this._bodyStream;
   }
 
   async text(): Promise<string> {
@@ -496,6 +515,7 @@ class Request {
   readonly signal: any;
   readonly redirect: string;
   bodyUsed: boolean = false;
+  _bodyStream: any = undefined;
   private _rawBytes: Uint8Array | null;
   private _rawText: string | null;
 
@@ -525,8 +545,26 @@ class Request {
     }
   }
 
+  // A stream over the bytes, made once: node's `body` is a `ReadableStream` of `Uint8Array`
+  // chunks and reading it is what marks the body used. It answered `null` until 2026-09-19.
   get body(): any {
-    return null;
+    if (this._bodyStream !== undefined) return this._bodyStream;
+    if (this._rawBytes === null && this._rawText === null) {
+      this._bodyStream = null;
+      return null;
+    }
+    const RS = (globalThis as any).ReadableStream;
+    if (typeof RS !== "function") return null;
+    const self = this;
+    this._bodyStream = new RS({
+      pull(controller: any) {
+        self.bodyUsed = true;
+        const bytes = self._rawBytes !== null ? self._rawBytes : new TextEncoder().encode(self._rawText || "");
+        if (bytes.length > 0) controller.enqueue(bytes);
+        controller.close();
+      },
+    });
+    return this._bodyStream;
   }
 
   async text(): Promise<string> {

@@ -480,10 +480,14 @@ def enumerate_interpreter(runner: Runner) -> dict[str, Receiver]:
 
     collect = COLLECT % {"describe": DESCRIBE}
     source = ENUMERATE_GLOBALS % {"collect": collect, "hook": js_string(HOST_HOOK_PREFIX), "skip": "[]"}
-    lines, refusal = runner.run(source, native=False, node=False, tag="enumerate-globals")
+    # Under the adapter, because that is what a program sees: node is the target of both engines
+    # (ADR 0063) and node has `process`, `Buffer` and `fetch` on every global object. Measured
+    # without it until 2026-09-19, the far gap counted those as missing on `globalThis` and never
+    # saw `Buffer.prototype` at all.
+    lines, refusal = runner.run(source, native=False, node=True, tag="enumerate-globals")
     if refusal is not None:
         sys.exit(f"the interpreter could not enumerate its own globals: {refusal}")
-    ingest(lines, False)
+    ingest(lines, True)
 
     requires = "\n".join(
         f"try {{ push({js_string(spec)}, require({js_string(spec)})); }} catch (e) "
@@ -515,20 +519,10 @@ def node_version() -> str:
 def enumerate_node(runner: Runner, receivers: dict[str, Receiver]) -> None:
     """Node's own answers for every receiver, and the receivers only node has.
 
-    The globals are compared against what the interpreter publishes *with* the node adapter, so
-    `process`, `Buffer` and `fetch` do not read as node-only merely because the interpreter's own
-    list above was taken without `--node`; a receiver the interpreter has only under the adapter
-    is still a receiver it has.
+    Every receiver is probed under the adapter, so a receiver missing here is one the interpreter
+    does not publish to a program at all.
     """
     collect = COLLECT % {"describe": DESCRIBE}
-    source = ENUMERATE_GLOBALS % {"collect": collect, "hook": js_string(HOST_HOOK_PREFIX), "skip": "[]"}
-    under_adapter: set[str] = set()
-    lines, refusal = runner.run(source, native=False, node=True, tag="enumerate-globals-node-adapter")
-    if refusal is None:
-        for line in lines:
-            parts = line.split("\t")
-            if len(parts) == 4 and parts[0] in ("S", "M"):
-                under_adapter.add(parts[1])
 
     def ingest(lines: list[str]) -> None:
         for line in lines:
@@ -538,10 +532,8 @@ def enumerate_node(runner: Runner, receivers: dict[str, Receiver]) -> None:
             _, key, a, b = parts
             rec = receivers.get(key)
             if rec is None:
-                if key in under_adapter:
-                    continue
                 kind, expr = receiver_expression(key)
-                rec = Receiver(key, kind, expr, key.startswith("node:"))
+                rec = Receiver(key, kind, expr, True)
                 rec.node_only = True
                 receivers[key] = rec
             if rec.node_names is None:
@@ -1300,7 +1292,8 @@ def render(receivers: dict[str, Receiver], order: list[str], runner: Runner) -> 
         "`^` means *the object this one inherits from*, which is the only way the shared "
         "prototypes get inventoried --- every typed array's own prototype has two members and the "
         "thirty-five that matter live one link up, on an object no name on the global object "
-        "reaches. `node:` receivers were probed with `--node`; everything else without it."
+        "reaches. Every receiver is probed under the Node adapter, which is what a program runs "
+        "with and what node itself is."
     )
     add("")
     self_total = sum(
