@@ -112,7 +112,16 @@ static int kiln_c99_process_object(kiln_value *out) {
      * initializer requires the `process` global, which retains the group,
      * so a build without it never constructs `process` this way. */
 #if KILN_RETAIN_GROUP_NODE_EVENT
-    if (status == KILN_C99_OK) status = kiln_c99_install_event_emitter_methods(*process);
+    /* Inherited, as node's are: `process` is an `EventEmitter` instance, so its methods live on
+     * `EventEmitter.prototype` and `Object.getPrototypeOf(process).on` is a function. They
+     * were installed as own methods until 2026-09-19, which read the same through `process.on`
+     * and differently through the prototype. */
+    if (status == KILN_C99_OK) {
+        kiln_value emitter_prototype;
+        status = kiln_c99_callable_prototype(kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_EMITTER),
+                                             &emitter_prototype);
+        if (status == KILN_C99_OK) status = kiln_c99_set_prototype(*process, emitter_prototype);
+    }
 #endif
     if (status == KILN_C99_OK) status = kiln_c99_new_object(&env);
     if (status == KILN_C99_OK && kiln_c99_environ != NULL) {
@@ -184,6 +193,24 @@ static int kiln_c99_process_object(kiln_value *out) {
     if (status == KILN_C99_OK)
         status = kiln_c99_put(NULL, *process, "pid", 3,
                               kiln_c99_number(1.0), 0, NULL);
+    /* `process.features`, the same nine flags the interpreter answers (node has a longer list,
+     * and these nine agree with it where kiln has the feature). */
+    if (status == KILN_C99_OK) {
+        static const struct { const char *name; size_t length; int value; } features[] = {
+            {"cached_builtins", 15, 1}, {"debug", 5, 0}, {"inspector", 9, 0}, {"ipv6", 4, 1},
+            {"tls", 3, 1}, {"tls_alpn", 8, 1}, {"tls_ocsp", 8, 1}, {"tls_sni", 7, 1}, {"uv", 2, 1},
+        };
+        kiln_value built;
+        size_t index;
+        status = kiln_c99_new_object(&built);
+        for (index = 0; status == KILN_C99_OK && index < sizeof features / sizeof *features; ++index)
+            status = kiln_c99_put(NULL, built, features[index].name, features[index].length,
+                                  kiln_c99_boolean(features[index].value), 0, NULL);
+        if (status == KILN_C99_OK) status = kiln_c99_put(NULL, *process, "features", 8, built, 0, NULL);
+    }
+    /* `process.getBuiltinModule` is a require over the linked builtins, which only the launcher
+     * holds; until it installs one the name refuses rather than reading `undefined`. */
+    if (status == KILN_C99_OK) status = kiln_c99_put_refused(*process, "getBuiltinModule", 16);
     /* `process.argv` follows node's single-executable-application convention, because a compiled
      * kiln program is one: there is no separate interpreter to name in slot 0 and no script file
      * to name in slot 1, so both name the executable and the program's own arguments still start
@@ -472,6 +499,15 @@ static int kiln_c99_global_object(kiln_value *out) {
         status = kiln_c99_console_object(&built);
         if (status == KILN_C99_OK) {
             status = kiln_c99_put(NULL, *globals, "console", 7, built, 0, NULL);
+        }
+    }
+    /* `process` too: the bare name loaded it by demand while `globalThis.process` answered
+     * `undefined` (2026-09-19). One object, the realm slot's, so the two spellings agree. */
+    if (status == KILN_C99_OK) {
+        kiln_value built;
+        status = kiln_c99_process_object(&built);
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(NULL, *globals, "process", 7, built, 0, NULL);
         }
     }
     /* `crypto` is a namespace built-in with no rows, so a member read refuses by name rather than

@@ -27084,11 +27084,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             "BigUint64Array",
             Value::Native(Native::TypedArrayConstructor(TypedKind::BigUint64), realm),
         );
+        // On the global object in every mode, as node has it: the bare name resolved everywhere
+        // while `globalThis.process` read `undefined` until 2026-09-19. The eleven web classes
+        // that stood here as hollow stubs (`new Event("x").type` was `undefined`) are the shared
+        // TypeScript in `kiln-builtins/src/web.ts` now, which both engines run under the adapter.
+        globals.set_non_enumerable("process", self.process_object());
         if self.async_host.is_some() {
-            for &(kind, name) in native::WebStubKind::ALL {
-                globals.set_non_enumerable(name, Value::Native(Native::WebStub(kind), realm));
-            }
-            globals.set_non_enumerable("process", self.process_object());
             // Captured and deleted by the shared Buffer bootstrap (`kiln-builtins/src/buffer.ts`),
             // which runs in Node mode only -- so it is published in Node mode only, and neither
             // engine's global surface carries it afterwards.
