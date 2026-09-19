@@ -1936,9 +1936,14 @@ impl ModuleGraph {
         };
 
         if node {
+            // `URL` first (the fetch classes below are built on it), then the web classes.
             let hir = frontend_oxc::parse(
                 "@kiln/web-bootstrap.ts",
-                kiln_builtins::WEB_BOOTSTRAP_SOURCE,
+                &format!(
+                    "{}\n{}",
+                    kiln_builtins::URL_BOOTSTRAP_SOURCE,
+                    kiln_builtins::WEB_BOOTSTRAP_SOURCE
+                ),
             );
             let bootstrap_program =
                 compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {

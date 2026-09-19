@@ -1443,6 +1443,7 @@ dependencies = [
  "kiln-runtime",
  "kiln-string",
  "kiln-temporal",
+ "kiln-url",
  "lasso",
  "md-5",
  "num-bigint 0.4.8",
@@ -1592,6 +1593,7 @@ dependencies = [
  "kiln-runtime",
  "kiln-string",
  "kiln-temporal",
+ "kiln-url",
  "libc",
  "libffi",
  "num-bigint 0.4.8",
@@ -1599,7 +1601,6 @@ dependencies = [
  "rayon",
  "regress",
  "tokio",
- "url",
 ]
 
 [[package]]
@@ -1673,6 +1674,13 @@ version = "0.1.0"
 [[package]]
 name = "kiln-test262"
 version = "0.0.0"
+
+[[package]]
+name = "kiln-url"
+version = "0.1.0"
+dependencies = [
+ "url",
+]
 
 [[package]]
 name = "kqueue"

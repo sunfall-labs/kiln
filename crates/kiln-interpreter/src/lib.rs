@@ -16088,6 +16088,45 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | Native::NodeBufferConcat
             | Native::NodeBufferToString => buffer::dispatch(native, receiver, arguments),
             Native::NodeQueryStringParse => querystring::dispatch(native, arguments),
+            // The bridges the shared TypeScript `URL` is built on (`kiln-builtins/src/url.ts`),
+            // over `kiln-url`, the record the native provider spills too. There is no request
+            // fast path here and nothing to adopt: the class lives in the realm's globals.
+            Native::UrlParseRaw => {
+                let input = arguments
+                    .first()
+                    .map_or_else(String::new, Value::to_display_string);
+                let base = match arguments.get(1) {
+                    None | Some(Value::Undefined) => None,
+                    Some(value) => Some(value.to_display_string()),
+                };
+                match kiln_url::record(&input, base.as_deref()) {
+                    Ok(record) => Ok(Value::String(record.into())),
+                    Err(_) => Err(ExecutionError::TypeErrorMessage {
+                        message: "Invalid URL".to_owned(),
+                    }),
+                }
+            }
+            Native::UrlSetRaw => {
+                let href = arguments
+                    .first()
+                    .map_or_else(String::new, Value::to_display_string);
+                let field = arguments.get(1).map_or(f64::NAN, Value::as_number);
+                let value = arguments
+                    .get(2)
+                    .map_or_else(String::new, Value::to_display_string);
+                if !(0.0..=9.0).contains(&field) || field.fract() != 0.0 {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "Invalid URL setter".to_owned(),
+                    });
+                }
+                match kiln_url::set(&href, field as u32, &value) {
+                    Ok(record) => Ok(Value::String(record.into())),
+                    Err(_) => Err(ExecutionError::TypeErrorMessage {
+                        message: "Invalid URL".to_owned(),
+                    }),
+                }
+            }
+            Native::UrlFastRaw | Native::UrlAdoptRaw => Ok(Value::Undefined),
             Native::UrlConstructor
             | Native::NodeUrlParse
             | Native::NodeUrlFileUrlToPath
@@ -26892,7 +26931,31 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             kiln_ir::Builtin::Set => Value::Native(Native::SetConstructor, realm),
             kiln_ir::Builtin::Map => Value::Native(Native::MapConstructor, realm),
             kiln_ir::Builtin::Buffer => Value::Native(Native::NodeBufferGlobal, realm),
-            kiln_ir::Builtin::Url => Value::Native(Native::UrlConstructor, realm),
+            // The shared TypeScript `URL` (`kiln-builtins/src/url.ts`) assigns itself onto the
+            // global object in Node mode, and the bare name has to find that class rather than
+            // the Rust constructor it replaces -- as it would in node, where `URL` is a global
+            // like any other and a polyfill's assignment is honoured.
+            kiln_ir::Builtin::Url => {
+                // Only a global object that already exists is asked: building one publishes
+                // `URL` through this very arm.
+                let existing = match &self.module_realm {
+                    Some(shared) => shared
+                        .borrow()
+                        .global_objects
+                        .get(realm.0 as usize)
+                        .and_then(|slot| slot.clone()),
+                    None => self
+                        .global_objects
+                        .get(realm.0 as usize)
+                        .and_then(|slot| slot.clone()),
+                };
+                if let Some(Value::Object(object)) = existing
+                    && let Some(assigned @ Value::Function(_)) = object.borrow().get_own("URL")
+                {
+                    return assigned.clone();
+                }
+                Value::Native(Native::UrlConstructor, realm)
+            }
             kiln_ir::Builtin::TextDecoder => Value::Native(Native::TextDecoderConstructor, realm),
             kiln_ir::Builtin::Array => Value::Native(Native::ArrayConstructor, realm),
             kiln_ir::Builtin::Object => Value::Native(Native::ObjectConstructor, realm),
@@ -27092,11 +27155,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if self.async_host.is_some() {
             // Captured and deleted by the shared Buffer bootstrap (`kiln-builtins/src/buffer.ts`),
             // which runs in Node mode only -- so it is published in Node mode only, and neither
-            // engine's global surface carries it afterwards.
+            // engine's global surface carries it afterwards. The four URL bridges likewise, for
+            // the shared `URL` (`kiln-builtins/src/url.ts`), which replaces the Rust one here.
             globals.set_non_enumerable(
                 "__kilnBufferToString",
                 Value::Native(Native::NodeBufferToString, realm),
             );
+            for (name, native) in [
+                ("__kilnUrlParse", Native::UrlParseRaw),
+                ("__kilnUrlSet", Native::UrlSetRaw),
+                ("__kilnUrlFast", Native::UrlFastRaw),
+                ("__kilnUrlAdopt", Native::UrlAdoptRaw),
+            ] {
+                globals.set_non_enumerable(name, Value::Native(native, realm));
+            }
         }
         // Published in every realm, not only a Node one: it is a WHATWG global every host has,
         // the bare name already resolved everywhere, and the native runtime's bootstrap defines
@@ -39460,6 +39532,10 @@ fn call_native(
         | Native::ProcessExit
         | Native::ProcessStartRaw
         | Native::ProcessCancelRaw
+        | Native::UrlParseRaw
+        | Native::UrlSetRaw
+        | Native::UrlFastRaw
+        | Native::UrlAdoptRaw
         | Native::ProcessStdinSetRawMode
         | Native::UrlConstructor
         | Native::UrlSearchParamsGet
@@ -48984,6 +49060,10 @@ fn native_js_name(native: &Native) -> String {
     match native {
         Native::ProcessStartRaw => "__kilnHostProcessStart".to_owned(),
         Native::ProcessCancelRaw => "__kilnHostProcessCancel".to_owned(),
+        Native::UrlParseRaw => "__kilnUrlParse".to_owned(),
+        Native::UrlSetRaw => "__kilnUrlSet".to_owned(),
+        Native::UrlFastRaw => "__kilnUrlFast".to_owned(),
+        Native::UrlAdoptRaw => "__kilnUrlAdopt".to_owned(),
         Native::NodeModuleCreateRequire => "__kilnHostModuleCreateRequire".to_owned(),
         // A symbol-keyed method is named for the symbol in brackets, which is what the
         // specification's `SetFunctionName` does with a symbol key. Derivation would spell it

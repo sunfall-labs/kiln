@@ -324,7 +324,7 @@ declare_ts_builtins! {
         logical_path: "node:url.ts",
         source_const: URL_SOURCE,
         exports_const: URL_EXPORTS,
-        sample_source_check: "export class URL",
+        sample_source_check: "export const URL",
         presence_test: url_builtin_source_is_present,
         compilation_test: url_builtin_compiles_cleanly,
         exports: [

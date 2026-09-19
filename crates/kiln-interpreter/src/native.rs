@@ -361,6 +361,11 @@ pub enum Native {
     ProcessExit,
     ProcessStartRaw,
     ProcessCancelRaw,
+    /// The four bridges the shared TypeScript `URL` captures (`kiln-builtins/src/url.ts`).
+    UrlParseRaw,
+    UrlSetRaw,
+    UrlFastRaw,
+    UrlAdoptRaw,
     ProcessStdinSetRawMode,
     UrlConstructor,
     UrlSearchParamsGet,
