@@ -17,6 +17,7 @@ static int kiln_c99_install_event_emitter_methods(kiln_value target) {
         {"off", 3, KILN_C99_METHOD_NODE_EVENT_REMOVE_LISTENER},
         {"removeAllListeners", 18, KILN_C99_METHOD_NODE_EVENT_REMOVE_ALL_LISTENERS},
         {"setMaxListeners", 15, KILN_C99_METHOD_NODE_EVENT_SET_MAX_LISTENERS},
+        {"eventNames", 10, KILN_C99_METHOD_NODE_EVENT_EVENT_NAMES},
     };
     size_t index;
     int status = KILN_C99_OK;
@@ -191,7 +192,9 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
         if ((state == NULL || state->value.tag != KILN_VALUE_ARRAY) &&
             code != KILN_C99_METHOD_NODE_EVENT_ON && code != KILN_C99_METHOD_NODE_EVENT_ONCE) {
             if (code == KILN_C99_METHOD_NODE_EVENT_EMIT) *result = kiln_c99_boolean(0);
-            else if (code == KILN_C99_METHOD_NODE_EVENT_LISTENERS) return kiln_c99_new_array(result);
+            else if (code == KILN_C99_METHOD_NODE_EVENT_LISTENERS ||
+                     code == KILN_C99_METHOD_NODE_EVENT_EVENT_NAMES)
+                return kiln_c99_new_array(result);
             else if (code == KILN_C99_METHOD_NODE_EVENT_LISTENER_COUNT) {
                 *result = kiln_c99_number(0.0);
                 return KILN_C99_OK;
@@ -218,6 +221,22 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
         }
     }
     entries = kiln_c99_array_of(table);
+    /* `eventNames()`: every bucket that still holds a listener, in registration order. */
+    if (code == KILN_C99_METHOD_NODE_EVENT_EVENT_NAMES) {
+        status = kiln_c99_new_array(result);
+        for (index = 0; status == KILN_C99_OK && index < entries->count; ++index) {
+            kiln_value entry = kiln_val_to_boundary(entries->elements[index]);
+            kiln_value listeners;
+            kiln_value found;
+            if (entry.tag != KILN_VALUE_OBJECT) continue;
+            status = kiln_c99_get(NULL, entry, "listeners", 9, &listeners, 0, NULL);
+            if (status != KILN_C99_OK) return status;
+            if (listeners.tag != KILN_VALUE_ARRAY || kiln_c99_array_of(listeners)->count == 0) continue;
+            status = kiln_c99_get(NULL, entry, "name", 4, &found, 0, NULL);
+            if (status == KILN_C99_OK) status = kiln_c99_array_push(*result, found);
+        }
+        return status;
+    }
     name = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
     bucket = kiln_c99_undefined();
     for (index = 0; index < entries->count; ++index) {

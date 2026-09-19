@@ -73,6 +73,7 @@ The tool is deliberately re-runnable and its outputs are deterministic (every li
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -450,6 +451,25 @@ ENUMERATE_NAMESPACES = """
 for (var i = 0; i < keys.length; i++) report(keys[i], vals[i]);
 console.log("#END");
 """
+
+
+@contextlib.contextmanager
+def built_outputs(root: Path, workdir: Path):
+    """Remove what `kiln run --native` built for the probes under `workdir` once the run is over.
+
+    A native run of `.scratch/surface-x/probe.cjs` links its executable under
+    `.kiln/bin/.scratch/surface-x/`, beside nothing this tool reads back. The temporary directory
+    goes at the end of the run; its build outputs did not, and nineteen runs had left 62 GiB
+    there by 2026-09-19 -- the disk this tool's own `guard_disk` was watching.
+    """
+    try:
+        yield
+    finally:
+        try:
+            relative = workdir.resolve().relative_to(root.resolve())
+        except ValueError:
+            return
+        shutil.rmtree(root / ".kiln" / "bin" / relative, ignore_errors=True)
 
 
 def enumerate_interpreter(runner: Runner) -> dict[str, Receiver]:
@@ -1095,7 +1115,7 @@ def main() -> int:
         print(f"re-rendered {outdir / (stem + '.md')}", file=sys.stderr)
         return report_gate(receivers, sorted(receivers)) if args.gate else 0
 
-    with tempfile.TemporaryDirectory(dir=str(root / ".scratch"), prefix="surface-") as tmp:
+    with tempfile.TemporaryDirectory(dir=str(root / ".scratch"), prefix="surface-") as tmp, built_outputs(root, Path(tmp)):
         runner = Runner(kiln, root, Path(tmp), args.timeout)
         print("enumerating the interpreter's surface ...", file=sys.stderr)
         receivers = enumerate_interpreter(runner)
