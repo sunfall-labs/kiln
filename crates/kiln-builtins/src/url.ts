@@ -342,7 +342,6 @@ Object.defineProperty(URL.prototype, Symbol.toStringTag, { value: "URL", configu
 
 __urlAdopt(URL, URL.prototype, URLSearchParams.prototype);
 (globalThis as any).URL = URL;
-// `URLSearchParams` is a global in node and is not yet one in the interpreter, which has no
-// constructor for it; `conformance/native/global-callable-names` holds the two engines to the
-// same list, so the global appears in both together (full-runtime/05). The class is reachable
-// as `url.searchParams` meanwhile.
+// Both globals, in both engines: the interpreter runs this bootstrap in every mode since
+// 2026-09-19, so the class the native backend had to hold back for parity is published.
+(globalThis as any).URLSearchParams = URLSearchParams;

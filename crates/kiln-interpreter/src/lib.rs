@@ -5324,6 +5324,21 @@ pub struct ModuleExecutionResult {
 #[derive(Clone)]
 pub struct ModuleRealmSession {
     shared: Rc<RefCell<ModuleRealmShared>>,
+    /// Whether the Node execution adapter (host I/O, HTTP) is installed in this realm. A graph
+    /// shares one realm in every mode; the adapter is what `--node` adds, and a plain run keeps
+    /// refusing `node:fs` and the like as it always did.
+    adapter: bool,
+}
+
+impl ModuleRealmSession {
+    /// A shared realm with no host adapter: one global object for the graph, the virtual clock,
+    /// and every host-reaching operation refusing as a plain run's did.
+    pub fn without_adapter() -> Self {
+        Self {
+            adapter: false,
+            ..Self::default()
+        }
+    }
 }
 
 struct ModuleRealmShared {
@@ -5344,6 +5359,7 @@ struct ModuleRealmShared {
 impl Default for ModuleRealmSession {
     fn default() -> Self {
         Self {
+            adapter: true,
             shared: Rc::new(RefCell::new(ModuleRealmShared {
                 realm: Realm::new(),
                 global_objects: vec![None],
@@ -6964,7 +6980,7 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
     vm.self_bindings = self_bindings;
     vm.module_path = module_path.map(Rc::from);
     vm.self_namespaces = self_namespaces;
-    if session.is_some() {
+    if session.as_ref().is_some_and(|(session, _)| session.adapter) {
         vm.async_host = Some(runtime as *mut RealmRuntime as *mut dyn ActiveAsyncHostOps);
         vm.http_runtime = Some(runtime as *mut RealmRuntime as *mut dyn ActiveHttpRuntime);
     }
@@ -7013,7 +7029,9 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
             }
         } else if drain {
             vm.run_node_event_loop(runtime)?;
-        } else if vm.async_host.is_none() {
+        } else if vm.async_host.is_none() && session.is_none() {
+            // A module with no shared realm drains its own loop; one in a shared realm leaves
+            // its timers for the entry's loop, as node does.
             vm.run_event_loop(runtime)?;
         }
     }
@@ -27155,20 +27173,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if self.async_host.is_some() {
             // Captured and deleted by the shared Buffer bootstrap (`kiln-builtins/src/buffer.ts`),
             // which runs in Node mode only -- so it is published in Node mode only, and neither
-            // engine's global surface carries it afterwards. The four URL bridges likewise, for
-            // the shared `URL` (`kiln-builtins/src/url.ts`), which replaces the Rust one here.
+            // engine's global surface carries it afterwards.
             globals.set_non_enumerable(
                 "__kilnBufferToString",
                 Value::Native(Native::NodeBufferToString, realm),
             );
-            for (name, native) in [
-                ("__kilnUrlParse", Native::UrlParseRaw),
-                ("__kilnUrlSet", Native::UrlSetRaw),
-                ("__kilnUrlFast", Native::UrlFastRaw),
-                ("__kilnUrlAdopt", Native::UrlAdoptRaw),
-            ] {
-                globals.set_non_enumerable(name, Value::Native(native, realm));
-            }
+        }
+        // The four bridges the shared `URL` (`kiln-builtins/src/url.ts`) captures and deletes;
+        // the URL bootstrap runs in every mode, as the native runtime's does.
+        for (name, native) in [
+            ("__kilnUrlParse", Native::UrlParseRaw),
+            ("__kilnUrlSet", Native::UrlSetRaw),
+            ("__kilnUrlFast", Native::UrlFastRaw),
+            ("__kilnUrlAdopt", Native::UrlAdoptRaw),
+        ] {
+            globals.set_non_enumerable(name, Value::Native(native, realm));
         }
         // Published in every realm, not only a Node one: it is a WHATWG global every host has,
         // the bare name already resolved everywhere, and the native runtime's bootstrap defines

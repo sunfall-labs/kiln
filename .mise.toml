@@ -27,6 +27,18 @@ run = "./scripts/test262-baseline.sh --update"
 description = "Fetch the pinned Test262 checkout into ~/.cache/kiln (needed once per machine)"
 run = "./scripts/test262-fetch.sh"
 
+[tasks.wpt]
+description = "Check the committed Web Platform Tests baseline (the WinterTC Minimum Common API's conformance suite) through both engines"
+run = "./scripts/wpt.sh"
+
+[tasks.wpt-update]
+description = "Regenerate the WPT baseline (deliberate: the diff is the record)"
+run = "./scripts/wpt.sh --update"
+
+[tasks.wpt-fetch]
+description = "Fetch the pinned WPT directories into ~/.cache/kiln (needed once per machine)"
+run = "./scripts/wpt-fetch.sh"
+
 [tasks.bench]
 description = "Every microbenchmark under bench/, under kiln, node and bun"
 run = "./bench/compare.sh"
