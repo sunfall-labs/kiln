@@ -1911,7 +1911,16 @@ impl ModuleGraph {
         if let Some(fs) = host.clone_fs() {
             runtime.set_fs(fs);
         }
-        let mut node_session = node.then(ModuleRealmSession::default);
+        // One realm for the whole graph in every mode: a module that writes `globalThis.x`
+        // is read by its importer, and a dependency's timers run in the entry's loop rather
+        // than before the entry body. Until 2026-09-19 the plain mode gave each module its own
+        // global object, which neither node nor the native backend does; the adapter (and the
+        // host clock) is the only thing `--node` adds now.
+        let mut node_session = Some(if node {
+            ModuleRealmSession::default()
+        } else {
+            ModuleRealmSession::without_adapter()
+        });
         let cache_targets = commonjs_cache
             .iter()
             .map(|(path, cell)| (std::rc::Rc::as_ptr(cell), path.clone()))
@@ -1935,16 +1944,25 @@ impl ModuleGraph {
             ensuring_targets: HashSet::new(),
         };
 
-        if node {
-            // `URL` first (the fetch classes below are built on it), then the web classes.
-            let hir = frontend_oxc::parse(
-                "@kiln/web-bootstrap.ts",
-                &format!(
+        {
+            // `URL` in every mode, as the native runtime has it; the fetch and web classes,
+            // which are built on it, under the adapter.
+            let source = if node {
+                format!(
                     "{}\n{}",
                     kiln_builtins::URL_BOOTSTRAP_SOURCE,
                     kiln_builtins::WEB_BOOTSTRAP_SOURCE
-                ),
-            );
+                )
+            } else {
+                // The Buffer bootstrap (Node mode) captures and deletes this bridge; without
+                // it the bridge would be the one global node does not have -- the native
+                // bootstrap does the same.
+                format!(
+                    "{}\ndelete globalThis.__kilnBufferToString;\n",
+                    kiln_builtins::URL_BOOTSTRAP_SOURCE
+                )
+            };
+            let hir = frontend_oxc::parse("@kiln/web-bootstrap.ts", &source);
             let bootstrap_program =
                 compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
                     path: PathBuf::from("@kiln/web-bootstrap.ts"),
@@ -2223,35 +2241,20 @@ impl ModuleGraph {
                 max_steps: limits.max_steps - total_steps,
                 ..limits
             };
-            let result = if node {
-                execute_node_module_in_session_with_loader(
-                    &module_node.program,
-                    &imports,
-                    &self_imports,
-                    host,
-                    remaining_limits,
-                    &mut runtime,
-                    node_session.as_mut().expect("Node mode owns a session"),
-                    capabilities.clone(),
-                    path == &self.entry,
-                    &mut commonjs_loader,
-                    true,
-                    Some(path.to_string_lossy().as_ref()),
-                )
-            } else {
-                execute_module_in_runtime_with_loader(
-                    &module_node.program,
-                    &imports,
-                    &self_imports,
-                    host,
-                    remaining_limits,
-                    &mut runtime,
-                    capabilities.clone(),
-                    &mut commonjs_loader,
-                    true,
-                    Some(path.to_string_lossy().as_ref()),
-                )
-            }
+            let result = execute_node_module_in_session_with_loader(
+                &module_node.program,
+                &imports,
+                &self_imports,
+                host,
+                remaining_limits,
+                &mut runtime,
+                node_session.as_mut().expect("the graph owns a session"),
+                capabilities.clone(),
+                path == &self.entry,
+                &mut commonjs_loader,
+                true,
+                Some(path.to_string_lossy().as_ref()),
+            )
             .map_err(|error| {
                 let error = match error {
                     ExecutionError::StepLimitExceeded { steps, .. } => {

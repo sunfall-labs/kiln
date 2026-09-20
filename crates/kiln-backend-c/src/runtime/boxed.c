@@ -806,7 +806,11 @@ static kiln_val kiln_c99_val_binary_fast(uint16_t operation, kiln_val left, kiln
     }
     if ((operation == 7 || operation == 15) && left == right) return KILN_VAL_TRUE;
     if ((operation == 8 || operation == 16) && left == right) return KILN_VAL_FALSE;
-    if (operation == 1 && KILN_VAL_IS_STRING(left) && KILN_VAL_IS_STRING(right)) {
+    if (operation == 1 && KILN_VAL_IS_STRING(left) && KILN_VAL_IS_STRING(right) &&
+        !kiln_string_is_utf16((const kiln_string *)KILN_VAL_PTR(left)) &&
+        !kiln_string_is_utf16((const kiln_string *)KILN_VAL_PTR(right))) {
+        /* Latin-1 on both sides only: the copy below is bytes, and a UTF-16 operand's units are
+         * two each. Anything else takes the general path, which widens. */
         const kiln_string *s1 = (const kiln_string *)KILN_VAL_PTR(left);
         const kiln_string *s2 = (const kiln_string *)KILN_VAL_PTR(right);
         size_t total_bytes = s1->unit_len + s2->unit_len;
@@ -821,25 +825,23 @@ static kiln_val kiln_c99_val_binary_fast(uint16_t operation, kiln_val left, kiln
             return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, s);
         }
     }
+    /* Equality is over code units, whichever way each side stores them: a `memcmp` of
+     * `unit_len` bytes compared a Latin-1 "null" against the first four bytes of a UTF-16 one and
+     * called them different, which is how every string `JSON.parse` read out of a document with
+     * one non-Latin-1 character in it stopped being `===` to its literal (WPT url/, 2026-09-19). */
     if ((operation == 7 || operation == 15) && KILN_VAL_IS_STRING(left) && KILN_VAL_IS_STRING(right)) {
         if (left == right) return KILN_VAL_TRUE;
-        const kiln_string *s1 = (const kiln_string *)KILN_VAL_PTR(left);
-        const kiln_string *s2 = (const kiln_string *)KILN_VAL_PTR(right);
-        size_t len1 = s1 ? s1->unit_len : 0;
-        size_t len2 = s2 ? s2->unit_len : 0;
-        if (len1 != len2) return KILN_VAL_FALSE;
-        if (len1 == 0) return KILN_VAL_TRUE;
-        return memcmp(s1->data, s2->data, len1) == 0 ? KILN_VAL_TRUE : KILN_VAL_FALSE;
+        return kiln_string_equal((const kiln_string *)KILN_VAL_PTR(left),
+                                 (const kiln_string *)KILN_VAL_PTR(right))
+                   ? KILN_VAL_TRUE
+                   : KILN_VAL_FALSE;
     }
     if ((operation == 8 || operation == 16) && KILN_VAL_IS_STRING(left) && KILN_VAL_IS_STRING(right)) {
         if (left == right) return KILN_VAL_FALSE;
-        const kiln_string *s1 = (const kiln_string *)KILN_VAL_PTR(left);
-        const kiln_string *s2 = (const kiln_string *)KILN_VAL_PTR(right);
-        size_t len1 = s1 ? s1->unit_len : 0;
-        size_t len2 = s2 ? s2->unit_len : 0;
-        if (len1 != len2) return KILN_VAL_TRUE;
-        if (len1 == 0) return KILN_VAL_FALSE;
-        return memcmp(s1->data, s2->data, len1) != 0 ? KILN_VAL_TRUE : KILN_VAL_FALSE;
+        return kiln_string_equal((const kiln_string *)KILN_VAL_PTR(left),
+                                 (const kiln_string *)KILN_VAL_PTR(right))
+                   ? KILN_VAL_FALSE
+                   : KILN_VAL_TRUE;
     }
     return kiln_val_from_boundary(kiln_c99_binary(operation, kiln_val_to_boundary(left), kiln_val_to_boundary(right)));
 }

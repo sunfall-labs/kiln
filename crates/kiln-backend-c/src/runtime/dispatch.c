@@ -4946,6 +4946,14 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     *result = kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE);
                     return KILN_C99_OK;
                 }
+                /* `TypeError` and the other native error constructors inherit from `Error`, not
+                 * from `Function.prototype` directly; WPT's `assert_throws_js` walks that chain
+                 * looking for a function named "Error" and answered "is not an Error subtype"
+                 * for every one of them until 2026-09-19. `AggregateError` too. */
+                if (kiln_c99_error_name(subject.bits) != NULL && subject.bits != KILN_C99_BUILTIN_ERROR) {
+                    *result = kiln_c99_builtin(KILN_C99_BUILTIN_ERROR);
+                    return KILN_C99_OK;
+                }
                 /* A prototype table's own prototype is `Object.prototype`, which is where the
                  * chain from any of them ends. */
                 *result = kiln_c99_is_namespace(subject.bits) &&

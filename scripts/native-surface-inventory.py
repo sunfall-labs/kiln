@@ -584,6 +584,86 @@ def enumerate_node(runner: Runner, receivers: dict[str, Receiver]) -> None:
             rec.node_names = sorted(set(rec.node_names))
 
 
+# WinterTC's Minimum Common Web Platform API (Ecma TC55, https://min-common-api.proposal.wintertc.org/),
+# as (receiver key, member) pairs the walk above already measures. The spec names the interfaces
+# and functions every server-side runtime is expected to share, and defines conformance by the
+# Web Platform Tests for each; this table answers the cheaper question first -- is it there at
+# all, in each engine, and does node have it -- and `scripts/wpt.sh` answers the rest.
+WINTERTC_MINIMUM_COMMON_API: list[tuple[str, str]] = (
+    [("globalThis", name) for name in [
+        # DOM, HTML, WebIDL
+        "AbortController", "AbortSignal", "Event", "EventTarget", "CustomEvent", "ErrorEvent",
+        "MessageChannel", "MessageEvent", "MessagePort", "PromiseRejectionEvent", "DOMException",
+        # Fetch, XHR, File API, Compression
+        "Headers", "Request", "Response", "FormData", "Blob", "File",
+        "CompressionStream", "DecompressionStream",
+        # Streams
+        "ByteLengthQueuingStrategy", "CountQueuingStrategy", "ReadableByteStreamController",
+        "ReadableStream", "ReadableStreamBYOBReader", "ReadableStreamBYOBRequest",
+        "ReadableStreamDefaultController", "ReadableStreamDefaultReader", "TransformStream",
+        "TransformStreamDefaultController", "WritableStream", "WritableStreamDefaultController",
+        "WritableStreamDefaultWriter",
+        # Encoding, URL, Crypto, hr-time, WebAssembly
+        "TextDecoder", "TextDecoderStream", "TextEncoder", "TextEncoderStream",
+        "URL", "URLSearchParams", "URLPattern", "Crypto", "CryptoKey", "SubtleCrypto",
+        "Performance", "WebAssembly",
+        # Global functions and properties
+        "globalThis", "atob", "btoa", "clearTimeout", "clearInterval", "queueMicrotask",
+        "reportError", "setTimeout", "setInterval", "structuredClone", "fetch", "self",
+        "onerror", "onunhandledrejection", "onrejectionhandled",
+        "navigator", "console", "crypto", "performance",
+    ]]
+    + [("WebAssembly", name) for name in [
+        "Global", "Instance", "Memory", "Module", "Table", "Tag", "Exception", "CompileError",
+        "LinkError", "RuntimeError", "compile", "compileStreaming", "instantiate",
+        "instantiateStreaming", "validate", "JSTag",
+    ]]
+    + [("navigator", "userAgent"), ("crypto", "subtle"), ("crypto", "getRandomValues"),
+       ("crypto", "randomUUID"), ("performance", "now"), ("performance", "timeOrigin")]
+    + [("console", name) for name in [
+        "assert", "clear", "count", "countReset", "debug", "dir", "dirxml", "error", "group",
+        "groupCollapsed", "groupEnd", "info", "log", "table", "time", "timeEnd", "timeLog",
+        "trace", "warn",
+    ]]
+)
+
+
+def wintertc_rows(receivers: dict[str, Receiver]) -> list[tuple[str, str, str, str, str]]:
+    """One row per Minimum Common API member: (name, node, interpreter, native, prototype gap).
+
+    A reading is `present`, `missing`, or for the native backend `refused`; the prototype gap
+    is how many of node's `X.prototype` members each engine lacks, for an interface both have,
+    so a constructor that is there with an empty prototype does not read as done."""
+    rows = []
+    for key, name in WINTERTC_MINIMUM_COMMON_API:
+        rec = receivers.get(key)
+        label = name if key == "globalThis" else f"{key}.{name}"
+        if rec is None:
+            rows.append((label, "?", "missing", "missing", ""))
+            continue
+        node = rec.node.get(name)
+        node_reading = "present" if node not in (None, "undefined") else "missing"
+        interp = rec.interpreted.get(name)
+        interp_reading = "present" if interp not in (None, "undefined") else "missing"
+        native = rec.native.get(name)
+        if name in rec.refused:
+            native_reading = "refused"
+        elif native not in (None, "undefined"):
+            native_reading = "present"
+        else:
+            native_reading = "missing"
+        gap = ""
+        proto = receivers.get(f"{name}.prototype") if key == "globalThis" else None
+        if proto is not None and proto.node_names:
+            versus = against_node(proto)
+            i = len(versus["interpreter"]["missing"])
+            n = len(versus["native"]["missing"])
+            if i or n:
+                gap = f"{i} / {n} of {len(proto.node_names)}"
+        rows.append((label, node_reading, interp_reading, native_reading, gap))
+    return rows
+
+
 def against_node(rec: Receiver) -> dict[str, dict[str, list[str]]]:
     """Each engine against node, per member: `missing` (node has it, the engine does not --
     for the native backend a refusal or an `undefined` both count), `differs` (both answer,
@@ -1332,6 +1412,41 @@ def render(receivers: dict[str, Receiver], order: list[str], runner: Runner) -> 
     )
     add("")
 
+    add("## WinterTC Minimum Common API")
+    add("")
+    add(
+        "The interfaces and globals WinterTC (Ecma TC55) says every server-side runtime shares "
+        "(https://min-common-api.proposal.wintertc.org/), read off the same measurement. "
+        "*present* is a member that answers something other than `undefined`; the last column "
+        "is how many of node's members on `X.prototype` each engine lacks, for an interface both "
+        "have, so a constructor with a hollow prototype does not read as done. Conformance beyond "
+        "presence is the Web Platform Tests' to say (`scripts/wpt.sh`)."
+    )
+    add("")
+    wintertc = wintertc_rows(receivers)
+    in_node = [r for r in wintertc if r[1] == "present"]
+    add("| | Node | Interpreter | Native |")
+    add("| --- | ---: | ---: | ---: |")
+    add(
+        f"| present, of {len(wintertc)} named | {len(in_node)} | "
+        f"{sum(1 for r in wintertc if r[2] == 'present')} | "
+        f"{sum(1 for r in wintertc if r[3] == 'present')} |"
+    )
+    add(
+        f"| missing where node has it | | "
+        f"{sum(1 for r in in_node if r[2] != 'present')} | "
+        f"{sum(1 for r in in_node if r[3] != 'present')} |"
+    )
+    add("")
+    add("| Member | Node | Interpreter | Native | `.prototype` missing (interp / native) |")
+    add("| --- | --- | --- | --- | --- |")
+    for label, node_r, interp_r, native_r, gap in wintertc:
+        if node_r == "present" and interp_r == "present" and native_r == "present" and not gap:
+            continue
+        add(f"| `{label}` | {node_r} | {interp_r} | {native_r} | {gap} |")
+    add("")
+    add("Rows where node, the interpreter and the native backend all have the member with no prototype gap are left out; everything else is listed.")
+    add("")
     add("## What to do first")
     add("")
     add(
