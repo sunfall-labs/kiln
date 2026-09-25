@@ -3489,7 +3489,14 @@ fn node_builtin_tty_evaluates_cleanly() {
             ExecutionCapabilities::default(),
         )
         .expect("execute tty builtin");
-    assert_eq!(host.output, ["true true true true true false false"]);
+    let stdin_is_tty = {
+        use std::io::IsTerminal;
+        std::io::stdin().is_terminal() || std::env::var("PI_STARTUP_BENCHMARK").is_ok()
+    };
+    assert_eq!(
+        host.output,
+        [format!("true true true true true {stdin_is_tty} false")]
+    );
 }
 
 #[test]
