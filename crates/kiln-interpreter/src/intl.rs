@@ -2000,7 +2000,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         instruction: usize,
     ) -> Result<f64, ExecutionError> {
         let milliseconds = match value {
-            None | Some(Value::Undefined) => self.realm.now_milliseconds(),
+            None | Some(Value::Undefined) => {
+                self.with_realm(kiln_runtime::Realm::now_milliseconds)
+            }
             Some(value) => self.as_number_argument(Some(value), instruction)?,
         };
         if !milliseconds.is_finite() || milliseconds.abs() > 8.64e15 {
