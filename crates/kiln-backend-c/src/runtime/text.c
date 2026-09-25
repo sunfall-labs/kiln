@@ -406,7 +406,7 @@ static void kiln_c99_forget_handled_throw(void) {
     }
 }
 
-void kiln_c99_publish_diagnostic(void) {
+KILN_COLD void kiln_c99_publish_diagnostic(void) {
     uint8_t *function_owned = NULL;
     size_t function_owned_len = 0;
     const uint8_t *function_bytes;
@@ -449,7 +449,7 @@ int kiln_c99_diagnostic_available(void) {
     return kiln_c99_diagnostic_site != NULL && kiln_c99_diagnostic_operation != NULL;
 }
 
-static void kiln_c99_note_refusal(const char *site, size_t instruction,
+static KILN_COLD void kiln_c99_note_refusal(const char *site, size_t instruction,
                                   const char *operation, size_t depth) {
     /* Runtime helpers do not own a bytecode instruction and deliberately pass no site. The
      * generated caller will attribute a propagated throw/refusal to its real instruction. In an

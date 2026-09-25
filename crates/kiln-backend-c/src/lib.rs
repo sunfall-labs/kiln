@@ -1451,13 +1451,13 @@ fn render_functions(
         } else {
             writeln!(
                 output,
-                "{static_kw}int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);"
+                "{static_kw}int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_val * restrict result, kiln_val * restrict upvalues, const kiln_val * restrict receiver_ptr, const kiln_val * restrict args, size_t argc);"
             )
             .unwrap();
             if has_fast {
                 writeln!(
                     output,
-                    "{static_kw}int {symbol}_fn_{index}_f(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);"
+                    "{static_kw}int {symbol}_fn_{index}_f(kiln_call_context *ctx, kiln_val * restrict result, kiln_val * restrict upvalues, const kiln_val * restrict receiver_ptr, const kiln_val * restrict args, size_t argc);"
                 )
                 .unwrap();
             }
@@ -1479,13 +1479,13 @@ fn render_functions(
             } else {
                 writeln!(
                     fn_declarations[index],
-                    "int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);"
+                    "int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_val * restrict result, kiln_val * restrict upvalues, const kiln_val * restrict receiver_ptr, const kiln_val * restrict args, size_t argc);"
                 )
                 .unwrap();
                 if has_fast {
                     writeln!(
                         fn_declarations[index],
-                        "int {symbol}_fn_{index}_f(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);"
+                        "int {symbol}_fn_{index}_f(kiln_call_context *ctx, kiln_val * restrict result, kiln_val * restrict upvalues, const kiln_val * restrict receiver_ptr, const kiln_val * restrict args, size_t argc);"
                     )
                     .unwrap();
                 }
@@ -3399,7 +3399,7 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
         output.push_str("static __attribute__((unused, noinline)) int ku_pic_poly_write(kiln_object *obj, const kiln_c99_site *site, kiln_val val) {\n    const kiln_shape *shape = obj->shape;\n    uint32_t slot = UINT32_MAX;\n    if (shape == site->entries[1].shape && site->entries[1].transition_to == NULL) slot = site->entries[1].slot;\n    else if (shape == site->entries[2].shape && site->entries[2].transition_to == NULL) slot = site->entries[2].slot;\n    else if (shape == site->entries[3].shape && site->entries[3].transition_to == NULL) slot = site->entries[3].slot;\n    if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity && !obj->frozen)) {\n        kiln_c99_prototype_touched(obj);\n        if (slot < KILN_C99_INLINE_SLOTS) obj->inline_slots[slot] = val;\n        else obj->slots[slot] = val;\n        return 1;\n    }\n    return 0;\n}\n");
     }
     if !program.functions.is_empty() {
-        output.push_str("#define KU_PARAMS kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc\n");
+        output.push_str("#define KU_PARAMS kiln_call_context *ctx, kiln_val * restrict result, kiln_val * restrict upvalues, const kiln_val * restrict receiver_ptr, const kiln_val * restrict args, size_t argc\n");
         output.push_str("#define KU_EPILOGUE() kiln_unwind:; return KILN_C99_THROWN; kiln_refusal:; *result = kiln_val_from_boundary(kiln_c99_control_diagnostic()); return KILN_C99_CONTROL_ERROR;\n");
     }
     if has_call {

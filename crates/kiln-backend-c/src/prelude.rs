@@ -2664,9 +2664,13 @@ macro_rules! header_prefix {
 #if defined(__GNUC__) || defined(__clang__)
 #define KILN_LIKELY(x) __builtin_expect(!!(x), 1)
 #define KILN_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#define KILN_COLD __attribute__((cold))
+#define KILN_NOINLINE __attribute__((noinline))
 #else
 #define KILN_LIKELY(x) (x)
 #define KILN_UNLIKELY(x) (x)
+#define KILN_COLD
+#define KILN_NOINLINE
 #endif
 
 /* Demand-driven prelude: one flag per prunable method dispatch group. A
@@ -2785,7 +2789,7 @@ static int kiln_c99_diagnostic_active_depth = 0;
  *
  * The first note wins, here as everywhere else in the diagnostic: the innermost helper runs first
  * and is the most specific, so an outer one adds provenance and leaves the detail alone. */
-static int kiln_c99_refuse(const char *lacked) {
+static KILN_COLD int kiln_c99_refuse(const char *lacked) {
     if (kiln_c99_diagnostic_detail == NULL) {
         kiln_c99_diagnostic_detail = lacked;
     }
@@ -2800,7 +2804,7 @@ static int kiln_c99_refuse(const char *lacked) {
  * text goes in `kiln_c99_diagnostic_compose`, which `GetComputed` also writes -- for the
  * *function* field, and only while no detail exists. One buffer, one writer: `GetComputed` checks
  * whether the detail already points into it, and an inner site that got there first keeps it. */
-static int kiln_c99_refuse_named(const char *lacked, const char *subject, size_t subject_len) {
+static KILN_COLD int kiln_c99_refuse_named(const char *lacked, const char *subject, size_t subject_len) {
     if (kiln_c99_diagnostic_detail == NULL) {
         /* Copied rather than `snprintf`ed. Nothing formatted here is a number, so the locale would
          * not change the answer -- but "this unit never calls the C library's printers" is a rule
@@ -2827,13 +2831,13 @@ static int kiln_c99_refuse_named(const char *lacked, const char *subject, size_t
     return KILN_C99_CONTROL_ERROR;
 }
 
-static void kiln_c99_note_refusal(const char *site, size_t instruction,
+static KILN_COLD void kiln_c99_note_refusal(const char *site, size_t instruction,
                                   const char *operation, size_t depth);
 
 /* Generated stack-tail sites already have the exact source coordinate and operation. Their
  * outlined helpers use this form so the diagnostic remains owned by that instruction while the
  * control status is still impossible to manufacture unnamed in runtime C. */
-static int kiln_c99_refuse_at(const char *site, size_t instruction,
+static KILN_COLD int kiln_c99_refuse_at(const char *site, size_t instruction,
                               const char *operation, size_t depth) {
     kiln_c99_note_refusal(site, instruction, operation, depth);
     return KILN_C99_CONTROL_ERROR;
@@ -2848,7 +2852,7 @@ static int kiln_c99_refuse_at(const char *site, size_t instruction,
  * The argument names the caller that does the converting. It is compiled away; it is there so the
  * claim can be checked by reading, and `REFUSAL_INTERNAL_STATUS` in the emitter carries the same
  * claim as a row that has to be added before a new one of these will build. */
-static int kiln_c99_internal_status(const char *converted_by) {
+static KILN_COLD int kiln_c99_internal_status(const char *converted_by) {
     (void)converted_by;
     return KILN_C99_CONTROL_ERROR;
 }

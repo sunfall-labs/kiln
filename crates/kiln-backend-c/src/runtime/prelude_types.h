@@ -314,7 +314,7 @@ int32_t kiln_bigint_is_zero(const void *handle);
  * cross as opaque pointers: the provider never reads an element, so nothing is unboxed or copied,
  * and a worker runs on a thread that owns no realm -- which is why the backend admits only a
  * body that reads its double parameters and returns a double (`parallel.rs`). */
-typedef void (*kiln_parallel_chunk_fn)(const void *in, void *out, size_t start, size_t end,
+typedef void (*kiln_parallel_chunk_fn)(const void * restrict in, void * restrict out, size_t start, size_t end,
                                        void *ctx);
 int32_t kiln_parallel_map(const void *in, size_t count, void *out, kiln_parallel_chunk_fn chunk,
                           void *ctx);
@@ -514,8 +514,8 @@ typedef struct kiln_call_context {
     int depth;
 } kiln_call_context;
 
-typedef int (*kiln_body_fn)(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
-                            const kiln_val *receiver, const kiln_val *args, size_t argc);
+typedef int (*kiln_body_fn)(kiln_call_context *ctx, kiln_val * restrict result, kiln_val * restrict upvalues,
+                            const kiln_val * restrict receiver, const kiln_val * restrict args, size_t argc);
 typedef struct kiln_closure {
     kiln_body_fn body;
     /* An arrow captures `new.target` where it was written, for the same reason it captures

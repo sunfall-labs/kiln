@@ -51,12 +51,12 @@ static inline void kiln_c99_site_stamp_builtin(kiln_c99_site *site, uint32_t bui
 }
 
 static kiln_value kiln_val_to_boundary(kiln_val v) {
-    if (KILN_VAL_IS_NUMBER(v)) {
+    if (KILN_VAL_IS_NUMBER(v) || v == UINT64_C(0xFFF8000000000000)) {
         kiln_value out;
         out.tag = KILN_VALUE_NUMBER;
         out.flags = 0;
         out.len = 0;
-        out.bits = (uint64_t)v;
+        out.bits = (v == UINT64_C(0xFFF8000000000000)) ? KILN_QNAN_BASE : (uint64_t)v;
         return out;
     }
     if (KILN_VAL_IS_BUILTIN(v)) {
