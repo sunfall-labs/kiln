@@ -163,13 +163,13 @@ pub fn typed_signature(
     let result = if returns_number { "double" } else { "kiln_val" };
     let mut params = String::from("int depth");
     if needs.upvalues {
-        params.push_str(", kiln_val *upvalues");
+        params.push_str(", kiln_val * restrict upvalues");
     }
     if needs.receiver {
         params.push_str(", kiln_val receiver");
     }
     if needs.row {
-        params.push_str(", const uint32_t *recv_row_in");
+        params.push_str(", const uint32_t * restrict recv_row_in");
     }
     if needs.runtime {
         params.push_str(", kiln_host *host, kiln_value *thrown");

@@ -32,29 +32,33 @@ extern const kiln_string *kiln_c99_intern_key(const kiln_string *view);
 extern const kiln_string *kiln_c99_intern_static_key(const kiln_string *view);
 extern const kiln_string *kiln_c99_interned_key_in(struct kiln_gc_heap *heap,
                                                    const kiln_string *view);
+#if defined(__GNUC__) || defined(__clang__)
+#define KILN_LIKELY(x) __builtin_expect(!!(x), 1)
+#define KILN_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#define KILN_COLD __attribute__((cold))
+#define KILN_NOINLINE __attribute__((noinline))
+#else
+#define KILN_LIKELY(x) (x)
+#define KILN_UNLIKELY(x) (x)
+#define KILN_COLD
+#define KILN_NOINLINE
+#endif
+
 extern kiln_value kiln_c99_number_bits(uint64_t bits);
 extern kiln_value kiln_c99_concat(kiln_value left, kiln_value right);
 extern int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_value value);
-extern void kiln_c99_note_refusal(const char *site, size_t instruction, const char *operation, size_t depth);
-extern void kiln_c99_publish_diagnostic(void);
+extern KILN_COLD void kiln_c99_note_refusal(const char *site, size_t instruction, const char *operation, size_t depth);
+extern KILN_COLD void kiln_c99_publish_diagnostic(void);
 extern void kiln_c99_gc_unit_roots(void *opaque, void *context, int phase);
-extern int kiln_c99_refuse(const char *lacked);
-extern int kiln_c99_refuse_named(const char *lacked, const char *subject, size_t subject_len);
-extern int kiln_c99_internal_status(const char *converted_by);
+extern KILN_COLD int kiln_c99_refuse(const char *lacked);
+extern KILN_COLD int kiln_c99_refuse_named(const char *lacked, const char *subject, size_t subject_len);
+extern KILN_COLD int kiln_c99_internal_status(const char *converted_by);
 static int kiln_c99_json_document(const kiln_string *source, kiln_val *out);
 
 #define KILN_C99_REFUSE(lacked) return kiln_c99_refuse(lacked)
 #define KILN_C99_REFUSE_NAMED(lacked, subject, subject_len) \
     return kiln_c99_refuse_named((lacked), (subject), (subject_len))
 #define KILN_C99_REFUSE_INTERNAL(converted_by) return kiln_c99_internal_status(converted_by)
-
-#if defined(__GNUC__) || defined(__clang__)
-#define KILN_LIKELY(x) __builtin_expect(!!(x), 1)
-#define KILN_UNLIKELY(x) __builtin_expect(!!(x), 0)
-#else
-#define KILN_LIKELY(x) (x)
-#define KILN_UNLIKELY(x) (x)
-#endif
 
 /* Emitted variable declarations */
 extern int kiln_c99_keys_check_mode;
@@ -194,10 +198,10 @@ extern int kiln_c99_truthy(kiln_value value);
 extern kiln_value kiln_c99_copy_text(const char *text, size_t len);
 extern kiln_val kiln_c99_val_from_text(const char *bytes, size_t len);
 extern int kiln_c99_new_array_with_capacity(kiln_value *out, size_t capacity, int is_numeric);
-extern kiln_value kiln_c99_control_diagnostic(void);
+extern KILN_COLD kiln_value kiln_c99_control_diagnostic(void);
 extern int kiln_c99_diagnostic_available(void);
 extern void kiln_c99_forget_handled_throw(void);
-extern void kiln_c99_note_refusal(const char *site, size_t instruction, const char *operation, size_t depth);
+extern KILN_COLD void kiln_c99_note_refusal(const char *site, size_t instruction, const char *operation, size_t depth);
 extern kiln_value kiln_c99_text(kiln_value value);
 extern kiln_value kiln_c99_concat(kiln_value left, kiln_value right);
 extern int kiln_c99_strict_equal(kiln_value left, kiln_value right);
@@ -278,8 +282,8 @@ extern uint64_t kiln_c99_array_method(const char *key, size_t key_len);
 extern uint64_t kiln_c99_string_method(const char *key, size_t key_len);
 extern int kiln_c99_read_property(kiln_host *host, kiln_value target, const char *key, size_t key_len, int depth, kiln_value *thrown, kiln_c99_site *site, kiln_value *out);
 extern int kiln_c99_write_property(kiln_host *host, kiln_value target, const char *key, size_t key_len, kiln_value value, int strict, int depth, kiln_value *thrown, kiln_c99_site *site);
-extern void kiln_c99_note_get_property_refusal(kiln_value target);
-extern void kiln_c99_note_get_computed_refusal(kiln_value target, kiln_value key);
+extern KILN_COLD void kiln_c99_note_get_property_refusal(kiln_value target);
+extern KILN_COLD void kiln_c99_note_get_computed_refusal(kiln_value target, kiln_value key);
 extern int kiln_c99_read_element(kiln_host *host, kiln_value target, kiln_value key, int depth, kiln_value *thrown, kiln_value *out);
 extern int kiln_c99_write_element(kiln_host *host, kiln_value target, kiln_value key, kiln_value value, int strict, int depth, kiln_value *thrown);
 extern uint32_t kiln_c99_gc_kind_of_ptr(const void *ptr);

@@ -30,9 +30,13 @@ expression: abi_surface(prelude)
 #if defined(__GNUC__) || defined(__clang__)
 #define KILN_LIKELY(x) __builtin_expect(!!(x), 1)
 #define KILN_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#define KILN_COLD __attribute__((cold))
+#define KILN_NOINLINE __attribute__((noinline))
 #else
 #define KILN_LIKELY(x) (x)
 #define KILN_UNLIKELY(x) (x)
+#define KILN_COLD
+#define KILN_NOINLINE
 #endif
 #ifndef KILN_RETAIN_GROUP_NODE_EVENT
 #define KILN_RETAIN_GROUP_NODE_EVENT 1
@@ -134,11 +138,11 @@ static size_t kiln_c99_diagnostic_function_len = 0;
 static const kiln_string *kiln_c99_diagnostic_function_key = NULL;
 static char kiln_c99_diagnostic_compose[128];
 static int kiln_c99_diagnostic_active_depth = 0;
-static int kiln_c99_refuse(const char *lacked) {
-static int kiln_c99_refuse_named(const char *lacked, const char *subject, size_t subject_len) {
-static void kiln_c99_note_refusal(const char *site, size_t instruction,
-static int kiln_c99_refuse_at(const char *site, size_t instruction,
-static int kiln_c99_internal_status(const char *converted_by) {
+static KILN_COLD int kiln_c99_refuse(const char *lacked) {
+static KILN_COLD int kiln_c99_refuse_named(const char *lacked, const char *subject, size_t subject_len) {
+static KILN_COLD void kiln_c99_note_refusal(const char *site, size_t instruction,
+static KILN_COLD int kiln_c99_refuse_at(const char *site, size_t instruction,
+static KILN_COLD int kiln_c99_internal_status(const char *converted_by) {
 #define KILN_C99_REFUSE(lacked) return kiln_c99_refuse(lacked)
 #define KILN_C99_REFUSE_NAMED(lacked, subject, subject_len) \
 #define KILN_C99_REFUSE_AT(site, instruction, operation, depth) \
@@ -877,7 +881,7 @@ static inline kiln_val kiln_val_from_boundary(kiln_value v) {
 static inline kiln_value kiln_c99_return_signal(void) {
 static inline kiln_val kiln_c99_val_from_double(double d) {
 int32_t kiln_bigint_is_zero(const void *handle);
-typedef void (*kiln_parallel_chunk_fn)(const void *in, void *out, size_t start, size_t end,
+typedef void (*kiln_parallel_chunk_fn)(const void * restrict in, void * restrict out, size_t start, size_t end,
 int32_t kiln_parallel_map(const void *in, size_t count, void *out, kiln_parallel_chunk_fn chunk,
 static inline int kiln_c99_val_truthy(kiln_val v) {
 static inline const char *kiln_c99_string_ascii_bytes(kiln_value value, size_t *length) {
@@ -909,7 +913,7 @@ extern int kiln_realm_gc_mark_roots(void *heap);
 struct kiln_closure;
 struct kiln_generator;
 typedef struct kiln_call_context {
-typedef int (*kiln_body_fn)(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
+typedef int (*kiln_body_fn)(kiln_call_context *ctx, kiln_val * restrict result, kiln_val * restrict upvalues,
 typedef struct kiln_closure {
 typedef struct kiln_method_store {
 typedef enum kiln_native_prototype_surface {
@@ -2116,10 +2120,10 @@ static kiln_value kiln_c99_control_diagnostic(void) {
 KILN_VALUE_STRING, 0, (const char *)kiln_c99_diagnostic_function_key,
 #undef KILN_DIAGNOSTIC_DECIMAL
 static void kiln_c99_forget_handled_throw(void) {
-void kiln_c99_publish_diagnostic(void) {
+KILN_COLD void kiln_c99_publish_diagnostic(void) {
 KILN_VALUE_STRING, 0, (const char *)kiln_c99_diagnostic_function_key,
 int kiln_c99_diagnostic_available(void) {
-static void kiln_c99_note_refusal(const char *site, size_t instruction,
+static KILN_COLD void kiln_c99_note_refusal(const char *site, size_t instruction,
 static int kiln_c99_text_append_grow(kiln_text *text, const char *bytes, size_t len) {
 static int kiln_c99_text_append_c(kiln_text *text, const char *literal) {
 static kiln_value kiln_c99_text_value(kiln_text *text) {

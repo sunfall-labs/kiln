@@ -337,7 +337,7 @@ pub fn emit_function_from_graph_with_profile(
             } else {
                 writeln!(
                     output,
-                    "{optnone}{static_kw}int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {{"
+                    "{optnone}{static_kw}int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_val * restrict result, kiln_val * restrict upvalues, const kiln_val * restrict receiver_ptr, const kiln_val * restrict args, size_t argc) {{"
                 )
                 .unwrap();
             }
@@ -362,7 +362,7 @@ pub fn emit_function_from_graph_with_profile(
             } else {
                 writeln!(
                     output,
-                    "{static_kw}{always_inline}int {symbol}_fn_{index}_f(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {{"
+                    "{static_kw}{always_inline}int {symbol}_fn_{index}_f(kiln_call_context *ctx, kiln_val * restrict result, kiln_val * restrict upvalues, const kiln_val * restrict receiver_ptr, const kiln_val * restrict args, size_t argc) {{"
                 )
                 .unwrap();
             }

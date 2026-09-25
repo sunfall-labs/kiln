@@ -8,11 +8,11 @@ static const kiln_string kiln_module_28c488eb61184e73093ffbb78484535e_function_n
 static void kiln_module_28c488eb61184e73093ffbb78484535e_gc_roots(void *heap, void *context, int phase) {
     kiln_c99_gc_unit_roots(heap, context, phase);
 }
-static inline int kiln_module_28c488eb61184e73093ffbb78484535e_fn_0(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);
-static inline int kiln_module_28c488eb61184e73093ffbb78484535e_fn_0_f(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);
-static inline kiln_val kiln_module_28c488eb61184e73093ffbb78484535e_fn_0_t(int depth, kiln_val *upvalues, kiln_val receiver, kiln_host *host, kiln_value *thrown, double p0);
+static inline int kiln_module_28c488eb61184e73093ffbb78484535e_fn_0(kiln_call_context *ctx, kiln_val * restrict result, kiln_val * restrict upvalues, const kiln_val * restrict receiver_ptr, const kiln_val * restrict args, size_t argc);
+static inline int kiln_module_28c488eb61184e73093ffbb78484535e_fn_0_f(kiln_call_context *ctx, kiln_val * restrict result, kiln_val * restrict upvalues, const kiln_val * restrict receiver_ptr, const kiln_val * restrict args, size_t argc);
+static inline kiln_val kiln_module_28c488eb61184e73093ffbb78484535e_fn_0_t(int depth, kiln_val * restrict upvalues, kiln_val receiver, kiln_host *host, kiln_value *thrown, double p0);
 /* function 0: add */
-static inline int kiln_module_28c488eb61184e73093ffbb78484535e_fn_0(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {
+static inline int kiln_module_28c488eb61184e73093ffbb78484535e_fn_0(kiln_call_context *ctx, kiln_val * restrict result, kiln_val * restrict upvalues, const kiln_val * restrict receiver_ptr, const kiln_val * restrict args, size_t argc) {
     kiln_host *host = ctx->host;
     kiln_value *thrown = ctx->thrown;
     kiln_generator *frame = ctx->frame;
@@ -34,7 +34,7 @@ kiln_refusal:;
     return KILN_C99_CONTROL_ERROR;
 }
 /* function 0: add, typed entry */
-static inline __attribute__((always_inline)) kiln_val kiln_module_28c488eb61184e73093ffbb78484535e_fn_0_t(int depth, kiln_val *upvalues, kiln_val receiver, kiln_host *host, kiln_value *thrown, double p0) {
+static inline __attribute__((always_inline)) kiln_val kiln_module_28c488eb61184e73093ffbb78484535e_fn_0_t(int depth, kiln_val * restrict upvalues, kiln_val receiver, kiln_host *host, kiln_value *thrown, double p0) {
     (void)depth;
     const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;
     double d0 = 0.0, d3 = 0.0, d4 = 0.0;
@@ -46,7 +46,7 @@ kiln_block_0:;
     return v3;
 }
 /* function 0: add, fast clone */
-static inline __attribute__((always_inline)) int kiln_module_28c488eb61184e73093ffbb78484535e_fn_0_f(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {
+static inline __attribute__((always_inline)) int kiln_module_28c488eb61184e73093ffbb78484535e_fn_0_f(kiln_call_context *ctx, kiln_val * restrict result, kiln_val * restrict upvalues, const kiln_val * restrict receiver_ptr, const kiln_val * restrict args, size_t argc) {
     (void)upvalues;
     kiln_val receiver = receiver_ptr ? *receiver_ptr : KILN_VAL_UNDEFINED;
     const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;

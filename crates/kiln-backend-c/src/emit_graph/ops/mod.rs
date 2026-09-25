@@ -282,7 +282,12 @@ pub(super) fn emit_graph_op(
             Constant::Number(bits) => {
                 let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
                 if need_box {
-                    writeln!(output, "    v{v} = UINT64_C({bits});").unwrap();
+                    let val_expr = if f64::from_bits(*bits).is_nan() {
+                        "KILN_QNAN_BASE".to_string()
+                    } else {
+                        format!("UINT64_C({bits})")
+                    };
+                    writeln!(output, "    v{v} = {val_expr};").unwrap();
                 }
                 if live_typed {
                     if need_box {

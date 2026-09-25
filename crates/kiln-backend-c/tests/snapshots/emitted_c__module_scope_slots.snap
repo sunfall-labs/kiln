@@ -10,9 +10,9 @@ static void kiln_module_a565026db870a77a306e28a6a100fa79_gc_roots(void *heap, vo
     if (phase == KILN_GC_PHASE_MARK) kiln_c99_gc_mark_vals((struct kiln_gc_heap *)heap, kiln_module_a565026db870a77a306e28a6a100fa79_globals, 2);
     kiln_c99_gc_unit_roots(heap, context, phase);
 }
-static inline int kiln_module_a565026db870a77a306e28a6a100fa79_fn_0(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);
+static inline int kiln_module_a565026db870a77a306e28a6a100fa79_fn_0(kiln_call_context *ctx, kiln_val * restrict result, kiln_val * restrict upvalues, const kiln_val * restrict receiver_ptr, const kiln_val * restrict args, size_t argc);
 /* function 0: read */
-static inline int kiln_module_a565026db870a77a306e28a6a100fa79_fn_0(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {
+static inline int kiln_module_a565026db870a77a306e28a6a100fa79_fn_0(kiln_call_context *ctx, kiln_val * restrict result, kiln_val * restrict upvalues, const kiln_val * restrict receiver_ptr, const kiln_val * restrict args, size_t argc) {
     kiln_host *host = ctx->host;
     kiln_value *thrown = ctx->thrown;
     kiln_generator *frame = ctx->frame;
