@@ -738,6 +738,15 @@ static kiln_gc_heap *kiln_c99_gc_heap(void) {
     return heap;
 }
 
+/* This thread's realm's heap, as an opaque token a module unit can remember and compare: an
+ * inline cache whose answer depends on the realm (a remembered miss that ends at this realm's
+ * Object.prototype, a literal site's shape whose keys are this realm's interned pointers) stamps
+ * itself with it. Exported, as every non-inline prelude function is, and memoized per unit by
+ * `kiln_c99_unit_heap` under the realm generation. */
+static const void *kiln_c99_realm_heap_token(void) {
+    return (const void *)kiln_c99_gc_heap();
+}
+
 /* The generation of the realm this thread is in: the word `kiln_c99_gc_heap` trusts its heap
  * pointer under, for any other cache in compiled C that must not outlive the realm it learned
  * from. */
@@ -2653,6 +2662,12 @@ static void kiln_c99_gc_finalize(kiln_gc_block *block) {
     case KILN_GC_BYTES:
         break;
     case KILN_GC_OBJECT:
+        /* An object an inline cache reads through is remembered by address (a holder, a
+         * prototype a remembered miss compared, a store's cleared prototype). Its death moves
+         * the epoch, so a new object at the same address -- which starts unflagged, and can gain
+         * members without moving anything -- is never taken for it. The per-heap site list
+         * clears the same entries, but only for sites registered in this realm's heap. */
+        if (((kiln_object *)payload)->cache_holder) kiln_c99_proto_epoch += 1;
         free(((kiln_object *)payload)->properties);
         if (((kiln_object *)payload)->slots != ((kiln_object *)payload)->inline_slots) {
             free(((kiln_object *)payload)->slots);
@@ -3323,5 +3338,6 @@ static kiln_shape kiln_c99_root_shape = {
     {NULL, NULL}, /* inline_trans_next */
     NULL, /* transitions */
     0,    /* has_symbol_key */
-    0     /* double_slots_mask */
+    0,    /* double_slots_mask */
+    NULL  /* edge_table */
 };

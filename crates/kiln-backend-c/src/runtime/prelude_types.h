@@ -83,6 +83,20 @@ static inline int kiln_c99_typed_failed(double d) {
 #define KILN_VAL_IS_NULL(v)      ((v) == KILN_VAL_NULL)
 #define KILN_VAL_IS_UNDEFINED(v) ((v) == KILN_VAL_UNDEFINED)
 #define KILN_VAL_IS_NULLISH(v)   ((v) == KILN_VAL_UNDEFINED || (v) == KILN_VAL_NULL)
+/* undefined, null, true or false: the values whose identity is their bits, so `===` against one
+ * of them is a word compare whatever the other operand is. */
+#define KILN_VAL_IS_IMMEDIATE(v) (KILN_VAL_IS_NULLISH(v) || KILN_VAL_IS_BOOLEAN(v))
+/* The equality operators (codes 7/8 strict, 15/16 loose) when an operand is an immediate: `===`
+ * compares words, and `==` against undefined or null holds exactly for undefined and null.
+ * `x === undefined`, `opts.signal != null`: the common tests of an optional member, which went
+ * through the boundary conversion and the full operator before. HOLE if the pair is not one. */
+#define KILN_VAL_EQUALITY_IMMEDIATE(op, left, right) \
+    (((op) == 7 || (op) == 8) && (KILN_VAL_IS_IMMEDIATE(left) || KILN_VAL_IS_IMMEDIATE(right)) \
+         ? ((((left) == (right)) == ((op) == 7)) ? KILN_VAL_TRUE : KILN_VAL_FALSE) \
+     : ((op) == 15 || (op) == 16) && (KILN_VAL_IS_NULLISH(left) || KILN_VAL_IS_NULLISH(right)) \
+         ? (((KILN_VAL_IS_NULLISH(left) && KILN_VAL_IS_NULLISH(right)) == ((op) == 15)) ? KILN_VAL_TRUE \
+                                                                                        : KILN_VAL_FALSE) \
+         : KILN_VAL_HOLE)
 #define KILN_VAL_IS_STRING(v)    (((v) & KILN_TAG_MASK) == KILN_TAG_STRING_PREFIX)
 #define KILN_VAL_IS_OBJECT(v)    (((v) & KILN_TAG_MASK) == KILN_TAG_OBJECT_PREFIX)
 #define KILN_VAL_IS_CLOSURE(v)   (((v) & KILN_TAG_MASK) == KILN_TAG_CLOSURE_PREFIX)
@@ -649,7 +663,25 @@ typedef struct kiln_shape {
      * of an object with this shape has to know before copying its slots wholesale. */
     uint32_t has_symbol_key;
     uint32_t double_slots_mask;
+    /* The transitions again, open-addressed by key pointer, once a shape has more than a few: a
+     * shape every object literal starts from (the root) collects one branch per distinct first
+     * key in the program *and* in the realm's bootstrap, and a list walk there is paid by every
+     * literal and every constructor. NULL until `KILN_SHAPE_TABLE_FROM` branches exist; the list
+     * above stays complete, so the table is only ever an index over it. A grown table replaces
+     * its predecessor without freeing it (see `kiln_c99_shape_index_edge`). */
+    struct kiln_shape_edge_table *edge_table;
 } kiln_shape;
+
+typedef struct kiln_shape_edge {
+    const kiln_string *ikey;
+    struct kiln_shape *next;
+} kiln_shape_edge;
+
+/* The mask lives with the slots it describes, so one pointer load gives a reader both. */
+typedef struct kiln_shape_edge_table {
+    uint32_t mask;
+    kiln_shape_edge edges[];
+} kiln_shape_edge_table;
 
 /* A plain data object: own string-keyed properties, scanned linearly.
  *
@@ -787,6 +819,16 @@ static uint64_t kiln_c99_proto_epoch;
 static inline void kiln_c99_prototype_touched(const kiln_object *object) {
     if (KILN_UNLIKELY(object->cache_holder)) kiln_c99_proto_epoch += 1;
 }
+
+/* Under `KILN_IC_CHECK`, every remembered miss a read answers is re-run the long way and a
+ * present property traps (`kiln_c99_site_miss_check`). Spelled as a macro so an emitted site
+ * names it unconditionally; it reads the enclosing body's `host`, `depth` and `thrown`. */
+#ifdef KILN_IC_CHECK
+#define KILN_C99_SITE_MISS_ORACLE(TARGET, KEY) \
+    kiln_c99_site_miss_check(host, (TARGET), (KEY), (KEY), depth, thrown)
+#else
+#define KILN_C99_SITE_MISS_ORACLE(TARGET, KEY) ((void)0)
+#endif
 
 /* A prototype chain is built by the program, so its length is the program's business -- but the
  * walk is on the C stack, where running out aborts rather than reports. Bounded, like the

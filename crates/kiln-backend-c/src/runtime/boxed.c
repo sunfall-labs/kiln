@@ -891,6 +891,13 @@ static kiln_val kiln_c99_val_binary(uint16_t operation, kiln_host *host, kiln_va
         *status = KILN_C99_OK;
         return kiln_c99_val_binary_fast(operation, left, right);
     }
+    {
+        kiln_val immediate = KILN_VAL_EQUALITY_IMMEDIATE(operation, left, right);
+        if (immediate != KILN_VAL_HOLE) {
+            *status = KILN_C99_OK;
+            return immediate;
+        }
+    }
     kiln_value l = kiln_val_to_boundary(left);
     kiln_value r = kiln_val_to_boundary(right);
     kiln_value ans;
@@ -1061,6 +1068,188 @@ static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln
 }
 #endif
 
+/* ---------------------------------------------------------------------------------------------
+ * The negative read cache: a site that has seen a read miss remembers "an object of this shape,
+ * with this prototype link, in this realm, has no such key anywhere a read looks", and answers
+ * the next such read `undefined` without the walk. `init.status` on `{ headers }`, `opts.signal`
+ * on an options bag, `if (o.x !== undefined)`: a miss used to cost the whole slow path -- the
+ * chain, the Object.prototype method table, the Object.prototype store -- on every read.
+ *
+ * WHY IT IS EXACT. An entry is `slot == UINT32_MAX`, `holder == NULL` and holds while all of:
+ *
+ *   - the receiver has the remembered shape, and no property list, no brand and no namespace
+ *     flag. A shape is the receiver's complete own-key set only when nothing lives beside it in a
+ *     list; an error, an `arguments` object and a namespace answer reads by rules of their own.
+ *   - the receiver's own prototype link is the remembered one, by tag and pointer. A shape says
+ *     nothing about the chain -- `Object.create(p)` and `{}` share the root -- so the link is
+ *     compared on every hit, and `__proto__ =` / `setPrototypeOf` on the receiver misses.
+ *   - `kiln_c99_proto_epoch` has not moved. Every object on the chain was checked to lack the
+ *     key when learned and was flagged `cache_holder`, so a property added, defined or deleted
+ *     on any of them, or a link of theirs changed, moves the epoch.
+ *   - `kiln_c99_builtin_store_epoch` has not moved: the chain ends at Object.prototype, whose
+ *     program-written members live in a built-in store, and every write to one moves it.
+ *   - the realm is the one learned in (its heap, per thread): sites and shapes are process-wide,
+ *     and another realm's Object.prototype is another store.
+ *   - the remembered prototype is alive: a collection that frees it clears `via`, and a live
+ *     object's address never equals NULL, so the pointer compare above fails from then on.
+ *
+ * What is never learned: an index-like key (elements), a machine key (`@@`), and the names the
+ * slow path answers from the *receiver's* kind rather than its chain (`__proto__`, `constructor`,
+ * `name`, `message`, `toString`); a chain through anything but ordinary objects (a function's
+ * statics, a built-in prototype, a proxy); and a key the chain or the Object.prototype store
+ * *holds* with the value undefined, or behind a getter -- only an absence is remembered, never
+ * an answer, because an answer can change without any shape or epoch moving.
+ *
+ * Entry fields, reused from the positive entry's layout: `via` the prototype object (NULL for
+ * none), `holder_slot` the prototype's tag, `epoch` the proto epoch, `holder_val` the built-in
+ * store epoch, `holder_value.bits` the realm's heap. */
+#ifndef KILN_C99_SITE_MISS_HOLDS_DEFINED
+#define KILN_C99_SITE_MISS_HOLDS_DEFINED
+static inline const void *kiln_c99_unit_heap(void) {
+    return (const void *)kiln_c99_gc_heap();
+}
+static inline int kiln_c99_site_miss_holds(const kiln_c99_pic_entry *entry, const kiln_object *object) {
+    return entry->holder == NULL && entry->transition_to == NULL &&
+           entry->epoch == kiln_c99_proto_epoch &&
+           entry->holder_val == (kiln_val)kiln_c99_builtin_store_epoch &&
+           object->properties == NULL && !object->error_brand && !object->arguments_brand &&
+           !object->module_namespace &&
+           object->prototype.tag == entry->holder_slot &&
+           (object->prototype.tag != KILN_VALUE_OBJECT ||
+            (const kiln_object *)(uintptr_t)object->prototype.bits == entry->via) &&
+           entry->holder_value.bits == (uint64_t)(uintptr_t)kiln_c99_unit_heap();
+}
+#endif
+
+#ifdef KILN_IC_CHECK
+/* The oracle for the negative cache: the slow path, run again, must find nothing. */
+static void kiln_c99_site_miss_check(kiln_host *host, kiln_val target, const kiln_string *key,
+                                     const kiln_string *canonical, int depth, kiln_value *thrown) {
+    kiln_value slow = kiln_c99_undefined();
+    int status = kiln_c99_get_key(host, kiln_val_to_boundary(target), key, canonical, &slow, depth,
+                                  thrown);
+    if (status != KILN_C99_OK || slow.tag != KILN_VALUE_UNDEFINED) {
+        fputs("kiln: inline-cache oracle: a remembered property miss is present under unmoved epochs; a mutation path forgot kiln_c99_prototype_touched\n", stderr);
+        __builtin_trap();
+    }
+}
+#endif
+
+/* Whether `key` is truly absent from `object` itself: not in its shape, its list or its
+ * elements. A key held with the value undefined is present. */
+static int kiln_c99_object_lacks_key(const kiln_object *object, const kiln_string *ikey,
+                                     const kiln_string *key) {
+    size_t index;
+    if (object->shape != NULL && kiln_c99_shape_find_slot(object->shape, ikey, NULL)) return 0;
+    for (index = 0; index < object->count && object->properties != NULL; ++index) {
+        if (object->properties[index].key == ikey ||
+            kiln_c99_same_key_view(&object->properties[index], key)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Remember that the read of `key` on `target` just missed, when the miss is one the entry above
+ * can prove again by comparing words. The slow path has already answered undefined; this only
+ * decides whether that answer is a function of what the entry compares. */
+static void kiln_c99_site_learn_miss(kiln_c99_site *site, kiln_val target, const kiln_string *key,
+                                     const kiln_string *canonical) {
+    const kiln_object *object;
+    const kiln_string *ikey;
+    kiln_value link;
+    kiln_c99_pic_entry remembered;
+    kiln_gc_heap *heap;
+    uint32_t p;
+    int steps;
+    void *ptr = KILN_VAL_PTR(target);
+    if (ptr == NULL || kiln_c99_gc_payload_kind(ptr) != KILN_GC_OBJECT) return;
+    object = (const kiln_object *)ptr;
+    if (object->shape == NULL || object->properties != NULL || object->elements != NULL ||
+        object->error_brand || object->arguments_brand || object->module_namespace) {
+        return;
+    }
+    if (kiln_c99_key_index_key(key) >= 0.0 || kiln_c99_key_is_reserved(key) ||
+        kiln_c99_same_name_key(key, "__proto__") || kiln_c99_same_name_key(key, "constructor") ||
+        kiln_c99_same_name_key(key, "name") || kiln_c99_same_name_key(key, "message") ||
+        kiln_c99_same_name_key(key, "toString")) {
+        return;
+    }
+    /* Looked up by bytes, not taken from the site: a site's pointer is only an optimisation and
+     * may be another realm's, and a stale one would find nothing and prove a false absence. */
+    (void)canonical;
+    ikey = kiln_c99_interned_key(key);
+    heap = kiln_c99_gc_heap();
+    if (heap == NULL) return;
+    if (ikey != NULL && !kiln_c99_object_lacks_key(object, ikey, key)) return;
+    /* The chain: ordinary objects only, each without the key, ending in nothing recorded
+     * (Object.prototype) or in an explicit null. */
+    link = object->prototype;
+    for (steps = 0; link.tag == KILN_VALUE_OBJECT; ++steps) {
+        const kiln_object *step = kiln_c99_object_of(link);
+        if (steps >= 32 || step == NULL || kiln_c99_gc_payload_kind((void *)step) != KILN_GC_OBJECT ||
+            step->module_namespace) {
+            return;
+        }
+        if (ikey != NULL && !kiln_c99_object_lacks_key(step, ikey, key)) return;
+        if (ikey == NULL) {
+            size_t index;
+            for (index = 0; index < step->count && step->properties != NULL; ++index) {
+                if (kiln_c99_same_key_view(&step->properties[index], key)) return;
+            }
+        }
+        link = step->prototype;
+    }
+    if (link.tag != KILN_VALUE_UNDEFINED && link.tag != KILN_VALUE_NULL) return;
+    /* Every chain that does not end in an explicit null on the receiver itself is answered, at
+     * its end, from Object.prototype's method table (fixed) and its program-written store, which
+     * must not hold the key either -- held there with undefined, or as a getter, it is an answer. */
+    if (object->prototype.tag != KILN_VALUE_NULL) {
+        kiln_value store;
+        if (kiln_c99_callable_store(kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE), &store, 0) !=
+            KILN_C99_OK) {
+            return;
+        }
+        if (store.tag == KILN_VALUE_OBJECT &&
+            !kiln_c99_object_lacks_key(kiln_c99_object_of(store), ikey != NULL ? ikey : key, key)) {
+            return;
+        }
+    }
+    /* Flag the chain only now that it will be remembered: a mutation of any of these moves the
+     * epoch from here on. */
+    link = object->prototype;
+    while (link.tag == KILN_VALUE_OBJECT) {
+        kiln_object *step = (kiln_object *)kiln_c99_object_of(link);
+        step->cache_holder = 1;
+        link = step->prototype;
+    }
+    memset(&remembered, 0, sizeof remembered);
+    remembered.shape = object->shape;
+    remembered.slot = UINT32_MAX;
+    remembered.holder_slot = object->prototype.tag;
+    remembered.via = object->prototype.tag == KILN_VALUE_OBJECT ? kiln_c99_object_of(object->prototype)
+                                                                : NULL;
+    remembered.epoch = kiln_c99_proto_epoch;
+    remembered.holder_val = (kiln_val)kiln_c99_builtin_store_epoch;
+    remembered.holder_value.bits = (uint64_t)(uintptr_t)heap;
+    for (p = 0; p < site->pic_count; ++p) {
+        if (site->entries[p].shape == object->shape) {
+            site->entries[p] = remembered;
+            break;
+        }
+    }
+    if (p == site->pic_count) {
+        if (site->pic_count < KILN_C99_PIC_SIZE) {
+            site->entries[site->pic_count++] = remembered;
+        } else {
+            site->entries[KILN_C99_PIC_SIZE - 1] = remembered;
+        }
+    }
+    /* The collector forgets `via` when the prototype dies, so its address can never be mistaken
+     * for a new object's. */
+    if (remembered.via != NULL) kiln_c99_gc_register_site(site);
+}
+
 static int kiln_c99_val_read_property_view(kiln_host *host, kiln_val target,
                                            const kiln_string *key,
                                            const kiln_string *canonical, int depth,
@@ -1093,7 +1282,11 @@ static int kiln_c99_val_read_property_view(kiln_host *host, kiln_val target,
                     } else if (site->entries[p].slot < object->slot_capacity) {
                         *out = object->slots[site->entries[p].slot];
                         return KILN_C99_OK;
-                    } else if (site->entries[p].slot == UINT32_MAX && site->entries[p].epoch == kiln_c99_proto_epoch) {
+                    } else if (site->entries[p].slot == UINT32_MAX &&
+                               kiln_c99_site_miss_holds(&site->entries[p], object)) {
+#ifdef KILN_IC_CHECK
+                        kiln_c99_site_miss_check(host, target, key, canonical, depth, thrown);
+#endif
                         *out = KILN_VAL_UNDEFINED;
                         return KILN_C99_OK;
                     }
@@ -1229,53 +1422,8 @@ static int kiln_c99_val_read_property_view(kiln_host *host, kiln_val target,
     int status = kiln_c99_get_site(host, t, key, canonical, &o, depth, thrown, site);
     if (status == KILN_C99_OK) {
         *out = kiln_val_from_boundary(o);
-        if (o.tag == KILN_VALUE_UNDEFINED && site != NULL && KILN_VAL_IS_OBJECT(target) &&
-            kiln_c99_key_index_key(key) < 0.0) {
-            void *ptr = KILN_VAL_PTR(target);
-            if (ptr != NULL && kiln_c99_gc_payload_kind(ptr) == KILN_GC_OBJECT) {
-                const kiln_object *object = (const kiln_object *)ptr;
-                if (object->shape != NULL && object->properties == NULL && object->elements == NULL) {
-                    uint32_t p;
-                    int found = 0;
-                    for (p = 0; p < site->pic_count; ++p) {
-                        if (site->entries[p].shape == object->shape) {
-                            site->entries[p].transition_to = NULL;
-                            site->entries[p].slot = UINT32_MAX;
-                            site->entries[p].holder = NULL;
-                            site->entries[p].epoch = kiln_c99_proto_epoch;
-                            found = 1;
-                            break;
-                        }
-                    }
-                    if (!found) {
-                        if (site->pic_count < KILN_C99_PIC_SIZE) {
-                            site->entries[site->pic_count].shape = object->shape;
-                            site->entries[site->pic_count].transition_to = NULL;
-                            site->entries[site->pic_count].slot = UINT32_MAX;
-                            site->entries[site->pic_count].holder = NULL;
-                            site->entries[site->pic_count].epoch = kiln_c99_proto_epoch;
-                            site->pic_count += 1;
-                        } else {
-                            uint32_t last = KILN_C99_PIC_SIZE - 1;
-                            site->entries[last].shape = object->shape;
-                            site->entries[last].transition_to = NULL;
-                            site->entries[last].slot = UINT32_MAX;
-                            site->entries[last].holder = NULL;
-                            site->entries[last].epoch = kiln_c99_proto_epoch;
-                        }
-                    }
-                    kiln_value cur_proto = object->prototype;
-                    while (cur_proto.tag == KILN_VALUE_OBJECT) {
-                        kiln_object *proto_obj = (kiln_object *)(uintptr_t)cur_proto.bits;
-                        if (proto_obj != NULL && kiln_c99_gc_payload_kind(proto_obj) == KILN_GC_OBJECT) {
-                            proto_obj->cache_holder = 1;
-                            cur_proto = proto_obj->prototype;
-                        } else {
-                            break;
-                        }
-                    }
-                }
-            }
+        if (o.tag == KILN_VALUE_UNDEFINED && site != NULL && KILN_VAL_IS_OBJECT(target)) {
+            kiln_c99_site_learn_miss(site, target, key, canonical);
         }
     }
     return status;

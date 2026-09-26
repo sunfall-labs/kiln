@@ -341,6 +341,37 @@ extern int kiln_c99_val_read_property(kiln_host *host, kiln_val target, const ch
 extern int kiln_c99_val_write_property(kiln_host *host, kiln_val target, const char *key, size_t key_len, kiln_val value, int strict, int depth, kiln_value *thrown, kiln_c99_site *site);
 extern int kiln_c99_val_read_property_key(kiln_host *host, kiln_val target, const kiln_string *key, int depth, kiln_value *thrown, kiln_c99_site *site, kiln_val *out);
 extern int kiln_c99_val_write_property_key(kiln_host *host, kiln_val target, const kiln_string *key, kiln_val value, int strict, int depth, kiln_value *thrown, kiln_c99_site *site);
+extern const void *kiln_c99_realm_heap_token(void);
+#ifdef KILN_IC_CHECK
+extern void kiln_c99_site_miss_check(kiln_host *host, kiln_val target, const kiln_string *key, const kiln_string *canonical, int depth, kiln_value *thrown);
+#endif
+#ifndef KILN_C99_SITE_MISS_HOLDS_DEFINED
+#define KILN_C99_SITE_MISS_HOLDS_DEFINED
+/* This thread's realm heap as a token, asked of the prelude once per realm generation. */
+static inline const void *kiln_c99_unit_heap(void) {
+    static _Thread_local uint64_t seen_generation;
+    static _Thread_local const void *seen_heap;
+    uint64_t generation = kiln_c99_realm_generation();
+    if (KILN_UNLIKELY(seen_heap == NULL || generation != seen_generation)) {
+        seen_heap = kiln_c99_realm_heap_token();
+        seen_generation = generation;
+    }
+    return seen_heap;
+}
+/* A remembered read miss still holds for `object`; see the prelude's copy in `boxed.c` for
+ * why each word is compared. */
+static inline int kiln_c99_site_miss_holds(const kiln_c99_pic_entry *entry, const kiln_object *object) {
+    return entry->holder == NULL && entry->transition_to == NULL &&
+           entry->epoch == kiln_c99_proto_epoch &&
+           entry->holder_val == (kiln_val)kiln_c99_builtin_store_epoch &&
+           object->properties == NULL && !object->error_brand && !object->arguments_brand &&
+           !object->module_namespace &&
+           object->prototype.tag == entry->holder_slot &&
+           (object->prototype.tag != KILN_VALUE_OBJECT ||
+            (const kiln_object *)(uintptr_t)object->prototype.bits == entry->via) &&
+           entry->holder_value.bits == (uint64_t)(uintptr_t)kiln_c99_unit_heap();
+}
+#endif
 #ifndef KILN_C99_VAL_PRIVATE_CACHED_DEFINED
 #define KILN_C99_VAL_PRIVATE_CACHED_DEFINED
 static inline int kiln_c99_val_get_private_cached(kiln_val *out, kiln_val receiver, kiln_val brand,

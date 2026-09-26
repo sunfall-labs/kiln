@@ -366,7 +366,6 @@ pub(super) fn emit_get_property(
                         if (site.entries[i].holder == NULL) {{ \
                             uint32_t slot = site.entries[i].slot; \
                             if (slot < obj->slot_capacity) {{ v{v} = obj->slots[slot]; handled = 1; break; }} \
-                            else if (slot == UINT32_MAX && site.entries[i].epoch == kiln_c99_proto_epoch) {{ v{v} = KILN_VAL_UNDEFINED; handled = 1; break; }} \
                         }} else {{ \
                             const kiln_object *first = site.entries[i].via != NULL ? site.entries[i].via : site.entries[i].holder; \
                             if (site.entries[i].epoch == kiln_c99_proto_epoch && obj->prototype.tag == KILN_VALUE_OBJECT && (const kiln_object *)(uintptr_t)obj->prototype.bits == first) {{ \
@@ -392,7 +391,8 @@ pub(super) fn emit_get_property(
                             if (KILN_LIKELY(s0 < obj->slot_capacity)) {{ \
                                 v{v} = obj->slots[s0]; \
                                 handled = 1; \
-                            }} else if (s0 == UINT32_MAX && site.entries[0].epoch == kiln_c99_proto_epoch) {{ \
+                            }} else if (s0 == UINT32_MAX && kiln_c99_site_miss_holds(&site.entries[0], obj)) {{ \
+                                KILN_C99_SITE_MISS_ORACLE(v{o}, {symbol}_key_{name}); \
                                 v{v} = KILN_VAL_UNDEFINED; \
                                 handled = 1; \
                             }} \

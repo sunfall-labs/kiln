@@ -58,23 +58,75 @@ static void kiln_c99_pin_interned_key(const kiln_string *ikey) {
     }
 }
 
-/* `@@private:<scope>:%brand`, the key a class constructor stores first on every instance (the
- * spelling is `kiln_ir`'s `private_key(scope, "%brand")`). */
-static int kiln_c99_is_class_brand_key(const kiln_string *key) {
-    static const char prefix[] = "@@private:";
-    static const char suffix[] = ":%brand";
-    size_t prefix_len = sizeof prefix - 1;
-    size_t suffix_len = sizeof suffix - 1;
-    size_t len;
-    size_t index;
-    if (key == NULL || kiln_string_is_utf16(key)) return 0;
-    len = key->unit_len;
-    if (len < prefix_len + suffix_len) return 0;
-    for (index = 0; index < prefix_len; ++index) {
-        if (kiln_string_latin1(key)[index] != prefix[index]) return 0;
+/* Past this many branches a shape indexes them by key pointer (`edge_table`). */
+#define KILN_SHAPE_TABLE_FROM 8u
+/* How many branches one shape may grow before an object that would take a new one goes to
+ * dictionary mode instead. With the index a branch costs the same to find among a thousand as
+ * among eight, so this bounds memory rather than lookup time: a program that builds objects keyed
+ * by unbounded data (`{[id]: x}` per request) stops minting shapes here. */
+#define KILN_SHAPE_MAX_BRANCHES 1024u
+/* And how many shapes the whole process may mint: the same bound for a program whose unbounded
+ * keys arrive one level down, where no single shape reaches the per-shape limit. Shapes are never
+ * freed and pin their keys, so this is the ceiling on what the tree can hold. */
+#define KILN_SHAPE_MAX_TOTAL 32768u
+
+static uint32_t kiln_c99_shape_total;
+
+static inline uint32_t kiln_c99_shape_edge_hash(const kiln_string *ikey) {
+    uint64_t bits = (uint64_t)(uintptr_t)ikey;
+    bits ^= bits >> 17;
+    bits *= UINT64_C(0x9E3779B97F4A7C15);
+    return (uint32_t)(bits >> 32);
+}
+
+/* Record `next` under `ikey` in `shape`'s index, growing it first when it is past half full.
+ * Returns 0 only when a table the shape needs could not be allocated; the caller then refuses
+ * the transition, so the list and the index never disagree.
+ *
+ * A grown table is filled before it is published, and its predecessor is not freed. Shapes are
+ * process-wide plain memory and a realm on another thread may be probing the old table while
+ * this one replaces it; each table is at most half the size of the next, so what is kept is
+ * bounded by the live one. */
+static int kiln_c99_shape_index_edge(kiln_shape *shape, const kiln_string *ikey, kiln_shape *next) {
+    uint32_t need = shape->num_transitions + 1;
+    kiln_shape_edge_table *table = shape->edge_table;
+    if (table == NULL || need * 2 > table->mask + 1) {
+        uint32_t cap = table == NULL ? 32u : (table->mask + 1) * 2;
+        kiln_shape_edge_table *grown;
+        kiln_shape_transition *tr;
+        size_t i;
+        while (need * 2 > cap) cap *= 2;
+        grown = (kiln_shape_edge_table *)calloc(1, sizeof *grown + cap * sizeof(kiln_shape_edge));
+        if (grown == NULL) return 0;
+        grown->mask = cap - 1;
+        /* Every existing branch: the two inline ones and the list. */
+        for (i = 0; i < 2 && i < shape->num_transitions; ++i) {
+            uint32_t at = kiln_c99_shape_edge_hash(shape->inline_trans_ikey[i]) & grown->mask;
+            while (grown->edges[at].ikey != NULL) at = (at + 1) & grown->mask;
+            grown->edges[at].ikey = shape->inline_trans_ikey[i];
+            grown->edges[at].next = shape->inline_trans_next[i];
+        }
+        for (tr = shape->transitions; tr != NULL; tr = tr->next_transition) {
+            uint32_t at = kiln_c99_shape_edge_hash(tr->ikey) & grown->mask;
+            while (grown->edges[at].ikey != NULL) at = (at + 1) & grown->mask;
+            grown->edges[at].ikey = tr->ikey;
+            grown->edges[at].next = tr->next;
+        }
+        {
+            uint32_t at = kiln_c99_shape_edge_hash(ikey) & grown->mask;
+            while (grown->edges[at].ikey != NULL) at = (at + 1) & grown->mask;
+            grown->edges[at].ikey = ikey;
+            grown->edges[at].next = next;
+        }
+        __atomic_store_n(&shape->edge_table, grown, __ATOMIC_RELEASE);
+        return 1;
     }
-    for (index = 0; index < suffix_len; ++index) {
-        if (kiln_string_latin1(key)[len - suffix_len + index] != suffix[index]) return 0;
+    {
+        uint32_t at = kiln_c99_shape_edge_hash(ikey) & table->mask;
+        while (table->edges[at].ikey != NULL) at = (at + 1) & table->mask;
+        /* The target before the key: a reader that sees the key sees where it leads. */
+        table->edges[at].next = next;
+        __atomic_store_n(&table->edges[at].ikey, ikey, __ATOMIC_RELEASE);
     }
     return 1;
 }
@@ -87,33 +139,54 @@ static int kiln_c99_shape_transition(kiln_shape *current, const kiln_string *ike
         return 0;
     }
     uint32_t expected_bit = is_double ? (1u << current->property_count) : 0;
-    for (i = 0; i < 2 && i < current->num_transitions; ++i) {
-        if (current->inline_trans_ikey[i] == ikey) {
-            kiln_shape *cand = current->inline_trans_next[i];
-            if ((cand->double_slots_mask & (1u << current->property_count)) == expected_bit) {
-                *out_shape = cand;
+    const kiln_shape_edge_table *table = __atomic_load_n(&current->edge_table, __ATOMIC_ACQUIRE);
+    if (table != NULL) {
+        /* The index holds every branch (it is built from the list and kept in step with it), so
+         * a probe that reaches an empty slot has seen every edge under this key. Two edges can
+         * share a key -- one whose new slot holds a double and one whose does not -- which is why
+         * the probe checks the mask and keeps going rather than stopping at the key. */
+        uint32_t at = kiln_c99_shape_edge_hash(ikey) & table->mask;
+        const kiln_string *seen;
+        while ((seen = __atomic_load_n(&table->edges[at].ikey, __ATOMIC_ACQUIRE)) != NULL) {
+            if (seen == ikey &&
+                (table->edges[at].next->double_slots_mask & (1u << current->property_count)) ==
+                    expected_bit) {
+                *out_shape = table->edges[at].next;
                 return 1;
+            }
+            at = (at + 1) & table->mask;
+        }
+    } else {
+        for (i = 0; i < 2 && i < current->num_transitions; ++i) {
+            if (current->inline_trans_ikey[i] == ikey) {
+                kiln_shape *cand = current->inline_trans_next[i];
+                if ((cand->double_slots_mask & (1u << current->property_count)) == expected_bit) {
+                    *out_shape = cand;
+                    return 1;
+                }
+            }
+        }
+        for (tr = current->transitions; tr != NULL; tr = tr->next_transition) {
+            if (tr->ikey == ikey) {
+                kiln_shape *cand = tr->next;
+                if ((cand->double_slots_mask & (1u << current->property_count)) == expected_bit) {
+                    *out_shape = cand;
+                    return 1;
+                }
             }
         }
     }
-    for (tr = current->transitions; tr != NULL; tr = tr->next_transition) {
-        if (tr->ikey == ikey) {
-            kiln_shape *cand = tr->next;
-            if ((cand->double_slots_mask & (1u << current->property_count)) == expected_bit) {
-                *out_shape = cand;
-                return 1;
-            }
-        }
-    }
-    /* A shape stops growing branches at 32: past that its objects go to dictionary mode rather
-     * than make every miss walk a long list. A class brand (`@@private:<scope>:%brand`) is the
-     * exception, because it is the first property of every instance of every class, so every
-     * class hangs its branch off the root shape -- and a realm whose bootstrap already defines a
-     * few dozen classes had filled the root before the program's first `new`, which left every
-     * instance of every later class a dictionary from its first field on. A program has as many
-     * brands as it has classes, which bounds the list; the ceiling below only keeps it finite. */
-    if (current->num_transitions >= 32 &&
-        (current->num_transitions >= 1024 || !kiln_c99_is_class_brand_key(ikey))) {
+    /* A shape stops growing branches at `KILN_SHAPE_MAX_BRANCHES`, and the process at
+     * `KILN_SHAPE_MAX_TOTAL` shapes: past either, the object goes to dictionary mode.
+     *
+     * This used to be 32 branches, with an exception for class brands, and the root shape was
+     * full before the program ran: the bootstrap alone takes some thirty first keys (`constructor`,
+     * `prototype`, `value`, `name`, `log`, ...), so every object literal whose first key was not
+     * one of those -- `{ a: 1 }`, `{ headers }`, `{ status }` -- became a dictionary at its first
+     * member. That made the literal site's shape cache (`ku_new_object_literal_fast`) and every
+     * shape-guarded read cache useless for exactly the objects handler code makes most. */
+    if (current->num_transitions >= KILN_SHAPE_MAX_BRANCHES ||
+        kiln_c99_shape_total >= KILN_SHAPE_MAX_TOTAL) {
         return 0;
     }
     next_shape = (kiln_shape *)calloc(1, sizeof(kiln_shape));
@@ -134,21 +207,33 @@ static int kiln_c99_shape_transition(kiln_shape *current, const kiln_string *ike
            current->property_count * sizeof(const kiln_string *));
     next_shape->keys[current->property_count] = ikey;
 
-    if (current->num_transitions < 2) {
-        current->inline_trans_ikey[current->num_transitions] = ikey;
-        current->inline_trans_next[current->num_transitions] = next_shape;
-    } else {
-        kiln_shape_transition *new_tr = (kiln_shape_transition *)calloc(1, sizeof(kiln_shape_transition));
-        if (new_tr == NULL) {
+    {
+        kiln_shape_transition *new_tr = NULL;
+        if (current->num_transitions >= 2) {
+            new_tr = (kiln_shape_transition *)calloc(1, sizeof(kiln_shape_transition));
+            if (new_tr == NULL) {
+                free(next_shape);
+                return 0;
+            }
+        }
+        if (current->num_transitions + 1 > KILN_SHAPE_TABLE_FROM &&
+            !kiln_c99_shape_index_edge(current, ikey, next_shape)) {
+            free(new_tr);
             free(next_shape);
             return 0;
         }
-        new_tr->ikey = ikey;
-        new_tr->next = next_shape;
-        new_tr->next_transition = current->transitions;
-        current->transitions = new_tr;
+        if (new_tr == NULL) {
+            current->inline_trans_ikey[current->num_transitions] = ikey;
+            current->inline_trans_next[current->num_transitions] = next_shape;
+        } else {
+            new_tr->ikey = ikey;
+            new_tr->next = next_shape;
+            new_tr->next_transition = current->transitions;
+            current->transitions = new_tr;
+        }
     }
     current->num_transitions++;
+    kiln_c99_shape_total++;
 
     *out_shape = next_shape;
     return 1;

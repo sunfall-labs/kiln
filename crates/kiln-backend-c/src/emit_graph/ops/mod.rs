@@ -1158,10 +1158,10 @@ pub(super) fn emit_graph_op(
                     .collect::<Vec<_>>()
                     .join(", ");
                 if let Some(keys) = static_keys
-                    && keys.iter().all(|k| k != "__proto__" && !k.starts_with('@'))
+                    && literal_keys_take_one_slot_each(&keys)
                     && count <= 8
                 {
-                    writeln!(output, "    {{ static const kiln_shape *lit_shape = NULL; kiln_val pairs[{pair_count}] = {{ {values} }}; int status = ku_new_object_literal_fast(&v{v}, &lit_shape, pairs, {count}); {check} }}", pair_count = count * 2).unwrap();
+                    writeln!(output, "    {{ static const kiln_shape *lit_shape = NULL; static const void *lit_heap = NULL; kiln_val pairs[{pair_count}] = {{ {values} }}; int status = ku_new_object_literal_fast(&v{v}, &lit_shape, &lit_heap, pairs, {count}); {check} }}", pair_count = count * 2).unwrap();
                 } else {
                     writeln!(output, "    {{ kiln_val pairs[{pair_count}] = {{ {values} }}; int status = kiln_c99_val_new_object_literal(&v{v}, pairs, {count}); {check} }}", pair_count = count * 2).unwrap();
                 }
@@ -1173,7 +1173,7 @@ pub(super) fn emit_graph_op(
                     .map(|(k, _)| resolve_const_string(*k, defs, program))
                     .collect();
                 if let Some(keys) = static_keys
-                    && keys.iter().all(|k| k != "__proto__" && !k.starts_with('@'))
+                    && literal_keys_take_one_slot_each(&keys)
                 {
                     let all_numbers = pairs.iter().all(|(_, val)| numbers.contains(val));
                     let mask_expr = if all_numbers {
@@ -1207,7 +1207,7 @@ pub(super) fn emit_graph_op(
                     }
                     writeln!(
                         output,
-                        "    {{ static const kiln_shape *lit_shape = NULL; kiln_value built; int status = kiln_c99_new_object(&built); if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; kiln_object *obj = kiln_c99_object_of(built); {mask_expr}if (KILN_LIKELY(lit_shape != NULL{mask_guard})) {{{direct_stores} obj->shape = (kiln_shape *)lit_shape; }} else {{{defines} if (status == KILN_C99_OK && obj->shape != NULL) lit_shape = obj->shape; }} v{v} = kiln_val_from_boundary(built); }}"
+                        "    {{ static const kiln_shape *lit_shape = NULL; static const void *lit_heap = NULL; kiln_value built; int status = kiln_c99_new_object(&built); if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; kiln_object *obj = kiln_c99_object_of(built); {mask_expr}if (KILN_LIKELY(lit_shape != NULL{mask_guard} && lit_heap == kiln_c99_unit_heap())) {{{direct_stores} obj->shape = (kiln_shape *)lit_shape; }} else {{{defines} if (status == KILN_C99_OK && obj->shape != NULL && obj->shape->property_count == {count} && obj->slots == obj->inline_slots && obj->properties == NULL && obj->elements == NULL && obj->prototype.tag == KILN_VALUE_UNDEFINED) {{ lit_shape = obj->shape; lit_heap = kiln_c99_unit_heap(); }} }} v{v} = kiln_val_from_boundary(built); }}"
                     ).unwrap();
                     return;
                 }
@@ -1566,4 +1566,31 @@ fn emit_sunk_bridge(
         }
         _ => unreachable!("only a spread or a named define targets a sunk literal"),
     }
+}
+
+/// Whether a literal's static keys each become one new named slot, in order: what a literal
+/// site's remembered shape (`ku_new_object_literal_fast`) assumes when it stores pair `i` into
+/// slot `i`. `__proto__` relinks instead of storing, a `@@` key is a symbol with rules of its own,
+/// an array-index spelling goes to the elements, and a repeated key overwrites an earlier slot --
+/// each of those is left to the defining path. The runtime checks the learned shape's size as
+/// well; this keeps such a site from trying.
+fn literal_keys_take_one_slot_each(keys: &[String]) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    keys.iter().all(|k| {
+        k != "__proto__"
+            && !k.starts_with('@')
+            && !is_array_index_spelling(k)
+            && seen.insert(k.as_str())
+    })
+}
+
+/// A canonical array index: `0`, or digits without a leading zero below 2^32 - 1.
+fn is_array_index_spelling(key: &str) -> bool {
+    if key.is_empty() || !key.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    if key.len() > 1 && key.starts_with('0') {
+        return false;
+    }
+    key.parse::<u64>().is_ok_and(|n| n < u64::from(u32::MAX))
 }

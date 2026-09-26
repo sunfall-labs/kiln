@@ -4754,6 +4754,8 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_introspect_pending", C99StateOwner::Process),
     ("kiln_c99_introspect_armed", C99StateOwner::Process),
     ("kiln_c99_root_shape", C99StateOwner::Constant),
+    // How many shapes the tree holds, which bounds it. Shapes outlive realms like the root does.
+    ("kiln_c99_shape_total", C99StateOwner::Process),
     ("kiln_c99_speculate_mode", C99StateOwner::Process),
     ("kiln_c99_node_stdin_paused", C99StateOwner::Process),
     ("kiln_c99_node_stdin_read_active", C99StateOwner::Process),
