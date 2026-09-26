@@ -341,6 +341,55 @@ extern int kiln_c99_val_read_property(kiln_host *host, kiln_val target, const ch
 extern int kiln_c99_val_write_property(kiln_host *host, kiln_val target, const char *key, size_t key_len, kiln_val value, int strict, int depth, kiln_value *thrown, kiln_c99_site *site);
 extern int kiln_c99_val_read_property_key(kiln_host *host, kiln_val target, const kiln_string *key, int depth, kiln_value *thrown, kiln_c99_site *site, kiln_val *out);
 extern int kiln_c99_val_write_property_key(kiln_host *host, kiln_val target, const kiln_string *key, kiln_val value, int strict, int depth, kiln_value *thrown, kiln_c99_site *site);
+#ifndef KILN_C99_VAL_PRIVATE_CACHED_DEFINED
+#define KILN_C99_VAL_PRIVATE_CACHED_DEFINED
+static inline int kiln_c99_val_get_private_cached(kiln_val *out, kiln_val receiver, kiln_val brand,
+                                                 const kiln_c99_private_site *site) {
+    if (KILN_LIKELY(site != NULL && site->shape != NULL && KILN_VAL_IS_OBJECT(receiver))) {
+        kiln_object *obj = (kiln_object *)KILN_VAL_PTR(receiver);
+        if (KILN_LIKELY(obj != NULL && obj->shape == site->shape &&
+                        kiln_c99_gc_kind_of_ptr(obj) == KILN_GC_OBJECT)) {
+            if (brand == KILN_VAL_UNDEFINED ||
+                (site->brand_slot < obj->slot_capacity && obj->slots[site->brand_slot] == brand)) {
+                if (KILN_LIKELY(site->member_slot < obj->slot_capacity)) {
+                    *out = obj->slots[site->member_slot];
+                    return 1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static inline int kiln_c99_val_set_private_cached(kiln_val receiver, kiln_val brand, kiln_val member,
+                                                 const kiln_c99_private_site *site) {
+    if (KILN_LIKELY(site != NULL && site->shape != NULL && KILN_VAL_IS_OBJECT(receiver))) {
+        kiln_object *obj = (kiln_object *)KILN_VAL_PTR(receiver);
+        if (KILN_LIKELY(obj != NULL && obj->shape == site->shape &&
+                        !obj->frozen && kiln_c99_gc_kind_of_ptr(obj) == KILN_GC_OBJECT)) {
+            if (brand == KILN_VAL_UNDEFINED ||
+                (site->brand_slot < obj->slot_capacity && obj->slots[site->brand_slot] == brand)) {
+                if (KILN_LIKELY(site->member_slot < obj->slot_capacity)) {
+                    if ((obj->shape->double_slots_mask & (1u << site->member_slot)) == 0 || KILN_VAL_IS_NUMBER(member)) {
+                        kiln_c99_prototype_touched(obj);
+                        obj->slots[site->member_slot] = member;
+                        return 1;
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+#endif
+extern int kiln_c99_val_get_private_fast(kiln_val *out, kiln_val receiver, kiln_val brand,
+                                         const char *brand_key, size_t brand_len,
+                                         const char *member_key, size_t member_len,
+                                         kiln_c99_private_site *site);
+extern int kiln_c99_val_set_private_fast(kiln_val receiver, kiln_val brand, kiln_val member,
+                                         const char *brand_key, size_t brand_len,
+                                         const char *member_key, size_t member_len,
+                                         kiln_c99_private_site *site);
 extern int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val key, int depth, kiln_value *thrown, kiln_val *out);
 extern int kiln_c99_val_write_element(kiln_host *host, kiln_val target, kiln_val key, kiln_val value, int strict, int depth, kiln_value *thrown);
 extern int kiln_c99_val_call_method(kiln_host *host, kiln_val receiver, const kiln_val *args, size_t argc, const char *key, size_t key_len, int depth, kiln_value *thrown, kiln_c99_site *site, const char *inst_site, size_t inst_idx, const char *inst_op, kiln_val *out);

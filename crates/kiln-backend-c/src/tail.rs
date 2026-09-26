@@ -108,11 +108,48 @@ pub(crate) fn emit_tail_instruction(
             let Constant::String(text) = &constants[*name as usize] else {
                 unreachable!("verification rejects a non-string private name before emission")
             };
+            let member_key = text.to_scalar_string().unwrap_or_default();
+            let member_len = member_key.len();
+            let brand_key = private_brand_key_of(&member_key);
+            let brand_len = brand_key.len();
             writeln!(
                 output,
-                "    {{ kiln_value brand = kiln_val_to_boundary(stack[--sp]); kiln_value receiver = kiln_val_to_boundary(stack[sp - 1]); if (brand.tag != KILN_VALUE_UNDEFINED) {{ kiln_property *brand_slot = kiln_c99_own_private(receiver, \"{brand_key}\", {brand_len}); if (brand_slot == NULL || brand_slot->accessor || !kiln_c99_strict_equal(brand_slot->value, brand)) {{ int status = kiln_c99_private_error_key(thrown, {symbol}_constant_{name}, 0); {unwind} }} }} kiln_property *slot = kiln_c99_own_private_key(receiver, {symbol}_constant_{name}); if (slot == NULL) {{ int status = kiln_c99_private_error_key(thrown, {symbol}_constant_{name}, 0); {unwind} }} if (slot->accessor) {{ kiln_value getter = slot->getter; kiln_value produced; int status; if (getter.tag == KILN_VALUE_UNDEFINED) {{ status = kiln_c99_private_error_key(thrown, {symbol}_constant_{name}, 2); {unwind} }} status = kiln_c99_call(host, &produced, getter, receiver, NULL, 0, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(produced); }} else {{ stack[sp - 1] = kiln_val_from_boundary(slot->value); }} }}",
-                brand_key = private_brand_key_of(&text.to_scalar_string().unwrap_or_default()),
-                brand_len = private_brand_key_of(&text.to_scalar_string().unwrap_or_default()).len()
+                "    {{ static kiln_c99_private_site site_{pc} = {{0}}; \
+                 kiln_val brand_v = stack[--sp]; \
+                 kiln_val receiver_v = stack[sp - 1]; \
+                 if (kiln_c99_val_get_private_cached(&stack[sp - 1], receiver_v, brand_v, &site_{pc}) || \
+                     kiln_c99_val_get_private_fast(&stack[sp - 1], receiver_v, brand_v, \"{brand_key}\", {brand_len}, \"{member_key}\", {member_len}, &site_{pc})) {{ \
+                 }} else {{ \
+                     kiln_value brand = kiln_val_to_boundary(brand_v); \
+                     kiln_value receiver = kiln_val_to_boundary(receiver_v); \
+                     if (brand.tag != KILN_VALUE_UNDEFINED) {{ \
+                         kiln_property *brand_slot = kiln_c99_own_private(receiver, \"{brand_key}\", {brand_len}); \
+                         if (brand_slot == NULL || brand_slot->accessor || !kiln_c99_strict_equal(brand_slot->value, brand)) {{ \
+                             int status = kiln_c99_private_error_key(thrown, {symbol}_constant_{name}, 0); \
+                             {unwind} \
+                         }} \
+                     }} \
+                     kiln_property *slot = kiln_c99_own_private_key(receiver, {symbol}_constant_{name}); \
+                     if (slot == NULL) {{ \
+                         int status = kiln_c99_private_error_key(thrown, {symbol}_constant_{name}, 0); \
+                         {unwind} \
+                     }} \
+                     if (slot->accessor) {{ \
+                         kiln_value getter = slot->getter; \
+                         kiln_value produced; \
+                         int status; \
+                         if (getter.tag == KILN_VALUE_UNDEFINED) {{ \
+                             status = kiln_c99_private_error_key(thrown, {symbol}_constant_{name}, 2); \
+                             {unwind} \
+                         }} \
+                         status = kiln_c99_call(host, &produced, getter, receiver, NULL, 0, depth, thrown); \
+                         if (status == KILN_C99_THROWN) {unwind} \
+                         if (status != KILN_C99_OK) return status; \
+                         stack[sp - 1] = kiln_val_from_boundary(produced); \
+                     }} else {{ \
+                         stack[sp - 1] = kiln_val_from_boundary(slot->value); \
+                     }} \
+                 }} }}"
             )
             .unwrap();
         }
@@ -120,11 +157,54 @@ pub(crate) fn emit_tail_instruction(
             let Constant::String(text) = &constants[*name as usize] else {
                 unreachable!("verification rejects a non-string private name before emission")
             };
+            let member_key = text.to_scalar_string().unwrap_or_default();
+            let member_len = member_key.len();
+            let brand_key = private_brand_key_of(&member_key);
+            let brand_len = brand_key.len();
             writeln!(
                 output,
-                "    {{ kiln_value brand = kiln_val_to_boundary(stack[--sp]); kiln_value member = kiln_val_to_boundary(stack[--sp]); kiln_value receiver = kiln_val_to_boundary(stack[sp - 1]); if (brand.tag != KILN_VALUE_UNDEFINED) {{ kiln_property *brand_slot = kiln_c99_own_private(receiver, \"{brand_key}\", {brand_len}); if (brand_slot == NULL || brand_slot->accessor || !kiln_c99_strict_equal(brand_slot->value, brand)) {{ int status = kiln_c99_private_error_key(thrown, {symbol}_constant_{name}, 1); {unwind} }} }} kiln_property *slot = kiln_c99_own_private_key(receiver, {symbol}_constant_{name}); if (slot == NULL) {{ int status = kiln_c99_private_error_key(thrown, {symbol}_constant_{name}, 1); {unwind} }} if (slot->accessor) {{ kiln_value setter = slot->setter; kiln_value produced; int status; if (setter.tag == KILN_VALUE_UNDEFINED) {{ status = kiln_c99_private_error_key(thrown, {symbol}_constant_{name}, 3); {unwind} }} status = kiln_c99_call(host, &produced, setter, receiver, &member, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} else if (!slot->writable) {{ int status = kiln_c99_private_error_key(thrown, {symbol}_constant_{name}, 4); {unwind} }} else {{ slot->value = member; }} stack[sp - 1] = kiln_val_from_boundary(member); }}",
-                brand_key = private_brand_key_of(&text.to_scalar_string().unwrap_or_default()),
-                brand_len = private_brand_key_of(&text.to_scalar_string().unwrap_or_default()).len()
+                "    {{ static kiln_c99_private_site site_{pc} = {{0}}; \
+                 kiln_val brand_v = stack[--sp]; \
+                 kiln_val member_v = stack[--sp]; \
+                 kiln_val receiver_v = stack[sp - 1]; \
+                 if (kiln_c99_val_set_private_cached(receiver_v, brand_v, member_v, &site_{pc}) || \
+                     kiln_c99_val_set_private_fast(receiver_v, brand_v, member_v, \"{brand_key}\", {brand_len}, \"{member_key}\", {member_len}, &site_{pc})) {{ \
+                     stack[sp - 1] = member_v; \
+                 }} else {{ \
+                     kiln_value brand = kiln_val_to_boundary(brand_v); \
+                     kiln_value member = kiln_val_to_boundary(member_v); \
+                     kiln_value receiver = kiln_val_to_boundary(receiver_v); \
+                     if (brand.tag != KILN_VALUE_UNDEFINED) {{ \
+                         kiln_property *brand_slot = kiln_c99_own_private(receiver, \"{brand_key}\", {brand_len}); \
+                         if (brand_slot == NULL || brand_slot->accessor || !kiln_c99_strict_equal(brand_slot->value, brand)) {{ \
+                             int status = kiln_c99_private_error_key(thrown, {symbol}_constant_{name}, 1); \
+                             {unwind} \
+                         }} \
+                     }} \
+                     kiln_property *slot = kiln_c99_own_private_key(receiver, {symbol}_constant_{name}); \
+                     if (slot == NULL) {{ \
+                         int status = kiln_c99_private_error_key(thrown, {symbol}_constant_{name}, 1); \
+                         {unwind} \
+                     }} \
+                     if (slot->accessor) {{ \
+                         kiln_value setter = slot->setter; \
+                         kiln_value produced; \
+                         int status; \
+                         if (setter.tag == KILN_VALUE_UNDEFINED) {{ \
+                             status = kiln_c99_private_error_key(thrown, {symbol}_constant_{name}, 3); \
+                             {unwind} \
+                         }} \
+                         status = kiln_c99_call(host, &produced, setter, receiver, &member, 1, depth, thrown); \
+                         if (status == KILN_C99_THROWN) {unwind} \
+                         if (status != KILN_C99_OK) return status; \
+                     }} else if (!slot->writable) {{ \
+                         int status = kiln_c99_private_error_key(thrown, {symbol}_constant_{name}, 4); \
+                         {unwind} \
+                     }} else {{ \
+                         slot->value = member; \
+                     }} \
+                     stack[sp - 1] = member_v; \
+                 }} }}"
             )
             .unwrap();
         }

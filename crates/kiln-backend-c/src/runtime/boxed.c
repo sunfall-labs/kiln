@@ -1423,6 +1423,78 @@ static int kiln_c99_val_write_property(kiln_host *host, kiln_val target,
                                             thrown, site);
 }
 
+static int kiln_c99_val_get_private_fast(kiln_val *out, kiln_val receiver, kiln_val brand,
+                                         const char *brand_key, size_t brand_len,
+                                         const char *member_key, size_t member_len,
+                                         kiln_c99_private_site *site) {
+    if (!KILN_VAL_IS_OBJECT(receiver)) {
+        return 0;
+    }
+    kiln_object *obj = (kiln_object *)KILN_VAL_PTR(receiver);
+    if (obj == NULL || obj->shape == NULL || kiln_c99_gc_kind_of_ptr(obj) != KILN_GC_OBJECT) {
+        return 0;
+    }
+    if (obj->accessor_count != 0 || obj->properties != NULL) {
+        return 0;
+    }
+    uint32_t bslot = UINT32_MAX;
+    if (brand != KILN_VAL_UNDEFINED) {
+        bslot = kiln_c99_shape_slot_named(obj->shape, brand_key, brand_len);
+        if (bslot == UINT32_MAX || bslot >= obj->slot_capacity || obj->slots[bslot] != brand) {
+            return 0;
+        }
+    }
+    uint32_t mslot = kiln_c99_shape_slot_named(obj->shape, member_key, member_len);
+    if (mslot == UINT32_MAX || mslot >= obj->slot_capacity) {
+        return 0;
+    }
+    if (site != NULL) {
+        site->shape = obj->shape;
+        site->brand_slot = bslot;
+        site->member_slot = mslot;
+    }
+    *out = obj->slots[mslot];
+    return 1;
+}
+
+static int kiln_c99_val_set_private_fast(kiln_val receiver, kiln_val brand, kiln_val member,
+                                         const char *brand_key, size_t brand_len,
+                                         const char *member_key, size_t member_len,
+                                         kiln_c99_private_site *site) {
+    if (!KILN_VAL_IS_OBJECT(receiver)) {
+        return 0;
+    }
+    kiln_object *obj = (kiln_object *)KILN_VAL_PTR(receiver);
+    if (obj == NULL || obj->shape == NULL || obj->frozen || kiln_c99_gc_kind_of_ptr(obj) != KILN_GC_OBJECT) {
+        return 0;
+    }
+    if (obj->accessor_count != 0 || obj->properties != NULL) {
+        return 0;
+    }
+    uint32_t bslot = UINT32_MAX;
+    if (brand != KILN_VAL_UNDEFINED) {
+        bslot = kiln_c99_shape_slot_named(obj->shape, brand_key, brand_len);
+        if (bslot == UINT32_MAX || bslot >= obj->slot_capacity || obj->slots[bslot] != brand) {
+            return 0;
+        }
+    }
+    uint32_t mslot = kiln_c99_shape_slot_named(obj->shape, member_key, member_len);
+    if (mslot == UINT32_MAX || mslot >= obj->slot_capacity) {
+        return 0;
+    }
+    if ((obj->shape->double_slots_mask & (1u << mslot)) != 0 && !KILN_VAL_IS_NUMBER(member)) {
+        return 0;
+    }
+    if (site != NULL) {
+        site->shape = obj->shape;
+        site->brand_slot = bslot;
+        site->member_slot = mslot;
+    }
+    kiln_c99_prototype_touched(obj);
+    obj->slots[mslot] = member;
+    return 1;
+}
+
 static void kiln_c99_note_get_property_refusal(kiln_value target) {
     if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = target.tag;
     if (target.tag == KILN_VALUE_BUILTIN && kiln_c99_diagnostic_function == NULL &&
