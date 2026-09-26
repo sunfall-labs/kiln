@@ -1962,6 +1962,165 @@ pub fn find_prototype_member(
         .find(|m| m.prototype == prototype && m.key.property_key() == key)
 }
 
+/// A member kiln has and Node does not (ADR 0068).
+///
+/// kiln adds built-ins Node lacks -- `parallelMap` first (ADR 0058) -- and each one is observable
+/// in principle: `'parallelMap' in []` is `true` here and `false` in Node, and a hardening library
+/// that audits the built-ins against a list it expects sees one more name. So every such member is
+/// *declared* as kiln's own, in this row, and three things read the declaration:
+///
+/// - both engines, which install it by default and leave it out when the program is run with
+///   `KILN_EXTENSIONS=0` or built with `kiln build --no-kiln-extensions` -- one switch that
+///   removes every row below, rather than a check per member;
+/// - the surface inventory, which reports these as "kiln extension" rather than as "extra (node
+///   lacks it)" beside members that are genuinely wrong;
+/// - the tests below, which hold every row non-enumerable (ADR 0068 rule 2): an extension never
+///   appears in `for...in`, spread, `Object.keys`, `JSON.stringify` or `util.inspect`.
+///
+/// The owner is spelled as the inventory and the specification spell it. `%TypedArray%.prototype`
+/// has no row in [`PROTOTYPE_SURFACE`] -- the shared TypeScript bootstrap installs it -- so the
+/// extension is keyed by the owner's name rather than by a [`PrototypeId`]; an owner that *is* a
+/// [`PrototypeId`] must also have its row there, with the same attributes, and the build checks it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KilnExtension {
+    /// The object that owns it: `"Array.prototype"`, `"%TypedArray%.prototype"`.
+    pub owner: &'static str,
+    pub key: MemberKey,
+    pub attributes: DescriptorAttributes,
+    /// Where the decision to have it is written down.
+    pub decided_by: &'static str,
+}
+
+/// Every kiln extension, in both engines. See [`KilnExtension`].
+pub const KILN_EXTENSIONS: &[KilnExtension] = &[
+    KilnExtension {
+        owner: "Array.prototype",
+        key: MemberKey::Named("parallelMap"),
+        attributes: DescriptorAttributes::METHOD,
+        decided_by: "ADR 0058",
+    },
+    KilnExtension {
+        owner: "%TypedArray%.prototype",
+        key: MemberKey::Named("parallelMap"),
+        attributes: DescriptorAttributes::METHOD,
+        decided_by: "ADR 0058",
+    },
+];
+
+/// The environment variable that removes every kiln extension at run time when it is `0`, in
+/// either engine (ADR 0068 rule 4). Any other value, or none, leaves them installed.
+pub const KILN_EXTENSIONS_ENV: &str = "KILN_EXTENSIONS";
+
+/// Whether `owner` carries `key` as a kiln extension rather than as a member of the language.
+pub const fn is_kiln_extension(owner: &str, key: &str) -> bool {
+    let mut index = 0;
+    while index < KILN_EXTENSIONS.len() {
+        if same(KILN_EXTENSIONS[index].owner, owner)
+            && same(KILN_EXTENSIONS[index].key.property_key(), key)
+        {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+impl PrototypeMember {
+    /// Whether this row is one of kiln's own members (ADR 0068) rather than the language's.
+    pub const fn is_kiln_extension(&self) -> bool {
+        is_kiln_extension(self.prototype.name(), self.key.property_key())
+    }
+}
+
+/// Whether a value of [`KILN_EXTENSIONS_ENV`] asks for the extensions: everything but `0` does.
+pub fn kiln_extensions_requested(value: Option<&str>) -> bool {
+    value != Some("0")
+}
+
+static KILN_EXTENSIONS_FROM_ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Whether this process installs the kiln extensions: the one check every engine-side consumer of
+/// this table makes, so a member is never removed by a special case of its own.
+///
+/// Read from [`KILN_EXTENSIONS_ENV`] once, the first time a realm asks. Once per process, not per
+/// realm: a program's surface is not something that changes while it runs. The native backend
+/// makes the same decision in its C prelude, where a binary built with `--no-kiln-extensions`
+/// has already made it.
+pub fn kiln_extensions_installed() -> bool {
+    *KILN_EXTENSIONS_FROM_ENV.get_or_init(|| {
+        kiln_extensions_requested(std::env::var(KILN_EXTENSIONS_ENV).ok().as_deref())
+    })
+}
+
+/// Whether `owner.key` is a kiln extension this process has left out.
+pub fn is_withheld_extension(owner: &str, key: &str) -> bool {
+    is_kiln_extension(owner, key) && !kiln_extensions_installed()
+}
+
+/// [`find_prototype_member`], less the kiln extensions this process has left out: what an engine
+/// *installs*, as opposed to what the description declares.
+pub fn installed_prototype_member(
+    prototype: PrototypeId,
+    key: &str,
+) -> Option<&'static PrototypeMember> {
+    find_prototype_member(prototype, key)
+        .filter(|member| !member.is_kiln_extension() || kiln_extensions_installed())
+}
+
+/// [`prototype_members`], less the kiln extensions this process has left out.
+pub fn installed_prototype_members(
+    prototype: PrototypeId,
+) -> impl Iterator<Item = &'static PrototypeMember> {
+    let installed = kiln_extensions_installed();
+    prototype_members(prototype).filter(move |member| installed || !member.is_kiln_extension())
+}
+
+const fn validate_kiln_extensions(extensions: &[KilnExtension]) {
+    let mut index = 0;
+    while index < extensions.len() {
+        let extension = &extensions[index];
+        // ADR 0068 rule 2: never enumerable, so no Node-only program can see one by walking.
+        assert!(
+            !extension.attributes.enumerable,
+            "a kiln extension must be non-enumerable (ADR 0068 rule 2)"
+        );
+        let mut other = index + 1;
+        while other < extensions.len() {
+            assert!(
+                !(same(extension.owner, extensions[other].owner)
+                    && extension.key.same(extensions[other].key)),
+                "a kiln extension is declared twice"
+            );
+            other += 1;
+        }
+        if let Some(prototype) = PrototypeId::from_name(extension.owner) {
+            let mut found = false;
+            let mut row = 0;
+            while row < PROTOTYPE_SURFACE.len() {
+                let member = &PROTOTYPE_SURFACE[row];
+                if member.prototype as usize == prototype as usize && member.key.same(extension.key)
+                {
+                    assert!(
+                        member.attributes.writable == extension.attributes.writable
+                            && member.attributes.enumerable == extension.attributes.enumerable
+                            && member.attributes.configurable == extension.attributes.configurable,
+                        "a kiln extension's attributes disagree with its PROTOTYPE_SURFACE row"
+                    );
+                    found = true;
+                }
+                row += 1;
+            }
+            assert!(
+                found,
+                "a kiln extension on a PrototypeId owner has no PROTOTYPE_SURFACE row"
+            );
+        }
+        index += 1;
+    }
+}
+
+const _: () = validate_kiln_extensions(KILN_EXTENSIONS);
+
 pub const fn prototype_has(prototype: PrototypeId, key: &str) -> bool {
     let mut index = 0;
     while index < PROTOTYPE_SURFACE.len() {
@@ -1978,6 +2137,57 @@ pub const fn prototype_has(prototype: PrototypeId, key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR 0068 rule 2, over the description itself: every member marked as kiln's own is
+    /// non-enumerable, in its own row and in the prototype row that installs it.
+    #[test]
+    fn every_kiln_extension_is_non_enumerable() {
+        assert!(!KILN_EXTENSIONS.is_empty());
+        for extension in KILN_EXTENSIONS {
+            assert!(
+                !extension.attributes.enumerable,
+                "{}.{} is enumerable",
+                extension.owner,
+                extension.key.property_key()
+            );
+        }
+        let marked: Vec<_> = PROTOTYPE_SURFACE
+            .iter()
+            .filter(|member| member.is_kiln_extension())
+            .collect();
+        assert!(!marked.is_empty());
+        for member in marked {
+            assert!(
+                !member.attributes.enumerable,
+                "{}.{} is enumerable",
+                member.prototype.name(),
+                member.key.property_key()
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_map_is_marked_on_both_owners() {
+        assert!(is_kiln_extension("Array.prototype", "parallelMap"));
+        assert!(is_kiln_extension("%TypedArray%.prototype", "parallelMap"));
+        assert!(!is_kiln_extension("Array.prototype", "map"));
+        assert!(
+            find_prototype_member(PrototypeId::Array, "parallelMap")
+                .is_some_and(PrototypeMember::is_kiln_extension)
+        );
+        assert!(
+            !find_prototype_member(PrototypeId::Array, "map")
+                .is_some_and(PrototypeMember::is_kiln_extension)
+        );
+    }
+
+    #[test]
+    fn only_zero_withholds_the_extensions() {
+        assert!(kiln_extensions_requested(None));
+        assert!(kiln_extensions_requested(Some("1")));
+        assert!(kiln_extensions_requested(Some("")));
+        assert!(!kiln_extensions_requested(Some("0")));
+    }
 
     #[test]
     fn well_known_symbol_round_trip() {

@@ -215,6 +215,10 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
 
     let is_test = matches!(invocation.command, Command::Test { .. });
     env::load_project_env(&root, is_test);
+    // `KILN_EXTENSIONS=0` (ADR 0068) is a property of the process that runs the program, and both
+    // engines read it once per process. A resident daemon was started with its own environment,
+    // so a command that asks for the switch is served in this process instead, where it applies.
+    let one_shot = one_shot || !kiln_builtin_surface::kiln_extensions_installed();
 
     let auto_node = |explicit: bool| -> bool {
         explicit
@@ -349,6 +353,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             node,
             march_native: _,
             explain,
+            no_kiln_extensions,
             static_link,
             pgo_generate,
             pgo_use,
@@ -364,6 +369,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                 shared,
                 node,
                 explain,
+                no_kiln_extensions,
                 static_link,
                 pgo_generate.as_deref(),
                 pgo_use.as_deref(),

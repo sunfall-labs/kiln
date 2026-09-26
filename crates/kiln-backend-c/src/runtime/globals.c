@@ -512,6 +512,13 @@ static int kiln_c99_global_object(kiln_value *out) {
             status = kiln_c99_put(NULL, *globals, "console", 7, built, 0, NULL);
         }
     }
+    /* Whether this realm installs kiln's own members (ADR 0068), for the shared bootstrap's
+     * `%TypedArray%.prototype`, which installs its extension itself. Captured and deleted by
+     * `kiln-builtins/src/extensions.ts` before any program runs, as the interpreter does. */
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_put(NULL, *globals, "__kilnExtensions", 16,
+                              kiln_c99_boolean(kiln_c99_kiln_extensions_on()), 0, NULL);
+    }
     /* `process` too: the bare name loaded it by demand while `globalThis.process` answered
      * `undefined` (2026-09-19). One object, the realm slot's, so the two spellings agree. */
     if (status == KILN_C99_OK) {

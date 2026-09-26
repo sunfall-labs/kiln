@@ -1325,6 +1325,7 @@ name = "kiln-builtins"
 version = "0.1.0"
 dependencies = [
  "frontend-oxc",
+ "kiln-builtin-surface",
  "kiln-ir",
  "kiln-module-resolver",
 ]
@@ -1336,6 +1337,7 @@ dependencies = [
  "annotate-snippets",
  "frontend-oxc",
  "kiln-backend-c",
+ "kiln-builtin-surface",
  "kiln-daemon",
  "kiln-data-formats",
  "kiln-hir",

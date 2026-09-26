@@ -16,6 +16,7 @@ kiln-module-resolver = { workspace = true }
 frontend-oxc = { workspace = true }
 kiln-hir = { workspace = true }
 kiln-backend-c = { workspace = true }
+kiln-builtin-surface = { workspace = true }
 kiln-ir = { workspace = true }
 kiln-module-graph = { workspace = true }
 notify = { workspace = true }
