@@ -101,4 +101,6 @@ Changes to hot paths landed while the machine was loaded by parallel builds, so 
 were inconclusive. They are re-measured together on a quiet machine before this plan closes:
 
 - `036d288d` the executor split (issue 03);
-- the shared keys and shapes of issue 04 steps 1 and 2.
+- the shared keys and shapes of issue 04 steps 1 and 2;
+- step 1b's key registration before `main`: startup time of large bundles (thirdparty `typescript`,
+  `babel`) before and after.
