@@ -421,6 +421,133 @@ fn a_closed_ring_refuses_new_sockets_and_fails_old_ones() {
     });
 }
 
+fn ring_listener(ring: &Rc<Ring>) -> (RingListener, SocketAddr) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let listener = ring
+        .listen(OwnedFd::from(listener))
+        .expect("ring takes the listener");
+    assert_eq!(listener.local_addr().unwrap(), address);
+    (listener, address)
+}
+
+#[test]
+fn multishot_accept_serves_a_burst_of_connections() {
+    let Some(ring) = ring_or_skip("multishot accept") else {
+        return;
+    };
+    let (runtime, local) = local();
+    local.block_on(&runtime, async {
+        let (listener, address) = ring_listener(&ring);
+        const CONNECTIONS: usize = ACCEPT_HIGH + 100;
+        let peer = std::thread::spawn(move || {
+            (0..CONNECTIONS)
+                .map(|_| std::net::TcpStream::connect(address).unwrap())
+                .collect::<Vec<_>>()
+        });
+        let mut accepted = Vec::new();
+        for _ in 0..CONNECTIONS {
+            let fd = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                .await
+                .expect("accept stalled")
+                .expect("accept succeeds");
+            let stream = std::net::TcpStream::from(fd);
+            assert_eq!(stream.local_addr().unwrap(), address);
+            accepted.push(stream);
+        }
+        let clients = tokio::task::spawn_blocking(move || peer.join().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(clients.len(), CONNECTIONS);
+        // Past the high-water mark the ring paused and re-armed; every connection still arrived.
+        assert!(ring.inner.borrow().listeners[listener.index as usize].is_some());
+        drop(listener);
+        settle(&ring).await;
+        assert!(ring.inner.borrow().listeners.iter().all(Option::is_none));
+    });
+    ring.shutdown();
+    assert!(!ring.inner.borrow().leak);
+}
+
+#[test]
+fn closing_a_ring_listener_stops_accepting_and_fails_pending_accepts() {
+    let Some(ring) = ring_or_skip("listener close") else {
+        return;
+    };
+    let (runtime, local) = local();
+    local.block_on(&runtime, async {
+        let (listener, address) = ring_listener(&ring);
+        let pending = tokio::task::spawn_local(listener.accept());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(
+            ring.inner.borrow().listeners[listener.index as usize]
+                .as_ref()
+                .unwrap()
+                .accept,
+            RecvState::Armed
+        );
+        drop(listener);
+        let result = tokio::time::timeout(Duration::from_secs(2), pending)
+            .await
+            .expect("pending accept woke")
+            .unwrap();
+        assert!(result.is_err());
+        settle(&ring).await;
+        assert!(ring.inner.borrow().listeners.iter().all(Option::is_none));
+        // The socket is really closed: the armed multishot accept no longer holds it open.
+        let refused = std::net::TcpStream::connect(address);
+        assert!(refused.is_err(), "listener still accepting after close");
+    });
+    ring.shutdown();
+}
+
+#[test]
+fn connections_accepted_for_nobody_are_reset_when_the_listener_closes() {
+    let Some(ring) = ring_or_skip("listener backlog reset") else {
+        return;
+    };
+    let (runtime, local) = local();
+    local.block_on(&runtime, async {
+        let (listener, address) = ring_listener(&ring);
+        // Arm, take one, and let two more land in the ring's queue unclaimed.
+        let first = accept_first(&listener, address).await;
+        let mut waiting: Vec<_> = (0..2)
+            .map(|_| std::net::TcpStream::connect(address).unwrap())
+            .collect();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(listener);
+        settle(&ring).await;
+        for stream in &mut waiting {
+            use std::io::Read;
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut byte = [0_u8; 1];
+            let result = stream.read(&mut byte);
+            assert!(
+                matches!(&result, Err(error) if error.kind() == io::ErrorKind::ConnectionReset),
+                "{result:?}"
+            );
+        }
+        drop(first);
+    });
+    ring.shutdown();
+}
+
+/// Connect once and accept it through the ring, arming the multishot accept.
+async fn accept_first(
+    listener: &RingListener,
+    address: SocketAddr,
+) -> (std::net::TcpStream, OwnedFd) {
+    let client = std::net::TcpStream::connect(address).unwrap();
+    let fd = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+        .await
+        .expect("accept stalled")
+        .unwrap();
+    (client, fd)
+}
+
 #[test]
 fn preference_parsing_and_forced_epoll() {
     let mut host = HostRing::new();

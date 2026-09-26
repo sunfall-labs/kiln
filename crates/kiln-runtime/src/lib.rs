@@ -2149,7 +2149,7 @@ enum ResourceLifecycleUpdate {
 enum HostCompletionValue {
     Public(AsyncHostValue),
     TcpListener {
-        listener: TcpListener,
+        listener: HostListener,
         referenced: bool,
     },
     TcpStream {
@@ -2158,11 +2158,43 @@ enum HostCompletionValue {
         referenced: bool,
         accepted: bool,
     },
+    /// A connection the io_uring accepted: not registered with Tokio's reactor until a discrete
+    /// read, write or shutdown needs it, and never if the HTTP engine takes it first.
+    #[cfg(target_os = "linux")]
+    TcpRawStream {
+        stream: std::net::TcpStream,
+        peer: std::net::SocketAddr,
+        referenced: bool,
+    },
+}
+
+/// A listening socket: Tokio's, or (with the io_uring backend) the ring's multishot accept.
+enum HostListener {
+    Tokio(TcpListener),
+    #[cfg(target_os = "linux")]
+    Ring(uring::RingListener),
+}
+
+impl HostListener {
+    fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        match self {
+            HostListener::Tokio(listener) => listener.local_addr(),
+            #[cfg(target_os = "linux")]
+            HostListener::Ring(listener) => listener.local_addr(),
+        }
+    }
 }
 
 enum HostResource {
     TcpListener {
-        listener: Rc<TcpListener>,
+        listener: Rc<HostListener>,
+        info: ResourceInfo,
+        referenced: bool,
+    },
+    /// An accepted stream still in its raw form (see `HostCompletionValue::TcpRawStream`).
+    #[cfg(target_os = "linux")]
+    TcpRaw {
+        stream: std::net::TcpStream,
         info: ResourceInfo,
         referenced: bool,
     },
@@ -2206,6 +2238,8 @@ impl std::fmt::Debug for TokioHost {
                         HostResource::TcpListener { referenced, .. }
                         | HostResource::TcpStream { referenced, .. }
                         | HostResource::TcpTaken { referenced, .. } => *referenced,
+                        #[cfg(target_os = "linux")]
+                        HostResource::TcpRaw { referenced, .. } => *referenced,
                     })
                     .count(),
             )
@@ -2469,8 +2503,24 @@ impl TokioHost {
                 AsyncHostOp::AppendFile { path, data }
             }
             AsyncHostOp::TcpListen { host, port } => {
+                // With the io_uring backend the ring accepts this listener's connections
+                // (multishot), and the socket is never registered with Tokio's reactor.
+                #[cfg(target_os = "linux")]
+                let ring = self.uring.ring();
                 self.spawn_task(request, sequence, referenced, async move {
-                    let result = bind_tcp_listener(host.as_str(), port)
+                    let result = bind_tcp_listener_std(host.as_str(), port)
+                        .and_then(|listener| {
+                            #[cfg(target_os = "linux")]
+                            if let Some(ring) = ring {
+                                return match ring.listen(std::os::fd::OwnedFd::from(listener)) {
+                                    Ok(listener) => Ok(HostListener::Ring(listener)),
+                                    Err(fd) => {
+                                        TcpListener::from_std(fd.into()).map(HostListener::Tokio)
+                                    }
+                                };
+                            }
+                            TcpListener::from_std(listener).map(HostListener::Tokio)
+                        })
                         .map(|listener| HostCompletionValue::TcpListener {
                             listener,
                             referenced,
@@ -2502,7 +2552,35 @@ impl TokioHost {
                 };
                 let listener = Rc::clone(listener);
                 let accepted_referenced = *resource_referenced;
+                #[cfg(target_os = "linux")]
+                if let HostListener::Ring(ring_listener) = &*listener {
+                    let accept = ring_listener.accept();
+                    self.spawn_task(request, sequence, referenced, async move {
+                        let result = async {
+                            let stream = std::net::TcpStream::from(accept.await?);
+                            // A multishot accept reports no address; ask for it once.
+                            let peer = stream.peer_addr()?;
+                            Ok(HostCompletionValue::TcpRawStream {
+                                stream,
+                                peer,
+                                referenced: accepted_referenced,
+                            })
+                        }
+                        .await
+                        .map_err(|error| socket_error("accept", error));
+                        HostCompletion {
+                            request,
+                            sequence,
+                            lifecycle: None,
+                            result,
+                        }
+                    });
+                    return request;
+                }
                 self.spawn_task(request, sequence, referenced, async move {
+                    let HostListener::Tokio(listener) = &*listener else {
+                        unreachable!("ring listeners are handled above");
+                    };
                     let result = listener
                         .accept()
                         .await
@@ -2548,6 +2626,8 @@ impl TokioHost {
                 return request;
             }
             AsyncHostOp::TcpRead { stream, max_bytes } => {
+                #[cfg(target_os = "linux")]
+                self.materialize_raw(stream);
                 let stream_id = stream;
                 let Some(HostResource::TcpStream {
                     reader,
@@ -2597,6 +2677,8 @@ impl TokioHost {
                 return request;
             }
             AsyncHostOp::TcpWrite { stream, data } => {
+                #[cfg(target_os = "linux")]
+                self.materialize_raw(stream);
                 let stream_id = stream;
                 let Some(HostResource::TcpStream {
                     writer,
@@ -2639,6 +2721,8 @@ impl TokioHost {
                 return request;
             }
             AsyncHostOp::TcpShutdown { stream } => {
+                #[cfg(target_os = "linux")]
+                self.materialize_raw(stream);
                 let stream_id = stream;
                 let Some(HostResource::TcpStream {
                     writer,
@@ -2827,6 +2911,11 @@ impl TokioHost {
                 referenced: current,
                 ..
             } => *current = referenced,
+            #[cfg(target_os = "linux")]
+            HostResource::TcpRaw {
+                referenced: current,
+                ..
+            } => *current = referenced,
         }
         Ok(AsyncHostValue::Undefined)
     }
@@ -2857,6 +2946,15 @@ impl TokioHost {
                 write_closed: *write_closed,
             },
             HostResource::TcpTaken { info, referenced } => ResourceState {
+                info: info.clone(),
+                referenced: *referenced,
+                read_closed: false,
+                write_closed: false,
+            },
+            #[cfg(target_os = "linux")]
+            HostResource::TcpRaw {
+                info, referenced, ..
+            } => ResourceState {
                 info: info.clone(),
                 referenced: *referenced,
                 read_closed: false,
@@ -2895,6 +2993,45 @@ impl TokioHost {
             code: "ERR_KILN_RUNTIME_TASK_PANIC",
             message: error.to_string(),
         });
+    }
+
+    /// Give a raw accepted stream its Tokio halves before a discrete read, write or shutdown.
+    #[cfg(target_os = "linux")]
+    fn materialize_raw(&mut self, resource: ResourceId) {
+        if !matches!(
+            self.resources.get(&resource),
+            Some(HostResource::TcpRaw { .. })
+        ) {
+            return;
+        }
+        let Some(HostResource::TcpRaw {
+            stream,
+            info,
+            referenced,
+        }) = self.resources.remove(&resource)
+        else {
+            return;
+        };
+        // Outside a runtime there is no reactor to register with (and Tokio would panic); the
+        // operation that asked then fails as an invalid resource.
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let Ok(stream) = TcpStream::from_std(stream) else {
+            return;
+        };
+        let (reader, writer) = stream.into_split();
+        self.resources.insert(
+            resource,
+            HostResource::TcpStream {
+                reader: Rc::new(tokio::sync::Mutex::new(reader)),
+                writer: Rc::new(tokio::sync::Mutex::new(writer)),
+                info,
+                referenced,
+                read_closed: false,
+                write_closed: false,
+            },
+        );
     }
 
     fn promote_completion(&mut self, completion: HostCompletion) {
@@ -2948,6 +3085,35 @@ impl TokioHost {
                     },
                 );
                 AsyncHostValue::Resource(info)
+            }
+            #[cfg(target_os = "linux")]
+            HostCompletionValue::TcpRawStream {
+                stream,
+                peer,
+                referenced,
+            } => {
+                let local = stream.local_addr().ok();
+                let id = ResourceId::new(self.next_resource);
+                self.next_resource = self.next_resource.wrapping_add(1).max(1);
+                let resource = ResourceInfo {
+                    id,
+                    kind: ResourceKind::TcpStream,
+                    address: local.map(|address| address.ip().to_string()),
+                    port: local.map(|address| address.port()),
+                };
+                self.resources.insert(
+                    id,
+                    HostResource::TcpRaw {
+                        stream,
+                        info: resource.clone(),
+                        referenced,
+                    },
+                );
+                AsyncHostValue::AcceptedTcpStream(AcceptedTcpStream {
+                    resource,
+                    peer_address: peer.ip().to_string(),
+                    peer_port: peer.port(),
+                })
             }
             HostCompletionValue::TcpStream {
                 stream,
@@ -3038,6 +3204,8 @@ impl AsyncHostOps for TokioHost {
                 HostResource::TcpListener { referenced, .. }
                 | HostResource::TcpStream { referenced, .. }
                 | HostResource::TcpTaken { referenced, .. } => *referenced,
+                #[cfg(target_os = "linux")]
+                HostResource::TcpRaw { referenced, .. } => *referenced,
             })
     }
 
@@ -3122,6 +3290,37 @@ impl RealmHostProvider for TokioHost {
     }
 
     fn take_transport(&mut self, resource: ResourceId) -> Option<HostTransport> {
+        // A connection the ring accepted goes straight onto the ring: it was never registered
+        // with Tokio's reactor, so there is nothing to leave.
+        #[cfg(target_os = "linux")]
+        if let Some(HostResource::TcpRaw { .. }) = self.resources.get(&resource)
+            && let Some(ring) = self.uring.ring()
+            && let Some(HostResource::TcpRaw {
+                stream,
+                info,
+                referenced: _,
+            }) = self.resources.remove(&resource)
+        {
+            let _ = stream.set_nodelay(true);
+            self.resources.insert(
+                resource,
+                HostResource::TcpTaken {
+                    info,
+                    referenced: false,
+                },
+            );
+            return match ring.register(std::os::fd::OwnedFd::from(stream)) {
+                Ok(stream) => Some(HostTransport(Box::new(stream))),
+                Err(fd) => {
+                    if tokio::runtime::Handle::try_current().is_err() {
+                        return None;
+                    }
+                    TcpStream::from_std(std::net::TcpStream::from(fd))
+                        .ok()
+                        .map(|stream| HostTransport(Box::new(stream)))
+                }
+            };
+        }
         // Both halves must be held by the table alone: a read or write still in flight owns a
         // clone and the socket cannot be reunited under it. The entry is rewritten only once
         // the socket is whole again, so a refusal leaves the table exactly as it was.
@@ -3536,7 +3735,7 @@ fn stream_closed(syscall: &str, resource: ResourceId) -> AsyncHostError {
     )
 }
 
-fn bind_tcp_listener(host: &str, port: u16) -> std::io::Result<TcpListener> {
+fn bind_tcp_listener_std(host: &str, port: u16) -> std::io::Result<std::net::TcpListener> {
     use std::net::ToSocketAddrs;
     use std::os::fd::FromRawFd;
 
@@ -3633,8 +3832,7 @@ fn bind_tcp_listener(host: &str, port: u16) -> std::io::Result<TcpListener> {
         fd
     };
 
-    let std_listener = unsafe { std::net::TcpListener::from_raw_fd(fd) };
-    TcpListener::from_std(std_listener)
+    Ok(unsafe { std::net::TcpListener::from_raw_fd(fd) })
 }
 
 fn socket_error(syscall: &str, error: std::io::Error) -> AsyncHostError {
@@ -5470,6 +5668,97 @@ mod tests {
             );
         }
         assert!(!runtime.host().has_referenced_work());
+    }
+
+    /// With the io_uring backend a listener is the ring's, its connections arrive raw, and a
+    /// discrete read or write gives one its Tokio halves on demand.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn uring_listener_accepts_raw_streams_that_serve_discrete_io() {
+        let mut host = TokioHost::new();
+        host.set_io_preference(IoPreference::Uring);
+        let mut runtime = RealmRuntime::with_host(host).expect("Tokio runtime builds");
+        runtime.start_host_op(
+            AsyncHostOp::TcpListen {
+                host: "127.0.0.1".into(),
+                port: 0,
+            },
+            true,
+        );
+        let listener = match next_host_completion(&mut runtime)
+            .expect("listen completes")
+            .result
+            .expect("listen succeeds")
+        {
+            AsyncHostValue::Resource(resource) => resource,
+            other => panic!("expected listener resource, got {other:?}"),
+        };
+        let on_ring = matches!(
+            runtime.host().resources.get(&listener.id),
+            Some(HostResource::TcpListener { listener, .. })
+                if matches!(**listener, HostListener::Ring(_))
+        );
+        if !on_ring {
+            eprintln!("skipped: io_uring unavailable, the listener fell back to epoll");
+            return;
+        }
+        let port = listener.port.expect("port");
+        let accept = runtime.start_host_op(
+            AsyncHostOp::TcpAccept {
+                listener: listener.id,
+            },
+            true,
+        );
+        let mut peer = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let accepted = next_host_completion(&mut runtime).expect("accept completes");
+        assert_eq!(accepted.request, accept);
+        let AsyncHostValue::AcceptedTcpStream(accepted) = accepted.result.expect("accepted") else {
+            panic!("expected an accepted stream");
+        };
+        assert_eq!(accepted.peer_address, "127.0.0.1");
+        assert_eq!(accepted.peer_port, peer.local_addr().unwrap().port());
+        assert_eq!(accepted.resource.port, Some(port));
+        assert!(matches!(
+            runtime.host().resources.get(&accepted.resource.id),
+            Some(HostResource::TcpRaw { .. })
+        ));
+        std::io::Write::write_all(&mut peer, b"raw bytes").unwrap();
+        runtime.start_host_op(
+            AsyncHostOp::TcpRead {
+                stream: accepted.resource.id,
+                max_bytes: 64,
+            },
+            true,
+        );
+        assert_eq!(
+            next_host_completion(&mut runtime).expect("read").result,
+            Ok(AsyncHostValue::Bytes(b"raw bytes".to_vec()))
+        );
+        assert!(matches!(
+            runtime.host().resources.get(&accepted.resource.id),
+            Some(HostResource::TcpStream { .. })
+        ));
+        runtime.start_host_op(
+            AsyncHostOp::TcpWrite {
+                stream: accepted.resource.id,
+                data: b"back".to_vec(),
+            },
+            true,
+        );
+        next_host_completion(&mut runtime).expect("write");
+        let mut back = [0_u8; 4];
+        std::io::Read::read_exact(&mut peer, &mut back).unwrap();
+        assert_eq!(&back, b"back");
+        for resource in [accepted.resource.id, listener.id] {
+            runtime.start_host_op(AsyncHostOp::CloseResource { resource }, true);
+            next_host_completion(&mut runtime).expect("close");
+        }
+        // The listener is really closed once the ring cancels its accept.
+        runtime.drive_executor().block_on(async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        });
+        assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+        assert!(runtime.shutdown());
     }
 
     #[test]
