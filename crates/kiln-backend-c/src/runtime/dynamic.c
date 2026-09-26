@@ -1776,6 +1776,10 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *re
 
     if (env_val.tag == KILN_VALUE_OBJECT) {
         kiln_object *pobj = kiln_c99_object_of(env_val);
+        /* The captured environment is an ordinary object built by `kiln_c99_put`, so it is shaped
+         * whenever its first binding's name can still branch from the root shape; the walk below
+         * reads the property list, which only a dictionary has. */
+        if (pobj->shape != NULL) kiln_c99_ensure_dictionary(pobj);
         for (size_t i = 0; i < pobj->count; ++i) {
             kiln_dyn_scope_set_key(&scope, pobj->properties[i].key, pobj->properties[i].value);
         }
