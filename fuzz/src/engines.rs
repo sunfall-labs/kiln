@@ -179,7 +179,7 @@ impl Outcome {
 /// engines comparable at all: the invariant under test is that they agree on *the same
 /// bytecode*, and bytecode the compiler would never emit is not evidence about that.
 pub fn lower(source: &str) -> Result<Program, String> {
-    let module = frontend_oxc::parse_with_goal("fuzz.js", source, SourceGoal::Script);
+    let module = kiln_frontend_oxc::parse_with_goal("fuzz.js", source, SourceGoal::Script);
     if module.panicked {
         return Err("frontend parser could not recover a program".to_owned());
     }

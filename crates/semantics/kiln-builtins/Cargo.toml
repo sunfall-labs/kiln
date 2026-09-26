@@ -1,0 +1,13 @@
+[package]
+name = "kiln-builtins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kiln-module-resolver = { workspace = true }
+
+[dev-dependencies]
+kiln-frontend-oxc = { workspace = true }
+kiln-ir = { workspace = true }

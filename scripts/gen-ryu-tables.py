@@ -7,7 +7,7 @@ shortest-round-trip proof in `kiln_c99_double_to_js` (runtime/numbers.c). Nothin
 transcription of anyone's table -- the two closed forms below are the whole definition, and
 running this script reproduces the file byte for byte.
 
-    python3 scripts/gen-ryu-tables.py > crates/kiln-backend-c/src/runtime/ryu_tables.c
+    python3 scripts/gen-ryu-tables.py > crates/native/kiln-backend-c/src/runtime/ryu_tables.c
 
 `pow5bits(e)` is `bitlength(5^e)`, i.e. `floor(e * log2(5)) + 1`; the C prelude computes it
 with the integer approximation `((e * 1217359) >> 19) + 1`, which this script checks is exact
@@ -67,7 +67,7 @@ def main() -> None:
 HEADER = """
 /* Ryu's two 128-bit multiplier tables. GENERATED -- do not edit by hand.
  *
- *     python3 scripts/gen-ryu-tables.py > crates/kiln-backend-c/src/runtime/ryu_tables.c
+ *     python3 scripts/gen-ryu-tables.py > crates/native/kiln-backend-c/src/runtime/ryu_tables.c
  *
  * `kiln_c99_ryu_pow5[i]` is 5^i normalised to 125 significant bits; `kiln_c99_ryu_pow5_inv[q]`
  * is `floor(2^(pow5bits(q) - 1 + 125) / 5^q) + 1`, the same normalisation of its reciprocal

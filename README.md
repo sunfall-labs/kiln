@@ -91,7 +91,7 @@ On Linux 6.1 and newer, listeners and HTTP connections run on an io_uring owned 
 own Tokio runtime (multishot accept and receive, batched sends; no second executor). Older
 kernels, and any kernel or seccomp profile that refuses a ring, use epoll. `KILN_IO=epoll` forces
 epoll anywhere and `KILN_IO=uring` asks for the ring below the floor. See
-`crates/kiln-runtime/src/uring.rs` for the design and the measurements behind that default.
+`crates/host/kiln-runtime/src/uring.rs` for the design and the measurements behind that default.
 
 ## Using it
 
@@ -155,7 +155,7 @@ Every decision of that kind is an ADR under `docs/adr/`, numbered and never edit
 
 | crate | role |
 |---|---|
-| `kiln-hir`, `frontend-oxc`, `kiln-ir` | owned HIR, the Oxc adapter, and the bytecode compiler |
+| `kiln-hir`, `kiln-frontend-oxc`, `kiln-ir` | owned HIR, the Oxc adapter, and the bytecode compiler |
 | `kiln-db` | the incremental query database |
 | `kiln-module-resolver`, `kiln-module-graph` | exact-path resolution and the module graph |
 | `kiln-interpreter` | the deterministic bytecode VM |

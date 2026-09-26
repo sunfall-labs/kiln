@@ -17,7 +17,7 @@ sequential loop. ADR 0018 is superseded by 0028 and is not a basis for anything 
 ## Context
 
 The compiled backend emits C99 translation units linked against one Rust static library, the
-provider archive (`crates/kiln-native-number-ffi`, 87 exports, `PROVIDER_ABI_VERSION` 30). The
+provider archive (`crates/native/kiln-native-provider-ffi`, 87 exports, `PROVIDER_ABI_VERSION` 30). The
 archive already carries the number grammar, `regress`, BigInt, Temporal, `node:path` and the Tokio
 realm runtime. It is a separate build from the workspace rlib
 (`scripts/package-native-number-provider.sh`), and the packager verifies its symbol table against
@@ -37,7 +37,7 @@ Two facts about the C side bound what any Rust engine can be asked to do:
 Two places currently violate the principle this ADR states:
 
 1. **`JSON.parse` exists twice.** A recursive-descent reader in `runtime/json.c` (line 513
-   onward) and a `JsonReader` in `crates/kiln-interpreter` implement the same grammar, and they
+   onward) and a `JsonReader` in `crates/interp/kiln-interpreter` implement the same grammar, and they
    have already disagreed once: `conformance/differential/json-surrogates.js` records the
    interpreter decoding each half of a surrogate pair on its own while the native backend got it
    right. The hot part of a parse of a small document is object construction (`kiln_c99_put`,
@@ -52,7 +52,7 @@ Two places currently violate the principle this ADR states:
    emitter has no closure inlining, and array elements are NaN-boxed `kiln_val`, not `double`, so
    nothing auto-vectorizes.
 
-`rayon` is already a workspace dependency and `crates/kiln-native/src/worker.rs` already runs
+`rayon` is already a workspace dependency and `crates/native/kiln-native/src/worker.rs` already runs
 compile jobs on it.
 
 ## Decision
@@ -85,7 +85,7 @@ lends a per-thread tape, and walks it. Both the C recursive-descent reader and t
   its tape was ever usable, and on documents of the benchmark's shape a scalar pass beat it at
   every size from 159 bytes to 8.5 MB (1.0x to 1.27x), because its two fixed SIMD stages over
   padded 64-byte blocks cost more than one scalar pass, and its tape had to be converted into
-  ours. The crate has no dependencies. The table is in `crates/kiln-json/src/lib.rs` and in
+  ours. The crate has no dependencies. The table is in `crates/semantics/kiln-json/src/lib.rs` and in
   `.scratch/json-tape/NOTES.md`, with two slower scanner variants recorded so they are not retried.
 * **Parity was reached and measured before landing**, 20 interleaved rounds against the base
   commit, best / p25 / median: small payload 0.386 / 0.401 / 0.405 us on main against
@@ -145,7 +145,7 @@ lends a per-thread tape, and walks it. Both the C recursive-descent reader and t
 
 ## Consequences
 
-* **Deleted.** Two JSON readers (~400 lines of C, ~200 of Rust). `crates/kiln-runtime/src/concurrency.rs`
+* **Deleted.** Two JSON readers (~400 lines of C, ~200 of Rust). `crates/host/kiln-runtime/src/concurrency.rs`
   (394 lines, re-exported and used by nothing). The unwired `is_pure()`. The polyfill hooks
   `__kiln_actor_dispatch`, `__kiln_transfer_region`, `__kiln_parallel_map` and
   `__kiln_schedule_task`, which no engine implements, are removed rather than left as promises.

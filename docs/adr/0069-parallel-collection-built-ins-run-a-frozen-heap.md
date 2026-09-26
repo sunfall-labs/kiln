@@ -21,7 +21,7 @@ built from bytecode, so a proof about a callback is a proof about the program).
 ## Context
 
 `parallelMap` exists on arrays and typed arrays in both engines. The native backend runs a
-callback across the pool only when `crates/kiln-backend-c/src/parallel.rs` proves it takes
+callback across the pool only when `crates/native/kiln-backend-c/src/parallel.rs` proves it takes
 numbers, returns a number, and touches nothing else: no captured variable (not even a constant),
 no property or element read, no allocation, no call other than a listed `Math` function.
 Everything else runs sequentially. The rules are carefully written and tested, but almost no

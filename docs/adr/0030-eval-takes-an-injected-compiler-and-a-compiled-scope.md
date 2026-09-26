@@ -34,7 +34,7 @@ each public execution boundary into the VM. There is no process-global or thread
 two realms on one Tokio thread may select different compiler authority, and an execution cannot
 inherit one from whatever ran before it. This keeps the shape ADR 0006 gives `kiln-db`—the VM
 still depends on no parser—while satisfying ADR 0031's rule that realm authority is named.
-`kiln-conformance` supplies a value built from `frontend_oxc::parse_with_goal` +
+`kiln-conformance` supplies a value built from `kiln_frontend_oxc::parse_with_goal` +
 `kiln_ir::compile_eval`; a caller that supplies the default capabilities has no `eval`, and says
 so rather than answering.
 

@@ -183,7 +183,7 @@ if [[ $KILN_NUMBER_SLIM_RUSTC_IDENTITY != "$KILN_NUMBER_EXPECTED_RUSTC_IDENTITY"
 fi
 
 "$KILN_NUMBER_CC" -std=c11 -pedantic -Wall -Wextra -Werror \
-	crates/kiln-native-provider-ffi/tests/ffi_harness.c \
+	crates/native/kiln-native-provider-ffi/tests/ffi_harness.c \
 	"$KILN_NUMBER_ARCHIVE" -lm -o "$KILN_NUMBER_TEMP/probe"
 "$KILN_NUMBER_TEMP/probe"
 
