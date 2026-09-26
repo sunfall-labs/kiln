@@ -701,6 +701,7 @@ declare_ts_builtins! {
             "default",
             "get",
             "request",
+            "serve",
         ],
     },
     FsPromises {
