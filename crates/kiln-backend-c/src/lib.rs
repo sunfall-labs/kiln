@@ -3534,7 +3534,21 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
 }\n");
         output.push_str("#define KU_CALL(DST, CALLEE, ARGS, ARGC, PC, OP, UNWIND) do { \\\n\
     int status = ku_call_fast(host, (CALLEE), (ARGS), (size_t)(ARGC), depth, thrown, ku_site, (size_t)(PC), (OP), &(DST)); \\\n\
-    KU_STATUS((PC), (OP), UNWIND); \\\n\
+    if (KILN_UNLIKELY(status != KILN_C99_OK)) { \\\n\
+        if (status == KILN_C99_THROWN) { \\\n\
+            if (kiln_c99_diagnostic_detail == NULL) { \\\n\
+                kiln_c99_diagnostic_receiver_tag = KILN_VALUE_FUNCTION; \\\n\
+                kiln_c99_diagnostic_detail = \"Call invocation threw\"; \\\n\
+            } \\\n\
+            kiln_c99_note_refusal(ku_site, (size_t)(PC), (OP), (size_t)kiln_c99_diagnostic_active_depth); \\\n\
+            UNWIND; \\\n\
+        } \\\n\
+        if (status == KILN_C99_CONTROL_ERROR) { \\\n\
+            kiln_c99_note_refusal(ku_site, (size_t)(PC), (OP), (size_t)kiln_c99_diagnostic_active_depth); \\\n\
+            goto kiln_refusal; \\\n\
+        } \\\n\
+        return status; \\\n\
+    } \\\n\
 } while (0)\n");
     }
     if has_call_method {

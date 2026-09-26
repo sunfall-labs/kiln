@@ -501,18 +501,8 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
     }
 
     if (code == KILN_C99_METHOD_STRING_TO_STRING ||
-        code == KILN_C99_METHOD_STRING_VALUE_OF ||
-        code == KILN_C99_METHOD_STRING_NORMALIZE) {
+        code == KILN_C99_METHOD_STRING_VALUE_OF) {
         *result = receiver;
-        return KILN_C99_OK;
-    }
-
-    if (code == KILN_C99_METHOD_STRING_LOCALE_COMPARE) {
-        kiln_value other = argc > 0 ? kiln_c99_text(args[0]) : kiln_c99_from_units(NULL, 0);
-        if (other.tag != KILN_VALUE_STRING) {
-            return KILN_C99_OUT_OF_MEMORY;
-        }
-        *result = kiln_c99_number((double)kiln_c99_string_compare(receiver, other));
         return KILN_C99_OK;
     }
 

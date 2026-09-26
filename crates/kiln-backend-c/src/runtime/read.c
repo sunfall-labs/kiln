@@ -958,6 +958,18 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                     key, ikey, out, depth, thrown, &in_store);
                 if (status != KILN_C99_OK || in_store) return status;
             }
+            if (kiln_c99_same_name_key(key, "@@toStringTag")) {
+                const char *tag = collection->is_weak
+                                      ? (collection->is_map ? "WeakMap" : "WeakSet")
+                                      : (collection->is_map ? "Map" : "Set");
+                size_t tag_len = collection->is_weak ? 7 : 3;
+                *out = kiln_c99_copy_ascii(tag, tag_len);
+                return KILN_C99_OK;
+            }
+            if (kiln_c99_same_name_key(key, "toLocaleString")) {
+                *out = kiln_c99_method(KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING);
+                return KILN_C99_OK;
+            }
             if (!kiln_c99_is_collection_member(collection, intrinsic_key, intrinsic_len)) {
                 KILN_C99_ABSENT("not a member of this collection's prototype; "
                                 "kiln_c99_is_collection_member holds the ones that are",

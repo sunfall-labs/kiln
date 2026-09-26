@@ -1628,11 +1628,13 @@ static int kiln_c99_val_invoke_cached_method(kiln_host *host, uint64_t method_co
                     if (KILN_VAL_IS_NUMBER(args[0])) {
                         double d;
                         memcpy(&d, &args[0], sizeof(d));
-                        if (!isnan(d) && d >= 0.0 && d < (double)s->unit_len && floor(d) == d) {
+                        if (isnan(d)) d = 0.0;
+                        d = trunc(d);
+                        if (d >= 0.0 && d < (double)s->unit_len) {
                             idx = (size_t)d;
                             *out = kiln_c99_val_from_double((double)kiln_string_unit_at(s, idx));
                             return KILN_C99_OK;
-                        } else if (isnan(d) || d < 0.0 || d >= (double)s->unit_len) {
+                        } else {
                             *out = KILN_QNAN_BASE;
                             return KILN_C99_OK;
                         }
@@ -1657,11 +1659,13 @@ static int kiln_c99_val_invoke_cached_method(kiln_host *host, uint64_t method_co
                     if (KILN_VAL_IS_NUMBER(args[0])) {
                         double d;
                         memcpy(&d, &args[0], sizeof(d));
-                        if (!isnan(d) && d >= 0.0 && d < (double)s->unit_len && floor(d) == d) {
+                        if (isnan(d)) d = 0.0;
+                        d = trunc(d);
+                        if (d >= 0.0 && d < (double)s->unit_len) {
                             idx = (size_t)d;
                             *out = kiln_c99_val_from_unit(kiln_string_unit_at(s, idx));
                             return KILN_C99_OK;
-                        } else if (isnan(d) || d < 0.0 || d >= (double)s->unit_len) {
+                        } else {
                             *out = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_c99_empty_string);
                             return KILN_C99_OK;
                         }
@@ -2165,6 +2169,12 @@ static int kiln_c99_val_call(kiln_host *host, kiln_val callee, const kiln_val *a
             if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = bcallee.tag;
             if (kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {
                 kiln_c99_diagnostic_detail = "Call callee is unsupported by the native callable model";
+            }
+            kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
+        } else if (status == KILN_C99_THROWN) {
+            if (kiln_c99_diagnostic_detail == NULL) {
+                kiln_c99_diagnostic_receiver_tag = bcallee.tag;
+                kiln_c99_diagnostic_detail = "Call invocation threw";
             }
             kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
         }
