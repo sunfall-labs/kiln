@@ -11,19 +11,23 @@
 //! One [`Ring`] per realm host, created lazily on the realm thread the first time a transport
 //! is taken. It is not a second executor: its only task is the *driver*, an ordinary
 //! `spawn_local` task on the realm's `LocalSet`. The ring is created with `SINGLE_ISSUER |
-//! DEFER_TASKRUN | TASKRUN_FLAG | COOP_TASKRUN`, so the kernel never runs completion work
-//! behind the realm's back: it only runs inside the driver's own `io_uring_enter`.
+//! COOP_TASKRUN | TASKRUN_FLAG`: completion work the kernel owes the ring runs when the realm
+//! thread next crosses into the kernel, never by interrupting it, and the shared
+//! `IORING_SQ_TASKRUN` flag says when such work is waiting.
 //!
 //! # Parking
 //!
-//! An eventfd is registered with the ring and with Tokio's reactor through `AsyncFd`, so the
+//! The ring's own descriptor is registered with Tokio's reactor through `AsyncFd`, so the
 //! realm's existing park (`epoll_wait`, which also covers timers, fs, processes and every
-//! other socket) wakes for ring completions too. The eventfd is never read: Tokio registers
-//! it edge-triggered, and every kernel signal is a fresh edge. While the driver is awake the
-//! eventfd is disabled (`IORING_CQ_EVENTFD_DISABLED`), because the driver checks the ring's
-//! shared flags itself; it is re-enabled, followed by a re-check, only when the driver is
-//! about to let the thread park. That keeps sends that complete inline during our own submit
-//! from waking the reactor for work we have already reaped.
+//! other socket) wakes for ring completions too. A socket event while the thread is parked
+//! queues task work, which ends the `epoll_wait` (`EINTR`); running it on the way out posts
+//! the completions, which makes the ring readable for the next `epoll_wait`, and the driver
+//! then reaps them without entering the kernel at all.
+//!
+//! `DEFER_TASKRUN` was the first design and was measured out: its local task work never wakes
+//! a poller of the ring descriptor, and a registered eventfd is signalled for it only through
+//! `call_rcu_hurry` when the work is queued from a socket wakeup (Linux 7.2,
+//! `io_eventfd_signal(.., defer)`), which cost 6-8 ms on every keep-alive request.
 //!
 //! # The flush point
 //!
@@ -36,7 +40,7 @@
 //! them. So one enter covers everything the tasks polled in one pass of the run queue queued,
 //! and a busy server loops enter → run tasks → enter without touching `epoll_wait` except for
 //! Tokio's own periodic reactor poll. Only when an enter produces nothing does the driver
-//! re-arm the eventfd and let the thread park.
+//! wait on the ring's readiness and let the thread park.
 //!
 //! # Buffers
 //!
@@ -67,17 +71,17 @@
 //! `KILN_IO=uring|epoll|auto` (default `auto`, which currently means epoll; see
 //! [`AUTO_SELECTS_URING`]). Selecting uring probes the kernel: a failed `io_uring_setup`
 //! (ENOSYS, EPERM from seccomp or `kernel.io_uring_disabled`), a kernel without
-//! `DEFER_TASKRUN` (before 6.1), a missing opcode, or a failed buffer-ring or eventfd
-//! registration all fall back to epoll for that realm.
+//! `SINGLE_ISSUER` (before 6.0, which multishot receive also needs), a missing opcode, or a
+//! failed buffer-ring registration all fall back to epoll for that realm.
 
 use std::cell::RefCell;
 use std::io;
 use std::mem::ManuallyDrop;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU16, Ordering, fence};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
@@ -411,7 +415,6 @@ struct Inner {
     closed: bool,
     failure: Option<String>,
     driver: DriverState,
-    eventfd: Option<OwnedFd>,
     /// Shutdown could not confirm the kernel was done with our memory; never free it.
     leak: bool,
     stats: RingStats,
@@ -437,7 +440,7 @@ impl Ring {
     pub(crate) fn new() -> io::Result<Rc<Self>> {
         let uring = IoUring::builder()
             .setup_single_issuer()
-            .setup_defer_taskrun()
+            .setup_coop_taskrun()
             .setup_taskrun_flag()
             .setup_cqsize(CQ_ENTRIES)
             .build(SQ_ENTRIES)?;
@@ -461,18 +464,6 @@ impl Ring {
         unsafe {
             submitter.register_buf_ring_with_flags(bufs.entries as u64, BUF_COUNT, BUF_GROUP, 0)?;
         }
-        // SAFETY: plain syscall; the result is checked.
-        let eventfd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
-        if eventfd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: `eventfd` is a fresh descriptor we own.
-        let eventfd = unsafe { OwnedFd::from_raw_fd(eventfd) };
-        submitter.register_eventfd(eventfd.as_raw_fd())?;
-        let mut uring = uring;
-        // Saves the fd lookup on every enter; purely an optimisation.
-        let _ = uring.submitter().register_ring_fd();
-        uring.completion().disable_eventfd();
         Ok(Rc::new(Self {
             inner: RefCell::new(Inner {
                 uring,
@@ -488,7 +479,6 @@ impl Ring {
                 closed: false,
                 failure: None,
                 driver: DriverState::default(),
-                eventfd: Some(eventfd),
                 leak: false,
                 stats: RingStats::default(),
             }),
@@ -543,8 +533,8 @@ impl Ring {
                 inner.driver.scheduled = true;
                 drop(inner);
                 tokio::task::spawn_local(Driver {
+                    ring_fd: None,
                     ring: Rc::clone(self),
-                    eventfd: None,
                 });
                 return;
             }
@@ -576,19 +566,20 @@ impl Ring {
         }
     }
 
-    fn poll_drive(&self, cx: &mut Context<'_>, eventfd: &mut Option<AsyncFd<OwnedFd>>) -> Poll<()> {
-        if eventfd.is_none() {
-            let fd = self.inner.borrow_mut().eventfd.take();
-            match fd.map(|fd| AsyncFd::with_interest(fd, tokio::io::Interest::READABLE)) {
-                Some(Ok(fd)) => *eventfd = Some(fd),
-                Some(Err(error)) => {
-                    self.fail(format!("could not register the ring's eventfd: {error}"));
+    fn poll_drive(&self, cx: &mut Context<'_>, ring_fd: &mut Option<AsyncFd<RingFd>>) -> Poll<()> {
+        if ring_fd.is_none() {
+            let fd = RingFd(self.inner.borrow().uring.as_raw_fd());
+            match AsyncFd::with_interest(fd, tokio::io::Interest::READABLE) {
+                Ok(fd) => *ring_fd = Some(fd),
+                Err(error) => {
+                    self.fail(format!(
+                        "could not register the ring with the reactor: {error}"
+                    ));
                     return Poll::Ready(());
                 }
-                None => return Poll::Ready(()),
             }
         }
-        let eventfd = eventfd.as_ref().expect("eventfd registered above");
+        let ring_fd = ring_fd.as_ref().expect("ring registered above");
         loop {
             let (reaped, wakers) = {
                 let mut inner = self.inner.borrow_mut();
@@ -618,50 +609,28 @@ impl Ring {
             }
             {
                 let mut inner = self.inner.borrow_mut();
-                inner.uring.completion().enable_eventfd();
-                // Pairs with the kernel's barrier between queueing work and reading the
-                // eventfd-disabled flag: either it sees the flag clear, or we see its work.
-                fence(Ordering::SeqCst);
-                let mut work = inner.has_work();
-                if work == Work::TaskrunOnly && inner.taskrun_stale {
-                    // The kernel leaves IORING_SQ_TASKRUN set when work queued during a run
-                    // is run in that same pass, and only clears it on the next run, so an
-                    // enter that just found nothing proves the flag stale. Enter once more,
-                    // now with the eventfd armed, so work that arrived while it was disabled
-                    // is not stranded behind the stale flag.
-                    inner.stats.stale_taskrun += 1;
-                    let reaped = inner.enter_and_reap();
-                    work = if reaped > 0 { Work::Other } else { Work::None };
-                    if reaped > 0 {
-                        inner.uring.completion().disable_eventfd();
-                        let wakers = std::mem::take(&mut inner.wake);
-                        inner.driver.scheduled = true;
-                        drop(inner);
-                        for waker in wakers {
-                            waker.wake();
-                        }
-                        cx.waker().wake_by_ref();
-                        return Poll::Pending;
-                    }
-                }
-                if work != Work::None {
+                let work = inner.has_work();
+                // A flag that the enter just made proved stale is not work (see `turn`). Parking
+                // on it is safe without DEFER_TASKRUN: real pending task work makes the park's
+                // own epoll_wait return, and running it posts the completions that wake us.
+                let stale = work == Work::TaskrunOnly && inner.taskrun_stale;
+                if work != Work::None && !stale {
                     // More to do, but never loop inside one poll: the work may be waiting on
                     // a task that only runs once the driver yields.
-                    inner.uring.completion().disable_eventfd();
                     inner.driver.scheduled = true;
                     drop(inner);
                     cx.waker().wake_by_ref();
                     return Poll::Pending;
                 }
+                if stale {
+                    inner.stats.stale_taskrun += 1;
+                }
                 inner.stats.parks += 1;
             }
-            match eventfd.poll_read_ready(cx) {
-                Poll::Ready(Ok(mut guard)) => {
-                    guard.clear_ready();
-                    self.inner.borrow_mut().uring.completion().disable_eventfd();
-                }
+            match ring_fd.poll_read_ready(cx) {
+                Poll::Ready(Ok(mut guard)) => guard.clear_ready(),
                 Poll::Ready(Err(error)) => {
-                    self.fail(format!("ring eventfd failed: {error}"));
+                    self.fail(format!("ring readiness failed: {error}"));
                     return Poll::Ready(());
                 }
                 Poll::Pending => return Poll::Pending,
@@ -1144,8 +1113,18 @@ fn set_linger_zero(fd: RawFd) {
 
 /// The ring's only task. See the module documentation for the loop it runs.
 struct Driver {
+    // Declared first so it leaves the reactor before the last `Rc<Ring>` can close the ring.
+    ring_fd: Option<AsyncFd<RingFd>>,
     ring: Rc<Ring>,
-    eventfd: Option<AsyncFd<OwnedFd>>,
+}
+
+/// The ring's descriptor as the reactor sees it; the ring itself owns and closes it.
+struct RingFd(RawFd);
+
+impl AsRawFd for RingFd {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0
+    }
 }
 
 impl std::future::Future for Driver {
@@ -1153,7 +1132,7 @@ impl std::future::Future for Driver {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let this = self.get_mut();
-        this.ring.poll_drive(cx, &mut this.eventfd)
+        this.ring.poll_drive(cx, &mut this.ring_fd)
     }
 }
 
