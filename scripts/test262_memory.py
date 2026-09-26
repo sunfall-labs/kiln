@@ -7,11 +7,51 @@ import sys
 import time
 
 
-def limit_bytes():
-    megabytes = int(os.environ.get("KILN_TEST262_MEMORY_MB", "4096"))
+MEBIBYTE = 1024 * 1024
+GIBIBYTE = 1024 * MEBIBYTE
+MEMORY_PER_WORKER = GIBIBYTE
+
+
+def limit_bytes(environment=None):
+    environment = os.environ if environment is None else environment
+    megabytes = int(environment.get("KILN_TEST262_MEMORY_MB", "4096"))
     if megabytes < 64:
         raise ValueError("KILN_TEST262_MEMORY_MB must be at least 64")
-    return megabytes * 1024 * 1024
+    return megabytes * MEBIBYTE
+
+
+def available_cpus():
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        return max(1, os.cpu_count() or 1)
+
+
+def worker_count(environment, cpu_count):
+    """Bound concurrent cases by CPUs, explicit job limits, and the memory budget.
+
+    The per-worker allowance is a scheduling policy, not a guarantee about an individual
+    test's memory use. The subprocess memory cap remains independently enforced.
+    """
+    limits = [max(1, cpu_count)]
+    for name in ("KILN_JOBS", "RAYON_NUM_THREADS"):
+        try:
+            requested = int(environment.get(name, ""))
+        except ValueError:
+            continue
+        if requested > 0:
+            limits.append(requested)
+    limits.append(max(1, limit_bytes(environment) // MEMORY_PER_WORKER))
+    return min(limits)
+
+
+def child_environment(environment, cpu_count=None):
+    """Copy the caller's environment and set the worker bound for the Kiln child."""
+    child = dict(environment)
+    child["RAYON_NUM_THREADS"] = str(
+        worker_count(environment, available_cpus() if cpu_count is None else cpu_count)
+    )
+    return child
 
 
 def _rlimit(limit):
