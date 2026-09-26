@@ -3428,40 +3428,6 @@ if (typeof JSON !== "undefined") {
     data(RegExp.prototype, Symbol.replace, methods[Symbol.replace], true);
     data(RegExp.prototype, Symbol.search, methods[Symbol.search], true);
     data(RegExp.prototype, Symbol.split, methods[Symbol.split], true);
-    const dateToPrimitive = {
-        [Symbol.toPrimitive](hint) {
-            if (hint === "number") return this.valueOf();
-            if (hint === "string" || hint === "default") return this.toString();
-            throw new TypeError("Invalid hint: " + String(hint));
-        },
-    };
-    data(Date.prototype, Symbol.toPrimitive, dateToPrimitive[Symbol.toPrimitive]);
-    // The three date spellings that need no locale: the realm's clock is UTC (ADR 0015), so the
-    // local fields are the UTC fields and the zone text is fixed.
-    const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    const two = (n) => String(n).padStart(2, "0");
-    const year = (d) => {
-        const y = d.getUTCFullYear();
-        return y < 0 ? "-" + String(-y).padStart(4, "0") : String(y).padStart(4, "0");
-    };
-    const dateMethods = {
-        toDateString() {
-            if (Number.isNaN(this.getTime())) return "Invalid Date";
-            return `${DAYS[this.getUTCDay()]} ${MONTHS[this.getUTCMonth()]} ${two(this.getUTCDate())} ${year(this)}`;
-        },
-        toTimeString() {
-            if (Number.isNaN(this.getTime())) return "Invalid Date";
-            return `${two(this.getUTCHours())}:${two(this.getUTCMinutes())}:${two(this.getUTCSeconds())} GMT+0000 (Coordinated Universal Time)`;
-        },
-        toUTCString() {
-            if (Number.isNaN(this.getTime())) return "Invalid Date";
-            return `${DAYS[this.getUTCDay()]}, ${two(this.getUTCDate())} ${MONTHS[this.getUTCMonth()]} ${year(this)} ${two(this.getUTCHours())}:${two(this.getUTCMinutes())}:${two(this.getUTCSeconds())} GMT`;
-        },
-    };
-    data(Date.prototype, "toDateString", dateMethods.toDateString, true);
-    data(Date.prototype, "toTimeString", dateMethods.toTimeString, true);
-    data(Date.prototype, "toUTCString", dateMethods.toUTCString, true);
     const symbolToPrimitive = {
         [Symbol.toPrimitive]() { return this.valueOf(); },
     };
@@ -3885,16 +3851,17 @@ fn native_builtin_bootstrap_module(
     } else {
         ""
     };
+    let date = kiln_builtins::DATE_BOOTSTRAP_SOURCE;
     let source = if node {
         format!(
-            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{url}\n{}",
+            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{date}\n{url}\n{}",
             kiln_builtins::WEB_BOOTSTRAP_SOURCE
         )
     } else {
         // The Buffer bootstrap (Node mode) captures and deletes this bridge; without it the
         // bridge would be the one global node does not have, so it goes here instead.
         format!(
-            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{url}\ndelete globalThis.__kilnBufferToString;\n"
+            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{date}\n{url}\ndelete globalThis.__kilnBufferToString;\n"
         )
     };
     let hir = frontend_oxc::parse(LOGICAL_PATH, &source);

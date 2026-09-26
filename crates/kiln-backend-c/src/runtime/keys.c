@@ -176,6 +176,47 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
             }
         }
     }
+    {
+        kiln_value store;
+        if (kiln_c99_callable_store(kiln_c99_builtin(builtin), &store, 0) == KILN_C99_OK &&
+            store.tag == KILN_VALUE_OBJECT) {
+            kiln_object *obj = kiln_c99_object_of(store);
+            size_t p;
+            if (obj->shape != NULL) kiln_c99_ensure_dictionary(obj);
+            for (p = 0; p < obj->count; ++p) {
+                size_t b_idx;
+                int duplicate = 0;
+                kiln_array *arr = kiln_c99_array_of(built);
+                if (kiln_c99_key_is_reserved(obj->properties[p].key)) {
+                    kiln_value symbol;
+                    if (kiln_c99_symbol_of_key_view(obj->properties[p].key, &symbol)) {
+                        for (b_idx = 0; b_idx < arr->count; ++b_idx) {
+                            if (kiln_c99_strict_equal(kiln_val_to_boundary(arr->elements[b_idx]), symbol)) {
+                                duplicate = 1;
+                                break;
+                            }
+                        }
+                        if (!duplicate) {
+                            status = kiln_c99_array_push(built, symbol);
+                            if (status != KILN_C99_OK) return status;
+                        }
+                    }
+                } else {
+                    kiln_value str_val = kiln_c99_stable_key_value(obj->properties[p].key);
+                    for (b_idx = 0; b_idx < arr->count; ++b_idx) {
+                        if (kiln_c99_strict_equal(kiln_val_to_boundary(arr->elements[b_idx]), str_val)) {
+                            duplicate = 1;
+                            break;
+                        }
+                    }
+                    if (!duplicate) {
+                        status = kiln_c99_array_push(built, str_val);
+                        if (status != KILN_C99_OK) return status;
+                    }
+                }
+            }
+        }
+    }
     *out = built;
     return KILN_C99_OK;
 }

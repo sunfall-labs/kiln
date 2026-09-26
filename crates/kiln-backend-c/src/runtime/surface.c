@@ -23,6 +23,7 @@ static const char *kiln_c99_builtin_owner_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_SET_PROTOTYPE: return "Set.prototype";
     case KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE: return "WeakMap.prototype";
     case KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE: return "WeakSet.prototype";
+    case KILN_C99_BUILTIN_DATE_PROTOTYPE: return "Date.prototype";
     default: return kiln_c99_builtin_name(builtin);
     }
 }
@@ -297,9 +298,15 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
     case KILN_C99_BUILTIN_REGEXP_PROTOTYPE:
         return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_REGEXP_TEST,
                                       KILN_C99_METHOD_REGEXP_TO_STRING);
-    case KILN_C99_BUILTIN_DATE_PROTOTYPE:
-        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_GET_TIME,
-                                      KILN_C99_METHOD_DATE_TO_STRING);
+    case KILN_C99_BUILTIN_DATE_PROTOTYPE: {
+        uint64_t code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_GET_TIME,
+                                               KILN_C99_METHOD_DATE_TO_STRING);
+        if (code == 0) {
+            code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_SET_TIME,
+                                          KILN_C99_METHOD_SET_MILLISECONDS);
+        }
+        return code;
+    }
 
     case KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE:
         /* The same range an instance read uses, so `DataView.prototype.getUint8` and

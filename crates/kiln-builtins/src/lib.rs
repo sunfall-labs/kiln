@@ -1253,9 +1253,21 @@ pub const WEB_BOOTSTRAP_SOURCE: &str = concat!(
 /// a plain module reaches for.
 pub const URL_BOOTSTRAP_SOURCE: &str = include_str!("url.ts");
 
+/// `Date.prototype` over the host's timestamp storage (ADR 0005, ADR 0063 rule 4, Phase 5.1).
+/// Part of every realm's bootstrap, in both interpreter and native execution.
+pub const DATE_BOOTSTRAP_SOURCE: &str = include_str!("date.ts");
+
 #[cfg(test)]
 mod web_tests {
     use super::*;
+
+    #[test]
+    fn date_bootstrap_compiles_cleanly() {
+        let hir = frontend_oxc::parse("@kiln/date-bootstrap.ts", DATE_BOOTSTRAP_SOURCE);
+        let program = kiln_ir::compile_module(&hir)
+            .expect("date bootstrap should compile to IR without error");
+        assert!(!program.program.code.is_empty());
+    }
 
     #[test]
     fn url_bootstrap_compiles_cleanly() {
@@ -1273,3 +1285,4 @@ mod web_tests {
         assert!(!program.program.code.is_empty());
     }
 }
+
