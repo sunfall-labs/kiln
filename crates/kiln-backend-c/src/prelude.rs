@@ -2554,7 +2554,9 @@ const _: () = assert_refusals_name_themselves(
 /// `prefix` (`"get"`/`"set"`/NULL at every caller in values.c): a genuine NUL-terminated
 /// C string literal, previously measured inside `kiln_c99_text_append_c`, now spelled
 /// out at the `kiln_c99_static_text(prefix, strlen(prefix))` call in definitions.c.
-pub const C_STRING_LENGTH_SITES: usize = 79;
+/// Seven left on 2026-09-26 with the `node:http` lazy-header probes (six header-buffer scans,
+/// now `memchr`) and the request-method table (lengths now stored beside the names).
+pub const C_STRING_LENGTH_SITES: usize = 72;
 
 /// How far the `strlen(` scan may skip after reading the last byte of its seven-byte window:
 /// the Horspool shift, as `refusal_scan_shift` is for the refusal scan, so the const evaluator
@@ -4745,6 +4747,8 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_builtin_store_epoch", C99StateOwner::Realm),
     ("kiln_c99_bytes_cache", C99StateOwner::Realm),
     ("kiln_c99_proto_epoch", C99StateOwner::Realm),
+    // Per thread, and trusted only for the heap it was built under: the `node:http` layouts.
+    ("kiln_c99_node_http_layouts", C99StateOwner::Realm),
     ("kiln_c99_gc_stress_checks", C99StateOwner::Process),
     ("kiln_c99_introspect_pending", C99StateOwner::Process),
     ("kiln_c99_introspect_armed", C99StateOwner::Process),

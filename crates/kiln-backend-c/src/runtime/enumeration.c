@@ -587,10 +587,6 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
                     *answer = 1;
                     return KILN_C99_OK;
                 }
-                if (intrinsic_key != NULL && kiln_c99_node_has_lazy_header(current, intrinsic_key, intrinsic_len)) {
-                    *answer = 1;
-                    return KILN_C99_OK;
-                }
             }
             current = object->prototype;
         }
@@ -808,7 +804,6 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
         return status;
     }
     if (target.tag == KILN_VALUE_OBJECT) {
-        kiln_c99_node_materialize_all_headers(target);
         kiln_object *object = kiln_c99_object_of(target);
         if (object->properties == NULL && object->shape != NULL) {
             if (object->elements != NULL) {

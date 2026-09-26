@@ -1468,7 +1468,6 @@ struct kiln_node_socket {
     struct kiln_node_client_request *client_requests;
     uint64_t next_client_request_id;
     struct kiln_node_response *responses;
-    struct kiln_node_response *recycled_response;
     int close_after_write;
     int close_after_responses;
     int shutdown_after_write;
@@ -1523,11 +1522,12 @@ typedef struct kiln_node_response {
     uint64_t request_id;
     kiln_value request;
     kiln_value object;
-    kiln_value headers;
-    /* The request's headers as the runtime flattened them: NUL-separated name/value pairs,
-     * copied because the event that carried them is the runtime's and does not outlive the
-     * callback.  A malloc'd inner buffer of this block, released by its finaliser (ADR 0041) or
-     * as soon as `req.headers` is read and the object it describes exists instead. */
+    /* The request's headers as the runtime flattened them: NUL-separated name/value pairs.
+     * While the head event is being dispatched this borrows the event's buffer
+     * (`request_headers_owned == 0`); the dispatch copies it before returning if `req.headers`
+     * was not read, because the runtime reuses that buffer for the next request on the
+     * connection. A malloc'd inner buffer of this block once owned, released by its finaliser
+     * (ADR 0041) or as soon as `req.headers` is read and the object it describes exists instead. */
     char *request_headers;
     size_t request_headers_len;
     int request_headers_owned;
@@ -1535,6 +1535,13 @@ typedef struct kiln_node_response {
     int started;
     int ended;
     struct kiln_node_response *next;
+    /* The response head the program is building, already in the private ABI's flattened form
+     * (`name NUL value NUL`, UTF-8, names as the program spelt them): `setHeader`, `writeHead`
+     * and friends edit it in place and the first `write`/`end` hands it to the runtime as is.
+     * A malloc'd inner buffer of this block, released by its finaliser. */
+    char *out_headers;
+    size_t out_headers_len;
+    size_t out_headers_capacity;
     /* Step B.3: Specialized URL construction and request target tracking */
     kiln_value url_object;
     kiln_value search_params_object;
