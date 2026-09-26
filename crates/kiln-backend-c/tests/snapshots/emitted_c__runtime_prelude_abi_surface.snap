@@ -1,6 +1,5 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 804
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -2441,8 +2440,6 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
 #else
 #endif
 #if KILN_RETAIN_GROUP_MATH_NUMBER
-#endif
-#if KILN_RETAIN_GROUP_DATE_SETTER
 #endif
 static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth,
 static int kiln_c99_is_symbol_key(const char *key, size_t key_len) {

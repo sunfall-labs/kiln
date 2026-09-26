@@ -295,15 +295,14 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
     case KILN_C99_BUILTIN_REGEXP_PROTOTYPE:
         return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_REGEXP_TEST,
                                       KILN_C99_METHOD_REGEXP_TO_STRING);
-    case KILN_C99_BUILTIN_DATE_PROTOTYPE: {
-        uint64_t code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_GET_TIME,
-                                               KILN_C99_METHOD_DATE_TO_STRING);
-        if (code == 0) {
-            code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_SET_TIME,
-                                          KILN_C99_METHOD_SET_MILLISECONDS);
+    case KILN_C99_BUILTIN_DATE_PROTOTYPE:
+        if (kiln_c99_same_name(key, key_len, "getTime")) {
+            return KILN_C99_METHOD_GET_TIME;
         }
-        return code;
-    }
+        if (kiln_c99_same_name(key, key_len, "setTime")) {
+            return KILN_C99_METHOD_SET_TIME;
+        }
+        return 0;
 
     case KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE:
         /* The same range an instance read uses, so `DataView.prototype.getUint8` and

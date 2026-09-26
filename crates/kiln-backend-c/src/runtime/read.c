@@ -180,6 +180,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
          * so, while `it.chunks` reading undefined would quietly fail a feature test. */
         if (kiln_c99_object_of(target)->prototype.tag == KILN_VALUE_BUILTIN &&
             kiln_c99_object_of(target)->prototype.bits == KILN_C99_BUILTIN_ITERATOR_PROTOTYPE) {
+            int found;
+            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_ITERATOR_PROTOTYPE,
+                                                       key, ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
             (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
                                                 &intrinsic_len);
             uint64_t helper = kiln_c99_iterator_prototype_method(intrinsic_key, intrinsic_len);
@@ -666,57 +670,33 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             return KILN_C99_OK;
         }
         {
+            int found;
+            int status = kiln_c99_prototype_store_read(host, kiln_c99_typed_prototype(view->kind),
+                                                       key, ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+            status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE,
+                                                   key, ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
             (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
                                                 &intrinsic_len);
-            /* One table for the prototype's own members, shared with `in` and with the
-             * reflective paths, so a read and a presence test can never disagree about which
-             * names a view has. `@@iterator` is `values`, which is what makes `[...view]` and
-             * `for (const x of view)` walk the live view rather than a copy. */
-            uint64_t method = kiln_c99_same_name_key(key, "@@iterator")
-                                  ? KILN_C99_METHOD_ARRAY_VALUES
-                                  : kiln_c99_typed_prototype_method(intrinsic_key, intrinsic_len);
-            if (method == 0) {
-                kiln_value concrete_proto =
-                    kiln_c99_builtin(kiln_c99_typed_prototype(view->kind));
-                kiln_value store;
-                if (kiln_c99_callable_store(concrete_proto, &store, 0) == KILN_C99_OK &&
-                    store.tag == KILN_VALUE_OBJECT) {
-                    kiln_object *properties = kiln_c99_object_of(store);
-                    size_t pidx;
-                    if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
-                    for (pidx = 0; pidx < properties->count; ++pidx) {
-                        if (kiln_c99_same_key_view(&properties->properties[pidx], key)) {
-                            return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
-                        }
-                    }
-                }
-                kiln_value common_proto =
-                    kiln_c99_builtin(KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE);
-                if (kiln_c99_callable_store(common_proto, &store, 0) == KILN_C99_OK &&
-                    store.tag == KILN_VALUE_OBJECT) {
-                    kiln_object *properties = kiln_c99_object_of(store);
-                    size_t pidx;
-                    if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
-                    for (pidx = 0; pidx < properties->count; ++pidx) {
-                        if (kiln_c99_same_key_view(&properties->properties[pidx], key)) {
-                            return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
-                        }
-                    }
-                }
-                if (kiln_c99_is_typed_array_member(view->kind == KILN_TYPED_UINT8, intrinsic_key, intrinsic_len)) {
-                    /* A real member this backend has not grown yet. `undefined` would be a
-                     * silent wrong answer -- the program would call it and get a TypeError
-                     * naming the wrong thing -- so this refuses and joins the backlog. */
-                    KILN_C99_REFUSE("a typed-array member this backend has not implemented");
-                }
-                method = kiln_c99_same_name_key(key, "isPrototypeOf")
-                             ? KILN_C99_METHOD_IS_PROTOTYPE_OF
-                         : kiln_c99_same_name_key(key, "propertyIsEnumerable")
-                             ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
-                             : kiln_c99_lookup_method(intrinsic_key, intrinsic_len,
-                                                      KILN_C99_METHOD_HAS_OWN_PROPERTY,
-                                                      KILN_C99_METHOD_OBJECT_VALUE_OF);
+            uint64_t method = kiln_c99_typed_prototype_method(intrinsic_key, intrinsic_len);
+            if (method != 0) {
+                *out = kiln_c99_method(method);
+                return KILN_C99_OK;
             }
+            if (kiln_c99_is_typed_array_member(view->kind == KILN_TYPED_UINT8, intrinsic_key, intrinsic_len)) {
+                /* A real member this backend has not grown yet. `undefined` would be a
+                 * silent wrong answer -- the program would call it and get a TypeError
+                 * naming the wrong thing -- so this refuses and joins the backlog. */
+                KILN_C99_REFUSE("a typed-array member this backend has not implemented");
+            }
+            method = kiln_c99_same_name_key(key, "isPrototypeOf")
+                         ? KILN_C99_METHOD_IS_PROTOTYPE_OF
+                     : kiln_c99_same_name_key(key, "propertyIsEnumerable")
+                         ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
+                         : kiln_c99_lookup_method(intrinsic_key, intrinsic_len,
+                                                  KILN_C99_METHOD_HAS_OWN_PROPERTY,
+                                                  KILN_C99_METHOD_OBJECT_VALUE_OF);
             *out = method == 0 ? kiln_c99_undefined() : kiln_c99_method(method);
         }
         return KILN_C99_OK;
@@ -1000,52 +980,13 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                                                        ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
         }
-        static const struct {
-            const char *name;
-            uint64_t code;
-        } ALIASES[] = {
-            {"valueOf", KILN_C99_METHOD_GET_TIME},
-            {"getUTCFullYear", KILN_C99_METHOD_GET_FULL_YEAR},
-            {"getUTCMonth", KILN_C99_METHOD_GET_MONTH},
-            {"getUTCDate", KILN_C99_METHOD_GET_DATE},
-            {"getUTCDay", KILN_C99_METHOD_GET_DAY},
-            {"getUTCHours", KILN_C99_METHOD_GET_HOURS},
-            {"getUTCMinutes", KILN_C99_METHOD_GET_MINUTES},
-            {"getUTCSeconds", KILN_C99_METHOD_GET_SECONDS},
-            {"getUTCMilliseconds", KILN_C99_METHOD_GET_MILLISECONDS},
-            /* `toUTCString`, `toDateString` and `toTimeString` were aliased to `toString` here
-             * and answered its whole spelling for all three -- `Sat Sep 19 2026 00:00:00 GMT+0000
-             * (Coordinated Universal Time)` where node says `Sat, 19 Sep 2026 00:00:00 GMT` -- a
-             * plausible wrong string. They are answered from the prototype's store now, where the
-             * runtime bootstrap defines them. The three `toLocale*` spellings were aliased the
-             * same way and now refuse: their answer needs locale data, which is `Intl`'s to link
-             * (ADR 0063 rule 5). */
-            /* The local writers are the UTC writers, for the same reason the local readers are
-             * the UTC readers: the realm has one zone and its offset is zero. */
-            {"setFullYear", KILN_C99_METHOD_SET_FULL_YEAR},
-            {"setMonth", KILN_C99_METHOD_SET_MONTH},
-            {"setDate", KILN_C99_METHOD_SET_DATE},
-            {"setHours", KILN_C99_METHOD_SET_HOURS},
-            {"setMinutes", KILN_C99_METHOD_SET_MINUTES},
-            {"setSeconds", KILN_C99_METHOD_SET_SECONDS},
-            {"setMilliseconds", KILN_C99_METHOD_SET_MILLISECONDS},
-        };
-        uint64_t code = kiln_c99_lookup_method(intrinsic_key, intrinsic_len, KILN_C99_METHOD_GET_TIME,
-                                               KILN_C99_METHOD_DATE_TO_STRING);
-        size_t alias;
-        if (code == 0) {
-            code = kiln_c99_lookup_method(intrinsic_key, intrinsic_len, KILN_C99_METHOD_SET_TIME,
-                                          KILN_C99_METHOD_SET_MILLISECONDS);
-        }
-        if (code != 0) {
-            *out = kiln_c99_method(code);
+        if (kiln_c99_same_name_key(key, "getTime")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_GET_TIME);
             return KILN_C99_OK;
         }
-        for (alias = 0; alias < sizeof ALIASES / sizeof *ALIASES; ++alias) {
-            if (kiln_c99_same_name_key(key, ALIASES[alias].name)) {
-                *out = kiln_c99_method(ALIASES[alias].code);
-                return KILN_C99_OK;
-            }
+        if (kiln_c99_same_name_key(key, "setTime")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_SET_TIME);
+            return KILN_C99_OK;
         }
         /* Same split as the array above: a member this backend lacks refuses by name, and a name
          * that is not a member at all is undefined. */
@@ -1349,7 +1290,6 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             kiln_typed_kind typed_kind;
             int concrete = kiln_c99_typed_prototype_kind(target.bits, &typed_kind);
             if (concrete || target.bits == KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE) {
-                uint64_t method;
                 if (concrete && kiln_c99_same_name_key(key, "constructor")) {
                     *out = kiln_c99_builtin(kiln_c99_typed_constructor(typed_kind));
                     return KILN_C99_OK;
@@ -1358,8 +1298,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                     *out = kiln_c99_number((double)kiln_c99_typed_width(typed_kind));
                     return KILN_C99_OK;
                 }
-                method = kiln_c99_typed_prototype_method(intrinsic_key, intrinsic_len);
-                if (method == 0) {
+                {
                     int found;
                     int status = kiln_c99_prototype_store_read(host, target.bits, key,
                                                                ikey, out, depth, thrown, &found);
@@ -1370,25 +1309,22 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                         if (status != KILN_C99_OK || found) return status;
                     }
                 }
-                if (method == 0) {
-                    /* The same question the *instance* read asks two hundred lines above, and it
-                     * was missing here: a real member of the prototype that this backend has not
-                     * built read as `undefined` off the prototype object while refusing off an
-                     * instance. `Uint8Array.prototype.toSorted` is one, and a library that patches
-                     * or feature-detects a method reads it off the prototype, which is the half
-                     * that was answering wrongly. */
-                    if (kiln_c99_is_typed_array_member(concrete && typed_kind == KILN_TYPED_UINT8,
-                                                       intrinsic_key, intrinsic_len)) {
-                        KILN_C99_REFUSE("a typed-array member this backend has not implemented");
-                    }
-                    method = kiln_c99_same_name_key(key, "isPrototypeOf")
-                                 ? KILN_C99_METHOD_IS_PROTOTYPE_OF
-                             : kiln_c99_same_name_key(key, "propertyIsEnumerable")
-                                 ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
-                                 : kiln_c99_lookup_method(intrinsic_key, intrinsic_len,
-                                                          KILN_C99_METHOD_HAS_OWN_PROPERTY,
-                                                          KILN_C99_METHOD_OBJECT_VALUE_OF);
+                uint64_t method = kiln_c99_typed_prototype_method(intrinsic_key, intrinsic_len);
+                if (method != 0) {
+                    *out = kiln_c99_method(method);
+                    return KILN_C99_OK;
                 }
+                if (kiln_c99_is_typed_array_member(concrete && typed_kind == KILN_TYPED_UINT8,
+                                                   intrinsic_key, intrinsic_len)) {
+                    KILN_C99_REFUSE("a typed-array member this backend has not implemented");
+                }
+                method = kiln_c99_same_name_key(key, "isPrototypeOf")
+                             ? KILN_C99_METHOD_IS_PROTOTYPE_OF
+                         : kiln_c99_same_name_key(key, "propertyIsEnumerable")
+                             ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
+                             : kiln_c99_lookup_method(intrinsic_key, intrinsic_len,
+                                                      KILN_C99_METHOD_HAS_OWN_PROPERTY,
+                                                      KILN_C99_METHOD_OBJECT_VALUE_OF);
                 *out = method == 0 ? kiln_c99_undefined() : kiln_c99_method(method);
                 return KILN_C99_OK;
             }
