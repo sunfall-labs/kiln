@@ -66,6 +66,13 @@
 //! everything else and waits for the kernel to finish; if it cannot confirm that within a
 //! deadline it leaks the memory rather than free something the kernel may still write.
 //!
+//! # Listeners
+//!
+//! With the backend selected, a listening socket belongs to the ring too ([`RingListener`]):
+//! one multishot `ACCEPT` stays armed, the connections it accepts are never registered with
+//! Tokio's reactor, and the HTTP engine takes them straight onto the ring. A raw
+//! `node:net` socket still gets Tokio halves, on its first discrete read, write or shutdown.
+//!
 //! # Selection
 //!
 //! `KILN_IO=uring|epoll|auto` (default `auto`, which currently means epoll; see
@@ -89,8 +96,9 @@ use io_uring::{IoUring, Probe, cqueue, opcode, squeue, types};
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-/// Whether `KILN_IO` unset (or `auto`) selects io_uring. See the report in NOTES.md for the
-/// measurements behind the default.
+/// Whether `KILN_IO` unset (or `auto`) selects io_uring. Off: the ring saves syscalls under
+/// load but costs latency on an idle connection (a parked realm is woken through task work,
+/// `EINTR` and a second `epoll_wait`), and it is the newer path.
 pub const AUTO_SELECTS_URING: bool = false;
 
 const SQ_ENTRIES: u32 = 256;

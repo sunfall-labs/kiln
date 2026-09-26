@@ -2578,8 +2578,10 @@ impl TokioHost {
                     return request;
                 }
                 self.spawn_task(request, sequence, referenced, async move {
-                    let HostListener::Tokio(listener) = &*listener else {
-                        unreachable!("ring listeners are handled above");
+                    let listener = match &*listener {
+                        HostListener::Tokio(listener) => listener,
+                        #[cfg(target_os = "linux")]
+                        HostListener::Ring(_) => unreachable!("ring listeners are handled above"),
                     };
                     let result = listener
                         .accept()
