@@ -79,11 +79,8 @@ static int kiln_c99_key_ascii_view(const kiln_string *key, char scratch[256], co
 }
 
 static uint64_t kiln_c99_typed_prototype_method_key(const kiln_string *key) {
-    char scratch[256];
-    const char *bytes;
-    size_t length;
-    if (!kiln_c99_key_ascii_view(key, scratch, &bytes, &length)) return 0;
-    return kiln_c99_typed_prototype_method(bytes, length);
+    (void)key;
+    return 0;
 }
 
 static void kiln_c99_typed_own_key(kiln_value target, const kiln_string *key, int *found,
@@ -109,8 +106,6 @@ static int kiln_c99_typed_prototype_own_key(kiln_value target, const kiln_string
     if (concrete) {
         *found = kiln_c99_same_name_key(key, "constructor") ||
                  kiln_c99_same_name_key(key, "BYTES_PER_ELEMENT");
-    } else {
-        *found = kiln_c99_typed_prototype_method_key(key) != 0;
     }
     if (!*found) {
         kiln_value store;

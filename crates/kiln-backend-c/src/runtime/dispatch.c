@@ -4406,103 +4406,13 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 *result = kiln_c99_number(time);
                 return KILN_C99_OK;
             }
-            if (code == KILN_C99_METHOD_GET_TIMEZONE_OFFSET) {
-                /* Zero, honestly reported rather than left to be discovered: the realm is UTC. */
-                *result = kiln_c99_number(0.0);
-                return KILN_C99_OK;
-            }
-            if (code == KILN_C99_METHOD_TO_ISO_STRING || code == KILN_C99_METHOD_TO_JSON) {
-                kiln_value iso;
-                status = kiln_c99_iso_string(&iso, time);
-                if (status != KILN_C99_OK) {
-                    return status;
-                }
-                if (iso.tag == KILN_VALUE_STRING) {
-                    *result = iso;
-                    return KILN_C99_OK;
-                }
-                /* An instant with no ISO spelling makes `toISOString` throw where `toJSON`
-                 * answers null, so the enclosing document still serialises. */
-                if (code == KILN_C99_METHOD_TO_JSON) {
-                    *result = kiln_c99_null();
-                    return KILN_C99_OK;
-                }
-                /* A `RangeError` the program can catch, which is what the sentence above already
-                 * says happens -- it was ending the process instead. */
-                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
-                                            "Invalid time value");
-            }
-            if (code == KILN_C99_METHOD_DATE_TO_STRING) {
-                return kiln_c99_date_to_string(result, time);
-            }
-#if KILN_RETAIN_GROUP_DATE_SETTER
-            if ((groups & KILN_C99_GROUP_DATE_SETTER)) {
-                /* A setter writes through the instant the receiver already holds, which is why
-                 * a Date is a heap slot rather than a value: `d.setUTCDate(31)` has to be
-                 * visible through every other name for the same date.
-                 *
-                 * Each one takes over the fields from its own downwards -- `setUTCHours(h, m)`
-                 * writes minutes too -- and leaves the rest alone. Out-of-range parts roll over
-                 * rather than clamping, which falls out of rebuilding the instant from the
-                 * fields instead of validating them: month 12 is January of the next year. */
-                double fields[7];
-                double written;
-                size_t supplied;
-                if (code == KILN_C99_METHOD_SET_TIME) {
-                    written = argc > 0 ? kiln_c99_as_number(args[0]) : 0.0 / 0.0;
-                    *(double *)(uintptr_t)receiver.bits = written;
-                    *result = kiln_c99_number(written);
-                    return KILN_C99_OK;
-                }
-                parts = kiln_c99_date_parts(time);
-                if (!parts.valid) {
-                    /* An invalid date stays invalid: there are no fields to write into. */
-                    *result = kiln_c99_number(0.0 / 0.0);
-                    return KILN_C99_OK;
-                }
-                fields[0] = (double)parts.year;
-                fields[1] = (double)(parts.month - 1);
-                fields[2] = (double)parts.day;
-                fields[3] = (double)parts.hour;
-                fields[4] = (double)parts.minute;
-                fields[5] = (double)parts.second;
-                fields[6] = (double)parts.millisecond;
-                /* `setUTCFullYear` starts at field 0, `setUTCMonth` at 1, and so on down. */
-                supplied = (size_t)(code - KILN_C99_METHOD_SET_FULL_YEAR);
-                for (index = 0; index < argc && supplied + index < 7; ++index) {
-                    fields[supplied + index] = kiln_c99_as_number(args[index]);
-                }
-                written = kiln_c99_instant_from_parts(fields);
+            if (code == KILN_C99_METHOD_SET_TIME) {
+                double written = argc > 0 ? kiln_c99_as_number(args[0]) : 0.0 / 0.0;
                 *(double *)(uintptr_t)receiver.bits = written;
                 *result = kiln_c99_number(written);
                 return KILN_C99_OK;
             }
-#endif
-            parts = kiln_c99_date_parts(time);
-            if (!parts.valid) {
-                *result = kiln_c99_number(0.0 / 0.0);
-                return KILN_C99_OK;
-            }
-            switch (code) {
-            case KILN_C99_METHOD_GET_FULL_YEAR:
-                *result = kiln_c99_number((double)parts.year);
-                break;
-            /* Zero-based, alone among the readers, which is the language's oldest wart. */
-            case KILN_C99_METHOD_GET_MONTH:
-                *result = kiln_c99_number((double)(parts.month - 1));
-                break;
-            case KILN_C99_METHOD_GET_DATE: *result = kiln_c99_number((double)parts.day); break;
-            case KILN_C99_METHOD_GET_DAY: *result = kiln_c99_number((double)parts.weekday); break;
-            case KILN_C99_METHOD_GET_HOURS: *result = kiln_c99_number((double)parts.hour); break;
-            case KILN_C99_METHOD_GET_MINUTES:
-                *result = kiln_c99_number((double)parts.minute);
-                break;
-            case KILN_C99_METHOD_GET_SECONDS:
-                *result = kiln_c99_number((double)parts.second);
-                break;
-            default: *result = kiln_c99_number((double)parts.millisecond); break;
-            }
-            return KILN_C99_OK;
+            KILN_C99_REFUSE("a Date method this backend has not implemented");
         }
         case KILN_C99_METHOD_ITERATOR_SELF:
             *result = receiver;
@@ -5920,212 +5830,33 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             *result = built;
             return KILN_C99_OK;
         }
-        switch (code) {
-        case KILN_C99_METHOD_JOIN: {
-            kiln_text joined = {NULL, 0, 0};
-            kiln_value separator = argc > 0 ? args[0] : kiln_c99_undefined();
-            kiln_value shown_separator;
-            int has_separator = 0;
-            if (separator.tag != KILN_VALUE_UNDEFINED) {
-                shown_separator = kiln_c99_text(separator);
-                if (shown_separator.tag != KILN_VALUE_STRING) {
-                    KILN_C99_REFUSE("Array.prototype.join given a separator with no text form");
-                }
-                has_separator = 1;
-            }
-            for (index = 0; index < view->length; ++index) {
-                kiln_value shown;
-                if (index != 0 &&
-                    (has_separator ? kiln_c99_text_append_string(&joined, shown_separator)
-                                   : kiln_c99_text_append(&joined, ",", 1)) != KILN_C99_OK) {
-                    free(joined.bytes);
-                    return KILN_C99_OUT_OF_MEMORY;
-                }
-                shown = kiln_c99_text(kiln_c99_number(kiln_c99_typed_get(view, index)));
-                if (shown.tag != KILN_VALUE_STRING ||
-                    kiln_c99_text_append_string(&joined, shown) != KILN_C99_OK) {
-                    free(joined.bytes);
-                    return KILN_C99_OUT_OF_MEMORY;
-                }
-            }
-            *result = kiln_c99_text_value(&joined);
-            return KILN_C99_OK;
-        }
-        case KILN_C99_METHOD_ARRAY_VALUES:
-            return kiln_c99_new_typed_iterator(result, receiver, 0);
-        case KILN_C99_METHOD_ARRAY_ENTRIES:
-            return kiln_c99_new_typed_iterator(result, receiver, 1);
-        case KILN_C99_METHOD_ARRAY_KEYS:
-            return kiln_c99_new_typed_iterator(result, receiver, 2);
-        case KILN_C99_METHOD_TYPED_SUBARRAY: {
+        if (code == KILN_C99_METHOD_TYPED_SUBARRAY) {
             size_t start = kiln_c99_relative_index(argc > 0 ? args[0] : kiln_c99_undefined(),
                                                    view->length, 0);
             size_t end = kiln_c99_relative_index(argc > 1 ? args[1] : kiln_c99_undefined(),
                                                  view->length, view->length);
             kiln_typed_array *sub =
                 (kiln_typed_array *)kiln_c99_gc_alloc(KILN_GC_TYPED_ARRAY, sizeof *sub);
-            if (sub == NULL) {
-                return KILN_C99_OUT_OF_MEMORY;
-            }
+            if (sub == NULL) return KILN_C99_OUT_OF_MEMORY;
             sub->buffer = view->buffer;
             sub->byte_offset = view->byte_offset + start * kiln_c99_typed_width(view->kind);
             sub->length = end >= start ? end - start : 0;
             sub->kind = view->kind;
-            /* A slice of a Buffer is a Buffer. The field was left unwritten while the view came
-             * from malloc, which read uninitialised memory; a collected block is no more zeroed
-             * than malloc was, so the answer has to be written down. */
             sub->is_buffer = view->is_buffer;
             *result = kiln_c99_value(KILN_VALUE_TYPED_ARRAY, (uint64_t)(uintptr_t)sub, NULL, 0);
             return KILN_C99_OK;
         }
-        case KILN_C99_METHOD_SLICE: {
-            size_t width = kiln_c99_typed_width(view->kind);
-            size_t start = kiln_c99_relative_index(argc > 0 ? args[0] : kiln_c99_undefined(),
-                                                   view->length, 0);
-            size_t end = kiln_c99_relative_index(argc > 1 ? args[1] : kiln_c99_undefined(),
-                                                 view->length, view->length);
-            size_t count = end >= start ? end - start : 0;
-            kiln_typed_array *copy;
-            status = kiln_c99_typed_alloc(result, view->kind, count);
-            if (status != KILN_C99_OK) {
-                return status;
-            }
-            copy = kiln_c99_typed_array_of(*result);
-            if (count != 0) {
-                /* The bytes rather than the elements: a copy of the same kind reinterprets them
-                 * identically, so there is nothing for a per-element conversion to decide. */
-                memcpy(copy->buffer->bytes,
-                       view->buffer->bytes + view->byte_offset + start * width,
-                       count * width);
-            }
-            return KILN_C99_OK;
-        }
-        case KILN_C99_METHOD_MAP:
-        case KILN_C99_METHOD_ARRAY_PARALLEL_MAP:
-        case KILN_C99_METHOD_FILTER: {
-            /* Both answer with a view of the receiver's kind. `filter`'s length is not known
-             * until the predicate has run, so what it keeps is gathered first and the view is
-             * sized from that; `map` fills one of the receiver's own length.
-             *
-             * Gathering as `double` rather than into the view directly is what keeps a callback
-             * that reads the receiver seeing the values it started with. */
-            kiln_value callback = argc > 0 ? args[0] : kiln_c99_undefined();
-            kiln_value self_value = argc > 1 ? args[1] : kiln_c99_undefined();
-            double *kept;
-            size_t count = 0;
-            if (!kiln_c99_is_callable(callback)) {
-                return kiln_c99_throw_not_a(thrown, callback, "function");
-            }
-            kept = (double *)malloc((view->length == 0 ? 1 : view->length) * sizeof *kept);
-            if (kept == NULL) {
-                return KILN_C99_OUT_OF_MEMORY;
-            }
-            for (index = 0; index < view->length; ++index) {
-                kiln_value visit[3];
-                kiln_value produced;
-                visit[0] = kiln_c99_number(kiln_c99_typed_get(view, index));
-                visit[1] = kiln_c99_number((double)index);
-                visit[2] = receiver;
-                status =
-                    kiln_c99_call(host, &produced, callback, self_value, visit, 3, depth, thrown);
-                if (status != KILN_C99_OK) {
-                    free(kept);
-                    return status;
-                }
-                if (code == KILN_C99_METHOD_FILTER) {
-                    if (kiln_c99_truthy(produced)) {
-                        kept[count++] = kiln_c99_as_number(visit[0]);
-                    }
-                    continue;
-                }
-                {
-                    /* `map` converts what the callback answered, so a callback returning "5"
-                     * stores 5 -- the element write is the conversion, exactly as `view[i] = x`
-                     * is. */
-                    double converted;
-                    status = kiln_c99_to_number_checked(host, produced, &converted, depth, thrown);
-                    if (status != KILN_C99_OK) {
-                        free(kept);
-                        return status;
-                    }
-                    kept[count++] = converted;
-                }
-            }
-            status = kiln_c99_typed_alloc(result, view->kind, count);
-            if (status != KILN_C99_OK) {
-                free(kept);
-                return status;
-            }
-            for (index = 0; index < count; ++index) {
-                kiln_c99_typed_set(kiln_c99_typed_array_of(*result), index, kept[index]);
-            }
-            free(kept);
-            return KILN_C99_OK;
-        }
-        case KILN_C99_METHOD_ARRAY_REVERSE: {
-            /* In place, and the receiver is the answer -- `view.reverse()` is the view it just
-             * changed, not a copy, which is what makes `a.reverse() === a` true. */
-            size_t low = 0;
-            size_t high = view->length == 0 ? 0 : view->length - 1;
-            while (low < high) {
-                double kept = kiln_c99_typed_get(view, low);
-                kiln_c99_typed_set(view, low, kiln_c99_typed_get(view, high));
-                kiln_c99_typed_set(view, high, kept);
-                ++low;
-                --high;
-            }
-            *result = receiver;
-            return KILN_C99_OK;
-        }
-        case KILN_C99_METHOD_ARRAY_SORT: {
-            /* Insertion sort, because a comparator is program code: it can throw, and it can
-             * read the view it is sorting. Sorting a copy of the values and writing them back at
-             * the end is what keeps a throw from leaving the view half-rearranged. */
-            kiln_value comparator = argc > 0 ? args[0] : kiln_c99_undefined();
-            double *items;
-            if (comparator.tag != KILN_VALUE_UNDEFINED && !kiln_c99_is_callable(comparator)) {
-                return kiln_c99_throw_not_a(thrown, comparator, "function");
-            }
-            items = (double *)malloc((view->length == 0 ? 1 : view->length) * sizeof *items);
-            if (items == NULL) {
-                return KILN_C99_OUT_OF_MEMORY;
-            }
-            for (index = 0; index < view->length; ++index) {
-                items[index] = kiln_c99_typed_get(view, index);
-            }
-            if (view->length > 1) {
-                kiln_c99_typed_sort_context ctx;
-                ctx.host = host;
-                ctx.comparator = comparator;
-                ctx.depth = depth;
-                ctx.thrown = thrown;
-                status = kiln_c99_timsort_typed(&ctx, items, view->length);
-                if (status != KILN_C99_OK) {
-                    free(items);
-                    return status;
-                }
-            }
-            for (index = 0; index < view->length; ++index) {
-                kiln_c99_typed_set(view, index, items[index]);
-            }
-            free(items);
-            *result = receiver;
-            return KILN_C99_OK;
-        }
-        case KILN_C99_METHOD_TYPED_SET: {
+        if (code == KILN_C99_METHOD_TYPED_SET) {
             size_t offset = 0;
             size_t count;
             double *items;
             if (argc == 0 || (args[0].tag != KILN_VALUE_ARRAY &&
                               args[0].tag != KILN_VALUE_TYPED_ARRAY)) {
-                KILN_C99_REFUSE("TypedArray.prototype.set needs an array or a typed array to copy "
-                                "from");
+                KILN_C99_REFUSE("TypedArray.prototype.set needs an array or a typed array to copy from");
             }
             if (argc > 1) {
                 status = kiln_c99_to_index(args[1], &offset, thrown);
-                if (status != KILN_C99_OK) {
-                    return status;
-                }
+                if (status != KILN_C99_OK) return status;
             }
             count = args[0].tag == KILN_VALUE_ARRAY
                         ? kiln_c99_array_of(args[0])->count
@@ -6134,13 +5865,9 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
                                             "offset is out of bounds");
             }
-            if (count > ((size_t)-1) / sizeof *items) {
-                return KILN_C99_OUT_OF_MEMORY;
-            }
+            if (count > ((size_t)-1) / sizeof *items) return KILN_C99_OUT_OF_MEMORY;
             items = (double *)malloc((count == 0 ? 1 : count) * sizeof *items);
-            if (items == NULL) {
-                return KILN_C99_OUT_OF_MEMORY;
-            }
+            if (items == NULL) return KILN_C99_OUT_OF_MEMORY;
             for (index = 0; index < count; ++index) {
                 items[index] = args[0].tag == KILN_VALUE_ARRAY
                                    ? kiln_c99_as_number(kiln_val_to_boundary(kiln_c99_array_of(args[0])->elements[index]))
@@ -6152,27 +5879,6 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             free(items);
             *result = kiln_c99_undefined();
             return KILN_C99_OK;
-        }
-        case KILN_C99_METHOD_TYPED_FILL: {
-            double filler = argc > 0 ? kiln_c99_as_number(args[0]) : NAN;
-            size_t start = kiln_c99_relative_index(argc > 1 ? args[1] : kiln_c99_undefined(),
-                                                   view->length, 0);
-            size_t end = kiln_c99_relative_index(argc > 2 ? args[2] : kiln_c99_undefined(),
-                                                 view->length, view->length);
-            for (index = start; index < end; ++index) {
-                kiln_c99_typed_set(view, index, filler);
-            }
-            *result = receiver;
-            return KILN_C99_OK;
-        }
-        default:
-            /* Everything else a view shares with `Array.prototype` -- `indexOf`, `includes`,
-             * `reduce`, `some`, `at`, `toString` and the rest -- is a *reader*, and the generic
-             * array-like walk below already implements those against anything with a `length`
-             * and indices. Falling through rather than refusing is what gives a view all of them
-             * without a second copy of each; only the four that must answer with a view of their
-             * own, or rearrange one in place, are written out above. */
-            break;
         }
     }
     if (receiver.tag != KILN_VALUE_ARRAY) {
