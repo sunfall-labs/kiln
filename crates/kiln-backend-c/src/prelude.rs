@@ -2118,14 +2118,14 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     },
     AbsentAnswer {
         function: "kiln_c99_get_own_kind",
-        sites: 24,
+        sites: 25,
         proved_by: "one membership predicate per receiver kind -- kiln_c99_is_array_member, \
                     kiln_c99_is_string_member, kiln_c99_is_date_member, \
                     kiln_c99_is_collection_member and the kiln_c99_collection_kind_member \
                     beneath it, which answers for a collection *prototype* the same way \
                     (a name belonging to a sibling kind -- `Map.prototype.add` -- is absent \
                     rather than unbuilt), kiln_c99_is_array_buffer_member, \
-                    kiln_c99_is_typed_array_member, and BUILTIN_SURFACE plus \
+                    kiln_c99_is_typed_array_member, RegExp.prototype without name, and BUILTIN_SURFACE plus \
                     BUILTIN_SURFACE_BACKLOG for the table-driven built-ins. These are the lists \
                     the two engines can disagree about, and \
                     scripts/native-surface-inventory.py --gate is what measures them",
@@ -3154,6 +3154,7 @@ enum kiln_value_tag {
 #define KILN_C99_BUILTIN_CRYPTO 100
 #define KILN_C99_BUILTIN_BIG_INT64_ARRAY_PROTOTYPE 101
 #define KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE 102
+#define KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER_PROTOTYPE 103
 
 /* Array methods, part two.
  *
