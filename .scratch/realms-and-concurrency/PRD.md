@@ -2,7 +2,8 @@
 
 Status: needs-triage
 Opened: 2026-09-26
-Governing ADRs: 0070 (a realm is a schedulable unit, accepted), 0040 (the executor is not the realm
+Governing ADRs: 0070 (a realm is a schedulable unit, accepted), 0071 (caches remember layouts,
+paths and code, never objects), 0040 (the executor is not the realm
 state), 0041 (the turn-boundary collector), 0068 (kiln extensions never change Node behaviour),
 0069 (parallel built-ins)
 Related plans: `.scratch/parallel-builtins/`, `.scratch/deploy-with-kiln/`
@@ -74,10 +75,10 @@ The targets in the second and last rows are the ones to measure first; issue 01 
 
 | # | title | status |
 | --- | --- | --- |
-| 01 | [Measure what a realm costs and what state is process-global](issues/01-measure-realm-cost.md) | ready-for-agent |
+| 01 | [Measure what a realm costs and what state is process-global](issues/01-measure-realm-cost.md) | resolved |
 | 02 | [`worker_threads` stubs refuse instead of doing nothing](issues/02-worker-threads-stubs-refuse.md) | ready-for-agent |
 | 03 | [Implement ADR 0040: the executor split](issues/03-executor-split.md) | ready-for-agent |
-| 04 | [All realm state reachable from the realm](issues/04-realm-context.md) | ready-for-agent |
+| 04 | [All realm state reachable from the realm: shared keys, shared shapes, caches restated, atomic publication, the realm context](issues/04-realm-context.md) | ready-for-agent |
 | 05 | [Several pinned realms in one process](issues/05-several-realms-per-process.md) | ready-for-agent |
 | 06 | [`node:worker_threads` on realms](issues/06-worker-threads.md) | ready-for-agent |
 | 07 | [`KILN_WORKERS` thread mode, and supervision for process mode](issues/07-kiln-workers-thread-mode.md) | ready-for-agent |
