@@ -781,7 +781,7 @@ impl HttpServerEngine {
             resource,
             dispatcher: Rc::new(Dispatcher::new(resource, dispatch)),
             requests: RefCell::new(HashMap::default()),
-            header_scratch: RefCell::new(Vec::with_capacity(512)),
+            header_scratch: RefCell::new(Vec::with_capacity(1024)),
             shutdown: Notify::new(),
             closing: Cell::new(false),
             abort_pending: Cell::new(false),
@@ -1056,6 +1056,7 @@ async fn serve(
     });
     let mut builder = auto::Builder::new(LocalExecutor);
     builder.http1().auto_date_header(false);
+    builder.http1().pipeline_flush(true);
     // Node's http.Server always allows a half-open socket: a client may shut its write side
     // after the request and still receive the response. With the socket in Hyper's hands the
     // EOF is seen at once, so refusing half-close would drop every such response before it is
@@ -1301,6 +1302,11 @@ fn unavailable() -> EngineResponse {
 
 pub(crate) fn flatten_header_map(headers: &HeaderMap, into: &mut Vec<u8>) {
     into.clear();
+    let needed: usize = headers
+        .iter()
+        .map(|(name, value)| name.as_str().len() + value.as_bytes().len() + 2)
+        .sum();
+    into.reserve(needed);
     for (name, value) in headers {
         into.extend_from_slice(name.as_str().as_bytes());
         into.push(0);
@@ -1758,5 +1764,27 @@ mod tests {
         let http1 = HttpServerEngine::with_http3(false);
         assert!(http3.http3);
         assert!(!http1.http3);
+    }
+
+    #[test]
+    fn flatten_header_map_reserves_capacity_and_encodes_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(hyper::header::HOST, HeaderValue::from_static("example.com"));
+        headers.insert(
+            hyper::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        let mut buffer = Vec::with_capacity(16);
+        flatten_header_map(&headers, &mut buffer);
+        let expected_needed = "host".len()
+            + "example.com".len()
+            + 2
+            + "content-type".len()
+            + "application/json".len()
+            + 2;
+        assert!(buffer.capacity() >= expected_needed);
+        let text = std::str::from_utf8(&buffer).expect("valid utf-8");
+        assert!(text.contains("host\0example.com\0"));
+        assert!(text.contains("content-type\0application/json\0"));
     }
 }
