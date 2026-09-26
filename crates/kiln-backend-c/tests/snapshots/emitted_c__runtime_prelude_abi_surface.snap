@@ -932,6 +932,7 @@ static inline void kiln_c99_prototype_touched(const kiln_object *object) {
 #define KILN_C99_PIC_SIZE 8
 typedef struct kiln_c99_pic_entry {
 typedef struct kiln_c99_site {
+typedef struct kiln_c99_private_site {
 static inline uint32_t kiln_c99_site_slot_for(const kiln_c99_site *site, const kiln_shape *shape) {
 static inline int kiln_c99_site_validate_holder_val(const kiln_c99_pic_entry *entry, const kiln_object *obj, kiln_val *out) {
 static inline kiln_val kiln_c99_site_validate_holder(const kiln_c99_pic_entry *entry, const kiln_object *obj) {
@@ -2704,6 +2705,8 @@ static int kiln_c99_val_read_property(kiln_host *host, kiln_val target,
 static int kiln_c99_val_write_property_view(kiln_host *host, kiln_val target,
 static int kiln_c99_val_write_property_key(kiln_host *host, kiln_val target,
 static int kiln_c99_val_write_property(kiln_host *host, kiln_val target,
+static int kiln_c99_val_get_private_fast(kiln_val *out, kiln_val receiver, kiln_val brand,
+static int kiln_c99_val_set_private_fast(kiln_val receiver, kiln_val brand, kiln_val member,
 static void kiln_c99_note_get_property_refusal(kiln_value target) {
 static void kiln_c99_note_get_computed_refusal(kiln_value target, kiln_value key) {
 static int kiln_c99_read_element(kiln_host *host, kiln_value target, kiln_value key,

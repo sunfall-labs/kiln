@@ -641,6 +641,17 @@ static int kiln_c99_adopt_super(kiln_value *receiver, kiln_value produced) {
 static int kiln_c99_call_val(kiln_host *host, kiln_val *result, kiln_val callee,
                              kiln_val receiver, const kiln_val *args, size_t argc,
                              int depth, kiln_value *thrown) {
+    if (KILN_LIKELY(KILN_VAL_IS_CLOSURE(callee))) {
+        kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(callee);
+        if (KILN_LIKELY(!plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {
+            kiln_val vreceiver = plain->arrow ? plain->captured_this : receiver;
+            if (!plain->arrow && !plain->strict && (vreceiver == KILN_VAL_UNDEFINED || vreceiver == KILN_VAL_NULL)) {
+                (void)kiln_c99_global_object_val(&vreceiver);
+            }
+            *result = KILN_VAL_UNDEFINED;
+            return kiln_c99_invoke_closure(host, result, plain, vreceiver, args, argc, depth, thrown, NULL, 0);
+        }
+    }
     kiln_value bcallee = kiln_val_to_boundary(callee);
     kiln_value breceiver = kiln_val_to_boundary(receiver);
     kiln_value inline_args[16];

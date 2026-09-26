@@ -856,6 +856,12 @@ typedef struct kiln_c99_site {
     uint64_t cached_generation;
 } kiln_c99_site;
 
+typedef struct kiln_c99_private_site {
+    const struct kiln_shape *shape;
+    uint32_t brand_slot;
+    uint32_t member_slot;
+} kiln_c99_private_site;
+
 /* The slot a property-read site remembers for `shape`, or UINT32_MAX when it remembers none
  * or remembers a method instead. */
 static inline uint32_t kiln_c99_site_slot_for(const kiln_c99_site *site, const kiln_shape *shape) {
