@@ -1431,7 +1431,9 @@ mod tests {
 
     impl HttpDispatch for Whole {
         fn event(&self, event: &HttpEvent<'_>) -> i32 {
-            self.events.borrow_mut().push((event.kind, event.data.to_vec()));
+            self.events
+                .borrow_mut()
+                .push((event.kind, event.data.to_vec()));
             if event.kind == HttpEventKind::RequestHead {
                 let mut engine = self.engine.borrow_mut();
                 assert!(engine.start_response(self.resource, event.id, 201, b"x-n\01\0", 1));
