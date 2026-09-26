@@ -1526,6 +1526,23 @@ E1
 E-on2 true 0
 E2
 T 4 3 true 4
+id = "regress/r18-worker-threads-receive-message"
+requires_host = "node"
+group = "regress"
+source = "regress/r18-worker-threads-receive-message.js"
+status = "runnable"
+features = ["node-worker-threads", "message-channel", "structured-clone"]
+catches = """
+`receiveMessageOnPort` answered `undefined` for every port, whatever it held, so a program polling \
+a port saw an empty queue forever and nothing said why. It takes the oldest queued message, \
+wrapped in `{ message }`, leaves the rest, and receives a copy rather than the sent object.\
+"""
+expected_stdout = """
+first {"message":{"n":1}}
+second {"message":"two"}
+empty undefined
+copied {"list":[1,2]}
+not a port ERR_INVALID_ARG_TYPE The "port" argument must be a MessagePort instance
 """
 
 [[test]]

@@ -475,6 +475,31 @@ delete (globalThis as any).__kilnJobsPending;
     get [Symbol.toStringTag](): string { return "MessagePort"; }
 
     static {
+      // `receiveMessageOnPort` (node:worker_threads): take the oldest message not yet
+      // dispatched, as a delivery would, without dispatching it. A queued close is not a message.
+      const receive = (port: MessagePort): { message: any } | undefined => {
+        if (port.#closed) return undefined;
+        const queue = port.#queue;
+        const at = port.#head;
+        if (at >= queue.length) return undefined;
+        const data = queue[at];
+        if (data === CLOSE_MARK) return undefined;
+        queue[at] = undefined;
+        queue[at + 1] = undefined;
+        if (at + 2 === queue.length) {
+          queue.length = 0;
+          port.#head = 0;
+        } else {
+          port.#head = at + 2;
+        }
+        return { message: data };
+      };
+      Object.defineProperty(MessagePort, Symbol.for("kiln.messagePort"), {
+        value: { receive },
+        writable: false,
+        enumerable: false,
+        configurable: false,
+      });
       deliverNext = (port: MessagePort) => {
         port.#scheduled = false;
         port.#hops = 0;
