@@ -1433,7 +1433,15 @@ static void kiln_c99_gc_clear_dead_sites(kiln_gc_heap *heap) {
         uint32_t p;
         for (p = 0; p < site->pic_count; ++p) {
             kiln_c99_pic_entry *entry = &site->entries[p];
-            if (entry->holder == NULL) continue;
+            if (entry->holder == NULL) {
+                /* A transitioning store remembers the prototype it was cleared against
+                 * (`kiln_c99_transition_store_clear`); forget one that died, so a new object at
+                 * its address is never mistaken for it. */
+                if (entry->via != NULL &&
+                    kiln_c99_gc_lookup_interior(heap, (uintptr_t)entry->via) == NULL)
+                    entry->via = NULL;
+                continue;
+            }
             if (kiln_c99_gc_lookup_interior(heap, (uintptr_t)entry->holder) == NULL ||
                 (entry->via != NULL && kiln_c99_gc_lookup_interior(heap, (uintptr_t)entry->via) == NULL)) {
                 entry->holder = NULL;

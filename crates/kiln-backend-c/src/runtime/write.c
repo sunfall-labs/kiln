@@ -38,8 +38,8 @@ static int kiln_c99_put_site_key(kiln_host *host, kiln_value target, const kiln_
                     /* Polymorphic transitioning store hit */
                     else if (!object->not_extensible &&
                              site->entries[p].slot < object->slot_capacity &&
-                             (object->prototype.tag == KILN_VALUE_UNDEFINED ||
-                              !kiln_c99_has_inherited_setter_or_readonly(object->prototype))) {
+                             kiln_c99_transition_store_clear(site, &site->entries[p], object,
+                                                             stable, key)) {
                         const kiln_shape *next_shape = site->entries[p].transition_to;
                         if ((next_shape->double_slots_mask & (1u << site->entries[p].slot)) &&
                             value.tag != KILN_VALUE_NUMBER) {
