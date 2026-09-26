@@ -109,8 +109,19 @@ run_probe() {
 	fi
 	name="${name%.*}"
 
+	# A probe may ask for an environment on its first line, `// native-env: NAME=value ...`, and
+	# both engines then run under it -- the one way to hold a run-time switch such as
+	# `KILN_EXTENSIONS=0` (ADR 0068) to the same comparison as everything else. The whole line is
+	# the environment; nothing else in a probe is read.
+	local -a probe_env=()
+	local directive
+	directive="$(sed -n '1s|^// native-env: ||p' "$probe")"
+	if [[ -n $directive ]]; then
+		read -r -a probe_env <<<"$directive"
+	fi
+
 	local interpreted
-	if ! interpreted="$("$KILN" --one-shot ${adapter:+"$adapter"} run "$probe" 2>&1)"; then
+	if ! interpreted="$(env ${probe_env[@]+"${probe_env[@]}"} "$KILN" --one-shot ${adapter:+"$adapter"} run "$probe" 2>&1)"; then
 		printf '%s\n' "$interpreted" > "$WORK_DIR/$name.failed"
 		return 0
 	fi
@@ -120,9 +131,9 @@ run_probe() {
 
 	local native native_status=0
 	if [[ -n $STRESS ]]; then
-		native="$(KILN_GC_STRESS="$STRESS" "$KILN" --one-shot ${adapter:+"$adapter"} run --native "$probe" 2>&1)" || native_status=$?
+		native="$(env ${probe_env[@]+"${probe_env[@]}"} KILN_GC_STRESS="$STRESS" "$KILN" --one-shot ${adapter:+"$adapter"} run --native "$probe" 2>&1)" || native_status=$?
 	else
-		native="$("$KILN" --one-shot ${adapter:+"$adapter"} run --native "$probe" 2>&1)" || native_status=$?
+		native="$(env ${probe_env[@]+"${probe_env[@]}"} "$KILN" --one-shot ${adapter:+"$adapter"} run --native "$probe" 2>&1)" || native_status=$?
 	fi
 
 	if [[ $native == "$interpreted" ]] && ((native_status == interpreted_status)); then

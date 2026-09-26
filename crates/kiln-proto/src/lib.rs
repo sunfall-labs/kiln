@@ -521,6 +521,10 @@ pub enum Request {
         source_view: SourceView,
         #[serde(default)]
         explain: bool,
+        /// Build a binary that never installs kiln's own members (ADR 0068). Left off the wire
+        /// when false, so a request that does not ask reads exactly as it did before.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_kiln_extensions: bool,
         #[serde(default)]
         static_link: bool,
         #[serde(default)]
@@ -1025,6 +1029,7 @@ mod tests {
                     profile: NativeProfile::Release,
                     source_view: SourceView(12),
                     explain: false,
+                    no_kiln_extensions: false,
                     static_link: false,
                     pgo_generate: None,
                     pgo_use: None,

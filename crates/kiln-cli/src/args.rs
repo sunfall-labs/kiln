@@ -77,6 +77,8 @@ pub enum Command {
         node: bool,
         march_native: bool,
         explain: bool,
+        /// Build a binary that never installs kiln's own members (ADR 0068).
+        no_kiln_extensions: bool,
         static_link: bool,
         pgo_generate: Option<PathBuf>,
         pgo_use: Option<PathBuf>,
@@ -141,6 +143,7 @@ where
     let mut shared = false;
     let mut march_native = false;
     let mut explain = false;
+    let mut no_kiln_extensions = false;
     let mut static_link = false;
     let mut pgo_generate: Option<PathBuf> = None;
     let mut pgo_use: Option<PathBuf> = None;
@@ -246,6 +249,10 @@ where
             }
             "--explain" => {
                 explain = true;
+            }
+            "--no-kiln-extensions" => {
+                reject_inline_value(&flag, &inline)?;
+                no_kiln_extensions = true;
             }
             "--static" => {
                 reject_inline_value(&flag, &inline)?;
@@ -359,6 +366,19 @@ where
     if explain && name != "build" {
         return Err(Error::usage("--explain only applies to `kiln build`"));
     }
+    // The interpreter and `kiln run --native` take the same choice from `KILN_EXTENSIONS=0` at run
+    // time; the flag exists for the one thing an environment cannot do, which is fix the answer
+    // into a binary that will be run somewhere else (ADR 0068).
+    if no_kiln_extensions && name != "build" {
+        return Err(Error::usage(
+            "--no-kiln-extensions only applies to `kiln build`; set KILN_EXTENSIONS=0 to run without them",
+        ));
+    }
+    if no_kiln_extensions && shared {
+        return Err(Error::usage(
+            "--no-kiln-extensions cannot be combined with `kiln build --shared`",
+        ));
+    }
     // The native backend compiles the step counter out entirely, so a budget there would be a
     // flag that silently does nothing -- which is the one thing this parser refuses to be.
     if max_steps.is_some() && native {
@@ -399,6 +419,7 @@ where
             node,
             march_native,
             explain,
+            no_kiln_extensions,
             static_link,
             pgo_generate,
             pgo_use,
@@ -685,6 +706,7 @@ mod tests {
                 node: false,
                 march_native: false,
                 explain: false,
+                no_kiln_extensions: false,
                 static_link: false,
                 pgo_generate: None,
                 pgo_use: None,
@@ -992,6 +1014,7 @@ mod tests {
                 node: false,
                 march_native: true,
                 explain: false,
+                no_kiln_extensions: false,
                 static_link: false,
                 pgo_generate: None,
                 pgo_use: None,
@@ -1007,6 +1030,7 @@ mod tests {
                 node: false,
                 march_native: true,
                 explain: false,
+                no_kiln_extensions: false,
                 static_link: false,
                 pgo_generate: None,
                 pgo_use: None,
@@ -1031,6 +1055,31 @@ mod tests {
     }
 
     #[test]
+    fn no_kiln_extensions_parses_for_build_only() {
+        assert!(matches!(
+            run(&["build", "src/main.ts", "--no-kiln-extensions"]).command,
+            Command::Build {
+                no_kiln_extensions: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            run(&["build", "src/main.ts"]).command,
+            Command::Build {
+                no_kiln_extensions: false,
+                ..
+            }
+        ));
+        assert!(
+            usage_error(&["run", "a.js", "--no-kiln-extensions"]).contains("KILN_EXTENSIONS=0")
+        );
+        assert!(
+            usage_error(&["build", "a.js", "--shared", "--no-kiln-extensions"])
+                .contains("--shared")
+        );
+    }
+
+    #[test]
     fn explain_option_parses_for_build() {
         assert_eq!(
             run(&["build", "src/main.ts", "--explain"]).command,
@@ -1042,6 +1091,7 @@ mod tests {
                 node: false,
                 march_native: false,
                 explain: true,
+                no_kiln_extensions: false,
                 static_link: false,
                 pgo_generate: None,
                 pgo_use: None,
@@ -1062,6 +1112,7 @@ mod tests {
                 node: false,
                 march_native: false,
                 explain: false,
+                no_kiln_extensions: false,
                 static_link: true,
                 pgo_generate: None,
                 pgo_use: None,
@@ -1107,6 +1158,7 @@ mod tests {
                 node: false,
                 march_native: false,
                 explain: false,
+                no_kiln_extensions: false,
                 static_link: false,
                 pgo_generate: None,
                 pgo_use: Some(PathBuf::from("/tmp/pgo/profile.profdata")),

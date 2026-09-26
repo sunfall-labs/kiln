@@ -1611,6 +1611,9 @@ pub(super) fn emit_call_method(
     // whose closure really is that proto; a typed entry that bails out, or a provider that could
     // not run the pool, leaves `handled` clear and the sequential lowering answers -- the same
     // answer, recomputed. Nothing is refused here.
+    // Both lowerings of `parallelMap` stand down when the realm withholds kiln's extensions
+    // (ADR 0068): the call then goes through the ordinary lookup, which misses, and throws the
+    // TypeError Node throws for a method that is not there.
     let parallel_pool_intrinsic = (key_str == "parallelMap" && argc == 1)
         .then(|| typed_callback(plan, program, args[0], &[1, 2]))
         .flatten()
@@ -1625,7 +1628,7 @@ pub(super) fn emit_call_method(
         .map(|c| {
             let target = c.target;
             format!(
-                "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
+                "if (!handled && kiln_c99_kiln_extensions_on() && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
                      void *ptr = KILN_VAL_PTR(v{o}); \
                      if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                          kiln_array *arr = (kiln_array *)ptr; \
@@ -1692,7 +1695,7 @@ pub(super) fn emit_call_method(
 
     let parallel_map_intrinsic = if key_str == "parallelMap" && argc >= 1 {
         Some(format!(
-            "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
+            "if (!handled && kiln_c99_kiln_extensions_on() && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
                          void *ptr = KILN_VAL_PTR(v{o}); \
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                              kiln_array *arr = (kiln_array *)ptr; \
