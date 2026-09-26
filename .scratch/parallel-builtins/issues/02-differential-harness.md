@@ -50,7 +50,7 @@ profile=native-release parallelism=1,2,max`, which builds the probe with `--prof
 native-release` and runs the binary once per `KILN_PARALLELISM` value (`max` = `nproc`); every
 run must print the interpreter's bytes. The probes stay under the size limit, and
 `kiln build --profile native-release --explain-parallel` (issue 03) confirms which sites are
-parallel in each (e.g. `parallel-math`: 7/7, `parallel-edges`: 7/7, `parallel-capture-const`: 6/7,
+parallel in each (e.g. `parallel-arith`: 7/7, `parallel-math`: 7/7, `parallel-edges`: 7/7, `parallel-capture-const`: 6/7,
 the seventh the reassigned `let`). Documented in `conformance/native/README.md`.
 `KILN_GC_STRESS` flows through the same loop, so `mise run native-stress` covers the probes; it
 was not run here.
@@ -85,6 +85,6 @@ per `mbx test` (≈20 s); run once with `PROPTEST_CASES=16` while developing.
 6. The interpreter's `Math.round(-0)` answered `+0` (Node: `-0`); the native backend was right.
 
 **Verified** (debug `kiln`, full log kept and grepped): `mbx test -p kiln-backend-c --offline`
-205 + 36 passed, 0 failed; `mbx test -p kiln-cli --offline` all passed; `scripts/native.sh`:
-232 matched, 1 refused (`shadow-realm`, pre-existing), 0 diverged. The parallel probes at `KILN_PARALLELISM=1`, `2` and the core count are part of
+207 + 36 passed, 0 failed; `mbx test -p kiln-cli --offline` all passed; `scripts/native.sh`:
+234 matched, 1 refused (`shadow-realm`, pre-existing), 0 diverged (after rebasing onto origin/main; 232/1/0 before). The parallel probes at `KILN_PARALLELISM=1`, `2` and the core count are part of
 that run (the directive loop); on their own: 12 matched, 0 diverged.

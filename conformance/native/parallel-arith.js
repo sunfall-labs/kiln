@@ -7,8 +7,8 @@
 // `scripts/native.sh` builds it with the release profile -- the only one that emits the
 // parallel lowering -- and runs the binary at KILN_PARALLELISM=1, 2 and the core count, each of
 // which must print the interpreter's bytes. `kiln build --profile native-release
-// --explain-parallel` on this file says which sites are parallel: all but `loop`, whose `let`
-// bindings the rules do not admit yet (`unsupported-operation`).
+// --explain-parallel` on this file says which sites are parallel: all of them, `loop` (a pure
+// numeric loop over `let` locals) included.
 //
 // A release module past 16 functions or 512 instructions is emitted with generic bodies only
 // (`kiln-native`'s specialization limit), which has no parallel lowering at all, so each file

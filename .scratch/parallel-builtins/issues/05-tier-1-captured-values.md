@@ -58,3 +58,13 @@ write count. Pinned by `parallel.rs` (`tier_1_a_capture_written_once_qualifies`,
 `reason_captures_*`, `reason_writes_capture`), `parallel_tests.rs`
 (`tier_1_a_capture_written_once_is_parallel_and_one_written_twice_is_not`, and captures in the
 property test), and the three `parallel-capture-*` probes at `KILN_PARALLELISM=1`, `2`, `max`.
+
+**Loops over `let` locals (added on request).** `x => { let s = x; for (let k = 0; k < 50; k++)
+s = (s * 31 + k) % 1000003; return s; }` was sequential with `unsupported-operation
+(MarkUninitialized)`: a block-scoped `let` in the body is a dead-zone mark on the frame's own slot,
+and rule 3 did not list it. It is now admitted (the callback has no cells, so the mark touches
+only the frame), and a dead-zone *check* is admitted only when the value read is proven a number
+-- exactly when the emitter lowers it to a plain copy; one that could still throw is refused.
+That callback now runs in parallel and matches `map` (`KILN_PARALLELISM=1` and the core count);
+test `a_let_binding_in_the_body_qualifies`, and the `loop` site of `parallel-arith.js` is now
+parallel.
