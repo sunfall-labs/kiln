@@ -602,6 +602,21 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
         *answer = kiln_c99_lookup_method(intrinsic_key, intrinsic_len, KILN_C99_METHOD_HAS_OWN_PROPERTY,
                                          KILN_C99_METHOD_OBJECT_VALUE_OF) != 0 ||
                   kiln_c99_same_name_key(key, "constructor");
+        if (!*answer) {
+            kiln_value store;
+            if (kiln_c99_callable_store(kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE), &store, 0) == KILN_C99_OK &&
+                store.tag == KILN_VALUE_OBJECT) {
+                kiln_object *properties = kiln_c99_object_of(store);
+                size_t pidx;
+                if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
+                for (pidx = 0; pidx < properties->count; ++pidx) {
+                    if (kiln_c99_same_key_view(&properties->properties[pidx], key)) {
+                        *answer = 1;
+                        break;
+                    }
+                }
+            }
+        }
     }
     return KILN_C99_OK;
 }

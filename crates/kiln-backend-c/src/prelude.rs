@@ -3152,6 +3152,8 @@ enum kiln_value_tag {
  * `undefined` where the interpreter has a function -- eleven silent wrong answers in the
  * 2026-09-19 inventory, one of them the member `uuid` feature-detects on. */
 #define KILN_C99_BUILTIN_CRYPTO 100
+#define KILN_C99_BUILTIN_BIG_INT64_ARRAY_PROTOTYPE 101
+#define KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE 102
 
 /* Array methods, part two.
  *

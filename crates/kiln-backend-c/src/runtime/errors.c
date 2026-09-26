@@ -14,6 +14,7 @@ static const char *kiln_c99_error_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_EVAL_ERROR: return "EvalError";
     case KILN_C99_BUILTIN_ERROR: return "Error";
     case KILN_C99_BUILTIN_AGGREGATE_ERROR: return "AggregateError";
+    case KILN_C99_BUILTIN_SUPPRESSED_ERROR: return "SuppressedError";
     default: return NULL;
     }
 }

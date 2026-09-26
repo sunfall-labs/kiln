@@ -3408,10 +3408,6 @@ if (typeof JSON !== "undefined") {
     const data = (target, key, value, writable) =>
         Object.defineProperty(target, key, { value, writable: writable === true,
                                              configurable: true, enumerable: false });
-    data(Error.prototype, "name", "Error", true);
-    data(Error.prototype, "message", "", true);
-    data(AggregateError.prototype, "name", "AggregateError", true);
-    data(AggregateError.prototype, "message", "", true);
     Object.defineProperty(String.prototype, "length", { value: 0, writable: false,
                                                         configurable: false, enumerable: false });
     data(ArrayBuffer.prototype, Symbol.toStringTag, "ArrayBuffer");
@@ -3851,17 +3847,24 @@ fn native_builtin_bootstrap_module(
     } else {
         ""
     };
-    let date = kiln_builtins::DATE_BOOTSTRAP_SOURCE;
+    let common_ts_builtins = format!(
+        "{}\n{}\n{}\n{}\n{}",
+        kiln_builtins::DATE_BOOTSTRAP_SOURCE,
+        kiln_builtins::TYPEDARRAY_BOOTSTRAP_SOURCE,
+        kiln_builtins::ERRORS_BOOTSTRAP_SOURCE,
+        kiln_builtins::ANNEXB_BOOTSTRAP_SOURCE,
+        kiln_builtins::DISPOSABLE_BOOTSTRAP_SOURCE,
+    );
     let source = if node {
         format!(
-            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{date}\n{url}\n{}",
+            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{common_ts_builtins}\n{url}\n{}",
             kiln_builtins::WEB_BOOTSTRAP_SOURCE
         )
     } else {
         // The Buffer bootstrap (Node mode) captures and deletes this bridge; without it the
         // bridge would be the one global node does not have, so it goes here instead.
         format!(
-            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{date}\n{url}\ndelete globalThis.__kilnBufferToString;\n"
+            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{common_ts_builtins}\n{url}\ndelete globalThis.__kilnBufferToString;\n"
         )
     };
     let hir = frontend_oxc::parse(LOGICAL_PATH, &source);

@@ -1257,9 +1257,53 @@ pub const URL_BOOTSTRAP_SOURCE: &str = include_str!("url.ts");
 /// Part of every realm's bootstrap, in both interpreter and native execution.
 pub const DATE_BOOTSTRAP_SOURCE: &str = include_str!("date.ts");
 
+/// `%TypedArray%.prototype` (ADR 0005, ADR 0063 rule 4, Phase 5.1).
+pub const TYPEDARRAY_BOOTSTRAP_SOURCE: &str = include_str!("typedarray.ts");
+
+/// Error subclass prototypes and `SuppressedError` (ADR 0005, ADR 0063 rule 4).
+pub const ERRORS_BOOTSTRAP_SOURCE: &str = include_str!("errors.ts");
+
+/// Annex B HTML and Object.prototype extensions and Array.fromAsync (ADR 0005, ADR 0063 rule 4).
+pub const ANNEXB_BOOTSTRAP_SOURCE: &str = include_str!("annexb.ts");
+
+/// `DisposableStack` and `AsyncDisposableStack` (ES2024 / Stage 3 Explicit Resource Management).
+pub const DISPOSABLE_BOOTSTRAP_SOURCE: &str = include_str!("disposable.ts");
+
 #[cfg(test)]
 mod web_tests {
     use super::*;
+
+    #[test]
+    fn typedarray_bootstrap_compiles_cleanly() {
+        let hir = frontend_oxc::parse("@kiln/typedarray-bootstrap.ts", TYPEDARRAY_BOOTSTRAP_SOURCE);
+        let program = kiln_ir::compile_module(&hir)
+            .expect("typedarray bootstrap should compile to IR without error");
+        assert!(!program.program.code.is_empty());
+    }
+
+    #[test]
+    fn errors_bootstrap_compiles_cleanly() {
+        let hir = frontend_oxc::parse("@kiln/errors-bootstrap.ts", ERRORS_BOOTSTRAP_SOURCE);
+        let program = kiln_ir::compile_module(&hir)
+            .expect("errors bootstrap should compile to IR without error");
+        assert!(!program.program.code.is_empty());
+    }
+
+    #[test]
+    fn annexb_bootstrap_compiles_cleanly() {
+        let hir = frontend_oxc::parse("@kiln/annexb-bootstrap.ts", ANNEXB_BOOTSTRAP_SOURCE);
+        let program = kiln_ir::compile_module(&hir)
+            .expect("annexb bootstrap should compile to IR without error");
+        assert!(!program.program.code.is_empty());
+    }
+
+    #[test]
+    fn disposable_bootstrap_compiles_cleanly() {
+        let hir = frontend_oxc::parse("@kiln/disposable-bootstrap.ts", DISPOSABLE_BOOTSTRAP_SOURCE);
+        let program = kiln_ir::compile_module(&hir)
+            .expect("disposable bootstrap should compile to IR without error");
+        assert!(!program.program.code.is_empty());
+    }
 
     #[test]
     fn date_bootstrap_compiles_cleanly() {
