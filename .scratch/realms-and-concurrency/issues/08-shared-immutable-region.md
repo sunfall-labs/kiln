@@ -1,7 +1,7 @@
 # 08. The shared immutable region
 
-Status: ready-for-human
-Blocked by: 04, ADR 0070 accepted
+Status: ready-for-agent
+Blocked by: 04
 
 ADR 0070's primitive B. A region of objects that never change, readable from every realm and every
 scheduler thread without copying, through a read path that writes nothing. That read path is the

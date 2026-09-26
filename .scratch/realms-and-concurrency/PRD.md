@@ -2,7 +2,7 @@
 
 Status: needs-triage
 Opened: 2026-09-26
-Governing ADRs: 0070 (a realm is a schedulable unit, proposed), 0040 (the executor is not the realm
+Governing ADRs: 0070 (a realm is a schedulable unit, accepted), 0040 (the executor is not the realm
 state), 0041 (the turn-boundary collector), 0068 (kiln extensions never change Node behaviour),
 0069 (parallel built-ins)
 Related plans: `.scratch/parallel-builtins/`, `.scratch/deploy-with-kiln/`
@@ -81,12 +81,12 @@ The targets in the second and last rows are the ones to measure first; issue 01 
 | 05 | [Several pinned realms in one process](issues/05-several-realms-per-process.md) | ready-for-agent |
 | 06 | [`node:worker_threads` on realms](issues/06-worker-threads.md) | ready-for-agent |
 | 07 | [`KILN_WORKERS` thread mode, and supervision for process mode](issues/07-kiln-workers-thread-mode.md) | ready-for-agent |
-| 08 | [The shared immutable region](issues/08-shared-immutable-region.md) | ready-for-human |
-| 09 | [The scheduler: turn migration, pinning, deterministic mode, one pool](issues/09-scheduler.md) | ready-for-human |
+| 08 | [The shared immutable region](issues/08-shared-immutable-region.md) | ready-for-agent |
+| 09 | [The scheduler: turn migration, pinning, deterministic mode, one pool](issues/09-scheduler.md) | ready-for-agent |
 | 10 | [Ownership transfer](issues/10-ownership-transfer.md) | ready-for-agent |
 | 11 | [Immutable shared structs: the API](issues/11-immutable-structs-api.md) | needs-triage |
 | 12 | [Actors: the API](issues/12-actors-api.md) | needs-triage |
 | 13 | [Benchmarks against Node, Bun and Go](issues/13-benchmarks.md) | ready-for-agent |
 
-08 and 09 are for a human first: they change the collector's and the runtime's contracts, and need
-ADR 0070 accepted.
+ADR 0070 was accepted on 2026-09-26; nothing here waits on a decision except the two API ADRs
+(11, 12).

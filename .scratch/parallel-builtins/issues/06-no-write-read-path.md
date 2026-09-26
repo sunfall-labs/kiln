@@ -1,7 +1,7 @@
 # 06. The no-write read path
 
-Status: ready-for-human
-Blocked by: ADR 0069 accepted
+Status: ready-for-agent
+Blocked by: realms-and-concurrency issue 08
 
 ADR 0069's frozen heap. Reads on a worker must write nothing. Known writes on today's read paths:
 

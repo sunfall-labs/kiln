@@ -3,7 +3,7 @@
 Status: needs-triage
 Opened: 2026-09-26
 Governing ADRs: 0068 (kiln extensions never change Node behaviour, accepted), 0069 (parallel
-collection built-ins run over a frozen heap, proposed), 0058 (application 2), 0041 (the collector)
+collection built-ins run over a frozen heap, accepted), 0058 (application 2), 0041 (the collector)
 
 ## Relation to ADR 0070
 
@@ -82,13 +82,13 @@ why; and a program that uses only Node's surface can never tell the extensions e
 | 03 | [`kiln build --explain-parallel`](issues/03-explain-parallel.md) | ready-for-agent |
 | 04 | [Cost model and thread budget](issues/04-cost-model-and-thread-budget.md) | ready-for-agent |
 | 05 | [Tier 1: read captured values](issues/05-tier-1-captured-values.md) | ready-for-agent |
-| 06 | [The no-write read path](issues/06-no-write-read-path.md) | ready-for-human |
+| 06 | [The no-write read path](issues/06-no-write-read-path.md) | ready-for-agent |
 | 07 | [Tier 2: read the heap](issues/07-tier-2-read-the-heap.md) | ready-for-agent |
-| 08 | [Tier 3: worker arenas and allocation](issues/08-tier-3-worker-arenas.md) | ready-for-human |
+| 08 | [Tier 3: worker arenas and allocation](issues/08-tier-3-worker-arenas.md) | ready-for-agent |
 | 09 | [Tier 4: pure calls](issues/09-tier-4-pure-calls.md) | ready-for-agent |
 | 10 | [The parallel family](issues/10-parallel-family.md) | ready-for-agent |
 | 11 | [Benchmarks on realistic workloads](issues/11-benchmarks.md) | ready-for-agent |
 | 12 | [User documentation](issues/12-user-documentation.md) | ready-for-agent |
 
-06 and 08 are marked for a human because they change the collector's contract and need ADR 0069
-accepted, with its mechanism reviewed, before they start.
+ADR 0069 was accepted on 2026-09-26. 06 and 08 are built on ADR 0070's shared region and transfer
+(realms issues 08 and 10).

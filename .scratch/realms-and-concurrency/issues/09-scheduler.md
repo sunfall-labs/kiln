@@ -1,7 +1,7 @@
 # 09. The scheduler: turn migration, pinning, deterministic mode, one pool
 
-Status: ready-for-human
-Blocked by: 05, ADR 0070 accepted
+Status: ready-for-agent
+Blocked by: 05
 
 ADR 0070's scheduler:
 

@@ -2,7 +2,9 @@
 
 ## Status
 
-Proposed, 2026-09-26. The goals and the semantics are decided by the project owner: the parallel
+Accepted, 2026-09-26, including the mechanism as revised for ADR 0070. Decided by the project owner.
+
+Originally proposed, 2026-09-26. The goals and the semantics are decided by the project owner: the parallel
 built-ins should be extremely effective and powerful, and must never change Node behaviour
 (ADR 0068), so a callback with side effects always runs sequentially. The mechanism (the frozen
 heap, the no-write read path and worker arenas) is proposed for review.

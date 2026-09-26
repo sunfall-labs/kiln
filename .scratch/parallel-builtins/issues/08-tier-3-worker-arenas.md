@@ -1,7 +1,7 @@
 # 08. Tier 3: worker arenas and allocation
 
-Status: ready-for-human
-Blocked by: 06, 07, ADR 0069 accepted
+Status: ready-for-agent
+Blocked by: 06, 07, realms-and-concurrency issue 10
 
 ADR 0069's worker arenas. The collector gains a paused state for the duration of a parallel
 section, each worker allocates from private chunks of the kind the nursery uses, and at the end the
