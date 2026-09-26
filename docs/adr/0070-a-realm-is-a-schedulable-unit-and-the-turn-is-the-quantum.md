@@ -2,7 +2,9 @@
 
 ## Status
 
-Proposed, 2026-09-26.
+Accepted, 2026-09-26. Decided by the project owner.
+
+Originally proposed, 2026-09-26.
 
 Supersedes ADR 0057 (region-isolated actors and zero-copy transfer): its goals stand, and its
 mechanisms are replaced by the three primitives below. Builds on ADR 0040 (the executor is not the
