@@ -506,6 +506,49 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
         return KILN_C99_OK;
     }
 
+    if (code == KILN_C99_METHOD_STRING_NORMALIZE) {
+        if (argc > 0 && args[0].tag != KILN_VALUE_UNDEFINED) {
+            kiln_value shown = kiln_c99_text(args[0]);
+            if (shown.tag != KILN_VALUE_STRING) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            const kiln_string *fstr = shown.ptr == NULL ? &kiln_c99_empty_string : (const kiln_string *)shown.ptr;
+            static const struct { const char *name; size_t len; } forms[4] = {
+                {"NFC", 3}, {"NFD", 3}, {"NFKC", 4}, {"NFKD", 4}
+            };
+            uint32_t which;
+            for (which = 0; which < 4; ++which) {
+                if (kiln_string_equals_ascii(fstr, forms[which].name, forms[which].len)) {
+                    break;
+                }
+            }
+            if (which == 4) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                             "The normalization form should be one of NFC, NFD, NFKC, NFKD.");
+            }
+        }
+        if (receiver_string->unit_len == 0 || kiln_c99_string_is_ascii(receiver)) {
+            *result = receiver;
+            return KILN_C99_OK;
+        }
+    }
+
+    if (code == KILN_C99_METHOD_STRING_LOCALE_COMPARE) {
+        kiln_value locales = argc > 1 ? args[1] : kiln_c99_undefined();
+        kiln_value options = argc > 2 ? args[2] : kiln_c99_undefined();
+        if (locales.tag == KILN_VALUE_UNDEFINED && options.tag == KILN_VALUE_UNDEFINED) {
+            kiln_value other = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
+            if (other.tag != KILN_VALUE_STRING) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            const kiln_string *other_string = other.ptr == NULL ? &kiln_c99_empty_string : (const kiln_string *)other.ptr;
+            if (receiver.ptr == other.ptr || kiln_string_equal(receiver_string, other_string)) {
+                *result = kiln_c99_number(0.0);
+                return KILN_C99_OK;
+            }
+        }
+    }
+
     if (code == KILN_C99_METHOD_STRING_CODE_POINT_AT) {
         double position = argc > 0 ? kiln_c99_as_number(args[0]) : 0.0;
         if (position != position) position = 0.0;
@@ -949,7 +992,7 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
             }
             form = which;
         }
-        if (count == 0) {
+        if (count == 0 || kiln_c99_string_is_ascii(receiver)) {
             *result = receiver;
             break;
         }
@@ -997,6 +1040,11 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
         int rc;
         kiln_value locales = argc > 1 ? args[1] : kiln_c99_undefined();
         kiln_value options = argc > 2 ? args[2] : kiln_c99_undefined();
+        if (locales.tag == KILN_VALUE_UNDEFINED && options.tag == KILN_VALUE_UNDEFINED &&
+            count == needle_count && (count == 0 || (units != NULL && needle != NULL && memcmp(units, needle, count * sizeof *units) == 0))) {
+            *result = kiln_c99_number(0.0);
+            break;
+        }
         static const struct { const char *name; size_t len; int boolean; } option_names[] = {
             {"usage", 5, 0},      {"sensitivity", 11, 0},       {"numeric", 7, 1},
             {"caseFirst", 9, 0},  {"ignorePunctuation", 17, 1}, {"collation", 9, 0},
