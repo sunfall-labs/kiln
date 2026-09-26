@@ -128,8 +128,11 @@ export function request(...args: any[]): any {
 }
 
 // `serve` is the WHATWG bootstrap's (web.ts), the same function `Bun.serve` and `Kiln.serve`
-// name: one implementation, captured before any program code can replace the globals.
-const bootstrapServe: any = (globalThis as any).Kiln?.serve;
+// name: one implementation, captured before any program code can replace the globals. Named as
+// the bare global rather than through `globalThis`, which would tell the compiled backend's
+// liveness pass that this module can reach anything and keep every dispatch group.
+declare const Kiln: any;
+const bootstrapServe: any = typeof Kiln !== "undefined" ? Kiln.serve : undefined;
 
 export function serve(options: any, callback?: () => void): any {
   if (typeof bootstrapServe !== "function") {
