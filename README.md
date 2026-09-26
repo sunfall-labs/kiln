@@ -87,6 +87,12 @@ number, and it is the one to beat. Absolute figures are about half the macOS tab
 which was taken on an unrecorded machine; the two are not comparable and neither is presented as
 the other. Full provenance is in `.scratch/server-throughput/measurements-2026-09-03.md`.
 
+On Linux, `KILN_IO=uring` moves listeners and HTTP connections onto an io_uring owned by the
+realm's own Tokio runtime (multishot accept and receive, batched sends; no second executor), and
+falls back to epoll wherever the kernel or a seccomp profile refuses a ring. It is opt-in:
+`KILN_IO` unset, `auto` or `epoll` keeps epoll. See `crates/kiln-runtime/src/uring.rs` for the
+design and the measurements behind that default.
+
 ## Using it
 
 Rust 1.97.1 (pinned in `rust-toolchain.toml`) and a C compiler: Zig, Clang, cc or GCC on `PATH`.
