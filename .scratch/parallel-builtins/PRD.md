@@ -5,6 +5,13 @@ Opened: 2026-09-26
 Governing ADRs: 0068 (kiln extensions never change Node behaviour, accepted), 0069 (parallel
 collection built-ins run over a frozen heap, proposed), 0058 (application 2), 0041 (the collector)
 
+## Relation to ADR 0070
+
+The parallel built-ins run on ADR 0070's architecture (`.scratch/realms-and-concurrency/`): chunks
+run on its scheduler, the no-write read path (06 here) is built once as its shared immutable
+region's read path (realms issue 08), and worker arenas (08 here) join the heap through its
+ownership transfer (realms issue 10). Issues 01 to 05 here do not depend on any of that.
+
 ## Problem
 
 `Array.prototype.parallelMap` and the typed-array `parallelMap`s exist in both engines. The native

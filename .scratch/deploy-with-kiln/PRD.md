@@ -114,6 +114,12 @@ Settled by the project owner on 2026-09-26:
 | C toolchain | host compiler preferred; a pinned `zig cc` downloaded when there is none or it cannot build the target | issue 13 |
 | first deploy artifact | static musl binaries, Linux x86_64 and arm64 | issue 13 |
 
+## Concurrency
+
+`node:worker_threads` (pino transports, piscina) and supervised `KILN_WORKERS` come from
+`.scratch/realms-and-concurrency/` issues 06 and 07 (ADR 0070). Its issue 02, making today's silent
+`worker_threads` stubs refuse, is worth doing before M1 publishes.
+
 ## Issues
 
 | # | title | status |

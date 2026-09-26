@@ -7,6 +7,10 @@ built-ins should be extremely effective and powerful, and must never change Node
 (ADR 0068), so a callback with side effects always runs sequentially. The mechanism (the frozen
 heap, the no-write read path and worker arenas) is proposed for review.
 
+Revised 2026-09-26 for ADR 0070: the pool is ADR 0070's scheduler, not a separate Rayon pool; the
+no-write read path is the read path of its shared immutable region (primitive B); and joining worker
+arenas is its ownership transfer (primitive C). The semantics below are unchanged.
+
 Extends ADR 0058 (application 2: `parallelMap` over a Rust fork-join pool). Makes concrete the
 region-transfer idea of ADR 0057 in the one place it is needed now: returning values that workers
 allocated. Relies on ADR 0041 (the collector runs at safepoints) and ADR 0061 (the value graph is
@@ -88,8 +92,10 @@ A cost model decides per call: below a threshold of elements and estimated work 
 call runs sequentially, so a small `parallelMap` is never slower than `map`. Chunk sizes adapt to
 the measured cost of the first chunk.
 
-The pool is sized so kiln never oversubscribes the machine: by default, the available cores divided
-by the number of `KILN_WORKERS` processes. `KILN_PARALLELISM` still overrides it.
+Chunks run on ADR 0070's scheduler threads, the same threads that run realm turns, so there is no
+second pool and the machine is never oversubscribed. Until that scheduler exists, the current pool
+is sized to the available cores divided by the number of `KILN_WORKERS` processes, and
+`KILN_PARALLELISM` still overrides it.
 
 ### Saying why
 

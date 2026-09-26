@@ -16,3 +16,8 @@ overrides it. The launcher passes N to each realm.
 - A benchmark sweeping input sizes from 1 to 10 million shows `parallelMap` never slower than
   `map` by more than measurement noise.
 - `KILN_WORKERS=auto` on a many-core box runs at most one pool thread per core in total.
+
+## Note, 2026-09-26
+
+ADR 0070 replaces the separate pool with its scheduler (realms issue 09), which removes the
+oversubscription for good. The thread budget here is the interim fix until then.

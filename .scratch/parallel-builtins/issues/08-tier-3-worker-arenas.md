@@ -21,3 +21,8 @@ the nursery.
 - `rows.parallelMap(r => ({ ...r, total: r.qty * r.price }))` runs in parallel and produces objects
   indistinguishable from `map`'s, including their shapes' property order.
 - Every tier 3 probe clean under `mise run native-stress`; no leaks across 10,000 repeated calls.
+
+## Note, 2026-09-26
+
+Joining arenas to the heap is ADR 0070's ownership transfer
+(`.scratch/realms-and-concurrency/issues/10-ownership-transfer.md`, step 2). Build the join there.
