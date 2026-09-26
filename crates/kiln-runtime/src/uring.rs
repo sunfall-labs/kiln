@@ -427,8 +427,8 @@ struct DriverState {
 }
 
 struct Inner {
-    // Field order is drop order: the ring closes before the buffer memory is unmapped.
     uring: IoUring,
+    /// Unmapped by `Ring::drop` only once the kernel is provably done with it.
     bufs: ManuallyDrop<BufRing>,
     conns: Vec<Option<Conn>>,
     listeners: Vec<Option<Listen>>,
@@ -489,7 +489,7 @@ impl Ring {
             }
         }
         let bufs = BufRing::new()?;
-        // SAFETY: the entries stay mapped until the ring is closed (field order in `Inner`).
+        // SAFETY: the entries stay mapped until `Ring::drop` unregisters the group (or leaks it).
         unsafe {
             submitter.register_buf_ring_with_flags(bufs.entries as u64, BUF_COUNT, BUF_GROUP, 0)?;
         }
@@ -710,10 +710,14 @@ impl Drop for Ring {
         }
         if inner.leak {
             // The kernel may still own some of this memory; losing it beats a use-after-free.
+            // The buffer ring stays mapped (it is never dropped) and so do the send buffers.
             std::mem::forget(std::mem::take(&mut inner.conns));
+            std::mem::forget(std::mem::take(&mut inner.listeners));
         } else {
-            // SAFETY: nothing is in flight, so no receive can select a buffer again; the ring
-            // itself is closed after this (field order), which also unregisters the group.
+            // Nothing is in flight, so no receive can select a buffer again. Unregister the
+            // group before unmapping it rather than rely on the ring closing afterwards.
+            let _ = inner.uring.submitter().unregister_buf_ring(BUF_GROUP);
+            // SAFETY: unregistered above and nothing is in flight; dropped exactly once.
             unsafe { ManuallyDrop::drop(&mut inner.bufs) };
         }
     }
