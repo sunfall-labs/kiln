@@ -302,7 +302,8 @@ fn constant_name(program: &Program, index: u32) -> Option<String> {
 /// 1. The proto is a plain function or arrow: not a generator, not async, no rest parameter,
 ///    and declared with one or two parameters (the element, and optionally the index).
 /// 2. No block has an exception handler and no terminator throws.
-/// 3. Values come only from numeric constants, the parameters and locals, the captures of rule
+/// 3. Values come only from numeric constants, the parameters and locals (a `let`'s dead-zone mark
+///    included, and a dead-zone check only of a value proven a number), the captures of rule
 ///    4, unary and binary arithmetic and comparison, `Phi`, and `Math.<name>` calls where
 ///    `<name>` with that arity is in [`PARALLEL_MATH`] and the receiver is the `Math` builtin.
 /// 4. Nothing reads or writes beyond the frame, except (tier 1, ADR 0069) reading a captured
@@ -412,6 +413,14 @@ pub fn parallel_verdict(
                     _ => Some(Refusal::new(Reason::NonNumericConstant)),
                 },
                 GraphOp::LoadLocal(_) | GraphOp::StoreLocal { .. } | GraphOp::Phi { .. } => None,
+                // A block-scoped `let` in the body (a loop counter, an accumulator): its dead-zone
+                // mark writes the frame's own slot -- the callback has no cells, rule 5 -- and a
+                // read of it needs no check once the value read is proven a number, which is
+                // how the emitter lowers it too (a plain copy). A read that could still be in
+                // its dead zone could throw on a worker, and is refused.
+                GraphOp::MarkUninitialized(_) => None,
+                GraphOp::CheckTdz { value, .. } => (!proven_numbers.contains(value))
+                    .then(|| Refusal::with(Reason::UnsupportedOperation, "a dead-zone check")),
                 GraphOp::LoadBuiltin(Builtin::Math) => None,
                 GraphOp::LoadBuiltin(_) => {
                     Some(Refusal::with(Reason::UnsupportedOperation, label(vid)))
@@ -517,7 +526,15 @@ pub fn parallel_verdict(
             }
             // Everything admitted above other than a capture read and a listed `Math` call is
             // admitted only as a pure operation, as it always was.
-            if !pure && !matches!(op, GraphOp::LoadUpvalue(_) | GraphOp::CallMethod { .. }) {
+            if !pure
+                && !matches!(
+                    op,
+                    GraphOp::LoadUpvalue(_)
+                        | GraphOp::CallMethod { .. }
+                        | GraphOp::MarkUninitialized(_)
+                        | GraphOp::CheckTdz { .. }
+                )
+            {
                 return Err(Refusal::with(Reason::UnsupportedOperation, label(vid)));
             }
         }
@@ -1186,6 +1203,19 @@ mod tests {
     fn reason_returns_undefined() {
         let code = vec![Instruction::Const(0), Instruction::Pop, Instruction::Return];
         assert_eq!(why(proto(code, 1)), Some(Reason::ReturnsUndefined));
+    }
+
+    #[test]
+    fn a_let_binding_in_the_body_qualifies() {
+        // `x => { let s; s = x; return s; }`: the dead-zone mark writes the frame's own slot.
+        let code = vec![
+            Instruction::MarkUninitialized(1),
+            Instruction::LoadLocal(0),
+            Instruction::StoreLocal(1),
+            Instruction::LoadLocal(1),
+            Instruction::Return,
+        ];
+        assert_eq!(why(proto(code, 1)), None);
     }
 
     #[test]
