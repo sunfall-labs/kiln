@@ -911,6 +911,82 @@ static int kiln_c99_node_copy_utf8(kiln_value value, char **out, size_t *out_len
     return KILN_C99_OK;
 }
 
+/* A request for a fetch-style (`serve`) server. Nothing Node-shaped is built: the engine took the
+ * request whole (the attach's whole-requests option), so this is the one event a request
+ * produces, and the listener receives the head as strings, the body as a Buffer (undefined when
+ * there is none), and the `(resource, id)` pair `fetchRespond` answers through. Everything handed
+ * over is copied out of the engine's buffers, which are only borrowed for this call; the
+ * arguments live in this frame, which a mid-turn collection scans. */
+static int kiln_c99_node_fetch_request(kiln_node_socket *socket, const kiln_realm_http_event *event,
+                                       kiln_value *exception) {
+    kiln_value arguments[6];
+    kiln_value ignored;
+    int status;
+    if (!kiln_c99_is_callable(socket->server->connection_listener)) return KILN_C99_OK;
+    arguments[0] = kiln_c99_node_http_method_text((const char *)event->method,
+                                                  (size_t)event->method_len);
+    arguments[1] = kiln_c99_undefined();
+    arguments[2] = kiln_c99_undefined();
+    arguments[3] = kiln_c99_undefined();
+    arguments[4] = kiln_c99_number((double)socket->resource);
+    arguments[5] = kiln_c99_number((double)event->id);
+    arguments[1] = kiln_c99_node_http_target_text((const char *)event->target,
+                                                  (size_t)event->target_len);
+    if (arguments[0].tag != KILN_VALUE_STRING || arguments[1].tag != KILN_VALUE_STRING)
+        return KILN_C99_OUT_OF_MEMORY;
+    /* `name NUL value NUL` per header, kept as one string; `Request.headers` parses it the
+     * first time a handler reads it. */
+    arguments[2] = kiln_c99_copy_text((const char *)event->headers, (size_t)event->headers_len);
+    if (arguments[2].tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+    if (event->data_len != 0) {
+        status = kiln_c99_buffer_from_bytes(&arguments[3], event->data, event->data_len);
+        if (status != KILN_C99_OK) return status;
+    }
+    return kiln_c99_call(socket->host, &ignored, socket->server->connection_listener,
+                         kiln_c99_undefined(), arguments, 6, 0, exception);
+}
+
+/* `fetchRespond(resource, id, status, headers, body)`: a whole response in one call, where
+ * `headers` is the `name NUL value NUL` flattening the engine parses straight into Hyper's map
+ * and `body` a string or a byte view. Answers false, without throwing, when the connection is
+ * gone -- an asynchronous handler can outlive its client. */
+static int kiln_c99_node_fetch_respond(kiln_value *result, const kiln_value *args, size_t argc,
+                                       kiln_value *thrown) {
+    double resource = kiln_c99_as_number(argc > 0 ? args[0] : kiln_c99_undefined());
+    double id = kiln_c99_as_number(argc > 1 ? args[1] : kiln_c99_undefined());
+    double code = kiln_c99_as_number(argc > 2 ? args[2] : kiln_c99_undefined());
+    kiln_c99_node_byte_span headers;
+    kiln_c99_node_byte_span body;
+    kiln_realm_http_response framed;
+    int status;
+    if (!(resource >= 1.0 && resource <= 9007199254740991.0 && floor(resource) == resource) ||
+        !(id >= 1.0 && id <= 9007199254740991.0 && floor(id) == id))
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "fetchRespond requires a request handle");
+    if (!(code >= 100.0 && code <= 999.0 && floor(code) == code))
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR, "Invalid status code");
+    status = kiln_c99_node_http_byte_span(argc > 3 ? args[3] : kiln_c99_undefined(), &headers);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_node_http_byte_span(argc > 4 ? args[4] : kiln_c99_undefined(), &body);
+    if (status != KILN_C99_OK) {
+        kiln_c99_node_http_byte_span_release(&headers);
+        return status;
+    }
+    memset(&framed, 0, sizeof framed);
+    framed.status = (uint16_t)code;
+    framed.headers = headers.bytes;
+    framed.headers_len = headers.len;
+    status = kiln_realm_http_response_start_active((uint64_t)resource, (uint64_t)id, &framed,
+                                                   16384);
+    if (status == KILN_C99_OK)
+        status = kiln_realm_http_response_end_active((uint64_t)resource, (uint64_t)id,
+                                                     body.bytes, body.len);
+    kiln_c99_node_http_byte_span_release(&headers);
+    kiln_c99_node_http_byte_span_release(&body);
+    *result = kiln_c99_boolean(status >= KILN_C99_OK);
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event,
                                     void *host, void *thrown) {
     kiln_node_socket *socket = (kiln_node_socket *)opaque;
@@ -923,6 +999,8 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
     (void)host;
     if (socket == NULL || event == NULL) return KILN_C99_INVALID_ARGUMENT;
     client = kiln_c99_node_client_for_id(socket, event->id);
+    if (event->kind == 1 && socket->server != NULL && socket->server->fetch_mode)
+        return kiln_c99_node_fetch_request(socket, event, exception);
     if (event->kind == 1) {
         int recycled = 0;
         if (socket->recycled_response != NULL && socket->recycled_response->ended) {
@@ -1413,9 +1491,12 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
                          ? kiln_c99_get(server->host, server->object, "httpAllowHalfOpen", 17,
                                         &allow_half_close, 0, exception)
                          : KILN_C99_OK;
+            /* Option bit 0 is half-close; bit 1 asks the engine for whole requests, which is
+             * what a fetch-style server's listener consumes. */
             if (status == KILN_C99_OK && server->protocol_http)
                 status = kiln_realm_http_server_attach_with_options_active(
-                    socket->resource, kiln_c99_truthy(allow_half_close),
+                    socket->resource,
+                    (kiln_c99_truthy(allow_half_close) ? 1 : 0) | (server->fetch_mode ? 2 : 0),
                     kiln_c99_node_http_event, kiln_c99_node_drop_http_connection, socket);
             if (status != KILN_C99_OK || server->closing) return status;
             if (!server->protocol_http) {
@@ -2328,6 +2409,7 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
     }
     if (code == KILN_C99_METHOD_NODE_NET_CREATE_SERVER ||
         code == KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER ||
+        code == KILN_C99_METHOD_NODE_HTTP_CREATE_FETCH_SERVER ||
         code == KILN_C99_METHOD_NODE_HTTP_SERVER) {
         kiln_node_server *server;
         kiln_value ignored;
@@ -2381,6 +2463,7 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
         if (status != KILN_C99_OK) { kiln_c99_gc_release(server); return status; }
         if (http) {
             server->protocol_http = 1;
+            server->fetch_mode = code == KILN_C99_METHOD_NODE_HTTP_CREATE_FETCH_SERVER;
             status = kiln_c99_put(host, server->object, "httpAllowHalfOpen", 17,
                                   kiln_c99_boolean(0), depth, thrown);
             if (status == KILN_C99_OK)
@@ -2703,10 +2786,13 @@ static int kiln_c99_node_flatten_headers(kiln_object *headers, kiln_text *out) {
 static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code,
                               kiln_value receiver, const kiln_value *args, size_t argc,
                               int depth, kiln_value *thrown) {
-    kiln_node_response *response = (kiln_node_response *)kiln_c99_node_hidden_pointer(
-        receiver, "@@node:response", 15);
+    kiln_node_response *response;
+    if (code == KILN_C99_METHOD_NODE_HTTP_FETCH_RESPOND)
+        return kiln_c99_node_fetch_respond(result, args, argc, thrown);
+    response = (kiln_node_response *)kiln_c99_node_hidden_pointer(receiver, "@@node:response", 15);
     (void)depth;
     if (code == KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER ||
+        code == KILN_C99_METHOD_NODE_HTTP_CREATE_FETCH_SERVER ||
         code == KILN_C99_METHOD_NODE_HTTP_SERVER)
         return kiln_c99_node_net(host, result, code, receiver, args, argc, depth, thrown);
     if (code == KILN_C99_METHOD_NODE_HTTP_GET || code == KILN_C99_METHOD_NODE_HTTP_REQUEST) {
