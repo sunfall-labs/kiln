@@ -372,3 +372,51 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
         return 0;
     }
 }
+
+/* ---- The built-ins' keys, registered before the first realm (ADR 0071) -----------------------
+ *
+ * The keys the prelude itself writes onto objects it builds, which no unit's constant table need
+ * name: every string-keyed member of the surface table, the per-request hot keys, the `node:http`
+ * layouts, and the handful the object-building paths spell (iterator results, property
+ * descriptors, errors, functions). Registered once per process, by whichever prelude copy's
+ * constructor runs first, and only before any heap exists (see `kiln_c99_register_static_keys`);
+ * a name missing here is not wrong, it is merely realm-local while a second realm is alive.
+ *
+ * Deliberately not the method-code table: 2.7k codes named through a linear surface lookup is
+ * a measurable cost before `main` in a program that starts in under 3 ms, and a method a program
+ * reaches by name is a constant of the unit that names it, which the unit registers. `@@` names
+ * are reserved slots reached through a Symbol, not string keys, and are left to that path. */
+static int kiln_c99_node_register_keys(kiln_shared_state *process);
+
+#define KILN_C99_OBJECT_BUILDING_KEYS(X)                                                          \
+    X("value") X("done") X("writable") X("enumerable") X("configurable") X("get") X("set")      \
+    X("length") X("name") X("prototype") X("constructor") X("message") X("stack") X("cause")    \
+    X("errors") X("code")
+
+static void kiln_c99_register_builtin_keys(void) __attribute__((constructor));
+static void kiln_c99_register_builtin_keys(void) {
+    kiln_shared_state *process = kiln_c99_process();
+    int registered = 1;
+    size_t index;
+    kiln_c99_process_lock(process);
+    if (process->builtins_registered || process->live_heaps != 0) {
+        kiln_c99_process_unlock(process);
+        return;
+    }
+    for (index = 0; registered && index < KILN_C99_HOT_KEY_COUNT; ++index)
+        registered = kiln_c99_register_static_text(process, kiln_c99_hot_key_text[index],
+                                                   kiln_c99_hot_key_len[index]);
+    for (index = 0; registered && index < KILN_C99_SURFACE_MEMBER_COUNT; ++index) {
+        const char *name = kiln_c99_builtin_members[index].name;
+        if (name == NULL || (name[0] == '@' && name[1] == '@')) continue;
+        registered = kiln_c99_register_static_text(process, name, strlen(name));
+    }
+#define KILN_C99_REGISTER_OBJECT_BUILDING_KEY(text)                                               \
+    if (registered) registered = kiln_c99_register_static_text(process, text, sizeof(text) - 1);
+    KILN_C99_OBJECT_BUILDING_KEYS(KILN_C99_REGISTER_OBJECT_BUILDING_KEY)
+#undef KILN_C99_REGISTER_OBJECT_BUILDING_KEY
+    if (registered) registered = kiln_c99_node_register_keys(process);
+    /* Out of memory leaves the rest to the run-time path; a later copy need not try again. */
+    process->builtins_registered = 1;
+    kiln_c99_process_unlock(process);
+}

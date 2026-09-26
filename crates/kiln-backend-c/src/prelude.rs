@@ -2606,7 +2606,9 @@ const _: () = assert_refusals_name_themselves(
 /// out at the `kiln_c99_static_text(prefix, strlen(prefix))` call in definitions.c.
 /// Seven left on 2026-09-26 with the `node:http` lazy-header probes (six header-buffer scans,
 /// now `memchr`) and the request-method table (lengths now stored beside the names).
-pub const C_STRING_LENGTH_SITES: usize = 72;
+/// One added the same day by `kiln_c99_register_builtin_keys` (surface.c), which measures a
+/// surface row's `name`: a C string literal out of the generated table, as its other readers do.
+pub const C_STRING_LENGTH_SITES: usize = 73;
 
 /// How far the `strlen(` scan may skip after reading the last byte of its seven-byte window:
 /// the Horspool shift, as `refusal_scan_shift` is for the refusal scan, so the const evaluator

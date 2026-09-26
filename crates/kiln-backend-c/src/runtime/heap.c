@@ -378,10 +378,13 @@ typedef struct kiln_shared_key_table {
 typedef struct kiln_shared_state {
     uint64_t layout;
     uint32_t lock;
-    /* Heaps registered and not yet torn down. A constant key joins the shared table only while
-     * the heap interning it is the only live one, which is what keeps one spelling from ever
-     * being a shared key and some live realm's own key at once (see `kiln_c99_intern_static_key`). */
+    /* Heaps registered and not yet torn down. Registration (`kiln_c99_register_static_keys`)
+     * adds to the shared table only while this is zero, and a constant first met at run time
+     * joins it only while the heap interning it is the only live one: either way no spelling is
+     * ever a shared key and some live realm's own key at once (see `kiln_c99_intern_static_key`). */
     uint32_t live_heaps;
+    /* Set once the built-ins' keys are registered, by whichever prelude copy got there first. */
+    uint32_t builtins_registered;
     uint64_t next_heap_serial;
     kiln_shared_key_table *keys;
     /* The empty key, headed like every other so `kiln_c99_key_len` reads zero from it. One for the
@@ -1921,6 +1924,8 @@ static kiln_string *kiln_c99_gc_alloc_key_copy(const kiln_string *view);
 static const kiln_string *kiln_c99_intern_key(const kiln_string *string);
 static const kiln_string *kiln_c99_intern_static_key(const kiln_string *string);
 static const kiln_string *kiln_c99_intern_pinned_key(const kiln_string *string);
+static int kiln_c99_register_static_keys(const kiln_string *const *keys, const kiln_string **out,
+                                         size_t count);
 
 /* `KILN_KEYS_CHECK=1`: every pointer-identity scan is re-run by bytes and a disagreement aborts
  * naming the key. The acceptance test for "interning is total", not a mode to ship. Read once
@@ -2237,6 +2242,12 @@ const kiln_string *kiln_c99_intern_pinned_key(const kiln_string *string) {
  * shared table is for (ADR 0071), and the answer is a shared key whenever that is sound: the
  * caller must use the pointer returned here, never its own literal's address.
  *
+ * Every constant a linked unit names, and the built-ins' names, were registered before the first
+ * heap (see `kiln_c99_register_static_keys`), so for them the first probe answers, shared, however
+ * many realms are alive. What follows is the fallback for a constant nobody registered -- a
+ * prelude literal outside the registered tables, or a unit whose registration came after a heap
+ * existed -- and it keeps step 1's rule, because registration cannot vouch for these.
+ *
  * Sound means no live realm already has the spelling as a key of its own, because a realm that
  * did would then find the shared key first and lose every property stored under its own. The
  * calling realm's table is checked directly; any other live realm's cannot be, so the spelling
@@ -2266,6 +2277,68 @@ const kiln_string *kiln_c99_intern_static_key(const kiln_string *string) {
         if (shared != NULL) return shared;
     }
     return kiln_c99_intern_pinned_key(string);
+}
+
+/* ---- Registration: the program's constants, before the first realm (ADR 0071) --------------
+ *
+ * Every unit registers its constant keys from a load-time constructor (`{sym}_register_keys`,
+ * emitted beside its key table), and the prelude registers the built-ins' own from one of its
+ * own (`kiln_c99_register_builtin_keys`, in `surface.c`). Constructors run before `main` -- and a
+ * shared library's run when it is loaded -- so the linker's own list of the objects it linked is
+ * the enumeration: no launcher, embedding host or library entry point has to name its units, and
+ * a unit's cache key depends on nothing but the unit.
+ *
+ * Only while no heap is live. A heap that exists may already hold one of these spellings as a key
+ * of its own, and a shared key published over it would hide every property stored under it; a
+ * registration that comes too late (a library loaded into a process whose realms are running)
+ * does nothing and says so, and those constants take the run-time path in
+ * `kiln_c99_intern_static_key` exactly as before. 1 means every key named is now a shared key
+ * (the empty key needs no entry: it is the process's already); 0 means too late, or out of
+ * memory, and that some may not be. */
+static int kiln_c99_register_static_keys_locked(kiln_shared_state *process,
+                                                const kiln_string *const *keys,
+                                                const kiln_string **out, size_t count) {
+    size_t index;
+    if (process->live_heaps != 0) return 0;
+    for (index = 0; index < count; ++index) {
+        const kiln_string *key = keys[index];
+        const kiln_string *shared;
+        uint64_t hash;
+        if (key == NULL) return 0;
+        if (key->unit_len == 0) {
+            shared = &process->empty_key;
+        } else {
+            hash = kiln_c99_key_hash(key);
+            shared = kiln_c99_shared_key_probe(key, hash);
+            if (shared == NULL) shared = kiln_c99_shared_key_insert(process, key, hash);
+            if (shared == NULL) return 0;
+        }
+        if (out != NULL) out[index] = shared;
+    }
+    return 1;
+}
+
+/* `out`, when given, receives each key's shared pointer: the unit's own key array, filled once
+ * for every realm. */
+int kiln_c99_register_static_keys(const kiln_string *const *keys, const kiln_string **out,
+                                  size_t count) {
+    kiln_shared_state *process = kiln_c99_process();
+    int registered;
+    kiln_c99_process_lock(process);
+    registered = kiln_c99_register_static_keys_locked(process, keys, out, count);
+    kiln_c99_process_unlock(process);
+    return registered;
+}
+
+/* Byte spellings, for the prelude's own tables of C strings. */
+static int kiln_c99_register_static_text(kiln_shared_state *process, const char *bytes, size_t len) {
+    kiln_string view;
+    const kiln_string *key = &view;
+    if (bytes == NULL || len > UINT32_MAX) return 1;
+    view.unit_len = (uint32_t)len;
+    view.flags = KILN_STRING_LATIN1;
+    view.data = bytes;
+    return kiln_c99_register_static_keys_locked(process, &key, NULL, 1);
 }
 
 /* A string block released by hand (`kiln_c99_gc_release`) must not stay canonical. */

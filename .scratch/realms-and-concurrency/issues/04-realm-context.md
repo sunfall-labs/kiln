@@ -134,3 +134,77 @@ still worth doing before landing.
 - Unit key statics (`{sym}_key_*`) are still per unit, not per realm; a key that ended up
   realm-local is reused by a second concurrent realm entering the same unit (step 5).
 - Retired shared key tables are never freed (step 4's quiescent reclamation can take them).
+
+### 2026-09-26 -- step 1b done (branch `alee/register-constant-keys`)
+
+**Where registration happens: load-time constructors, not the launcher.** Every emitted unit
+with a key table now carries `__attribute__((constructor)) static void {sym}_register_keys(void)`
+beside it, and the prelude carries one more, `kiln_c99_register_builtin_keys` (end of
+`runtime/surface.c`). Constructors run before `main`, and a shared library's run when it is
+loaded, so the linker's own list of linked objects is the enumeration: the graph launcher, the
+scalar and embedding entry points, the shared-library wrapper and a chunked unit all get it with no
+launcher change and no unit list. The launcher does know its units (the namespaces), but a
+launcher-driven call would have had to be added to every entry point separately and would miss an
+embedding host that calls `kiln_realm_create` itself.
+
+**Cache keys.** A unit's constructor names only that unit's own constants (a file-scope
+`{sym}_key_sources[N]` array of its `{sym}_string_*` headers), so the generated C is still a
+function of the unit alone; the only cache effect is the one-time miss from the emitter and
+prelude changing. Nothing is added to the launcher, so its key is unchanged.
+
+**What registration does** (`kiln_c99_register_static_keys(keys, out, count)`, `heap.c`): under
+the process lock, and only while `live_heaps == 0`, each key is probed/inserted into the shared
+table and its shared pointer written to `out`. `ku` passes `ku_keys` straight in; any other symbol
+fills its `{sym}_key_*` statics from a stack array. When every key registered, the unit sets
+`{sym}_keys_ready = 1` and a new `{sym}_keys_shared = 1`; the realm reset then leaves the
+pointers alone (`if (phase == RESET && !{sym}_keys_shared) keys_ready = 0`), so the per-realm
+re-intern at first entry disappears. Called with a heap already live (a library loaded into a
+running process) it returns 0 and changes nothing: it cannot vouch that no live realm owns the
+spelling. Out of memory also returns 0. Either way the unit falls back to the old per-realm
+`{sym}_intern_keys` path.
+
+**Built-ins' keys**, registered once per process (`builtins_registered` in the shared block, so
+the first prelude copy does it and later copies skip): the per-request hot keys, every string name
+in the surface table (258 rows; `@@` names skipped: they are reserved slots reached through a
+Symbol), the `node:http` request/response layout names plus `@@node:events` (moved to file scope
+in `node.c`; they were already shared lazily in the single-realm case), and a short X-macro list
+of keys the object-building paths spell (`value done writable enumerable configurable get set
+length name prototype constructor message stack cause errors code`). The method-code table is
+deliberately not registered: 2.7k codes through a linear surface lookup would be a measurable
+pre-`main` cost, and a method a program reaches by name is already a constant of the unit that
+names it.
+
+**The lazy rule is kept, as a fallback only.** `kiln_c99_intern_static_key` still shares an
+unregistered constant only while its heap is the only live one. It now covers only (a) prelude
+literals outside the registered sets (e.g. `"module completion"`), and (b) units whose
+registration came too late or ran out of memory. Every constant of a unit linked into the program
+is shared regardless of how many realms are alive. Removing the rule would make (a) and (b)
+realm-local always, which is correct but loses sharing in the one-realm case for no gain.
+
+**Empty key.** Registration maps `""` to the process's `empty_key` (no table entry), so a unit's
+`""` key static is the process pointer and `kiln_c99_key_is_shared` answers yes for it -- the same
+answer the intern paths give.
+
+**Step 5.** The per-unit key statics stay process statics; once shared they are realm-independent
+by construction, so step 5 may leave shared unit keys where they are and move only the fallback
+(realm-local) case into the per-realm block -- or move all of them; nothing here depends on the
+storage location, only on `{sym}_keys_shared`.
+
+**Verified.** `mbx test -p kiln-backend-c --offline`: 176 passed, 1 ignored; emitted_c 36 passed
+(four snapshots updated: three units gain the constructor, the ABI surface gains the new prelude
+functions). `mbx test -p kiln-native --offline`: 217 passed, 2 ignored; drift 4 passed.
+`scripts/native.sh`: 224 matched, 1 refused (shadow-realm, pre-existing), 0 diverged. `mise run
+native-stress`: 224 matched, 1 refused, 0 diverged. The two-heap test now emits a unit naming
+`gamma` and checks, before any heap, that the constructor filled `{sym}_key_0` with a shared
+pointer and set `keys_shared`/`keys_ready`; that built-in names (`statusCode`, `value`, `done`)
+intern shared; that a registration after a heap exists refuses; that `gamma` first interned
+while two heaps are live is the shared key and the unit's own pointer, with a shared shape edge
+both realms follow; and that `epsilon`, which no unit names, still takes the fallback rule
+(realm-local while two heaps live). `compact_module_with_many_keys...` checks the `ku` path is
+shared before the unit ever runs.
+
+**Performance note.** Hot paths are unchanged (the entry prologue's `keys_ready` check is the
+same; reset gained one flag test). Startup gains the constructors: a hash, probe and malloc per
+unit constant, formerly paid at each unit's first entry into each realm (plus a heap copy), now
+paid once before `main` -- also for units never entered, and ~300 built-in names. Not
+re-benchmarked; worth watching in the quiet-machine pass for very large bundles' start time.

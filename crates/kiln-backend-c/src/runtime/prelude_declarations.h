@@ -30,6 +30,8 @@ extern const kiln_string *kiln_c99_intern_static(const char *bytes, size_t len);
 extern const kiln_string *kiln_c99_intern(const char *bytes, size_t len);
 extern const kiln_string *kiln_c99_intern_key(const kiln_string *view);
 extern const kiln_string *kiln_c99_intern_static_key(const kiln_string *view);
+extern int kiln_c99_register_static_keys(const kiln_string *const *keys, const kiln_string **out,
+                                         size_t count);
 extern const kiln_string *kiln_c99_interned_key_in(struct kiln_gc_heap *heap,
                                                    const kiln_string *view);
 #if defined(__GNUC__) || defined(__clang__)
@@ -90,6 +92,8 @@ extern const kiln_string *kiln_c99_intern(const char *bytes, size_t len);
 extern const kiln_string *kiln_c99_intern_static(const char *bytes, size_t len);
 extern const kiln_string *kiln_c99_intern_key(const kiln_string *view);
 extern const kiln_string *kiln_c99_intern_static_key(const kiln_string *view);
+extern int kiln_c99_register_static_keys(const kiln_string *const *keys, const kiln_string **out,
+                                         size_t count);
 extern void kiln_c99_gc_release(void *payload);
 extern void kiln_c99_gc_result_roots(void *opaque, void *context, int phase);
 extern int kiln_c99_new_object(kiln_value *out);
