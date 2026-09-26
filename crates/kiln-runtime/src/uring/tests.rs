@@ -93,6 +93,51 @@ fn echo_round_trips_and_eof_reads_zero() {
     assert!(!ring.inner.borrow().leak);
 }
 
+/// A peer on another thread, so every request arrives while the realm thread is parked: the
+/// wake path the DEFER_TASKRUN + eventfd design got wrong (6-8 ms per request, see the module
+/// documentation).
+#[test]
+fn round_trips_from_another_thread_are_not_delayed() {
+    let Some(ring) = ring_or_skip("round trips") else {
+        return;
+    };
+    let (runtime, local) = local();
+    local.block_on(&runtime, async {
+        let (listener, address) = listener().await;
+        const ROUNDS: usize = 300;
+        let peer = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let mut stream = std::net::TcpStream::connect(address).unwrap();
+            stream.set_nodelay(true).unwrap();
+            let started = Instant::now();
+            for _ in 0..ROUNDS {
+                stream.write_all(b"ping").unwrap();
+                let mut pong = [0_u8; 4];
+                stream.read_exact(&mut pong).unwrap();
+                assert_eq!(&pong, b"pong");
+            }
+            started.elapsed()
+        });
+        let (server, _) = listener.accept().await.unwrap();
+        let mut server = onto_ring(&ring, server);
+        for _ in 0..ROUNDS {
+            let mut ping = [0_u8; 4];
+            server.read_exact(&mut ping).await.unwrap();
+            server.write_all(b"pong").await.unwrap();
+        }
+        let elapsed = tokio::task::spawn_blocking(move || peer.join().unwrap())
+            .await
+            .unwrap();
+        assert!(
+            elapsed < Duration::from_millis(ROUNDS as u64),
+            "{ROUNDS} round trips took {elapsed:?}"
+        );
+        drop(server);
+        settle(&ring).await;
+    });
+    ring.shutdown();
+}
+
 #[test]
 fn large_write_to_a_slow_reader_applies_backpressure_and_arrives_intact() {
     let Some(ring) = ring_or_skip("slow reader") else {
