@@ -79,6 +79,9 @@ pub enum Command {
         explain: bool,
         /// Build a binary that never installs kiln's own members (ADR 0068).
         no_kiln_extensions: bool,
+        /// Print only the `parallelMap` section of the explanation: every call site, whether
+        /// it runs in parallel, and the rule that kept it sequential when it does not.
+        explain_parallel: bool,
         static_link: bool,
         pgo_generate: Option<PathBuf>,
         pgo_use: Option<PathBuf>,
@@ -144,6 +147,7 @@ where
     let mut march_native = false;
     let mut explain = false;
     let mut no_kiln_extensions = false;
+    let mut explain_parallel = false;
     let mut static_link = false;
     let mut pgo_generate: Option<PathBuf> = None;
     let mut pgo_use: Option<PathBuf> = None;
@@ -253,6 +257,10 @@ where
             "--no-kiln-extensions" => {
                 reject_inline_value(&flag, &inline)?;
                 no_kiln_extensions = true;
+            }
+            "--explain-parallel" => {
+                reject_inline_value(&flag, &inline)?;
+                explain_parallel = true;
             }
             "--static" => {
                 reject_inline_value(&flag, &inline)?;
@@ -379,6 +387,11 @@ where
             "--no-kiln-extensions cannot be combined with `kiln build --shared`",
         ));
     }
+    if explain_parallel && name != "build" {
+        return Err(Error::usage(
+            "--explain-parallel only applies to `kiln build`",
+        ));
+    }
     // The native backend compiles the step counter out entirely, so a budget there would be a
     // flag that silently does nothing -- which is the one thing this parser refuses to be.
     if max_steps.is_some() && native {
@@ -420,6 +433,7 @@ where
             march_native,
             explain,
             no_kiln_extensions,
+            explain_parallel,
             static_link,
             pgo_generate,
             pgo_use,
@@ -705,6 +719,7 @@ mod tests {
                 shared: false,
                 node: false,
                 march_native: false,
+                explain_parallel: false,
                 explain: false,
                 no_kiln_extensions: false,
                 static_link: false,
@@ -1013,6 +1028,7 @@ mod tests {
                 shared: false,
                 node: false,
                 march_native: true,
+                explain_parallel: false,
                 explain: false,
                 no_kiln_extensions: false,
                 static_link: false,
@@ -1029,6 +1045,7 @@ mod tests {
                 shared: false,
                 node: false,
                 march_native: true,
+                explain_parallel: false,
                 explain: false,
                 no_kiln_extensions: false,
                 static_link: false,
@@ -1080,6 +1097,22 @@ mod tests {
     }
 
     #[test]
+    fn explain_parallel_option_parses_for_build_only() {
+        let Command::Build {
+            explain,
+            explain_parallel,
+            ..
+        } = run(&["build", "src/main.ts", "--explain-parallel"]).command
+        else {
+            panic!("expected build");
+        };
+        assert!(explain_parallel);
+        assert!(!explain);
+        assert!(usage_error(&["run", "a.js", "--explain-parallel"]).contains("only applies"));
+        assert!(usage_error(&["check", "a.js", "--explain-parallel"]).contains("only applies"));
+    }
+
+    #[test]
     fn explain_option_parses_for_build() {
         assert_eq!(
             run(&["build", "src/main.ts", "--explain"]).command,
@@ -1090,6 +1123,7 @@ mod tests {
                 shared: false,
                 node: false,
                 march_native: false,
+                explain_parallel: false,
                 explain: true,
                 no_kiln_extensions: false,
                 static_link: false,
@@ -1111,6 +1145,7 @@ mod tests {
                 shared: false,
                 node: false,
                 march_native: false,
+                explain_parallel: false,
                 explain: false,
                 no_kiln_extensions: false,
                 static_link: true,
@@ -1157,6 +1192,7 @@ mod tests {
                 shared: false,
                 node: false,
                 march_native: false,
+                explain_parallel: false,
                 explain: false,
                 no_kiln_extensions: false,
                 static_link: false,

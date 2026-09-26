@@ -354,13 +354,14 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             march_native: _,
             explain,
             no_kiln_extensions,
+            explain_parallel,
             static_link,
             pgo_generate,
             pgo_use,
         } => {
             let node = if shared { false } else { auto_node(node) };
             let mut backend = open(one_shot, &socket)?;
-            report(commands::build(
+            let mut built = commands::build(
                 backend.as_mut(),
                 &path,
                 &root,
@@ -368,12 +369,16 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                 profile,
                 shared,
                 node,
-                explain,
+                explain || explain_parallel,
                 no_kiln_extensions,
                 static_link,
                 pgo_generate.as_deref(),
                 pgo_use.as_deref(),
-            )?)
+            )?;
+            if explain_parallel && !explain {
+                built.text = render::parallel_explanation_only(&built.text);
+            }
+            report(built)
         }
         Command::Check { path, node } => {
             let node = auto_node(node);

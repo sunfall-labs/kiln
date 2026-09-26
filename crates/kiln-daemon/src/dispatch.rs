@@ -1673,7 +1673,13 @@ pub(crate) fn native_build_program(
     ) {
         Ok(report) => {
             let explanation = if explain {
-                Some(kiln_backend_c::facts::analyze_program(&program, Some(&path)).format_explain())
+                // The parallel section first: `--explain-parallel` keeps it and drops the rest.
+                let mut text =
+                    kiln_backend_c::parallel::format_explain_section(&report.parallel_sites, &path);
+                text.push_str(
+                    &kiln_backend_c::facts::analyze_program(&program, Some(&path)).format_explain(),
+                );
+                Some(text)
             } else {
                 None
             };
@@ -1855,7 +1861,10 @@ pub(crate) fn native_build_graph(
     ) {
         Ok(report) => {
             let explanation = if explain {
-                let mut text = kiln_backend_c::facts::analyze_graph(graph).format_explain();
+                // The parallel section first: `--explain-parallel` keeps it and drops the rest.
+                let mut text =
+                    kiln_backend_c::parallel::format_explain_section(&report.parallel_sites, &path);
+                text.push_str(&kiln_backend_c::facts::analyze_graph(graph).format_explain());
                 // Out-of-band attribution: failures here must never fail the
                 // build, so each section is skipped rather than propagated.
                 if let Ok(demand) = kiln_liveness::executable_demand(

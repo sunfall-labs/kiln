@@ -237,6 +237,29 @@ pub fn native_build(source: &str, summary: &NativeBuildSummary) -> String {
     out
 }
 
+/// `kiln build --explain-parallel`: the build summary, then the explanation's `parallel:`
+/// section alone, one site per line at the left margin:
+///
+/// ```text
+/// src/report.ts:42:18  parallelMap  sequential
+///   captures-reassigned: captures `total` (src/report.ts:43:20), which is assigned 2 times
+/// ```
+pub fn parallel_explanation_only(text: &str) -> String {
+    let Some(at) = text.find("\nparallel:\n") else {
+        return text.to_owned();
+    };
+    let mut out = text[..at].to_owned();
+    out.push('\n');
+    for line in text[at + "\nparallel:\n".len()..].lines() {
+        let Some(line) = line.strip_prefix("  ") else {
+            break;
+        };
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 /// `kiln build --shared` output. Shared-library reports intentionally contain only the
 /// generated source, PIC object, and library layers involved in an embedding build.
 pub fn native_shared_build(source: &str, summary: &NativeSharedLibrarySummary) -> String {
