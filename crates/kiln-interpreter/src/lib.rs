@@ -8684,7 +8684,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         instruction,
                     )?;
                 } else {
-                    if let Ok(Value::Number(fd_bits)) = self.read_property(receiver, "fd", instruction) {
+                    if let Ok(Value::Number(fd_bits)) =
+                        self.read_property(receiver, "fd", instruction)
+                    {
                         let fd = fd_bits as i32;
                         if fd == 1 || fd == 2 {
                             let op = if fd == 1 {
@@ -8694,14 +8696,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             };
                             let text = match &chunk {
                                 Value::String(s) => s.to_lossy_string(),
-                                Value::TypedArray(view) => String::from_utf8_lossy(&view.bytes()).into_owned(),
-                                Value::ArrayBuffer(ab) => String::from_utf8_lossy(&ab.bytes.borrow()).into_owned(),
+                                Value::TypedArray(view) => {
+                                    String::from_utf8_lossy(&view.bytes()).into_owned()
+                                }
+                                Value::ArrayBuffer(ab) => {
+                                    String::from_utf8_lossy(&ab.bytes.borrow()).into_owned()
+                                }
                                 _ => String::new(),
                             };
                             if !text.is_empty() {
-                                let trimmed = text.strip_suffix("\r\n").or_else(|| text.strip_suffix('\n')).unwrap_or(&text);
+                                let trimmed = text
+                                    .strip_suffix("\r\n")
+                                    .or_else(|| text.strip_suffix('\n'))
+                                    .unwrap_or(&text);
                                 self.host
-                                    .call(op, &[HostValue::from(Value::String(trimmed.to_owned().into()))])
+                                    .call(
+                                        op,
+                                        &[HostValue::from(Value::String(
+                                            trimmed.to_owned().into(),
+                                        ))],
+                                    )
                                     .map_err(|error| ExecutionError::Host {
                                         instruction,
                                         message: error.to_string(),
@@ -38462,8 +38476,10 @@ fn call_native(
                 let rounded = (value + 0.5).floor();
                 // A negative input that rounds to zero gives *negative* zero, which the floor
                 // has already thrown away. Only `Object.is` and `1 / x` can see the difference,
-                // and a console shows it, so it is worth putting back.
-                if rounded == 0.0 && value < 0.0 {
+                // and a console shows it, so it is worth putting back. `-0` itself is one of
+                // them (`-0 < 0` is false, so the sign bit is the test), which the native
+                // backend had right and the `parallelMap` harness caught this side missing.
+                if rounded == 0.0 && value.is_sign_negative() {
                     -0.0
                 } else {
                     rounded

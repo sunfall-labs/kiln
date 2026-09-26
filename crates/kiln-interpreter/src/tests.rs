@@ -4529,6 +4529,9 @@ fn math_round_goes_toward_positive_infinity() {
     // A negative input rounding to zero gives negative zero, which the floor loses.
     assert!(round(-0.5).is_sign_negative());
     assert_eq!(round(-0.5), 0.0);
+    // And negative zero stays negative zero.
+    assert!(round(-0.0).is_sign_negative());
+    assert!(round(0.0).is_sign_positive());
 }
 
 #[test]
