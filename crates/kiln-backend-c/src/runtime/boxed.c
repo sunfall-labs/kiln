@@ -1003,8 +1003,8 @@ static int kiln_c99_write_property(kiln_host *host, kiln_value target,
                         }
                     } else if (!object->not_extensible &&
                                site->entries[p].slot < object->slot_capacity &&
-                               (object->prototype.tag == KILN_VALUE_UNDEFINED ||
-                                !kiln_c99_has_inherited_setter_or_readonly(object->prototype))) {
+                               kiln_c99_transition_store_clear(site, &site->entries[p], object,
+                                                               NULL, NULL)) {
                         const kiln_shape *next_shape = site->entries[p].transition_to;
                         if ((next_shape->double_slots_mask & (1u << site->entries[p].slot)) &&
                             value.tag != KILN_VALUE_NUMBER) {
@@ -1328,8 +1328,10 @@ static int kiln_c99_val_write_property_view(kiln_host *host, kiln_val target,
                         }
                     } else if (!object->not_extensible &&
                                site->entries[p].slot < object->slot_capacity &&
-                               (object->prototype.tag == KILN_VALUE_UNDEFINED ||
-                                !kiln_c99_has_inherited_setter_or_readonly(object->prototype))) {
+                               kiln_c99_transition_store_clear(
+                                   site, &site->entries[p], object,
+                                   canonical != NULL ? canonical : kiln_c99_interned_key(key),
+                                   key)) {
                         const kiln_shape *next_shape = site->entries[p].transition_to;
                         if ((next_shape->double_slots_mask & (1u << site->entries[p].slot)) &&
                             !KILN_VAL_IS_NUMBER(value)) {

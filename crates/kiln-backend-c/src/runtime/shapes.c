@@ -58,6 +58,27 @@ static void kiln_c99_pin_interned_key(const kiln_string *ikey) {
     }
 }
 
+/* `@@private:<scope>:%brand`, the key a class constructor stores first on every instance (the
+ * spelling is `kiln_ir`'s `private_key(scope, "%brand")`). */
+static int kiln_c99_is_class_brand_key(const kiln_string *key) {
+    static const char prefix[] = "@@private:";
+    static const char suffix[] = ":%brand";
+    size_t prefix_len = sizeof prefix - 1;
+    size_t suffix_len = sizeof suffix - 1;
+    size_t len;
+    size_t index;
+    if (key == NULL || kiln_string_is_utf16(key)) return 0;
+    len = key->unit_len;
+    if (len < prefix_len + suffix_len) return 0;
+    for (index = 0; index < prefix_len; ++index) {
+        if (kiln_string_latin1(key)[index] != prefix[index]) return 0;
+    }
+    for (index = 0; index < suffix_len; ++index) {
+        if (kiln_string_latin1(key)[len - suffix_len + index] != suffix[index]) return 0;
+    }
+    return 1;
+}
+
 static int kiln_c99_shape_transition(kiln_shape *current, const kiln_string *ikey, int is_double, kiln_shape **out_shape) {
     kiln_shape_transition *tr;
     kiln_shape *next_shape;
@@ -84,7 +105,15 @@ static int kiln_c99_shape_transition(kiln_shape *current, const kiln_string *ike
             }
         }
     }
-    if (current->num_transitions >= 32) {
+    /* A shape stops growing branches at 32: past that its objects go to dictionary mode rather
+     * than make every miss walk a long list. A class brand (`@@private:<scope>:%brand`) is the
+     * exception, because it is the first property of every instance of every class, so every
+     * class hangs its branch off the root shape -- and a realm whose bootstrap already defines a
+     * few dozen classes had filled the root before the program's first `new`, which left every
+     * instance of every later class a dictionary from its first field on. A program has as many
+     * brands as it has classes, which bounds the list; the ceiling below only keeps it finite. */
+    if (current->num_transitions >= 32 &&
+        (current->num_transitions >= 1024 || !kiln_c99_is_class_brand_key(ikey))) {
         return 0;
     }
     next_shape = (kiln_shape *)calloc(1, sizeof(kiln_shape));

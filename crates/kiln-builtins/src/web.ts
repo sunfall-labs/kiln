@@ -1,15 +1,28 @@
 // kiln-builtins: WHATWG Web Standards (fetch, Headers, Request, Response, FormData, Blob)
 // Phase 5.2, ADR 0005
 
-class Headers {
-  private _map: Map<string, string> = new Map();
-  private _setCookies: string[] = [];
+// Declared here rather than in the class body (see the note above `Response`).
+interface Headers {
+  // Lowercased name to value, the values of a repeated name joined with ", ". Null while the
+  // headers are still the flattened block a request arrived with (`_flat`): reading one field
+  // scans that block, and only a write or an iteration builds the map.
+  _map: Map<string, string> | null;
+  // `name NUL value NUL` per field, names lowercased and values trimmed; null once `_map` exists.
+  _flat: string | null;
+  // Every `set-cookie` value, which `_map` joins and `getSetCookie` must not. Null for none.
+  _setCookies: string[] | null;
+}
 
+class Headers {
   constructor(init?: any) {
+    this._map = new Map();
+    this._flat = null;
+    this._setCookies = null;
     if (!init) return;
     if (init instanceof Headers) {
-      this._map = new Map(init._map);
-      this._setCookies = init._setCookies.slice();
+      const source = init._materialize();
+      this._map = new Map(source);
+      if (init._setCookies !== null) this._setCookies = init._setCookies.slice();
     } else if (Array.isArray(init)) {
       for (let i = 0; i < init.length; i++) {
         const entry = init[i];
@@ -18,8 +31,10 @@ class Headers {
         }
       }
     } else if (typeof init === "object") {
-      for (const key in init) {
-        if (!Object.prototype.hasOwnProperty.call(init, key)) continue;
+      // Own enumerable string keys, which is what `for...in` filtered by `hasOwnProperty` gave.
+      const keys = Object.keys(init);
+      for (let i = 0; i < keys.length; i++) {
+        const key = keys[i];
         const val = init[key];
         if (Array.isArray(val)) {
           for (let j = 0; j < val.length; j++) {
@@ -32,72 +47,129 @@ class Headers {
     }
   }
 
+  // The map, built from the flattened block the first time something needs more than a read.
+  _materialize(): Map<string, string> {
+    let map = this._map;
+    if (map === null) {
+      map = new Map();
+      const flattened = this._flat as string;
+      const length = flattened.length;
+      let at = 0;
+      while (at < length) {
+        const nameEnd = flattened.indexOf("\0", at);
+        if (nameEnd < 0) break;
+        const valueEnd = flattened.indexOf("\0", nameEnd + 1);
+        if (valueEnd < 0) break;
+        const name = flattened.slice(at, nameEnd);
+        const value = flattened.slice(nameEnd + 1, valueEnd);
+        const existing = map.get(name);
+        map.set(name, existing === undefined ? value : `${existing}, ${value}`);
+        if (name === "set-cookie") {
+          if (this._setCookies === null) this._setCookies = [];
+          this._setCookies.push(value);
+        }
+        at = valueEnd + 1;
+      }
+      this._map = map;
+      this._flat = null;
+    }
+    return map;
+  }
+
+  // One field of the flattened block, without building the map: its values joined with ", ", or
+  // null. `name` is already lowercased.
+  _flatGet(name: string): string | null {
+    const flattened = this._flat as string;
+    const length = flattened.length;
+    const nameLength = name.length;
+    let found: string | null = null;
+    let at = 0;
+    while (at < length) {
+      const nameEnd = flattened.indexOf("\0", at);
+      if (nameEnd < 0) break;
+      const valueEnd = flattened.indexOf("\0", nameEnd + 1);
+      if (valueEnd < 0) break;
+      if (nameEnd - at === nameLength && flattened.startsWith(name, at)) {
+        const value = flattened.slice(nameEnd + 1, valueEnd);
+        found = found === null ? value : `${found}, ${value}`;
+      }
+      at = valueEnd + 1;
+    }
+    return found;
+  }
+
   append(name: string, value: string): void {
     const k = String(name).toLowerCase().trim();
     const v = String(value).trim();
+    const map = this._materialize();
     if (k === "set-cookie") {
+      if (this._setCookies === null) this._setCookies = [];
       this._setCookies.push(v);
     }
-    const existing = this._map.get(k);
+    const existing = map.get(k);
     if (existing !== undefined) {
-      this._map.set(k, `${existing}, ${v}`);
+      map.set(k, `${existing}, ${v}`);
     } else {
-      this._map.set(k, v);
+      map.set(k, v);
     }
   }
 
   delete(name: string): void {
     const k = String(name).toLowerCase().trim();
-    this._map.delete(k);
+    this._materialize().delete(k);
     if (k === "set-cookie") {
-      this._setCookies = [];
+      this._setCookies = null;
     }
   }
 
   get(name: string): string | null {
     const k = String(name).toLowerCase().trim();
+    if (this._map === null) return this._flatGet(k);
     const v = this._map.get(k);
     return v !== undefined ? v : null;
   }
 
   getSetCookie(): string[] {
-    return this._setCookies.slice();
+    this._materialize();
+    return this._setCookies === null ? [] : this._setCookies.slice();
   }
 
   has(name: string): boolean {
     const k = String(name).toLowerCase().trim();
+    if (this._map === null) return this._flatGet(k) !== null;
     return this._map.has(k);
   }
 
   set(name: string, value: string): void {
     const k = String(name).toLowerCase().trim();
     const v = String(value).trim();
+    const map = this._materialize();
     if (k === "set-cookie") {
       this._setCookies = [v];
     }
-    this._map.set(k, v);
+    map.set(k, v);
   }
 
   forEach(callback: (value: string, key: string, parent: Headers) => void, thisArg?: any): void {
-    this._map.forEach((value, key) => {
+    this._materialize().forEach((value, key) => {
       callback.call(thisArg, value, key, this);
     });
   }
 
   keys(): IterableIterator<string> {
-    return this._map.keys();
+    return this._materialize().keys();
   }
 
   values(): IterableIterator<string> {
-    return this._map.values();
+    return this._materialize().values();
   }
 
   entries(): IterableIterator<[string, string]> {
-    return this._map.entries();
+    return this._materialize().entries();
   }
 
   [Symbol.iterator](): IterableIterator<[string, string]> {
-    return this._map.entries();
+    return this._materialize().entries();
   }
 
   get [Symbol.toStringTag](): string {
@@ -345,38 +417,101 @@ function extractBodyData(body: any): { bytes: Uint8Array | null; text: string | 
   return { bytes: null, text: s };
 }
 
-class Response {
+// The `Content-Type` the Fetch standard's "extract a body" gives a body that is a string.
+const TEXT_PLAIN_UTF8 = "text/plain;charset=UTF-8";
+
+// The body's own content type, which a Request or Response adds to its headers when they do not
+// name one (Fetch, "extract a body"): a string is `text/plain;charset=UTF-8`, a Blob its `type`.
+function bodyContentType(body: any): string | null {
+  if (typeof body === "string") return TEXT_PLAIN_UTF8;
+  if (body instanceof Blob) return body.type !== "" ? body.type : null;
+  return null;
+}
+
+// Fields are declared here rather than in the class body: a class-body declaration without an
+// initializer still defines the property (as undefined) before the constructor runs, which on the
+// compiled backend is one more property store per field per Response. The constructor assigns
+// every field exactly once, in one order on every path, so every Response shares one shape.
+interface Response {
   readonly status: number;
   readonly statusText: string;
-  readonly headers: Headers;
-  readonly ok: boolean;
   readonly redirected: boolean;
   readonly type: string;
   readonly url: string;
-  bodyUsed: boolean = false;
-  _bodyStream: any = undefined;
+  bodyUsed: boolean;
+  _bodyStream: any;
   _rawBytes: Uint8Array | null;
   _rawText: string | null;
+  // Null until `headers` is first read when no headers were given: most responses a server
+  // builds are never asked, and `serve` sends only `_contentType` for them.
+  _headers: Headers | null;
+  _contentType: string | null;
+}
 
+class Response {
   constructor(body?: any, init?: any) {
-    this.status = init?.status !== undefined ? Number(init.status) : 200;
-    this.statusText = init?.statusText !== undefined ? String(init.statusText) : "";
-    this.ok = this.status >= 200 && this.status <= 299;
-    this.headers = init?.headers instanceof Headers ? init.headers : new Headers(init?.headers);
-    this.url = init?.url ? String(init.url) : "";
-    this.redirected = Boolean(init?.redirected);
-    this.type = "default";
-    if (typeof body === "string") {
-      this._rawBytes = null;
-      this._rawText = body;
-    } else if (body === undefined || body === null) {
-      this._rawBytes = null;
-      this._rawText = null;
-    } else {
-      const extracted = extractBodyData(body);
-      this._rawBytes = extracted.bytes;
-      this._rawText = extracted.text;
+    let status = 200;
+    let statusText = "";
+    let url = "";
+    let redirected = false;
+    let headers: Headers | null = null;
+    let ownHeaders = false;
+    if (init !== undefined && init !== null) {
+      if (init.status !== undefined) status = Number(init.status);
+      if (init.statusText !== undefined) statusText = String(init.statusText);
+      if (init.url) url = String(init.url);
+      redirected = Boolean(init.redirected);
+      const given = init.headers;
+      if (given instanceof Headers) {
+        headers = given;
+      } else if (given !== undefined && given !== null) {
+        // Copied now: the init is the caller's to change afterwards.
+        headers = new Headers(given);
+        ownHeaders = true;
+      }
     }
+    let rawBytes: Uint8Array | null = null;
+    let rawText: string | null = null;
+    let contentType: string | null = null;
+    if (typeof body === "string") {
+      rawText = body;
+      contentType = TEXT_PLAIN_UTF8;
+    } else if (body !== undefined && body !== null) {
+      const extracted = extractBodyData(body);
+      rawBytes = extracted.bytes;
+      rawText = extracted.text;
+      contentType = bodyContentType(body);
+    }
+    if (headers !== null && contentType !== null && !headers.has("content-type")) {
+      // The body's type is added to this object's own headers, never to the caller's Headers.
+      if (!ownHeaders) headers = new Headers(headers);
+      headers.set("content-type", contentType);
+    }
+    (this as any).status = status;
+    (this as any).statusText = statusText;
+    (this as any).redirected = redirected;
+    (this as any).type = "default";
+    (this as any).url = url;
+    this.bodyUsed = false;
+    this._bodyStream = undefined;
+    this._rawBytes = rawBytes;
+    this._rawText = rawText;
+    this._headers = headers;
+    this._contentType = contentType;
+  }
+
+  get ok(): boolean {
+    return this.status >= 200 && this.status <= 299;
+  }
+
+  get headers(): Headers {
+    let headers = this._headers;
+    if (headers === null) {
+      headers = new Headers();
+      if (this._contentType !== null) headers.set("content-type", this._contentType);
+      this._headers = headers;
+    }
+    return headers;
   }
 
   // A stream over the bytes, made once: node's `body` is a `ReadableStream` of `Uint8Array`
@@ -474,7 +609,6 @@ class Response {
   static error(): Response {
     const res = new Response(null, { status: 0, statusText: "" });
     (res as any).type = "error";
-    (res as any).ok = false;
     return res;
   }
 
@@ -504,58 +638,174 @@ class Response {
   }
 }
 
-class Request {
+// A request `serve()` received, handed to the Request constructor through these rather than
+// through an init object so that nothing but the Request itself is allocated per request. Set
+// immediately before `new Request(SERVED_REQUEST)` and read by nothing else.
+const SERVED_REQUEST: any = {};
+let servedMethod = "GET";
+let servedTarget = "/";
+let servedHeaders = "";
+let servedBody: Uint8Array | null = null;
+let servedHost = "";
+
+// Headers over one `name NUL value NUL` block (the engine's flattening of a request head, names
+// lowercased and values trimmed), kept flat until something needs more than a read.
+function headersFromFlattened(flattened: string): Headers {
+  const headers = new Headers();
+  headers._map = null;
+  headers._flat = flattened;
+  return headers;
+}
+
+// The `Host` field of a flattened request head, or null.
+function flattenedHost(flattened: string): string | null {
+  const length = flattened.length;
+  let at = 0;
+  while (at < length) {
+    const nameEnd = flattened.indexOf("\0", at);
+    if (nameEnd < 0) return null;
+    const valueEnd = flattened.indexOf("\0", nameEnd + 1);
+    if (valueEnd < 0) return null;
+    if (nameEnd - at === 4 && flattened.startsWith("host", at)) {
+      return flattened.slice(nameEnd + 1, valueEnd);
+    }
+    at = valueEnd + 1;
+  }
+  return null;
+}
+
+// Declared here rather than in the class body, for the reason given above `Response`.
+interface Request {
   readonly method: string;
-  readonly url: string;
-  readonly headers: Headers;
   readonly signal: any;
   readonly redirect: string;
-  bodyUsed: boolean = false;
-  _bodyStream: any = undefined;
+  bodyUsed: boolean;
+  _bodyStream: any;
   _rawBytes: Uint8Array | null;
   _rawText: string | null;
+  // `url` and `headers` are built on first read. A request `serve()` received keeps the request
+  // target and the flattened head (`_target`, `_flatHeaders`, with `_host` the authority to use
+  // when the head names none); a constructed one keeps its URL and the headers init.
+  _url: string | null;
+  _headers: Headers | null;
+  _contentType: string | null;
+  _target: string;
+  _flatHeaders: string | null;
+  _host: string;
+}
 
+class Request {
   constructor(input: any, init?: any) {
+    const self = this as any;
+    if (input === SERVED_REQUEST) {
+      self.method = servedMethod;
+      self.signal = undefined;
+      self.redirect = "follow";
+      this.bodyUsed = false;
+      this._bodyStream = undefined;
+      this._rawBytes = servedBody;
+      this._rawText = null;
+      this._url = null;
+      this._headers = null;
+      this._contentType = null;
+      this._target = servedTarget;
+      this._flatHeaders = servedHeaders;
+      this._host = servedHost;
+      return;
+    }
+    let url: string;
+    let method: string;
+    let signal: any;
+    let redirect: string;
+    let headersInit: any;
+    let bodySource: any;
+    let contentType: string | null = null;
     if (input instanceof Request) {
-      this.url = input.url;
-      this.method = (init?.method || input.method).toUpperCase();
-      this.headers = init?.headers instanceof Headers ? init.headers : new Headers(init?.headers || input.headers);
-      this.signal = init?.signal || input.signal;
-      this.redirect = init?.redirect || input.redirect || "follow";
-      const bodySource =
-        init?.body !== undefined
-          ? init.body
-          : (input as any)._rawBytes || (input as any)._rawText;
-      if (typeof bodySource === "string") {
-        this._rawBytes = null;
-        this._rawText = bodySource;
-      } else if (bodySource === undefined || bodySource === null) {
-        this._rawBytes = null;
-        this._rawText = null;
+      url = input.url;
+      method = (init?.method || input.method).toUpperCase();
+      headersInit = init?.headers instanceof Headers ? init.headers : init?.headers || input.headers;
+      signal = init?.signal || input.signal;
+      redirect = init?.redirect || input.redirect || "follow";
+      if (init?.body !== undefined) {
+        bodySource = init.body;
+        contentType = bodyContentType(bodySource);
       } else {
-        const extracted = extractBodyData(bodySource);
-        this._rawBytes = extracted.bytes;
-        this._rawText = extracted.text;
+        bodySource = (input as any)._rawBytes || (input as any)._rawText;
       }
     } else {
-      this.url = String(input);
-      this.method = (init?.method || "GET").toUpperCase();
-      this.headers = init?.headers instanceof Headers ? init.headers : new Headers(init?.headers);
-      this.signal = init?.signal;
-      this.redirect = init?.redirect || "follow";
-      const body = init?.body;
-      if (typeof body === "string") {
-        this._rawBytes = null;
-        this._rawText = body;
-      } else if (body === undefined || body === null) {
-        this._rawBytes = null;
-        this._rawText = null;
-      } else {
-        const extracted = extractBodyData(body);
-        this._rawBytes = extracted.bytes;
-        this._rawText = extracted.text;
-      }
+      url = String(input);
+      method = (init?.method || "GET").toUpperCase();
+      headersInit = init?.headers;
+      signal = init?.signal;
+      redirect = init?.redirect || "follow";
+      bodySource = init?.body;
+      contentType = bodyContentType(bodySource);
     }
+    let rawBytes: Uint8Array | null = null;
+    let rawText: string | null = null;
+    if (typeof bodySource === "string") {
+      rawText = bodySource;
+    } else if (bodySource !== undefined && bodySource !== null) {
+      const extracted = extractBodyData(bodySource);
+      rawBytes = extracted.bytes;
+      rawText = extracted.text;
+    }
+    // A Headers passed as `init.headers` is this request's own (as it always was here); anything
+    // else is copied now, since the init is the caller's to change afterwards.
+    let headers: Headers =
+      init?.headers instanceof Headers && headersInit === init.headers ? init.headers : new Headers(headersInit);
+    if (contentType !== null && !headers.has("content-type")) {
+      // The body's type is added to this object's own headers, never to the caller's Headers.
+      if (headers === headersInit) headers = new Headers(headers);
+      headers.set("content-type", contentType);
+    }
+    self.method = method;
+    self.signal = signal;
+    self.redirect = redirect;
+    this.bodyUsed = false;
+    this._bodyStream = undefined;
+    this._rawBytes = rawBytes;
+    this._rawText = rawText;
+    this._url = url;
+    this._headers = headers;
+    this._contentType = contentType;
+    this._target = "";
+    this._flatHeaders = null;
+    this._host = "";
+  }
+
+  get url(): string {
+    let url = this._url;
+    if (url === null) {
+      const target = this._target;
+      if (target.charCodeAt(0) !== 47 /* "/" */ && /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(target)) {
+        // An absolute-form target (a proxy request) is already the URL.
+        url = target;
+      } else {
+        const flattened = this._flatHeaders;
+        const host = flattened !== null ? flattenedHost(flattened) : null;
+        url = `http://${host !== null && host !== "" ? host : this._host}${target}`;
+      }
+      this._url = url;
+    }
+    return url;
+  }
+
+  get headers(): Headers {
+    let headers = this._headers;
+    if (headers === null) {
+      const flattened = this._flatHeaders;
+      if (flattened !== null) {
+        // The URL may still need the Host field, which is about to stop being kept.
+        if (this._url === null) this._url = this.url;
+        headers = headersFromFlattened(flattened);
+        this._flatHeaders = null;
+      } else {
+        headers = new Headers();
+      }
+      this._headers = headers;
+    }
+    return headers;
   }
 
   // A stream over the bytes, made once: node's `body` is a `ReadableStream` of `Uint8Array`
@@ -872,6 +1122,41 @@ if (typeof (globalThis as any).fetch === "undefined") {
   (globalThis as any).fetch = fetch;
 }
 
+// The header block `fetchRespond` takes: `name NUL value NUL` per field, the flattening the
+// engine parses straight into Hyper's map. A response whose headers were never read or given
+// is only its body's content type, and costs no Headers at all.
+function flattenResponseHeaders(response: any): string {
+  const headers: Headers | null = response._headers;
+  if (headers === null) {
+    const contentType = response._contentType;
+    return contentType === null ? "" : `content-type\0${contentType}\0`;
+  }
+  // A request's headers handed straight back are already the block.
+  if (headers._map === null) return headers._flat as string;
+  let flattened = "";
+  // `forEach` rather than `for...of`: no iterator and no entry array per field.
+  headers._map.forEach((value: string, name: string) => {
+    if (name === "set-cookie") {
+      // Each cookie is its own field; the map's joined value is only what `get` answers.
+      const cookies = headers._setCookies;
+      if (cookies !== null) {
+        for (let i = 0; i < cookies.length; i++) flattened += `set-cookie\0${cookies[i]}\0`;
+      }
+    } else {
+      flattened += `${name}\0${value}\0`;
+    }
+  });
+  return flattened;
+}
+
+// `serve({ fetch, port, hostname }, callback)`, the one implementation behind `Bun.serve`,
+// `Kiln.serve` and `node:http`'s `serve`.
+//
+// It is not built on `createServer`. The host's fetch server hands each request over whole --
+// method, target and the flattened header block as strings, the body as bytes -- and the
+// handler's Response goes back through one `fetchRespond` call carrying status, header block and
+// body. No IncomingMessage or ServerResponse exists, and a Request's `url` and `headers` are
+// only built if the handler reads them.
 function serve(
   options:
     | {
@@ -890,59 +1175,57 @@ function serve(
   const hostname = typeof options === "object" && options.hostname ? String(options.hostname) : undefined;
 
   const httpMod = typeof process !== "undefined" ? (process as any).__kilnNativeModules?.http : null;
-  if (!httpMod || typeof httpMod.createServer !== "function") {
+  if (!httpMod || typeof httpMod.createFetchServer !== "function" || typeof httpMod.fetchRespond !== "function") {
     throw new Error("serve requires an HTTP host capability that this realm does not provide");
   }
+  const respond = httpMod.fetchRespond;
+  // The authority a request's URL names when it carries no Host field (HTTP/1.0).
+  const fallbackHost = hostname ? `${hostname}:${port}` : `localhost:${port}`;
 
-  function sendResponse(webRes: any, res: any) {
-    res.statusCode = webRes.status;
-    for (const [k, v] of webRes.headers.entries()) {
-      res.setHeader(k, v);
+  function fail(resource: number, id: number, err: any) {
+    respond(resource, id, 500, "", err?.message || "Internal Server Error");
+  }
+
+  function send(resource: number, id: number, response: any) {
+    if (!(response instanceof Response)) {
+      fail(resource, id, new TypeError("serve: the fetch handler must return a Response"));
+      return;
     }
-    const rawText = webRes._rawText;
-    if (rawText !== null && rawText !== undefined) {
-      res.end(rawText);
-    } else {
-      const rawBytes = webRes._rawBytes;
-      if (rawBytes !== null && rawBytes !== undefined) {
-        res.end(rawBytes);
-      } else {
-        webRes.text().then(
-          (body: string) => res.end(body),
-          (err: any) => {
-            res.statusCode = 500;
-            res.end(err?.message || "Internal Server Error");
-          }
-        );
-      }
+    try {
+      const text = response._rawText;
+      const body = text !== null ? text : response._rawBytes !== null ? response._rawBytes : "";
+      respond(resource, id, response.status, flattenResponseHeaders(response), body);
+    } catch (err: any) {
+      fail(resource, id, err);
     }
   }
 
-  const server = httpMod.createServer((req: any, res: any) => {
-    try {
-      const hostHeader = req.headers?.host || (hostname ? `${hostname}:${port}` : `localhost:${port}`);
-      const url = `http://${hostHeader}${req.url}`;
-      const webReq = new Request(url, {
-        method: req.method,
-        headers: req.headers,
-      });
-      const webRes = fetchHandler(webReq);
-      if (webRes instanceof Promise) {
-        webRes.then(
-          (r: any) => sendResponse(r, res),
-          (err: any) => {
-            res.statusCode = 500;
-            res.end(err?.message || "Internal Server Error");
-          }
+  const server = httpMod.createFetchServer(
+    (method: string, target: string, headers: string, body: any, resource: number, id: number) => {
+      servedMethod = method;
+      servedTarget = target;
+      servedHeaders = headers;
+      servedBody = body === undefined ? null : body;
+      servedHost = fallbackHost;
+      let result: any;
+      try {
+        result = fetchHandler(new Request(SERVED_REQUEST));
+      } catch (err: any) {
+        fail(resource, id, err);
+        return;
+      }
+      if (result instanceof Response) {
+        send(resource, id, result);
+      } else if (result !== null && typeof result === "object" && typeof result.then === "function") {
+        result.then(
+          (response: any) => send(resource, id, response),
+          (err: any) => fail(resource, id, err)
         );
       } else {
-        sendResponse(webRes, res);
+        send(resource, id, result);
       }
-    } catch (err: any) {
-      res.statusCode = 500;
-      res.end(err?.message || "Internal Server Error");
     }
-  });
+  );
 
   if (hostname) {
     server.listen(port, hostname, callback);

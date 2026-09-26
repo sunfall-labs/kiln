@@ -529,6 +529,13 @@ pub fn retained_method_groups(
         || members.globals.iter().any(|name| {
             name == "URLSearchParams" || name == "fetch" || name == "Request" || name == "Response"
         });
+    // `Bun.serve` and `Kiln.serve` are the bootstrap's `serve` (kiln-builtins web.ts), which
+    // reaches the HTTP host through `process.__kilnNativeModules.http` rather than through an
+    // import of `node:http` -- so the global is the only sign of it a program gives.
+    let uses_serve_global = members
+        .globals
+        .iter()
+        .any(|name| name == "Bun" || name == "Kiln");
     let uses_date = members.builtins.iter().any(|name| name == "Date");
     let uses_math_number = members
         .builtins
@@ -581,6 +588,9 @@ pub fn retained_method_groups(
     }
     if uses_url || dynamic {
         mask |= groups::URL;
+    }
+    if uses_serve_global {
+        mask |= builtin_groups(&NodeBuiltin::Http).unwrap_or(FULL);
     }
     if uses_temporal {
         mask |= groups::TEMPORAL

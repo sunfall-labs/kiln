@@ -6033,6 +6033,13 @@ static int kiln_install_native_modules(kiln_host *host) {
     if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(host, http_obj, "request", 7, http_request, 0, NULL);
     if (status != KILN_C99_OK) return status;
+    /* The private host half of `serve()` (kiln-builtins web.ts). */
+    kiln_value http_create_fetch_server = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 530 /* KILN_C99_METHOD_NODE_HTTP_CREATE_FETCH_SERVER */ };
+    kiln_value http_fetch_respond = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 531 /* KILN_C99_METHOD_NODE_HTTP_FETCH_RESPOND */ };
+    status = kiln_c99_put(host, http_obj, "createFetchServer", 17, http_create_fetch_server, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, http_obj, "fetchRespond", 12, http_fetch_respond, 0, NULL);
+    if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(host, modules_obj, "http", 4, http_obj, 0, NULL);
     if (status != KILN_C99_OK) return status;
 
