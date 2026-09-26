@@ -496,6 +496,11 @@ typedef struct kiln_gc_hooks {
 } kiln_gc_hooks;
 extern void *kiln_realm_gc_current_heap(void);
 extern const uint64_t *kiln_realm_generation_slot(void);
+/* Process-wide storage the prelude keeps its shared keys and shapes in (ADR 0071): at least
+ * `size` zero-initialised bytes, the same address for every unit and every thread for the life of
+ * the process, or NULL when `size` exceeds what the provider reserved. The prelude is emitted per
+ * translation unit with internal linkage, so a static of its own would be one table per unit. */
+extern void *kiln_realm_process_shared(uint64_t size);
 extern int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap);
 extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
 extern int kiln_realm_gc_mark_roots(void *heap);
@@ -649,6 +654,17 @@ typedef struct kiln_shape {
      * of an object with this shape has to know before copying its slots wholesale. */
     uint32_t has_symbol_key;
     uint32_t double_slots_mask;
+    /* ADR 0071. A *shared* shape is the root or a transition by a shared (process-wide) key from
+     * a shared shape: it means the same layout in every realm, is never freed, and its edges are
+     * published atomically because any realm's thread may add one. Every other shape is
+     * realm-local: owned by the heap that made it (`owned_next` threads the heap's list of them),
+     * freed when that heap is torn down, and reachable from a shared shape only through that
+     * heap's own side table -- never through the shared shape's edges, which another realm reads.
+     * `retained` marks a realm-local shape a teardown survivor still uses, which teardown then
+     * leaks rather than frees. */
+    uint32_t shared;
+    uint32_t retained;
+    struct kiln_shape *owned_next;
 } kiln_shape;
 
 /* A plain data object: own string-keyed properties, scanned linearly.
