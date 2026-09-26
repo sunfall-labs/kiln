@@ -24,5 +24,8 @@ http-body-util = { workspace = true, optional = true }
 bytes = { workspace = true }
 libc = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = { workspace = true }
+
 [dev-dependencies]
 h2 = "0.4"
