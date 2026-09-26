@@ -472,7 +472,7 @@ pub struct ScriptedHost {
 /// Tokio provider does); the realm's timer-versus-completion arbitration remains shared.
 pub trait RealmHostProvider: AsyncHostOps {
     /// Let provider-owned tasks finish cooperative teardown while the realm executor is alive.
-    fn drain_on_shutdown(&mut self, _executor: &DriveExecutor) {}
+    fn drain_on_shutdown(&mut self, _executor: &Executor) {}
 
     /// Start an operation while the realm's LocalSet is active.
     ///
@@ -732,44 +732,111 @@ pub struct RuntimeMetricsSnapshot {
     pub busy_duration: Duration,
 }
 
-/// A deterministic, current-thread runtime for realm tasks.
+/// The Tokio executor: a current-thread runtime and the `LocalSet` realm tasks run on.
 ///
-/// The runtime starts Tokio time paused on the first call to [`Self::drive`]. A drive advances
-/// automatically to each realm's next timer only after all currently-ready microtasks have been
-/// exhausted. This makes a timer's delay virtual: a one-hour timer costs no wall-clock hour.
+/// Separate from [`RealmState`], which owns everything a drive reads and writes, so that a drive
+/// can hold the state for its whole lifetime while the executor runs it. The previous single
+/// struct could not express that, and the native adapter re-entered the executor for every small
+/// step instead of running inside it once (ADR 0040).
 ///
-/// A runtime is intentionally synchronous at this initial seam. Callers enter a realm through
-/// [`Self::drive`]; a future async HostOps seam can add an asynchronous entry point without
-/// exposing Tokio types or changing the ordering contract.
-///
-/// `drive` accepts generic caller-owned microtask and timer payloads. Timer payloads must be
-/// [`Clone`] when driven because an interval re-arms the same callback before returning it.
-/// The Tokio executor, owning nothing a drive mutates.
-///
-/// Separated from [`RealmState`] so that a drive can hold the state for its whole lifetime while
-/// the executor is held alongside it. That is the one thing the previous single struct could not
-/// express, and the reason the native adapter re-entered the executor for every small step
-/// instead of running inside it once. See ADR 0040.
-struct Executor {
+/// An executor owns no realm. It is shared as `Rc<Executor>`, and a [`RealmState`] is built
+/// without one, so the state is an owned value a later scheduler can drive from whichever
+/// executor runs its next turn (ADR 0070). What an executor does own is what Tokio makes
+/// per-runtime: the paused clock and the runtime's metric stream.
+pub struct Executor {
     runtime: tokio::runtime::Runtime,
     local: tokio::task::LocalSet,
+    /// Whether Tokio time has been paused for a deterministic clock. Pausing is a property of
+    /// the runtime, not of any one realm.
+    time_paused: std::cell::Cell<bool>,
+    runtime_metrics: std::cell::RefCell<tokio_metrics::RuntimeIntervals>,
+    // Current-thread by construction: the LocalSet and the realms it drives are thread-bound.
+    _not_send: PhantomData<Rc<()>>,
 }
 
 impl Executor {
-    /// Run `operation` inside this executor: directly when the caller is already there (a
-    /// language callback made from a task, or from `enter`), since Tokio panics on a nested
-    /// `block_on`; through one `block_on` otherwise.
+    /// Builds a current-thread runtime with Tokio's I/O and timer drivers enabled.
+    pub fn new() -> Result<Self, RuntimeBuildError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .map_err(RuntimeBuildError)?;
+        let runtime_metrics = tokio_metrics::RuntimeMonitor::new(runtime.handle()).intervals();
+        Ok(Self {
+            runtime,
+            local: tokio::task::LocalSet::new(),
+            time_paused: std::cell::Cell::new(false),
+            runtime_metrics: std::cell::RefCell::new(runtime_metrics),
+            _not_send: PhantomData,
+        })
+    }
+
+    /// Run `future` to completion on this runtime and `LocalSet`: the one place a realm's
+    /// thread parks. A drive enters here once per program run; Tokio panics on a nested entry,
+    /// which is what makes a stray one loud instead of a deadlock.
+    pub fn block_on<F: Future>(&self, future: F) -> F::Output {
+        self.local.block_on(&self.runtime, future)
+    }
+
+    /// Make this executor ambient for `operation` without running it or parking the thread.
     ///
-    /// This is the one place the runtime asks "am I in context". ADR 0040 deleted the
-    /// `_in_context` twins that put that question on every caller; a runtime that is only
-    /// ever entered through its own executor can answer it itself.
-    fn run<R>(&self, operation: impl FnOnce() -> R) -> R {
-        if tokio::runtime::Handle::try_current().is_ok() {
-            operation()
-        } else {
-            self.local
-                .block_on(&self.runtime, async move { operation() })
+    /// Realm operations that spawn onto the `LocalSet` or register with the I/O driver
+    /// ([`RealmState::start_host_op`], the HTTP attaches) need the executor's context. Inside a
+    /// drive that context is already current; a caller outside one, such as the interpreter
+    /// between turns, enters it here. Both guards nest, so the question "am I in context" that
+    /// the deleted `_in_context` twins put on every caller does not arise: this is correct in
+    /// either case and never calls `block_on`. Spawned tasks run at the next entry.
+    pub fn scope<R>(&self, operation: impl FnOnce() -> R) -> R {
+        let _runtime = self.runtime.enter();
+        let _local = self.local.enter();
+        operation()
+    }
+
+    /// Pause Tokio time for a deterministic clock, once for this runtime.
+    pub fn pause_time(&self) {
+        if !self.time_paused.get() {
+            let _entered = self.runtime.enter();
+            tokio::time::pause();
+            self.time_paused.set(true);
         }
+    }
+
+    /// Whether Tokio time has been paused on this runtime.
+    pub fn is_time_paused(&self) -> bool {
+        self.time_paused.get()
+    }
+
+    /// Samples stable whole-runtime counters accumulated since the previous call.
+    ///
+    /// These are developer diagnostics, not JavaScript-observable time or scheduler state. The
+    /// sample's `elapsed` and durations use wall time even though realm timers use paused Tokio
+    /// time for deterministic execution.
+    pub fn sample_runtime_metrics(&self) -> RuntimeMetricsSnapshot {
+        let metrics = self
+            .runtime_metrics
+            .borrow_mut()
+            .next()
+            .expect("Tokio runtime metric intervals are infinite");
+        RuntimeMetricsSnapshot {
+            elapsed: metrics.elapsed,
+            workers: metrics.workers_count,
+            live_tasks: metrics.live_tasks_count,
+            global_queue_depth: metrics.global_queue_depth,
+            park_count: metrics.total_park_count,
+            busy_duration: metrics.total_busy_duration,
+        }
+    }
+
+    /// Tear down `state` after giving its provider's tasks a chance to complete cooperative
+    /// cleanup on this executor. Terminal and idempotent: `false` when teardown had already
+    /// begun. Must be called outside any drive, since the drain parks.
+    pub fn shut_down<H: RealmHostProvider>(&self, state: &mut RealmState<H>) -> bool {
+        if state.is_shutdown() {
+            return false;
+        }
+        state.host.drain_on_shutdown(self);
+        state.shutdown()
     }
 }
 
@@ -805,22 +872,14 @@ pub async fn yield_to_tasks() {
     tokio::task::yield_now().await;
 }
 
-/// A handle on a realm's executor that owes nothing to the realm's borrow.
-pub struct DriveExecutor(Rc<Executor>);
-
-impl DriveExecutor {
-    /// Run `future` to completion on the realm's current-thread runtime and `LocalSet`.
-    pub fn block_on<F: Future>(&self, future: F) -> F::Output {
-        self.0.local.block_on(&self.0.runtime, future)
-    }
-}
-
-/// Everything a drive reads and writes, owning nothing that runs futures.
-/// Everything a realm owns that is not the executor: the host, its capabilities, the
-/// HTTP connection table, and the metrics stream. See ADR 0040.
+/// Everything a realm owns that is not the executor: the host, its capabilities, the HTTP
+/// engines and agent, and the queued-event adapter. See ADR 0040.
+///
+/// Built without an executor and holding no handle to one, so it is an owned value that
+/// whichever executor runs a turn can drive. Its operations never park the thread; those that
+/// spawn or register I/O expect to run inside an executor's context (a drive, or
+/// [`Executor::scope`]).
 pub struct RealmState<H> {
-    runtime_metrics: tokio_metrics::RuntimeIntervals,
-    time_paused: bool,
     host: H,
     capabilities: RealmCapabilities,
     http_agent: HttpAgent,
@@ -844,6 +903,20 @@ pub struct RealmState<H> {
     lifecycle: RealmRuntimeLifecycle,
 }
 
+/// A deterministic, current-thread runtime for realm tasks: a realm's state plus the executor
+/// that drives it, for callers that are entered from outside the executor (the interpreter,
+/// the daemon, conformance, the worker pool).
+///
+/// The runtime starts Tokio time paused on the first call to [`Self::drive`]. A drive advances
+/// automatically to each realm's next timer only after all currently-ready microtasks have been
+/// exhausted. This makes a timer's delay virtual: a one-hour timer costs no wall-clock hour.
+///
+/// `drive` accepts generic caller-owned microtask and timer payloads. Timer payloads must be
+/// [`Clone`] when driven because an interval re-arms the same callback before returning it.
+///
+/// Every operation that needs the executor's context enters it with [`Executor::scope`] and
+/// delegates to [`RealmState`]; a caller already running inside a drive, like the native
+/// adapter, holds the two separately and calls the state directly.
 pub struct RealmRuntime<H: RealmHostProvider = TokioHost> {
     executor: Rc<Executor>,
     state: RealmState<H>,
@@ -863,7 +936,7 @@ impl<H: RealmHostProvider> std::fmt::Debug for RealmRuntime<H> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("RealmRuntime")
-            .field("time_paused", &self.state.time_paused)
+            .field("time_paused", &self.executor.is_time_paused())
             .field("lifecycle", &self.state.lifecycle)
             .finish_non_exhaustive()
     }
@@ -893,18 +966,7 @@ impl RealmRuntime<TokioHost> {
 impl<H: RealmHostProvider> RealmRuntime<H> {
     /// Tear down the realm after giving provider tasks a chance to complete cooperative cleanup.
     pub fn shutdown(&mut self) -> bool {
-        if self.state.is_shutdown() {
-            return false;
-        }
-        let executor = self.drive_executor();
-        self.state.host.drain_on_shutdown(&executor);
-        self.state.shutdown()
-    }
-
-    /// Select the host clock before the realm is entered. This keeps Tokio time real for
-    /// host-backed executions; deterministic realms retain paused virtual time.
-    pub fn use_host_clock(&mut self) {
-        self.state.capabilities.clock = ClockCapability::Host;
+        self.executor.shut_down(&mut self.state)
     }
 
     /// Builds a runtime around an explicit asynchronous host provider.
@@ -921,57 +983,32 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         host: H,
         capabilities: RealmCapabilities,
     ) -> Result<Self, RuntimeBuildError> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .enable_time()
-            .build()
-            .map_err(RuntimeBuildError)?;
-        let runtime_metrics = tokio_metrics::RuntimeMonitor::new(runtime.handle()).intervals();
-        Ok(Self {
-            executor: Rc::new(Executor {
-                runtime,
-                local: tokio::task::LocalSet::new(),
-            }),
-            state: RealmState {
-                runtime_metrics,
-                time_paused: false,
-                host,
-                capabilities,
-                http_agent: HttpAgent::default(),
-                #[cfg(feature = "http")]
-                http_server: HttpServerEngine::default(),
-                #[cfg(feature = "http")]
-                http_client: HttpClientEngine::default(),
-                #[cfg(not(feature = "http"))]
-                http_server: (),
-                #[cfg(not(feature = "http"))]
-                http_client: (),
-                queued_http: Rc::new(QueuedHttp::default()),
-                lifecycle: RealmRuntimeLifecycle::Open,
-            },
+        Ok(Self::from_parts(
+            Rc::new(Executor::new()?),
+            RealmState::new(host, capabilities),
+        ))
+    }
+
+    /// A runtime over an existing executor and realm state.
+    pub fn from_parts(executor: Rc<Executor>, state: RealmState<H>) -> Self {
+        Self {
+            executor,
+            state,
             _not_send: PhantomData,
-        })
+        }
     }
 
-    /// Borrow the executor and the realm state at once, disjointly.
-    ///
-    /// This is the whole point of the split, and the one thing the previous single struct could
-    /// not express. A drive needs the state for its entire lifetime *and* needs the executor to
-    /// run it; with both behind one `&mut self` those two borrows conflict, so the native adapter
-    /// re-entered the executor for each small step. Two fields borrow independently, so a caller
-    /// can hold `&mut RealmState` across an `await` while the executor drives it. See ADR 0040.
-    ///
-    /// Nothing here runs a future yet; step 1 of the sequence is the split alone.
-    #[allow(dead_code)]
-    fn split(&mut self) -> (&Executor, &mut RealmState<H>) {
-        (&self.executor, &mut self.state)
+    /// The executor this runtime drives its realm on. Shared, so a caller can run one future
+    /// for the life of a loop while that loop borrows the runtime.
+    pub fn executor(&self) -> &Rc<Executor> {
+        &self.executor
     }
 
-    /// The executor, detached from this runtime's borrow, so a drive can `block_on` one future
-    /// for the life of a program while callbacks inside it borrow the runtime (ADR 0040 step 4,
-    /// ADR 0046).
-    pub fn drive_executor(&self) -> DriveExecutor {
-        DriveExecutor(Rc::clone(&self.executor))
+    /// Pause Tokio time once, if this realm keeps the deterministic clock.
+    fn pause_virtual_time(&self) {
+        if self.state.capabilities.clock == ClockCapability::Virtual {
+            self.executor.pause_time();
+        }
     }
 
     /// Try to start one host operation, rejecting admission after teardown begins.
@@ -980,14 +1017,9 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         operation: AsyncHostOp,
         referenced: bool,
     ) -> Option<RequestId> {
-        if self.is_shutdown() {
-            return None;
-        }
-        let host = &mut self.state.host;
-        Some(
-            self.executor
-                .run(|| RealmHostProvider::start_on_realm(host, operation, referenced)),
-        )
+        let state = &mut self.state;
+        self.executor
+            .scope(|| state.try_start_host_op(operation, referenced))
     }
 
     /// Starts one asynchronous host operation on this realm's Tokio runtime.
@@ -1004,10 +1036,8 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         if !self.state.host.has_pending_work() {
             return Ok(None);
         }
-        self.executor.local.block_on(
-            &self.executor.runtime,
-            self.state.host.next_completion_async(),
-        )
+        self.executor
+            .block_on(self.state.host.next_completion_async())
     }
 
     /// Wait for either the next host completion or the realm's next timer.
@@ -1023,12 +1053,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         if self.is_shutdown() {
             return None;
         }
-        if self.state.capabilities.clock == ClockCapability::Virtual && !self.state.time_paused {
-            self.executor.local.block_on(&self.executor.runtime, async {
-                tokio::time::pause();
-            });
-            self.state.time_paused = true;
-        }
+        self.pause_virtual_time();
         if let Some(failure) = self.state.host.runtime_failure() {
             return Some(RuntimeTurn::Failure(failure.clone()));
         }
@@ -1051,7 +1076,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         // an event for the caller's checkpoint, and the next timer coming due.
         let signal = Rc::clone(&self.state.queued_http.signal);
         let host = &mut self.state.host;
-        self.executor.local.block_on(&self.executor.runtime, async {
+        self.executor.block_on(async {
             let completion = async {
                 if host_pending {
                     host.next_completion_async().await
@@ -1104,8 +1129,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         self.next_turn(realm)
     }
 
-    /// Attach the HTTP engine to an accepted stream (ADR 0046): the host hands over its
-    /// transport and Hyper drives it, calling `dispatch` directly for every protocol event.
+    /// [`RealmState::server_attach`], entered from outside the executor.
     #[cfg(feature = "http")]
     pub fn server_attach(
         &mut self,
@@ -1113,42 +1137,26 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         allow_half_close: bool,
         dispatch: Rc<dyn HttpDispatch>,
     ) -> bool {
-        if self.is_shutdown() || self.state.http_owns(resource) {
-            return false;
-        }
-        let Some(transport) = self.state.host.take_transport(resource) else {
-            return false;
-        };
-        let engine = &mut self.state.http_server;
+        let state = &mut self.state;
         self.executor
-            .run(|| engine.attach(resource, transport, allow_half_close, dispatch))
+            .scope(|| state.server_attach(resource, allow_half_close, dispatch))
     }
 
-    /// Attach the HTTP client engine to a connected stream (ADR 0046): the host hands over its
-    /// transport and Hyper drives it, calling `dispatch` directly for every response event.
+    /// [`RealmState::client_attach`], entered from outside the executor.
     #[cfg(feature = "http")]
     pub fn client_attach(&mut self, resource: ResourceId, dispatch: Rc<dyn HttpDispatch>) -> bool {
-        if self.is_shutdown() || self.state.http_owns(resource) {
-            return false;
-        }
-        let Some(transport) = self.state.host.take_transport(resource) else {
-            return false;
-        };
-        let engine = &mut self.state.http_client;
+        let state = &mut self.state;
         self.executor
-            .run(|| engine.attach(resource, transport, dispatch))
+            .scope(|| state.client_attach(resource, dispatch))
     }
 
-    /// Attach a server connection whose events are queued for
-    /// [`RealmState::take_queued_server_events`]
-    /// (the queued adapter of ADR 0046, for a loop that drains events at its checkpoint).
+    /// [`RealmState::server_attach_queued`], entered from outside the executor.
     #[cfg(feature = "http")]
     pub fn server_attach_queued(&mut self, resource: ResourceId, allow_half_close: bool) -> bool {
         self.server_attach_queued_with(resource, allow_half_close, false)
     }
 
-    /// [`Self::server_attach_queued`], optionally taking requests whole
-    /// ([`HttpDispatch::whole_requests`]), which is what a fetch-style `serve` handler consumes.
+    /// [`RealmState::server_attach_queued_with`], entered from outside the executor.
     #[cfg(feature = "http")]
     pub fn server_attach_queued_with(
         &mut self,
@@ -1156,186 +1164,32 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         allow_half_close: bool,
         whole_requests: bool,
     ) -> bool {
-        let Some(admission) = self.state.queued_http.admit(resource) else {
-            return false;
-        };
-        let dispatch = Rc::new(QueuedDispatch {
-            resource,
-            admission,
-            role: QueuedRole::Server,
-            queue: Rc::clone(&self.state.queued_http),
-            whole_requests,
-        });
-        if self.server_attach(resource, allow_half_close, dispatch) {
-            true
-        } else {
-            false
-        }
+        let state = &mut self.state;
+        self.executor
+            .scope(|| state.server_attach_queued_with(resource, allow_half_close, whole_requests))
     }
 
-    /// Attach a client connection whose events are queued for
-    /// [`Self::take_http_client_events`].
+    /// [`RealmState::client_attach_queued`], entered from outside the executor.
     #[cfg(feature = "http")]
     pub fn client_attach_queued(&mut self, resource: ResourceId) -> bool {
-        let Some(admission) = self.state.queued_http.admit(resource) else {
-            return false;
-        };
-        let dispatch = Rc::new(QueuedDispatch {
-            resource,
-            admission,
-            role: QueuedRole::Client,
-            queue: Rc::clone(&self.state.queued_http),
-            whole_requests: false,
-        });
-        if self.client_attach(resource, dispatch) {
-            true
-        } else {
-            false
-        }
+        let state = &mut self.state;
+        self.executor.scope(|| state.client_attach_queued(resource))
     }
 
-    /// The direct HTTP server engine.
-    #[cfg(feature = "http")]
-    pub fn http_server(&mut self) -> &mut HttpServerEngine {
-        &mut self.state.http_server
-    }
-
-    /// The direct HTTP client engine.
-    #[cfg(feature = "http")]
-    pub fn http_client(&mut self) -> &mut HttpClientEngine {
-        &mut self.state.http_client
-    }
-
-    /// Stop the connection on `resource`, whichever engine owns it. The transport is released
-    /// once the engine has published `Closed`; a caller closing from outside an engine
-    /// callback sees that on its next turn.
-    #[cfg(feature = "http")]
+    /// [`RealmState::http_close`], entered from outside the executor.
     pub fn http_close(&mut self, resource: ResourceId, mode: HttpCloseMode) -> bool {
-        let engine = &mut self.state;
-        self.executor.run(|| {
-            engine.http_server.close(resource, mode) || engine.http_client.close(resource, mode)
-        })
-    }
-
-    /// Without `http` no engine can own a transport, so there is nothing to stop.
-    #[cfg(not(feature = "http"))]
-    pub fn http_close(&mut self, _resource: ResourceId, _mode: HttpCloseMode) -> bool {
-        false
-    }
-
-    /// Whether any direct server connection is still open.
-    #[cfg(feature = "http")]
-    pub fn has_open_server_connections(&self) -> bool {
-        self.state.http_server.open_connections() != 0
-    }
-
-    /// Without `http` no server connection can be open.
-    #[cfg(not(feature = "http"))]
-    pub fn has_open_server_connections(&self) -> bool {
-        false
-    }
-
-    /// How many server connections are open. The boolean above answers the drive's question;
-    /// this answers a person's, through the `SIGUSR1` dump.
-    #[cfg(feature = "http")]
-    pub fn open_server_connections(&self) -> usize {
-        self.state.http_server.open_connections()
-    }
-
-    /// Without `http` no server connection can be open.
-    #[cfg(not(feature = "http"))]
-    pub fn open_server_connections(&self) -> usize {
-        0
-    }
-
-    /// How many client connections are open, likewise.
-    #[cfg(feature = "http")]
-    pub fn open_client_connections(&self) -> usize {
-        self.state.http_client.open_connections()
-    }
-
-    /// Without `http` no client connection can be open.
-    #[cfg(not(feature = "http"))]
-    pub fn open_client_connections(&self) -> usize {
-        0
-    }
-
-    /// The host's completion signal, for a drive that waits outside any borrow of this runtime.
-    pub fn completion_signal(&self) -> Option<Rc<tokio::sync::Notify>> {
-        self.state.host.completion_signal()
-    }
-
-    /// Wake a parked drive: something it was not waiting for has changed what it should wait
-    /// for, such as a timer armed from inside a connection callback.
-    pub fn wake_drive(&self) {
-        if let Some(signal) = self.state.host.completion_signal() {
-            signal.notify_one();
-        }
+        let state = &mut self.state;
+        self.executor.scope(|| state.http_close(resource, mode))
     }
 
     /// Pause Tokio time for the deterministic clock, once.
     pub fn pause_time(&mut self) {
-        if self.state.capabilities.clock == ClockCapability::Virtual && !self.state.time_paused {
-            let _entered = self.executor.runtime.enter();
-            tokio::time::pause();
-            self.state.time_paused = true;
-        }
+        self.pause_virtual_time();
     }
 
-    /// A turn that is ready now, without parking: a failure, an already-completed host
-    /// operation, or nothing. The caller decides how to wait when this is `None`.
-    pub fn ready_turn<M, T>(&mut self) -> Option<RuntimeTurn<M, T>>
-    where
-        T: Clone,
-    {
-        if self.is_shutdown() {
-            return None;
-        }
-        if let Some(failure) = self.state.host.runtime_failure() {
-            return Some(RuntimeTurn::Failure(failure.clone()));
-        }
-        if let Some(completion) = AsyncHostOps::next_completion(&mut self.state.host) {
-            return Some(RuntimeTurn::Completion(completion));
-        }
-        if let Some(failure) = self.state.host.runtime_failure() {
-            return Some(RuntimeTurn::Failure(failure.clone()));
-        }
-        if self.state.queued_http.has_events() || self.state.queued_http.take_signalled() {
-            return Some(RuntimeTurn::Protocol);
-        }
-        None
-    }
-
-    /// Whether a drive still has something to wait for: referenced host work, or a timer.
-    pub fn has_referenced_host_work(&self) -> bool {
-        self.state.host.has_referenced_work()
-    }
-
-    /// Whether any host operation is pending, referenced or not: whether a completion can
-    /// still arrive.
-    pub fn has_pending_host_work(&self) -> bool {
-        self.state.host.has_pending_work()
-    }
-
-    /// Requests in flight on direct connections: server responses the language has not
-    /// finished, and client requests whose response has not ended.
-    #[cfg(feature = "http")]
-    pub fn requests_in_flight(&self) -> usize {
-        self.state.http_server.requests_in_flight() + self.state.http_client.requests_in_flight()
-    }
-
-    /// Without `http` no request can be in flight on a direct connection.
-    #[cfg(not(feature = "http"))]
-    pub fn requests_in_flight(&self) -> usize {
-        0
-    }
-
-    /// A one-line description of the host's pending work, for `KILN_HTTP_TRACE`.
-    pub fn describe_host_work(&self) -> String
-    where
-        H: std::fmt::Debug,
-    {
-        format!("{:?}", self.state.host)
+    /// Samples stable whole-runtime counters accumulated since the previous call.
+    pub fn sample_runtime_metrics(&mut self) -> RuntimeMetricsSnapshot {
+        self.executor.sample_runtime_metrics()
     }
 
     /// Runs one synchronous realm operation as the current Tokio task.
@@ -1348,9 +1202,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         F: FnOnce() -> R,
     {
         assert!(!self.is_shutdown(), "a shut down realm cannot be entered");
-        self.executor
-            .local
-            .block_on(&self.executor.runtime, async move { operation() })
+        self.executor.block_on(async move { operation() })
     }
 
     /// Drives `realm` until it has no microtasks or timers left.
@@ -1370,16 +1222,9 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         C: FnMut(&mut Realm<M, T>) -> Result<(), E>,
     {
         assert!(!self.is_shutdown(), "a shut down realm cannot be driven");
-        if self.state.capabilities.clock == ClockCapability::Virtual && !self.state.time_paused {
-            self.executor.local.block_on(&self.executor.runtime, async {
-                tokio::time::pause();
-            });
-            self.state.time_paused = true;
-        }
-        self.executor.local.block_on(
-            &self.executor.runtime,
-            drive_realm(realm, &mut execute, &mut checkpoint),
-        )
+        self.pause_virtual_time();
+        self.executor
+            .block_on(drive_realm(realm, &mut execute, &mut checkpoint))
     }
 
     /// Waits for and removes the next timer after the caller has drained its microtasks.
@@ -1395,15 +1240,8 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         if self.is_shutdown() {
             return None;
         }
-        if self.state.capabilities.clock == ClockCapability::Virtual && !self.state.time_paused {
-            self.executor.local.block_on(&self.executor.runtime, async {
-                tokio::time::pause();
-            });
-            self.state.time_paused = true;
-        }
-        self.executor
-            .local
-            .block_on(&self.executor.runtime, next_timer(realm))
+        self.pause_virtual_time();
+        self.executor.block_on(next_timer(realm))
     }
 }
 
@@ -1412,7 +1250,322 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
 /// Splitting these off is what makes the nesting rule structural rather than a runtime
 /// check: a drive holding `&mut RealmState` cannot name a method that would park the
 /// thread, because those live on [`RealmRuntime`] and need its executor. See ADR 0040.
+///
+/// Some of these spawn onto the `LocalSet` or register sockets with the I/O driver, and so
+/// expect the executor's context to be current: they are called from inside a drive (the
+/// native adapter) or through the [`RealmRuntime`] wrapper of the same name, which enters it
+/// with [`Executor::scope`]. None of them parks.
 impl<H: RealmHostProvider> RealmState<H> {
+    /// A realm's state, built without any executor. It is driven by whichever executor runs
+    /// its turns, through [`RealmRuntime::from_parts`] or a drive that holds both.
+    pub fn new(host: H, capabilities: RealmCapabilities) -> Self {
+        Self {
+            host,
+            capabilities,
+            http_agent: HttpAgent::default(),
+            #[cfg(feature = "http")]
+            http_server: HttpServerEngine::default(),
+            #[cfg(feature = "http")]
+            http_client: HttpClientEngine::default(),
+            #[cfg(not(feature = "http"))]
+            http_server: (),
+            #[cfg(not(feature = "http"))]
+            http_client: (),
+            queued_http: Rc::new(QueuedHttp::default()),
+            lifecycle: RealmRuntimeLifecycle::Open,
+        }
+    }
+
+    /// Select the host clock before the realm is entered. This keeps Tokio time real for
+    /// host-backed executions; deterministic realms retain paused virtual time.
+    pub fn use_host_clock(&mut self) {
+        self.capabilities.clock = ClockCapability::Host;
+    }
+
+    /// Try to start one host operation, rejecting admission after teardown begins.
+    ///
+    /// Expects the executor's context (see the block comment).
+    pub fn try_start_host_op(
+        &mut self,
+        operation: AsyncHostOp,
+        referenced: bool,
+    ) -> Option<RequestId> {
+        if self.is_shutdown() {
+            return None;
+        }
+        Some(RealmHostProvider::start_on_realm(
+            &mut self.host,
+            operation,
+            referenced,
+        ))
+    }
+
+    /// Starts one asynchronous host operation. Expects the executor's context.
+    pub fn start_host_op(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
+        self.try_start_host_op(operation, referenced)
+            .expect("a shut down realm cannot start host work")
+    }
+
+    /// Attach the HTTP engine to an accepted stream (ADR 0046): the host hands over its
+    /// transport and Hyper drives it, calling `dispatch` directly for every protocol event.
+    /// Expects the executor's context: the connection is a task on its `LocalSet`.
+    #[cfg(feature = "http")]
+    pub fn server_attach(
+        &mut self,
+        resource: ResourceId,
+        allow_half_close: bool,
+        dispatch: Rc<dyn HttpDispatch>,
+    ) -> bool {
+        if self.is_shutdown() || self.http_owns(resource) {
+            return false;
+        }
+        let Some(transport) = self.host.take_transport(resource) else {
+            return false;
+        };
+        self.http_server
+            .attach(resource, transport, allow_half_close, dispatch)
+    }
+
+    /// Attach the HTTP client engine to a connected stream (ADR 0046): the host hands over its
+    /// transport and Hyper drives it, calling `dispatch` directly for every response event.
+    /// Expects the executor's context.
+    #[cfg(feature = "http")]
+    pub fn client_attach(&mut self, resource: ResourceId, dispatch: Rc<dyn HttpDispatch>) -> bool {
+        if self.is_shutdown() || self.http_owns(resource) {
+            return false;
+        }
+        let Some(transport) = self.host.take_transport(resource) else {
+            return false;
+        };
+        self.http_client.attach(resource, transport, dispatch)
+    }
+
+    /// Attach a server connection whose events are queued for
+    /// [`RealmState::take_queued_server_events`]
+    /// (the queued adapter of ADR 0046, for a loop that drains events at its checkpoint).
+    #[cfg(feature = "http")]
+    pub fn server_attach_queued(&mut self, resource: ResourceId, allow_half_close: bool) -> bool {
+        self.server_attach_queued_with(resource, allow_half_close, false)
+    }
+
+    /// [`Self::server_attach_queued`], optionally taking requests whole
+    /// ([`HttpDispatch::whole_requests`]), which is what a fetch-style `serve` handler consumes.
+    #[cfg(feature = "http")]
+    pub fn server_attach_queued_with(
+        &mut self,
+        resource: ResourceId,
+        allow_half_close: bool,
+        whole_requests: bool,
+    ) -> bool {
+        let Some(admission) = self.queued_http.admit(resource) else {
+            return false;
+        };
+        let dispatch = Rc::new(QueuedDispatch {
+            resource,
+            admission,
+            role: QueuedRole::Server,
+            queue: Rc::clone(&self.queued_http),
+            whole_requests,
+        });
+        self.server_attach(resource, allow_half_close, dispatch)
+    }
+
+    /// Attach a client connection whose events are queued for
+    /// [`Self::take_queued_client_events`].
+    #[cfg(feature = "http")]
+    pub fn client_attach_queued(&mut self, resource: ResourceId) -> bool {
+        let Some(admission) = self.queued_http.admit(resource) else {
+            return false;
+        };
+        let dispatch = Rc::new(QueuedDispatch {
+            resource,
+            admission,
+            role: QueuedRole::Client,
+            queue: Rc::clone(&self.queued_http),
+            whole_requests: false,
+        });
+        self.client_attach(resource, dispatch)
+    }
+
+    /// The direct HTTP server engine.
+    #[cfg(feature = "http")]
+    pub fn http_server(&mut self) -> &mut HttpServerEngine {
+        &mut self.http_server
+    }
+
+    /// The direct HTTP client engine.
+    #[cfg(feature = "http")]
+    pub fn http_client(&mut self) -> &mut HttpClientEngine {
+        &mut self.http_client
+    }
+
+    /// Stop the connection on `resource`, whichever engine owns it. The transport is released
+    /// once the engine has published `Closed`; a caller closing from outside an engine
+    /// callback sees that on its next turn. Expects the executor's context.
+    #[cfg(feature = "http")]
+    pub fn http_close(&mut self, resource: ResourceId, mode: HttpCloseMode) -> bool {
+        self.http_server.close(resource, mode) || self.http_client.close(resource, mode)
+    }
+
+    /// Without `http` no engine can own a transport, so there is nothing to stop.
+    #[cfg(not(feature = "http"))]
+    pub fn http_close(&mut self, _resource: ResourceId, _mode: HttpCloseMode) -> bool {
+        false
+    }
+
+    /// Whether any direct server connection is still open.
+    #[cfg(feature = "http")]
+    pub fn has_open_server_connections(&self) -> bool {
+        self.http_server.open_connections() != 0
+    }
+
+    /// Without `http` no server connection can be open.
+    #[cfg(not(feature = "http"))]
+    pub fn has_open_server_connections(&self) -> bool {
+        false
+    }
+
+    /// How many server connections are open. The boolean above answers the drive's question;
+    /// this answers a person's, through the `SIGUSR1` dump.
+    #[cfg(feature = "http")]
+    pub fn open_server_connections(&self) -> usize {
+        self.http_server.open_connections()
+    }
+
+    /// Without `http` no server connection can be open.
+    #[cfg(not(feature = "http"))]
+    pub fn open_server_connections(&self) -> usize {
+        0
+    }
+
+    /// How many client connections are open, likewise.
+    #[cfg(feature = "http")]
+    pub fn open_client_connections(&self) -> usize {
+        self.http_client.open_connections()
+    }
+
+    /// Without `http` no client connection can be open.
+    #[cfg(not(feature = "http"))]
+    pub fn open_client_connections(&self) -> usize {
+        0
+    }
+
+    /// The host's completion signal, for a drive that waits outside any borrow of this state.
+    pub fn completion_signal(&self) -> Option<Rc<tokio::sync::Notify>> {
+        self.host.completion_signal()
+    }
+
+    /// Wake a parked drive: something it was not waiting for has changed what it should wait
+    /// for, such as a timer armed from inside a connection callback.
+    pub fn wake_drive(&self) {
+        if let Some(signal) = self.host.completion_signal() {
+            signal.notify_one();
+        }
+    }
+
+    /// A turn that is ready now, without parking: a failure, an already-completed host
+    /// operation, or nothing. The caller decides how to wait when this is `None`.
+    pub fn ready_turn<M, T>(&mut self) -> Option<RuntimeTurn<M, T>>
+    where
+        T: Clone,
+    {
+        if self.is_shutdown() {
+            return None;
+        }
+        if let Some(failure) = self.host.runtime_failure() {
+            return Some(RuntimeTurn::Failure(failure.clone()));
+        }
+        if let Some(completion) = AsyncHostOps::next_completion(&mut self.host) {
+            return Some(RuntimeTurn::Completion(completion));
+        }
+        if let Some(failure) = self.host.runtime_failure() {
+            return Some(RuntimeTurn::Failure(failure.clone()));
+        }
+        if self.queued_http.has_events() || self.queued_http.take_signalled() {
+            return Some(RuntimeTurn::Protocol);
+        }
+        None
+    }
+
+    /// Requests in flight on direct connections: server responses the language has not
+    /// finished, and client requests whose response has not ended.
+    #[cfg(feature = "http")]
+    pub fn requests_in_flight(&self) -> usize {
+        self.http_server.requests_in_flight() + self.http_client.requests_in_flight()
+    }
+
+    /// Without `http` no request can be in flight on a direct connection.
+    #[cfg(not(feature = "http"))]
+    pub fn requests_in_flight(&self) -> usize {
+        0
+    }
+
+    /// A one-line description of the host's pending work, for `KILN_HTTP_TRACE`.
+    pub fn describe_host_work(&self) -> String
+    where
+        H: std::fmt::Debug,
+    {
+        format!("{:?}", self.host)
+    }
+
+    /// Ask the HTTP agent for a connection to `origin` (node's `http.Agent` pool).
+    pub fn acquire_client_connection(&mut self, origin: HttpOrigin, request: u64) -> AgentDecision {
+        assert!(
+            !self.is_shutdown(),
+            "a shut down realm cannot acquire an HTTP connection"
+        );
+        let decision = self.http_agent.acquire(origin, request);
+        if let AgentDecision::Reuse(resource) = decision {
+            let _ = self.host.set_resource_referenced_now(resource, true);
+        }
+        decision
+    }
+
+    /// Record that the agent's pending connect for `request` produced `resource`.
+    pub fn client_connection_connected(
+        &mut self,
+        origin: HttpOrigin,
+        resource: ResourceId,
+        request: u64,
+    ) -> bool {
+        if self.is_shutdown() {
+            return false;
+        }
+        self.http_agent.connected(origin, resource, request)
+    }
+
+    /// Return a client connection to the agent after its response.
+    pub fn release_client_connection(
+        &mut self,
+        resource: ResourceId,
+        reusable: bool,
+    ) -> AgentRelease {
+        if self.is_shutdown() {
+            return AgentRelease::Retire;
+        }
+        let release = self.http_agent.release(resource, reusable);
+        if release == AgentRelease::Idle {
+            let _ = self.host.set_resource_referenced_now(resource, false);
+        }
+        release
+    }
+
+    /// Tell the agent a connect to `origin` failed.
+    pub fn client_connection_failed(&mut self, origin: &HttpOrigin) -> AgentFailure {
+        if self.is_shutdown() {
+            return AgentFailure::Empty;
+        }
+        self.http_agent.connect_failed(origin)
+    }
+
+    /// Tell the agent a client connection closed.
+    pub fn client_connection_closed(&mut self, resource: ResourceId) -> Option<u64> {
+        if self.is_shutdown() {
+            return None;
+        }
+        self.http_agent.closed(resource)
+    }
+
     /// Returns whether terminal realm teardown has begun.
     pub fn is_shutdown(&self) -> bool {
         self.lifecycle != RealmRuntimeLifecycle::Open
@@ -1442,26 +1595,6 @@ impl<H: RealmHostProvider> RealmState<H> {
 
     pub fn capabilities(&self) -> &RealmCapabilities {
         &self.capabilities
-    }
-
-    /// Samples stable whole-runtime counters accumulated since the previous call.
-    ///
-    /// These are developer diagnostics, not JavaScript-observable time or scheduler state. The
-    /// sample's `elapsed` and durations use wall time even though realm timers use paused Tokio
-    /// time for deterministic execution.
-    pub fn sample_runtime_metrics(&mut self) -> RuntimeMetricsSnapshot {
-        let metrics = self
-            .runtime_metrics
-            .next()
-            .expect("Tokio runtime metric intervals are infinite");
-        RuntimeMetricsSnapshot {
-            elapsed: metrics.elapsed,
-            workers: metrics.workers_count,
-            live_tasks: metrics.live_tasks_count,
-            global_queue_depth: metrics.global_queue_depth,
-            park_count: metrics.total_park_count,
-            busy_duration: metrics.total_busy_duration,
-        }
     }
 
     #[cfg(test)]
@@ -1889,15 +2022,7 @@ fn flatten_headers(headers: &[(String, String)]) -> Vec<u8> {
 
 impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
     fn acquire_client_connection(&mut self, origin: HttpOrigin, request: u64) -> AgentDecision {
-        assert!(
-            !self.is_shutdown(),
-            "a shut down realm cannot acquire an HTTP connection"
-        );
-        let decision = self.state.http_agent.acquire(origin, request);
-        if let AgentDecision::Reuse(resource) = decision {
-            let _ = self.state.host.set_resource_referenced_now(resource, true);
-        }
-        decision
+        self.state.acquire_client_connection(origin, request)
     }
 
     fn client_connection_connected(
@@ -1906,35 +2031,20 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         resource: ResourceId,
         request: u64,
     ) -> bool {
-        if self.is_shutdown() {
-            return false;
-        }
-        self.state.http_agent.connected(origin, resource, request)
+        self.state
+            .client_connection_connected(origin, resource, request)
     }
 
     fn release_client_connection(&mut self, resource: ResourceId, reusable: bool) -> AgentRelease {
-        if self.is_shutdown() {
-            return AgentRelease::Retire;
-        }
-        let release = self.state.http_agent.release(resource, reusable);
-        if release == AgentRelease::Idle {
-            let _ = self.state.host.set_resource_referenced_now(resource, false);
-        }
-        release
+        self.state.release_client_connection(resource, reusable)
     }
 
     fn client_connection_failed(&mut self, origin: &HttpOrigin) -> AgentFailure {
-        if self.is_shutdown() {
-            return AgentFailure::Empty;
-        }
-        self.state.http_agent.connect_failed(origin)
+        self.state.client_connection_failed(origin)
     }
 
     fn client_connection_closed(&mut self, resource: ResourceId) -> Option<u64> {
-        if self.is_shutdown() {
-            return None;
-        }
-        self.state.http_agent.closed(resource)
+        self.state.client_connection_closed(resource)
     }
 
     fn start_connection(&mut self, resource: ResourceId, allow_half_close: bool) -> bool {
@@ -3261,7 +3371,7 @@ impl AsyncHostOps for TokioHost {
 }
 
 impl RealmHostProvider for TokioHost {
-    fn drain_on_shutdown(&mut self, executor: &DriveExecutor) {
+    fn drain_on_shutdown(&mut self, executor: &Executor) {
         for (_, cancel) in std::mem::take(&mut self.process_cancellers) {
             let _ = cancel.send(());
         }
@@ -4450,7 +4560,7 @@ mod tests {
             },
             true,
         );
-        let executor = runtime.drive_executor();
+        let executor = Rc::clone(runtime.executor());
         let mut pid = None;
         for _ in 0..100 {
             executor.block_on(yield_to_tasks());
@@ -4508,7 +4618,7 @@ mod tests {
         );
         let mut pid = None;
         for _ in 0..100 {
-            runtime.drive_executor().block_on(yield_to_tasks());
+            Rc::clone(runtime.executor()).block_on(yield_to_tasks());
             if let Ok(contents) = fs::read_to_string(&marker) {
                 pid = Some(contents.trim().parse::<i32>().expect("child PID"));
                 break;
@@ -4555,7 +4665,7 @@ mod tests {
         );
         let mut pid = None;
         for _ in 0..100 {
-            runtime.drive_executor().block_on(yield_to_tasks());
+            Rc::clone(runtime.executor()).block_on(yield_to_tasks());
             if let Ok(contents) = fs::read_to_string(&marker) {
                 pid = Some(contents.trim().parse::<i32>().expect("child PID"));
                 break;
@@ -5799,7 +5909,7 @@ mod tests {
             next_host_completion(&mut runtime).expect("close");
         }
         // The listener is really closed once the ring cancels its accept.
-        runtime.drive_executor().block_on(async {
+        Rc::clone(runtime.executor()).block_on(async {
             tokio::time::sleep(Duration::from_millis(20)).await;
         });
         assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
