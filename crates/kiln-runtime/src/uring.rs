@@ -75,8 +75,8 @@
 //!
 //! # Selection
 //!
-//! `KILN_IO=uring|epoll|auto` (default `auto`, which currently means epoll; see
-//! [`AUTO_SELECTS_URING`]). Selecting uring probes the kernel: a failed `io_uring_setup`
+//! `KILN_IO=uring|epoll|auto` (default `auto`, which means io_uring on a kernel at or above
+//! [`AUTO_MIN_KERNEL`] and epoll below it). Selecting uring probes the kernel: a failed `io_uring_setup`
 //! (ENOSYS, EPERM from seccomp or `kernel.io_uring_disabled`), a kernel without
 //! `SINGLE_ISSUER` (before 6.0, which multishot receive also needs), a missing opcode, or a
 //! failed buffer-ring registration all fall back to epoll for that realm.
@@ -96,13 +96,47 @@ use io_uring::{IoUring, Probe, cqueue, opcode, squeue, types};
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-/// Whether `KILN_IO` unset (or `auto`) selects io_uring. Off for now. Measured on Linux 7.2
-/// (loopback, one pinned core, node:http hello): under saturating keep-alive load the ring
-/// takes 0.1 syscalls per request against epoll's 2.0 and 25-40% less server CPU per request,
-/// but with the lighter node-driven load the difference was within noise, only one kernel has
-/// been validated, and io_uring's wake-up behaviour has already proved kernel-specific (see
-/// "Parking"). Flip it once an LTS kernel (6.1/6.6) and a multi-worker run agree.
-pub const AUTO_SELECTS_URING: bool = false;
+/// The oldest kernel on which `KILN_IO` unset (or `auto`) selects io_uring. Below it, auto
+/// means epoll; `KILN_IO=uring` still asks for the ring on any kernel that accepts it.
+///
+/// The feature probe cannot be the whole test. It catches a kernel that *refuses* something
+/// (an opcode, `SINGLE_ISSUER`, the buffer ring), but not one that accepts the ring and then
+/// behaves badly: the first design here, DEFER_TASKRUN plus an eventfd, passed every functional
+/// test on 7.2 and added 6-8 ms to every keep-alive request (see "Parking"). 6.1 is the first
+/// LTS kernel with everything this file uses -- multishot receive over a provided buffer ring,
+/// `SINGLE_ISSUER`, `COOP_TASKRUN` -- so auto stays off the kernels where those were new.
+/// Measured on 7.2 only (loopback, one pinned core, node:http hello): under saturating
+/// keep-alive load the ring takes 0.1 syscalls per request against epoll's 2.0 and 25-40% less
+/// server CPU per request; under light load the two are within noise.
+pub const AUTO_MIN_KERNEL: (u32, u32) = (6, 1);
+
+/// `major.minor` from a `uname` release such as `7.2.6-1-cachyos` or `6.1.0-18-amd64`.
+fn parse_kernel_release(release: &str) -> Option<(u32, u32)> {
+    let mut parts = release.split(|c: char| !c.is_ascii_digit());
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// The running kernel's `major.minor`, or `None` when `uname` fails or its release is not
+/// in the usual form -- which auto treats as below the floor.
+fn running_kernel() -> Option<(u32, u32)> {
+    static KERNEL: OnceLock<Option<(u32, u32)>> = OnceLock::new();
+    *KERNEL.get_or_init(|| {
+        // SAFETY: `utsname` is plain bytes, and `uname` fills it or fails without touching it.
+        let mut name: libc::utsname = unsafe { std::mem::zeroed() };
+        if unsafe { libc::uname(&mut name) } != 0 {
+            return None;
+        }
+        // SAFETY: on success `release` is a NUL-terminated string inside the array.
+        let release = unsafe { std::ffi::CStr::from_ptr(name.release.as_ptr()) };
+        parse_kernel_release(&release.to_string_lossy())
+    })
+}
+
+fn auto_selects_uring() -> bool {
+    running_kernel().is_some_and(|kernel| kernel >= AUTO_MIN_KERNEL)
+}
 
 const SQ_ENTRIES: u32 = 256;
 const CQ_ENTRIES: u32 = 4096;
@@ -164,7 +198,7 @@ impl IoPreference {
         match self {
             IoPreference::Uring => true,
             IoPreference::Epoll => false,
-            IoPreference::Auto => AUTO_SELECTS_URING,
+            IoPreference::Auto => auto_selects_uring(),
         }
     }
 }

@@ -863,3 +863,27 @@ mod http {
         run_scenarios(Some(ring), 3);
     }
 }
+
+#[test]
+fn kernel_release_parses_major_and_minor() {
+    assert_eq!(parse_kernel_release("7.2.6-1-cachyos"), Some((7, 2)));
+    assert_eq!(parse_kernel_release("6.1.0-18-amd64"), Some((6, 1)));
+    assert_eq!(parse_kernel_release("6.12"), Some((6, 12)));
+    assert_eq!(parse_kernel_release("5.15.0-105-generic"), Some((5, 15)));
+    assert_eq!(parse_kernel_release("6"), None);
+    assert_eq!(parse_kernel_release("generic"), None);
+    assert_eq!(parse_kernel_release(""), None);
+}
+
+#[test]
+fn auto_floor_compares_versions_not_strings() {
+    // 6.10 is newer than 6.9; a string comparison would say otherwise.
+    assert!((6, 10) >= AUTO_MIN_KERNEL);
+    assert!((6, 1) >= AUTO_MIN_KERNEL);
+    assert!((5, 19) < AUTO_MIN_KERNEL);
+    assert!((6, 0) < AUTO_MIN_KERNEL);
+    assert_eq!(
+        auto_selects_uring(),
+        running_kernel().is_some_and(|kernel| kernel >= AUTO_MIN_KERNEL)
+    );
+}
