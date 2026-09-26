@@ -12,7 +12,7 @@ import tempfile
 import time
 from typing import Any
 
-from test262_memory import run_limited, verify_effective_cap
+from test262_memory import child_environment, run_limited, verify_effective_cap
 
 REPOSITORY = "https://github.com/tc39/test262.git"
 COMMIT = "771005236e88a909635104e03ba12559688c0172"
@@ -156,7 +156,13 @@ def run_result(kiln: str, root: pathlib.Path, output: pathlib.Path, log: pathlib
     log.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     with log.open("w", encoding="utf-8") as stream:
-        completed, exceeded = run_limited([kiln, "--one-shot", "test", str(root), "--out", str(output)], cwd=os.getcwd(), stdout=stream, stderr=subprocess.STDOUT)
+        completed, exceeded = run_limited(
+            [kiln, "--one-shot", "test", str(root), "--out", str(output)],
+            cwd=os.getcwd(),
+            stdout=stream,
+            stderr=subprocess.STDOUT,
+            env=child_environment(os.environ),
+        )
     if exceeded:
         raise CorpusError(f"child exceeded memory cap; full log: {log}")
     if not output.is_file():
