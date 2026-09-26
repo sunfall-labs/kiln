@@ -590,7 +590,7 @@ pub fn retained_method_groups(
             | groups::TEMPORAL_OP;
     }
     if uses_date {
-        mask |= groups::DATE_SETTER;
+        mask |= groups::DATE_SETTER | groups::MATH_NUMBER;
     }
     if uses_math_number {
         mask |= groups::MATH_NUMBER;

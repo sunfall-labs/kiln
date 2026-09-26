@@ -4382,7 +4382,9 @@ fn render_module(
     let should_chunk = policy.compact && program.functions.len() > 500;
     // Compact graph modules are each compiled as their own translation unit. Private identifiers
     // therefore do not need the link-visible content hash; retain it only on exported adapters.
-    let unit_symbol = if policy.compact { "ku" } else { symbol };
+    // Chunked modules must retain the module symbol prefix so their non-static chunk symbols
+    // do not collide with other chunked modules in the same binary.
+    let unit_symbol = if policy.compact && !should_chunk { "ku" } else { symbol };
     let plan = validate_program(program).expect("render called after validation");
     let callables = produces_references(program) || policy.compact;
     // What the compiler said, padded with the strict answer. A `ModuleProgram` assembled by hand

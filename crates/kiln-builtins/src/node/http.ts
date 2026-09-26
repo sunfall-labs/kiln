@@ -170,7 +170,8 @@ export function serve(
 
   const server = createServer((req: any, res: any) => {
     try {
-      const Req = (globalThis as any).Request;
+      const Req = typeof Request !== "undefined" ? (Request as any) : null;
+      if (!Req) throw new Error("Request is not available");
       const hostHeader = req.headers?.host || (hostname ? `${hostname}:${port}` : `localhost:${port}`);
       const url = `http://${hostHeader}${req.url}`;
       const webReq = new Req(url, {

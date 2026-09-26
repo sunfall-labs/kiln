@@ -1945,11 +1945,12 @@ impl ModuleGraph {
         };
 
         {
-            // `URL` in every mode, as the native runtime has it; the fetch and web classes,
+            // `URL` and `Date` in every mode, as the native runtime has it; the fetch and web classes,
             // which are built on it, under the adapter.
+            let date = kiln_builtins::DATE_BOOTSTRAP_SOURCE;
             let source = if node {
                 format!(
-                    "{}\n{}",
+                    "{date}\n{}\n{}",
                     kiln_builtins::URL_BOOTSTRAP_SOURCE,
                     kiln_builtins::WEB_BOOTSTRAP_SOURCE
                 )
@@ -1958,7 +1959,7 @@ impl ModuleGraph {
                 // it the bridge would be the one global node does not have -- the native
                 // bootstrap does the same.
                 format!(
-                    "{}\ndelete globalThis.__kilnBufferToString;\n",
+                    "{date}\n{}\ndelete globalThis.__kilnBufferToString;\n",
                     kiln_builtins::URL_BOOTSTRAP_SOURCE
                 )
             };
@@ -3380,7 +3381,7 @@ where
                                 let payload = loop {
                                     match (self.provider)(&path, source) {
                                         Err(ModuleGraphError::CjsStaticModuleSyntax {
-                                            diagnostics,
+                                            diagnostics: _,
                                             ..
                                         }) if source == ModuleSource::CommonJs
                                             && node_format_is_ambiguous(&path) =>

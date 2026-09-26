@@ -1647,6 +1647,17 @@ static int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val 
         const kiln_string *keystr = (const kiln_string *)KILN_VAL_PTR(key);
         if (KILN_LIKELY(obj != NULL && keystr != NULL && kiln_c99_gc_kind_of_ptr(obj) == KILN_GC_OBJECT)) {
             if (obj->shape != NULL && obj->accessor_count == 0) {
+                if (obj->elements != NULL) {
+                    double index_num = kiln_c99_key_index_key(keystr);
+                    if (index_num >= 0.0 && index_num < 100000.0) {
+                        size_t elem_idx = (size_t)index_num;
+                        if (elem_idx < obj->element_count &&
+                            obj->elements[elem_idx] != KILN_VAL_HOLE) {
+                            *out = obj->elements[elem_idx];
+                            return KILN_C99_OK;
+                        }
+                    }
+                }
                 uint32_t slot;
                 const kiln_string *ikey = kiln_c99_intern_key(keystr);
                 if (ikey != NULL && kiln_c99_shape_find_slot(obj->shape, ikey, &slot)) {
