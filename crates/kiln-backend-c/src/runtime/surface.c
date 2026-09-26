@@ -1,9 +1,6 @@
 };
 
 static void *kiln_c99_node_hidden_pointer(kiln_value object, const char *key, size_t key_len);
-static int kiln_c99_node_materialize_header(kiln_value headers_obj, const char *key, size_t key_len, kiln_value *out);
-static void kiln_c99_node_materialize_all_headers(kiln_value headers_obj);
-static int kiln_c99_node_has_lazy_header(kiln_value headers_obj, const char *key, size_t key_len);
 static int kiln_c99_val_call(kiln_host *host, kiln_val callee, const kiln_val *args, size_t argc,
                              int depth, kiln_value *thrown, const char *inst_site, size_t inst_idx,
                              const char *inst_op, kiln_val *out);

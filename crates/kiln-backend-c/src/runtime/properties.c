@@ -80,7 +80,7 @@ static int kiln_c99_same_name_key(const kiln_string *key, const char *name) {
 static int kiln_c99_is_node_hidden_key_key(const kiln_string *key) {
     static const char *const names[] = {
         "@@node:socket", "@@node:server", "@@node:client", "@@node:response",
-        "@@node:lazy-headers", "@@kiln:node:is-file", "@@kiln:node:is-directory",
+        "@@kiln:node:is-file", "@@kiln:node:is-directory",
     };
     size_t index;
     for (index = 0; index < sizeof names / sizeof names[0]; ++index) {

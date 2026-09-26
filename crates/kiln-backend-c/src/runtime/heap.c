@@ -2544,7 +2544,6 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         kiln_c99_gc_mark_block(heap, socket->server);
         kiln_c99_gc_mark_block(heap, socket->client_requests);
         kiln_c99_gc_mark_block(heap, socket->responses);
-        kiln_c99_gc_mark_block(heap, socket->recycled_response);
         break;
     }
     case KILN_GC_NODE_CLIENT_REQUEST: {
@@ -2560,7 +2559,6 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         kiln_node_response *response = (kiln_node_response *)payload;
         kiln_c99_gc_mark_value(heap, &response->request);
         kiln_c99_gc_mark_value(heap, &response->object);
-        kiln_c99_gc_mark_value(heap, &response->headers);
         kiln_c99_gc_mark_value(heap, &response->url_object);
         kiln_c99_gc_mark_value(heap, &response->search_params_object);
         kiln_c99_gc_mark_value(heap, &response->pathname_val);
@@ -2706,6 +2704,8 @@ static void kiln_c99_gc_finalize(kiln_gc_block *block) {
             free(response->request_headers);
             response->request_headers = NULL;
         }
+        free(response->out_headers);
+        response->out_headers = NULL;
         break;
     }
     case KILN_GC_NODE_CLIENT_REQUEST: {

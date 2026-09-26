@@ -2046,9 +2046,6 @@ static const kiln_builtin_member kiln_c99_builtin_members[] = {
 typedef struct {
 static const kiln_builtin_gap kiln_c99_builtin_backlog[] = {
 static void *kiln_c99_node_hidden_pointer(kiln_value object, const char *key, size_t key_len);
-static int kiln_c99_node_materialize_header(kiln_value headers_obj, const char *key, size_t key_len, kiln_value *out);
-static void kiln_c99_node_materialize_all_headers(kiln_value headers_obj);
-static int kiln_c99_node_has_lazy_header(kiln_value headers_obj, const char *key, size_t key_len);
 static int kiln_c99_val_call(kiln_host *host, kiln_val callee, const kiln_val *args, size_t argc,
 int kiln_c99_get_array_unscopables(kiln_value *out);
 static const char *kiln_c99_builtin_owner_name(uint64_t builtin) {
@@ -2190,8 +2187,6 @@ static kiln_value kiln_c99_key_value(const kiln_string *view, const kiln_string 
 static kiln_value kiln_c99_stable_key_value(const kiln_string *stable) {
 static int kiln_c99_prototype_store_read(kiln_host *host, uint64_t prototype,
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_string *key,
-#if KILN_RETAIN_GROUP_NODE_HTTP
-#endif
 #if KILN_RETAIN_GROUP_TEMPORAL
 #endif
 #if KILN_RETAIN_GROUP_TEMPORAL
@@ -2251,9 +2246,27 @@ static int kiln_c99_node_set_hidden_pointer(kiln_value object, const char *key, 
 static int kiln_c99_is_node_hidden_key(const char *key, size_t key_len) {
 static void *kiln_c99_node_hidden_pointer(kiln_value object, const char *key, size_t key_len) {
 static int kiln_c99_ascii_case_equal(const char *a, size_t a_len, const char *b, size_t b_len) {
-static int kiln_c99_node_materialize_header(kiln_value headers_obj, const char *key, size_t key_len, kiln_value *out) {
-static void kiln_c99_node_materialize_all_headers(kiln_value headers_obj) {
-static int kiln_c99_node_has_lazy_header(kiln_value headers_obj, const char *key, size_t key_len) {
+enum {
+enum {
+typedef struct {
+static _Thread_local kiln_node_http_layout kiln_c99_node_http_layouts;
+static kiln_shape *kiln_c99_node_layout_shape(const kiln_string *const *keys, size_t count) {
+static int kiln_c99_node_http_layout_ready(const kiln_node_http_layout **out) {
+static int kiln_c99_node_http_instance(kiln_value *out, kiln_value prototype, kiln_shape *shape,
+static void *kiln_c99_node_hidden_pointer_value(kiln_value value) {
+static kiln_node_response *kiln_c99_node_response_of(kiln_value receiver) {
+static int kiln_c99_node_layout_store(kiln_value target, size_t index, const kiln_string *key,
+static int kiln_c99_node_layout_load(kiln_value target, size_t index, const kiln_string *key,
+static int kiln_c99_node_request_headers_keep(kiln_node_response *response) {
+typedef struct {
+static int kiln_c99_node_header_name_order(const kiln_c99_node_header_field *left,
+static int kiln_c99_node_request_headers_object(kiln_node_response *response, kiln_value *out) {
+static int kiln_c99_node_utf8_bytes(kiln_value text, const char **bytes, size_t *len,
+static int kiln_c99_node_out_find(const kiln_node_response *response, const char *name,
+static int kiln_c99_node_out_reserve(kiln_node_response *response, size_t needed) {
+static int kiln_c99_node_out_set(kiln_node_response *response, const char *name,
+static void kiln_c99_node_out_remove(kiln_node_response *response, const char *name,
+static int kiln_c99_node_out_set_values(kiln_node_response *response, kiln_value name,
 static int kiln_c99_node_client_try_start(kiln_node_client_request *request) {
 static int kiln_c99_node_emit(kiln_host *host, kiln_value object, const char *event,
 static int kiln_c99_node_server_maybe_emit_close(kiln_node_server *server,
@@ -2448,8 +2461,6 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
 static int kiln_c99_define_property(kiln_host *host, kiln_value target, const char *key,
 static int kiln_c99_define_properties(kiln_host *host, kiln_value target, kiln_value descriptors,
 static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
-#if KILN_RETAIN_GROUP_NODE_HTTP
-#endif
 static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const char *key,
 static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_set_function_name(kiln_value function, kiln_value key, const char *prefix) {
