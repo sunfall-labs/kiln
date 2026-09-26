@@ -2,22 +2,9 @@
 
 
 static int kiln_c99_string_compare(kiln_value left, kiln_value right) {
-    kiln_c99_utf16_iter left_iterator = {left.ptr, left.len, 0, 0, 0};
-    kiln_c99_utf16_iter right_iterator = {right.ptr, right.len, 0, 0, 0};
-    uint16_t left_unit;
-    uint16_t right_unit;
-    int left_has;
-    int right_has;
-    for (;;) {
-        left_has = kiln_c99_utf16_next(&left_iterator, &left_unit);
-        right_has = kiln_c99_utf16_next(&right_iterator, &right_unit);
-        if (!left_has || !right_has) {
-            return left_has ? 1 : (right_has ? -1 : 0);
-        }
-        if (left_unit != right_unit) {
-            return left_unit < right_unit ? -1 : 1;
-        }
-    }
+    const kiln_string *ls = left.ptr == NULL ? &kiln_c99_empty_string : (const kiln_string *)left.ptr;
+    const kiln_string *rs = right.ptr == NULL ? &kiln_c99_empty_string : (const kiln_string *)right.ptr;
+    return kiln_string_compare_units(ls, rs);
 }
 
 static kiln_value kiln_c99_unary(uint16_t operation, kiln_value value) {

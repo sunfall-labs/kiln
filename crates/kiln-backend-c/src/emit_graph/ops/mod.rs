@@ -1145,13 +1145,24 @@ pub(super) fn emit_graph_op(
             if plan.compact {
                 if count == 0 {
                     writeln!(output, "    {{ int status = kiln_c99_val_new_object_literal(&v{v}, NULL, 0); {check} }}").unwrap();
+                    return;
+                }
+                let static_keys: Option<Vec<String>> = pairs
+                    .iter()
+                    .map(|(k, _)| resolve_const_string(*k, defs, program))
+                    .collect();
+                let values = pairs
+                    .iter()
+                    .flat_map(|(key, value)| [key, value])
+                    .map(|value| format!("v{}", value.0))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if let Some(keys) = static_keys
+                    && keys.iter().all(|k| k != "__proto__" && !k.starts_with('@'))
+                    && count <= 8
+                {
+                    writeln!(output, "    {{ static const kiln_shape *lit_shape = NULL; kiln_val pairs[{pair_count}] = {{ {values} }}; int status = ku_new_object_literal_fast(&v{v}, &lit_shape, pairs, {count}); {check} }}", pair_count = count * 2).unwrap();
                 } else {
-                    let values = pairs
-                        .iter()
-                        .flat_map(|(key, value)| [key, value])
-                        .map(|value| format!("v{}", value.0))
-                        .collect::<Vec<_>>()
-                        .join(", ");
                     writeln!(output, "    {{ kiln_val pairs[{pair_count}] = {{ {values} }}; int status = kiln_c99_val_new_object_literal(&v{v}, pairs, {count}); {check} }}", pair_count = count * 2).unwrap();
                 }
                 return;

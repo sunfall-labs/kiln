@@ -844,6 +844,32 @@ static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t co
             kiln_value write_args[3] = { argc > 0 ? args[0] : kiln_c99_undefined(), kiln_c99_copy_text("buffer", 6), callback };
             status = kiln_c99_call(host, &ignored, hook, receiver, write_args, 3, depth, thrown);
             if (status != KILN_C99_OK) return status;
+        } else {
+            kiln_value fd_val;
+            if (kiln_c99_get(host, receiver, "fd", 2, &fd_val, depth, NULL) == KILN_C99_OK &&
+                fd_val.tag == KILN_VALUE_NUMBER) {
+                int fd = (int)kiln_c99_as_number(fd_val);
+                if (fd >= 0) {
+                    kiln_value data_val = argc > 0 ? args[0] : kiln_c99_undefined();
+                    if (data_val.tag == KILN_VALUE_STRING) {
+                        uint8_t *data_owned = NULL;
+                        size_t bytes_len = 0;
+                        if (kiln_c99_string_to_utf8_lossy(data_val, &data_owned, &bytes_len) == KILN_C99_OK) {
+                            if (bytes_len > 0) {
+                                (void)write(fd, data_owned, bytes_len);
+                            }
+                            free(data_owned);
+                        }
+                    } else if (data_val.tag == KILN_VALUE_TYPED_ARRAY) {
+                        kiln_typed_array *view = kiln_c99_typed_array_of(data_val);
+                        size_t width = kiln_c99_typed_width(view->kind);
+                        if (view->length <= SIZE_MAX / width) {
+                            const uint8_t *b = view->buffer->bytes + view->byte_offset;
+                            (void)write(fd, b, view->length * width);
+                        }
+                    }
+                }
+            }
         }
         *result = kiln_c99_boolean(1); return KILN_C99_OK;
     }

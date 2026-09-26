@@ -423,7 +423,10 @@ pub fn emit_function_from_graph_with_profile(
     } else {
         String::new()
     };
-    let typed_epoch_check: String = if matches!(kind, EntryKind::Boxed | EntryKind::Fast) {
+    let typed_epoch_check: String = if matches!(
+        kind,
+        EntryKind::Boxed | EntryKind::Fast | EntryKind::Typed { .. }
+    ) {
         let typed_sites = sites::collect_typed_call_sites(graph, program, plan, &plan.numbers);
         let mut checks = String::new();
         for (vid, typed_candidates) in typed_sites {

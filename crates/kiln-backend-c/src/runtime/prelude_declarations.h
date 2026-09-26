@@ -290,6 +290,15 @@ extern uint32_t kiln_c99_gc_kind_of_ptr(const void *ptr);
 extern kiln_value kiln_val_to_boundary(kiln_val v);
 extern kiln_value kiln_val_binding_to_boundary(kiln_val v);
 
+#ifndef KILN_C99_REALM_GENERATION_DEFINED
+#define KILN_C99_REALM_GENERATION_DEFINED
+static inline uint64_t kiln_c99_realm_generation(void) {
+    static _Thread_local const uint64_t *slot = NULL;
+    if (KILN_UNLIKELY(slot == NULL)) slot = kiln_realm_generation_slot();
+    return slot != NULL ? *slot : 0;
+}
+#endif
+
 #ifndef KILN_C99_CACHED_METHOD_MATCHES_DEFINED
 #define KILN_C99_CACHED_METHOD_MATCHES_DEFINED
 static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln_val target) {
@@ -304,6 +313,10 @@ static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln
         return 1;
     } else if (ctag == KILN_VALUE_BOOLEAN && KILN_VAL_IS_BOOLEAN(target)) {
         return 1;
+    } else if (ctag == KILN_VALUE_BUILTIN) {
+        return KILN_VAL_IS_BUILTIN(target) && KILN_VAL_BUILTIN_ID(target) == site->cached_builtin &&
+               site->cached_epoch == kiln_c99_builtin_store_epoch &&
+               site->cached_generation == kiln_c99_realm_generation();
     } else if (ctag == KILN_VALUE_ARRAY && ((target & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) {
         void *ptr = KILN_VAL_PTR(target);
         if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {
@@ -313,6 +326,9 @@ static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln
     } else if (ctag == KILN_VALUE_TYPED_ARRAY && ((target & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) {
         void *ptr = KILN_VAL_PTR(target);
         return kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY;
+    } else if (ctag == KILN_VALUE_REGEXP && (KILN_VAL_IS_OBJECT(target) || ((target & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX))) {
+        void *ptr = KILN_VAL_PTR(target);
+        return kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_REGEXP;
     }
     return 0;
 }
@@ -329,6 +345,7 @@ extern int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val 
 extern int kiln_c99_val_write_element(kiln_host *host, kiln_val target, kiln_val key, kiln_val value, int strict, int depth, kiln_value *thrown);
 extern int kiln_c99_val_call_method(kiln_host *host, kiln_val receiver, const kiln_val *args, size_t argc, const char *key, size_t key_len, int depth, kiln_value *thrown, kiln_c99_site *site, const char *inst_site, size_t inst_idx, const char *inst_op, kiln_val *out);
 extern int kiln_c99_val_call_method_key(kiln_host *host, kiln_val receiver, const kiln_val *args, size_t argc, const kiln_string *key, int depth, kiln_value *thrown, kiln_c99_site *site, const char *inst_site, size_t inst_idx, const char *inst_op, kiln_val *out);
+extern int kiln_c99_val_invoke_cached_method(kiln_host *host, uint64_t method_code, kiln_val receiver, const kiln_val *args, size_t argc, int depth, kiln_value *thrown, kiln_val *out);
 extern int kiln_c99_val_call(kiln_host *host, kiln_val callee, const kiln_val *args, size_t argc, int depth, kiln_value *thrown, const char *inst_site, size_t inst_idx, const char *inst_op, kiln_val *out);
 extern int kiln_c99_val_new(kiln_host *host, kiln_val callee, const kiln_val *args, size_t argc, int depth, kiln_value *thrown, kiln_val *out);
 extern int kiln_c99_val_to_property_key(kiln_host *host, kiln_val target, kiln_val key, int depth, kiln_value *thrown, kiln_val *out);

@@ -92,7 +92,7 @@ typedef struct kiln_gc_block {
  * per block, done once per slab instead. */
 #define KILN_GC_SLAB_SIZE ((size_t)64 * 1024)
 #define KILN_GC_SLAB_CLASS_MIN ((size_t)48) /* smallest total slot (header + 1 byte payload) */
-#define KILN_GC_SLAB_CLASS_MAX ((size_t)256)
+#define KILN_GC_SLAB_CLASS_MAX ((size_t)384)
 #define KILN_GC_SLAB_CLASS_STEP ((size_t)16)
 #define KILN_GC_SLOT_FREE ((size_t)-1) /* block->size sentinel: this slot is on the free list */
 
@@ -741,11 +741,14 @@ static kiln_gc_heap *kiln_c99_gc_heap(void) {
 /* The generation of the realm this thread is in: the word `kiln_c99_gc_heap` trusts its heap
  * pointer under, for any other cache in compiled C that must not outlive the realm it learned
  * from. */
+#ifndef KILN_C99_REALM_GENERATION_DEFINED
+#define KILN_C99_REALM_GENERATION_DEFINED
 static inline uint64_t kiln_c99_realm_generation(void) {
     kiln_realm_cache *cache = &kiln_c99_realm_cached;
     if (cache->generation_slot == NULL) cache->generation_slot = kiln_realm_generation_slot();
     return *cache->generation_slot;
 }
+#endif
 
 /* Hand the realm this heap's promise lane and answer with the heap.
  *
@@ -2650,9 +2653,13 @@ static void kiln_c99_gc_finalize(kiln_gc_block *block) {
         }
         free(((kiln_object *)payload)->elements);
         break;
-    case KILN_GC_CLOSURE:
-        free(((kiln_closure *)payload)->upvalues);
+    case KILN_GC_CLOSURE: {
+        kiln_closure *closure = (kiln_closure *)payload;
+        if (closure->upvalues != NULL && closure->upvalues != closure->inline_upvalues) {
+            free(closure->upvalues);
+        }
         break;
+    }
     case KILN_GC_ARRAY: {
         kiln_array *arr = (kiln_array *)payload;
         if (kiln_c99_array_elements_owned(arr)) {

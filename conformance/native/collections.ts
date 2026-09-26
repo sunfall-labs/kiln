@@ -49,3 +49,27 @@ const first = { id: 1 };
 const second = { id: 1 };
 const byIdentity = new Map([[first, "first"]]);
 console.log(byIdentity.get(first), byIdentity.get(second), byIdentity.size);
+
+// Mutation during forEach: newly added entries must be visited, deletions skipped.
+const mutatedSet = new Set([1]);
+const visitedSet: number[] = [];
+mutatedSet.forEach((x: number) => {
+    visitedSet.push(x);
+    if (x < 3) mutatedSet.add(x + 1);
+});
+console.log(visitedSet.join(","));
+
+const mutatedMap = new Map([["a", 1]]);
+const visitedMap: string[] = [];
+mutatedMap.forEach((v: number, k: string) => {
+    visitedMap.push(`${k}:${v}`);
+    if (k === "a") {
+        mutatedMap.set("b", 2);
+        mutatedMap.set("c", 3);
+    }
+    if (k === "b") {
+        mutatedMap.delete("c");
+        mutatedMap.set("d", 4);
+    }
+});
+console.log(visitedMap.join(","));

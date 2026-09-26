@@ -1547,7 +1547,12 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                                           argc > 1 ? argc - 1 : 0);
     }
     if (code == KILN_C99_METHOD_PROCESS_CWD) {
-        *result = kiln_c99_copy_text("/", 1);
+        char cwd_buf[4096];
+        if (getcwd(cwd_buf, sizeof(cwd_buf)) != NULL) {
+            *result = kiln_c99_copy_text(cwd_buf, strlen(cwd_buf));
+        } else {
+            *result = kiln_c99_copy_text("/", 1);
+        }
         return KILN_C99_OK;
     }
     if (code == KILN_C99_METHOD_PROCESS_KILL) {
@@ -3504,9 +3509,9 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 return KILN_C99_OK;
             case KILN_C99_METHOD_COLLECTION_FOR_EACH: {
                 /* The callback takes `(value, key, collection)`. A Set passes its value twice,
-                 * which is the specification's way of giving both one signature. */
-                size_t length = collection->count;
-                for (index = 0; index < length && index < collection->count; ++index) {
+                 * which is the specification's way of giving both one signature.
+                 * Newly added entries during iteration must also be visited per ES spec. */
+                for (index = 0; index < collection->count; ++index) {
                     kiln_value visit[3];
                     kiln_value ignored;
                     if (collection->entries[index].dead) {
@@ -5372,27 +5377,66 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         }
         case KILN_C99_METHOD_OBJECT_FROM_ENTRIES: {
             kiln_value built;
-            kiln_array *pairs;
-            if (argc == 0 || args[0].tag != KILN_VALUE_ARRAY) {
-                KILN_C99_REFUSE("Object.fromEntries of something that is not an array");
+            kiln_value source = argc > 0 ? args[0] : kiln_c99_undefined();
+            if (source.tag == KILN_VALUE_UNDEFINED || source.tag == KILN_VALUE_NULL) {
+                return kiln_c99_throw_not_a(thrown, source, "iterable");
             }
             status = kiln_c99_new_object(&built);
             if (status != KILN_C99_OK) {
                 return status;
             }
-            pairs = kiln_c99_array_of(args[0]);
-            for (index = 0; index < pairs->count; ++index) {
-                kiln_array *pair;
-                kiln_value entry = kiln_val_to_boundary(pairs->elements[index]);
-                if (entry.tag != KILN_VALUE_ARRAY) {
-                    KILN_C99_REFUSE("Object.fromEntries given an entry that is not an array");
+            if (source.tag == KILN_VALUE_COLLECTION && kiln_c99_collection_of(source)->is_map) {
+                kiln_collection *col = kiln_c99_collection_of(source);
+                for (index = 0; index < col->count; ++index) {
+                    if (col->entries[index].dead) continue;
+                    status = kiln_c99_set_computed(host, built, col->entries[index].key,
+                                                   col->entries[index].value, depth, thrown);
+                    if (status != KILN_C99_OK) {
+                        return status;
+                    }
                 }
-                pair = kiln_c99_array_of(entry);
-                status = kiln_c99_set_computed(
-                    host, built, pair->count > 0 && pair->elements[0] != KILN_VAL_HOLE ? kiln_val_to_boundary(pair->elements[0]) : kiln_c99_undefined(),
-                    pair->count > 1 && pair->elements[1] != KILN_VAL_HOLE ? kiln_val_to_boundary(pair->elements[1]) : kiln_c99_undefined(), depth, thrown);
-                if (status != KILN_C99_OK) {
-                    return status;
+            } else {
+                kiln_value gathered;
+                kiln_array *pairs;
+                if (source.tag == KILN_VALUE_ARRAY) {
+                    gathered = source;
+                } else {
+                    status = kiln_c99_new_array(&gathered);
+                    if (status != KILN_C99_OK) {
+                        return status;
+                    }
+                    status = kiln_c99_iterate(host, gathered, source, depth, thrown);
+                    if (status != KILN_C99_OK) {
+                        return status;
+                    }
+                }
+                pairs = kiln_c99_array_of(gathered);
+                for (index = 0; index < pairs->count; ++index) {
+                    kiln_value entry = pairs->elements[index] == KILN_VAL_HOLE
+                                           ? kiln_c99_undefined()
+                                           : kiln_val_to_boundary(pairs->elements[index]);
+                    kiln_value key = kiln_c99_undefined();
+                    kiln_value val = kiln_c99_undefined();
+                    if (entry.tag == KILN_VALUE_ARRAY) {
+                        kiln_array *pair = kiln_c99_array_of(entry);
+                        if (pair->count > 0 && pair->elements[0] != KILN_VAL_HOLE) {
+                            key = kiln_val_to_boundary(pair->elements[0]);
+                        }
+                        if (pair->count > 1 && pair->elements[1] != KILN_VAL_HOLE) {
+                            val = kiln_val_to_boundary(pair->elements[1]);
+                        }
+                    } else if (entry.tag == KILN_VALUE_OBJECT) {
+                        status = kiln_c99_get(host, entry, "0", 1, &key, depth, thrown);
+                        if (status != KILN_C99_OK) return status;
+                        status = kiln_c99_get(host, entry, "1", 1, &val, depth, thrown);
+                        if (status != KILN_C99_OK) return status;
+                    } else {
+                        return kiln_c99_throw_not_a(thrown, entry, "object");
+                    }
+                    status = kiln_c99_set_computed(host, built, key, val, depth, thrown);
+                    if (status != KILN_C99_OK) {
+                        return status;
+                    }
                 }
             }
             *result = built;

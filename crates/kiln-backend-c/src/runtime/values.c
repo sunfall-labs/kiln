@@ -174,17 +174,21 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const kiln_
                                  uint32_t handler_depth, uint32_t prologue_resume,
                                  const kiln_val *captured,
                                  uint32_t count) {
-    kiln_closure *closure = (kiln_closure *)kiln_c99_gc_alloc(KILN_GC_CLOSURE, sizeof *closure);
+    kiln_closure *closure = (kiln_closure *)kiln_c99_gc_alloc_hot(KILN_GC_CLOSURE, sizeof *closure, 1);
     kiln_val *upvalues = NULL;
     uint32_t index;
     if (closure == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
     if (count != 0) {
-        upvalues = (kiln_val *)malloc((size_t)count * sizeof *upvalues);
-        if (upvalues == NULL) {
-            kiln_c99_gc_release(closure);
-            return KILN_C99_OUT_OF_MEMORY;
+        if (count <= 4) {
+            upvalues = closure->inline_upvalues;
+        } else {
+            upvalues = (kiln_val *)malloc((size_t)count * sizeof *upvalues);
+            if (upvalues == NULL) {
+                kiln_c99_gc_release(closure);
+                return KILN_C99_OUT_OF_MEMORY;
+            }
         }
         for (index = 0; index < count; ++index) {
             upvalues[index] = captured[index];
@@ -211,7 +215,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const kiln_
          * before the arrow is called, so it has to be copied out now rather than pointed at. */
         int captured = kiln_c99_visible_arguments(&closure->captured_arguments);
         if (captured != KILN_C99_OK) {
-            free(upvalues);
+            if (upvalues != closure->inline_upvalues) free(upvalues);
             kiln_c99_gc_release(closure);
             return captured;
         }

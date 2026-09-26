@@ -3281,6 +3281,7 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
     let mut has_binary = false;
     let mut has_read_property = false;
     let mut has_write_property = false;
+    let mut has_new_object = false;
     let mut has_status = false;
     let mut has_truthy = false;
 
@@ -3293,8 +3294,13 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
                       has_binary: &mut bool,
                       has_read_property: &mut bool,
                       has_write_property: &mut bool,
+                      has_new_object: &mut bool,
                       has_truthy: &mut bool| {
         match inst {
+            Instruction::NewObject { .. } => {
+                *has_new_object = true;
+                *has_status = true;
+            }
             Instruction::Call { .. } => {
                 *has_call = true;
                 *has_status = true;
@@ -3353,6 +3359,7 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
             &mut has_binary,
             &mut has_read_property,
             &mut has_write_property,
+            &mut has_new_object,
             &mut has_truthy,
         );
     }
@@ -3368,12 +3375,13 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
                 &mut has_binary,
                 &mut has_read_property,
                 &mut has_write_property,
+                &mut has_new_object,
                 &mut has_truthy,
             );
         }
     }
     if has_truthy {
-        output.push_str("static __attribute__((unused, noinline)) int ku_truthy(kiln_val v) { return kiln_c99_val_truthy(v); }\n#define kiln_c99_val_truthy ku_truthy\n");
+        output.push_str("static __attribute__((unused, noinline)) int ku_truthy_slow(kiln_val v) { return kiln_c99_val_truthy(v); }\nstatic inline int ku_truthy(kiln_val v) {\n    if (v == KILN_VAL_FALSE || v == KILN_VAL_UNDEFINED || v == KILN_VAL_NULL) return 0;\n    if (v == KILN_VAL_TRUE) return 1;\n    uint64_t tag = v & KILN_TAG_MASK;\n    if (tag >= KILN_TAG_OBJECT_PREFIX && tag <= KILN_TAG_SYMBOL_PREFIX) return 1;\n    return ku_truthy_slow(v);\n}\n#define kiln_c99_val_truthy ku_truthy\n");
     }
     // Unconditional: the instruction scan above decides the other macros, but every runtime
     // call the ops emit ends in `KU_STATUS`, and the scan is a hand list -- `New` was not on it,
@@ -3388,28 +3396,235 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
         output.push_str("#define KU_LOAD_CELL(DST, CELL, THROWN, PC, OP, UNWIND) do { const kiln_val *ku_cell = (const kiln_val *)KILN_VAL_PTR(CELL); int status = kiln_c99_val_check_tdz(*ku_cell, (THROWN)); KU_STATUS((PC), (OP), UNWIND); (DST) = *ku_cell; } while (0)\n");
     }
     if has_binary {
-        output.push_str("#define KU_BINARY(DST, CODE, LEFT, RIGHT, PC, OP, UNWIND) do { int status = KILN_C99_OK; (DST) = kiln_c99_val_binary((CODE), host, (LEFT), (RIGHT), &status, depth, thrown); KU_STATUS((PC), (OP), UNWIND); } while (0)\n");
+        output.push_str("static __attribute__((unused)) inline kiln_val ku_binary_fast(uint16_t op, kiln_host *host, kiln_val left, kiln_val right, int *status, int depth, kiln_value *thrown) {\n\
+    if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) return kiln_c99_val_binary_fast(op, left, right);\n\
+    if (KILN_LIKELY((op == 1 || op == 7 || op == 8 || op == 15 || op == 16) && KILN_VAL_IS_STRING(left) && KILN_VAL_IS_STRING(right))) return kiln_c99_val_binary_fast(op, left, right);\n\
+    return kiln_c99_val_binary(op, host, left, right, status, depth, thrown);\n\
+}\n");
+        output.push_str("#define KU_BINARY(DST, CODE, LEFT, RIGHT, PC, OP, UNWIND) do { int status = KILN_C99_OK; (DST) = ku_binary_fast((CODE), host, (LEFT), (RIGHT), &status, depth, thrown); KU_STATUS((PC), (OP), UNWIND); } while (0)\n");
     }
     if has_read_property {
-        output.push_str("#define KU_READ_PROPERTY(DST, OBJECT, KEY, KEY_LEN, SITE, PC, OP, UNWIND) do { int status = kiln_c99_val_read_property_key(host, (OBJECT), (KEY), depth, thrown, (SITE), &(DST)); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(OBJECT)); KU_STATUS((PC), (OP), UNWIND); } while (0)\n");
-        output.push_str("static __attribute__((unused, noinline)) kiln_val ku_pic_poly_read(const kiln_object *obj, const kiln_c99_site *site) {\n    const kiln_shape *shape = obj->shape;\n    uint32_t slot = UINT32_MAX;\n    if (shape == site->entries[1].shape) slot = site->entries[1].slot;\n    else if (shape == site->entries[2].shape) slot = site->entries[2].slot;\n    else if (shape == site->entries[3].shape) slot = site->entries[3].slot;\n    if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity)) {\n        return slot < KILN_C99_INLINE_SLOTS ? obj->inline_slots[slot] : obj->slots[slot];\n    }\n    return KILN_VAL_HOLE;\n}\n");
+        output.push_str("static __attribute__((unused, noinline)) kiln_val ku_pic_poly_read(const kiln_object *obj, kiln_c99_site *site) {\n\
+    const kiln_shape *shape = obj->shape;\n\
+    for (int i = 1; i < (int)site->pic_count && i < KILN_C99_PIC_SIZE; ++i) {\n\
+        if (shape == site->entries[i].shape) {\n\
+            kiln_c99_pic_entry tmp = site->entries[0];\n\
+            site->entries[0] = site->entries[i];\n\
+            site->entries[i] = tmp;\n\
+            if (site->entries[0].holder == NULL) {\n\
+                uint32_t slot = site->entries[0].slot;\n\
+                if (KILN_LIKELY(slot < obj->slot_capacity)) return obj->slots[slot];\n\
+                if (slot == UINT32_MAX && site->entries[0].epoch == kiln_c99_proto_epoch) return KILN_VAL_UNDEFINED;\n\
+            } else {\n\
+                const kiln_object *first = site->entries[0].via != NULL ? site->entries[0].via : site->entries[0].holder;\n\
+                if (KILN_LIKELY(site->entries[0].epoch == kiln_c99_proto_epoch && \
+                                obj->prototype.tag == KILN_VALUE_OBJECT && \
+                                (const kiln_object *)(uintptr_t)obj->prototype.bits == first)) {\n\
+                    return site->entries[0].holder_shape != NULL \
+                               ? site->entries[0].holder->slots[site->entries[0].holder_slot] \
+                               : site->entries[0].holder_val;\n\
+                }\n\
+            }\n\
+        }\n\
+    }\n\
+    return KILN_VAL_HOLE;\n\
+}\n");
+        output.push_str("#define KU_READ_PROPERTY(DST, OBJECT, KEY, KEY_LEN, SITE, PC, OP, UNWIND) do { \\\n\
+    kiln_c99_site *ku_s = (SITE); \\\n\
+    kiln_val ku_t = (OBJECT); \\\n\
+    if (KILN_LIKELY(ku_s != NULL && ku_s->entries[0].shape != NULL && KILN_VAL_IS_OBJECT(ku_t))) { \\\n\
+        const kiln_object *ku_obj = (const kiln_object *)KILN_VAL_PTR(ku_t); \\\n\
+        if (KILN_LIKELY(ku_obj != NULL && ku_obj->shape == ku_s->entries[0].shape)) { \\\n\
+            if (KILN_LIKELY(ku_s->entries[0].holder == NULL)) { \\\n\
+                uint32_t ku_s0 = ku_s->entries[0].slot; \\\n\
+                if (KILN_LIKELY(ku_s0 < ku_obj->slot_capacity)) { \\\n\
+                    (DST) = ku_obj->slots[ku_s0]; \\\n\
+                    break; \\\n\
+                } else if (ku_s0 == UINT32_MAX && ku_s->entries[0].epoch == kiln_c99_proto_epoch) { \\\n\
+                    (DST) = KILN_VAL_UNDEFINED; \\\n\
+                    break; \\\n\
+                } \\\n\
+            } else { \\\n\
+                const kiln_object *ku_first = ku_s->entries[0].via != NULL ? ku_s->entries[0].via : ku_s->entries[0].holder; \\\n\
+                if (KILN_LIKELY(ku_s->entries[0].epoch == kiln_c99_proto_epoch && \\\n\
+                                ku_obj->prototype.tag == KILN_VALUE_OBJECT && \\\n\
+                                (const kiln_object *)(uintptr_t)ku_obj->prototype.bits == ku_first)) { \\\n\
+                    (DST) = ku_s->entries[0].holder_shape != NULL \\\n\
+                                ? ku_s->entries[0].holder->slots[ku_s->entries[0].holder_slot] \\\n\
+                                : ku_s->entries[0].holder_val; \\\n\
+                    break; \\\n\
+                } \\\n\
+            } \\\n\
+        } else if (ku_obj != NULL && ku_s->pic_count > 1) { \\\n\
+            kiln_val ku_pv = ku_pic_poly_read(ku_obj, ku_s); \\\n\
+            if (ku_pv != KILN_VAL_HOLE) { (DST) = ku_pv; break; } \\\n\
+        } \\\n\
+    } else if (ku_s != NULL && !ku_s->has_cached_method) { \\\n\
+        if (ku_s->cached_tag == KILN_VALUE_ARRAY && ((ku_t & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) { \\\n\
+            const kiln_array *ku_arr = (const kiln_array *)KILN_VAL_PTR(ku_t); \\\n\
+            (DST) = kiln_c99_val_from_double((double)ku_arr->count); \\\n\
+            break; \\\n\
+        } else if (ku_s->cached_tag == KILN_VALUE_STRING && KILN_VAL_IS_STRING(ku_t)) { \\\n\
+            const kiln_string *ku_str = (const kiln_string *)KILN_VAL_PTR(ku_t); \\\n\
+            (DST) = kiln_c99_val_from_double((double)(ku_str != NULL ? ku_str->unit_len : 0)); \\\n\
+            break; \\\n\
+        } \\\n\
+    } \\\n\
+    int status = kiln_c99_val_read_property_key(host, ku_t, (KEY), depth, thrown, ku_s, &(DST)); \\\n\
+    if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(ku_t)); \\\n\
+    KU_STATUS((PC), (OP), UNWIND); \\\n\
+} while (0)\n");
     }
     if has_write_property {
-        output.push_str("#define KU_WRITE_PROPERTY(OBJECT, KEY, VAL, STRICT, SITE, PC, OP, UNWIND) do { int status = kiln_c99_val_write_property_key(host, (OBJECT), (KEY), (VAL), (STRICT), depth, thrown, (SITE)); KU_STATUS((PC), (OP), UNWIND); } while (0)\n");
-        output.push_str("static __attribute__((unused, noinline)) int ku_pic_poly_write(kiln_object *obj, const kiln_c99_site *site, kiln_val val) {\n    const kiln_shape *shape = obj->shape;\n    uint32_t slot = UINT32_MAX;\n    if (shape == site->entries[1].shape && site->entries[1].transition_to == NULL) slot = site->entries[1].slot;\n    else if (shape == site->entries[2].shape && site->entries[2].transition_to == NULL) slot = site->entries[2].slot;\n    else if (shape == site->entries[3].shape && site->entries[3].transition_to == NULL) slot = site->entries[3].slot;\n    if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity && !obj->frozen)) {\n        kiln_c99_prototype_touched(obj);\n        if (slot < KILN_C99_INLINE_SLOTS) obj->inline_slots[slot] = val;\n        else obj->slots[slot] = val;\n        return 1;\n    }\n    return 0;\n}\n");
+        output.push_str("static __attribute__((unused, noinline)) int ku_pic_poly_write(kiln_object *obj, kiln_c99_site *site, kiln_val val) {\n    const kiln_shape *shape = obj->shape;\n    for (int i = 1; i < (int)site->pic_count && i < KILN_C99_PIC_SIZE; ++i) {\n        if (shape == site->entries[i].shape && site->entries[i].transition_to == NULL) {\n            uint32_t slot = site->entries[i].slot;\n            if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity && !obj->frozen)) {\n                kiln_c99_pic_entry tmp = site->entries[0];\n                site->entries[0] = site->entries[i];\n                site->entries[i] = tmp;\n                kiln_c99_prototype_touched(obj);\n                obj->slots[slot] = val;\n                return 1;\n            }\n        }\n    }\n    return 0;\n}\n");
+        output.push_str("#define KU_WRITE_PROPERTY(OBJECT, KEY, VAL, STRICT, SITE, PC, OP, UNWIND) do { \\\n\
+    kiln_c99_site *ku_s = (SITE); \\\n\
+    kiln_val ku_t = (OBJECT); \\\n\
+    kiln_val ku_v = (VAL); \\\n\
+    if (KILN_LIKELY(ku_s != NULL && ku_s->entries[0].shape != NULL && KILN_VAL_IS_OBJECT(ku_t))) { \\\n\
+        kiln_object *ku_obj = (kiln_object *)KILN_VAL_PTR(ku_t); \\\n\
+        if (KILN_LIKELY(ku_obj != NULL && ku_obj->shape == ku_s->entries[0].shape && ku_s->entries[0].transition_to == NULL && !ku_obj->frozen)) { \\\n\
+            uint32_t ku_s0 = ku_s->entries[0].slot; \\\n\
+            if (KILN_LIKELY((ku_obj->shape->double_slots_mask & (1u << ku_s0)) == 0 || KILN_VAL_IS_NUMBER(ku_v))) { \\\n\
+                if (KILN_LIKELY(ku_s0 < ku_obj->slot_capacity)) { \\\n\
+                    kiln_c99_prototype_touched(ku_obj); \\\n\
+                    ku_obj->slots[ku_s0] = ku_v; \\\n\
+                    break; \\\n\
+                } \\\n\
+            } \\\n\
+        } else if (ku_obj != NULL && ku_s->pic_count > 1) { \\\n\
+            if (ku_pic_poly_write(ku_obj, ku_s, ku_v)) break; \\\n\
+        } \\\n\
+    } \\\n\
+    int status = kiln_c99_val_write_property_key(host, ku_t, (KEY), ku_v, (STRICT), depth, thrown, ku_s); \\\n\
+    KU_STATUS((PC), (OP), UNWIND); \\\n\
+} while (0)\n");
     }
     if !program.functions.is_empty() {
         output.push_str("#define KU_PARAMS kiln_call_context *ctx, kiln_val * restrict result, kiln_val * restrict upvalues, const kiln_val * restrict receiver_ptr, const kiln_val * restrict args, size_t argc\n");
         output.push_str("#define KU_EPILOGUE() kiln_unwind:; return KILN_C99_THROWN; kiln_refusal:; *result = kiln_val_from_boundary(kiln_c99_control_diagnostic()); return KILN_C99_CONTROL_ERROR;\n");
     }
     if has_call {
-        output.push_str("#define KU_CALL(DST, CALLEE, ARGS, ARGC, PC, OP, UNWIND) do { int status = kiln_c99_val_call(host, (CALLEE), (ARGS), (size_t)(ARGC), depth, thrown, ku_site, (size_t)(PC), (OP), &(DST)); KU_STATUS((PC), (OP), UNWIND); } while (0)\n");
+        output.push_str("static __attribute__((unused)) inline int ku_call_fast(kiln_host *host, kiln_val callee, const kiln_val *args, size_t argc, int depth, kiln_value *thrown, const char *site, size_t pc, const char *op, kiln_val *dst) {\n\
+    if (KILN_LIKELY(KILN_VAL_IS_CLOSURE(callee))) {\n\
+        kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(callee);\n\
+        if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {\n\
+            kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED;\n\
+            if (KILN_UNLIKELY(!plain->arrow && !plain->strict)) (void)kiln_c99_global_object_val(&recv);\n\
+            kiln_call_context ctx_call = { host, thrown, NULL, depth + 1 };\n\
+            kiln_val res = KILN_VAL_UNDEFINED;\n\
+            int status = plain->body(&ctx_call, &res, plain->upvalues, &recv, args, argc);\n\
+            if (KILN_LIKELY(status == KILN_C99_OK)) {\n\
+                *dst = res;\n\
+                return KILN_C99_OK;\n\
+            }\n\
+            if (status == KILN_C99_THROWN || status == KILN_C99_CONTROL_ERROR) {\n\
+                if (kiln_c99_diagnostic_function == NULL && kiln_c99_diagnostic_function_key == NULL && plain != NULL) {\n\
+                    kiln_c99_diagnostic_function = NULL;\n\
+                    kiln_c99_diagnostic_function_len = 0;\n\
+                    kiln_c99_diagnostic_function_key = plain->name;\n\
+                }\n\
+                *dst = res;\n\
+                return status;\n\
+            }\n\
+            return kiln_c99_val_call(host, callee, args, argc, depth, thrown, site, pc, op, dst);\n\
+        }\n\
+    }\n\
+    return kiln_c99_val_call(host, callee, args, argc, depth, thrown, site, pc, op, dst);\n\
+}\n");
+        output.push_str("#define KU_CALL(DST, CALLEE, ARGS, ARGC, PC, OP, UNWIND) do { \\\n\
+    int status = ku_call_fast(host, (CALLEE), (ARGS), (size_t)(ARGC), depth, thrown, ku_site, (size_t)(PC), (OP), &(DST)); \\\n\
+    KU_STATUS((PC), (OP), UNWIND); \\\n\
+} while (0)\n");
     }
     if has_call_method {
-        output.push_str("#define KU_CALL_METHOD(DST, OBJ, ARGS, ARGC, KEY, SITE, PC, OP, UNWIND) do { int status = kiln_c99_val_call_method_key(host, (OBJ), (ARGS), (size_t)(ARGC), (KEY), depth, thrown, (SITE), ku_site, (size_t)(PC), (OP), &(DST)); KU_STATUS((PC), (OP), UNWIND); } while (0)\n");
+        output.push_str("static __attribute__((unused)) inline int ku_call_method_fast(kiln_host *host, kiln_val ku_recv, const kiln_val *args, size_t argc, const kiln_string *key, kiln_c99_site *ku_s, const char *ku_site, size_t pc, const char *op, int depth, kiln_value *thrown, kiln_val *dst) {\n\
+    if (KILN_LIKELY(ku_s != NULL)) {\n\
+        if (KILN_UNLIKELY(kiln_c99_cached_method_matches(ku_s, ku_recv) && depth < KILN_C99_MAX_CALL_DEPTH)) {\n\
+            return kiln_c99_val_invoke_cached_method(host, ku_s->cached_method, ku_recv, args, argc, depth, thrown, dst);\n\
+        }\n\
+        if (KILN_LIKELY(KILN_VAL_IS_OBJECT(ku_recv) && ku_s->pic_count > 0)) {\n\
+            const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(ku_recv);\n\
+            kiln_val cached_fn = kiln_c99_site_cached_callee(ku_s, obj);\n\
+            if (KILN_LIKELY(cached_fn != 0 && KILN_VAL_IS_CLOSURE(cached_fn))) {\n\
+                kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(cached_fn);\n\
+                if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {\n\
+                    kiln_val vreceiver = plain->arrow ? plain->captured_this : ku_recv;\n\
+                    if (KILN_UNLIKELY(!plain->arrow && !plain->strict && (vreceiver == KILN_VAL_UNDEFINED || vreceiver == KILN_VAL_NULL))) {\n\
+                        (void)kiln_c99_global_object_val(&vreceiver);\n\
+                    }\n\
+                    kiln_call_context ctx_call = { host, thrown, NULL, depth + 1 };\n\
+                    kiln_val res = KILN_VAL_UNDEFINED;\n\
+                    int status = plain->body(&ctx_call, &res, plain->upvalues, &vreceiver, args, argc);\n\
+                    if (KILN_LIKELY(status == KILN_C99_OK)) {\n\
+                        *dst = res;\n\
+                        return KILN_C99_OK;\n\
+                    }\n\
+                    if (status == KILN_C99_THROWN) {\n\
+                        if (kiln_c99_diagnostic_detail == NULL) {\n\
+                            kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(ku_recv).tag;\n\
+                            kiln_c99_diagnostic_detail = \"CallMethod invocation threw\";\n\
+                        }\n\
+                        *dst = res;\n\
+                        return KILN_C99_THROWN;\n\
+                    }\n\
+                    if (status == KILN_C99_CONTROL_ERROR) {\n\
+                        if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(ku_recv).tag;\n\
+                        if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod invocation refused\";\n\
+                        *dst = res;\n\
+                        return KILN_C99_CONTROL_ERROR;\n\
+                    }\n\
+                    return kiln_c99_val_call_method_key(host, ku_recv, args, argc, key, depth, thrown, ku_s, ku_site, pc, op, dst);\n\
+                }\n\
+            } else if (cached_fn != 0 && KILN_VAL_IS_METHOD(cached_fn) && depth < KILN_C99_MAX_CALL_DEPTH) {\n\
+                return kiln_c99_val_invoke_cached_method(host, KILN_VAL_METHOD_ID(cached_fn), ku_recv, args, argc, depth, thrown, dst);\n\
+            }\n\
+        }\n\
+    }\n\
+    return kiln_c99_val_call_method_key(host, ku_recv, args, argc, key, depth, thrown, ku_s, ku_site, pc, op, dst);\n\
+}\n");
+        output.push_str("#define KU_CALL_METHOD(DST, OBJ, ARGS, ARGC, KEY, SITE, PC, OP, UNWIND) do { \\\n\
+    int status = ku_call_method_fast(host, (OBJ), (ARGS), (size_t)(ARGC), (KEY), (SITE), ku_site, (size_t)(PC), (OP), depth, thrown, &(DST)); \\\n\
+    KU_STATUS((PC), (OP), UNWIND); \\\n\
+} while (0)\n");
     }
     if has_closure {
         output.push_str(&format!("#define KU_CLOSURE(DST, PROTO, RECV, CAP, CAP_CNT) do {{ int status = {closure_fn}(&(DST), (PROTO), (RECV), (CAP), (CAP_CNT)); if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; }} while (0)\n"));
+    }
+    if has_new_object {
+        output.push_str("static __attribute__((unused)) inline uint32_t ku_compute_literal_mask(const kiln_val *pairs, size_t count) {\n\
+    uint32_t mask = 0;\n\
+    for (size_t i = 0; i < count; ++i) {\n\
+        if (KILN_VAL_IS_NUMBER(pairs[i * 2 + 1])) mask |= (1u << i);\n\
+    }\n\
+    return mask;\n\
+}\n\
+static __attribute__((unused)) inline int ku_new_object_literal_fast(kiln_val *out, const kiln_shape **lit_shape, const kiln_val *pairs, size_t count) {\n\
+    const kiln_shape *shape = *lit_shape;\n\
+    if (KILN_LIKELY(shape != NULL && count <= KILN_C99_INLINE_SLOTS)) {\n\
+        uint32_t mask = ku_compute_literal_mask(pairs, count);\n\
+        if (KILN_LIKELY(shape->double_slots_mask == mask)) {\n\
+            kiln_value built;\n\
+            int status = kiln_c99_new_object(&built);\n\
+            if (KILN_UNLIKELY(status != KILN_C99_OK)) return status;\n\
+            kiln_object *obj = kiln_c99_object_of(built);\n\
+            obj->shape = (kiln_shape *)shape;\n\
+            for (size_t i = 0; i < count; ++i) {\n\
+                obj->inline_slots[i] = pairs[i * 2 + 1];\n\
+            }\n\
+            *out = kiln_val_from_boundary(built);\n\
+            return KILN_C99_OK;\n\
+        }\n\
+    }\n\
+    int status = kiln_c99_val_new_object_literal(out, pairs, count);\n\
+    if (KILN_LIKELY(status == KILN_C99_OK && count <= KILN_C99_INLINE_SLOTS && KILN_VAL_IS_OBJECT(*out))) {\n\
+        kiln_object *obj = (kiln_object *)KILN_VAL_PTR(*out);\n\
+        if (obj->shape != NULL && obj->slots == obj->inline_slots) {\n\
+            *lit_shape = obj->shape;\n\
+        }\n\
+    }\n\
+    return status;\n\
+}\n");
     }
 }
 

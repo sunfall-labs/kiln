@@ -588,6 +588,7 @@ typedef struct kiln_closure {
     uint32_t prologue_resume;
     uint32_t proto;
     uint32_t upvalue_count;
+    kiln_val inline_upvalues[4];
     kiln_val *upvalues;
 } kiln_closure;
 
@@ -703,7 +704,7 @@ typedef struct kiln_property {
     kiln_value setter;
 } kiln_property;
 
-#define KILN_C99_INLINE_SLOTS 8
+#define KILN_C99_INLINE_SLOTS 16
 
 typedef struct kiln_object {
     kiln_property *properties;
@@ -797,7 +798,7 @@ static inline void kiln_c99_prototype_touched(const kiln_object *object) {
  * whatsoever -- and objects built by the same code put their keys at the same indices, which is
  * what makes one guess right for every instance of a class that does not exist. One of these is
  * a block-scope static at each GetProperty, SetProperty, SetPropertyStrict and CallMethod. */
-#define KILN_C99_PIC_SIZE 4
+#define KILN_C99_PIC_SIZE 8
 
 typedef struct kiln_c99_pic_entry {
     const kiln_shape *shape;
@@ -878,42 +879,49 @@ static inline uint32_t kiln_c99_site_slot_for(const kiln_c99_site *site, const k
  * tells their methods apart. */
 /* The long validation of a holder entry: walk the receiver's chain by pointer, check each shape
  * is the one remembered, and read the method where it was found; 0 when anything differs. */
-static inline kiln_val kiln_c99_site_validate_holder(const kiln_c99_pic_entry *entry, const kiln_object *obj) {
-    const kiln_object *step;
-    {
-                if (obj->prototype.tag != KILN_VALUE_OBJECT) {
-                    return 0;
-                }
-                step = (const kiln_object *)(uintptr_t)obj->prototype.bits;
-                if (entry->via != NULL) {
-                    if (step != entry->via || step->shape != entry->via_shape ||
-                        step->prototype.tag != KILN_VALUE_OBJECT) {
-                        return 0;
-                    }
-                    step = (const kiln_object *)(uintptr_t)step->prototype.bits;
-                }
-                if (step != entry->holder || step->shape != entry->holder_shape) {
-                    return 0;
-                }
-                if (entry->holder_shape != NULL) {
-                    if (entry->holder_slot >= step->slot_capacity) {
-                        return 0;
-                    }
-                    return step->slots[entry->holder_slot];
-                }
-                if (entry->holder_slot >= step->count) {
-                    return 0;
-                }
-                {
-                    const kiln_property *record = &step->properties[entry->holder_slot];
-                    if (record->key != entry->holder_key ||
-                        record->value.tag != entry->holder_value.tag ||
-                        record->value.bits != entry->holder_value.bits) {
-                        return 0;
-                    }
-                }
-                return entry->holder_val;
+static inline int kiln_c99_site_validate_holder_val(const kiln_c99_pic_entry *entry, const kiln_object *obj, kiln_val *out) {
+    if (obj->prototype.tag != KILN_VALUE_OBJECT) {
+        return 0;
     }
+    const kiln_object *step = (const kiln_object *)(uintptr_t)obj->prototype.bits;
+    if (entry->via != NULL) {
+        if (step != entry->via || step->shape != entry->via_shape ||
+            step->prototype.tag != KILN_VALUE_OBJECT) {
+            return 0;
+        }
+        step = (const kiln_object *)(uintptr_t)step->prototype.bits;
+    }
+    if (step != entry->holder || step->shape != entry->holder_shape) {
+        return 0;
+    }
+    if (entry->holder_shape != NULL) {
+        if (entry->holder_slot >= step->slot_capacity) {
+            return 0;
+        }
+        *out = step->slots[entry->holder_slot];
+        return 1;
+    }
+    if (entry->holder_slot >= step->count) {
+        return 0;
+    }
+    {
+        const kiln_property *record = &step->properties[entry->holder_slot];
+        if (record->key != entry->holder_key ||
+            record->value.tag != entry->holder_value.tag ||
+            record->value.bits != entry->holder_value.bits) {
+            return 0;
+        }
+    }
+    *out = entry->holder_val;
+    return 1;
+}
+
+static inline kiln_val kiln_c99_site_validate_holder(const kiln_c99_pic_entry *entry, const kiln_object *obj) {
+    kiln_val val = 0;
+    if (kiln_c99_site_validate_holder_val(entry, obj, &val)) {
+        return val;
+    }
+    return 0;
 }
 
 /* Whether the entry this site holds for `obj`'s shape reads its method through a prototype:

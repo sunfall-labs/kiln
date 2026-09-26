@@ -151,7 +151,7 @@ typedef struct kiln_c99_method_metadata {
 static kiln_c99_method_metadata kiln_c99_method_metadata_for(uint64_t code);
 static inline void kiln_c99_reset_diagnostics(void) {
 #define KILN_C99_ABSENT(why, out)      \
-#define KILN_C99_MAX_CALL_DEPTH 256
+#define KILN_C99_MAX_CALL_DEPTH 2048
 enum kiln_value_tag {
 KILN_VALUE_UNDEFINED = 0,
 KILN_VALUE_NULL = 1,
@@ -924,15 +924,16 @@ struct kiln_shape;
 typedef struct kiln_shape_transition {
 typedef struct kiln_shape {
 typedef struct kiln_property {
-#define KILN_C99_INLINE_SLOTS 8
+#define KILN_C99_INLINE_SLOTS 16
 typedef struct kiln_object {
 static uint64_t kiln_c99_proto_epoch;
 static inline void kiln_c99_prototype_touched(const kiln_object *object) {
 #define KILN_C99_MAX_PROTOTYPE_DEPTH 10000
-#define KILN_C99_PIC_SIZE 4
+#define KILN_C99_PIC_SIZE 8
 typedef struct kiln_c99_pic_entry {
 typedef struct kiln_c99_site {
 static inline uint32_t kiln_c99_site_slot_for(const kiln_c99_site *site, const kiln_shape *shape) {
+static inline int kiln_c99_site_validate_holder_val(const kiln_c99_pic_entry *entry, const kiln_object *obj, kiln_val *out) {
 static inline kiln_val kiln_c99_site_validate_holder(const kiln_c99_pic_entry *entry, const kiln_object *obj) {
 static inline int kiln_c99_site_callee_is_inherited(const kiln_c99_site *site, const kiln_object *obj) {
 static inline kiln_val kiln_c99_site_cached_callee(const kiln_c99_site *site, const kiln_object *obj) {
@@ -1547,7 +1548,7 @@ static kiln_data_view *kiln_c99_data_view_of(kiln_value value) {
 typedef struct kiln_gc_block {
 #define KILN_GC_SLAB_SIZE ((size_t)64 * 1024)
 #define KILN_GC_SLAB_CLASS_MIN ((size_t)48) /* smallest total slot (header + 1 byte payload) */
-#define KILN_GC_SLAB_CLASS_MAX ((size_t)256)
+#define KILN_GC_SLAB_CLASS_MAX ((size_t)384)
 #define KILN_GC_SLAB_CLASS_STEP ((size_t)16)
 #define KILN_GC_SLOT_FREE ((size_t)-1) /* block->size sentinel: this slot is on the free list */
 typedef struct kiln_gc_slab {
@@ -1614,7 +1615,10 @@ static kiln_gc_heap *kiln_c99_gc_heap_uncached(void);
 static int kiln_c99_run_promise_jobs(void *context, void *host, void *thrown);
 static int kiln_c99_promise_jobs_pending(void *context);
 static kiln_gc_heap *kiln_c99_gc_heap(void) {
+#ifndef KILN_C99_REALM_GENERATION_DEFINED
+#define KILN_C99_REALM_GENERATION_DEFINED
 static inline uint64_t kiln_c99_realm_generation(void) {
+#endif
 static kiln_gc_heap *kiln_c99_gc_lane_attached(void *attached) {
 static kiln_gc_heap *kiln_c99_gc_heap_uncached(void) {
 static size_t kiln_c99_gc_hash(const void *pointer, size_t mask) {
@@ -2706,6 +2710,7 @@ static int kiln_c99_read_element(kiln_host *host, kiln_value target, kiln_value 
 static int kiln_c99_write_element(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val key,
 static int kiln_c99_val_write_element(kiln_host *host, kiln_val target, kiln_val key,
+static int kiln_c99_val_invoke_cached_method(kiln_host *host, uint64_t method_code, kiln_val receiver,
 static int kiln_c99_val_call_method_view(kiln_host *host, kiln_val receiver, const kiln_val *args,
 done:
 static int kiln_c99_val_call_method_key(kiln_host *host, kiln_val receiver, const kiln_val *args,

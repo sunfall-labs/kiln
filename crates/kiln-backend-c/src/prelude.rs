@@ -2554,7 +2554,7 @@ const _: () = assert_refusals_name_themselves(
 /// `prefix` (`"get"`/`"set"`/NULL at every caller in values.c): a genuine NUL-terminated
 /// C string literal, previously measured inside `kiln_c99_text_append_c`, now spelled
 /// out at the `kiln_c99_static_text(prefix, strlen(prefix))` call in definitions.c.
-pub const C_STRING_LENGTH_SITES: usize = 78;
+pub const C_STRING_LENGTH_SITES: usize = 79;
 
 /// How far the `strlen(` scan may skip after reading the last byte of its seven-byte window:
 /// the Horspool shift, as `refusal_scan_shift` is for the refusal scan, so the const evaluator
@@ -2953,7 +2953,7 @@ macro_rules! header_rest {
  * anything.  The interpreter's own limit is 10000 frames, but its frames are heap-allocated and
  * these are not: a generated body holds its stack and locals as automatic arrays, so the safe
  * bound is far lower and has to be enforced rather than hoped for. */
-#define KILN_C99_MAX_CALL_DEPTH 256
+#define KILN_C99_MAX_CALL_DEPTH 2048
 
 
 enum kiln_value_tag {

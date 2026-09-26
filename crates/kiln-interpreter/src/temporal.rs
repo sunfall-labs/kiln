@@ -831,8 +831,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 let zone = zone_argument(arguments.first())?;
                 // The realm's clock, not the host's: the same virtual instant `Date.now()` reads,
                 // which is what makes two reads with no timer between them agree (ADR 0015).
-                let epoch_nanoseconds =
-                    self.with_realm(|realm| realm.now().as_nanos() as i128);
+                let epoch_nanoseconds = self.with_realm(|realm| realm.now().as_nanos() as i128);
                 engine::now::read(kind, epoch_nanoseconds, zone.as_deref())
                     .map(wrap)
                     .map_err(thrown)
