@@ -4771,7 +4771,9 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_gc_stress_checks", C99StateOwner::Process),
     ("kiln_c99_introspect_pending", C99StateOwner::Process),
     ("kiln_c99_introspect_armed", C99StateOwner::Process),
-    ("kiln_c99_root_shape", C99StateOwner::Constant),
+    // The process-shared block (ADR 0071): shared keys and the shape root, one per process.
+    // Each unit caches the pointer to it; the block itself is the provider archive's.
+    ("kiln_c99_shared_block", C99StateOwner::Process),
     ("kiln_c99_speculate_mode", C99StateOwner::Process),
     // ADR 0068: whether this process installs kiln's own members, read from the environment once.
     ("kiln_c99_kiln_extensions_state", C99StateOwner::Process),

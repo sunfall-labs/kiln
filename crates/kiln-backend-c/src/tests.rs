@@ -2092,8 +2092,16 @@ int kiln_realm_runtime_report(uint64_t *out_fields, uint64_t capacity, uint64_t 
     *out_count = 0;
     return KILN_C99_INVALID_ARGUMENT;
 }
-void *kiln_realm_gc_current_heap(void) { return NULL; }
-const uint64_t *kiln_realm_generation_slot(void) { static uint64_t generation = 1; return &generation; }
+/* A test may host heaps of its own (`kiln_test_heap`), switching between them by bumping
+ * `kiln_test_generation` the way a realm entry does; by default there is none. */
+static void *kiln_test_heap;
+static uint64_t kiln_test_generation = 1;
+void *kiln_realm_gc_current_heap(void) { return kiln_test_heap; }
+const uint64_t *kiln_realm_generation_slot(void) { return &kiln_test_generation; }
+void *kiln_realm_process_shared(uint64_t size) {
+    static union { uint64_t align; unsigned char bytes[4096]; } block;
+    return size <= sizeof block.bytes ? (void *)block.bytes : NULL;
+}
 int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap) {
     /* The fixture has no realm heap: every unit collects nothing and keeps its fallback heap. */
     (void)hooks;
@@ -4213,6 +4221,129 @@ int main(void) {
         run.status.success(),
         "index encoding failed: {:?}",
         run.status
+    );
+}
+
+/// ADR 0071, keys and shapes: grow the shape tree from two heaps in turn on one thread, the way
+/// a thread hosting several realms does, and check that constant keys and the shapes built from
+/// them are the same pointers in both, that each realm's run-time keys stay its own, that no edge
+/// either realm can follow names the other's key, and that tearing one heap down frees its shapes
+/// without disturbing the other's.
+#[test]
+fn two_heaps_share_constant_keys_and_shapes_but_not_run_time_ones() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static kiln_gc_heap *kiln_test_new_heap(void) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)malloc(sizeof *heap);
+    if (heap == NULL) return NULL;
+    kiln_c99_gc_heap_init(heap);
+    heap->enabled = 0;
+    kiln_c99_gc_heap_register(heap);
+    return heap;
+}
+static void kiln_test_enter(kiln_gc_heap *heap) {
+    kiln_test_heap = heap;
+    kiln_test_generation += 1;
+}
+/* Whether any edge a shared shape owns -- which every realm follows -- names `key`. */
+static int kiln_test_shared_edge_names(const kiln_shape *shape, const kiln_string *key) {
+    const kiln_shape_transition *edge;
+    uint32_t index;
+    for (index = 0; index < 2 && index < shape->num_transitions; ++index)
+        if (shape->inline_trans_ikey[index] == key) return 1;
+    for (edge = shape->transitions; edge != NULL; edge = edge->next_transition)
+        if (edge->ikey == key) return 1;
+    return 0;
+}
+static int kiln_test_owns(const kiln_gc_heap *heap, const kiln_shape *shape) {
+    const kiln_shape *each;
+    for (each = heap->local_shapes; each != NULL; each = each->owned_next)
+        if (each == shape) return 1;
+    return 0;
+}
+int main(void) {
+    kiln_gc_heap *first = kiln_test_new_heap();
+    kiln_gc_heap *second;
+    kiln_shape *root = kiln_c99_shape_root();
+    const kiln_string *alpha1, *beta1, *xray1, *alpha2, *beta2, *xray2, *gamma2, *delta2;
+    kiln_shape *a1, *ab1, *ax1, *a2, *ab2, *ax2, *ag2, *again;
+    kiln_value object;
+    if (first == NULL) return 1;
+    kiln_test_enter(first);
+    if (!root->shared) return 2;
+    if (kiln_c99_intern("", 0) != kiln_c99_key_empty) return 3;
+
+    /* The first realm, alone: constants join the shared table, a run-time key stays its own. */
+    alpha1 = kiln_c99_intern_static("alpha", 5);
+    beta1 = kiln_c99_intern_static("beta", 4);
+    xray1 = kiln_c99_intern("xray", 4);
+    if (alpha1 == NULL || beta1 == NULL || xray1 == NULL) return 4;
+    if (!kiln_c99_key_is_shared(alpha1) || !kiln_c99_key_is_shared(beta1)) return 5;
+    if (kiln_c99_key_is_shared(xray1)) return 6;
+    if (kiln_c99_interned("alpha", 5) != alpha1 || kiln_c99_intern("alpha", 5) != alpha1) return 7;
+    if (!kiln_c99_shape_transition(root, alpha1, 0, &a1) ||
+        !kiln_c99_shape_transition(a1, beta1, 0, &ab1) ||
+        !kiln_c99_shape_transition(a1, xray1, 0, &ax1)) return 8;
+    if (!a1->shared || !ab1->shared || ax1->shared) return 9;
+    if (!kiln_test_owns(first, ax1) || kiln_test_owns(first, a1)) return 10;
+    if (kiln_test_shared_edge_names(a1, xray1)) return 11;
+    if (kiln_c99_new_object(&object) != KILN_C99_OK ||
+        kiln_c99_object_of(object)->shape != root) return 12;
+
+    /* The second realm, while the first is alive. */
+    second = kiln_test_new_heap();
+    if (second == NULL) return 13;
+    kiln_test_enter(second);
+    if (kiln_c99_shape_root() != root) return 14;
+    alpha2 = kiln_c99_intern_static("alpha", 5);
+    beta2 = kiln_c99_intern("beta", 4);
+    xray2 = kiln_c99_intern("xray", 4);
+    /* Two realms live: a new constant cannot be shared without risking a clash, so it is ours. */
+    gamma2 = kiln_c99_intern_static("gamma", 5);
+    if (alpha2 != alpha1 || beta2 != beta1) return 15;
+    if (xray2 == NULL || xray2 == xray1 || kiln_c99_key_is_shared(xray2)) return 16;
+    if (gamma2 == NULL || kiln_c99_key_is_shared(gamma2)) return 17;
+    if (!kiln_c99_shape_transition(root, alpha2, 0, &a2) ||
+        !kiln_c99_shape_transition(a2, beta2, 0, &ab2)) return 18;
+    if (a2 != a1 || ab2 != ab1) return 19;
+    if (!kiln_c99_shape_transition(a2, xray2, 0, &ax2) ||
+        !kiln_c99_shape_transition(a2, gamma2, 0, &ag2)) return 20;
+    if (ax2 == ax1 || ax2->shared || ag2->shared) return 21;
+    if (ax2->keys[1] != xray2 || ax2->ikey != xray2) return 22;
+    if (!kiln_test_owns(second, ax2) || kiln_test_owns(second, ax1)) return 23;
+    if (kiln_test_shared_edge_names(a1, xray2) || kiln_test_shared_edge_names(a1, gamma2)) return 24;
+    /* The first realm's edge is invisible here: its key is not ours, and asking by our own key
+     * made our own shape. */
+    if (kiln_c99_local_edge_row(second, a1, xray1, 1u << 1, 0) != NULL) return 25;
+
+    /* Back to the first: its own edges, and the shared ones, unchanged. */
+    kiln_test_enter(first);
+    if (!kiln_c99_shape_transition(a1, xray1, 0, &again) || again != ax1) return 26;
+    if (!kiln_c99_shape_transition(root, alpha1, 0, &again) || again != a1) return 27;
+    if (kiln_c99_interned("gamma", 5) != NULL) return 28;
+
+    /* Tear the first down: its shapes go with it, and the second is untouched. */
+    kiln_c99_gc_teardown_begin(first);
+    kiln_c99_gc_teardown_end(first);
+    kiln_test_enter(second);
+    if (!kiln_c99_shape_transition(a1, xray2, 0, &again) || again != ax2) return 29;
+    if (!kiln_c99_shape_transition(a1, beta2, 0, &again) || again != ab1) return 30;
+    /* Alone again: a new constant is shared, and one this realm already made stays its own. */
+    delta2 = kiln_c99_intern_static("delta", 5);
+    if (delta2 == NULL || !kiln_c99_key_is_shared(delta2)) return 31;
+    if (kiln_c99_intern_static("gamma", 5) != gamma2 || kiln_c99_key_is_shared(gamma2)) return 32;
+    kiln_c99_gc_teardown_begin(second);
+    kiln_c99_gc_teardown_end(second);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "two-heap-shapes");
+    assert!(
+        run.status.success(),
+        "two heaps sharing keys and shapes failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
     );
 }
 
