@@ -2,6 +2,10 @@
 
 ## Status
 
+Still proposed as of 2026-09-26. Settled by the project owner as waiting: the io_uring engine is not
+on `main` (it has been prototyped under `.scratch/compio-http*`). Accept or reject when that branch
+is ready to land.
+
 Proposed. Extends ADR 0032 (Hyper/Tokio ownership split), ADR 0046 (Hyper tasks over host transports),
 and ADR 0058 (Rust-backed runtime engines).
 

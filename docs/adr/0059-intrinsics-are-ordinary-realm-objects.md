@@ -2,7 +2,10 @@
 
 ## Status
 
-Proposed, 2026-09-13.
+Accepted, 2026-09-26. Decided by the project owner with ADR 0060 and ADR 0065, as the object-model
+half of giving each built-in member one owner.
+
+Originally proposed, 2026-09-13.
 
 Extends ADR 0005 (built-ins are TypeScript bootstrap code), ADR 0038 (a realm owns its
 intrinsics), ADR 0043 (the built-in surface is declared once) and ADR 0054 (a built-in member is
