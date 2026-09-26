@@ -2379,7 +2379,7 @@ int kiln_node_fs_rmdir_sync(const uint8_t *path, uint64_t path_len, int32_t *out
 /// the headed `kiln_string` ABI, whose definition lives in `HEADER`'s prefix, while the calls
 /// in the prelude see `foundation.c`'s forward declarations. A definition may follow its
 /// calls; a use of an undeclared type may not, so this order is the only one that compiles.
-fn linked_source(module_source: &str, wrapper: &str) -> String {
+pub(crate) fn linked_source(module_source: &str, wrapper: &str) -> String {
     format!(
         "#if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)\n\
              #define _POSIX_C_SOURCE 200809L\n\

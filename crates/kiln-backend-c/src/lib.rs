@@ -1342,12 +1342,16 @@ fn render_functions(
     // if its text names none of the host, `thrown`, the receiver, the upvalue table, a shape row,
     // or the collector: the same reading `typed_needs` does above, as the machine's own check
     // that a chunk worker calling this clone reaches nothing a realm thread owns.
+    //
+    // The clone is emitted from the proto's parallel plan (`direct.parallel`), which assumes the
+    // captured reads of tier 1 are numbers: the clone takes them as `double` parameters after
+    // its own, and the call site guards them on the realm thread before any chunk runs.
     let mut parallel_clones: Vec<Option<String>> = vec![None; program.functions.len()];
-    for (index, typed) in direct.typed.iter().enumerate() {
-        let Some(typed) = typed else {
+    for (index, parallel) in direct.parallel.iter().enumerate() {
+        let Some(typed) = parallel else {
             continue;
         };
-        if !(typed.typed_returns[index] && typed.parallel_safe[index]) {
+        if direct.typed[index].is_none() || !typed.parallel_safe[index] {
             continue;
         }
         let proto = &program.functions[index];
@@ -1787,6 +1791,7 @@ fn render_functions(
                     symbol,
                     index,
                     proto.parameter_count,
+                    &emit_graph::parallel_captures(&direct.entry, index),
                     should_chunk,
                 );
             }
@@ -3654,6 +3659,17 @@ fn render(
     symbol: &str,
     policy: &EmissionPolicy,
 ) -> Result<String, EmitError> {
+    parallel::with_original_source(program, || {
+        render_positioned(program, program_hash, symbol, policy)
+    })
+}
+
+fn render_positioned(
+    program: &Program,
+    program_hash: u64,
+    symbol: &str,
+    policy: &EmissionPolicy,
+) -> Result<String, EmitError> {
     let plan = validate_program(program).expect("render called after validation");
     let mut compacted;
     let program = if policy.compact || policy.omit_source {
@@ -4384,13 +4400,39 @@ fn render_module(
     commonjs: bool,
     diagnostic_site: &str,
 ) -> Result<RenderedModule, EmitError> {
+    // `parallelMap` site records name positions in the module as written; emission packs the
+    // source below. See `parallel::SiteRecord`.
+    parallel::with_original_source(&module.program, || {
+        render_module_positioned(
+            module,
+            program_hash,
+            symbol,
+            policy,
+            commonjs,
+            diagnostic_site,
+        )
+    })
+}
+
+fn render_module_positioned(
+    module: &ModuleProgram,
+    program_hash: u64,
+    symbol: &str,
+    policy: &EmissionPolicy,
+    commonjs: bool,
+    diagnostic_site: &str,
+) -> Result<RenderedModule, EmitError> {
     let program = &module.program;
     let should_chunk = policy.compact && program.functions.len() > 500;
     // Compact graph modules are each compiled as their own translation unit. Private identifiers
     // therefore do not need the link-visible content hash; retain it only on exported adapters.
     // Chunked modules must retain the module symbol prefix so their non-static chunk symbols
     // do not collide with other chunked modules in the same binary.
-    let unit_symbol = if policy.compact && !should_chunk { "ku" } else { symbol };
+    let unit_symbol = if policy.compact && !should_chunk {
+        "ku"
+    } else {
+        symbol
+    };
     let plan = validate_program(program).expect("render called after validation");
     let callables = produces_references(program) || policy.compact;
     // What the compiler said, padded with the strict answer. A `ModuleProgram` assembled by hand
@@ -5718,6 +5760,9 @@ fn hash_module_with_seed(module: &ModuleProgram, seed: u64) -> u64 {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod parallel_tests;
 
 /// The reserved key an instance stores its class's brand under, derived from a private name.
 ///
