@@ -50,6 +50,10 @@ kiln-test-selector = { path = "crates/kiln-test-selector" }
 kiln-test262 = { path = "crates/kiln-test262" }
 frontend-oxc = { path = "crates/frontend-oxc" }
 libc = { version = "0.2", default-features = false }
+# The Linux io_uring transport in kiln-runtime (src/uring.rs). Used directly, without Tokio's
+# `tokio_unstable` io-uring integration; its only dependencies (bitflags, cfg-if, libc) are
+# already in the tree.
+io-uring = { version = "0.7.15", default-features = false }
 libffi = { version = "5.2", default-features = false }
 oxc_allocator = { version = "0.147.0", default-features = false }
 oxc_ast = { version = "0.147.0", default-features = false }

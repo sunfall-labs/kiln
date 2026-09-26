@@ -1,0 +1,1390 @@
+//! A Linux io_uring transport for connections the HTTP engines own (ADR 0046).
+//!
+//! The host hands Hyper an owned byte transport through `take_transport`. On Linux, when the
+//! io_uring backend is selected, that transport is a [`UringStream`] over the same socket
+//! instead of a Tokio `TcpStream`. Nothing above the seam changes: Hyper still sees
+//! `AsyncRead + AsyncWrite`, the realm still runs on its current-thread Tokio runtime and
+//! `LocalSet`, and `ScriptedHost`/`ScriptedTransport` never reach this module.
+//!
+//! # Ownership
+//!
+//! One [`Ring`] per realm host, created lazily on the realm thread the first time a transport
+//! is taken. It is not a second executor: its only task is the *driver*, an ordinary
+//! `spawn_local` task on the realm's `LocalSet`. The ring is created with `SINGLE_ISSUER |
+//! DEFER_TASKRUN | TASKRUN_FLAG | COOP_TASKRUN`, so the kernel never runs completion work
+//! behind the realm's back: it only runs inside the driver's own `io_uring_enter`.
+//!
+//! # Parking
+//!
+//! An eventfd is registered with the ring and with Tokio's reactor through `AsyncFd`, so the
+//! realm's existing park (`epoll_wait`, which also covers timers, fs, processes and every
+//! other socket) wakes for ring completions too. The eventfd is never read: Tokio registers
+//! it edge-triggered, and every kernel signal is a fresh edge. While the driver is awake the
+//! eventfd is disabled (`IORING_CQ_EVENTFD_DISABLED`), because the driver checks the ring's
+//! shared flags itself; it is re-enabled, followed by a re-check, only when the driver is
+//! about to let the thread park. That keeps sends that complete inline during our own submit
+//! from waking the reactor for work we have already reaped.
+//!
+//! # The flush point
+//!
+//! Transports never enter the kernel. A write appends to the connection's pending buffer and
+//! a read that finds nothing buffered just registers its waker; either one *kicks* the driver,
+//! which schedules it on the `LocalSet` behind every task already queued. When the driver
+//! runs it turns every pending write into one send SQE per connection and makes a single
+//! `io_uring_enter` (submit, plus `GETEVENTS` when the kernel has flagged deferred work), then
+//! reaps every CQE, wakes the tasks those completions belong to, and reschedules itself behind
+//! them. So one enter covers everything the tasks polled in one pass of the run queue queued,
+//! and a busy server loops enter → run tasks → enter without touching `epoll_wait` except for
+//! Tokio's own periodic reactor poll. Only when an enter produces nothing does the driver
+//! re-arm the eventfd and let the thread park.
+//!
+//! # Buffers
+//!
+//! Receives use one multishot `RECV` per connection over a provided-buffer ring
+//! (`IORING_REGISTER_PBUF_RING`). Each completion's bytes are copied into the connection's own
+//! receive buffer as they are reaped and the provided buffer is recycled at once, so a slow
+//! reader can never starve the shared pool; a connection holding more than [`RX_HIGH`]
+//! unread bytes cancels its receive and re-arms once the reader drains it (TCP flow control
+//! then pushes back on the peer, as it does on the epoll path).
+//!
+//! Sends are plain `SEND` with `MSG_WAITALL` (the kernel retries short stream sends itself),
+//! at most one in flight per connection so bytes can never be reordered, from a buffer the
+//! connection owns. Writes past [`TX_HIGH`] queued bytes return `Pending`. `poll_flush` is
+//! immediate, as it is for a `TcpStream`: bytes the ring owns are the equivalent of bytes in
+//! the kernel's send buffer. `poll_shutdown` waits for every queued byte to be sent before
+//! `shutdown(SHUT_WR)`, which is what keeps a response ahead of the FIN.
+//!
+//! Every buffer and every descriptor lives in the ring's connection table, not in the
+//! transport. Dropping a transport cancels its receive and lets any queued send finish; the
+//! slot and its socket are released only when the last in-flight operation has completed,
+//! so a buffer always outlives the kernel's use of it, and a descriptor number can never be
+//! reused under an SQE that still names it. Realm shutdown sends what is queued, cancels
+//! everything else and waits for the kernel to finish; if it cannot confirm that within a
+//! deadline it leaks the memory rather than free something the kernel may still write.
+//!
+//! # Selection
+//!
+//! `KILN_IO=uring|epoll|auto` (default `auto`, which currently means epoll; see
+//! [`AUTO_SELECTS_URING`]). Selecting uring probes the kernel: a failed `io_uring_setup`
+//! (ENOSYS, EPERM from seccomp or `kernel.io_uring_disabled`), a kernel without
+//! `DEFER_TASKRUN` (before 6.1), a missing opcode, or a failed buffer-ring or eventfd
+//! registration all fall back to epoll for that realm.
+
+use std::cell::RefCell;
+use std::io;
+use std::mem::ManuallyDrop;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::pin::Pin;
+use std::rc::Rc;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU16, Ordering, fence};
+use std::task::{Context, Poll, Waker};
+use std::time::{Duration, Instant};
+
+use io_uring::{IoUring, Probe, cqueue, opcode, squeue, types};
+use tokio::io::unix::AsyncFd;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+/// Whether `KILN_IO` unset (or `auto`) selects io_uring. See the report in NOTES.md for the
+/// measurements behind the default.
+pub const AUTO_SELECTS_URING: bool = false;
+
+const SQ_ENTRIES: u32 = 256;
+const CQ_ENTRIES: u32 = 4096;
+/// Provided receive buffers: count (a power of two) and size.
+const BUF_COUNT: u16 = 256;
+const BUF_SIZE: usize = 4096;
+const BUF_GROUP: u16 = 0;
+/// Unread bytes past which a connection stops receiving until its reader catches up.
+pub const RX_HIGH: usize = 256 * 1024;
+/// Queued, unsent bytes past which a write returns `Pending`.
+pub const TX_HIGH: usize = 256 * 1024;
+/// How long realm shutdown lets queued sends finish, and then how long it waits for the
+/// kernel to confirm every cancellation.
+const SHUTDOWN_SEND_GRACE: Duration = Duration::from_millis(250);
+const SHUTDOWN_CANCEL_DEADLINE: Duration = Duration::from_secs(1);
+
+const KIND_RECV: u64 = 1;
+const KIND_SEND: u64 = 2;
+const KIND_CANCEL: u64 = 3;
+
+/// `kind` in the top byte, the slot's generation in the next 24 bits, the slot below. The
+/// generation keeps a cancellation aimed at one connection's receive from ever matching the
+/// receive of a later connection that reuses the slot.
+fn user_data(kind: u64, generation: u32, index: u32) -> u64 {
+    (kind << 56) | (u64::from(generation & 0x00ff_ffff) << 32) | u64::from(index)
+}
+
+/// What the program asked for through `KILN_IO`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoPreference {
+    Auto,
+    Epoll,
+    Uring,
+}
+
+impl IoPreference {
+    pub fn from_env() -> Self {
+        static FROM_ENV: OnceLock<IoPreference> = OnceLock::new();
+        *FROM_ENV.get_or_init(|| match std::env::var("KILN_IO") {
+            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "uring" | "io_uring" | "io-uring" => IoPreference::Uring,
+                "epoll" => IoPreference::Epoll,
+                "" | "auto" => IoPreference::Auto,
+                other => {
+                    eprintln!("kiln: ignoring KILN_IO={other:?}; expected uring, epoll or auto");
+                    IoPreference::Auto
+                }
+            },
+            Err(_) => IoPreference::Auto,
+        })
+    }
+
+    fn wants_uring(self) -> bool {
+        match self {
+            IoPreference::Uring => true,
+            IoPreference::Epoll => false,
+            IoPreference::Auto => AUTO_SELECTS_URING,
+        }
+    }
+}
+
+/// The host's lazily created ring, or the decision not to have one.
+pub(crate) struct HostRing {
+    preference: IoPreference,
+    state: HostRingState,
+}
+
+enum HostRingState {
+    Untried,
+    Ready(Rc<Ring>),
+    Unavailable,
+}
+
+impl HostRing {
+    pub(crate) fn new() -> Self {
+        Self {
+            preference: IoPreference::from_env(),
+            state: HostRingState::Untried,
+        }
+    }
+
+    /// Override `KILN_IO` for this host. Only meaningful before the first transport.
+    pub(crate) fn set_preference(&mut self, preference: IoPreference) {
+        self.preference = preference;
+        if matches!(self.state, HostRingState::Unavailable) {
+            self.state = HostRingState::Untried;
+        }
+    }
+
+    /// The ring to put a taken transport on, creating it on first use, or `None` for epoll.
+    pub(crate) fn ring(&mut self) -> Option<Rc<Ring>> {
+        match &self.state {
+            HostRingState::Ready(ring) if !ring.is_closed() => return Some(Rc::clone(ring)),
+            HostRingState::Ready(_) | HostRingState::Unavailable => return None,
+            HostRingState::Untried => {}
+        }
+        if !self.preference.wants_uring() {
+            self.state = HostRingState::Unavailable;
+            return None;
+        }
+        match Ring::new() {
+            Ok(ring) => {
+                crate::http_trace_line(format_args!("io backend: io_uring"));
+                self.state = HostRingState::Ready(Rc::clone(&ring));
+                Some(ring)
+            }
+            Err(error) => {
+                if self.preference == IoPreference::Uring {
+                    static WARNED: OnceLock<()> = OnceLock::new();
+                    WARNED.get_or_init(|| {
+                        eprintln!(
+                            "kiln: KILN_IO=uring requested but io_uring is unavailable ({error}); using epoll"
+                        );
+                    });
+                }
+                crate::http_trace_line(format_args!("io backend: epoll ({error})"));
+                self.state = HostRingState::Unavailable;
+                None
+            }
+        }
+    }
+
+    pub(crate) fn shutdown(&mut self) {
+        if let HostRingState::Ready(ring) = &self.state {
+            ring.shutdown();
+        }
+    }
+}
+
+/// The provided-buffer ring: a page-aligned array of `io_uring_buf` entries the kernel pops
+/// from, and the memory those entries point into.
+struct BufRing {
+    entries: *mut types::BufRingEntry,
+    entries_len: usize,
+    data: *mut u8,
+    data_len: usize,
+    tail: u16,
+}
+
+impl BufRing {
+    fn new() -> io::Result<Self> {
+        let entries_len = usize::from(BUF_COUNT) * std::mem::size_of::<types::BufRingEntry>();
+        let data_len = usize::from(BUF_COUNT) * BUF_SIZE;
+        let entries = anonymous_map(entries_len)?;
+        let data = match anonymous_map(data_len) {
+            Ok(data) => data,
+            Err(error) => {
+                // SAFETY: `entries` was mapped just above with this length.
+                unsafe { libc::munmap(entries.cast(), entries_len) };
+                return Err(error);
+            }
+        };
+        let mut ring = Self {
+            entries: entries.cast(),
+            entries_len,
+            data,
+            data_len,
+            tail: 0,
+        };
+        for bid in 0..BUF_COUNT {
+            ring.push(bid);
+        }
+        ring.publish();
+        Ok(ring)
+    }
+
+    fn push(&mut self, bid: u16) {
+        let slot = usize::from(self.tail & (BUF_COUNT - 1));
+        // SAFETY: `slot < BUF_COUNT` and the mapping holds `BUF_COUNT` entries. The kernel only
+        // reads entries between its head and our published tail, and this slot is past it.
+        unsafe {
+            let entry = &mut *self.entries.add(slot);
+            entry.set_addr(self.data.add(usize::from(bid) * BUF_SIZE) as u64);
+            entry.set_len(BUF_SIZE as u32);
+            entry.set_bid(bid);
+        }
+        self.tail = self.tail.wrapping_add(1);
+    }
+
+    fn publish(&self) {
+        // SAFETY: the tail lives in the first entry's reserved field and is only ever written
+        // by us; the kernel reads it with acquire semantics.
+        unsafe {
+            let tail = types::BufRingEntry::tail(self.entries) as *const AtomicU16;
+            (*tail).store(self.tail, Ordering::Release);
+        }
+    }
+
+    fn bytes(&self, bid: u16, len: usize) -> &[u8] {
+        assert!(bid < BUF_COUNT && len <= BUF_SIZE);
+        // SAFETY: bounds checked above; the kernel wrote `len` bytes into this buffer before
+        // posting the completion that names it, and does not touch it again until we push it.
+        unsafe { std::slice::from_raw_parts(self.data.add(usize::from(bid) * BUF_SIZE), len) }
+    }
+}
+
+impl Drop for BufRing {
+    fn drop(&mut self) {
+        // SAFETY: both regions were mapped by `new` with these lengths. The caller only drops a
+        // `BufRing` once no receive can still select from it (see `Ring::drop`).
+        unsafe {
+            libc::munmap(self.entries.cast(), self.entries_len);
+            libc::munmap(self.data.cast(), self.data_len);
+        }
+    }
+}
+
+fn anonymous_map(len: usize) -> io::Result<*mut u8> {
+    // SAFETY: a fresh private anonymous mapping aliases nothing.
+    let ptr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            len,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    if ptr == libc::MAP_FAILED {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(ptr.cast())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecvState {
+    Idle,
+    Armed,
+    Cancelling,
+}
+
+/// Everything about one socket, owned by the ring so it outlives the kernel's use of it.
+struct Conn {
+    fd: Option<OwnedFd>,
+    generation: u32,
+    rx: Vec<u8>,
+    rx_pos: usize,
+    rx_eof: bool,
+    rx_err: Option<i32>,
+    recv: RecvState,
+    read_waker: Option<Waker>,
+    tx_pending: Vec<u8>,
+    tx_inflight: Vec<u8>,
+    tx_off: usize,
+    sending: bool,
+    tx_err: Option<i32>,
+    write_waker: Option<Waker>,
+    wr_shut: bool,
+    /// In-flight kernel operations naming this slot: the armed receive and the send.
+    ops: u32,
+    dropped: bool,
+    dirty: bool,
+}
+
+impl Conn {
+    fn new(fd: OwnedFd, generation: u32) -> Self {
+        Self {
+            fd: Some(fd),
+            generation,
+            rx: Vec::new(),
+            rx_pos: 0,
+            rx_eof: false,
+            rx_err: None,
+            recv: RecvState::Idle,
+            read_waker: None,
+            tx_pending: Vec::new(),
+            tx_inflight: Vec::new(),
+            tx_off: 0,
+            sending: false,
+            tx_err: None,
+            write_waker: None,
+            wr_shut: false,
+            ops: 0,
+            dropped: false,
+            dirty: false,
+        }
+    }
+
+    fn buffered(&self) -> usize {
+        self.rx.len() - self.rx_pos
+    }
+
+    fn queued(&self) -> usize {
+        self.tx_pending.len() + (self.tx_inflight.len() - self.tx_off)
+    }
+
+    fn raw_fd(&self) -> RawFd {
+        self.fd.as_ref().map_or(-1, AsRawFd::as_raw_fd)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Work {
+    None,
+    /// Only the kernel's IORING_SQ_TASKRUN flag, which can be stale (see `poll_drive`).
+    TaskrunOnly,
+    Other,
+}
+
+#[derive(Default)]
+struct DriverState {
+    spawned: bool,
+    scheduled: bool,
+    waker: Option<Waker>,
+}
+
+struct Inner {
+    // Field order is drop order: the ring closes before the buffer memory is unmapped.
+    uring: IoUring,
+    bufs: ManuallyDrop<BufRing>,
+    conns: Vec<Option<Conn>>,
+    free: Vec<u32>,
+    dirty: Vec<u32>,
+    wake: Vec<Waker>,
+    cqes: Vec<cqueue::Entry>,
+    cancels: u32,
+    generation: u32,
+    taskrun_stale: bool,
+    closed: bool,
+    failure: Option<String>,
+    driver: DriverState,
+    eventfd: Option<OwnedFd>,
+    /// Shutdown could not confirm the kernel was done with our memory; never free it.
+    leak: bool,
+    stats: RingStats,
+}
+
+/// Counters for tests and `KILN_HTTP_TRACE`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RingStats {
+    pub enters: u64,
+    pub cqes: u64,
+    pub sends: u64,
+    pub recv_arms: u64,
+    pub parks: u64,
+    pub stale_taskrun: u64,
+}
+
+/// One io_uring instance per realm host. See the module documentation.
+pub(crate) struct Ring {
+    inner: RefCell<Inner>,
+}
+
+impl Ring {
+    pub(crate) fn new() -> io::Result<Rc<Self>> {
+        let uring = IoUring::builder()
+            .setup_single_issuer()
+            .setup_defer_taskrun()
+            .setup_taskrun_flag()
+            .setup_cqsize(CQ_ENTRIES)
+            .build(SQ_ENTRIES)?;
+        let submitter = uring.submitter();
+        let mut probe = Probe::new();
+        submitter.register_probe(&mut probe)?;
+        for (code, name) in [
+            (opcode::RecvMulti::CODE, "RECV"),
+            (opcode::Send::CODE, "SEND"),
+            (opcode::AsyncCancel::CODE, "ASYNC_CANCEL"),
+        ] {
+            if !probe.is_supported(code) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!("io_uring opcode {name} is not supported"),
+                ));
+            }
+        }
+        let bufs = BufRing::new()?;
+        // SAFETY: the entries stay mapped until the ring is closed (field order in `Inner`).
+        unsafe {
+            submitter.register_buf_ring_with_flags(bufs.entries as u64, BUF_COUNT, BUF_GROUP, 0)?;
+        }
+        // SAFETY: plain syscall; the result is checked.
+        let eventfd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+        if eventfd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `eventfd` is a fresh descriptor we own.
+        let eventfd = unsafe { OwnedFd::from_raw_fd(eventfd) };
+        submitter.register_eventfd(eventfd.as_raw_fd())?;
+        let mut uring = uring;
+        // Saves the fd lookup on every enter; purely an optimisation.
+        let _ = uring.submitter().register_ring_fd();
+        uring.completion().disable_eventfd();
+        Ok(Rc::new(Self {
+            inner: RefCell::new(Inner {
+                uring,
+                bufs: ManuallyDrop::new(bufs),
+                conns: Vec::new(),
+                free: Vec::new(),
+                dirty: Vec::new(),
+                wake: Vec::new(),
+                cqes: Vec::with_capacity(256),
+                cancels: 0,
+                generation: 0,
+                taskrun_stale: false,
+                closed: false,
+                failure: None,
+                driver: DriverState::default(),
+                eventfd: Some(eventfd),
+                leak: false,
+                stats: RingStats::default(),
+            }),
+        }))
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.inner.borrow().closed
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stats(&self) -> RingStats {
+        self.inner.borrow().stats
+    }
+
+    /// Put `fd` (a connected, non-blocking stream socket) on the ring. The receive is queued
+    /// now and submitted at the next flush, which the first poll of the stream triggers.
+    pub(crate) fn register(self: &Rc<Self>, fd: OwnedFd) -> Result<UringStream, OwnedFd> {
+        let mut inner = self.inner.borrow_mut();
+        if inner.closed {
+            return Err(fd);
+        }
+        inner.generation = inner.generation.wrapping_add(1);
+        let conn = Conn::new(fd, inner.generation);
+        let index = match inner.free.pop() {
+            Some(index) => {
+                inner.conns[index as usize] = Some(conn);
+                index
+            }
+            None => {
+                inner.conns.push(Some(conn));
+                (inner.conns.len() - 1) as u32
+            }
+        };
+        inner.arm_recv(index);
+        Ok(UringStream {
+            ring: Rc::clone(self),
+            index,
+        })
+    }
+
+    /// Make sure the driver will run behind the tasks already queued. Must be called from a
+    /// task on the realm's `LocalSet` the first time, since that is where the driver is spawned.
+    fn kick(self: &Rc<Self>) {
+        let waker = {
+            let mut inner = self.inner.borrow_mut();
+            if inner.closed {
+                return;
+            }
+            if !inner.driver.spawned {
+                inner.driver.spawned = true;
+                inner.driver.scheduled = true;
+                drop(inner);
+                tokio::task::spawn_local(Driver {
+                    ring: Rc::clone(self),
+                    eventfd: None,
+                });
+                return;
+            }
+            if inner.driver.scheduled {
+                return;
+            }
+            inner.driver.scheduled = true;
+            inner.driver.waker.clone()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    /// Wake an already spawned driver; used where no task context is guaranteed (drop).
+    fn kick_existing(&self) {
+        let waker = {
+            let Ok(mut inner) = self.inner.try_borrow_mut() else {
+                return;
+            };
+            if inner.closed || !inner.driver.spawned || inner.driver.scheduled {
+                return;
+            }
+            inner.driver.scheduled = true;
+            inner.driver.waker.clone()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    fn poll_drive(&self, cx: &mut Context<'_>, eventfd: &mut Option<AsyncFd<OwnedFd>>) -> Poll<()> {
+        if eventfd.is_none() {
+            let fd = self.inner.borrow_mut().eventfd.take();
+            match fd.map(|fd| AsyncFd::with_interest(fd, tokio::io::Interest::READABLE)) {
+                Some(Ok(fd)) => *eventfd = Some(fd),
+                Some(Err(error)) => {
+                    self.fail(format!("could not register the ring's eventfd: {error}"));
+                    return Poll::Ready(());
+                }
+                None => return Poll::Ready(()),
+            }
+        }
+        let eventfd = eventfd.as_ref().expect("eventfd registered above");
+        loop {
+            let (reaped, wakers) = {
+                let mut inner = self.inner.borrow_mut();
+                if inner.closed {
+                    return Poll::Ready(());
+                }
+                inner.driver.scheduled = false;
+                match &mut inner.driver.waker {
+                    Some(waker) => waker.clone_from(cx.waker()),
+                    slot @ None => *slot = Some(cx.waker().clone()),
+                }
+                let reaped = inner.turn();
+                (reaped, std::mem::take(&mut inner.wake))
+            };
+            let failed = self.inner.borrow().closed;
+            for waker in wakers {
+                waker.wake();
+            }
+            if failed {
+                return Poll::Ready(());
+            }
+            if reaped > 0 {
+                // Let the tasks those completions woke run, then flush what they queued.
+                self.inner.borrow_mut().driver.scheduled = true;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            {
+                let mut inner = self.inner.borrow_mut();
+                inner.uring.completion().enable_eventfd();
+                // Pairs with the kernel's barrier between queueing work and reading the
+                // eventfd-disabled flag: either it sees the flag clear, or we see its work.
+                fence(Ordering::SeqCst);
+                let mut work = inner.has_work();
+                if work == Work::TaskrunOnly && inner.taskrun_stale {
+                    // The kernel leaves IORING_SQ_TASKRUN set when work queued during a run
+                    // is run in that same pass, and only clears it on the next run, so an
+                    // enter that just found nothing proves the flag stale. Enter once more,
+                    // now with the eventfd armed, so work that arrived while it was disabled
+                    // is not stranded behind the stale flag.
+                    inner.stats.stale_taskrun += 1;
+                    let reaped = inner.enter_and_reap();
+                    work = if reaped > 0 { Work::Other } else { Work::None };
+                    if reaped > 0 {
+                        inner.uring.completion().disable_eventfd();
+                        let wakers = std::mem::take(&mut inner.wake);
+                        inner.driver.scheduled = true;
+                        drop(inner);
+                        for waker in wakers {
+                            waker.wake();
+                        }
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
+                }
+                if work != Work::None {
+                    // More to do, but never loop inside one poll: the work may be waiting on
+                    // a task that only runs once the driver yields.
+                    inner.uring.completion().disable_eventfd();
+                    inner.driver.scheduled = true;
+                    drop(inner);
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                inner.stats.parks += 1;
+            }
+            match eventfd.poll_read_ready(cx) {
+                Poll::Ready(Ok(mut guard)) => {
+                    guard.clear_ready();
+                    self.inner.borrow_mut().uring.completion().disable_eventfd();
+                }
+                Poll::Ready(Err(error)) => {
+                    self.fail(format!("ring eventfd failed: {error}"));
+                    return Poll::Ready(());
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+
+    /// A ring-level failure: every transport sees an error from now on.
+    fn fail(&self, message: String) {
+        crate::http_trace_line(format_args!("io_uring failure: {message}"));
+        let wakers = {
+            let mut inner = self.inner.borrow_mut();
+            inner.failure.get_or_insert(message);
+            inner.closed = true;
+            inner.collect_all_wakers()
+        };
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+
+    /// Realm teardown: send what is queued, cancel everything else, and wait for the kernel
+    /// to finish with every buffer. Idempotent.
+    pub(crate) fn shutdown(&self) {
+        let wakers = {
+            let Ok(mut inner) = self.inner.try_borrow_mut() else {
+                return;
+            };
+            if inner.closed && inner.failure.is_none() && inner.inflight() == 0 {
+                return;
+            }
+            inner.drain_for_shutdown();
+            inner.collect_all_wakers()
+        };
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+}
+
+impl Drop for Ring {
+    fn drop(&mut self) {
+        let inner = self.inner.get_mut();
+        if inner.inflight() > 0 && !inner.leak {
+            inner.drain_for_shutdown();
+        }
+        if inner.leak {
+            // The kernel may still own some of this memory; losing it beats a use-after-free.
+            std::mem::forget(std::mem::take(&mut inner.conns));
+        } else {
+            // SAFETY: nothing is in flight, so no receive can select a buffer again; the ring
+            // itself is closed after this (field order), which also unregisters the group.
+            unsafe { ManuallyDrop::drop(&mut inner.bufs) };
+        }
+    }
+}
+
+impl Inner {
+    fn conn(&mut self, index: u32) -> &mut Conn {
+        self.conns[index as usize]
+            .as_mut()
+            .expect("io_uring connection slot in use")
+    }
+
+    fn inflight(&self) -> u32 {
+        self.cancels
+            + self
+                .conns
+                .iter()
+                .flatten()
+                .map(|conn| conn.ops)
+                .sum::<u32>()
+    }
+
+    fn push(&mut self, entry: squeue::Entry) {
+        loop {
+            // SAFETY: every entry built here points at memory the connection table owns until
+            // the matching completion is reaped.
+            if unsafe { self.uring.submission().push(&entry) }.is_ok() {
+                return;
+            }
+            // The submission queue is full: hand what is there to the kernel and retry.
+            if let Err(error) = self.enter() {
+                self.closed = true;
+                self.failure
+                    .get_or_insert(format!("io_uring submit failed: {error}"));
+                return;
+            }
+        }
+    }
+
+    fn enter(&mut self) -> io::Result<usize> {
+        loop {
+            self.stats.enters += 1;
+            match self.uring.submit() {
+                Ok(count) => return Ok(count),
+                Err(error) if error.raw_os_error() == Some(libc::EINTR) => continue,
+                // Completions are backed up; reaping makes room, the caller retries.
+                Err(error) if matches!(error.raw_os_error(), Some(libc::EBUSY | libc::EAGAIN)) => {
+                    self.reap();
+                    return Ok(0);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn arm_recv(&mut self, index: u32) {
+        let conn = self.conn(index);
+        let fd = conn.raw_fd();
+        let generation = conn.generation;
+        conn.recv = RecvState::Armed;
+        conn.ops += 1;
+        self.stats.recv_arms += 1;
+        let entry = opcode::RecvMulti::new(types::Fd(fd), BUF_GROUP)
+            .build()
+            .user_data(user_data(KIND_RECV, generation, index));
+        self.push(entry);
+    }
+
+    fn should_arm(&self, conn: &Conn) -> bool {
+        !self.closed
+            && !conn.dropped
+            && !conn.rx_eof
+            && conn.rx_err.is_none()
+            && conn.recv == RecvState::Idle
+            && conn.fd.is_some()
+            && conn.buffered() < RX_HIGH / 2
+    }
+
+    fn cancel_recv(&mut self, index: u32) {
+        let conn = self.conn(index);
+        if conn.recv != RecvState::Armed {
+            return;
+        }
+        conn.recv = RecvState::Cancelling;
+        let generation = conn.generation;
+        self.cancels += 1;
+        let entry = opcode::AsyncCancel::new(user_data(KIND_RECV, generation, index))
+            .build()
+            .user_data(user_data(KIND_CANCEL, generation, index));
+        self.push(entry);
+    }
+
+    fn mark_dirty(&mut self, index: u32) {
+        let conn = self.conn(index);
+        if !conn.dirty {
+            conn.dirty = true;
+            self.dirty.push(index);
+        }
+    }
+
+    /// Turn every connection's pending bytes into a send, one in flight per connection.
+    fn flush_sends(&mut self) {
+        let mut dirty = std::mem::take(&mut self.dirty);
+        for &index in &dirty {
+            let closed = self.closed;
+            let Some(conn) = self.conns[index as usize].as_mut() else {
+                continue;
+            };
+            conn.dirty = false;
+            if closed || conn.sending || conn.tx_pending.is_empty() || conn.tx_err.is_some() {
+                continue;
+            }
+            std::mem::swap(&mut conn.tx_pending, &mut conn.tx_inflight);
+            conn.tx_pending.clear();
+            conn.tx_off = 0;
+            self.submit_send(index);
+        }
+        dirty.clear();
+        if self.dirty.is_empty() {
+            self.dirty = dirty;
+        }
+    }
+
+    fn submit_send(&mut self, index: u32) {
+        let conn = self.conn(index);
+        let fd = conn.raw_fd();
+        let generation = conn.generation;
+        let remaining = &conn.tx_inflight[conn.tx_off..];
+        let (ptr, len) = (
+            remaining.as_ptr(),
+            remaining.len().min(u32::MAX as usize) as u32,
+        );
+        conn.sending = true;
+        conn.ops += 1;
+        self.stats.sends += 1;
+        let entry = opcode::Send::new(types::Fd(fd), ptr, len)
+            .flags(libc::MSG_NOSIGNAL | libc::MSG_WAITALL)
+            .build()
+            .user_data(user_data(KIND_SEND, generation, index));
+        self.push(entry);
+    }
+
+    fn has_work(&mut self) -> Work {
+        if !self.dirty.is_empty() {
+            return Work::Other;
+        }
+        let sq = self.uring.submission();
+        if !sq.is_empty() || sq.cq_overflow() {
+            return Work::Other;
+        }
+        let taskrun = sq.taskrun();
+        drop(sq);
+        if !self.uring.completion().is_empty() {
+            Work::Other
+        } else if taskrun {
+            Work::TaskrunOnly
+        } else {
+            Work::None
+        }
+    }
+
+    fn enter_and_reap(&mut self) -> usize {
+        if let Err(error) = self.enter() {
+            self.closed = true;
+            self.failure
+                .get_or_insert(format!("io_uring submit failed: {error}"));
+            let mut wakers = self.collect_all_wakers();
+            self.wake.append(&mut wakers);
+            return 0;
+        }
+        self.reap()
+    }
+
+    /// One flush: queue sends, enter the kernel if there is anything to submit or deferred
+    /// work to run, and reap. Returns the number of completions handled.
+    fn turn(&mut self) -> usize {
+        self.flush_sends();
+        let (submit, taskrun) = {
+            let sq = self.uring.submission();
+            (!sq.is_empty() || sq.cq_overflow(), sq.taskrun())
+        };
+        let reaped = if submit || taskrun {
+            self.enter_and_reap()
+        } else {
+            self.reap()
+        };
+        // `submit` enters with GETEVENTS too whenever the flag is set, so either kind of
+        // enter that finds nothing leaves the flag proven stale.
+        self.taskrun_stale = taskrun && reaped == 0;
+        reaped
+    }
+
+    fn reap(&mut self) -> usize {
+        let mut total = 0;
+        loop {
+            let mut cqes = std::mem::take(&mut self.cqes);
+            cqes.extend(self.uring.completion());
+            if cqes.is_empty() {
+                self.cqes = cqes;
+                break;
+            }
+            total += cqes.len();
+            self.stats.cqes += cqes.len() as u64;
+            for cqe in cqes.drain(..) {
+                self.complete(cqe);
+            }
+            self.cqes = cqes;
+            self.bufs.publish();
+        }
+        total
+    }
+
+    fn complete(&mut self, cqe: cqueue::Entry) {
+        let data = cqe.user_data();
+        let index = data as u32;
+        match data >> 56 {
+            KIND_CANCEL => self.cancels -= 1,
+            KIND_RECV => self.complete_recv(index, cqe.result(), cqe.flags()),
+            KIND_SEND => self.complete_send(index, cqe.result()),
+            kind => debug_assert!(false, "unknown io_uring completion kind {kind}"),
+        }
+    }
+
+    fn complete_recv(&mut self, index: u32, result: i32, flags: u32) {
+        let more = cqueue::more(flags);
+        let bid = cqueue::buffer_select(flags);
+        let closed = self.closed;
+        let conn = self.conns[index as usize]
+            .as_mut()
+            .expect("receive completion for a live slot");
+        if let Some(bid) = bid {
+            if result > 0 && !conn.dropped && conn.rx_err.is_none() && !closed {
+                if conn.rx_pos == conn.rx.len() {
+                    conn.rx.clear();
+                    conn.rx_pos = 0;
+                }
+                conn.rx
+                    .extend_from_slice(self.bufs.bytes(bid, result as usize));
+            }
+            self.bufs.push(bid);
+        }
+        let mut wake = result > 0;
+        if !more {
+            conn.recv = RecvState::Idle;
+            conn.ops -= 1;
+            match result {
+                0 => {
+                    conn.rx_eof = true;
+                    wake = true;
+                }
+                error
+                    if error < 0
+                        && error != -libc::ENOBUFS
+                        && error != -libc::ECANCELED
+                        && !conn.dropped =>
+                {
+                    conn.rx_err = Some(-error);
+                    wake = true;
+                }
+                _ => {}
+            }
+        }
+        if wake && let Some(waker) = conn.read_waker.take() {
+            self.wake.push(waker);
+        }
+        let conn = self.conns[index as usize].as_ref().expect("live slot");
+        if conn.recv == RecvState::Armed && conn.buffered() >= RX_HIGH {
+            self.cancel_recv(index);
+        } else if self.should_arm(conn) {
+            self.arm_recv(index);
+        }
+        self.maybe_release(index);
+    }
+
+    fn complete_send(&mut self, index: u32, result: i32) {
+        let conn = self.conn(index);
+        conn.ops -= 1;
+        conn.sending = false;
+        let mut resend = false;
+        if result < 0 {
+            conn.tx_err = Some(-result);
+            conn.tx_inflight.clear();
+            conn.tx_pending.clear();
+            conn.tx_off = 0;
+        } else {
+            conn.tx_off += result as usize;
+            if result > 0 && conn.tx_off < conn.tx_inflight.len() {
+                resend = true;
+            } else {
+                if conn.tx_off < conn.tx_inflight.len() {
+                    // A zero-length completion for a non-empty send: the peer is gone.
+                    conn.tx_err = Some(libc::EPIPE);
+                    conn.tx_pending.clear();
+                }
+                conn.tx_inflight.clear();
+                conn.tx_off = 0;
+            }
+        }
+        let pending = !conn.tx_pending.is_empty();
+        if let Some(waker) = conn.write_waker.take() {
+            self.wake.push(waker);
+        }
+        if resend && !self.closed {
+            self.submit_send(index);
+        } else if pending {
+            self.mark_dirty(index);
+        }
+        self.maybe_release(index);
+    }
+
+    /// Close a dropped connection's socket once the kernel is done with every buffer in it.
+    fn maybe_release(&mut self, index: u32) {
+        let closed = self.closed;
+        let Some(conn) = self.conns[index as usize].as_mut() else {
+            return;
+        };
+        if !conn.dropped || conn.ops > 0 || conn.sending {
+            return;
+        }
+        if !conn.tx_pending.is_empty() && conn.tx_err.is_none() && !closed {
+            return;
+        }
+        if conn.buffered() > 0
+            && let Some(fd) = &conn.fd
+        {
+            // The epoll path closes a socket with unread input, which resets the connection.
+            // The ring has already taken those bytes out of the kernel, so ask for the reset.
+            set_linger_zero(fd.as_raw_fd());
+        }
+        self.conns[index as usize] = None;
+        if conn_dirty_listed(&self.dirty, index) {
+            self.dirty.retain(|&dirty| dirty != index);
+        }
+        self.free.push(index);
+    }
+
+    fn collect_all_wakers(&mut self) -> Vec<Waker> {
+        let mut wakers = std::mem::take(&mut self.wake);
+        for conn in self.conns.iter_mut().flatten() {
+            wakers.extend(conn.read_waker.take());
+            wakers.extend(conn.write_waker.take());
+        }
+        wakers
+    }
+
+    fn drain_for_shutdown(&mut self) {
+        // Hand queued bytes to the kernel first, as closing a socket would on the epoll path.
+        self.closed = false;
+        self.flush_sends();
+        self.closed = true;
+        let indexes: Vec<u32> = (0..self.conns.len() as u32)
+            .filter(|&index| self.conns[index as usize].is_some())
+            .collect();
+        for &index in &indexes {
+            self.cancel_recv(index);
+        }
+        self.wait_inflight(SHUTDOWN_SEND_GRACE);
+        if self.inflight() > 0 {
+            self.cancels += 1;
+            let entry = opcode::AsyncCancel2::new(types::CancelBuilder::any())
+                .build()
+                .user_data(user_data(KIND_CANCEL, 0, u32::MAX));
+            self.push(entry);
+            self.wait_inflight(SHUTDOWN_CANCEL_DEADLINE);
+        }
+        if self.inflight() > 0 {
+            self.leak = true;
+            return;
+        }
+        // Nothing is in flight: every socket can close now.
+        for slot in &mut self.conns {
+            if let Some(conn) = slot {
+                conn.fd = None;
+                if conn.dropped {
+                    *slot = None;
+                }
+            }
+        }
+    }
+
+    fn wait_inflight(&mut self, budget: Duration) {
+        let deadline = Instant::now() + budget;
+        while self.inflight() > 0 {
+            let now = Instant::now();
+            if now >= deadline {
+                return;
+            }
+            let left = deadline - now;
+            let timespec = types::Timespec::new()
+                .sec(left.as_secs())
+                .nsec(left.subsec_nanos());
+            let args = types::SubmitArgs::new().timespec(&timespec);
+            self.stats.enters += 1;
+            match self.uring.submitter().submit_with_args(1, &args) {
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.raw_os_error(),
+                        Some(libc::ETIME | libc::EINTR | libc::EBUSY | libc::EAGAIN)
+                    ) => {}
+                Err(_) => return,
+            }
+            self.reap();
+        }
+    }
+}
+
+fn conn_dirty_listed(dirty: &[u32], index: u32) -> bool {
+    dirty.contains(&index)
+}
+
+fn set_linger_zero(fd: RawFd) {
+    let linger = libc::linger {
+        l_onoff: 1,
+        l_linger: 0,
+    };
+    // SAFETY: plain setsockopt on a descriptor we own; failure only loses the reset.
+    unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_LINGER,
+            (&linger as *const libc::linger).cast(),
+            std::mem::size_of::<libc::linger>() as libc::socklen_t,
+        );
+    }
+}
+
+/// The ring's only task. See the module documentation for the loop it runs.
+struct Driver {
+    ring: Rc<Ring>,
+    eventfd: Option<AsyncFd<OwnedFd>>,
+}
+
+impl std::future::Future for Driver {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let this = self.get_mut();
+        this.ring.poll_drive(cx, &mut this.eventfd)
+    }
+}
+
+/// A connection on the ring, handed to Hyper as the host transport.
+pub struct UringStream {
+    ring: Rc<Ring>,
+    index: u32,
+}
+
+impl std::fmt::Debug for UringStream {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UringStream")
+            .field("index", &self.index)
+            .finish()
+    }
+}
+
+fn ring_closed(inner: &Inner) -> io::Error {
+    match &inner.failure {
+        Some(message) => io::Error::other(message.clone()),
+        None => io::Error::new(
+            io::ErrorKind::NotConnected,
+            "the realm's io_uring was shut down",
+        ),
+    }
+}
+
+impl UringStream {
+    fn write_bufs(
+        &self,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let mut inner = self.ring.inner.borrow_mut();
+        if inner.closed {
+            return Poll::Ready(Err(ring_closed(&inner)));
+        }
+        let conn = inner.conn(self.index);
+        if let Some(error) = conn.tx_err {
+            return Poll::Ready(Err(io::Error::from_raw_os_error(error)));
+        }
+        if conn.wr_shut {
+            return Poll::Ready(Err(io::Error::from_raw_os_error(libc::EPIPE)));
+        }
+        let total: usize = bufs.iter().map(|buf| buf.len()).sum();
+        if total == 0 {
+            return Poll::Ready(Ok(0));
+        }
+        let room = TX_HIGH.saturating_sub(conn.queued());
+        if room == 0 {
+            conn.write_waker = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
+        // Take everything when it fits; otherwise only what fits, so the caller sees
+        // backpressure at the same granularity as a kernel send buffer.
+        let mut left = room.min(total);
+        let taken = left;
+        conn.tx_pending.reserve(left);
+        for buf in bufs {
+            if left == 0 {
+                break;
+            }
+            let part = buf.len().min(left);
+            conn.tx_pending.extend_from_slice(&buf[..part]);
+            left -= part;
+        }
+        let needs_flush = !conn.sending;
+        if needs_flush {
+            inner.mark_dirty(self.index);
+        }
+        drop(inner);
+        if needs_flush {
+            self.ring.kick();
+        }
+        Poll::Ready(Ok(taken))
+    }
+}
+
+impl AsyncRead for UringStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let mut inner = this.ring.inner.borrow_mut();
+        if inner.closed {
+            return Poll::Ready(Err(ring_closed(&inner)));
+        }
+        let conn = inner.conn(this.index);
+        if conn.buffered() > 0 {
+            let len = conn.buffered().min(buf.remaining());
+            buf.put_slice(&conn.rx[conn.rx_pos..conn.rx_pos + len]);
+            conn.rx_pos += len;
+            if conn.rx_pos == conn.rx.len() {
+                conn.rx.clear();
+                conn.rx_pos = 0;
+                if conn.rx.capacity() > 4 * RX_HIGH {
+                    conn.rx.shrink_to(BUF_SIZE);
+                }
+            }
+            let rearm = inner.should_arm(inner.conns[this.index as usize].as_ref().expect("live"));
+            if rearm {
+                inner.arm_recv(this.index);
+                drop(inner);
+                this.ring.kick();
+            }
+            return Poll::Ready(Ok(()));
+        }
+        if let Some(error) = conn.rx_err {
+            return Poll::Ready(Err(io::Error::from_raw_os_error(error)));
+        }
+        if conn.rx_eof {
+            return Poll::Ready(Ok(()));
+        }
+        match &mut conn.read_waker {
+            Some(waker) => waker.clone_from(cx.waker()),
+            slot @ None => *slot = Some(cx.waker().clone()),
+        }
+        let idle = conn.recv == RecvState::Idle;
+        if idle && inner.should_arm(inner.conns[this.index as usize].as_ref().expect("live")) {
+            inner.arm_recv(this.index);
+        }
+        drop(inner);
+        // The receive (armed at registration or just now) may not be submitted yet.
+        this.ring.kick();
+        Poll::Pending
+    }
+}
+
+impl AsyncWrite for UringStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.write_bufs(cx, &[io::IoSlice::new(buf)])
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        self.write_bufs(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        true
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let mut inner = self.ring.inner.borrow_mut();
+        if inner.closed {
+            return Poll::Ready(Err(ring_closed(&inner)));
+        }
+        match inner.conn(self.index).tx_err {
+            Some(error) => Poll::Ready(Err(io::Error::from_raw_os_error(error))),
+            None => Poll::Ready(Ok(())),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let mut inner = self.ring.inner.borrow_mut();
+        if inner.closed {
+            return Poll::Ready(Err(ring_closed(&inner)));
+        }
+        let conn = inner.conn(self.index);
+        if conn.wr_shut {
+            return Poll::Ready(Ok(()));
+        }
+        if let Some(error) = conn.tx_err {
+            return Poll::Ready(Err(io::Error::from_raw_os_error(error)));
+        }
+        if conn.sending || !conn.tx_pending.is_empty() {
+            // The FIN must follow every byte already written.
+            conn.write_waker = Some(cx.waker().clone());
+            let unsubmitted = !conn.sending;
+            if unsubmitted {
+                inner.mark_dirty(self.index);
+            }
+            drop(inner);
+            self.ring.kick();
+            return Poll::Pending;
+        }
+        conn.wr_shut = true;
+        let fd = conn.raw_fd();
+        // SAFETY: plain syscall on a descriptor the ring owns.
+        let result = unsafe { libc::shutdown(fd, libc::SHUT_WR) };
+        if result < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ENOTCONN) {
+                return Poll::Ready(Err(error));
+            }
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl Drop for UringStream {
+    fn drop(&mut self) {
+        let Ok(mut inner) = self.ring.inner.try_borrow_mut() else {
+            // Only reachable if a waker we woke dropped a stream re-entrantly; the slot is
+            // then reclaimed at realm shutdown.
+            return;
+        };
+        let Some(conn) = inner.conns[self.index as usize].as_mut() else {
+            return;
+        };
+        conn.dropped = true;
+        conn.read_waker = None;
+        conn.write_waker = None;
+        let unsent = !conn.sending && !conn.tx_pending.is_empty() && conn.tx_err.is_none();
+        if inner.closed {
+            let conn = inner.conn(self.index);
+            if conn.ops == 0 {
+                inner.conns[self.index as usize] = None;
+                inner.free.push(self.index);
+            }
+            return;
+        }
+        inner.cancel_recv(self.index);
+        if unsent {
+            inner.mark_dirty(self.index);
+        }
+        inner.maybe_release(self.index);
+        drop(inner);
+        self.ring.kick_existing();
+    }
+}
+
+#[cfg(test)]
+mod tests;
