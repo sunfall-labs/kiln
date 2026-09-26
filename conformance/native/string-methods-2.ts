@@ -23,3 +23,11 @@ console.log(["b", "a", "c"].sort((l, r) => l.localeCompare(r)).join(""));
 // normalised, which is what a bundler emits.
 console.log("abc".normalize(), "abc".normalize("NFC"), "abc".toString(), "abc".valueOf());
 console.log(text.toString() === text, text.valueOf() === text, "".normalize() === "");
+console.log("".normalize("NFKD") === "", "ﬁ".normalize("NFKD"), "e\u0301".normalize("NFC"));
+try { "".normalize("INVALID"); } catch (e) { console.log(e instanceof RangeError); }
+try { "abc".normalize("INVALID"); } catch (e) { console.log(e instanceof RangeError); }
+
+const probe = "example_text";
+console.log(probe.localeCompare(probe), "hello".localeCompare("hello"), "".localeCompare(""));
+console.log(["b", "a", "C"].sort((x, y) => x.localeCompare(y, "en", { sensitivity: "base" })).join(""));
+try { "a".localeCompare("a", "invalid!!"); } catch (e) { console.log(e instanceof RangeError); }

@@ -570,9 +570,17 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 // `toString` that throws does so before an invalid `locales` is noticed.
                 let left = self.intl_string_argument(Some(receiver), instruction)?;
                 let right = self.intl_string_argument(arguments.first(), instruction)?;
+                let locales = argument(arguments, 1);
+                let options = argument(arguments, 2);
+                if matches!(locales, Value::Undefined)
+                    && matches!(options, Value::Undefined)
+                    && left == right
+                {
+                    return Ok(Value::Number(0.0));
+                }
                 let built = self.intl_construct(
                     Service::Collator,
-                    &[argument(arguments, 1), argument(arguments, 2)],
+                    &[locales, options],
                     instruction,
                 )?;
                 let Value::Intl(value) = &built else {

@@ -39096,11 +39096,18 @@ fn call_native(
                         None | Some(Value::Undefined) => "NFC".to_owned(),
                         Some(value) => value.to_display_string(),
                     };
-                    let units: Vec<u16> = text.units().collect();
-                    let Some(normalized) = kiln_intl::normalize::normalize(&units, &form) else {
+                    if !matches!(form.as_str(), "NFC" | "NFD" | "NFKC" | "NFKD") {
                         return Err(ExecutionError::RadixOutOfRange);
-                    };
-                    Value::String(StringUnits::from_units(&normalized))
+                    }
+                    if text.is_empty() || text.is_ascii() {
+                        Value::String(text.clone())
+                    } else {
+                        let units: Vec<u16> = text.units().collect();
+                        let Some(normalized) = kiln_intl::normalize::normalize(&units, &form) else {
+                            return Err(ExecutionError::RadixOutOfRange);
+                        };
+                        Value::String(StringUnits::from_units(&normalized))
+                    }
                 }
                 Native::StringTrimStart => {
                     Value::String(string_trim_units(text, true, false))

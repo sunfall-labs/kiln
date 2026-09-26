@@ -59,6 +59,10 @@ impl StringUnits {
         self.unit_len() == 0
     }
 
+    pub fn is_ascii(&self) -> bool {
+        self.as_view().is_ascii()
+    }
+
     pub fn encode_utf16(&self) -> UnitIter<'_> {
         self.units()
     }
@@ -140,6 +144,13 @@ impl<'a> StringView<'a> {
 
     pub fn is_empty(self) -> bool {
         self.unit_len() == 0
+    }
+
+    pub fn is_ascii(self) -> bool {
+        match self {
+            Self::Latin1(bytes) => bytes.is_ascii(),
+            Self::Utf16(units) => units.iter().all(|&unit| unit <= 0x7f),
+        }
     }
 
     pub fn unit_at(self, index: usize) -> Option<u16> {
