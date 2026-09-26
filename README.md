@@ -87,6 +87,18 @@ number, and it is the one to beat. Absolute figures are about half the macOS tab
 which was taken on an unrecorded machine; the two are not comparable and neither is presented as
 the other. Full provenance is in `.scratch/server-throughput/measurements-2026-09-03.md`.
 
+With more than one worker the first process is a supervisor that runs no JavaScript itself (on
+POSIX; Windows always runs one realm). It forwards `SIGTERM`, `SIGINT`, `SIGHUP` and `SIGQUIT` to
+every worker, waits for all of them, and then exits by the same signal (`128+signal` as PID 1), so
+`docker stop` drains every worker; `SIGUSR1` is forwarded without stopping anything. A worker that
+dies of a signal or exits non-zero is restarted with backoff (100 ms doubling to 2 s), and one that
+crashes six times in a row within five seconds of starting stops the server with its status; a
+worker that exits 0 is not restarted. Workers exit when the supervisor dies (Linux:
+`PR_SET_PDEATHSIG`; elsewhere a pipe each worker watches). Each worker sees
+`process.env.KILN_WORKER_INDEX` (`0`..`N-1`, kept across a restart) and `KILN_WORKER_COUNT`, in
+both engines; a single realm sets neither, so a program can run once-only startup work where the
+index is `0` or absent.
+
 On Linux 6.1 and newer, listeners and HTTP connections run on an io_uring owned by the realm's
 own Tokio runtime (multishot accept and receive, batched sends; no second executor). Older
 kernels, and any kernel or seccomp profile that refuses a ring, use epoll. `KILN_IO=epoll` forces

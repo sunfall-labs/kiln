@@ -1220,6 +1220,31 @@ pub struct BuiltinMember {
     /// `"(KILN_C99_METHOD_OBJECT_KEYS)"`. Carried so a guard can join a row against the C it
     /// generates without parsing the macro invocation back out of this file.
     pub answers: &'static str,
+    /// Whether the row is one of kiln's own members rather than the language's (ADR 0068):
+    /// installed by default, left out by `KILN_EXTENSIONS=0` or `kiln build
+    /// --no-kiln-extensions`. Written on the row as a trailing `kiln_extension` and held equal to
+    /// `kiln_builtin_surface::KILN_EXTENSIONS` by [`assert_surface_is_covered`], so a member
+    /// cannot be marked on one side only.
+    pub kiln_extension: bool,
+}
+
+/// `kiln_extension` on a [`builtin_surface!`] row, as the Rust flag and as the emitted C flag.
+macro_rules! kiln_extension_flag {
+    () => {
+        false
+    };
+    (kiln_extension) => {
+        true
+    };
+}
+
+macro_rules! kiln_extension_c_flag {
+    () => {
+        "0,"
+    };
+    (kiln_extension) => {
+        "1,"
+    };
 }
 
 macro_rules! builtin_member_row {
@@ -1298,8 +1323,11 @@ macro_rules! builtin_member_row {
 ///
 /// Rows are declared in the interpreter's own order, because that order is what
 /// `Object.getOwnPropertyNames` reports on both sides and agreeing costs nothing here.
+///
+/// A trailing `kiln_extension` marks one of kiln's own members (ADR 0068); see
+/// [`BuiltinMember::kiln_extension`].
 macro_rules! builtin_surface {
-    ($(($builtin:ident, $owner:literal, $name:literal, $kind:tt $args:tt)),* $(,)?) => {
+    ($(($builtin:ident, $owner:literal, $name:literal, $kind:tt $args:tt $(, $extension:ident)?)),* $(,)?) => {
         /// Every member the emitted C answers for, by owner. See [`BuiltinMember`].
         pub const BUILTIN_SURFACE: &[BuiltinMember] = &[
             $(BuiltinMember {
@@ -1307,11 +1335,16 @@ macro_rules! builtin_surface {
                 name: $name,
                 kind: stringify!($kind),
                 answers: stringify!($args),
+                kiln_extension: kiln_extension_flag!($($extension)?),
             },)*
         ];
 
         macro_rules! emit_builtin_surface_rows {
             () => { concat!($(builtin_member_row!($builtin, $name, $kind $args)),*) };
+        }
+
+        macro_rules! emit_builtin_extension_flags {
+            () => { concat!($(kiln_extension_c_flag!($($extension)?)),*) };
         }
     };
 }
@@ -1532,7 +1565,8 @@ builtin_surface! {
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "length", num("0.0")),
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "constructor", ctor(KILN_C99_BUILTIN_ARRAY)),
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "map", code(KILN_C99_METHOD_ARRAY_GENERIC_MAP)),
-    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "parallelMap", code(KILN_C99_METHOD_ARRAY_PARALLEL_MAP)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "parallelMap", code(KILN_C99_METHOD_ARRAY_PARALLEL_MAP),
+     kiln_extension),
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "forEach", code(KILN_C99_METHOD_FOR_EACH)),
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "filter", code(KILN_C99_METHOD_ARRAY_GENERIC_FILTER)),
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "reduce", code(KILN_C99_METHOD_REDUCE)),
@@ -1692,13 +1726,13 @@ macro_rules! builtin_backlog {
 
 builtin_backlog! {
     ("Object.prototype", "__defineGetter__",
-     "legacy Annex B accessor method not modeled in native C backend"),
+     "answered by the runtime bootstrap in TypeScript, from the prototype's store; no row"),
     ("Object.prototype", "__defineSetter__",
-     "legacy Annex B accessor method not modeled in native C backend"),
+     "answered by the runtime bootstrap in TypeScript, from the prototype's store; no row"),
     ("Object.prototype", "__lookupGetter__",
-     "legacy Annex B accessor method not modeled in native C backend"),
+     "answered by the runtime bootstrap in TypeScript, from the prototype's store; no row"),
     ("Object.prototype", "__lookupSetter__",
-     "legacy Annex B accessor method not modeled in native C backend"),
+     "answered by the runtime bootstrap in TypeScript, from the prototype's store; no row"),
     ("Object.prototype", "__proto__",
      "legacy Annex B proto accessor handled via runtime link rather than static table"),
     ("Function.prototype", "@@hasInstance",
@@ -1710,9 +1744,9 @@ builtin_backlog! {
     ("Map.prototype", "size",
      "Map.prototype.size accessor is evaluated on instances in C99 runtime rather than prototype"),
     ("Map.prototype", "getOrInsert",
-     "getOrInsert Stage 3 method not yet implemented in C99"),
+     "answered by the runtime bootstrap in TypeScript, from the prototype's store; no row"),
     ("Map.prototype", "getOrInsertComputed",
-     "getOrInsertComputed Stage 3 method not yet implemented in C99"),
+     "answered by the runtime bootstrap in TypeScript, from the prototype's store; no row"),
     ("Set.prototype", "size",
      "Set.prototype.size accessor is evaluated on instances in C99 runtime rather than prototype"),
     ("Set.prototype", "union",
@@ -1730,9 +1764,9 @@ builtin_backlog! {
     ("Set.prototype", "isDisjointFrom",
      "answered by the runtime bootstrap in TypeScript, from the prototype's store; no row"),
     ("WeakMap.prototype", "getOrInsert",
-     "getOrInsert Stage 3 method not yet implemented in C99"),
+     "answered by the runtime bootstrap in TypeScript, from the prototype's store; no row"),
     ("WeakMap.prototype", "getOrInsertComputed",
-     "getOrInsertComputed Stage 3 method not yet implemented in C99"),
+     "answered by the runtime bootstrap in TypeScript, from the prototype's store; no row"),
     ("Object", "groupBy",
      "answered by the runtime bootstrap in TypeScript, from the constructor's store; no row"),
     ("Object", "seal",
@@ -1921,6 +1955,24 @@ const fn assert_surface_is_covered(surface: &[BuiltinMember], backlog: &[Builtin
                  either declare it there so both engines have it, or drop the row"
             );
         }
+        index += 1;
+    }
+
+    // A kiln extension is marked on its row exactly when the shared description declares it one
+    // (ADR 0068): the switch that removes them reads the row's mark, so a mark missing here would
+    // leave the member installed under `KILN_EXTENSIONS=0`, and a stray one would remove a member
+    // of the language.
+    index = 0;
+    while index < surface.len() {
+        assert!(
+            surface[index].kiln_extension
+                == kiln_builtin_surface::is_kiln_extension(
+                    surface[index].owner,
+                    surface[index].name
+                ),
+            "a BUILTIN_SURFACE row's `kiln_extension` mark disagrees with \
+             kiln_builtin_surface::KILN_EXTENSIONS"
+        );
         index += 1;
     }
 
@@ -4150,19 +4202,23 @@ static uint64_t kiln_c99_iterator_prototype_method(const char *key, size_t key_l
 
 /* A member the language puts on `Iterator.prototype` that this backend has not built.
  *
- * Named rather than counted, and separate from the range above, because the two absences are
- * different answers. `it.nope` is undefined on any object and must stay so; `it.chunks` is a
- * function in the interpreter, so answering undefined here would send
- * `typeof it.chunks === "function"` down the branch written for a realm that never had it. The
- * refusal is the honest half of that pair. */
+ * `chunks`, `windows` and `join` are now answered by bootstrap TypeScript in iterator.ts. */
 static int kiln_c99_iterator_prototype_gap(const char *key, size_t key_len) {
-    return kiln_c99_same_name(key, key_len, "chunks") ||
-           kiln_c99_same_name(key, key_len, "windows") ||
-           kiln_c99_same_name(key, key_len, "join");
+    (void)key;
+    (void)key_len;
+    return 0;
 }
 
+static int kiln_c99_extension_withheld(uint64_t builtin, const char *key, size_t key_len);
+
+/* An array's methods by name. A kiln extension the realm withholds (ADR 0068) is not one of them,
+ * so `[].parallelMap` reads `undefined` under `KILN_EXTENSIONS=0` exactly as it does in Node. */
 static uint64_t kiln_c99_array_method(const char *key, size_t key_len) {
-    return kiln_c99_lookup_method_group(key, key_len, KILN_C99_GROUP_ARRAY_LOOKUP);
+    uint64_t code = kiln_c99_lookup_method_group(key, key_len, KILN_C99_GROUP_ARRAY_LOOKUP);
+    if (code != 0 && kiln_c99_extension_withheld(KILN_C99_BUILTIN_ARRAY_PROTOTYPE, key, key_len)) {
+        return 0;
+    }
+    return code;
 }
 
 /* Whether a name is a member of `Array.prototype` *in the language*, and the same question for
@@ -4188,6 +4244,11 @@ static int kiln_c99_is_array_member(const char *key, size_t key_len) {
         "toLocaleString", "toReversed", "toSorted", "toSpliced", "toString", "unshift", "values",
         "with"};
     size_t index;
+    /* A withheld kiln extension is not a member at all (ADR 0068), which is the answer that keeps
+     * a read of it `undefined` rather than a refusal. */
+    if (kiln_c99_extension_withheld(KILN_C99_BUILTIN_ARRAY_PROTOTYPE, key, key_len)) {
+        return 0;
+    }
     for (index = 0; index < sizeof members / sizeof *members; ++index) {
         if (kiln_c99_same_name(key, key_len, members[index])) {
             return 1;
@@ -4200,23 +4261,17 @@ static int kiln_c99_is_array_member(const char *key, size_t key_len) {
 }
 
 static int kiln_c99_is_date_member(const char *key, size_t key_len) {
+    /* All other Date.prototype members are answered by date.ts from the prototype's store.
+     * The toLocale* methods require Intl locale data (ADR 0063 rule 5) and remain unbuilt. */
     static const char *const members[] = {
-        "constructor", "getDate", "getDay", "getFullYear", "getHours", "getMilliseconds",
-        "getMinutes", "getMonth", "getSeconds", "getTime", "getTimezoneOffset", "getUTCDate",
-        "getUTCDay", "getUTCFullYear", "getUTCHours", "getUTCMilliseconds", "getUTCMinutes",
-        "getUTCMonth", "getUTCSeconds", "getYear", "setDate", "setFullYear", "setHours",
-        "setMilliseconds", "setMinutes", "setMonth", "setSeconds", "setTime", "setUTCDate",
-        "setUTCFullYear", "setUTCHours", "setUTCMilliseconds", "setUTCMinutes", "setUTCMonth",
-        "setUTCSeconds", "setYear", "toDateString", "toISOString", "toJSON", "toLocaleDateString",
-        "toLocaleString", "toLocaleTimeString", "toString", "toTimeString", "toUTCString",
-        "valueOf"};
+        "toLocaleDateString", "toLocaleString", "toLocaleTimeString"};
     size_t index;
     for (index = 0; index < sizeof members / sizeof *members; ++index) {
         if (kiln_c99_same_name(key, key_len, members[index])) {
             return 1;
         }
     }
-    return kiln_c99_same_name(key, key_len, "@@toPrimitive");
+    return 0;
 }
 
 /* The same question one type further over: whether a name is a member of the prototype the
@@ -4323,37 +4378,10 @@ static int kiln_c99_is_string_member(const char *key, size_t key_len) {
  * rather than delegating to `kiln_c99_array_method`, which would hand out `push` -- a name node
  * answers `undefined` for and a program feature-detects on. */
 static uint64_t kiln_c99_typed_prototype_method(const char *key, size_t key_len) {
-    if (kiln_c99_same_name(key, key_len, "join")) return KILN_C99_METHOD_JOIN;
-    if (kiln_c99_same_name(key, key_len, "values")) return KILN_C99_METHOD_ARRAY_VALUES;
-    if (kiln_c99_same_name(key, key_len, "entries")) return KILN_C99_METHOD_ARRAY_ENTRIES;
-    if (kiln_c99_same_name(key, key_len, "keys")) return KILN_C99_METHOD_ARRAY_KEYS;
+    /* Most %TypedArray%.prototype methods are answered by typedarray.ts from the
+     * prototype's store. Only raw C ABI primitives (subarray and set) have fallback codes. */
     if (kiln_c99_same_name(key, key_len, "subarray")) return KILN_C99_METHOD_TYPED_SUBARRAY;
-    if (kiln_c99_same_name(key, key_len, "slice")) return KILN_C99_METHOD_SLICE;
     if (kiln_c99_same_name(key, key_len, "set")) return KILN_C99_METHOD_TYPED_SET;
-    if (kiln_c99_same_name(key, key_len, "fill")) return KILN_C99_METHOD_TYPED_FILL;
-    /* `toString` is `Array.prototype.toString`, which joins -- not `Object.prototype.toString`,
-     * which reports the kind. Falling through to the generic one is how `String(view)` came to
-     * be "[object Uint8Array]" where both node and the interpreter say "1,2,3". */
-    if (kiln_c99_same_name(key, key_len, "toString")) return KILN_C99_METHOD_ARRAY_TO_STRING;
-    if (kiln_c99_same_name(key, key_len, "at")) return KILN_C99_METHOD_ARRAY_AT;
-    if (kiln_c99_same_name(key, key_len, "indexOf")) return KILN_C99_METHOD_INDEX_OF;
-    if (kiln_c99_same_name(key, key_len, "lastIndexOf")) return KILN_C99_METHOD_ARRAY_LAST_INDEX_OF;
-    if (kiln_c99_same_name(key, key_len, "includes")) return KILN_C99_METHOD_INCLUDES;
-    if (kiln_c99_same_name(key, key_len, "find")) return KILN_C99_METHOD_ARRAY_FIND;
-    if (kiln_c99_same_name(key, key_len, "findIndex")) return KILN_C99_METHOD_ARRAY_FIND_INDEX;
-    if (kiln_c99_same_name(key, key_len, "findLast")) return KILN_C99_METHOD_ARRAY_FIND_LAST;
-    if (kiln_c99_same_name(key, key_len, "findLastIndex"))
-        return KILN_C99_METHOD_ARRAY_FIND_LAST_INDEX;
-    if (kiln_c99_same_name(key, key_len, "forEach")) return KILN_C99_METHOD_FOR_EACH;
-    if (kiln_c99_same_name(key, key_len, "some")) return KILN_C99_METHOD_ARRAY_SOME;
-    if (kiln_c99_same_name(key, key_len, "every")) return KILN_C99_METHOD_ARRAY_EVERY;
-    if (kiln_c99_same_name(key, key_len, "reduce")) return KILN_C99_METHOD_REDUCE;
-    if (kiln_c99_same_name(key, key_len, "reduceRight")) return KILN_C99_METHOD_ARRAY_REDUCE_RIGHT;
-    if (kiln_c99_same_name(key, key_len, "map")) return KILN_C99_METHOD_MAP;
-    if (kiln_c99_same_name(key, key_len, "parallelMap")) return KILN_C99_METHOD_ARRAY_PARALLEL_MAP;
-    if (kiln_c99_same_name(key, key_len, "filter")) return KILN_C99_METHOD_FILTER;
-    if (kiln_c99_same_name(key, key_len, "sort")) return KILN_C99_METHOD_ARRAY_SORT;
-    if (kiln_c99_same_name(key, key_len, "reverse")) return KILN_C99_METHOD_ARRAY_REVERSE;
     return 0;
 }
 
@@ -4366,20 +4394,10 @@ static uint64_t kiln_c99_typed_prototype_method(const char *key, size_t key_len)
  * absent and are not implemented either: answering `undefined` for one would be a silent wrong
  * answer, so a read of one refuses instead and lands in the backlog by name. */
 static int kiln_c99_is_typed_array_member(int byte_view, const char *key, size_t key_len) {
-    static const char *const members[] = {"copyWithin", "toLocaleString", "toReversed",
-                                          "toSorted",   "with"};
-    /* The base64 and hex codecs are `Uint8Array`'s alone -- they read and write *bytes*, and no
-     * other view's element is a byte -- so the kind is part of the question. `Int32Array.prototype
-     * .toBase64` is absent in the language and `undefined` is its right answer; on a `Uint8Array`
-     * the interpreter has a function, and `undefined` there is the silent wrong answer a
-     * `typeof view.toBase64 === "function"` feature test walks past. */
+    /* copyWithin, toLocaleString, toReversed, toSorted, and with are answered by typedarray.ts.
+     * The base64 and hex codecs are Uint8Array's alone and remain unbuilt. */
     static const char *const byte_members[] = {"setFromBase64", "setFromHex"};
     size_t index;
-    for (index = 0; index < sizeof members / sizeof *members; ++index) {
-        if (kiln_c99_same_name(key, key_len, members[index])) {
-            return 1;
-        }
-    }
     if (!byte_view) {
         return 0;
     }
@@ -4392,22 +4410,12 @@ static int kiln_c99_is_typed_array_member(int byte_view, const char *key, size_t
 }
 
 /* Whether a name is a member of `ArrayBuffer.prototype` *in the language* that this backend does
- * not answer -- the same question `kiln_c99_is_typed_array_member` asks one type over.
- *
- * An `ArrayBuffer` here answers `byteLength` and `constructor` and nothing else, and every other
- * name read as `undefined` against the interpreter's functions and booleans:
- * `typeof buffer.slice === "function"` is a feature test a bundle really writes, and `undefined`
- * walks past it. None of these is implemented -- the buffer has no length that can move and no
- * hand-off -- so each refuses by name and lands in the backlog rather than lying about itself. */
+ * not answer -- the same question `kiln_c99_is_typed_array_member` asks one type over. */
 static int kiln_c99_is_array_buffer_member(const char *key, size_t key_len) {
-    static const char *const members[] = {"detached",
-                                          "immutable",
-                                          "maxByteLength",
-                                          "resizable",
+    /* detached, maxByteLength, resizable, transfer, and transferToFixedLength are answered by arraybuffer.ts. */
+    static const char *const members[] = {"immutable",
                                           "resize",
                                           "sliceToImmutable",
-                                          "transfer",
-                                          "transferToFixedLength",
                                           "transferToImmutable"};
     size_t index;
     for (index = 0; index < sizeof members / sizeof *members; ++index) {
@@ -4497,6 +4505,16 @@ static const kiln_builtin_member kiln_c99_builtin_members[] = {
 
 #define KILN_C99_SURFACE_MEMBER_COUNT \
     (sizeof kiln_c99_builtin_members / sizeof *kiln_c99_builtin_members)
+
+/* One flag per row above: 1 where the row is one of kiln's own members rather than the
+ * language's (ADR 0068), from the row's `kiln_extension` mark, which the Rust build holds equal to
+ * `kiln_builtin_surface::KILN_EXTENSIONS`. `kiln_c99_builtin_row_withheld` in `surface.c` is the
+ * one place it is read. */
+static const unsigned char kiln_c99_builtin_member_is_extension[] = {
+"#,
+    emit_builtin_extension_flags!(),
+    r#"
+};
 
 /* The members this backend knows the language has and it does not answer, by the global that owns
  * them. Generated from the same declaration as the Rust list, so the two cannot disagree.
@@ -4757,6 +4775,8 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     // How many shapes the tree holds, which bounds it. Shapes outlive realms like the root does.
     ("kiln_c99_shape_total", C99StateOwner::Process),
     ("kiln_c99_speculate_mode", C99StateOwner::Process),
+    // ADR 0068: whether this process installs kiln's own members, read from the environment once.
+    ("kiln_c99_kiln_extensions_state", C99StateOwner::Process),
     ("kiln_c99_node_stdin_paused", C99StateOwner::Process),
     ("kiln_c99_node_stdin_read_active", C99StateOwner::Process),
     ("kiln_c99_node_stdin_request", C99StateOwner::Process),

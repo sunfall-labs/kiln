@@ -1170,6 +1170,7 @@ static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, s
 static kiln_value kiln_c99_undefined(void);
 static kiln_value kiln_c99_null(void);
 static kiln_value kiln_c99_boolean(int value);
+static int kiln_c99_kiln_extensions_on(void);
 static kiln_value kiln_c99_number(double value);
 static kiln_value kiln_c99_uninitialized(void);
 static kiln_value kiln_c99_builtin(uint64_t code);
@@ -2048,6 +2049,7 @@ static uint64_t kiln_c99_lookup_method_group(const char *key, size_t key_len, ui
 static uint64_t kiln_c99_lookup_method(const char *key, size_t key_len, uint64_t first,
 static uint64_t kiln_c99_iterator_prototype_method(const char *key, size_t key_len) {
 static int kiln_c99_iterator_prototype_gap(const char *key, size_t key_len) {
+static int kiln_c99_extension_withheld(uint64_t builtin, const char *key, size_t key_len);
 static uint64_t kiln_c99_array_method(const char *key, size_t key_len) {
 static int kiln_c99_is_array_member(const char *key, size_t key_len) {
 static int kiln_c99_is_date_member(const char *key, size_t key_len) {
@@ -2068,6 +2070,8 @@ static uint64_t kiln_c99_string_method(const char *key, size_t key_len) {
 typedef struct {
 static const kiln_builtin_member kiln_c99_builtin_members[] = {
 #define KILN_C99_SURFACE_MEMBER_COUNT \
+static const unsigned char kiln_c99_builtin_member_is_extension[] = {
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
 typedef struct {
 static const kiln_builtin_gap kiln_c99_builtin_backlog[] = {
 static void *kiln_c99_node_hidden_pointer(kiln_value object, const char *key, size_t key_len);
@@ -2075,6 +2079,13 @@ static int kiln_c99_val_call(kiln_host *host, kiln_val callee, const kiln_val *a
 int kiln_c99_get_array_unscopables(kiln_value *out);
 static const char *kiln_c99_builtin_owner_name(uint64_t builtin) {
 static int kiln_c99_backlog_names(const char *owner, const char *key, size_t key_len) {
+static int kiln_c99_kiln_extensions_state;
+static int kiln_c99_kiln_extensions_on(void) {
+#if defined(KILN_REALM_NO_EXTENSIONS)
+#else
+#endif
+static int kiln_c99_builtin_row_withheld(size_t row) {
+static int kiln_c99_extension_withheld(uint64_t builtin, const char *key, size_t key_len) {
 static int kiln_c99_has_surface(uint64_t builtin) {
 typedef struct kiln_builtin_member_entry {
 static kiln_builtin_member_entry kiln_c99_builtin_member_index[KILN_C99_SURFACE_MEMBER_COUNT];
@@ -2455,8 +2466,6 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
 #else
 #endif
 #if KILN_RETAIN_GROUP_MATH_NUMBER
-#endif
-#if KILN_RETAIN_GROUP_DATE_SETTER
 #endif
 static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth,
 static int kiln_c99_is_symbol_key(const char *key, size_t key_len) {

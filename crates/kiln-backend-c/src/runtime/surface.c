@@ -40,6 +40,52 @@ static int kiln_c99_backlog_names(const char *owner, const char *key, size_t key
     return 0;
 }
 
+/* KILN EXTENSIONS (ADR 0068). kiln installs members Node does not have -- `parallelMap` first --
+ * and every one of them can be removed with one switch, for the rare program that audits the
+ * built-ins: `KILN_EXTENSIONS=0` in the environment of any run, or a binary built with
+ * `kiln build --no-kiln-extensions`, which defines `KILN_REALM_NO_EXTENSIONS` for this unit and
+ * then never installs them whatever its environment says.
+ *
+ * Which members are extensions is not decided here: each is a surface row marked
+ * `kiln_extension`, which the Rust build holds equal to `kiln_builtin_surface::KILN_EXTENSIONS`,
+ * and the functions below are the only readers of that mark. Read once per process, like the
+ * interpreter's `kiln_extensions_installed`: a program's surface does not change while it runs. */
+static int kiln_c99_kiln_extensions_state;
+
+static int kiln_c99_kiln_extensions_on(void) {
+#if defined(KILN_REALM_NO_EXTENSIONS)
+    return 0;
+#else
+    if (kiln_c99_kiln_extensions_state == 0) {
+        const char *value = getenv("KILN_EXTENSIONS");
+        kiln_c99_kiln_extensions_state = value != NULL && strcmp(value, "0") == 0 ? 2 : 1;
+    }
+    return kiln_c99_kiln_extensions_state == 1;
+#endif
+}
+
+/* Whether surface row `row` is a kiln extension this process leaves out. */
+static int kiln_c99_builtin_row_withheld(size_t row) {
+    return kiln_c99_builtin_member_is_extension[row] != 0 && !kiln_c99_kiln_extensions_on();
+}
+
+/* Whether `builtin.key` is a kiln extension this process leaves out: the question for the lookups
+ * that answer by name rather than by row (`kiln_c99_array_method`, `kiln_c99_is_array_member`). */
+static int kiln_c99_extension_withheld(uint64_t builtin, const char *key, size_t key_len) {
+    size_t index;
+    if (kiln_c99_kiln_extensions_on()) {
+        return 0;
+    }
+    for (index = 0; index < KILN_C99_SURFACE_MEMBER_COUNT; ++index) {
+        const kiln_builtin_member *member = &kiln_c99_builtin_members[index];
+        if (kiln_c99_builtin_member_is_extension[index] != 0 && member->builtin == builtin &&
+            kiln_c99_same_name(key, key_len, member->name)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* Whether this built-in's surface is table-driven at all.
  *
  * The ones that are not -- the prototype method tables, `Temporal`'s eight types, the typed-array
@@ -94,14 +140,21 @@ static int kiln_c99_builtin_member_entry_before(const kiln_builtin_member_entry 
 
 static void kiln_c99_builtin_member_index_build(void) {
     size_t index;
+    size_t len = 0;
     for (index = 0; index < KILN_C99_SURFACE_MEMBER_COUNT; ++index) {
         const kiln_builtin_member *member = &kiln_c99_builtin_members[index];
-        kiln_c99_builtin_member_index[index].builtin = member->builtin;
-        kiln_c99_builtin_member_index[index].name = member->name;
-        kiln_c99_builtin_member_index[index].len = member->name != NULL ? strlen(member->name) : 0;
-        kiln_c99_builtin_member_index[index].row = index;
+        /* A withheld kiln extension (ADR 0068) never enters the index, so every lookup through it
+         * -- read, call, `in`, `hasOwnProperty`, descriptors -- misses it exactly as on Node. */
+        if (kiln_c99_builtin_row_withheld(index)) {
+            continue;
+        }
+        kiln_c99_builtin_member_index[len].builtin = member->builtin;
+        kiln_c99_builtin_member_index[len].name = member->name;
+        kiln_c99_builtin_member_index[len].len = member->name != NULL ? strlen(member->name) : 0;
+        kiln_c99_builtin_member_index[len].row = index;
+        ++len;
     }
-    for (index = 1; index < KILN_C99_SURFACE_MEMBER_COUNT; ++index) {
+    for (index = 1; index < len; ++index) {
         kiln_builtin_member_entry pending = kiln_c99_builtin_member_index[index];
         size_t behind = index;
         while (behind > 0 &&
@@ -111,7 +164,7 @@ static void kiln_c99_builtin_member_index_build(void) {
         }
         kiln_c99_builtin_member_index[behind] = pending;
     }
-    kiln_c99_builtin_member_index_len = KILN_C99_SURFACE_MEMBER_COUNT;
+    kiln_c99_builtin_member_index_len = len;
     kiln_c99_builtin_member_index_ready = 1;
 }
 
@@ -295,15 +348,14 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
     case KILN_C99_BUILTIN_REGEXP_PROTOTYPE:
         return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_REGEXP_TEST,
                                       KILN_C99_METHOD_REGEXP_TO_STRING);
-    case KILN_C99_BUILTIN_DATE_PROTOTYPE: {
-        uint64_t code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_GET_TIME,
-                                               KILN_C99_METHOD_DATE_TO_STRING);
-        if (code == 0) {
-            code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_SET_TIME,
-                                          KILN_C99_METHOD_SET_MILLISECONDS);
+    case KILN_C99_BUILTIN_DATE_PROTOTYPE:
+        if (kiln_c99_same_name(key, key_len, "getTime")) {
+            return KILN_C99_METHOD_GET_TIME;
         }
-        return code;
-    }
+        if (kiln_c99_same_name(key, key_len, "setTime")) {
+            return KILN_C99_METHOD_SET_TIME;
+        }
+        return 0;
 
     case KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE:
         /* The same range an instance read uses, so `DataView.prototype.getUint8` and

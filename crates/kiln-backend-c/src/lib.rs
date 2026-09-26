@@ -96,6 +96,9 @@ pub struct EmissionPolicy {
     pub compile_regex: Option<bool>,
     /// Omit embedded JavaScript source text for closures (Function.prototype.toString returns [native code]).
     pub omit_source: bool,
+    /// Build a binary that never installs kiln's own members (ADR 0068), whatever its
+    /// `KILN_EXTENSIONS` says at run time: `kiln build --no-kiln-extensions`.
+    pub no_kiln_extensions: bool,
 }
 
 impl EmissionPolicy {
@@ -3262,6 +3265,9 @@ fn render_emission_policy(output: &mut String, policy: &EmissionPolicy) {
         u8::from(policy.host_clock)
     )
     .unwrap();
+    if policy.no_kiln_extensions {
+        output.push_str("#define KILN_REALM_NO_EXTENSIONS 1\n");
+    }
     match policy.entropy {
         EmissionEntropyPolicy::Deterministic => {}
         EmissionEntropyPolicy::Seeded(seed) => {
@@ -5046,6 +5052,11 @@ fn hash_program_with_policy_and_seed(program: &Program, policy: &EmissionPolicy,
         hash ^= u64::from(value);
         hash = hash.wrapping_mul(0x100000001b3);
     }
+    // Mixed in only when set, so every existing key is unchanged (ADR 0068).
+    if policy.no_kiln_extensions {
+        hash ^= 0x7e;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
     if let Some(seed) = entropy_seed {
         for value in seed.to_le_bytes() {
             hash ^= u64::from(value);
@@ -5577,6 +5588,11 @@ fn hash_module_with_policy_and_seed(
         u8::from(policy.generic_only),
     ] {
         hash ^= u64::from(value);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    // Mixed in only when set, so every existing key is unchanged (ADR 0068).
+    if policy.no_kiln_extensions {
+        hash ^= 0x7e;
         hash = hash.wrapping_mul(0x100000001b3);
     }
     if let Some(seed) = entropy_seed {

@@ -27319,6 +27319,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Value::Native(Native::NodeBufferToString, realm),
             );
         }
+        // Whether this realm installs kiln's own members (ADR 0068), for the shared bootstrap's
+        // `%TypedArray%.prototype`, which installs its extension itself. Captured and deleted by
+        // `kiln-builtins/src/extensions.ts` before any other bootstrap line runs.
+        globals.set_non_enumerable(
+            "__kilnExtensions",
+            Value::Boolean(kiln_builtin_surface::kiln_extensions_installed()),
+        );
         // The four bridges the shared `URL` (`kiln-builtins/src/url.ts`) captures and deletes;
         // the URL bootstrap runs in every mode, as the native runtime's does.
         for (name, native) in [
@@ -41669,7 +41676,7 @@ fn number_method_value(method: kiln_builtin_surface::NumberMethod, realm: RealmI
 
 /// The methods a number primitive exposes.
 fn number_property(name: &str) -> Value {
-    let Some(member) = kiln_builtin_surface::find_prototype_member(
+    let Some(member) = kiln_builtin_surface::installed_prototype_member(
         kiln_builtin_surface::PrototypeId::Number,
         name,
     ) else {
@@ -41687,9 +41694,10 @@ fn number_property(name: &str) -> Value {
 }
 
 fn array_property(name: &str) -> Value {
-    let Some(member) =
-        kiln_builtin_surface::find_prototype_member(kiln_builtin_surface::PrototypeId::Array, name)
-    else {
+    let Some(member) = kiln_builtin_surface::installed_prototype_member(
+        kiln_builtin_surface::PrototypeId::Array,
+        name,
+    ) else {
         return Value::Undefined;
     };
     match member.binding {
@@ -44546,10 +44554,16 @@ const TYPED_ARRAY_GENERIC_METHODS: [&str; 28] = [
 ];
 
 /// The static spelling of one of those names, which is what a marker can carry.
+///
+/// A kiln extension (ADR 0068) is left out when this process withholds them, the same check the
+/// description-driven tables make, so `%TypedArray%.prototype` answers exactly Node's names then.
 fn typed_array_generic(name: &str) -> Option<&'static str> {
     TYPED_ARRAY_GENERIC_METHODS
         .into_iter()
         .find(|method| *method == name)
+        .filter(|method| {
+            !kiln_builtin_surface::is_withheld_extension("%TypedArray%.prototype", method)
+        })
 }
 
 /// The methods on `ArrayBuffer.prototype`, for the same reason.
@@ -44763,7 +44777,7 @@ fn object_method_value(method: kiln_builtin_surface::ObjectMethod, realm: RealmI
 }
 
 fn object_property(name: &str) -> Value {
-    let Some(member) = kiln_builtin_surface::find_prototype_member(
+    let Some(member) = kiln_builtin_surface::installed_prototype_member(
         kiln_builtin_surface::PrototypeId::Object,
         name,
     ) else {
@@ -44851,7 +44865,7 @@ fn intrinsic_owns(native: Native, key: &str) -> Option<Value> {
 }
 
 fn tabulated_object_property(name: &str) -> Value {
-    let Some(member) = kiln_builtin_surface::find_prototype_member(
+    let Some(member) = kiln_builtin_surface::installed_prototype_member(
         kiln_builtin_surface::PrototypeId::Object,
         name,
     ) else {
@@ -44885,7 +44899,7 @@ fn inherit_from_object(table: PrototypeTable, found: Value, name: &str) -> Value
 
 /// What `Boolean.prototype` answers, and what a boolean primitive finds through it.
 fn boolean_method(name: &str) -> Value {
-    let Some(member) = kiln_builtin_surface::find_prototype_member(
+    let Some(member) = kiln_builtin_surface::installed_prototype_member(
         kiln_builtin_surface::PrototypeId::Boolean,
         name,
     ) else {
@@ -44907,7 +44921,7 @@ fn boolean_method(name: &str) -> Value {
 
 /// What `BigInt.prototype` answers.
 fn bigint_method(name: &str) -> Value {
-    let Some(member) = kiln_builtin_surface::find_prototype_member(
+    let Some(member) = kiln_builtin_surface::installed_prototype_member(
         kiln_builtin_surface::PrototypeId::BigInt,
         name,
     ) else {
@@ -44933,7 +44947,7 @@ fn bigint_method(name: &str) -> Value {
 
 /// What `Promise.prototype` answers, and what a promise finds through it.
 fn promise_method(name: &str) -> Value {
-    let Some(member) = kiln_builtin_surface::find_prototype_member(
+    let Some(member) = kiln_builtin_surface::installed_prototype_member(
         kiln_builtin_surface::PrototypeId::Promise,
         name,
     ) else {
@@ -45835,7 +45849,7 @@ fn function_method_value(method: kiln_builtin_surface::FunctionMethod, realm: Re
 
 /// The same three with the realm's store left out: what `Function.prototype` was *built* with.
 fn tabulated_function_property(name: &str) -> Value {
-    let Some(member) = kiln_builtin_surface::find_prototype_member(
+    let Some(member) = kiln_builtin_surface::installed_prototype_member(
         kiln_builtin_surface::PrototypeId::Function,
         name,
     ) else {
@@ -45889,9 +45903,10 @@ fn map_method_value(method: kiln_builtin_surface::MapMethod, realm: RealmId) -> 
 }
 
 fn tabulated_map_property(name: &str) -> Value {
-    let Some(member) =
-        kiln_builtin_surface::find_prototype_member(kiln_builtin_surface::PrototypeId::Map, name)
-    else {
+    let Some(member) = kiln_builtin_surface::installed_prototype_member(
+        kiln_builtin_surface::PrototypeId::Map,
+        name,
+    ) else {
         return Value::Undefined;
     };
     match member.binding {
@@ -45957,9 +45972,10 @@ fn set_method_value(method: kiln_builtin_surface::SetMethod, realm: RealmId) -> 
 }
 
 fn tabulated_set_property(name: &str) -> Value {
-    let Some(member) =
-        kiln_builtin_surface::find_prototype_member(kiln_builtin_surface::PrototypeId::Set, name)
-    else {
+    let Some(member) = kiln_builtin_surface::installed_prototype_member(
+        kiln_builtin_surface::PrototypeId::Set,
+        name,
+    ) else {
         return Value::Undefined;
     };
     match member.binding {
@@ -46003,7 +46019,7 @@ fn weak_map_method_value(method: kiln_builtin_surface::WeakMapMethod, realm: Rea
 }
 
 fn tabulated_weak_map_property(name: &str) -> Value {
-    let Some(member) = kiln_builtin_surface::find_prototype_member(
+    let Some(member) = kiln_builtin_surface::installed_prototype_member(
         kiln_builtin_surface::PrototypeId::WeakMap,
         name,
     ) else {
@@ -46032,7 +46048,7 @@ fn weak_set_method_value(method: kiln_builtin_surface::WeakSetMethod, realm: Rea
 }
 
 fn tabulated_weak_set_property(name: &str) -> Value {
-    let Some(member) = kiln_builtin_surface::find_prototype_member(
+    let Some(member) = kiln_builtin_surface::installed_prototype_member(
         kiln_builtin_surface::PrototypeId::WeakSet,
         name,
     ) else {
@@ -47342,7 +47358,7 @@ impl Intrinsics {
                 _ => unreachable!(),
             };
             let mut data = ObjectData::default();
-            for member in kiln_builtin_surface::prototype_members(proto_id) {
+            for member in kiln_builtin_surface::installed_prototype_members(proto_id) {
                 let key_str = match member.key {
                     kiln_builtin_surface::MemberKey::Named(name) => name,
                     kiln_builtin_surface::MemberKey::Symbol(sym) => sym.property_key(),
@@ -47962,7 +47978,7 @@ fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String, Property)>
         PrototypeTable::WeakSet => Some(kiln_builtin_surface::PrototypeId::WeakSet),
         _ => None,
     } {
-        return kiln_builtin_surface::prototype_members(proto_id)
+        return kiln_builtin_surface::installed_prototype_members(proto_id)
             .filter_map(|member| {
                 let name = match member.key {
                     kiln_builtin_surface::MemberKey::Named(name) => name,
@@ -48900,7 +48916,7 @@ fn intrinsic_own_attributes(target: &Value, key: &str) -> Option<Attributes> {
             PrototypeTable::WeakSet => kiln_builtin_surface::PrototypeId::WeakSet,
             _ => unreachable!(),
         };
-        return kiln_builtin_surface::find_prototype_member(proto_id, key).map(|member| {
+        return kiln_builtin_surface::installed_prototype_member(proto_id, key).map(|member| {
             Attributes {
                 writable: member.attributes.writable,
                 enumerable: member.attributes.enumerable,

@@ -332,6 +332,7 @@ server.listen(0, "127.0.0.1", () => {
                 true,
                 false,
                 false,
+                false,
                 None,
                 None,
             )
@@ -417,6 +418,7 @@ server.listen(0, "127.0.0.1", () => {
                 kiln_proto::NativeProfile::Dev,
                 false,
                 true,
+                false,
                 false,
                 false,
                 None,
@@ -716,6 +718,62 @@ server.listen(0, "127.0.0.1", () => {
         let _ = std::fs::remove_dir_all(&fixture);
     }
 
+    /// ADR 0068 rule 4: `kiln build --no-kiln-extensions` fixes the answer into the binary, so it
+    /// installs exactly Node's surface even when its environment asks for the extensions.
+    #[test]
+    fn one_shot_native_build_without_kiln_extensions_installs_node_surface() {
+        let fixture = std::env::temp_dir().join(format!(
+            "kiln-cli-no-extensions-fixture-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&fixture);
+        std::fs::create_dir_all(&fixture).expect("create no-extensions fixture");
+        let source = fixture.join("main.ts");
+        let artifact = fixture.join("main");
+        std::fs::write(
+            &source,
+            "const ta = Object.getPrototypeOf(Uint8Array.prototype);\n\
+             console.log('parallelMap' in [], Object.getOwnPropertyNames(Array.prototype).includes('parallelMap'));\n\
+             console.log('parallelMap' in ta, typeof (new Uint8Array(1) as any).parallelMap);\n\
+             try { ([1, 2] as any).parallelMap((x: number) => x); console.log('called'); } catch (e) { console.log(e instanceof TypeError); }\n",
+        )
+        .expect("write source");
+
+        let built = {
+            let mut session = OneShot::start().expect("start an in-process engine");
+            commands::build(
+                &mut session,
+                &source,
+                &fixture,
+                Some(&artifact),
+                kiln_proto::NativeProfile::Dev,
+                false,
+                false,
+                false,
+                true,
+                false,
+                None,
+                None,
+            )
+            .expect("build without kiln extensions")
+        };
+        assert_eq!(built.exit_code, 0);
+        let output = std::process::Command::new(&artifact)
+            .env("KILN_EXTENSIONS", "1")
+            .output()
+            .expect("run the binary built without kiln extensions");
+        assert!(
+            output.status.success(),
+            "stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "false false\nfalse undefined\ntrue\n"
+        );
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
     #[test]
     fn one_shot_native_build_with_explain_prints_facts() {
         let fixture =
@@ -741,6 +799,7 @@ server.listen(0, "127.0.0.1", () => {
                 false,
                 false,
                 true,
+                false,
                 false,
                 None,
                 None,

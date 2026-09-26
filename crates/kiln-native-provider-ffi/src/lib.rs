@@ -150,13 +150,14 @@ mod realm {
     use kiln_host_abi::{
         AsyncHostError, AsyncHostOp, AsyncHostValue, RequestId, ResourceId, ResourceKind,
     };
+    use kiln_runtime::{
+        Executor, Realm, RealmCapabilities, RealmState, RuntimeTurn, TimerId, TokioHost, WorkItem,
+        duration_from_milliseconds,
+    };
     #[cfg(feature = "realm-http")]
     use kiln_runtime::{
-        ActiveHttpRuntime, HttpCloseMode,
+        HttpCloseMode,
         node_http_agent::{AgentDecision, AgentRelease, HttpOrigin},
-    };
-    use kiln_runtime::{
-        Realm, RealmRuntime, RuntimeTurn, TimerId, WorkItem, duration_from_milliseconds,
     };
     use kiln_string::StringUnits;
     use std::cell::{Cell, RefCell};
@@ -818,7 +819,11 @@ mod realm {
     }
 
     struct NativeRealm {
-        runtime: RefCell<RealmRuntime>,
+        /// The executor and the realm's state, held separately (ADR 0040): a drive enters the
+        /// executor once and reaches the state through its cell, one synchronous step at a
+        /// time, so a language callback made from inside a step or from an HTTP task finds it
+        /// unborrowed.
+        runtime: NativeRuntime,
         work: RefCell<Realm<NativeMicrotask, NativeWork>>,
         continuations: RefCell<HashMap<RequestId, AsyncContinuation>>,
         #[cfg(feature = "realm-http")]
@@ -1104,6 +1109,30 @@ mod realm {
             .set(status & INTROSPECT_ARMED == INTROSPECT_ARMED);
     }
 
+    /// A native realm's executor and state (ADR 0040). The state is an owned value built without
+    /// the executor, so nothing here ties one realm's state to one executor instance beyond the
+    /// tasks its HTTP engines have spawned (ADR 0070).
+    struct NativeRuntime {
+        executor: Rc<Executor>,
+        state: RefCell<RealmState<TokioHost>>,
+    }
+
+    impl NativeRuntime {
+        /// The state for one synchronous step. `None` when it is already borrowed: a re-entrant
+        /// call fails closed instead of aliasing it.
+        fn state_mut(&self) -> Option<std::cell::RefMut<'_, RealmState<TokioHost>>> {
+            self.state.try_borrow_mut().ok()
+        }
+    }
+
+    impl Drop for NativeRuntime {
+        fn drop(&mut self) {
+            // What `RealmRuntime`'s drop did: let provider tasks finish cooperative cleanup on
+            // the executor, then tear the state down, before either is released.
+            self.executor.shut_down(self.state.get_mut());
+        }
+    }
+
     impl Drop for NativeRealm {
         fn drop(&mut self) {
             // Release what the archive holds first, while the heap is still alive: a queued work
@@ -1155,7 +1184,13 @@ mod realm {
     impl NativeRealm {
         fn new() -> Result<Self, kiln_runtime::RuntimeBuildError> {
             Ok(Self {
-                runtime: RefCell::new(RealmRuntime::new()?),
+                runtime: NativeRuntime {
+                    executor: Rc::new(Executor::new()?),
+                    state: RefCell::new(RealmState::new(
+                        TokioHost::new(),
+                        RealmCapabilities::default(),
+                    )),
+                },
                 work: RefCell::new(Realm::new()),
                 continuations: RefCell::new(HashMap::new()),
                 #[cfg(feature = "realm-http")]
@@ -1234,7 +1269,6 @@ mod realm {
         static ACTIVE_REALM: Cell<u64> = const { Cell::new(0) };
         static ACTIVE_REALM_RC: RefCell<Option<Rc<NativeRealm>>> = const { RefCell::new(None) };
         static ACTIVE_HEAP: Cell<*mut c_void> = const { Cell::new(std::ptr::null_mut()) };
-        static ACTIVE_RUNTIME: Cell<*mut RealmRuntime> = const { Cell::new(std::ptr::null_mut()) };
         /// Bumped whenever the answer to "which realm, which heap" changes on this thread: a
         /// realm entered or left, a heap attached. The prelude caches per-realm answers in
         /// thread-locals of its own and compares against this before trusting one, reading it
@@ -1252,23 +1286,6 @@ mod realm {
     #[unsafe(no_mangle)]
     pub extern "C" fn kiln_realm_generation_slot() -> *const u64 {
         ACTIVE_GENERATION.with(|generation| generation.as_ptr() as *const u64)
-    }
-
-    struct ActiveRuntime {
-        previous: *mut RealmRuntime,
-    }
-
-    impl ActiveRuntime {
-        fn enter(runtime: *mut RealmRuntime) -> Self {
-            let previous = ACTIVE_RUNTIME.with(|active| active.replace(runtime));
-            Self { previous }
-        }
-    }
-
-    impl Drop for ActiveRuntime {
-        fn drop(&mut self) {
-            ACTIVE_RUNTIME.with(|active| active.set(self.previous));
-        }
     }
 
     fn ffi(operation: impl FnOnce() -> i32) -> i32 {
@@ -1304,17 +1321,6 @@ mod realm {
                 realm(handle)
             } else {
                 None
-            }
-        })
-    }
-
-    fn active_runtime() -> Option<*mut RealmRuntime> {
-        ACTIVE_RUNTIME.with(|active| {
-            let pointer = active.get();
-            if pointer.is_null() {
-                None
-            } else {
-                Some(pointer)
             }
         })
     }
@@ -1424,16 +1430,17 @@ mod realm {
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_realm_http_server_close_active(resource: u64, mode: i32) -> i32 {
         ffi(|| {
-            let (Some(_realm), Some(runtime)) = (active_realm(), active_runtime()) else {
+            let Some(realm) = active_realm() else {
                 return INVALID_ARGUMENT;
+            };
+            let Some(mut runtime) = realm.runtime.state_mut() else {
+                return RUNTIME_ERROR;
             };
             let mode = match mode {
                 HTTP_CLOSE_GRACEFUL => HttpCloseMode::Graceful,
                 HTTP_CLOSE_ABORT => HttpCloseMode::Abort,
                 _ => return INVALID_ARGUMENT,
             };
-            // SAFETY: this private ABI call runs synchronously inside the active realm.
-            let runtime = unsafe { &mut *runtime };
             // A missing registration is a failed capability lookup, never permission to treat
             // the socket as a raw resource: only the engine that owns the transport can close
             // it, for either role. `Closed` reaches the handler from the engine's task.
@@ -1450,10 +1457,8 @@ mod realm {
         // the language makes back into this archive is already in context, and the HTTP engine's
         // tasks call the language while this future is parked, so no RefCell of the realm may be
         // held across an await here.
-        let executor = realm.runtime.borrow().drive_executor();
-        let _active = ActiveRuntime::enter(realm.runtime.as_ptr());
         realm.drive_context.set((host, thrown));
-        let status = executor.block_on(drive_async(realm));
+        let status = realm.runtime.executor.block_on(drive_async(realm));
         realm
             .drive_context
             .set((std::ptr::null_mut(), std::ptr::null_mut()));
@@ -1469,20 +1474,21 @@ mod realm {
             if status != 0 {
                 return status;
             }
-            let turn = {
-                let mut runtime = realm.runtime.borrow_mut();
-                if matches!(realm.clock.get(), NativeClock::Virtual) {
-                    runtime.pause_time();
-                }
-                runtime.ready_turn::<NativeMicrotask, NativeWork>()
-            };
+            if matches!(realm.clock.get(), NativeClock::Virtual) {
+                realm.runtime.executor.pause_time();
+            }
+            let turn = realm
+                .runtime
+                .state
+                .borrow_mut()
+                .ready_turn::<NativeMicrotask, NativeWork>();
             match turn {
                 Some(RuntimeTurn::Completion(completion)) => {
                     if let Some(status) = route_completion(realm, completion) {
                         return status;
                     }
                     while let Some(RuntimeTurn::Completion(next)) = {
-                        let mut runtime = realm.runtime.borrow_mut();
+                        let mut runtime = realm.runtime.state.borrow_mut();
                         runtime.ready_turn::<NativeMicrotask, NativeWork>()
                     } {
                         if let Some(status) = route_completion(realm, next) {
@@ -1508,7 +1514,7 @@ mod realm {
                 Some(RuntimeTurn::Protocol) | None => {}
             }
             let (referenced, pending, in_flight, deadline, now, signal) = {
-                let runtime = realm.runtime.borrow();
+                let runtime = realm.runtime.state.borrow();
                 let mut work = realm.work.borrow_mut();
                 (
                     runtime.has_referenced_host_work(),
@@ -1522,7 +1528,7 @@ mod realm {
             if http_trace_enabled() {
                 eprintln!(
                     "[kiln-drive] referenced={referenced} pending={pending} in_flight={in_flight} deadline={deadline:?} host={}",
-                    realm.runtime.borrow().describe_host_work(),
+                    realm.runtime.state.borrow().describe_host_work(),
                 );
             }
             // A timer that is already due runs now. It is not a wait case: under load the
@@ -1698,9 +1704,14 @@ mod realm {
             let Some(_active) = ActiveRealm::enter(handle, Rc::clone(&realm)) else {
                 return INVALID_ARGUMENT;
             };
-            let _active_runtime = ActiveRuntime::enter(realm.runtime.as_ptr());
+            if realm.runtime.state.borrow().is_shutdown() {
+                return RUNTIME_ERROR;
+            }
             // SAFETY: the C caller owns `context` and the callback contract for this call.
-            unsafe { &mut *realm.runtime.as_ptr() }.enter(|| unsafe { entry(context) })
+            realm
+                .runtime
+                .executor
+                .block_on(async move { unsafe { entry(context) } })
         })
     }
 
@@ -2790,13 +2801,13 @@ mod realm {
             }
             // SAFETY: checked non-null; the caller owns the output slot.
             unsafe { out_count.write(0) };
-            let (Some(_realm), Some(runtime)) = (active_realm(), active_runtime()) else {
+            let Some(realm) = active_realm() else {
                 return INVALID_ARGUMENT;
             };
-            // SAFETY: the drive installed this pointer for the realm it is driving, and the
-            // turn boundary this is called from holds no borrow of it.
-            let runtime = unsafe { &mut *runtime };
-            let metrics = runtime.sample_runtime_metrics();
+            let Some(runtime) = realm.runtime.state_mut() else {
+                return RUNTIME_ERROR;
+            };
+            let metrics = realm.runtime.executor.sample_runtime_metrics();
             let fields: [u64; RUNTIME_REPORT_FIELDS] = [
                 metrics.live_tasks as u64,
                 metrics.park_count,
@@ -3020,7 +3031,7 @@ mod realm {
             if realm.entered.get() {
                 return INVALID_ARGUMENT;
             }
-            realm.runtime.borrow_mut().use_host_clock();
+            realm.runtime.state.borrow_mut().use_host_clock();
             realm.clock.set(NativeClock::wall());
             // The realm's clock jumps from the epoch to the present here, before any timer
             // measures from it.
@@ -3286,18 +3297,19 @@ mod realm {
                 // request graceful/abort HTTP close through the dedicated realm operation.
                 return INVALID_ARGUMENT;
             }
-            let Some(runtime) = active_runtime() else {
-                return INVALID_ARGUMENT;
+            // The callback runs synchronously inside the drive (or `kiln_realm_enter`), so the
+            // executor's context is current and the realm's state is not borrowed.
+            let Some(mut runtime) = realm.runtime.state_mut() else {
+                return RUNTIME_ERROR;
             };
-            // SAFETY: `runtime` is the active realm's runtime, and the callback runs synchronously
-            // while the runtime's owned Tokio task is executing.
             // `flags & 1` is the generic request-liveness bit; zero leaves incidental inspection
             // requests unreferenced while resource creation still records its own resource state.
             let referenced = operation_view.flags & 1 != 0;
             if http_trace_enabled() {
                 eprintln!("[kiln-host] start {operation:?} referenced={referenced}");
             }
-            let request = unsafe { &mut *runtime }.start_host_op(operation, referenced);
+            let request = runtime.start_host_op(operation, referenced);
+            std::mem::drop(runtime);
             let continuation = AsyncContinuation {
                 pointer: work,
                 run,
@@ -3346,11 +3358,13 @@ mod realm {
                 return INVALID_ARGUMENT;
             };
             let request = RequestId::new(request);
-            let Some(runtime) = active_runtime() else {
-                return INVALID_ARGUMENT;
+            let Some(canceled) = realm
+                .runtime
+                .state_mut()
+                .map(|mut state| state.cancel_host_op(request))
+            else {
+                return RUNTIME_ERROR;
             };
-            // SAFETY: `runtime` is the active realm's runtime for this synchronous callback.
-            let canceled = unsafe { &mut *runtime }.cancel_host_op(request);
             let removed = realm.continuations.borrow_mut().remove(&request).is_some();
             let queued = realm.queued.borrow().contains(&request);
             if canceled || removed || queued {
@@ -3504,7 +3518,7 @@ mod realm {
                     | HttpEventKind::Error
             ) {
                 // The drive may be waiting for exactly this request to finish.
-                let runtime = realm.runtime.borrow();
+                let runtime = realm.runtime.state.borrow();
                 if !runtime.has_pending_host_work() {
                     runtime.wake_drive();
                 }
@@ -3513,6 +3527,7 @@ mod realm {
                 realm.http_connections.borrow_mut().remove(&self.resource);
                 let _ = realm
                     .runtime
+                    .state
                     .borrow_mut()
                     .retire_http_connection(self.resource);
             }
@@ -3553,9 +3568,7 @@ mod realm {
         work: *mut c_void,
     ) -> i32 {
         ffi(|| {
-            let (Some(realm), Some(runtime), Some(run), Some(drop)) =
-                (active_realm(), active_runtime(), run, drop)
-            else {
+            let (Some(realm), Some(run), Some(drop)) = (active_realm(), run, drop) else {
                 return INVALID_ARGUMENT;
             };
             if work.is_null() || resource == 0 {
@@ -3577,12 +3590,14 @@ mod realm {
                 owner: Rc::clone(&owner),
                 whole_requests,
             });
-            // SAFETY: active_runtime points at this active realm's exclusively-entered runtime.
-            let runtime = unsafe { &mut *runtime };
+            let Some(mut runtime) = realm.runtime.state_mut() else {
+                return RUNTIME_ERROR;
+            };
             let attached = match role {
                 HttpRole::Server => runtime.server_attach(resource, allow_half_close, dispatch),
                 HttpRole::Client => runtime.client_attach(resource, dispatch),
             };
+            std::mem::drop(runtime);
             if !attached {
                 return INVALID_ARGUMENT;
             }
@@ -3668,12 +3683,13 @@ mod realm {
         out_resource: *mut u64,
     ) -> i32 {
         ffi(|| {
-            let (Some(_realm), Some(runtime), Some(out_resource)) =
-                (active_realm(), active_runtime(), unsafe {
-                    out_resource.as_mut()
-                })
+            let (Some(realm), Some(out_resource)) =
+                (active_realm(), unsafe { out_resource.as_mut() })
             else {
                 return INVALID_ARGUMENT;
+            };
+            let Some(mut runtime) = realm.runtime.state_mut() else {
+                return RUNTIME_ERROR;
             };
             let Some(host) = (unsafe { borrowed_bytes(host, host_len) }) else {
                 return INVALID_ARGUMENT;
@@ -3682,9 +3698,7 @@ mod realm {
                 return INVALID_ARGUMENT;
             };
             *out_resource = 0;
-            match unsafe { &mut *runtime }
-                .acquire_client_connection(HttpOrigin::http(host, port), request)
-            {
+            match runtime.acquire_client_connection(HttpOrigin::http(host, port), request) {
                 AgentDecision::Connect => HTTP_AGENT_CONNECT,
                 AgentDecision::Reuse(resource) => {
                     *out_resource = resource.get();
@@ -3729,8 +3743,11 @@ mod realm {
         request: u64,
     ) -> i32 {
         ffi(|| {
-            let (Some(_realm), Some(runtime)) = (active_realm(), active_runtime()) else {
+            let Some(realm) = active_realm() else {
                 return INVALID_ARGUMENT;
+            };
+            let Some(mut runtime) = realm.runtime.state_mut() else {
+                return RUNTIME_ERROR;
             };
             let Some(host) = (unsafe { borrowed_bytes(host, host_len) }) else {
                 return INVALID_ARGUMENT;
@@ -3738,7 +3755,7 @@ mod realm {
             let Ok(host) = std::str::from_utf8(host) else {
                 return INVALID_ARGUMENT;
             };
-            i32::from(unsafe { &mut *runtime }.client_connection_connected(
+            i32::from(runtime.client_connection_connected(
                 HttpOrigin::http(host, port),
                 ResourceId::new(resource),
                 request,
@@ -3754,17 +3771,16 @@ mod realm {
         out_request: *mut u64,
     ) -> i32 {
         ffi(|| {
-            let (Some(_realm), Some(runtime), Some(out_request)) =
-                (active_realm(), active_runtime(), unsafe {
-                    out_request.as_mut()
-                })
+            let (Some(realm), Some(out_request)) =
+                (active_realm(), unsafe { out_request.as_mut() })
             else {
                 return INVALID_ARGUMENT;
             };
+            let Some(mut runtime) = realm.runtime.state_mut() else {
+                return RUNTIME_ERROR;
+            };
             *out_request = 0;
-            match unsafe { &mut *runtime }
-                .release_client_connection(ResourceId::new(resource), reusable != 0)
-            {
+            match runtime.release_client_connection(ResourceId::new(resource), reusable != 0) {
                 AgentRelease::Idle => HTTP_AGENT_IDLE,
                 AgentRelease::Dispatch { request } => {
                     *out_request = request;
@@ -3787,7 +3803,7 @@ mod realm {
             if request.is_null() {
                 return INVALID_ARGUMENT;
             }
-            let (Some(realm), Some(runtime)) = (active_realm(), active_runtime()) else {
+            let Some(realm) = active_realm() else {
                 return INVALID_ARGUMENT;
             };
             let resource = kiln_host_abi::ResourceId::new(resource);
@@ -3821,8 +3837,10 @@ mod realm {
             let Ok(high_water_mark) = usize::try_from(high_water_mark) else {
                 return INVALID_ARGUMENT;
             };
-            // SAFETY: active_runtime is this active realm's exclusively-entered runtime.
-            let sent = unsafe { &mut *runtime }.http_client().send_request(
+            let Some(mut runtime) = realm.runtime.state_mut() else {
+                return RUNTIME_ERROR;
+            };
+            let sent = runtime.http_client().send_request(
                 resource,
                 id,
                 method,
@@ -3843,15 +3861,17 @@ mod realm {
         end: bool,
     ) -> i32 {
         ffi(|| {
-            let (Some(_realm), Some(runtime)) = (active_realm(), active_runtime()) else {
+            let Some(realm) = active_realm() else {
                 return INVALID_ARGUMENT;
+            };
+            let Some(mut runtime) = realm.runtime.state_mut() else {
+                return RUNTIME_ERROR;
             };
             // SAFETY: the generated adapter keeps this span live until this call copies it.
             let Some(data) = (unsafe { borrowed_bytes(data, data_len) }) else {
                 return INVALID_ARGUMENT;
             };
-            // SAFETY: active_runtime is exclusively owned by this active realm callback.
-            let client = unsafe { &mut *runtime }.http_client();
+            let client = runtime.http_client();
             let resource = kiln_host_abi::ResourceId::new(resource);
             let disposition = if end {
                 client.end_request(resource, id, data)
@@ -3899,8 +3919,11 @@ mod realm {
             if response.is_null() {
                 return INVALID_ARGUMENT;
             }
-            let (Some(_realm), Some(runtime)) = (active_realm(), active_runtime()) else {
+            let Some(realm) = active_realm() else {
                 return INVALID_ARGUMENT;
+            };
+            let Some(mut runtime) = realm.runtime.state_mut() else {
+                return RUNTIME_ERROR;
             };
             // SAFETY: this private frame remains live for the synchronous call.
             let response = unsafe { &*response };
@@ -3908,8 +3931,6 @@ mod realm {
                 return INVALID_ARGUMENT;
             };
             let resource = kiln_host_abi::ResourceId::new(resource);
-            // SAFETY: active_runtime is exclusively owned by the active realm callback.
-            let runtime = unsafe { &mut *runtime };
             // The engine parses the flattened span itself, straight into Hyper's map.
             // SAFETY: the adapter keeps the span live for this synchronous call.
             let Some(headers) = (unsafe { borrowed_bytes(response.headers, response.headers_len) })
@@ -3936,16 +3957,17 @@ mod realm {
         end: bool,
     ) -> i32 {
         ffi(|| {
-            let (Some(_realm), Some(runtime)) = (active_realm(), active_runtime()) else {
+            let Some(realm) = active_realm() else {
                 return INVALID_ARGUMENT;
+            };
+            let Some(mut runtime) = realm.runtime.state_mut() else {
+                return RUNTIME_ERROR;
             };
             // SAFETY: the adapter keeps this borrowed span live until the command copies it.
             let Some(data) = (unsafe { borrowed_bytes(data, data_len) }) else {
                 return INVALID_ARGUMENT;
             };
             let resource = kiln_host_abi::ResourceId::new(resource);
-            // SAFETY: active_runtime is exclusively owned by this active realm callback.
-            let runtime = unsafe { &mut *runtime };
             let disposition = if end {
                 runtime.http_server().end_response(resource, id, data)
             } else {
@@ -4058,9 +4080,10 @@ mod realm {
             std::mem::drop(queue);
             // A timer armed from inside a connection's callback (ADR 0046) changes what the
             // parked drive must wait for; tell it.
-            if let Some(runtime) = active_runtime() {
-                // SAFETY: the active runtime pointer is valid for the whole drive.
-                unsafe { &*runtime }.wake_drive();
+            if let Some(realm) = active_realm()
+                && let Ok(state) = realm.runtime.state.try_borrow()
+            {
+                state.wake_drive();
             }
             // SAFETY: null was rejected and the caller supplies a writable identity slot.
             unsafe { out_id.write(id.get()) };

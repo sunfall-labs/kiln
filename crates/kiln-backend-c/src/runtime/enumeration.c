@@ -286,6 +286,19 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
         return kiln_c99_proxy_has(host, target, exposed, answer, depth, thrown);
     }
     if (target.tag == KILN_VALUE_BUILTIN) {
+        kiln_value store;
+        if (kiln_c99_callable_store(target, &store, 0) == KILN_C99_OK &&
+            store.tag == KILN_VALUE_OBJECT) {
+            kiln_object *properties = kiln_c99_object_of(store);
+            size_t pidx;
+            if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
+            for (pidx = 0; pidx < properties->count; ++pidx) {
+                if (kiln_c99_same_key_view(&properties->properties[pidx], key)) {
+                    *answer = 1;
+                    return KILN_C99_OK;
+                }
+            }
+        }
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         *answer = kiln_c99_builtin_has_member(target.bits, intrinsic_key, intrinsic_len);
         return KILN_C99_OK;
@@ -369,6 +382,20 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
         return KILN_C99_OK;
     }
     if (target.tag == KILN_VALUE_ARRAY_BUFFER) {
+        kiln_value store;
+        kiln_value proto = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE);
+        if (kiln_c99_callable_store(proto, &store, 0) == KILN_C99_OK &&
+            store.tag == KILN_VALUE_OBJECT) {
+            kiln_object *properties = kiln_c99_object_of(store);
+            size_t pidx;
+            if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
+            for (pidx = 0; pidx < properties->count; ++pidx) {
+                if (kiln_c99_same_key_view(&properties->properties[pidx], key)) {
+                    *answer = 1;
+                    return KILN_C99_OK;
+                }
+            }
+        }
         *answer = kiln_c99_same_name_key(key, "byteLength") ||
                   kiln_c99_same_name_key(key, "constructor") ||
                   kiln_c99_same_name_key(key, "slice");
@@ -399,16 +426,12 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
             *answer = (size_t)index < view->length;
         } else {
             (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
-            /* The same table the read uses, so `"map" in view` and `view.map` can never
-             * disagree -- listing the methods a second time here is how they came to. */
-            *answer = kiln_c99_typed_prototype_method(intrinsic_key, intrinsic_len) != 0 ||
-                      kiln_c99_same_name_key(key, "length") ||
+            *answer = kiln_c99_same_name_key(key, "length") ||
                       kiln_c99_same_name_key(key, "byteLength") ||
                       kiln_c99_same_name_key(key, "byteOffset") ||
                       kiln_c99_same_name_key(key, "BYTES_PER_ELEMENT") ||
                       kiln_c99_same_name_key(key, "buffer") ||
                       kiln_c99_same_name_key(key, "constructor") ||
-                      kiln_c99_same_name_key(key, "@@iterator") ||
                       kiln_c99_same_name_key(key, "isPrototypeOf") ||
                       kiln_c99_same_name_key(key, "propertyIsEnumerable") ||
                       kiln_c99_lookup_method(intrinsic_key, intrinsic_len, KILN_C99_METHOD_HAS_OWN_PROPERTY,
@@ -444,6 +467,9 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
                             }
                         }
                     }
+                }
+                if (!*answer) {
+                    *answer = kiln_c99_typed_prototype_method(intrinsic_key, intrinsic_len) != 0;
                 }
             }
         }
