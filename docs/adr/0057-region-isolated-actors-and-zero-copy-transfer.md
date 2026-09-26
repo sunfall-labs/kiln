@@ -2,7 +2,12 @@
 
 ## Status
 
-Still proposed as of 2026-09-26. Settled by the project owner as waiting: parts are built
+**Superseded by ADR 0070** (2026-09-26). Its goals (multicore without shared mutable heaps or
+serialization cost) stand; its mechanisms are replaced by realms scheduled across threads and three
+primitives: messages, a shared immutable region, and ownership transfer. The text below is kept as
+the argument that led there.
+
+Earlier note: still proposed as of 2026-09-26. Settled by the project owner as waiting: parts are built
 (`parallelMap`, ADR 0058) but actors and zero-copy region transfer are not. Accept or reject when
 that work is scheduled.
 
