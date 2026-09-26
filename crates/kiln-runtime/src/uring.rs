@@ -111,6 +111,11 @@ const SHUTDOWN_CANCEL_DEADLINE: Duration = Duration::from_secs(1);
 const KIND_RECV: u64 = 1;
 const KIND_SEND: u64 = 2;
 const KIND_CANCEL: u64 = 3;
+const KIND_ACCEPT: u64 = 4;
+/// Accepted connections the ring holds for a listener before it stops accepting and leaves the
+/// rest in the kernel's backlog, and the level at which it starts again.
+const ACCEPT_HIGH: usize = 256;
+const ACCEPT_LOW: usize = 64;
 
 /// `kind` in the top byte, the slot's generation in the next 24 bits, the slot below. The
 /// generation keeps a cancellation aimed at one connection's receive from ever matching the
@@ -393,6 +398,19 @@ enum Work {
     Other,
 }
 
+/// A listening socket with a multishot accept on the ring, and the connections it has accepted
+/// that nobody has asked for yet.
+struct Listen {
+    fd: Option<OwnedFd>,
+    generation: u32,
+    accept: RecvState,
+    queue: std::collections::VecDeque<OwnedFd>,
+    error: Option<i32>,
+    waiters: Vec<Waker>,
+    /// The host closed the listener; the slot goes once the accept has completed.
+    closed: bool,
+}
+
 #[derive(Default)]
 struct DriverState {
     spawned: bool,
@@ -405,7 +423,9 @@ struct Inner {
     uring: IoUring,
     bufs: ManuallyDrop<BufRing>,
     conns: Vec<Option<Conn>>,
+    listeners: Vec<Option<Listen>>,
     free: Vec<u32>,
+    free_listeners: Vec<u32>,
     dirty: Vec<u32>,
     wake: Vec<Waker>,
     cqes: Vec<cqueue::Entry>,
@@ -451,6 +471,7 @@ impl Ring {
             (opcode::RecvMulti::CODE, "RECV"),
             (opcode::Send::CODE, "SEND"),
             (opcode::AsyncCancel::CODE, "ASYNC_CANCEL"),
+            (opcode::AcceptMulti::CODE, "ACCEPT"),
         ] {
             if !probe.is_supported(code) {
                 return Err(io::Error::new(
@@ -469,7 +490,9 @@ impl Ring {
                 uring,
                 bufs: ManuallyDrop::new(bufs),
                 conns: Vec::new(),
+                listeners: Vec::new(),
                 free: Vec::new(),
+                free_listeners: Vec::new(),
                 dirty: Vec::new(),
                 wake: Vec::new(),
                 cqes: Vec::with_capacity(256),
@@ -703,6 +726,12 @@ impl Inner {
                 .flatten()
                 .map(|conn| conn.ops)
                 .sum::<u32>()
+            + self
+                .listeners
+                .iter()
+                .flatten()
+                .map(|listen| u32::from(listen.accept != RecvState::Idle))
+                .sum::<u32>()
     }
 
     fn push(&mut self, entry: squeue::Entry) {
@@ -902,6 +931,7 @@ impl Inner {
             KIND_CANCEL => self.cancels -= 1,
             KIND_RECV => self.complete_recv(index, cqe.result(), cqe.flags()),
             KIND_SEND => self.complete_send(index, cqe.result()),
+            KIND_ACCEPT => self.complete_accept(index, cqe.result(), cqe.flags()),
             kind => debug_assert!(false, "unknown io_uring completion kind {kind}"),
         }
     }
@@ -1025,7 +1055,103 @@ impl Inner {
             wakers.extend(conn.read_waker.take());
             wakers.extend(conn.write_waker.take());
         }
+        for listen in self.listeners.iter_mut().flatten() {
+            wakers.append(&mut listen.waiters);
+        }
         wakers
+    }
+
+    fn listen(&mut self, index: u32) -> &mut Listen {
+        self.listeners[index as usize]
+            .as_mut()
+            .expect("io_uring listener slot in use")
+    }
+
+    fn arm_accept(&mut self, index: u32) {
+        let listen = self.listen(index);
+        let Some(fd) = listen.fd.as_ref().map(AsRawFd::as_raw_fd) else {
+            return;
+        };
+        let generation = listen.generation;
+        listen.accept = RecvState::Armed;
+        let entry = opcode::AcceptMulti::new(types::Fd(fd))
+            .flags(libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC)
+            .build()
+            .user_data(user_data(KIND_ACCEPT, generation, index));
+        self.push(entry);
+    }
+
+    fn cancel_accept(&mut self, index: u32) {
+        let listen = self.listen(index);
+        if listen.accept != RecvState::Armed {
+            return;
+        }
+        listen.accept = RecvState::Cancelling;
+        let generation = listen.generation;
+        self.cancels += 1;
+        let entry = opcode::AsyncCancel::new(user_data(KIND_ACCEPT, generation, index))
+            .build()
+            .user_data(user_data(KIND_CANCEL, generation, index));
+        self.push(entry);
+    }
+
+    fn should_arm_accept(&self, listen: &Listen) -> bool {
+        !self.closed
+            && !listen.closed
+            && listen.accept == RecvState::Idle
+            && listen.error.is_none()
+            && listen.fd.is_some()
+            && listen.queue.len() < ACCEPT_LOW
+    }
+
+    fn complete_accept(&mut self, index: u32, result: i32, flags: u32) {
+        let more = cqueue::more(flags);
+        let listen = self.listeners[index as usize]
+            .as_mut()
+            .expect("accept completion for a live listener");
+        if result >= 0 {
+            // SAFETY: a successful accept completion carries a fresh descriptor we now own.
+            let fd = unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(result) };
+            if listen.closed {
+                set_linger_zero(fd.as_raw_fd());
+            } else {
+                listen.queue.push_back(fd);
+            }
+        }
+        if !more {
+            listen.accept = RecvState::Idle;
+            if result < 0 && result != -libc::ECANCELED && !listen.closed {
+                listen.error = Some(-result);
+            }
+        }
+        let wake = result >= 0 || listen.error.is_some();
+        if wake {
+            self.wake.append(&mut listen.waiters);
+        }
+        let listen = self.listeners[index as usize]
+            .as_ref()
+            .expect("live listener");
+        if listen.accept == RecvState::Armed && listen.queue.len() >= ACCEPT_HIGH {
+            self.cancel_accept(index);
+        } else if self.should_arm_accept(listen) {
+            self.arm_accept(index);
+        }
+        self.maybe_release_listener(index);
+    }
+
+    fn maybe_release_listener(&mut self, index: u32) {
+        let Some(listen) = self.listeners[index as usize].as_mut() else {
+            return;
+        };
+        if !listen.closed || listen.accept != RecvState::Idle {
+            return;
+        }
+        // Connections accepted for nobody: reset them, as closing a listener resets its backlog.
+        for fd in listen.queue.drain(..) {
+            set_linger_zero(fd.as_raw_fd());
+        }
+        self.listeners[index as usize] = None;
+        self.free_listeners.push(index);
     }
 
     fn drain_for_shutdown(&mut self) {
@@ -1038,6 +1164,11 @@ impl Inner {
             .collect();
         for &index in &indexes {
             self.cancel_recv(index);
+        }
+        for index in 0..self.listeners.len() as u32 {
+            if self.listeners[index as usize].is_some() {
+                self.cancel_accept(index);
+            }
         }
         self.wait_inflight(SHUTDOWN_SEND_GRACE);
         if self.inflight() > 0 {
@@ -1053,6 +1184,10 @@ impl Inner {
             return;
         }
         // Nothing is in flight: every socket can close now.
+        for listen in self.listeners.iter_mut().flatten() {
+            listen.fd = None;
+            listen.queue.clear();
+        }
         for slot in &mut self.conns {
             if let Some(conn) = slot {
                 conn.fd = None;
@@ -1133,6 +1268,172 @@ impl std::future::Future for Driver {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let this = self.get_mut();
         this.ring.poll_drive(cx, &mut this.ring_fd)
+    }
+}
+
+/// A listening socket whose connections the ring accepts (multishot `ACCEPT`). The accept is
+/// armed on the first [`RingListener::accept`] and then stays armed, so a busy listener costs
+/// no syscall per connection; accepted sockets are never registered with Tokio's reactor.
+/// Dropping the handle cancels the accept, resets connections nobody took, and closes the
+/// socket once the kernel has let go of it.
+pub struct RingListener {
+    ring: Rc<Ring>,
+    index: u32,
+    generation: u32,
+}
+
+impl std::fmt::Debug for RingListener {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RingListener")
+            .field("index", &self.index)
+            .finish()
+    }
+}
+
+impl Ring {
+    /// Take ownership of a bound, listening, non-blocking socket.
+    pub(crate) fn listen(self: &Rc<Self>, fd: OwnedFd) -> Result<RingListener, OwnedFd> {
+        let mut inner = self.inner.borrow_mut();
+        if inner.closed {
+            return Err(fd);
+        }
+        inner.generation = inner.generation.wrapping_add(1);
+        let generation = inner.generation;
+        let listen = Listen {
+            fd: Some(fd),
+            generation,
+            accept: RecvState::Idle,
+            queue: std::collections::VecDeque::new(),
+            error: None,
+            waiters: Vec::new(),
+            closed: false,
+        };
+        let index = match inner.free_listeners.pop() {
+            Some(index) => {
+                inner.listeners[index as usize] = Some(listen);
+                index
+            }
+            None => {
+                inner.listeners.push(Some(listen));
+                (inner.listeners.len() - 1) as u32
+            }
+        };
+        Ok(RingListener {
+            ring: Rc::clone(self),
+            index,
+            generation,
+        })
+    }
+}
+
+impl RingListener {
+    /// The next accepted connection: a connected, non-blocking socket.
+    pub fn accept(&self) -> RingAccept {
+        RingAccept {
+            ring: Rc::clone(&self.ring),
+            index: self.index,
+            generation: self.generation,
+        }
+    }
+
+    pub fn local_addr(&self) -> io::Result<std::net::SocketAddr> {
+        let inner = self.ring.inner.borrow();
+        let fd = inner.listeners[self.index as usize]
+            .as_ref()
+            .filter(|listen| listen.generation == self.generation)
+            .and_then(|listen| listen.fd.as_ref())
+            .map(AsRawFd::as_raw_fd)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "listener closed"))?;
+        // SAFETY: borrowed for one getsockname; ManuallyDrop keeps the ring's descriptor open.
+        let borrowed = ManuallyDrop::new(unsafe {
+            <std::net::TcpListener as std::os::fd::FromRawFd>::from_raw_fd(fd)
+        });
+        borrowed.local_addr()
+    }
+}
+
+impl Drop for RingListener {
+    fn drop(&mut self) {
+        let wakers = {
+            let Ok(mut inner) = self.ring.inner.try_borrow_mut() else {
+                return;
+            };
+            let Some(listen) = inner.listeners[self.index as usize].as_mut() else {
+                return;
+            };
+            if listen.generation != self.generation {
+                return;
+            }
+            listen.closed = true;
+            let wakers = std::mem::take(&mut listen.waiters);
+            if !inner.closed {
+                inner.cancel_accept(self.index);
+            } else {
+                let listen = inner.listen(self.index);
+                listen.accept = RecvState::Idle;
+            }
+            inner.maybe_release_listener(self.index);
+            wakers
+        };
+        for waker in wakers {
+            waker.wake();
+        }
+        self.ring.kick_existing();
+    }
+}
+
+/// One accept from a [`RingListener`].
+pub struct RingAccept {
+    ring: Rc<Ring>,
+    index: u32,
+    generation: u32,
+}
+
+impl std::future::Future for RingAccept {
+    type Output = io::Result<OwnedFd>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<OwnedFd>> {
+        let this = self.get_mut();
+        let mut inner = this.ring.inner.borrow_mut();
+        if inner.closed {
+            return Poll::Ready(Err(ring_closed(&inner)));
+        }
+        let listener_gone = || io::Error::new(io::ErrorKind::NotConnected, "listener closed");
+        let Some(listen) = inner.listeners[this.index as usize].as_mut() else {
+            return Poll::Ready(Err(listener_gone()));
+        };
+        if listen.generation != this.generation || listen.closed {
+            return Poll::Ready(Err(listener_gone()));
+        }
+        if let Some(fd) = listen.queue.pop_front() {
+            let rearm = inner
+                .should_arm_accept(inner.listeners[this.index as usize].as_ref().expect("live"));
+            if rearm {
+                inner.arm_accept(this.index);
+                drop(inner);
+                this.ring.kick();
+            }
+            return Poll::Ready(Ok(fd));
+        }
+        if let Some(error) = listen.error.take() {
+            return Poll::Ready(Err(io::Error::from_raw_os_error(error)));
+        }
+        if !listen
+            .waiters
+            .iter()
+            .any(|waker| waker.will_wake(cx.waker()))
+        {
+            listen.waiters.push(cx.waker().clone());
+        }
+        let arm =
+            inner.should_arm_accept(inner.listeners[this.index as usize].as_ref().expect("live"));
+        if arm {
+            inner.arm_accept(this.index);
+        }
+        drop(inner);
+        this.ring.kick();
+        Poll::Pending
     }
 }
 
