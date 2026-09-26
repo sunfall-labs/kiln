@@ -205,6 +205,11 @@ impl HttpHeaders {
         Self { raw: None, entries }
     }
 
+    /// The `name NUL value NUL` block the engine flattened, when the headers came from one.
+    pub fn raw(&self) -> Option<&[u8]> {
+        self.raw.as_deref()
+    }
+
     pub fn header(&self, name: &str) -> Option<&str> {
         if !self.entries.is_empty() {
             return self

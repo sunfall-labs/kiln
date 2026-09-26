@@ -127,81 +127,15 @@ export function request(...args: any[]): any {
   throw new Error("node:http requires an HTTP host capability that this realm does not provide");
 }
 
-export function serve(
-  options:
-    | {
-        fetch: (request: any) => any;
-        port?: number;
-        hostname?: string;
-      }
-    | ((request: any) => any),
-  callback?: () => void
-): any {
-  const fetchHandler = typeof options === "function" ? options : options?.fetch;
-  if (typeof fetchHandler !== "function") {
-    throw new TypeError("serve requires a fetch handler function");
-  }
-  const port = typeof options === "object" && options.port !== undefined ? Number(options.port) : 3000;
-  const hostname = typeof options === "object" ? options.hostname : undefined;
+// `serve` is the WHATWG bootstrap's (web.ts), the same function `Bun.serve` and `Kiln.serve`
+// name: one implementation, captured before any program code can replace the globals.
+const bootstrapServe: any = (globalThis as any).Kiln?.serve;
 
-  function sendResponse(webRes: any, res: any) {
-    res.statusCode = webRes.status;
-    for (const [k, v] of webRes.headers.entries()) {
-      res.setHeader(k, v);
-    }
-    const rawText = webRes._rawText;
-    if (rawText !== null && rawText !== undefined) {
-      res.end(rawText);
-    } else {
-      const rawBytes = webRes._rawBytes;
-      if (rawBytes !== null && rawBytes !== undefined) {
-        res.end(rawBytes);
-      } else {
-        webRes.text().then(
-          (body: string) => res.end(body),
-          (err: any) => {
-            res.statusCode = 500;
-            res.end(err?.message || "Internal Server Error");
-          }
-        );
-      }
-    }
+export function serve(options: any, callback?: () => void): any {
+  if (typeof bootstrapServe !== "function") {
+    throw new Error("serve requires an HTTP host capability that this realm does not provide");
   }
-
-  const server = createServer((req: any, res: any) => {
-    try {
-      const Req = typeof Request !== "undefined" ? (Request as any) : null;
-      if (!Req) throw new Error("Request is not available");
-      const hostHeader = req.headers?.host || (hostname ? `${hostname}:${port}` : `localhost:${port}`);
-      const url = `http://${hostHeader}${req.url}`;
-      const webReq = new Req(url, {
-        method: req.method,
-        headers: req.headers,
-      });
-      const webRes = fetchHandler(webReq);
-      if (webRes instanceof Promise) {
-        webRes.then(
-          (r: any) => sendResponse(r, res),
-          (err: any) => {
-            res.statusCode = 500;
-            res.end(err?.message || "Internal Server Error");
-          }
-        );
-      } else {
-        sendResponse(webRes, res);
-      }
-    } catch (err: any) {
-      res.statusCode = 500;
-      res.end(err?.message || "Internal Server Error");
-    }
-  });
-
-  if (hostname) {
-    server.listen(port, hostname, callback);
-  } else {
-    server.listen(port, callback);
-  }
-  return server;
+  return bootstrapServe(options, callback);
 }
 
 const httpNamespace = {

@@ -286,6 +286,14 @@ pub(crate) fn property(prop: &str) -> Option<Value> {
         "IncomingMessage" => Some(Value::Native(Native::NodeReadable, RealmId::PRIMARY)),
         "request" => Some(Value::Native(Native::NodeHttpRequest, RealmId::PRIMARY)),
         "get" => Some(Value::Native(Native::NodeHttpGet, RealmId::PRIMARY)),
+        "createFetchServer" => Some(Value::Native(
+            Native::NodeHttpCreateFetchServer,
+            RealmId::PRIMARY,
+        )),
+        "fetchRespond" => Some(Value::Native(
+            Native::NodeHttpFetchRespond,
+            RealmId::PRIMARY,
+        )),
         "ServerResponse" => Some(Value::Native(
             Native::NodeHttpServerResponse,
             RealmId::PRIMARY,
@@ -328,6 +336,8 @@ pub(crate) const fn js_name(native: Native) -> Option<&'static str> {
         Native::NodeHttpCreateServer => Some("createServer"),
         Native::NodeHttpRequest => Some("request"),
         Native::NodeHttpGet => Some("get"),
+        Native::NodeHttpCreateFetchServer => Some("createFetchServer"),
+        Native::NodeHttpFetchRespond => Some("fetchRespond"),
         Native::NodeHttpServerResponse => Some("ServerResponse"),
         Native::NodeHttps => Some("https"),
         Native::NodeHttpsCreateServer => Some("createServer"),

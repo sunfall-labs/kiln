@@ -8175,6 +8175,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     timeout_milliseconds: 0.0,
                     streams: Vec::new(),
                     object: None,
+                    fetch: false,
                 }));
                 let object = node_server_object(&state);
                 self.register_node_server(&state);
@@ -8868,7 +8869,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::NodeClientRequestWrite | Native::NodeClientRequestEnd => {
                 self.dispatch_node_client_request(native, receiver, arguments, instruction)
             }
-            Native::NodeHttpServer | Native::NodeHttpCreateServer => {
+            Native::NodeHttpFetchRespond => self.http_fetch_respond(arguments, instruction),
+            Native::NodeHttpServer
+            | Native::NodeHttpCreateServer
+            | Native::NodeHttpCreateFetchServer => {
                 // Node accepts both `createServer(listener)` and
                 // `createServer(options, listener)`. Options are transport policy; the last
                 // callable argument is the request listener on either form. Keeping overload
@@ -8911,6 +8915,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     timeout_milliseconds: 0.0,
                     streams: Vec::new(),
                     object: None,
+                    fetch: native == Native::NodeHttpCreateFetchServer,
                 }));
                 let object = node_server_object(&state);
                 self.register_node_server(&state);
@@ -9222,11 +9227,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .is_some_and(|value| value.is_truthy());
                     // ADR 0046: the host hands the accepted socket to the engine, whose task
                     // queues protocol events for the checkpoint to drain.
+                    let whole_requests = state.borrow().fetch;
                     let attached = unsafe {
-                        ActiveHttpRuntime::start_connection(
+                        ActiveHttpRuntime::start_connection_with(
                             &mut *runtime,
                             accepted.resource.id,
                             allow_half_close,
+                            whole_requests,
                         )
                     };
                     if !attached {
@@ -9564,6 +9571,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let event_count = events.len();
         for event in events {
             match event {
+                RuntimeHttpEvent::RequestHead { id, request } if server.borrow().fetch => {
+                    self.dispatch_http_fetch_request(server, resource, id, request, instruction)?;
+                }
                 RuntimeHttpEvent::RequestHead { id, request } => {
                     self.dispatch_http_request_head(
                         server,
@@ -10028,6 +10038,106 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 instruction,
                 message: "node:http body event has no active request".into(),
             })
+    }
+
+    /// A request for a fetch-style (`serve`) server: the engine took it whole, and the handler
+    /// gets `(method, target, headers, body, resource, id)` -- the flattened `name NUL value NUL`
+    /// header block as one string, the body as a Buffer or `undefined` -- exactly as the native
+    /// backend's `kiln_c99_node_fetch_request` hands them over. Nothing Node-shaped is built.
+    fn dispatch_http_fetch_request(
+        &mut self,
+        server: &Rc<RefCell<NodeServerState>>,
+        resource: kiln_host_abi::ResourceId,
+        id: u64,
+        request: kiln_runtime::node_http::HttpRequest,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let handler = server.borrow().handler.clone();
+        let headers =
+            String::from_utf8_lossy(request.headers.raw().unwrap_or_default()).into_owned();
+        let body = if request.body.is_empty() {
+            Value::Undefined
+        } else {
+            node_bytes_value(request.body)
+        };
+        self.call_value(
+            &handler,
+            Value::Undefined,
+            vec![
+                Value::String(request.method.into()),
+                Value::String(request.target.into()),
+                Value::String(headers.into()),
+                body,
+                Value::Number(resource.get() as f64),
+                Value::Number(id as f64),
+            ],
+            instruction,
+        )?;
+        // One JavaScript turn, as for a Node request listener (see `dispatch_http_request_head`).
+        self.drain_microtask_jobs()?;
+        Ok(())
+    }
+
+    /// `fetchRespond(resource, id, status, headers, body)`: the whole response in one call, with
+    /// `headers` the `name NUL value NUL` flattening. False, not a throw, once the connection is
+    /// gone -- an asynchronous handler can outlive its client.
+    fn http_fetch_respond(
+        &mut self,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let handle = |value: Option<&Value>| {
+            let number = value.map_or(f64::NAN, Value::as_number);
+            ((1.0..=9_007_199_254_740_991.0).contains(&number) && number.fract() == 0.0)
+                .then_some(number as u64)
+        };
+        let (Some(resource), Some(id)) = (handle(arguments.first()), handle(arguments.get(1)))
+        else {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "fetchRespond requires a request handle".into(),
+            });
+        };
+        let status = arguments.get(2).map_or(f64::NAN, Value::as_number);
+        if !(100.0..=999.0).contains(&status) || status.fract() != 0.0 {
+            return Err(ExecutionError::RangeErrorMessage {
+                message: "Invalid status code".into(),
+            });
+        }
+        let flattened = match arguments.get(3) {
+            None | Some(Value::Undefined) => String::new(),
+            Some(value) => value.to_display_string(),
+        };
+        let mut headers = Vec::new();
+        let mut fields = flattened.split('\0');
+        while let Some(name) = fields.next() {
+            if name.is_empty() {
+                break;
+            }
+            let Some(value) = fields.next() else { break };
+            headers.push((name.to_owned(), value.to_owned()));
+        }
+        let body = node_body_bytes(arguments.get(4))?;
+        let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
+            instruction,
+            message: "serve requires the realm HTTP runtime".into(),
+        })?;
+        let resource = kiln_host_abi::ResourceId::new(resource);
+        // SAFETY: the realm's HTTP runtime outlives every call the realm makes.
+        let started = unsafe {
+            ActiveHttpRuntime::start_response(
+                &mut *runtime,
+                resource,
+                id,
+                status as u16,
+                headers,
+                16 * 1024,
+            )
+        };
+        // SAFETY: as above.
+        let ended = started
+            && unsafe { ActiveHttpRuntime::end_response(&mut *runtime, resource, id, body) }
+                .is_some();
+        Ok(Value::Boolean(ended))
     }
 
     fn dispatch_http_request_head(
@@ -11397,6 +11507,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             timeout_milliseconds: 0.0,
                             streams: vec![connection],
                             object: None,
+                            fetch: false,
                         }));
                         {
                             let mut socket_state = socket_state.borrow_mut();
@@ -15738,6 +15849,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | Native::NodeHttpCreateServer
                 | Native::NodeHttpRequest
                 | Native::NodeHttpGet
+                | Native::NodeHttpCreateFetchServer
+                | Native::NodeHttpFetchRespond
                 | Native::NodeClientRequestWrite
                 | Native::NodeClientRequestEnd
                 | Native::NodeServerListen
@@ -39568,6 +39681,8 @@ fn call_native(
         | Native::NodeHttpCreateServer
         | Native::NodeHttpRequest
         | Native::NodeHttpGet
+        | Native::NodeHttpCreateFetchServer
+        | Native::NodeHttpFetchRespond
         | Native::NodeClientRequestWrite
         | Native::NodeClientRequestEnd
         | Native::NodeBuffer

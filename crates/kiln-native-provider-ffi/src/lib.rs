@@ -3433,6 +3433,9 @@ mod realm {
         realm: std::rc::Weak<NativeRealm>,
         resource: kiln_host_abi::ResourceId,
         owner: Rc<HttpEventOwner>,
+        /// The connection belongs to a fetch-style (`serve`) server, which takes each request
+        /// whole (`HttpDispatch::whole_requests`).
+        whole_requests: bool,
     }
 
     #[cfg(feature = "realm-http")]
@@ -3525,13 +3528,26 @@ mod realm {
             }
             drain_realm_queues(&realm)
         }
+
+        fn whole_requests(&self) -> bool {
+            self.whole_requests
+        }
     }
+
+    /// `kiln_realm_http_server_attach_with_options_active`'s option bits. Bit 0 was the whole
+    /// of the argument (a boolean) before bit 1 existed, so every older caller still means what
+    /// it meant.
+    #[cfg(feature = "realm-http")]
+    const HTTP_ATTACH_ALLOW_HALF_CLOSE: i32 = 1;
+    #[cfg(feature = "realm-http")]
+    const HTTP_ATTACH_WHOLE_REQUESTS: i32 = 2;
 
     #[cfg(feature = "realm-http")]
     fn attach_http(
         resource: u64,
         role: HttpRole,
         allow_half_close: bool,
+        whole_requests: bool,
         run: Option<RunHttpEvent>,
         drop: Option<DropWork>,
         work: *mut c_void,
@@ -3559,6 +3575,7 @@ mod realm {
                 realm: Rc::downgrade(&realm),
                 resource,
                 owner: Rc::clone(&owner),
+                whole_requests,
             });
             // SAFETY: active_runtime points at this active realm's exclusively-entered runtime.
             let runtime = unsafe { &mut *runtime };
@@ -3588,14 +3605,14 @@ mod realm {
         drop: Option<DropWork>,
         work: *mut c_void,
     ) -> i32 {
-        attach_http(resource, HttpRole::Server, false, run, drop, work)
+        attach_http(resource, HttpRole::Server, false, false, run, drop, work)
     }
 
     #[cfg(feature = "realm-http")]
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_realm_http_server_attach_with_options_active(
         resource: u64,
-        allow_half_close: i32,
+        options: i32,
         run: Option<RunHttpEvent>,
         drop: Option<DropWork>,
         work: *mut c_void,
@@ -3603,7 +3620,8 @@ mod realm {
         attach_http(
             resource,
             HttpRole::Server,
-            allow_half_close != 0,
+            options & HTTP_ATTACH_ALLOW_HALF_CLOSE != 0,
+            options & HTTP_ATTACH_WHOLE_REQUESTS != 0,
             run,
             drop,
             work,
@@ -3618,7 +3636,7 @@ mod realm {
         drop: Option<DropWork>,
         work: *mut c_void,
     ) -> i32 {
-        attach_http(resource, HttpRole::Client, false, run, drop, work)
+        attach_http(resource, HttpRole::Client, false, false, run, drop, work)
     }
 
     #[cfg(feature = "realm-http")]

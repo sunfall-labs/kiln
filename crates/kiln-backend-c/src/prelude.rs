@@ -862,6 +862,12 @@ method_ids! {
     (KILN_C99_METHOD_NODE_RESPONSE_END, 279, NodeHttp; 0, 0),
     (KILN_C99_METHOD_NODE_HTTP_GET, 280, NodeHttp; 0, 0),
     (KILN_C99_METHOD_NODE_HTTP_REQUEST, 281, NodeHttp; 0, 0),
+    /* The private host half of `serve()` (web.ts), reached only through
+     * `process.__kilnNativeModules.http`: a server whose listener receives each request whole as
+     * strings and bytes, and the one call that answers it. Plumbing for a TypeScript built-in,
+     * not a built-in -- neither is a member of any public object. */
+    (KILN_C99_METHOD_NODE_HTTP_CREATE_FETCH_SERVER, 530, NodeHttp; 0, 0),
+    (KILN_C99_METHOD_NODE_HTTP_FETCH_RESPOND, 531, NodeHttp; 0, 0),
     (KILN_C99_METHOD_NODE_CLIENT_REQUEST_WRITE, 282, NodeHttp; 0, 0),
     (KILN_C99_METHOD_NODE_CLIENT_REQUEST_END, 283, NodeHttp; 0, 0),
     /* Three groups, and no precedence between them: `kiln_c99_invoke_method` routes this
@@ -3770,6 +3776,8 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_NODE_RESPONSE_END),
     emit_method_define!(KILN_C99_METHOD_NODE_HTTP_GET),
     emit_method_define!(KILN_C99_METHOD_NODE_HTTP_REQUEST),
+    emit_method_define!(KILN_C99_METHOD_NODE_HTTP_CREATE_FETCH_SERVER),
+    emit_method_define!(KILN_C99_METHOD_NODE_HTTP_FETCH_RESPOND),
     emit_method_define!(KILN_C99_METHOD_NODE_CLIENT_REQUEST_WRITE),
     emit_method_define!(KILN_C99_METHOD_NODE_CLIENT_REQUEST_END),
     emit_method_define!(KILN_C99_METHOD_NODE_REQUEST_HEADERS_GET),

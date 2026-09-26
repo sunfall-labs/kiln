@@ -18,7 +18,7 @@ use std::task::{Context, Poll, Waker};
 
 use bytes::Bytes;
 use http_body_util::BodyExt;
-use hyper::body::{Frame, Incoming};
+use hyper::body::{Body as _, Frame, Incoming};
 use hyper::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::service::service_fn;
 use hyper::{Request, Response};
@@ -154,6 +154,14 @@ pub trait HttpDispatch {
     fn started(&self) {}
     fn event(&self, event: &HttpEvent<'_>) -> i32;
     fn checkpoint(&self) -> i32;
+    /// Whether the language wants each request whole: the engine collects the request body
+    /// before dispatching, delivers it as the `RequestHead` event's `data`, and dispatches no
+    /// `RequestData`/`RequestEnd` for it. This is the shape a fetch-style handler (`serve`)
+    /// consumes -- one crossing per request instead of three -- and it is fixed for the life of
+    /// the connection. Node's `IncomingMessage` streams, so the default is false.
+    fn whole_requests(&self) -> bool {
+        false
+    }
 }
 
 /// What both engines keep per connection: the realm's dispatch, and the body events produced
@@ -165,17 +173,25 @@ pub(crate) struct Dispatcher {
     deferred: RefCell<Vec<(u64, BodyEvent)>>,
     pub(crate) deferred_wake: Notify,
     failed: Cell<bool>,
+    /// [`HttpDispatch::whole_requests`], read once.
+    whole_requests: bool,
 }
 
 impl Dispatcher {
     pub(crate) fn new(resource: ResourceId, dispatch: Rc<dyn HttpDispatch>) -> Self {
+        let whole_requests = dispatch.whole_requests();
         Self {
             resource,
             dispatch,
             deferred: RefCell::new(Vec::new()),
             deferred_wake: Notify::new(),
             failed: Cell::new(false),
+            whole_requests,
         }
+    }
+
+    pub(crate) fn whole_requests(&self) -> bool {
+        self.whole_requests
     }
 
     pub(crate) fn failed(&self) -> bool {
@@ -1136,6 +1152,26 @@ async fn handle(
             rendered_target.as_bytes()
         }
     };
+    // A language that takes requests whole gets the body with the head, so the body is read
+    // before anything is dispatched. A request that declares no body (every GET) costs nothing.
+    let whole = shared.dispatcher.whole_requests();
+    let whole_body = if whole && !body.is_end_stream() {
+        match (&mut body).collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(error) => {
+                trace!("{:?} request {id} body failed: {error}", shared.resource);
+                shared.requests.borrow_mut().remove(&id);
+                let mut response = Response::new(EngineBody::Empty);
+                *response.status_mut() = hyper::StatusCode::BAD_REQUEST;
+                response
+                    .headers_mut()
+                    .insert(hyper::header::CONNECTION, HeaderValue::from_static("close"));
+                return response;
+            }
+        }
+    } else {
+        Bytes::new()
+    };
     {
         let mut scratch = shared.header_scratch.borrow_mut();
         flatten_header_map(&parts.headers, &mut scratch);
@@ -1148,6 +1184,7 @@ async fn handle(
             method: parts.method.as_str().as_bytes(),
             target,
             headers: &scratch,
+            data: &whole_body,
             ..HttpEvent::bare(HttpEventKind::RequestHead, id)
         };
         shared.dispatch(&head)
@@ -1201,7 +1238,7 @@ async fn handle(
         };
         (response, Some(pump))
     } else {
-        if dispatched {
+        if dispatched && !whole {
             let mut failed = false;
             while let Some(frame) = body.frame().await {
                 match frame {
@@ -1383,6 +1420,95 @@ mod tests {
             }
         }
         String::from_utf8(answer).expect("utf-8 response")
+    }
+
+    /// A dispatch that takes requests whole and answers each from inside its head event.
+    struct Whole {
+        engine: Rc<RefCell<HttpServerEngine>>,
+        resource: ResourceId,
+        events: RefCell<Vec<(HttpEventKind, Vec<u8>)>>,
+    }
+
+    impl HttpDispatch for Whole {
+        fn event(&self, event: &HttpEvent<'_>) -> i32 {
+            self.events.borrow_mut().push((event.kind, event.data.to_vec()));
+            if event.kind == HttpEventKind::RequestHead {
+                let mut engine = self.engine.borrow_mut();
+                assert!(engine.start_response(self.resource, event.id, 201, b"x-n\01\0", 1));
+                let mut body = b"got ".to_vec();
+                body.extend_from_slice(event.data);
+                engine
+                    .end_response(self.resource, event.id, &body)
+                    .expect("response ends");
+            }
+            0
+        }
+
+        fn checkpoint(&self) -> i32 {
+            0
+        }
+
+        fn whole_requests(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn a_whole_request_arrives_as_one_event_carrying_its_body() {
+        let (runtime, local) = local();
+        local.block_on(&runtime, async {
+            let (mut client, server) = tokio::io::duplex(1 << 16);
+            let engine = Rc::new(RefCell::new(HttpServerEngine::default()));
+            let resource = ResourceId::new(9);
+            let whole = Rc::new(Whole {
+                engine: Rc::clone(&engine),
+                resource,
+                events: RefCell::new(Vec::new()),
+            });
+            assert!(engine.borrow_mut().attach(
+                resource,
+                HostTransport(Box::new(server)),
+                false,
+                whole.clone(),
+            ));
+            // A body in two chunks (chunked encoding) is collected before the head is dispatched.
+            client
+                .write_all(
+                    b"POST /a HTTP/1.1\r\nhost: x\r\ntransfer-encoding: chunked\r\n\r\n\
+                      3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n",
+                )
+                .await
+                .expect("request writes");
+            let text = read_until_complete(&mut client, b"got abcde").await;
+            assert!(text.starts_with("HTTP/1.1 201 Created\r\n"), "{text}");
+            assert!(text.contains("x-n: 1\r\n"), "{text}");
+            // A request without a body costs no wait at all.
+            client
+                .write_all(b"GET /b HTTP/1.1\r\nhost: x\r\n\r\n")
+                .await
+                .expect("second request writes");
+            let text = read_until_complete(&mut client, b"got ").await;
+            assert!(text.contains("content-length: 4\r\n"), "{text}");
+            drop(client);
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+            let events = whole.events.borrow();
+            let heads: Vec<_> = events
+                .iter()
+                .filter(|(kind, _)| *kind == HttpEventKind::RequestHead)
+                .map(|(_, data)| data.clone())
+                .collect();
+            assert_eq!(heads, vec![b"abcde".to_vec(), Vec::new()]);
+            assert!(
+                events.iter().all(|(kind, _)| !matches!(
+                    kind,
+                    HttpEventKind::RequestData | HttpEventKind::RequestEnd
+                )),
+                "{:?}",
+                events.iter().map(|(kind, _)| *kind).collect::<Vec<_>>()
+            );
+        });
     }
 
     #[test]

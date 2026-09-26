@@ -171,6 +171,20 @@ pub trait ActiveHttpRuntime {
     /// Attach the server engine to an accepted stream. False if the host cannot hand its
     /// transport over or the resource is already attached.
     fn start_connection(&mut self, resource: ResourceId, allow_half_close: bool) -> bool;
+    /// [`Self::start_connection`] for a connection that takes requests whole
+    /// ([`HttpDispatch::whole_requests`]) when `whole_requests` is set: the fetch-style
+    /// `serve` server's connections.
+    fn start_connection_with(
+        &mut self,
+        resource: ResourceId,
+        allow_half_close: bool,
+        whole_requests: bool,
+    ) -> bool {
+        if whole_requests {
+            return false;
+        }
+        self.start_connection(resource, allow_half_close)
+    }
     /// Stop a connection of either role. False once no engine owns it, which is not an error
     /// for a caller that heard `Closed` a moment ago.
     fn close_connection(&mut self, resource: ResourceId, mode: HttpCloseMode) -> bool;
@@ -1113,6 +1127,18 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     /// (the queued adapter of ADR 0046, for a loop that drains events at its checkpoint).
     #[cfg(feature = "http")]
     pub fn server_attach_queued(&mut self, resource: ResourceId, allow_half_close: bool) -> bool {
+        self.server_attach_queued_with(resource, allow_half_close, false)
+    }
+
+    /// [`Self::server_attach_queued`], optionally taking requests whole
+    /// ([`HttpDispatch::whole_requests`]), which is what a fetch-style `serve` handler consumes.
+    #[cfg(feature = "http")]
+    pub fn server_attach_queued_with(
+        &mut self,
+        resource: ResourceId,
+        allow_half_close: bool,
+        whole_requests: bool,
+    ) -> bool {
         let Some(admission) = self.state.queued_http.admit(resource) else {
             return false;
         };
@@ -1121,6 +1147,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             admission,
             role: QueuedRole::Server,
             queue: Rc::clone(&self.state.queued_http),
+            whole_requests,
         });
         if self.server_attach(resource, allow_half_close, dispatch) {
             true
@@ -1141,6 +1168,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             admission,
             role: QueuedRole::Client,
             queue: Rc::clone(&self.state.queued_http),
+            whole_requests: false,
         });
         if self.client_attach(resource, dispatch) {
             true
@@ -1703,6 +1731,7 @@ struct QueuedDispatch {
     admission: u64,
     role: QueuedRole,
     queue: Rc<QueuedHttp>,
+    whole_requests: bool,
 }
 
 #[cfg(feature = "http")]
@@ -1757,7 +1786,8 @@ impl HttpDispatch for QueuedDispatch {
                                 node_http::HttpVersion::Http11
                             },
                             headers: node_http::HttpHeaders::from_raw(event.headers.to_vec()),
-                            body: Vec::new(),
+                            // Empty unless the connection takes requests whole.
+                            body: event.data.to_vec(),
                             keep_alive: event.keep_alive,
                         },
                     },
@@ -1815,6 +1845,10 @@ impl HttpDispatch for QueuedDispatch {
     fn checkpoint(&self) -> i32 {
         // The loop that drains the queue runs its own checkpoint after each event.
         0
+    }
+
+    fn whole_requests(&self) -> bool {
+        self.whole_requests
     }
 }
 
@@ -1887,13 +1921,22 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
     }
 
     fn start_connection(&mut self, resource: ResourceId, allow_half_close: bool) -> bool {
+        self.start_connection_with(resource, allow_half_close, false)
+    }
+
+    fn start_connection_with(
+        &mut self,
+        resource: ResourceId,
+        allow_half_close: bool,
+        whole_requests: bool,
+    ) -> bool {
         #[cfg(feature = "http")]
         {
-            return self.server_attach_queued(resource, allow_half_close);
+            return self.server_attach_queued_with(resource, allow_half_close, whole_requests);
         }
         #[cfg(not(feature = "http"))]
         {
-            let _ = (resource, allow_half_close);
+            let _ = (resource, allow_half_close, whole_requests);
             return false;
         }
     }
