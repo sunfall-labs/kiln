@@ -828,7 +828,9 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
         case KILN_C99_BUILTIN_INT32_ARRAY:
         case KILN_C99_BUILTIN_UINT32_ARRAY:
         case KILN_C99_BUILTIN_FLOAT32_ARRAY:
-        case KILN_C99_BUILTIN_FLOAT64_ARRAY: {
+        case KILN_C99_BUILTIN_FLOAT64_ARRAY:
+        case KILN_C99_BUILTIN_BIG_INT64_ARRAY:
+        case KILN_C99_BUILTIN_BIG_UINT64_ARRAY: {
             kiln_typed_kind kind;
             *answer = kiln_c99_builtin_typed_kind(constructor.bits, &kind) &&
                       value.tag == KILN_VALUE_TYPED_ARRAY &&
@@ -841,6 +843,8 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
         case KILN_C99_BUILTIN_REFERENCE_ERROR:
         case KILN_C99_BUILTIN_SYNTAX_ERROR:
         case KILN_C99_BUILTIN_URI_ERROR:
+        case KILN_C99_BUILTIN_EVAL_ERROR:
+        case KILN_C99_BUILTIN_SUPPRESSED_ERROR:
         case KILN_C99_BUILTIN_AGGREGATE_ERROR: {
             /* `Error` is the base of all of them, so it accepts any kind; the others accept only
              * their own. There is no prototype chain here to walk, and this is the same answer

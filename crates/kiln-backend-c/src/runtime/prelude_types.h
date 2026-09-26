@@ -416,7 +416,9 @@ typedef enum kiln_typed_kind {
     KILN_TYPED_INT32,
     KILN_TYPED_UINT32,
     KILN_TYPED_FLOAT32,
-    KILN_TYPED_FLOAT64
+    KILN_TYPED_FLOAT64,
+    KILN_TYPED_BIG_INT64,
+    KILN_TYPED_BIG_UINT64
 } kiln_typed_kind;
 
 typedef struct kiln_typed_buffer {

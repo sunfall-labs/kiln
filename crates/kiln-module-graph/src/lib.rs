@@ -1945,12 +1945,19 @@ impl ModuleGraph {
         };
 
         {
-            // `URL` and `Date` in every mode, as the native runtime has it; the fetch and web classes,
-            // which are built on it, under the adapter.
-            let date = kiln_builtins::DATE_BOOTSTRAP_SOURCE;
+            // ECMAScript built-in prototypes in every mode, as the native runtime has it:
+            // Date.prototype, %TypedArray%.prototype, Error subclasses, Annex B, and DisposableStack.
+            let common_ts_builtins = format!(
+                "{}\n{}\n{}\n{}\n{}",
+                kiln_builtins::DATE_BOOTSTRAP_SOURCE,
+                kiln_builtins::TYPEDARRAY_BOOTSTRAP_SOURCE,
+                kiln_builtins::ERRORS_BOOTSTRAP_SOURCE,
+                kiln_builtins::ANNEXB_BOOTSTRAP_SOURCE,
+                kiln_builtins::DISPOSABLE_BOOTSTRAP_SOURCE,
+            );
             let source = if node {
                 format!(
-                    "{date}\n{}\n{}",
+                    "{common_ts_builtins}\n{}\n{}",
                     kiln_builtins::URL_BOOTSTRAP_SOURCE,
                     kiln_builtins::WEB_BOOTSTRAP_SOURCE
                 )
@@ -1959,7 +1966,7 @@ impl ModuleGraph {
                 // it the bridge would be the one global node does not have -- the native
                 // bootstrap does the same.
                 format!(
-                    "{date}\n{}\ndelete globalThis.__kilnBufferToString;\n",
+                    "{common_ts_builtins}\n{}\ndelete globalThis.__kilnBufferToString;\n",
                     kiln_builtins::URL_BOOTSTRAP_SOURCE
                 )
             };

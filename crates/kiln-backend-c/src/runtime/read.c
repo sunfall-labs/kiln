@@ -240,6 +240,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 *out = kiln_c99_method(inherited);
                 return KILN_C99_OK;
             }
+            {
+                int found;
+                int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_OBJECT_PROTOTYPE,
+                                                           key, ikey, out, depth, thrown, &found);
+                if (status != KILN_C99_OK || found) return status;
+            }
             if (kiln_c99_same_name_key(key, "constructor")) {
                 /* An error already records its kind, and `error.constructor.name` is the ordinary
                  * way a program asks which one it caught -- so the answer comes from the kind
@@ -854,6 +860,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             *out = kiln_c99_method(code);
             return KILN_C99_OK;
         }
+        {
+            int found;
+            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_STRING_PROTOTYPE,
+                                                       key, ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+        }
         if (kiln_c99_is_string_member(intrinsic_key, intrinsic_len)) {
             KILN_C99_REFUSE("a String.prototype member this backend has not implemented");
         }
@@ -1351,20 +1363,15 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                     return KILN_C99_OK;
                 }
                 method = kiln_c99_typed_prototype_method(intrinsic_key, intrinsic_len);
-                if (method == 0 && concrete) {
-                    kiln_value common_proto =
-                        kiln_c99_builtin(KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE);
-                    kiln_value store;
-                    if (kiln_c99_callable_store(common_proto, &store, 0) == KILN_C99_OK &&
-                        store.tag == KILN_VALUE_OBJECT) {
-                        kiln_object *properties = kiln_c99_object_of(store);
-                        size_t pidx;
-                        if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
-                        for (pidx = 0; pidx < properties->count; ++pidx) {
-                            if (kiln_c99_same_key_view(&properties->properties[pidx], key)) {
-                                return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
-                            }
-                        }
+                if (method == 0) {
+                    int found;
+                    int status = kiln_c99_prototype_store_read(host, target.bits, key,
+                                                               ikey, out, depth, thrown, &found);
+                    if (status != KILN_C99_OK || found) return status;
+                    if (concrete) {
+                        status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE,
+                                                               key, ikey, out, depth, thrown, &found);
+                        if (status != KILN_C99_OK || found) return status;
                     }
                 }
                 if (method == 0) {
@@ -1408,6 +1415,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                        ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
                    : kiln_c99_same_name_key(key, "valueOf") ? KILN_C99_METHOD_OBJECT_VALUE_OF
                        : 0;
+        }
+        if (code == 0 && target.bits == KILN_C99_BUILTIN_OBJECT_PROTOTYPE) {
+            int found;
+            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_OBJECT_PROTOTYPE,
+                                                       key, ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
         }
         /* `RangeError.name` is how `error.constructor.name` gets its answer, which is the ordinary
          * way a program asks what kind of error it caught. A namespace is not a constructor and
@@ -1509,6 +1522,18 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             }
         }
         if (kiln_c99_same_name_key(key, "prototype")) {
+            kiln_value store;
+            if (kiln_c99_callable_store(target, &store, 0) == KILN_C99_OK &&
+                store.tag == KILN_VALUE_OBJECT) {
+                kiln_object *properties = kiln_c99_object_of(store);
+                size_t pidx;
+                if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
+                for (pidx = 0; pidx < properties->count; ++pidx) {
+                    if (kiln_c99_same_key_view(&properties->properties[pidx], key)) {
+                        return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
+                    }
+                }
+            }
             /* Reached for its methods rather than as an object: these are not yet the objects the
              * chains actually end at, which is what `Object.getPrototypeOf` would need.
              *

@@ -108,6 +108,8 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_UINT32_ARRAY_PROTOTYPE: return "Uint32Array";
     case KILN_C99_BUILTIN_FLOAT32_ARRAY_PROTOTYPE: return "Float32Array";
     case KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE: return "Float64Array";
+    case KILN_C99_BUILTIN_BIG_INT64_ARRAY_PROTOTYPE: return "BigInt64Array";
+    case KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE: return "BigUint64Array";
     case KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE: return "ArrayBuffer";
     default: {
         /* Every other tag is an error constructor; a tag with no name at all is a tag added

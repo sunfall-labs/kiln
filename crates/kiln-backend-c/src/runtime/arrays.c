@@ -140,7 +140,9 @@ static size_t kiln_c99_typed_width(kiln_typed_kind kind) {
     case KILN_TYPED_INT32:
     case KILN_TYPED_UINT32:
     case KILN_TYPED_FLOAT32: return 4;
-    case KILN_TYPED_FLOAT64: return 8;
+    case KILN_TYPED_FLOAT64:
+    case KILN_TYPED_BIG_INT64:
+    case KILN_TYPED_BIG_UINT64: return 8;
     }
     return 1;
 }
@@ -156,6 +158,8 @@ static const char *kiln_c99_typed_name(kiln_typed_kind kind) {
     case KILN_TYPED_UINT32: return "Uint32Array";
     case KILN_TYPED_FLOAT32: return "Float32Array";
     case KILN_TYPED_FLOAT64: return "Float64Array";
+    case KILN_TYPED_BIG_INT64: return "BigInt64Array";
+    case KILN_TYPED_BIG_UINT64: return "BigUint64Array";
     }
     return "TypedArray";
 }
@@ -171,6 +175,8 @@ static int kiln_c99_builtin_typed_kind(uint64_t builtin, kiln_typed_kind *kind) 
     case KILN_C99_BUILTIN_UINT32_ARRAY: *kind = KILN_TYPED_UINT32; return 1;
     case KILN_C99_BUILTIN_FLOAT32_ARRAY: *kind = KILN_TYPED_FLOAT32; return 1;
     case KILN_C99_BUILTIN_FLOAT64_ARRAY: *kind = KILN_TYPED_FLOAT64; return 1;
+    case KILN_C99_BUILTIN_BIG_INT64_ARRAY: *kind = KILN_TYPED_BIG_INT64; return 1;
+    case KILN_C99_BUILTIN_BIG_UINT64_ARRAY: *kind = KILN_TYPED_BIG_UINT64; return 1;
     default: return 0;
     }
 }
@@ -186,6 +192,8 @@ static uint64_t kiln_c99_typed_constructor(kiln_typed_kind kind) {
     case KILN_TYPED_UINT32: return KILN_C99_BUILTIN_UINT32_ARRAY;
     case KILN_TYPED_FLOAT32: return KILN_C99_BUILTIN_FLOAT32_ARRAY;
     case KILN_TYPED_FLOAT64: return KILN_C99_BUILTIN_FLOAT64_ARRAY;
+    case KILN_TYPED_BIG_INT64: return KILN_C99_BUILTIN_BIG_INT64_ARRAY;
+    case KILN_TYPED_BIG_UINT64: return KILN_C99_BUILTIN_BIG_UINT64_ARRAY;
     }
     return KILN_C99_BUILTIN_UINT8_ARRAY;
 }
@@ -201,6 +209,8 @@ static uint64_t kiln_c99_typed_prototype(kiln_typed_kind kind) {
     case KILN_TYPED_UINT32: return KILN_C99_BUILTIN_UINT32_ARRAY_PROTOTYPE;
     case KILN_TYPED_FLOAT32: return KILN_C99_BUILTIN_FLOAT32_ARRAY_PROTOTYPE;
     case KILN_TYPED_FLOAT64: return KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE;
+    case KILN_TYPED_BIG_INT64: return KILN_C99_BUILTIN_BIG_INT64_ARRAY_PROTOTYPE;
+    case KILN_TYPED_BIG_UINT64: return KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE;
     }
     return KILN_C99_BUILTIN_UINT8_ARRAY_PROTOTYPE;
 }
@@ -218,6 +228,8 @@ static int kiln_c99_typed_prototype_kind(uint64_t builtin, kiln_typed_kind *kind
     case KILN_C99_BUILTIN_UINT32_ARRAY_PROTOTYPE: *kind = KILN_TYPED_UINT32; return 1;
     case KILN_C99_BUILTIN_FLOAT32_ARRAY_PROTOTYPE: *kind = KILN_TYPED_FLOAT32; return 1;
     case KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE: *kind = KILN_TYPED_FLOAT64; return 1;
+    case KILN_C99_BUILTIN_BIG_INT64_ARRAY_PROTOTYPE: *kind = KILN_TYPED_BIG_INT64; return 1;
+    case KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE: *kind = KILN_TYPED_BIG_UINT64; return 1;
     default: return 0;
     }
 }
