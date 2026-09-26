@@ -8682,8 +8682,35 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         vec![chunk, Value::String("buffer".into()), done],
                         instruction,
                     )?;
-                } else if let Some(callback) = callback {
-                    self.call_value(&callback, Value::Undefined, Vec::new(), instruction)?;
+                } else {
+                    if let Ok(Value::Number(fd_bits)) = self.read_property(receiver, "fd", instruction) {
+                        let fd = fd_bits as i32;
+                        if fd == 1 || fd == 2 {
+                            let op = if fd == 1 {
+                                HostOp::WriteStdout
+                            } else {
+                                HostOp::WriteStderr
+                            };
+                            let text = match &chunk {
+                                Value::String(s) => s.to_lossy_string(),
+                                Value::TypedArray(view) => String::from_utf8_lossy(&view.bytes()).into_owned(),
+                                Value::ArrayBuffer(ab) => String::from_utf8_lossy(&ab.bytes.borrow()).into_owned(),
+                                _ => String::new(),
+                            };
+                            if !text.is_empty() {
+                                let trimmed = text.strip_suffix("\r\n").or_else(|| text.strip_suffix('\n')).unwrap_or(&text);
+                                self.host
+                                    .call(op, &[HostValue::from(Value::String(trimmed.to_owned().into()))])
+                                    .map_err(|error| ExecutionError::Host {
+                                        instruction,
+                                        message: error.to_string(),
+                                    })?;
+                            }
+                        }
+                    }
+                    if let Some(callback) = callback {
+                        self.call_value(&callback, Value::Undefined, Vec::new(), instruction)?;
+                    }
                 }
                 Ok(Value::Boolean(true))
             }

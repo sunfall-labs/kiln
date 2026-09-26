@@ -4190,7 +4190,8 @@ static int kiln_c99_is_array_member(const char *key, size_t key_len) {
     }
     /* `@@iterator` and `@@unscopables` are members too, and reserved keys reach here spelled with
      * the `@@` prefix. */
-    return key_len > 2 && key[0] == '@' && key[1] == '@';
+    return kiln_c99_same_name(key, key_len, "@@iterator") ||
+           kiln_c99_same_name(key, key_len, "@@unscopables");
 }
 
 static int kiln_c99_is_date_member(const char *key, size_t key_len) {
@@ -4210,7 +4211,7 @@ static int kiln_c99_is_date_member(const char *key, size_t key_len) {
             return 1;
         }
     }
-    return key_len > 2 && key[0] == '@' && key[1] == '@';
+    return kiln_c99_same_name(key, key_len, "@@toPrimitive");
 }
 
 /* The same question one type further over: whether a name is a member of the prototype the
