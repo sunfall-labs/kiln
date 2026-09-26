@@ -100,9 +100,14 @@ close contract and every scripted test are unchanged.
 * **Submission is batched.** Entries queued during a turn are submitted together at one flush
   point in the drive loop, so N connections' receives and sends cost one `io_uring_enter` rather
   than N pairs of syscalls. That batching is what io_uring buys here.
-* **Selected at run time, not compile time.** The host probes at startup and falls back to epoll on
-  `ENOSYS`, `EPERM` (Docker's default seccomp profile), `kernel.io_uring_disabled` or a missing
-  opcode. `KILN_IO=uring|epoll` forces either. One provider archive, one test matrix.
+* **Selected at run time, not compile time.** `KILN_IO` unset or `auto` selects io_uring on Linux
+  6.1 and newer, the first LTS kernel with everything the transport uses, and epoll below it. The
+  host probes the ring on first use and falls back to epoll on `ENOSYS`, `EPERM` (Docker's
+  default seccomp profile), `kernel.io_uring_disabled`, a missing opcode or a failed buffer-ring
+  registration. The floor exists because the probe only catches a kernel that refuses something:
+  the transport's first design, DEFER_TASKRUN plus an eventfd, was accepted by 7.2, passed every
+  functional test, and added 6–8 ms to each keep-alive request. `KILN_IO=epoll` forces epoll;
+  `KILN_IO=uring` asks for the ring below the floor. One provider archive, one test matrix.
 
 ### 3. Measure CPU per request
 
@@ -112,17 +117,63 @@ server.
 
 ## Measured results
 
-To be completed from the implementation branches before this ADR is accepted:
-`perf/native-serve`, `perf/lazy-node-http` and `perf/uring-transport`, integrated on
-`perf/http-fast-path`.
+Implemented on `perf/native-serve`, `perf/lazy-node-http` and `perf/uring-transport`, integrated on
+`perf/http-fast-path`. The machine was shared with other builds throughout (load average 15–34),
+which roughly triples the absolute figures against the quiet-machine profile above. The ratios
+come from interleaved runs of base and candidate in the same minutes.
+
+**Realm work.** Server µs/request, three interleaved rounds, node load client, one pinned core:
+
+| | ca3b20a8 | integrated | change |
+| --- | --- | --- | --- |
+| `node:http` hello | 30.4 / 32.7 / 31.1 | 29.6 / 27.6 / 28.1 | −10% |
+| `serve()` hello | 79.6 / 71.3 / 67.8 | 34.7 / 32.9 / 32.3 | 2.2x less |
+| `serve()` route (reads URL and a header, sets headers) | 85.1 / 87.0 / 80.4 | 61.6 / 55.5 / 52.5 | 1.5x less |
+
+* `serve()` no longer builds node objects. The engine dispatches whole requests, the `Request`
+  builds its URL and headers on first read, and the response reaches the `ResponseSlot` in one
+  crossing (`fetchRespond`).
+* `node:http` builds `req`/`res` from fixed layouts with pre-interned keys. It stopped recycling
+  one pair per keep-alive socket, which cost nine property deletes per request and was the
+  source of three native-only bugs: a kept `req` changed `url` on the next request, handler
+  properties leaked across requests, and `res.statusCode = 404; res.end()` sent 200. User
+  instructions per request fell 35%.
+* `req.headers` kept a raw pointer into the engine's borrowed per-connection header buffer, so
+  any read after an `await` saw the next request's headers or freed memory. The head dispatch
+  now copies the bytes. `conformance/native/app-http-request-lifecycle.mjs` covers this.
+* Class instances whose prototype chain has a getter had become dictionary objects on the native
+  backend, and the root shape stopped branching at 32 class brands, which the bootstrap had
+  already used up. Both are fixed (7a2ae86d), and the fix applies to all native code.
+
+What remains in `serve()` route is general native object-model cost rather than HTTP: a missing
+property read is ~350 ns, an object literal ~1.4 µs, `new Headers(obj)` ~2.2 µs, and a `for…of`
+over a Map ~5 µs.
+
+**io_uring.** Median of eight interleaved runs, `node:http` hello, same binary, `KILN_IO`
+switched:
+
+| load | epoll | io_uring |
+| --- | --- | --- |
+| oha, 16 connections | 17.6 µs, 35k req/s | 10.3 µs, 61k req/s |
+| oha, 64 connections | 16.4 µs, 42k req/s | 9.4 µs, 71k req/s |
+| node load client | 30.7 µs | 29.4 µs |
+| one connection, p50 latency | 34 µs | 36 µs |
+
+At 64 connections io_uring makes 0.07–0.09 syscalls per request (about 26 requests per
+`io_uring_enter`) against epoll's 2.04. Syscall entry/exit falls from 4.2% of CPU to 0.3%, and
+the ring and its driver add about 5%. `KILN_WORKERS=4` with four rings served 190k req/s. The
+gain appears only when the server is busy enough to batch. Under the node client, which cannot
+saturate the server, the two are within noise.
 
 ## Consequences
 
-* The draft's 150–250k req/s per core and 1M req/s claims are withdrawn. The ceiling that the
-  profile supports is set by the kernel TCP path. On loopback that is about 5 µs of the 10.7;
+* The draft's 150–250k req/s per core and 1M req/s claims are withdrawn. Past the io_uring
+  batching, the ceiling the profile supports is set by the kernel TCP path. On loopback that is about 5 µs of the 10.7;
   on a real NIC without conntrack it is roughly 3 µs.
-* io_uring is Linux-only by construction and optional at run time. macOS and Windows keep the
-  Tokio transport, and so does any Linux host that refuses the ring.
+* io_uring is Linux-only by construction and selected at run time. macOS, Windows, Linux below
+  6.1 and any Linux host that refuses the ring keep the Tokio transport. Only 7.2 has been
+  validated; a regression on another kernel is answered with `KILN_IO=epoll` and a raised floor.
+* Each realm on the ring reserves 1 MiB of provided receive buffers.
 * `node:fs` through Tokio's own io_uring driver (Tokio 1.53, `io-uring` feature) would remove the
   blocking-pool hop per filesystem operation. It requires `tokio_unstable`, which the workspace
   keeps out of the shipped runtime. It is left as a separate decision.
