@@ -92,41 +92,33 @@ class Headers {
     this._headers = newHeaders;
   }
 
+  private _getCombinedMap(): Map<string, string> {
+    const map = new Map<string, string>();
+    for (let i = 0; i < this._headers.length; i++) {
+      const k = this._headers[i][0];
+      const v = this._headers[i][1];
+      const existing = map.get(k);
+      map.set(k, existing !== undefined ? `${existing}, ${v}` : v);
+    }
+    return map;
+  }
+
   forEach(callback: (value: string, key: string, parent: Headers) => void, thisArg?: any): void {
-    const seen = new Set<string>();
-    for (let i = 0; i < this._headers.length; i++) {
-      const k = this._headers[i][0];
-      if (!seen.has(k)) {
-        seen.add(k);
-        const val = this.get(k);
-        if (val !== null) {
-          callback.call(thisArg, val, k, this);
-        }
-      }
-    }
+    this._getCombinedMap().forEach((value, key) => {
+      callback.call(thisArg, value, key, this);
+    });
   }
 
-  *keys(): IterableIterator<string> {
-    const seen = new Set<string>();
-    for (let i = 0; i < this._headers.length; i++) {
-      const k = this._headers[i][0];
-      if (!seen.has(k)) {
-        seen.add(k);
-        yield k;
-      }
-    }
+  keys(): IterableIterator<string> {
+    return this._getCombinedMap().keys();
   }
 
-  *values(): IterableIterator<string> {
-    for (const k of this.keys()) {
-      yield this.get(k)!;
-    }
+  values(): IterableIterator<string> {
+    return this._getCombinedMap().values();
   }
 
-  *entries(): IterableIterator<[string, string]> {
-    for (const k of this.keys()) {
-      yield [k, this.get(k)!];
-    }
+  entries(): IterableIterator<[string, string]> {
+    return this._getCombinedMap().entries();
   }
 
   [Symbol.iterator](): IterableIterator<[string, string]> {
@@ -337,15 +329,28 @@ class FormData {
   }
 }
 
+let _sharedEncoder: any = null;
+function getSharedEncoder(): any {
+  if (!_sharedEncoder && typeof TextEncoder !== "undefined") {
+    _sharedEncoder = new TextEncoder();
+  }
+  return _sharedEncoder;
+}
+
+let _sharedDecoder: any = null;
+function getSharedDecoder(): any {
+  if (!_sharedDecoder && typeof TextDecoder !== "undefined") {
+    _sharedDecoder = new TextDecoder();
+  }
+  return _sharedDecoder;
+}
+
 function extractBodyData(body: any): { bytes: Uint8Array | null; text: string | null } {
   if (body === undefined || body === null) {
     return { bytes: null, text: null };
   }
   if (typeof body === "string") {
-    return {
-      bytes: typeof TextEncoder !== "undefined" ? new TextEncoder().encode(body) : null,
-      text: body,
-    };
+    return { bytes: null, text: body };
   }
   if (body instanceof Uint8Array) {
     return { bytes: body, text: null };
@@ -360,10 +365,7 @@ function extractBodyData(body: any): { bytes: Uint8Array | null; text: string | 
     return { bytes: new Uint8Array(body), text: null };
   }
   const s = String(body);
-  return {
-    bytes: typeof TextEncoder !== "undefined" ? new TextEncoder().encode(s) : null,
-    text: s,
-  };
+  return { bytes: null, text: s };
 }
 
 class Response {
@@ -406,7 +408,10 @@ class Response {
     this._bodyStream = new RS({
       pull(controller: any) {
         self.bodyUsed = true;
-        const bytes = self._rawBytes !== null ? self._rawBytes : new TextEncoder().encode(self._rawText || "");
+        const bytes =
+          self._rawBytes !== null
+            ? self._rawBytes
+            : (getSharedEncoder()?.encode(self._rawText || "") || new Uint8Array(0));
         if (bytes.length > 0) controller.enqueue(bytes);
         controller.close();
       },
@@ -419,9 +424,8 @@ class Response {
     this.bodyUsed = true;
     if (this._rawText !== null) return this._rawText;
     if (this._rawBytes !== null) {
-      if (typeof TextDecoder !== "undefined") {
-        return new TextDecoder().decode(this._rawBytes);
-      }
+      const dec = getSharedDecoder();
+      if (dec) return dec.decode(this._rawBytes);
       let res = "";
       for (let i = 0; i < this._rawBytes.length; i++) {
         res += String.fromCharCode(this._rawBytes[i]);
@@ -439,6 +443,9 @@ class Response {
   async arrayBuffer(): Promise<ArrayBuffer> {
     if (this.bodyUsed) throw new TypeError("Body has already been consumed");
     this.bodyUsed = true;
+    if (this._rawBytes === null && this._rawText !== null) {
+      this._rawBytes = getSharedEncoder()?.encode(this._rawText) || null;
+    }
     if (this._rawBytes !== null) {
       return this._rawBytes.buffer.slice(
         this._rawBytes.byteOffset,
@@ -453,6 +460,10 @@ class Response {
     this.bodyUsed = true;
     if (this._rawBytes !== null) {
       return new Uint8Array(this._rawBytes);
+    }
+    if (this._rawText !== null) {
+      const enc = getSharedEncoder();
+      return enc ? enc.encode(this._rawText) : new Uint8Array(0);
     }
     return new Uint8Array(0);
   }
@@ -536,7 +547,7 @@ class Request {
     } else {
       this.url = String(input);
       this.method = (init?.method || "GET").toUpperCase();
-      this.headers = new Headers(init?.headers);
+      this.headers = init?.headers instanceof Headers ? init.headers : new Headers(init?.headers);
       this.signal = init?.signal;
       this.redirect = init?.redirect || "follow";
       const extracted = extractBodyData(init?.body);
@@ -559,7 +570,10 @@ class Request {
     this._bodyStream = new RS({
       pull(controller: any) {
         self.bodyUsed = true;
-        const bytes = self._rawBytes !== null ? self._rawBytes : new TextEncoder().encode(self._rawText || "");
+        const bytes =
+          self._rawBytes !== null
+            ? self._rawBytes
+            : (getSharedEncoder()?.encode(self._rawText || "") || new Uint8Array(0));
         if (bytes.length > 0) controller.enqueue(bytes);
         controller.close();
       },
@@ -572,9 +586,8 @@ class Request {
     this.bodyUsed = true;
     if (this._rawText !== null) return this._rawText;
     if (this._rawBytes !== null) {
-      if (typeof TextDecoder !== "undefined") {
-        return new TextDecoder().decode(this._rawBytes);
-      }
+      const dec = getSharedDecoder();
+      if (dec) return dec.decode(this._rawBytes);
       let res = "";
       for (let i = 0; i < this._rawBytes.length; i++) {
         res += String.fromCharCode(this._rawBytes[i]);
@@ -592,6 +605,9 @@ class Request {
   async arrayBuffer(): Promise<ArrayBuffer> {
     if (this.bodyUsed) throw new TypeError("Body has already been consumed");
     this.bodyUsed = true;
+    if (this._rawBytes === null && this._rawText !== null) {
+      this._rawBytes = getSharedEncoder()?.encode(this._rawText) || null;
+    }
     if (this._rawBytes !== null) {
       return this._rawBytes.buffer.slice(
         this._rawBytes.byteOffset,
@@ -606,6 +622,10 @@ class Request {
     this.bodyUsed = true;
     if (this._rawBytes !== null) {
       return new Uint8Array(this._rawBytes);
+    }
+    if (this._rawText !== null) {
+      const enc = getSharedEncoder();
+      return enc ? enc.encode(this._rawText) : new Uint8Array(0);
     }
     return new Uint8Array(0);
   }
