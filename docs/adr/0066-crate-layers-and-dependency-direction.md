@@ -2,7 +2,9 @@
 
 ## Status
 
-Proposed, 2026-09-26.
+Accepted, 2026-09-26, including the move into layer directories. Decided by the project owner.
+
+Originally proposed, 2026-09-26.
 
 Builds on design.md §12 (foundational crates stay small and stable) and on ADR 0060 and ADR 0065,
 which decide where semantics live; this ADR decides where the code that holds them lives.

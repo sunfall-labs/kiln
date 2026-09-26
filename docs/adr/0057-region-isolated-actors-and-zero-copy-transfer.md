@@ -2,6 +2,10 @@
 
 ## Status
 
+Still proposed as of 2026-09-26. Settled by the project owner as waiting: parts are built
+(`parallelMap`, ADR 0058) but actors and zero-copy region transfer are not. Accept or reject when
+that work is scheduled.
+
 Proposed.
 
 Extends ADR 0028's multi-realm runtime model and ADR 0041's turn-boundary garbage collector. Introduces structured in-process concurrency without shared-mutable heaps or structured-clone serialization.

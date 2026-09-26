@@ -1,7 +1,6 @@
 # 08. The crypto surface services use
 
 Status: ready-for-agent
-Blocked by: architecture-consolidation issue 01
 
 `node:crypto` today: `createHash`, `createHmac`, `Hash`, `Hmac`, `getHashes`, `randomBytes`,
 `randomFillSync`, `randomUUID`, `getRandomValues`, `timingSafeEqual`. Services also need, driven by

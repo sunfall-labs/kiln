@@ -1,7 +1,6 @@
 # 08. The primitive table and `kiln:primitives`
 
 Status: ready-for-agent
-Blocked by: 01 (ADR 0065)
 
 Build the mechanism of ADR 0065 with a first handful of primitives, enough for 09 and 10:
 

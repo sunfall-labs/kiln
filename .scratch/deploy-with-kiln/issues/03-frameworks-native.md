@@ -11,9 +11,9 @@ Work the refusal and divergence list in the order the harness reports it. Record
 in this file's comments. The `conformance/thirdparty/README.md` habit of recording what each
 library found is worth keeping here.
 
-Fastify compiles JSON-schema validators with `new Function` at startup (through ajv). How that runs
-natively depends on ADR 0051 (the in-process evaluator) and on issue 06; find out which path it
-takes before working around it.
+Fastify compiles JSON-schema validators with `new Function` at startup (through ajv). ADR 0067 §1
+decides how that runs: precompiled natively when the source is known at build time, otherwise in
+ADR 0051's evaluator. The evaluator path is enough for M1; precompiling is issue 16.
 
 ## Acceptance
 

@@ -1,6 +1,6 @@
 # 01. Settle the proposed ADRs
 
-Status: ready-for-human
+Status: resolved
 
 Ten ADRs are marked Proposed. While ADR 0059 and ADR 0060 are unaccepted, ADR 0043's rule that a
 built-in member "always remains separately implemented by the two engines" is still the recorded
@@ -26,3 +26,19 @@ A rejected ADR stays in the tree with its status changed and a paragraph saying 
 ## Acceptance
 
 - Every ADR above has a status other than Proposed, or a dated note saying what it is waiting on.
+
+## Resolution, 2026-09-26
+
+Decided by the project owner:
+
+| ADR | outcome |
+| --- | --- |
+| 0060 (as revised) | Accepted |
+| 0065 | Accepted |
+| 0066 | Accepted, including the move into layer directories |
+| 0059 | Accepted |
+| 0050, 0058, 0061 | Accepted as built |
+| 0021 | Superseded by ADR 0053 |
+| 0057, 0064 | Still proposed, with a dated note naming what each is waiting on |
+
+Issues 05, 06, 07 and 08 are unblocked.

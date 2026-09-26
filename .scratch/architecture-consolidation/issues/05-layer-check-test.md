@@ -1,7 +1,6 @@
 # 05. Layer check test
 
 Status: ready-for-agent
-Blocked by: 01 (ADR 0066)
 
 A workspace test that reads `cargo metadata`, assigns each crate its ADR 0066 layer, and fails on a
 normal (non-dev) dependency that points to a higher layer, or across `interp/` and `native/`. The

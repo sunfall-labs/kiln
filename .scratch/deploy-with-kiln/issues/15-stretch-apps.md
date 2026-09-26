@@ -1,7 +1,7 @@
 # 15. The stretch apps
 
 Status: needs-triage
-Blocked by: 05, 06
+Blocked by: 05
 
 Each is an investigation first: run `kiln check` (05) against it and file what it reports, before
 committing to making it pass.

@@ -1,7 +1,6 @@
 # 02. The app harness
 
 Status: ready-for-agent
-Blocked by: 01 (the list), but the harness can be built against Express first
 
 A new corpus, `conformance/apps/<app>/`, each directory holding:
 

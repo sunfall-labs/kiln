@@ -1,7 +1,7 @@
 # 11. Per-app benchmarks against Node and Bun
 
 Status: ready-for-agent
-Blocked by: 02, 10 (reporting rule)
+Blocked by: 02
 
 Extend `bench/server/compare.sh` from hello-world and one small service to every corpus app that
 matches Node. Per app and runtime:
