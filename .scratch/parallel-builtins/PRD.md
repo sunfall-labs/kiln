@@ -89,6 +89,7 @@ why; and a program that uses only Node's surface can never tell the extensions e
 | 10 | [The parallel family](issues/10-parallel-family.md) | ready-for-agent |
 | 11 | [Benchmarks on realistic workloads](issues/11-benchmarks.md) | ready-for-agent |
 | 12 | [User documentation](issues/12-user-documentation.md) | ready-for-agent |
+| 13 | [Parallel code in every module and every build profile](issues/13-parallel-code-in-every-module.md) | ready-for-agent, first |
 
 ADR 0069 was accepted on 2026-09-26. 06 and 08 are built on ADR 0070's shared region and transfer
 (realms issues 08 and 10).
