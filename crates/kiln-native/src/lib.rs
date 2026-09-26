@@ -3847,14 +3847,7 @@ fn native_builtin_bootstrap_module(
     } else {
         ""
     };
-    let common_ts_builtins = format!(
-        "{}\n{}\n{}\n{}\n{}",
-        kiln_builtins::DATE_BOOTSTRAP_SOURCE,
-        kiln_builtins::TYPEDARRAY_BOOTSTRAP_SOURCE,
-        kiln_builtins::ERRORS_BOOTSTRAP_SOURCE,
-        kiln_builtins::ANNEXB_BOOTSTRAP_SOURCE,
-        kiln_builtins::DISPOSABLE_BOOTSTRAP_SOURCE,
-    );
+    let common_ts_builtins = kiln_builtins::common_bootstrap_source();
     let source = if node {
         format!(
             "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{common_ts_builtins}\n{url}\n{}",
