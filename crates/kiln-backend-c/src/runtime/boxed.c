@@ -1642,6 +1642,36 @@ static int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val 
             }
         }
     }
+    if (KILN_LIKELY(KILN_VAL_IS_OBJECT(target) && KILN_VAL_IS_STRING(key))) {
+        kiln_object *obj = (kiln_object *)KILN_VAL_PTR(target);
+        const kiln_string *keystr = (const kiln_string *)KILN_VAL_PTR(key);
+        if (KILN_LIKELY(obj != NULL && keystr != NULL && kiln_c99_gc_kind_of_ptr(obj) == KILN_GC_OBJECT)) {
+            if (obj->shape != NULL && obj->accessor_count == 0) {
+                uint32_t slot;
+                const kiln_string *ikey = kiln_c99_intern_key(keystr);
+                if (ikey != NULL && kiln_c99_shape_find_slot(obj->shape, ikey, &slot)) {
+                    if (slot < obj->slot_capacity) {
+                        *out = obj->slots[slot];
+                        return KILN_C99_OK;
+                    }
+                }
+                if (obj->prototype.tag == KILN_VALUE_NULL) {
+                    *out = KILN_VAL_UNDEFINED;
+                    return KILN_C99_OK;
+                }
+            } else if (obj->properties != NULL && obj->accessor_count == 0 && obj->prototype.tag == KILN_VALUE_NULL) {
+                const kiln_string *ikey = kiln_c99_intern_key(keystr);
+                size_t idx = kiln_c99_own_index_key(obj, ikey, keystr);
+                if (idx != obj->count) {
+                    *out = kiln_val_from_boundary(obj->properties[idx].value);
+                    return KILN_C99_OK;
+                } else {
+                    *out = KILN_VAL_UNDEFINED;
+                    return KILN_C99_OK;
+                }
+            }
+        }
+    }
     kiln_value t = kiln_val_to_boundary(target);
     kiln_value k = kiln_val_to_boundary(key);
     kiln_value o;
@@ -1839,6 +1869,39 @@ static int kiln_c99_val_invoke_cached_method(kiln_host *host, uint64_t method_co
                     }
                     arr->count -= 1;
                     *out = arr->elements[arr->count];
+                    return KILN_C99_OK;
+                }
+            }
+        }
+    } else if (method_code == KILN_C99_METHOD_ARRAY_SHIFT) {
+        if (KILN_LIKELY((receiver & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) {
+            void *ptr = KILN_VAL_PTR(receiver);
+            if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {
+                kiln_array *arr = (kiln_array *)ptr;
+                if (!arr->frozen && !arr->not_extensible) {
+                    if (arr->count == 0) {
+                        *out = KILN_VAL_UNDEFINED;
+                        return KILN_C99_OK;
+                    }
+                    kiln_val first = arr->elements[0] == KILN_VAL_HOLE ? KILN_VAL_UNDEFINED : arr->elements[0];
+                    arr->count -= 1;
+                    if (arr->count > 0) {
+                        memmove(arr->elements, arr->elements + 1, arr->count * sizeof *arr->elements);
+                    }
+                    *out = first;
+                    return KILN_C99_OK;
+                }
+            }
+        }
+    } else if (method_code == KILN_C99_METHOD_SPLIT) {
+        if (KILN_VAL_IS_STRING(receiver) && argc == 1 && KILN_VAL_IS_STRING(args[0])) {
+            const kiln_string *src = (const kiln_string *)KILN_VAL_PTR(receiver);
+            const kiln_string *sep = (const kiln_string *)KILN_VAL_PTR(args[0]);
+            if (src != NULL && sep != NULL && !kiln_string_is_utf16(src) && !kiln_string_is_utf16(sep) && sep->unit_len == 1) {
+                kiln_value bresult;
+                int st = kiln_c99_split_string_ascii_byte(&bresult, src, (char)kiln_string_unit_at(sep, 0), (size_t)0xFFFFFFFFu);
+                if (KILN_LIKELY(st == KILN_C99_OK)) {
+                    *out = kiln_val_from_boundary(bresult);
                     return KILN_C99_OK;
                 }
             }
