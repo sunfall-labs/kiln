@@ -2699,9 +2699,16 @@ fn property_key_constants(program: &Program) -> Vec<u32> {
     keys
 }
 
-/// One canonical pointer per key the unit names, filled at the first entry into a realm and
-/// cleared by the unit's `KILN_GC_PHASE_RESET` when that realm is destroyed. Interned as static:
-/// the constant table outlives every heap, so the entry is pinned and nothing is copied.
+/// One canonical pointer per key the unit names. A load-time constructor registers the unit's
+/// constants into the process's shared key table before the first realm exists (ADR 0071) and
+/// fills the pointers from it once, for every realm; `{symbol}_keys_shared` records that, and the
+/// realm reset leaves such pointers alone. When registration could not vouch for every key -- a
+/// library loaded after a heap existed, or out of memory -- the pointers are filled at the first
+/// entry into each realm instead and cleared by that realm's `KILN_GC_PHASE_RESET`, as before.
+///
+/// The constructor names only this unit's own constants, so registration adds nothing to the
+/// unit's cache key that its content did not already decide, and no launcher, embedding host or
+/// shared-library entry point has to enumerate units: the linker's list of objects is the list.
 fn render_key_table(
     output: &mut String,
     program: &Program,
@@ -2729,18 +2736,22 @@ fn render_key_table(
         }
     }
     writeln!(output, "static int {symbol}_keys_ready;").unwrap();
+    writeln!(output, "static int {symbol}_keys_shared;").unwrap();
+    writeln!(
+        output,
+        "static const kiln_string *const {symbol}_key_sources[{}] = {{",
+        keys.len()
+    )
+    .unwrap();
+    for index in keys {
+        let Constant::String(_) = &program.constants[*index as usize] else {
+            unreachable!("verification rejects a non-string property name before emission")
+        };
+        writeln!(output, "    &{symbol}_string_{index},").unwrap();
+    }
+    writeln!(output, "}};").unwrap();
     writeln!(output, "static int {symbol}_intern_keys(void) {{").unwrap();
     if symbol == "ku" && keys.len() > 4 {
-        writeln!(
-            output,
-            "    static const kiln_string *const ku_static_keys[{}] = {{",
-            keys.len()
-        )
-        .unwrap();
-        for index in keys {
-            writeln!(output, "        &{symbol}_string_{index},").unwrap();
-        }
-        writeln!(output, "    }};").unwrap();
         writeln!(
             output,
             "    for (size_t i = 0; i < (size_t){}; ++i) {{",
@@ -2749,15 +2760,12 @@ fn render_key_table(
         .unwrap();
         writeln!(
             output,
-            "        if ((ku_keys[i] = kiln_c99_intern_static_key(ku_static_keys[i])) == NULL) return KILN_C99_OUT_OF_MEMORY;"
+            "        if ((ku_keys[i] = kiln_c99_intern_static_key(ku_key_sources[i])) == NULL) return KILN_C99_OUT_OF_MEMORY;"
         )
         .unwrap();
         writeln!(output, "    }}").unwrap();
     } else {
         for (i, index) in keys.iter().enumerate() {
-            let Constant::String(_) = &program.constants[*index as usize] else {
-                unreachable!("verification rejects a non-string property name before emission")
-            };
             // The key store is canonical headed keys now: intern the constant's header
             // directly, in either width. The Latin1 bridge and its UTF-16 refusal are gone.
             if symbol == "ku" {
@@ -2778,6 +2786,37 @@ fn render_key_table(
     writeln!(
         output,
         "    {symbol}_keys_ready = 1;\n    return KILN_C99_OK;\n}}"
+    )
+    .unwrap();
+    // Registration. `ku` registers straight into its key array; any other symbol's keys are
+    // separate statics, filled from a local array only once every key is known to be shared.
+    writeln!(
+        output,
+        "__attribute__((constructor)) static void {symbol}_register_keys(void) {{"
+    )
+    .unwrap();
+    if symbol == "ku" {
+        writeln!(
+            output,
+            "    if (!kiln_c99_register_static_keys(ku_key_sources, ku_keys, (size_t){})) return;",
+            keys.len()
+        )
+        .unwrap();
+    } else {
+        writeln!(output, "    const kiln_string *shared[{}];", keys.len()).unwrap();
+        writeln!(
+            output,
+            "    if (!kiln_c99_register_static_keys({symbol}_key_sources, shared, (size_t){})) return;",
+            keys.len()
+        )
+        .unwrap();
+        for (i, index) in keys.iter().enumerate() {
+            writeln!(output, "    {symbol}_key_{index} = shared[{i}];").unwrap();
+        }
+    }
+    writeln!(
+        output,
+        "    {symbol}_keys_shared = 1;\n    {symbol}_keys_ready = 1;\n}}"
     )
     .unwrap();
 }
@@ -2947,10 +2986,11 @@ fn render_unit_roots(
     )
     .unwrap();
     if keyed {
-        // The canonical pointers belong to the realm's intern table, which dies with the realm.
+        // Unless registration made them shared, the canonical pointers belong to the realm's
+        // intern table, which dies with the realm.
         writeln!(
             output,
-            "    if (phase == KILN_GC_PHASE_RESET) {symbol}_keys_ready = 0;"
+            "    if (phase == KILN_GC_PHASE_RESET && !{symbol}_keys_shared) {symbol}_keys_ready = 0;"
         )
         .unwrap();
     }

@@ -1,5 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 804
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -1703,6 +1704,7 @@ static kiln_string *kiln_c99_gc_alloc_key_copy(const kiln_string *view);
 static const kiln_string *kiln_c99_intern_key(const kiln_string *string);
 static const kiln_string *kiln_c99_intern_static_key(const kiln_string *string);
 static const kiln_string *kiln_c99_intern_pinned_key(const kiln_string *string);
+static int kiln_c99_register_static_keys(const kiln_string *const *keys, const kiln_string **out,
 static int kiln_c99_keys_check_mode = -1;
 static int kiln_c99_keys_checked(void) {
 static uint64_t kiln_c99_key_hash(const kiln_string *string) {
@@ -1725,6 +1727,9 @@ static const kiln_string *kiln_c99_intern_static(const char *bytes, size_t len) 
 const kiln_string *kiln_c99_intern_key(const kiln_string *string) {
 const kiln_string *kiln_c99_intern_pinned_key(const kiln_string *string) {
 const kiln_string *kiln_c99_intern_static_key(const kiln_string *string) {
+static int kiln_c99_register_static_keys_locked(kiln_shared_state *process,
+int kiln_c99_register_static_keys(const kiln_string *const *keys, const kiln_string **out,
+static int kiln_c99_register_static_text(kiln_shared_state *process, const char *bytes, size_t len) {
 static void kiln_c99_key_forget(kiln_gc_heap *heap, const kiln_string *string) {
 static void kiln_c99_key_mark_pinned(kiln_gc_heap *heap) {
 static void kiln_c99_key_purge(kiln_gc_heap *heap) {
@@ -2117,6 +2122,12 @@ static uint64_t kiln_c99_surface_method(uint64_t builtin, const char *key, size_
 static const char *kiln_c99_surface_method_name(uint64_t code) {
 static int kiln_c99_surface_value(uint64_t builtin, const char *key, size_t key_len,
 static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, size_t key_len) {
+static int kiln_c99_node_register_keys(kiln_shared_state *process);
+#define KILN_C99_OBJECT_BUILDING_KEYS(X)                                                          \
+static void kiln_c99_register_builtin_keys(void) __attribute__((constructor));
+static void kiln_c99_register_builtin_keys(void) {
+#define KILN_C99_REGISTER_OBJECT_BUILDING_KEY(text)                                               \
+#undef KILN_C99_REGISTER_OBJECT_BUILDING_KEY
 void kiln_c99_publish_diagnostic(void);
 static kiln_value kiln_c99_builtin(uint64_t code) {
 static int kiln_c99_is_callable(kiln_value value) {
@@ -2305,6 +2316,10 @@ enum {
 typedef struct {
 static _Thread_local kiln_node_http_layout kiln_c99_node_http_layouts;
 static kiln_shape *kiln_c99_node_layout_shape(const kiln_string *const *keys, size_t count) {
+typedef struct {
+static const kiln_node_layout_name kiln_c99_node_request_names[KILN_C99_NODE_REQ_COUNT] = {
+static const kiln_node_layout_name kiln_c99_node_response_names[KILN_C99_NODE_RES_COUNT] = {
+static int kiln_c99_node_register_keys(kiln_shared_state *process) {
 static int kiln_c99_node_http_layout_ready(const kiln_node_http_layout **out) {
 static int kiln_c99_node_http_instance(kiln_value *out, kiln_value prototype, kiln_shape *shape,
 static void *kiln_c99_node_hidden_pointer_value(kiln_value value) {

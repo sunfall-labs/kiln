@@ -561,13 +561,37 @@ static kiln_shape *kiln_c99_node_layout_shape(const kiln_string *const *keys, si
     return shape;
 }
 
+typedef struct {
+    const char *text;
+    size_t len;
+} kiln_node_layout_name;
+
+static const kiln_node_layout_name kiln_c99_node_request_names[KILN_C99_NODE_REQ_COUNT] = {
+    {"@@node:response", 15}, {"method", 6}, {"url", 3}, {"socket", 6}, {"connection", 10},
+    {"complete", 8}};
+static const kiln_node_layout_name kiln_c99_node_response_names[KILN_C99_NODE_RES_COUNT] = {
+    {"@@node:response", 15}, {"req", 3}, {"socket", 6}, {"connection", 10},
+    {"statusCode", 10}, {"headersSent", 11}, {"writableEnded", 13}};
+
+/* The layouts' keys, registered with the built-ins' before the first realm (see
+ * `kiln_c99_register_builtin_keys`), so every realm's request and response meet one shared
+ * shape. Called under the process lock. */
+static int kiln_c99_node_register_keys(kiln_shared_state *process) {
+    size_t index;
+    for (index = 0; index < KILN_C99_NODE_REQ_COUNT; ++index)
+        if (!kiln_c99_register_static_text(process, kiln_c99_node_request_names[index].text,
+                                           kiln_c99_node_request_names[index].len))
+            return 0;
+    for (index = 0; index < KILN_C99_NODE_RES_COUNT; ++index)
+        if (!kiln_c99_register_static_text(process, kiln_c99_node_response_names[index].text,
+                                           kiln_c99_node_response_names[index].len))
+            return 0;
+    return kiln_c99_register_static_text(process, "@@node:events", 13);
+}
+
 static int kiln_c99_node_http_layout_ready(const kiln_node_http_layout **out) {
-    static const struct { const char *text; size_t len; } request_names[KILN_C99_NODE_REQ_COUNT] = {
-        {"@@node:response", 15}, {"method", 6}, {"url", 3}, {"socket", 6}, {"connection", 10},
-        {"complete", 8}};
-    static const struct { const char *text; size_t len; } response_names[KILN_C99_NODE_RES_COUNT] = {
-        {"@@node:response", 15}, {"req", 3}, {"socket", 6}, {"connection", 10},
-        {"statusCode", 10}, {"headersSent", 11}, {"writableEnded", 13}};
+    const kiln_node_layout_name *request_names = kiln_c99_node_request_names;
+    const kiln_node_layout_name *response_names = kiln_c99_node_response_names;
     kiln_node_http_layout *layout = &kiln_c99_node_http_layouts;
     const kiln_gc_heap *heap = kiln_c99_gc_heap();
     size_t index;
