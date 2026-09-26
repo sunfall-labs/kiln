@@ -422,7 +422,11 @@ fn a_closed_ring_refuses_new_sockets_and_fails_old_ones() {
 }
 
 fn ring_listener(ring: &Rc<Ring>) -> (RingListener, SocketAddr) {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    ring_listener_on(ring, "127.0.0.1:0")
+}
+
+fn ring_listener_on(ring: &Rc<Ring>, bind: &str) -> (RingListener, SocketAddr) {
+    let listener = std::net::TcpListener::bind(bind).unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
     let listener = ring
@@ -477,7 +481,9 @@ fn closing_a_ring_listener_stops_accepting_and_fails_pending_accepts() {
     };
     let (runtime, local) = local();
     local.block_on(&runtime, async {
-        let (listener, address) = ring_listener(&ring);
+        // An address of its own, so no other test's listener can take the freed port and answer
+        // the connect below: every other test binds 127.0.0.1.
+        let (listener, address) = ring_listener_on(&ring, "127.77.0.1:0");
         let pending = tokio::task::spawn_local(listener.accept());
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert_eq!(
@@ -495,9 +501,18 @@ fn closing_a_ring_listener_stops_accepting_and_fails_pending_accepts() {
         assert!(result.is_err());
         settle(&ring).await;
         assert!(ring.inner.borrow().listeners.iter().all(Option::is_none));
-        // The socket is really closed: the armed multishot accept no longer holds it open.
-        let refused = std::net::TcpStream::connect(address);
-        assert!(refused.is_err(), "listener still accepting after close");
+        // The socket is really closed: the armed multishot accept no longer holds it open. Poll
+        // rather than connect once: another test in this binary may fork a child (they run
+        // `ps`) while the listener is open, and the child holds a copy of every descriptor until
+        // its exec closes the CLOEXEC ones -- a moment, where a leaked accept would be forever.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while std::net::TcpStream::connect(address).is_ok() {
+            assert!(
+                Instant::now() < deadline,
+                "listener still accepting after close"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     });
     ring.shutdown();
 }
