@@ -1,0 +1,16 @@
+supervisor 3535503, workers: 3535505 3535506 3535507 3535508
+PASS (a) 4 worker processes
+seen: worker 0/4 worker 1/4 worker 2/4 worker 3/4 
+PASS (a)+(e) every worker served; KILN_WORKER_INDEX 0..3, KILN_WORKER_COUNT 4
+after kill -9 3535505: 3535506 3535507 3535508 3536710
+PASS (b) worker 3535505 replaced; 4 workers again
+PASS (b) capacity back: all four indices serve (worker 0/4 worker 1/4 worker 2/4 worker 3/4 )
+PASS (b) restart logged: kiln: worker 0 (pid 3535505) was killed by signal 9 after 3157 ms; restarting in 100 ms
+PASS (c) SIGTERM: supervisor exited 143 after 2 ms, every worker gone
+PASS (c) exit status 143 (128+SIGTERM)
+PASS (c) port closed
+PASS (d) supervisor SIGKILLed: every worker exited
+PASS (d) port closed
+--- supervisor stderr
+kiln: worker 0 (pid 3535505) was killed by signal 9 after 3157 ms; restarting in 100 ms
+failures: 0

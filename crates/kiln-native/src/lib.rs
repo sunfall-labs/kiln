@@ -5456,14 +5456,31 @@ fn graph_launcher_source_with_imports(
     let mut evaluation = String::with_capacity(modules.len() * 512);
     output.push_str(
         r#"/* Kiln native graph launcher. */
+/* The worker supervisor in `main` needs `sigaction`, `kill`, `poll`, `fcntl` and
+ * `clock_gettime`, which glibc hides under `-std=c11` unless POSIX is asked for before the first
+ * include (the prelude does the same). Darwin declares them without it. */
+#if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include <locale.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #ifndef _WIN32
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <stdio.h>
+#include <time.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <sys/prctl.h>
+#else
+#include <pthread.h>
+#endif
 #endif
 
 enum kiln_value_tag {
@@ -6726,15 +6743,330 @@ static int kiln_cli_http3_enabled(int argc, char **argv) {
  * `undefined is not a function` at the first import -- measured, before this used fork.
  *
  * A process per realm is also what `node`'s cluster does, for the same reason, and the text
- * segment is shared copy-on-write so the cost is the heaps, which were never shareable anyway. */
+ * segment is shared copy-on-write so the cost is the heaps, which were never shareable anyway.
+ *
+ * With more than one worker the first process is a *supervisor* and runs no realm of its own,
+ * which is what lets it restart a worker at all: a re-fork has to come from a process that has
+ * never built a realm, because a realm is threads (the provider's runtime) plus process-global
+ * state, and forking either into a fresh worker hands it locks some other thread held and
+ * namespaces another realm filled. So `KILN_WORKERS=N` is N realm processes (indices 0..N-1)
+ * under one supervisor that never enters JavaScript -- node's cluster primary, without the
+ * program running in it. The supervisor:
+ *
+ *  - forwards SIGTERM, SIGINT, SIGHUP and SIGQUIT to every live worker, stops restarting, waits
+ *    for all of them, then dies of the same signal (or exits 128+signal when it is PID 1, where
+ *    a default action never fires). A worker receives exactly the signal a single-process
+ *    server would, so it behaves exactly as one does. `docker stop` therefore drains every
+ *    worker before PID 1 exits and the namespace is torn down. SIGUSR1 (the introspection dump)
+ *    is forwarded without stopping anything.
+ *  - restarts a worker that dies of a signal or exits non-zero, with backoff; one that exits 0
+ *    is finished and is not restarted. A worker that crashes more than KILN_SUP_MAX_STREAK times in a row,
+ *    each within KILN_SUP_STABLE_MS of starting, is a crash loop: the supervisor stops the
+ *    others and exits with that worker's status.
+ *  - arranges for workers to die with it: PR_SET_PDEATHSIG on Linux, and elsewhere a pipe whose
+ *    far end only the supervisor holds, watched by one thread in each worker.
+ *
+ * Each worker sees `KILN_WORKER_INDEX` (0..N-1; a restarted worker keeps its index) and
+ * `KILN_WORKER_COUNT` in its environment before its realm starts, so `process.env` answers in
+ * both engines with no new built-in. A single realm sets neither, so an unset variable means
+ * "the only worker", and a program run without `KILN_WORKERS` sees the environment node would.
+ * Worker 0 is the one that writes the result file: one path, one writer.
+ *
+ * Where the count comes from is `kiln_cli_worker_count`'s business alone; a count recorded in
+ * the binary at build time would be a default there, and nothing below cares. */
+#ifndef _WIN32
+#define KILN_SUP_MAX_STREAK 5
+#define KILN_SUP_STABLE_MS 5000LL
+#define KILN_SUP_BACKOFF_MS 100LL
+#define KILN_SUP_BACKOFF_CAP_MS 2000LL
+
+static int kiln_sup_pipe[2] = { -1, -1 };
+static volatile sig_atomic_t kiln_sup_stop_signal = 0;
+static const int kiln_sup_signals[] = { SIGTERM, SIGINT, SIGHUP, SIGQUIT, SIGUSR1, SIGCHLD };
+#define KILN_SUP_SIGNAL_COUNT (sizeof kiln_sup_signals / sizeof kiln_sup_signals[0])
+
+static int kiln_sup_is_stop_signal(int sig) {
+    return sig == SIGTERM || sig == SIGINT || sig == SIGHUP || sig == SIGQUIT;
+}
+
+/* Async-signal-safe: record, and wake the loop through the self-pipe. Everything else happens
+ * in the loop, outside the handler. */
+static void kiln_sup_on_signal(int sig) {
+    int saved = errno;
+    unsigned char byte = (unsigned char)sig;
+    ssize_t ignored;
+    if (kiln_sup_is_stop_signal(sig) && kiln_sup_stop_signal == 0) kiln_sup_stop_signal = sig;
+    if (kiln_sup_pipe[1] >= 0) {
+        ignored = write(kiln_sup_pipe[1], &byte, 1);
+        (void)ignored;
+    }
+    errno = saved;
+}
+
+static long long kiln_sup_now_ms(void) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return 0;
+    return (long long)now.tv_sec * 1000LL + (long long)(now.tv_nsec / 1000000L);
+}
+
+static void kiln_sup_cloexec_nonblock(int fd, int nonblock) {
+    int flags = fcntl(fd, F_GETFD);
+    if (flags >= 0) fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+    if (nonblock) {
+        flags = fcntl(fd, F_GETFL);
+        if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    }
+}
+
+#if !defined(__linux__)
+/* The supervisor holds the only write end, so the read returns end-of-file exactly when it has
+ * gone, however it went. The worker then gets the SIGTERM PR_SET_PDEATHSIG would have sent. */
+static void *kiln_sup_watch_supervisor(void *argument) {
+    int fd = (int)(intptr_t)argument;
+    char byte;
+    for (;;) {
+        ssize_t read_count = read(fd, &byte, 1);
+        if (read_count < 0 && errno == EINTR) continue;
+        break;
+    }
+    kill(getpid(), SIGTERM);
+    return NULL;
+}
+#endif
+
+/* Runs in the fresh child and never returns. Signals are blocked on entry (the supervisor
+ * blocks them around fork), so the supervisor's handler can never run here. */
+static void kiln_sup_worker(int argc, char **argv, long index, long workers, pid_t supervisor,
+                            const sigset_t *original_mask, int death_fd) {
+    char text[32];
+    size_t signal_index;
+    struct sigaction action;
+    memset(&action, 0, sizeof action);
+    action.sa_handler = SIG_DFL;
+    sigemptyset(&action.sa_mask);
+    for (signal_index = 0; signal_index < KILN_SUP_SIGNAL_COUNT; ++signal_index)
+        sigaction(kiln_sup_signals[signal_index], &action, NULL);
+    close(kiln_sup_pipe[0]);
+    close(kiln_sup_pipe[1]);
+    kiln_sup_pipe[0] = kiln_sup_pipe[1] = -1;
+#if defined(__linux__)
+    (void)death_fd;
+    (void)prctl(PR_SET_PDEATHSIG, SIGTERM);
+    /* The supervisor may have died between fork and prctl, which then never fires. */
+    if (getppid() != supervisor) _exit(1);
+#else
+    (void)supervisor;
+    if (death_fd >= 0) {
+        pthread_t watcher;
+        pthread_attr_t attributes;
+        if (pthread_attr_init(&attributes) == 0) {
+            pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
+            if (pthread_create(&watcher, &attributes, kiln_sup_watch_supervisor,
+                               (void *)(intptr_t)death_fd) != 0)
+                fputs("kiln: worker cannot watch its supervisor; it will outlive it\n", stderr);
+            pthread_attr_destroy(&attributes);
+        }
+    }
+#endif
+    snprintf(text, sizeof text, "%ld", index);
+    setenv("KILN_WORKER_INDEX", text, 1);
+    snprintf(text, sizeof text, "%ld", workers);
+    setenv("KILN_WORKER_COUNT", text, 1);
+    sigprocmask(SIG_SETMASK, original_mask, NULL);
+    /* `exit`, not `_exit`: a worker ends the way a single-realm `main` returning does. */
+    exit(kiln_cli_run_realm(argc, argv, index == 0) == 0 ? 0 : 1);
+}
+
+static void kiln_sup_forward(const pid_t *pids, long workers, int sig) {
+    long index;
+    for (index = 0; index < workers; ++index)
+        if (pids[index] > 0) kill(pids[index], sig);
+}
+
+static int kiln_sup_run(int argc, char **argv, long workers) {
+    pid_t *pids = (pid_t *)calloc((size_t)workers, sizeof *pids);
+    long long *started = (long long *)calloc((size_t)workers, sizeof *started);
+    long long *restart_at = (long long *)calloc((size_t)workers, sizeof *restart_at);
+    int *streak = (int *)calloc((size_t)workers, sizeof *streak);
+    int death_pipe[2] = { -1, -1 };
+    pid_t self = getpid();
+    sigset_t blocked, original;
+    struct sigaction action;
+    size_t signal_index;
+    long index, live = 0;
+    int stopping = 0, stop_signal = 0, exit_status = 0;
+    if (pids == NULL || started == NULL || restart_at == NULL || streak == NULL) return 1;
+    if (pipe(kiln_sup_pipe) != 0) {
+        fprintf(stderr, "kiln: cannot start the worker supervisor: %s\n", strerror(errno));
+        return 1;
+    }
+    kiln_sup_cloexec_nonblock(kiln_sup_pipe[0], 1);
+    kiln_sup_cloexec_nonblock(kiln_sup_pipe[1], 1);
+#if !defined(__linux__)
+    if (pipe(death_pipe) == 0) {
+        kiln_sup_cloexec_nonblock(death_pipe[0], 0);
+        kiln_sup_cloexec_nonblock(death_pipe[1], 0);
+    } else {
+        death_pipe[0] = death_pipe[1] = -1;
+    }
+#endif
+    sigemptyset(&blocked);
+    for (signal_index = 0; signal_index < KILN_SUP_SIGNAL_COUNT; ++signal_index)
+        sigaddset(&blocked, kiln_sup_signals[signal_index]);
+    sigprocmask(SIG_BLOCK, &blocked, &original);
+    memset(&action, 0, sizeof action);
+    action.sa_handler = kiln_sup_on_signal;
+    sigemptyset(&action.sa_mask);
+    for (signal_index = 0; signal_index < KILN_SUP_SIGNAL_COUNT; ++signal_index) {
+        action.sa_flags = SA_RESTART | (kiln_sup_signals[signal_index] == SIGCHLD ? SA_NOCLDSTOP : 0);
+        sigaction(kiln_sup_signals[signal_index], &action, NULL);
+    }
+    sigprocmask(SIG_SETMASK, &original, NULL);
+    for (index = 0; index < workers; ++index) restart_at[index] = 0; /* due now */
+
+    for (;;) {
+        long long now = kiln_sup_now_ms();
+        long long wait_ms = -1;
+        struct pollfd wake;
+        unsigned char bytes[64];
+        ssize_t read_count;
+        pid_t pid;
+        int status;
+
+        if (!stopping) {
+            for (index = 0; index < workers; ++index) {
+                if (pids[index] != 0 || restart_at[index] < 0 || restart_at[index] > now) continue;
+                /* Blocked across fork, so the child starts with no supervisor handler able to run;
+                 * pending signals are not inherited, and the child resets them before unblocking. */
+                sigprocmask(SIG_BLOCK, &blocked, NULL);
+                pid = fork();
+                if (pid == 0) kiln_sup_worker(argc, argv, index, workers, self, &original, death_pipe[0]);
+                sigprocmask(SIG_SETMASK, &original, NULL);
+                if (pid < 0) {
+                    long long delay;
+                    int fork_error = errno;
+                    streak[index] += 1;
+                    if (streak[index] > KILN_SUP_MAX_STREAK) {
+                        fprintf(stderr, "kiln: cannot fork worker %ld: %s; giving up\n", index, strerror(fork_error));
+                        exit_status = 1;
+                        stopping = 1;
+                        kiln_sup_forward(pids, workers, SIGTERM);
+                        break;
+                    }
+                    delay = KILN_SUP_BACKOFF_MS << (streak[index] - 1);
+                    if (delay > KILN_SUP_BACKOFF_CAP_MS) delay = KILN_SUP_BACKOFF_CAP_MS;
+                    fprintf(stderr, "kiln: cannot fork worker %ld: %s; retrying in %lld ms\n", index, strerror(fork_error), delay);
+                    restart_at[index] = now + delay;
+                    continue;
+                }
+                pids[index] = pid;
+                started[index] = now;
+                restart_at[index] = -1;
+                live += 1;
+            }
+        }
+        if (!stopping) {
+            for (index = 0; index < workers; ++index) {
+                if (pids[index] != 0 || restart_at[index] < 0) continue;
+                if (wait_ms < 0 || restart_at[index] - now < wait_ms)
+                    wait_ms = restart_at[index] > now ? restart_at[index] - now : 0;
+            }
+        }
+        if (live == 0 && wait_ms < 0) break;
+
+        /* A second's cap keeps a lost wakeup (a full pipe) from ever mattering. */
+        if (wait_ms < 0 || wait_ms > 1000) wait_ms = 1000;
+        wake.fd = kiln_sup_pipe[0];
+        wake.events = POLLIN;
+        wake.revents = 0;
+        (void)poll(&wake, 1, (int)wait_ms);
+
+        while ((read_count = read(kiln_sup_pipe[0], bytes, sizeof bytes)) > 0) {
+            ssize_t byte_index;
+            for (byte_index = 0; byte_index < read_count; ++byte_index) {
+                int sig = (int)bytes[byte_index];
+                if (sig == SIGUSR1) {
+                    kiln_sup_forward(pids, workers, SIGUSR1);
+                } else if (kiln_sup_is_stop_signal(sig)) {
+                    if (!stopping) stop_signal = sig;
+                    stopping = 1;
+                    kiln_sup_forward(pids, workers, sig);
+                }
+            }
+        }
+        if (!stopping && kiln_sup_stop_signal != 0) {
+            stop_signal = (int)kiln_sup_stop_signal;
+            stopping = 1;
+            kiln_sup_forward(pids, workers, stop_signal);
+        }
+
+        now = kiln_sup_now_ms();
+        for (;;) {
+            long long lived, delay;
+            pid = waitpid(-1, &status, WNOHANG);
+            if (pid < 0 && errno == EINTR) continue;
+            if (pid <= 0) break;
+            /* PID 1 also inherits orphans of whatever the program spawned; reaping them is
+             * part of the job, and they are nobody's worker. */
+            for (index = 0; index < workers && pids[index] != pid; ++index) {}
+            if (index == workers) continue;
+            pids[index] = 0;
+            live -= 1;
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) continue;
+            if (stopping) {
+                /* A worker that dies of the forwarded signal is the drain succeeding. */
+                continue;
+            }
+            lived = now - started[index];
+            if (lived >= KILN_SUP_STABLE_MS) streak[index] = 0;
+            streak[index] += 1;
+            if (streak[index] > KILN_SUP_MAX_STREAK) {
+                if (WIFSIGNALED(status))
+                    fprintf(stderr, "kiln: worker %ld (pid %ld) was killed by signal %d, crash %d in a row within %lld ms of starting; giving up\n",
+                            index, (long)pid, WTERMSIG(status), streak[index], KILN_SUP_STABLE_MS);
+                else
+                    fprintf(stderr, "kiln: worker %ld (pid %ld) exited with status %d, crash %d in a row within %lld ms of starting; giving up\n",
+                            index, (long)pid, WEXITSTATUS(status), streak[index], KILN_SUP_STABLE_MS);
+                exit_status = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+                stopping = 1;
+                kiln_sup_forward(pids, workers, SIGTERM);
+                continue;
+            }
+            delay = KILN_SUP_BACKOFF_MS << (streak[index] - 1);
+            if (delay > KILN_SUP_BACKOFF_CAP_MS) delay = KILN_SUP_BACKOFF_CAP_MS;
+            if (WIFSIGNALED(status))
+                fprintf(stderr, "kiln: worker %ld (pid %ld) was killed by signal %d after %lld ms; restarting in %lld ms\n",
+                        index, (long)pid, WTERMSIG(status), lived, delay);
+            else
+                fprintf(stderr, "kiln: worker %ld (pid %ld) exited with status %d after %lld ms; restarting in %lld ms\n",
+                        index, (long)pid, WEXITSTATUS(status), lived, delay);
+            restart_at[index] = now + delay;
+        }
+    }
+
+    free(pids);
+    free(started);
+    free(restart_at);
+    free(streak);
+    if (stop_signal != 0) {
+        /* Die the way a single-process server does. As PID 1 the default action never fires,
+         * so fall through to the shell's spelling of the same thing. */
+        memset(&action, 0, sizeof action);
+        action.sa_handler = SIG_DFL;
+        sigemptyset(&action.sa_mask);
+        sigaction(stop_signal, &action, NULL);
+        sigemptyset(&blocked);
+        sigaddset(&blocked, stop_signal);
+        sigprocmask(SIG_UNBLOCK, &blocked, NULL);
+        raise(stop_signal);
+        return 128 + stop_signal;
+    }
+    return exit_status;
+}
+#endif
+
 int main(int argc, char **argv) {
     long workers;
-    int status;
-#ifndef _WIN32
-    long index = 0;
-    long joined;
-    pid_t *children;
-#endif
     if (setlocale(LC_NUMERIC, "C") == NULL) return 1;
     if (kiln_cli_http3_enabled(argc, argv)) {
 #ifndef _WIN32
@@ -6749,28 +7081,7 @@ int main(int argc, char **argv) {
     return kiln_cli_run_realm(argc, argv, 1) == 0 ? 0 : 1;
 #else
     if (workers <= 1) return kiln_cli_run_realm(argc, argv, 1) == 0 ? 0 : 1;
-    children = (pid_t *)calloc((size_t)(workers - 1), sizeof *children);
-    if (children == NULL) return 1;
-    for (index = 0; index < workers - 1; ++index) {
-        pid_t child = fork();
-        if (child == 0) {
-            /* A child forked before any realm exists, so it inherits no realm state to trip over.
-             * It never writes the result file: one path, one writer. */
-            free(children);
-            _exit(kiln_cli_run_realm(argc, argv, 0) == 0 ? 0 : 1);
-        }
-        if (child < 0) break; /* Fewer realms than asked for still serves. None does not. */
-        children[index] = child;
-    }
-    status = kiln_cli_run_realm(argc, argv, 1);
-    for (joined = 0; joined < index; ++joined) {
-        int child_status = 0;
-        if (waitpid(children[joined], &child_status, 0) < 0) continue;
-        if (status == 0 && WIFEXITED(child_status) && WEXITSTATUS(child_status) != 0)
-            status = WEXITSTATUS(child_status);
-    }
-    free(children);
-    return status == 0 ? 0 : 1;
+    return kiln_sup_run(argc, argv, workers);
 #endif
 }
 "##,
