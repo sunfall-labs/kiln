@@ -1741,6 +1741,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                     kiln_c99_same_name_key(key, "sticky") ||
                     kiln_c99_same_name_key(key, "name"))) ||
                 (target.bits == KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER_PROTOTYPE &&
+                    kiln_c99_same_name_key(key, "name")) ||
+                (target.bits == KILN_C99_BUILTIN_ITERATOR_PROTOTYPE &&
                     kiln_c99_same_name_key(key, "name"))) {
                 KILN_C99_ABSENT("not a member of this prototype: prototype is an object without a name", out);
             }
@@ -1769,6 +1771,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                     return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                                 "Method get SharedArrayBuffer.prototype.growable called on incompatible receiver");
                 }
+            }
+            if (target.bits == KILN_C99_BUILTIN_OBJECT_PROTOTYPE && kiln_c99_same_name_key(key, "__proto__")) {
+                *out = kiln_c99_null();
+                return KILN_C99_OK;
             }
 
         }

@@ -138,6 +138,7 @@ static int kiln_c99_builtin_length(uint64_t builtin, double *out) {
     case KILN_C99_BUILTIN_ASYNC_DISPOSABLE_STACK:
     case KILN_C99_BUILTIN_TEMPORAL_PLAIN_TIME:
     case KILN_C99_BUILTIN_TEMPORAL_DURATION:
+    case KILN_C99_BUILTIN_ITERATOR:
         *out = 0.0;
         return 1;
 
