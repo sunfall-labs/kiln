@@ -159,3 +159,36 @@ function warm(read, value) {
   Function.prototype.lateOnFunctionProto = "fn proto";
   console.log("function after", readF(f));
 }
+
+// 12. A two-level chain (a subclass instance): a member added at the far level, then on the near
+// one; and a chain three levels deep, which is never remembered.
+{
+  class A { constructor() { this.a = 1; } }
+  class B extends A { constructor() { super(); this.b = 2; } }
+  const readQ = (o) => o.q;
+  const b = new B();
+  console.log("depth2 warm", warm(readQ, b));
+  A.prototype.q = "far";
+  console.log("depth2 far", readQ(b));
+  B.prototype.q = "near";
+  console.log("depth2 near", readQ(b));
+  class C extends B {}
+  const c = new C();
+  const readR = (o) => o.r;
+  console.log("depth3 warm", warm(readR, c));
+  A.prototype.r = "deep";
+  console.log("depth3 after", readR(c));
+}
+
+// 13. Names Object.prototype's own store already holds (the Annex B methods), read at a warmed
+// site, and the same site after a program write to a name it had missed.
+{
+  const readAny = (o, k) => (k === 0 ? o.__lookupGetter__ : o.lateStoreName);
+  const o = { a: 1 };
+  let absent = 0;
+  for (let i = 0; i < 50; i++) if (readAny(o, 1) === undefined) absent++;
+  console.log("store warm", absent, typeof readAny(o, 0));
+  Object.prototype.lateStoreName = "in store";
+  console.log("store after", readAny(o, 1));
+  Object.prototype.lateStoreName = undefined;
+}

@@ -672,15 +672,12 @@ typedef struct kiln_shape {
     struct kiln_shape_edge_table *edge_table;
 } kiln_shape;
 
-typedef struct kiln_shape_edge {
-    const kiln_string *ikey;
-    struct kiln_shape *next;
-} kiln_shape_edge;
-
-/* The mask lives with the slots it describes, so one pointer load gives a reader both. */
+/* The mask lives with the slots it describes, so one pointer load gives a reader both. A slot is
+ * one word -- the child shape, whose `ikey` is the edge's key -- so a slot is claimed with a
+ * single compare-and-swap and read with a single acquire load (ADR 0071). */
 typedef struct kiln_shape_edge_table {
     uint32_t mask;
-    kiln_shape_edge edges[];
+    struct kiln_shape *edges[];
 } kiln_shape_edge_table;
 
 /* A plain data object: own string-keyed properties, scanned linearly.
@@ -820,15 +817,7 @@ static inline void kiln_c99_prototype_touched(const kiln_object *object) {
     if (KILN_UNLIKELY(object->cache_holder)) kiln_c99_proto_epoch += 1;
 }
 
-/* Under `KILN_IC_CHECK`, every remembered miss a read answers is re-run the long way and a
- * present property traps (`kiln_c99_site_miss_check`). Spelled as a macro so an emitted site
- * names it unconditionally; it reads the enclosing body's `host`, `depth` and `thrown`. */
-#ifdef KILN_IC_CHECK
-#define KILN_C99_SITE_MISS_ORACLE(TARGET, KEY) \
-    kiln_c99_site_miss_check(host, (TARGET), (KEY), (KEY), depth, thrown)
-#else
-#define KILN_C99_SITE_MISS_ORACLE(TARGET, KEY) ((void)0)
-#endif
+
 
 /* A prototype chain is built by the program, so its length is the program's business -- but the
  * walk is on the C stack, where running out aborts rather than reports. Bounded, like the
@@ -905,6 +894,126 @@ typedef struct kiln_c99_private_site {
     uint32_t brand_slot;
     uint32_t member_slot;
 } kiln_c99_private_site;
+
+/* This realm's `Object.prototype` own-property store -- where the bootstrap's Annex B methods and
+ * every program write to Object.prototype live -- or NULL while it has none. Realm state, recorded
+ * by `kiln_c99_callable_store` and cleared at heap teardown; the collector keeps the store alive
+ * through the realm's registry. A remembered read miss whose chain ends at Object.prototype scans
+ * it live for the key on every hit: ADR 0071's "which built-in, checked against what this realm
+ * has done to it", consulted and never copied into a cache. The copy of this header a module unit
+ * compiles declares it `extern`. */
+static const kiln_object *kiln_c99_object_prototype_store;
+
+/* How many heaps -- realms -- this process has made. Process state, never reset. See
+ * `KILN_C99_SHAPES_ARE_THIS_REALMS`. */
+static uint32_t kiln_c99_heaps_made;
+
+/* Whether a shape learned anywhere in this process may be handed to an object of this realm
+ * without proving it by transitions. A shape is a sequence of interned key pointers, and keys are
+ * interned per heap (ADR 0047) until ADR 0071's shared constant-key table exists; so a literal
+ * site's remembered shape names *this* realm's keys only while the process has made one heap.
+ * Reading through a shape is safe regardless -- an object reaches a shape only by transitions made
+ * with its own realm's keys -- which is why only a cache that *assigns* a shape asks this. */
+#define KILN_C99_SHAPES_ARE_THIS_REALMS() \
+    (__atomic_load_n(&kiln_c99_heaps_made, __ATOMIC_RELAXED) <= 1u)
+
+/* ---------------------------------------------------------------------------------------------
+ * The negative read cache (ADR 0071 terms: a path of layouts, never an object).
+ *
+ * A miss entry says: "an object of shape `shape`, whose prototype chain is `depth` ordinary
+ * objects with these layouts and then ends at `Object.prototype` (or at an explicit null), has
+ * no property called this site's key". It is `slot == UINT32_MAX`, `holder == NULL`,
+ * `transition_to == NULL`, with
+ *
+ *   holder_slot   the path: depth in bits 0-1 (0..2), and in bit 2 whether the chain ends in an
+ *                 explicit null (1) or at Object.prototype (0);
+ *   via_shape     the layout at depth 1, and holder_shape the layout at depth 2. A level that is
+ *                 a dictionary-mode object (a class prototype keeps its methods in a list) is
+ *                 `KILN_C99_MISS_DICTIONARY` and is checked live: its list is scanned for the key
+ *                 by pointer on every hit, which reads the object the hit walked to, never one
+ *                 the entry remembers.
+ *
+ * `key` must be the pointer the entry was learned with; learning requires it to be the realm's
+ * canonical pointer for the spelling, so the pointer scans are exact (ADR 0047).
+ *
+ * A hit walks the receiver's *live* prototype pointers that many steps and checks each layout,
+ * so a relinked receiver (`__proto__ =`, `setPrototypeOf`), a same-shape object with another
+ * prototype, a property added anywhere on the chain (a new shape, or a list entry the scan
+ * finds), and a collected prototype whose address was reused are all misses by construction: no
+ * pointer to an object is ever compared. The chain's end is a built-in, checked by which one it
+ * is and by a live scan of this realm's store for it (`kiln_c99_object_prototype_store`).
+ *
+ * Exact because every level the slow path consults is covered: the receiver's own keys (its
+ * shape, and no list), each chain level (its shape, and no list; or its list, scanned), and the
+ * end (Object.prototype's fixed method table, which a learned key was already absent from, and
+ * its own-property store, scanned live). The names the slow path answers
+ * from the receiver's *kind* are never learned (`kiln_c99_site_learn_miss`). */
+#define KILN_C99_MISS_DICTIONARY ((const kiln_shape *)(uintptr_t)1)
+#define KILN_C99_MISS_DEPTH(path) ((path) & 3u)
+#define KILN_C99_MISS_ENDS_NULL 4u
+
+static inline int kiln_c99_miss_list_lacks(const kiln_object *object, const kiln_string *key) {
+    size_t index;
+    for (index = 0; index < object->count; ++index) {
+        if (object->properties[index].key == key) return 0;
+    }
+    return 1;
+}
+
+/* Whether `object` lacks `key` in its shape and in its list, by pointer. */
+static inline int kiln_c99_miss_object_lacks(const kiln_object *object, const kiln_string *key) {
+    if (object->shape != NULL) {
+        uint32_t index;
+        for (index = 0; index < object->shape->property_count; ++index) {
+            if (object->shape->keys[index] == key) return 0;
+        }
+    }
+    return kiln_c99_miss_list_lacks(object, key);
+}
+
+/* `entry` is the site's entry for `object->shape`; `key` the site's canonical key pointer, or
+ * NULL when the caller has none (then a dictionary level cannot be checked and the entry does not
+ * hold). */
+static inline int kiln_c99_site_miss_holds(const kiln_c99_pic_entry *entry, const kiln_object *object,
+                                           const kiln_string *key) {
+    uint32_t path = entry->holder_slot;
+    uint32_t depth = KILN_C99_MISS_DEPTH(path);
+    uint32_t level;
+    const kiln_object *step = object;
+    if (entry->holder != NULL || entry->transition_to != NULL || object->properties != NULL ||
+        object->error_brand || object->arguments_brand || object->module_namespace) {
+        return 0;
+    }
+    for (level = 0; level < depth; ++level) {
+        const kiln_shape *want = level == 0 ? entry->via_shape : entry->holder_shape;
+        if (step->prototype.tag != KILN_VALUE_OBJECT) return 0;
+        step = (const kiln_object *)(uintptr_t)step->prototype.bits;
+        if (want == KILN_C99_MISS_DICTIONARY) {
+            if (step->shape != NULL || key == NULL || step->module_namespace ||
+                !kiln_c99_miss_list_lacks(step, key)) {
+                return 0;
+            }
+        } else if (step->shape != want || step->properties != NULL) {
+            return 0;
+        }
+    }
+    if (path & KILN_C99_MISS_ENDS_NULL) return step->prototype.tag == KILN_VALUE_NULL;
+    if (step->prototype.tag != KILN_VALUE_UNDEFINED) return 0;
+    {
+        const kiln_object *store = kiln_c99_object_prototype_store;
+        return store == NULL || (key != NULL && kiln_c99_miss_object_lacks(store, key));
+    }
+}
+
+/* Under `KILN_IC_CHECK`, every remembered miss a read answers is re-run the long way and a
+ * present property traps (`kiln_c99_site_miss_check`). Spelled as a macro so an emitted site
+ * names it unconditionally; it reads the enclosing body's `host`, `depth` and `thrown`. */
+#ifdef KILN_IC_CHECK
+#define KILN_C99_SITE_MISS_ORACLE(TARGET, KEY) \
+    kiln_c99_site_miss_check(host, (TARGET), (KEY), (KEY), depth, thrown)
+#else
+#define KILN_C99_SITE_MISS_ORACLE(TARGET, KEY) ((void)0)
+#endif
 
 /* The slot a property-read site remembers for `shape`, or UINT32_MAX when it remembers none
  * or remembers a method instead. */

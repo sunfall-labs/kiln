@@ -2149,7 +2149,7 @@ pub struct AbsentAnswer {
 /// checks the half a `const` cannot -- that the sites are in the functions claimed here.
 pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     AbsentAnswer {
-        function: "kiln_c99_callable_store",
+        function: "kiln_c99_callable_store_lookup",
         sites: 4,
         proved_by: "a callable with no property store has no own member at all, so there is no \
                     list to be short of",
@@ -4584,6 +4584,19 @@ pub fn runtime_prelude_header() -> &'static str {
             text != PRELUDE_HEADER,
             "the prototype epoch's definition moved"
         );
+        for (definition, declaration) in [
+            (
+                "static const kiln_object *kiln_c99_object_prototype_store;",
+                "extern const kiln_object *kiln_c99_object_prototype_store __attribute__((visibility(\"hidden\")));",
+            ),
+            (
+                "static uint32_t kiln_c99_heaps_made;",
+                "extern uint32_t kiln_c99_heaps_made __attribute__((visibility(\"hidden\")));",
+            ),
+        ] {
+            assert!(text.contains(definition), "{definition} moved");
+            text = text.replace(definition, declaration);
+        }
         let json_document =
             "static int kiln_c99_json_document(const kiln_string *source, kiln_val *out);";
         assert!(
@@ -4665,6 +4678,8 @@ fn build_runtime_prelude_source(src: &str) -> String {
         "kiln_c99_atomics",
         "kiln_c99_builtin_store_epoch",
         "kiln_c99_proto_epoch",
+        "kiln_c99_object_prototype_store",
+        "kiln_c99_heaps_made",
     ];
 
     for line in src.lines() {
@@ -4766,6 +4781,10 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_builtin_store_epoch", C99StateOwner::Realm),
     ("kiln_c99_bytes_cache", C99StateOwner::Realm),
     ("kiln_c99_proto_epoch", C99StateOwner::Realm),
+    // This realm's Object.prototype store, scanned live by remembered read misses.
+    ("kiln_c99_object_prototype_store", C99StateOwner::Realm),
+    // How many heaps the process has made: whether a remembered shape can name this realm's keys.
+    ("kiln_c99_heaps_made", C99StateOwner::Process),
     // Per thread, and trusted only for the heap it was built under: the `node:http` layouts.
     ("kiln_c99_node_http_layouts", C99StateOwner::Realm),
     ("kiln_c99_gc_stress_checks", C99StateOwner::Process),

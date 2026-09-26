@@ -930,23 +930,31 @@ static kiln_native_constructor kiln_c99_native_constructors[] = {
 struct kiln_shape;
 typedef struct kiln_shape_transition {
 typedef struct kiln_shape {
-typedef struct kiln_shape_edge {
 typedef struct kiln_shape_edge_table {
 typedef struct kiln_property {
 #define KILN_C99_INLINE_SLOTS 16
 typedef struct kiln_object {
 static uint64_t kiln_c99_proto_epoch;
 static inline void kiln_c99_prototype_touched(const kiln_object *object) {
-#ifdef KILN_IC_CHECK
-#define KILN_C99_SITE_MISS_ORACLE(TARGET, KEY) \
-#else
-#define KILN_C99_SITE_MISS_ORACLE(TARGET, KEY) ((void)0)
-#endif
 #define KILN_C99_MAX_PROTOTYPE_DEPTH 10000
 #define KILN_C99_PIC_SIZE 8
 typedef struct kiln_c99_pic_entry {
 typedef struct kiln_c99_site {
 typedef struct kiln_c99_private_site {
+static const kiln_object *kiln_c99_object_prototype_store;
+static uint32_t kiln_c99_heaps_made;
+#define KILN_C99_SHAPES_ARE_THIS_REALMS() \
+#define KILN_C99_MISS_DICTIONARY ((const kiln_shape *)(uintptr_t)1)
+#define KILN_C99_MISS_DEPTH(path) ((path) & 3u)
+#define KILN_C99_MISS_ENDS_NULL 4u
+static inline int kiln_c99_miss_list_lacks(const kiln_object *object, const kiln_string *key) {
+static inline int kiln_c99_miss_object_lacks(const kiln_object *object, const kiln_string *key) {
+static inline int kiln_c99_site_miss_holds(const kiln_c99_pic_entry *entry, const kiln_object *object,
+#ifdef KILN_IC_CHECK
+#define KILN_C99_SITE_MISS_ORACLE(TARGET, KEY) \
+#else
+#define KILN_C99_SITE_MISS_ORACLE(TARGET, KEY) ((void)0)
+#endif
 static inline uint32_t kiln_c99_site_slot_for(const kiln_c99_site *site, const kiln_shape *shape) {
 static inline int kiln_c99_site_validate_holder_val(const kiln_c99_pic_entry *entry, const kiln_object *obj, kiln_val *out) {
 static inline kiln_val kiln_c99_site_validate_holder(const kiln_c99_pic_entry *entry, const kiln_object *obj) {
@@ -1631,7 +1639,6 @@ static kiln_gc_heap *kiln_c99_gc_heap_uncached(void);
 static int kiln_c99_run_promise_jobs(void *context, void *host, void *thrown);
 static int kiln_c99_promise_jobs_pending(void *context);
 static kiln_gc_heap *kiln_c99_gc_heap(void) {
-static const void *kiln_c99_realm_heap_token(void) {
 #ifndef KILN_C99_REALM_GENERATION_DEFINED
 #define KILN_C99_REALM_GENERATION_DEFINED
 static inline uint64_t kiln_c99_realm_generation(void) {
@@ -1766,7 +1773,8 @@ static void kiln_c99_pin_interned_key(const kiln_string *ikey) {
 #define KILN_SHAPE_MAX_TOTAL 32768u
 static uint32_t kiln_c99_shape_total;
 static inline uint32_t kiln_c99_shape_edge_hash(const kiln_string *ikey) {
-static int kiln_c99_shape_index_edge(kiln_shape *shape, const kiln_string *ikey, kiln_shape *next) {
+static void kiln_c99_shape_edge_claim(kiln_shape_edge_table *table, kiln_shape *next) {
+static int kiln_c99_shape_index_edge(kiln_shape *shape, kiln_shape *next) {
 static int kiln_c99_shape_transition(kiln_shape *current, const kiln_string *ikey, int is_double, kiln_shape **out_shape) {
 static int kiln_c99_ensure_dictionary(kiln_object *object) {
 static int kiln_c99_new_object(kiln_value *out) {
@@ -2197,7 +2205,9 @@ static int kiln_c99_function_store(kiln_value function, kiln_value *out) {
 static kiln_method_store *kiln_c99_fixture_method_stores;
 static void kiln_c99_drop_callable_store(void *pointer) {
 static uint64_t kiln_c99_builtin_store_epoch;
+static int kiln_c99_callable_store_lookup(kiln_value callable, kiln_value *out, int create);
 static int kiln_c99_callable_store(kiln_value callable, kiln_value *out, int create) {
+static int kiln_c99_callable_store_lookup(kiln_value callable, kiln_value *out, int create) {
 static int kiln_c99_store_get_key(kiln_host *host, kiln_value target,
 static int kiln_c99_proxy_trap(kiln_host *host, kiln_value proxy, const char *name,
 static int kiln_c99_proxy_get(kiln_host *host, kiln_value proxy, kiln_value key,
@@ -2748,15 +2758,9 @@ static int kiln_c99_write_property(kiln_host *host, kiln_value target,
 #define KILN_C99_CACHED_METHOD_MATCHES_DEFINED
 static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln_val target) {
 #endif
-#ifndef KILN_C99_SITE_MISS_HOLDS_DEFINED
-#define KILN_C99_SITE_MISS_HOLDS_DEFINED
-static inline const void *kiln_c99_unit_heap(void) {
-static inline int kiln_c99_site_miss_holds(const kiln_c99_pic_entry *entry, const kiln_object *object) {
-#endif
 #ifdef KILN_IC_CHECK
 static void kiln_c99_site_miss_check(kiln_host *host, kiln_val target, const kiln_string *key,
 #endif
-static int kiln_c99_object_lacks_key(const kiln_object *object, const kiln_string *ikey,
 static void kiln_c99_site_learn_miss(kiln_c99_site *site, kiln_val target, const kiln_string *key,
 static int kiln_c99_val_read_property_view(kiln_host *host, kiln_val target,
 #ifdef KILN_IC_CHECK

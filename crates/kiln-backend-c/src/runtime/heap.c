@@ -469,6 +469,7 @@ static void kiln_c99_nursery_destroy(kiln_gc_nursery *nursery) {
 
 static void kiln_c99_gc_heap_init(kiln_gc_heap *heap) {
     const char *setting;
+    __atomic_fetch_add(&kiln_c99_heaps_made, 1u, __ATOMIC_RELAXED);
     memset(heap, 0, sizeof *heap);
     heap->hooks = &kiln_c99_gc_hooks;
     heap->floor = KILN_GC_DEFAULT_FLOOR;
@@ -736,15 +737,6 @@ static kiln_gc_heap *kiln_c99_gc_heap(void) {
     cache->heap = heap;
     cache->generation = generation;
     return heap;
-}
-
-/* This thread's realm's heap, as an opaque token a module unit can remember and compare: an
- * inline cache whose answer depends on the realm (a remembered miss that ends at this realm's
- * Object.prototype, a literal site's shape whose keys are this realm's interned pointers) stamps
- * itself with it. Exported, as every non-inline prelude function is, and memoized per unit by
- * `kiln_c99_unit_heap` under the realm generation. */
-static const void *kiln_c99_realm_heap_token(void) {
-    return (const void *)kiln_c99_gc_heap();
 }
 
 /* The generation of the realm this thread is in: the word `kiln_c99_gc_heap` trusts its heap
@@ -2662,12 +2654,6 @@ static void kiln_c99_gc_finalize(kiln_gc_block *block) {
     case KILN_GC_BYTES:
         break;
     case KILN_GC_OBJECT:
-        /* An object an inline cache reads through is remembered by address (a holder, a
-         * prototype a remembered miss compared, a store's cleared prototype). Its death moves
-         * the epoch, so a new object at the same address -- which starts unflagged, and can gain
-         * members without moving anything -- is never taken for it. The per-heap site list
-         * clears the same entries, but only for sites registered in this realm's heap. */
-        if (((kiln_object *)payload)->cache_holder) kiln_c99_proto_epoch += 1;
         free(((kiln_object *)payload)->properties);
         if (((kiln_object *)payload)->slots != ((kiln_object *)payload)->inline_slots) {
             free(((kiln_object *)payload)->slots);
@@ -3095,6 +3081,8 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
 }
 
 static void kiln_c99_gc_teardown_begin(void *opaque) {
+    /* Realm state that names an object of this heap. */
+    kiln_c99_object_prototype_store = NULL;
     kiln_gc_heap *heap = (kiln_gc_heap *)opaque;
     if (heap == NULL || heap->fallback) return;
     heap->collecting = 1;

@@ -391,7 +391,7 @@ pub(super) fn emit_get_property(
                             if (KILN_LIKELY(s0 < obj->slot_capacity)) {{ \
                                 v{v} = obj->slots[s0]; \
                                 handled = 1; \
-                            }} else if (s0 == UINT32_MAX && kiln_c99_site_miss_holds(&site.entries[0], obj)) {{ \
+                            }} else if (s0 == UINT32_MAX && kiln_c99_site_miss_holds(&site.entries[0], obj, {symbol}_key_{name})) {{ \
                                 KILN_C99_SITE_MISS_ORACLE(v{o}, {symbol}_key_{name}); \
                                 v{v} = KILN_VAL_UNDEFINED; \
                                 handled = 1; \

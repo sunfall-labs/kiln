@@ -203,7 +203,21 @@ static void kiln_c99_drop_callable_store(void *pointer) {
 static uint64_t kiln_c99_builtin_store_epoch;
 
 
+static int kiln_c99_callable_store_lookup(kiln_value callable, kiln_value *out, int create);
+
+/* The own-property store of a callable or built-in. Object.prototype's store, once it exists, is
+ * also recorded as realm state (`kiln_c99_object_prototype_store`) so a remembered read miss can
+ * consult it live. */
 static int kiln_c99_callable_store(kiln_value callable, kiln_value *out, int create) {
+    int status = kiln_c99_callable_store_lookup(callable, out, create);
+    if (status == KILN_C99_OK && callable.tag == KILN_VALUE_BUILTIN &&
+        callable.bits == KILN_C99_BUILTIN_OBJECT_PROTOTYPE && out->tag == KILN_VALUE_OBJECT) {
+        kiln_c99_object_prototype_store = kiln_c99_object_of(*out);
+    }
+    return status;
+}
+
+static int kiln_c99_callable_store_lookup(kiln_value callable, kiln_value *out, int create) {
     kiln_method_store *entry;
     if (callable.tag == KILN_VALUE_FUNCTION) {
         kiln_closure *closure = kiln_c99_closure_of(callable);

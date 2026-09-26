@@ -79,55 +79,53 @@ static inline uint32_t kiln_c99_shape_edge_hash(const kiln_string *ikey) {
     return (uint32_t)(bits >> 32);
 }
 
-/* Record `next` under `ikey` in `shape`'s index, growing it first when it is past half full.
- * Returns 0 only when a table the shape needs could not be allocated; the caller then refuses
- * the transition, so the list and the index never disagree.
+/* Claim a free slot of `table` for `next` (keyed by `next->ikey`) with one compare-and-swap. */
+static void kiln_c99_shape_edge_claim(kiln_shape_edge_table *table, kiln_shape *next) {
+    uint32_t at = kiln_c99_shape_edge_hash(next->ikey) & table->mask;
+    for (;;) {
+        kiln_shape *expected = NULL;
+        if (__atomic_compare_exchange_n(&table->edges[at], &expected, next, 0, __ATOMIC_RELEASE,
+                                        __ATOMIC_RELAXED)) {
+            return;
+        }
+        at = (at + 1) & table->mask;
+    }
+}
+
+/* Record `next` in `shape`'s index, growing it first when it is past half full. Returns 0 only
+ * when a table the shape needs could not be allocated; the caller then refuses the transition, so
+ * the list and the index never disagree.
  *
- * A grown table is filled before it is published, and its predecessor is not freed. Shapes are
- * process-wide plain memory and a realm on another thread may be probing the old table while
- * this one replaces it; each table is at most half the size of the next, so what is kept is
- * bounded by the live one. */
-static int kiln_c99_shape_index_edge(kiln_shape *shape, const kiln_string *ikey, kiln_shape *next) {
+ * ADR 0071's publishing rule: a grown table is built completely, then published with one release
+ * store of the shape's pointer; a slot of a live table is claimed with a compare-and-swap. A
+ * replaced table is never freed -- shapes are never freed either, and a reader on another thread
+ * may still be probing it; each table is at most half the next, so what is kept is bounded by the
+ * live one. (Retiring it at a turn boundary, per the ADR, is the refinement once the tree is
+ * written by several threads.) */
+static int kiln_c99_shape_index_edge(kiln_shape *shape, kiln_shape *next) {
     uint32_t need = shape->num_transitions + 1;
-    kiln_shape_edge_table *table = shape->edge_table;
+    kiln_shape_edge_table *table = __atomic_load_n(&shape->edge_table, __ATOMIC_ACQUIRE);
     if (table == NULL || need * 2 > table->mask + 1) {
         uint32_t cap = table == NULL ? 32u : (table->mask + 1) * 2;
         kiln_shape_edge_table *grown;
         kiln_shape_transition *tr;
         size_t i;
         while (need * 2 > cap) cap *= 2;
-        grown = (kiln_shape_edge_table *)calloc(1, sizeof *grown + cap * sizeof(kiln_shape_edge));
+        grown = (kiln_shape_edge_table *)calloc(1, sizeof *grown + cap * sizeof(kiln_shape *));
         if (grown == NULL) return 0;
         grown->mask = cap - 1;
-        /* Every existing branch: the two inline ones and the list. */
+        /* Every existing branch -- the two inline ones and the list -- and the new one. */
         for (i = 0; i < 2 && i < shape->num_transitions; ++i) {
-            uint32_t at = kiln_c99_shape_edge_hash(shape->inline_trans_ikey[i]) & grown->mask;
-            while (grown->edges[at].ikey != NULL) at = (at + 1) & grown->mask;
-            grown->edges[at].ikey = shape->inline_trans_ikey[i];
-            grown->edges[at].next = shape->inline_trans_next[i];
+            kiln_c99_shape_edge_claim(grown, shape->inline_trans_next[i]);
         }
         for (tr = shape->transitions; tr != NULL; tr = tr->next_transition) {
-            uint32_t at = kiln_c99_shape_edge_hash(tr->ikey) & grown->mask;
-            while (grown->edges[at].ikey != NULL) at = (at + 1) & grown->mask;
-            grown->edges[at].ikey = tr->ikey;
-            grown->edges[at].next = tr->next;
+            kiln_c99_shape_edge_claim(grown, tr->next);
         }
-        {
-            uint32_t at = kiln_c99_shape_edge_hash(ikey) & grown->mask;
-            while (grown->edges[at].ikey != NULL) at = (at + 1) & grown->mask;
-            grown->edges[at].ikey = ikey;
-            grown->edges[at].next = next;
-        }
+        kiln_c99_shape_edge_claim(grown, next);
         __atomic_store_n(&shape->edge_table, grown, __ATOMIC_RELEASE);
         return 1;
     }
-    {
-        uint32_t at = kiln_c99_shape_edge_hash(ikey) & table->mask;
-        while (table->edges[at].ikey != NULL) at = (at + 1) & table->mask;
-        /* The target before the key: a reader that sees the key sees where it leads. */
-        table->edges[at].next = next;
-        __atomic_store_n(&table->edges[at].ikey, ikey, __ATOMIC_RELEASE);
-    }
+    kiln_c99_shape_edge_claim(table, next);
     return 1;
 }
 
@@ -146,12 +144,11 @@ static int kiln_c99_shape_transition(kiln_shape *current, const kiln_string *ike
          * share a key -- one whose new slot holds a double and one whose does not -- which is why
          * the probe checks the mask and keeps going rather than stopping at the key. */
         uint32_t at = kiln_c99_shape_edge_hash(ikey) & table->mask;
-        const kiln_string *seen;
-        while ((seen = __atomic_load_n(&table->edges[at].ikey, __ATOMIC_ACQUIRE)) != NULL) {
-            if (seen == ikey &&
-                (table->edges[at].next->double_slots_mask & (1u << current->property_count)) ==
-                    expected_bit) {
-                *out_shape = table->edges[at].next;
+        kiln_shape *seen;
+        while ((seen = __atomic_load_n(&table->edges[at], __ATOMIC_ACQUIRE)) != NULL) {
+            if (seen->ikey == ikey &&
+                (seen->double_slots_mask & (1u << current->property_count)) == expected_bit) {
+                *out_shape = seen;
                 return 1;
             }
             at = (at + 1) & table->mask;
@@ -217,7 +214,7 @@ static int kiln_c99_shape_transition(kiln_shape *current, const kiln_string *ike
             }
         }
         if (current->num_transitions + 1 > KILN_SHAPE_TABLE_FROM &&
-            !kiln_c99_shape_index_edge(current, ikey, next_shape)) {
+            !kiln_c99_shape_index_edge(current, next_shape)) {
             free(new_tr);
             free(next_shape);
             return 0;

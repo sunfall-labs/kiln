@@ -3446,7 +3446,7 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
                 if (KILN_LIKELY(ku_s0 < ku_obj->slot_capacity)) { \\\n\
                     (DST) = ku_obj->slots[ku_s0]; \\\n\
                     break; \\\n\
-                } else if (ku_s0 == UINT32_MAX && kiln_c99_site_miss_holds(&ku_s->entries[0], ku_obj)) { \\\n\
+                } else if (ku_s0 == UINT32_MAX && kiln_c99_site_miss_holds(&ku_s->entries[0], ku_obj, (KEY))) { \\\n\
                     KILN_C99_SITE_MISS_ORACLE(ku_t, (KEY)); \\\n\
                     (DST) = KILN_VAL_UNDEFINED; \\\n\
                     break; \\\n\
@@ -3620,9 +3620,9 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
     }\n\
     return mask;\n\
 }\n\
-static __attribute__((unused)) inline int ku_new_object_literal_fast(kiln_val *out, const kiln_shape **lit_shape, const void **lit_heap, const kiln_val *pairs, size_t count) {\n\
-    const kiln_shape *shape = *lit_shape;\n\
-    if (KILN_LIKELY(shape != NULL && count <= KILN_C99_INLINE_SLOTS && *lit_heap == kiln_c99_unit_heap())) {\n\
+static __attribute__((unused)) inline int ku_new_object_literal_fast(kiln_val *out, const kiln_shape **lit_shape, const kiln_val *pairs, size_t count) {\n\
+    const kiln_shape *shape = __atomic_load_n(lit_shape, __ATOMIC_ACQUIRE);\n\
+    if (KILN_LIKELY(shape != NULL && count <= KILN_C99_INLINE_SLOTS && KILN_C99_SHAPES_ARE_THIS_REALMS())) {\n\
         uint32_t mask = ku_compute_literal_mask(pairs, count);\n\
         if (KILN_LIKELY(shape->double_slots_mask == mask)) {\n\
             kiln_value built;\n\
@@ -3641,8 +3641,7 @@ static __attribute__((unused)) inline int ku_new_object_literal_fast(kiln_val *o
     if (KILN_LIKELY(status == KILN_C99_OK && count <= KILN_C99_INLINE_SLOTS && KILN_VAL_IS_OBJECT(*out))) {\n\
         kiln_object *obj = (kiln_object *)KILN_VAL_PTR(*out);\n\
         if (obj->shape != NULL && obj->shape->property_count == count && obj->slots == obj->inline_slots && obj->properties == NULL && obj->elements == NULL && obj->prototype.tag == KILN_VALUE_UNDEFINED) {\n\
-            *lit_shape = obj->shape;\n\
-            *lit_heap = kiln_c99_unit_heap();\n\
+            __atomic_store_n(lit_shape, (const kiln_shape *)obj->shape, __ATOMIC_RELEASE);\n\
         }\n\
     }\n\
     return status;\n\

@@ -1161,7 +1161,7 @@ pub(super) fn emit_graph_op(
                     && literal_keys_take_one_slot_each(&keys)
                     && count <= 8
                 {
-                    writeln!(output, "    {{ static const kiln_shape *lit_shape = NULL; static const void *lit_heap = NULL; kiln_val pairs[{pair_count}] = {{ {values} }}; int status = ku_new_object_literal_fast(&v{v}, &lit_shape, &lit_heap, pairs, {count}); {check} }}", pair_count = count * 2).unwrap();
+                    writeln!(output, "    {{ static const kiln_shape *lit_shape = NULL; kiln_val pairs[{pair_count}] = {{ {values} }}; int status = ku_new_object_literal_fast(&v{v}, &lit_shape, pairs, {count}); {check} }}", pair_count = count * 2).unwrap();
                 } else {
                     writeln!(output, "    {{ kiln_val pairs[{pair_count}] = {{ {values} }}; int status = kiln_c99_val_new_object_literal(&v{v}, pairs, {count}); {check} }}", pair_count = count * 2).unwrap();
                 }
@@ -1207,7 +1207,7 @@ pub(super) fn emit_graph_op(
                     }
                     writeln!(
                         output,
-                        "    {{ static const kiln_shape *lit_shape = NULL; static const void *lit_heap = NULL; kiln_value built; int status = kiln_c99_new_object(&built); if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; kiln_object *obj = kiln_c99_object_of(built); {mask_expr}if (KILN_LIKELY(lit_shape != NULL{mask_guard} && lit_heap == kiln_c99_unit_heap())) {{{direct_stores} obj->shape = (kiln_shape *)lit_shape; }} else {{{defines} if (status == KILN_C99_OK && obj->shape != NULL && obj->shape->property_count == {count} && obj->slots == obj->inline_slots && obj->properties == NULL && obj->elements == NULL && obj->prototype.tag == KILN_VALUE_UNDEFINED) {{ lit_shape = obj->shape; lit_heap = kiln_c99_unit_heap(); }} }} v{v} = kiln_val_from_boundary(built); }}"
+                        "    {{ static const kiln_shape *lit_shape = NULL; kiln_value built; int status = kiln_c99_new_object(&built); if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; kiln_object *obj = kiln_c99_object_of(built); {mask_expr}if (KILN_LIKELY(lit_shape != NULL{mask_guard} && KILN_C99_SHAPES_ARE_THIS_REALMS())) {{{direct_stores} obj->shape = (kiln_shape *)lit_shape; }} else {{{defines} if (status == KILN_C99_OK && obj->shape != NULL && obj->shape->property_count == {count} && obj->slots == obj->inline_slots && obj->properties == NULL && obj->elements == NULL && obj->prototype.tag == KILN_VALUE_UNDEFINED) {{ lit_shape = obj->shape; }} }} v{v} = kiln_val_from_boundary(built); }}"
                     ).unwrap();
                     return;
                 }

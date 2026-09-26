@@ -1068,59 +1068,8 @@ static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln
 }
 #endif
 
-/* ---------------------------------------------------------------------------------------------
- * The negative read cache: a site that has seen a read miss remembers "an object of this shape,
- * with this prototype link, in this realm, has no such key anywhere a read looks", and answers
- * the next such read `undefined` without the walk. `init.status` on `{ headers }`, `opts.signal`
- * on an options bag, `if (o.x !== undefined)`: a miss used to cost the whole slow path -- the
- * chain, the Object.prototype method table, the Object.prototype store -- on every read.
- *
- * WHY IT IS EXACT. An entry is `slot == UINT32_MAX`, `holder == NULL` and holds while all of:
- *
- *   - the receiver has the remembered shape, and no property list, no brand and no namespace
- *     flag. A shape is the receiver's complete own-key set only when nothing lives beside it in a
- *     list; an error, an `arguments` object and a namespace answer reads by rules of their own.
- *   - the receiver's own prototype link is the remembered one, by tag and pointer. A shape says
- *     nothing about the chain -- `Object.create(p)` and `{}` share the root -- so the link is
- *     compared on every hit, and `__proto__ =` / `setPrototypeOf` on the receiver misses.
- *   - `kiln_c99_proto_epoch` has not moved. Every object on the chain was checked to lack the
- *     key when learned and was flagged `cache_holder`, so a property added, defined or deleted
- *     on any of them, or a link of theirs changed, moves the epoch.
- *   - `kiln_c99_builtin_store_epoch` has not moved: the chain ends at Object.prototype, whose
- *     program-written members live in a built-in store, and every write to one moves it.
- *   - the realm is the one learned in (its heap, per thread): sites and shapes are process-wide,
- *     and another realm's Object.prototype is another store.
- *   - the remembered prototype is alive: a collection that frees it clears `via`, and a live
- *     object's address never equals NULL, so the pointer compare above fails from then on.
- *
- * What is never learned: an index-like key (elements), a machine key (`@@`), and the names the
- * slow path answers from the *receiver's* kind rather than its chain (`__proto__`, `constructor`,
- * `name`, `message`, `toString`); a chain through anything but ordinary objects (a function's
- * statics, a built-in prototype, a proxy); and a key the chain or the Object.prototype store
- * *holds* with the value undefined, or behind a getter -- only an absence is remembered, never
- * an answer, because an answer can change without any shape or epoch moving.
- *
- * Entry fields, reused from the positive entry's layout: `via` the prototype object (NULL for
- * none), `holder_slot` the prototype's tag, `epoch` the proto epoch, `holder_val` the built-in
- * store epoch, `holder_value.bits` the realm's heap. */
-#ifndef KILN_C99_SITE_MISS_HOLDS_DEFINED
-#define KILN_C99_SITE_MISS_HOLDS_DEFINED
-static inline const void *kiln_c99_unit_heap(void) {
-    return (const void *)kiln_c99_gc_heap();
-}
-static inline int kiln_c99_site_miss_holds(const kiln_c99_pic_entry *entry, const kiln_object *object) {
-    return entry->holder == NULL && entry->transition_to == NULL &&
-           entry->epoch == kiln_c99_proto_epoch &&
-           entry->holder_val == (kiln_val)kiln_c99_builtin_store_epoch &&
-           object->properties == NULL && !object->error_brand && !object->arguments_brand &&
-           !object->module_namespace &&
-           object->prototype.tag == entry->holder_slot &&
-           (object->prototype.tag != KILN_VALUE_OBJECT ||
-            (const kiln_object *)(uintptr_t)object->prototype.bits == entry->via) &&
-           entry->holder_value.bits == (uint64_t)(uintptr_t)kiln_c99_unit_heap();
-}
-#endif
-
+/* The negative read cache: see `kiln_c99_site_miss_holds` in the header for what an entry says
+ * and why a hit is exact. This file learns entries and checks them under `KILN_IC_CHECK`. */
 #ifdef KILN_IC_CHECK
 /* The oracle for the negative cache: the slow path, run again, must find nothing. */
 static void kiln_c99_site_miss_check(kiln_host *host, kiln_val target, const kiln_string *key,
@@ -1129,39 +1078,28 @@ static void kiln_c99_site_miss_check(kiln_host *host, kiln_val target, const kil
     int status = kiln_c99_get_key(host, kiln_val_to_boundary(target), key, canonical, &slow, depth,
                                   thrown);
     if (status != KILN_C99_OK || slow.tag != KILN_VALUE_UNDEFINED) {
-        fputs("kiln: inline-cache oracle: a remembered property miss is present under unmoved epochs; a mutation path forgot kiln_c99_prototype_touched\n", stderr);
+        fputs("kiln: inline-cache oracle: a remembered property miss is present; a layout or a live prototype check is missing\n", stderr);
         __builtin_trap();
     }
 }
 #endif
 
-/* Whether `key` is truly absent from `object` itself: not in its shape, its list or its
- * elements. A key held with the value undefined is present. */
-static int kiln_c99_object_lacks_key(const kiln_object *object, const kiln_string *ikey,
-                                     const kiln_string *key) {
-    size_t index;
-    if (object->shape != NULL && kiln_c99_shape_find_slot(object->shape, ikey, NULL)) return 0;
-    for (index = 0; index < object->count && object->properties != NULL; ++index) {
-        if (object->properties[index].key == ikey ||
-            kiln_c99_same_key_view(&object->properties[index], key)) {
-            return 0;
-        }
-    }
-    return 1;
-}
-
-/* Remember that the read of `key` on `target` just missed, when the miss is one the entry above
- * can prove again by comparing words. The slow path has already answered undefined; this only
- * decides whether that answer is a function of what the entry compares. */
+/* Remember that the read of `key` on `target` just missed, when the miss is one a path of layouts
+ * proves again (see the header). The slow path has already answered undefined; this only decides
+ * whether that answer is a function of what an entry compares. `canonical` is the site's pointer
+ * for the key; an entry with a dictionary level is checked by that pointer, so it is learned only
+ * when the site has one and it is the realm's canonical pointer for the spelling. */
 static void kiln_c99_site_learn_miss(kiln_c99_site *site, kiln_val target, const kiln_string *key,
                                      const kiln_string *canonical) {
     const kiln_object *object;
+    const kiln_object *step;
     const kiln_string *ikey;
-    kiln_value link;
+    const kiln_shape *levels[2] = {NULL, NULL};
     kiln_c99_pic_entry remembered;
-    kiln_gc_heap *heap;
+    uint32_t depth = 0;
+    uint32_t path;
     uint32_t p;
-    int steps;
+    int has_dictionary = 0;
     void *ptr = KILN_VAL_PTR(target);
     if (ptr == NULL || kiln_c99_gc_payload_kind(ptr) != KILN_GC_OBJECT) return;
     object = (const kiln_object *)ptr;
@@ -1169,85 +1107,69 @@ static void kiln_c99_site_learn_miss(kiln_c99_site *site, kiln_val target, const
         object->error_brand || object->arguments_brand || object->module_namespace) {
         return;
     }
+    /* Names the slow path answers from the receiver's kind, or with rules of their own. */
     if (kiln_c99_key_index_key(key) >= 0.0 || kiln_c99_key_is_reserved(key) ||
         kiln_c99_same_name_key(key, "__proto__") || kiln_c99_same_name_key(key, "constructor") ||
         kiln_c99_same_name_key(key, "name") || kiln_c99_same_name_key(key, "message") ||
         kiln_c99_same_name_key(key, "toString")) {
         return;
     }
-    /* Looked up by bytes, not taken from the site: a site's pointer is only an optimisation and
-     * may be another realm's, and a stale one would find nothing and prove a false absence. */
-    (void)canonical;
+    /* By bytes, not from the site: the site's pointer is only an optimisation, and one that is not
+     * this realm's canonical pointer would find nothing and prove a false absence. */
     ikey = kiln_c99_interned_key(key);
-    heap = kiln_c99_gc_heap();
-    if (heap == NULL) return;
-    if (ikey != NULL && !kiln_c99_object_lacks_key(object, ikey, key)) return;
-    /* The chain: ordinary objects only, each without the key, ending in nothing recorded
-     * (Object.prototype) or in an explicit null. */
-    link = object->prototype;
-    for (steps = 0; link.tag == KILN_VALUE_OBJECT; ++steps) {
-        const kiln_object *step = kiln_c99_object_of(link);
-        if (steps >= 32 || step == NULL || kiln_c99_gc_payload_kind((void *)step) != KILN_GC_OBJECT ||
+    if (ikey == NULL) return;
+    if (kiln_c99_shape_find_slot(object->shape, ikey, NULL)) return;
+    step = object;
+    while (step->prototype.tag == KILN_VALUE_OBJECT) {
+        if (depth == 2) return;
+        step = kiln_c99_object_of(step->prototype);
+        if (step == NULL || kiln_c99_gc_payload_kind((void *)step) != KILN_GC_OBJECT ||
             step->module_namespace) {
             return;
         }
-        if (ikey != NULL && !kiln_c99_object_lacks_key(step, ikey, key)) return;
-        if (ikey == NULL) {
-            size_t index;
-            for (index = 0; index < step->count && step->properties != NULL; ++index) {
-                if (kiln_c99_same_key_view(&step->properties[index], key)) return;
-            }
+        if (step->shape != NULL) {
+            if (step->properties != NULL || kiln_c99_shape_find_slot(step->shape, ikey, NULL)) return;
+            levels[depth] = step->shape;
+        } else {
+            /* Bounded, since every hit scans it. */
+            if (step->count > 32 || !kiln_c99_miss_list_lacks(step, ikey)) return;
+            levels[depth] = KILN_C99_MISS_DICTIONARY;
+            has_dictionary = 1;
         }
-        link = step->prototype;
+        depth += 1;
     }
-    if (link.tag != KILN_VALUE_UNDEFINED && link.tag != KILN_VALUE_NULL) return;
-    /* Every chain that does not end in an explicit null on the receiver itself is answered, at
-     * its end, from Object.prototype's method table (fixed) and its program-written store, which
-     * must not hold the key either -- held there with undefined, or as a getter, it is an answer. */
-    if (object->prototype.tag != KILN_VALUE_NULL) {
-        kiln_value store;
-        if (kiln_c99_callable_store(kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE), &store, 0) !=
-            KILN_C99_OK) {
-            return;
-        }
-        if (store.tag == KILN_VALUE_OBJECT &&
-            !kiln_c99_object_lacks_key(kiln_c99_object_of(store), ikey != NULL ? ikey : key, key)) {
-            return;
-        }
+    if (step->prototype.tag == KILN_VALUE_NULL) {
+        path = depth | KILN_C99_MISS_ENDS_NULL;
+    } else if (step->prototype.tag == KILN_VALUE_UNDEFINED) {
+        /* Object.prototype: its method table is fixed, and a key it answers from there never
+         * reaches here as a miss; its own-property store is scanned live on every hit, and must
+         * lack the key now. */
+        const kiln_object *store = kiln_c99_object_prototype_store;
+        if (store != NULL && !kiln_c99_miss_object_lacks(store, ikey)) return;
+        path = depth;
+    } else {
+        return;
     }
-    /* Flag the chain only now that it will be remembered: a mutation of any of these moves the
-     * epoch from here on. */
-    link = object->prototype;
-    while (link.tag == KILN_VALUE_OBJECT) {
-        kiln_object *step = (kiln_object *)kiln_c99_object_of(link);
-        step->cache_holder = 1;
-        link = step->prototype;
-    }
+    /* Every hit compares by the site's pointer, so it must be the canonical one. */
+    if (canonical != ikey) return;
+    (void)has_dictionary;
     memset(&remembered, 0, sizeof remembered);
     remembered.shape = object->shape;
     remembered.slot = UINT32_MAX;
-    remembered.holder_slot = object->prototype.tag;
-    remembered.via = object->prototype.tag == KILN_VALUE_OBJECT ? kiln_c99_object_of(object->prototype)
-                                                                : NULL;
-    remembered.epoch = kiln_c99_proto_epoch;
-    remembered.holder_val = (kiln_val)kiln_c99_builtin_store_epoch;
-    remembered.holder_value.bits = (uint64_t)(uintptr_t)heap;
+    remembered.holder_slot = path;
+    remembered.via_shape = levels[0];
+    remembered.holder_shape = levels[1];
     for (p = 0; p < site->pic_count; ++p) {
         if (site->entries[p].shape == object->shape) {
             site->entries[p] = remembered;
-            break;
+            return;
         }
     }
-    if (p == site->pic_count) {
-        if (site->pic_count < KILN_C99_PIC_SIZE) {
-            site->entries[site->pic_count++] = remembered;
-        } else {
-            site->entries[KILN_C99_PIC_SIZE - 1] = remembered;
-        }
+    if (site->pic_count < KILN_C99_PIC_SIZE) {
+        site->entries[site->pic_count++] = remembered;
+    } else {
+        site->entries[KILN_C99_PIC_SIZE - 1] = remembered;
     }
-    /* The collector forgets `via` when the prototype dies, so its address can never be mistaken
-     * for a new object's. */
-    if (remembered.via != NULL) kiln_c99_gc_register_site(site);
 }
 
 static int kiln_c99_val_read_property_view(kiln_host *host, kiln_val target,
@@ -1283,7 +1205,7 @@ static int kiln_c99_val_read_property_view(kiln_host *host, kiln_val target,
                         *out = object->slots[site->entries[p].slot];
                         return KILN_C99_OK;
                     } else if (site->entries[p].slot == UINT32_MAX &&
-                               kiln_c99_site_miss_holds(&site->entries[p], object)) {
+                               kiln_c99_site_miss_holds(&site->entries[p], object, canonical)) {
 #ifdef KILN_IC_CHECK
                         kiln_c99_site_miss_check(host, target, key, canonical, depth, thrown);
 #endif
