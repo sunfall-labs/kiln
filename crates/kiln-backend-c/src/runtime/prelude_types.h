@@ -510,6 +510,11 @@ typedef struct kiln_gc_hooks {
 } kiln_gc_hooks;
 extern void *kiln_realm_gc_current_heap(void);
 extern const uint64_t *kiln_realm_generation_slot(void);
+/* Process-wide storage the prelude keeps its shared keys and shapes in (ADR 0071): at least
+ * `size` zero-initialised bytes, the same address for every unit and every thread for the life of
+ * the process, or NULL when `size` exceeds what the provider reserved. The prelude is emitted per
+ * translation unit with internal linkage, so a static of its own would be one table per unit. */
+extern void *kiln_realm_process_shared(uint64_t size);
 extern int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap);
 extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
 extern int kiln_realm_gc_mark_roots(void *heap);
@@ -663,6 +668,17 @@ typedef struct kiln_shape {
      * of an object with this shape has to know before copying its slots wholesale. */
     uint32_t has_symbol_key;
     uint32_t double_slots_mask;
+    /* ADR 0071. A *shared* shape is the root or a transition by a shared (process-wide) key from
+     * a shared shape: it means the same layout in every realm, is never freed, and its edges are
+     * published atomically because any realm's thread may add one. Every other shape is
+     * realm-local: owned by the heap that made it (`owned_next` threads the heap's list of them),
+     * freed when that heap is torn down, and reachable from a shared shape only through that
+     * heap's own side table -- never through the shared shape's edges, which another realm reads.
+     * `retained` marks a realm-local shape a teardown survivor still uses, which teardown then
+     * leaks rather than frees. */
+    uint32_t shared;
+    uint32_t retained;
+    struct kiln_shape *owned_next;
     /* The transitions again, open-addressed by key pointer, once a shape has more than a few: a
      * shape every object literal starts from (the root) collects one branch per distinct first
      * key in the program *and* in the realm's bootstrap, and a list walk there is paid by every
@@ -904,18 +920,13 @@ typedef struct kiln_c99_private_site {
  * compiles declares it `extern`. */
 static const kiln_object *kiln_c99_object_prototype_store;
 
-/* How many heaps -- realms -- this process has made. Process state, never reset. See
- * `KILN_C99_SHAPES_ARE_THIS_REALMS`. */
-static uint32_t kiln_c99_heaps_made;
-
-/* Whether a shape learned anywhere in this process may be handed to an object of this realm
- * without proving it by transitions. A shape is a sequence of interned key pointers, and keys are
- * interned per heap (ADR 0047) until ADR 0071's shared constant-key table exists; so a literal
- * site's remembered shape names *this* realm's keys only while the process has made one heap.
- * Reading through a shape is safe regardless -- an object reaches a shape only by transitions made
- * with its own realm's keys -- which is why only a cache that *assigns* a shape asks this. */
-#define KILN_C99_SHAPES_ARE_THIS_REALMS() \
-    (__atomic_load_n(&kiln_c99_heaps_made, __ATOMIC_RELAXED) <= 1u)
+/* Whether a literal site may remember `shape` and hand it to objects of any realm without the
+ * transitions that would have produced it (ADR 0071). Only a *shared* shape qualifies: it is a
+ * layout of shared (process-wide) keys, never freed, and a spelling is never a shared key and a
+ * live realm's own key at once, so building the same literal by transitions in any realm reaches
+ * exactly this shape. A realm-local shape names keys of the realm that made it and is freed with
+ * its heap; remembering one would hand a later realm freed memory or foreign keys. */
+#define KILN_C99_SHAPE_IS_PORTABLE(shape) ((shape)->shared != 0)
 
 /* ---------------------------------------------------------------------------------------------
  * The negative read cache (ADR 0071 terms: a path of layouts, never an object).
@@ -935,6 +946,10 @@ static uint32_t kiln_c99_heaps_made;
  *
  * `key` must be the pointer the entry was learned with; learning requires it to be the realm's
  * canonical pointer for the spelling, so the pointer scans are exact (ADR 0047).
+ *
+ * Every remembered layout is a *shared* shape (ADR 0071): never freed, the same layout in every
+ * realm, so an entry means the same thing in every realm and cannot match a freed realm-local
+ * shape's address. A path through a realm-local shape is not remembered.
  *
  * A hit walks the receiver's *live* prototype pointers that many steps and checks each layout,
  * so a relinked receiver (`__proto__ =`, `setPrototypeOf`), a same-shape object with another

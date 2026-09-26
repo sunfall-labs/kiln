@@ -16,3 +16,20 @@ separately from a disagreement, because a refusal is a backlog entry and a disag
 Run it with `scripts/native.sh`. Both engines are driven through the CLI, so this covers the
 whole path -- lowering, emission, the C toolchain, the runtime and the HostOps boundary -- rather
 than the backend crate in isolation, which its own unit tests already do.
+
+## Probes that need a release build: the `kiln-native:` directive
+
+A probe may name, in its first five lines, a profile and a set of thread counts:
+
+```js
+// kiln-native: profile=native-release parallelism=1,2,max
+```
+
+`scripts/native.sh` then builds it with `--profile native-release` and runs the binary once per
+`KILN_PARALLELISM` value (`max` is the core count); every run must print the interpreter's bytes.
+The `parallel-*.js` probes -- the parallel/sequential differential harness of
+`.scratch/parallel-builtins` issue 02 -- use it, because only a release build emits the parallel
+lowering of `parallelMap`, and because a result that depends on how many threads computed it is a
+divergence like any other. A release module past 16 functions or 512 instructions is emitted
+generic-only, with no parallel lowering at all, so those probes stay small; `kiln build --profile
+native-release --explain-parallel <probe>` says which of their sites run in parallel.

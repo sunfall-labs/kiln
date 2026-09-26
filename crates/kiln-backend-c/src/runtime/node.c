@@ -529,8 +529,11 @@ enum {
 };
 
 typedef struct {
-    /* The heap the pinned keys and shapes below belong to; another heap (realm) rebuilds. */
-    const void *heap;
+    /* The serial of the heap the keys and shapes below were resolved under; another heap
+     * (realm) resolves them again. A serial rather than the heap pointer, because a freed heap's
+     * address can come back as the next realm's, and a realm-local key or shape of the first
+     * would then be read in the second. */
+    uint64_t heap_serial;
     const kiln_string *request_keys[KILN_C99_NODE_REQ_COUNT];
     const kiln_string *response_keys[KILN_C99_NODE_RES_COUNT];
     kiln_shape *request_shape;
@@ -543,52 +546,63 @@ typedef struct {
  * own heap, and the heap pointer inside says which one the keys and shapes belong to. */
 static _Thread_local kiln_node_http_layout kiln_c99_node_http_layouts;
 
-/* A shape chain spelling `keys` in order. Realm-lifetime like every other shape; rebuilt only
- * when a different heap asks, which a process does once per realm. */
+/* The shape spelling `keys` in order from the root, by ordinary transitions: with shared keys the
+ * chain is shared and every realm meets the same shapes, and a program that builds the same member
+ * sequence meets them too instead of forking one. Unbounded, because the runtime's own layout must
+ * not depend on how many branches the program grew off the root first. */
 static kiln_shape *kiln_c99_node_layout_shape(const kiln_string *const *keys, size_t count) {
-    kiln_shape *parent = &kiln_c99_root_shape;
+    kiln_shape *shape = kiln_c99_shape_root();
     size_t index;
     for (index = 0; index < count; ++index) {
-        kiln_shape *next = (kiln_shape *)calloc(1, sizeof *next);
-        if (next == NULL) return NULL;
-        next->parent = parent;
-        next->ikey = keys[index];
-        next->slot_index = (uint32_t)index;
-        next->property_count = (uint32_t)index + 1;
-        memcpy((void *)next->keys, (const void *)parent->keys, index * sizeof *next->keys);
-        next->keys[index] = keys[index];
-        next->has_symbol_key = parent->has_symbol_key || kiln_c99_key_is_reserved(keys[index]);
-        next->double_slots_mask = 0;
-        /* An edge from our own previous shape, so a program that happens to build the same
-         * member sequence from it meets the same shape instead of forking one. */
-        if (index != 0) {
-            parent->inline_trans_ikey[0] = keys[index];
-            parent->inline_trans_next[0] = next;
-            parent->num_transitions = 1;
-        }
-        parent = next;
+        kiln_shape *next = NULL;
+        if (!kiln_c99_shape_transition_ex(shape, keys[index], 0, 1, &next)) return NULL;
+        shape = next;
     }
-    return parent;
+    return shape;
+}
+
+typedef struct {
+    const char *text;
+    size_t len;
+} kiln_node_layout_name;
+
+static const kiln_node_layout_name kiln_c99_node_request_names[KILN_C99_NODE_REQ_COUNT] = {
+    {"@@node:response", 15}, {"method", 6}, {"url", 3}, {"socket", 6}, {"connection", 10},
+    {"complete", 8}};
+static const kiln_node_layout_name kiln_c99_node_response_names[KILN_C99_NODE_RES_COUNT] = {
+    {"@@node:response", 15}, {"req", 3}, {"socket", 6}, {"connection", 10},
+    {"statusCode", 10}, {"headersSent", 11}, {"writableEnded", 13}};
+
+/* The layouts' keys, registered with the built-ins' before the first realm (see
+ * `kiln_c99_register_builtin_keys`), so every realm's request and response meet one shared
+ * shape. Called under the process lock. */
+static int kiln_c99_node_register_keys(kiln_shared_state *process) {
+    size_t index;
+    for (index = 0; index < KILN_C99_NODE_REQ_COUNT; ++index)
+        if (!kiln_c99_register_static_text(process, kiln_c99_node_request_names[index].text,
+                                           kiln_c99_node_request_names[index].len))
+            return 0;
+    for (index = 0; index < KILN_C99_NODE_RES_COUNT; ++index)
+        if (!kiln_c99_register_static_text(process, kiln_c99_node_response_names[index].text,
+                                           kiln_c99_node_response_names[index].len))
+            return 0;
+    return kiln_c99_register_static_text(process, "@@node:events", 13);
 }
 
 static int kiln_c99_node_http_layout_ready(const kiln_node_http_layout **out) {
-    static const struct { const char *text; size_t len; } request_names[KILN_C99_NODE_REQ_COUNT] = {
-        {"@@node:response", 15}, {"method", 6}, {"url", 3}, {"socket", 6}, {"connection", 10},
-        {"complete", 8}};
-    static const struct { const char *text; size_t len; } response_names[KILN_C99_NODE_RES_COUNT] = {
-        {"@@node:response", 15}, {"req", 3}, {"socket", 6}, {"connection", 10},
-        {"statusCode", 10}, {"headersSent", 11}, {"writableEnded", 13}};
+    const kiln_node_layout_name *request_names = kiln_c99_node_request_names;
+    const kiln_node_layout_name *response_names = kiln_c99_node_response_names;
     kiln_node_http_layout *layout = &kiln_c99_node_http_layouts;
-    const void *heap = kiln_c99_gc_heap();
+    const kiln_gc_heap *heap = kiln_c99_gc_heap();
     size_t index;
     if (heap == NULL) return KILN_C99_OUT_OF_MEMORY;
-    if (layout->heap == heap) {
+    if (layout->heap_serial == heap->serial && heap->serial != 0) {
         *out = layout;
         return KILN_C99_OK;
     }
-    layout->heap = NULL;
-    /* Pinned: shapes are plain memory the collector never traces, so the key table itself has
-     * to keep these blocks alive for as long as the heap lives. */
+    layout->heap_serial = 0;
+    /* Constant keys: shared when that is sound, and otherwise pinned in the realm's own table,
+     * because shapes are plain memory the collector never traces. */
     for (index = 0; index < KILN_C99_NODE_REQ_COUNT; ++index) {
         layout->request_keys[index] =
             kiln_c99_intern_static(request_names[index].text, request_names[index].len);
@@ -606,7 +620,7 @@ static int kiln_c99_node_http_layout_ready(const kiln_node_http_layout **out) {
         kiln_c99_node_layout_shape(layout->response_keys, KILN_C99_NODE_RES_COUNT);
     if (layout->request_shape == NULL || layout->response_shape == NULL)
         return KILN_C99_OUT_OF_MEMORY;
-    layout->heap = heap;
+    layout->heap_serial = heap->serial;
     *out = layout;
     return KILN_C99_OK;
 }
@@ -647,7 +661,7 @@ static kiln_node_response *kiln_c99_node_response_of(kiln_value receiver) {
         const kiln_object *object = kiln_c99_object_of(receiver);
         const kiln_node_http_layout *layout = &kiln_c99_node_http_layouts;
         const kiln_string *key = layout->response_keys[KILN_C99_NODE_RES_RESPONSE];
-        if (layout->heap != NULL && key != NULL) {
+        if (layout->heap_serial != 0 && key != NULL) {
             if (object->shape != NULL) {
                 if (object->shape->property_count != 0 && object->shape->keys[0] == key &&
                     object->slot_capacity != 0 && KILN_VAL_IS_OBJECT(object->slots[0]))
@@ -1057,7 +1071,8 @@ static int kiln_c99_node_emit(kiln_host *host, kiln_value object, const char *ev
     if (object.tag == KILN_VALUE_OBJECT) {
         const kiln_object *store = kiln_c99_object_of(object);
         const kiln_node_http_layout *layout = &kiln_c99_node_http_layouts;
-        if (layout->heap != NULL && layout->heap == kiln_c99_gc_heap()) {
+        const kiln_gc_heap *heap = kiln_c99_gc_heap();
+        if (layout->heap_serial != 0 && heap != NULL && layout->heap_serial == heap->serial) {
             /* The pinned key is the canonical pointer, so either representation is searched by
              * pointer, and a shaped emitter stays shaped. */
             int listening = 0;

@@ -129,12 +129,42 @@ run_probe() {
 	# Named anyway, because the comparison below is between the two engines and reads as one.
 	local interpreted_status=0
 
-	local native native_status=0
-	if [[ -n $STRESS ]]; then
-		native="$(env ${probe_env[@]+"${probe_env[@]}"} KILN_GC_STRESS="$STRESS" "$KILN" --one-shot ${adapter:+"$adapter"} run --native "$probe" 2>&1)" || native_status=$?
-	else
-		native="$(env ${probe_env[@]+"${probe_env[@]}"} "$KILN" --one-shot ${adapter:+"$adapter"} run --native "$probe" 2>&1)" || native_status=$?
+	# A probe may also ask for more than the default build in its first lines:
+	#
+	#   // kiln-native: profile=native-release parallelism=1,2,max
+	#
+	# `profile` is passed to `--profile` (the development profile emits generic bodies only, so
+	# the parallel lowering of `parallelMap` exists only in a release build), and `parallelism`
+	# runs the one binary once per KILN_PARALLELISM value (`max` is the core count). Every run
+	# must print the interpreter's bytes: a result that depends on how many threads computed it
+	# is a divergence like any other.
+	local native_directive profile="" parallelism="default"
+	native_directive="$(head -5 -- "$probe" | grep -m1 -oE 'kiln-native:.*' || true)"
+	if [[ $native_directive =~ profile=([a-z-]+) ]]; then
+		profile="${BASH_REMATCH[1]}"
 	fi
+	if [[ $native_directive =~ parallelism=([0-9a-z,]+) ]]; then
+		parallelism="${BASH_REMATCH[1]//,/ }"
+	fi
+
+	local native native_status=0 threads
+	for threads in $parallelism; do
+		native_status=0
+		local -a run_env=(${probe_env[@]+"${probe_env[@]}"})
+		if [[ $threads == max ]]; then
+			run_env+=("KILN_PARALLELISM=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)")
+		elif [[ $threads != default ]]; then
+			run_env+=("KILN_PARALLELISM=$threads")
+		fi
+		if [[ -n $STRESS ]]; then
+			run_env+=("KILN_GC_STRESS=$STRESS")
+		fi
+		native="$(env ${run_env[@]+"${run_env[@]}"} "$KILN" --one-shot ${adapter:+"$adapter"} run --native ${profile:+--profile "$profile"} "$probe" 2>&1)" || native_status=$?
+		if [[ $native != "$interpreted" ]] || ((native_status != interpreted_status)); then
+			[[ $threads != default ]] && native="$native [KILN_PARALLELISM=$threads]"
+			break
+		fi
+	done
 
 	if [[ $native == "$interpreted" ]] && ((native_status == interpreted_status)); then
 		touch "$WORK_DIR/$name.matched"

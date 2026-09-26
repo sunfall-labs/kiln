@@ -1342,12 +1342,16 @@ fn render_functions(
     // if its text names none of the host, `thrown`, the receiver, the upvalue table, a shape row,
     // or the collector: the same reading `typed_needs` does above, as the machine's own check
     // that a chunk worker calling this clone reaches nothing a realm thread owns.
+    //
+    // The clone is emitted from the proto's parallel plan (`direct.parallel`), which assumes the
+    // captured reads of tier 1 are numbers: the clone takes them as `double` parameters after
+    // its own, and the call site guards them on the realm thread before any chunk runs.
     let mut parallel_clones: Vec<Option<String>> = vec![None; program.functions.len()];
-    for (index, typed) in direct.typed.iter().enumerate() {
-        let Some(typed) = typed else {
+    for (index, parallel) in direct.parallel.iter().enumerate() {
+        let Some(typed) = parallel else {
             continue;
         };
-        if !(typed.typed_returns[index] && typed.parallel_safe[index]) {
+        if direct.typed[index].is_none() || !typed.parallel_safe[index] {
             continue;
         }
         let proto = &program.functions[index];
@@ -1787,6 +1791,7 @@ fn render_functions(
                     symbol,
                     index,
                     proto.parameter_count,
+                    &emit_graph::parallel_captures(&direct.entry, index),
                     should_chunk,
                 );
             }
@@ -2689,14 +2694,101 @@ fn property_key_constants(program: &Program) -> Vec<u32> {
         .chain(program.functions.iter().flat_map(|proto| proto.code.iter()))
         .filter_map(key_of)
         .collect();
+    literal_key_constants(program, &program.code, &mut keys);
+    for proto in &program.functions {
+        literal_key_constants(program, &proto.code, &mut keys);
+    }
     keys.sort_unstable();
     keys.dedup();
     keys
 }
 
-/// One canonical pointer per key the unit names, filled at the first entry into a realm and
-/// cleared by the unit's `KILN_GC_PHASE_RESET` when that realm is destroyed. Interned as static:
-/// the constant table outlives every heap, so the entry is pinned and nothing is copied.
+/// The string constants an object literal (`NewObject`) takes as its static keys, added to `keys`.
+///
+/// They join the unit's key table so the load-time constructor registers them as shared keys
+/// (ADR 0071): a literal built from shared keys gets a shared shape, and a shared shape is the
+/// only kind a literal site may remember and hand to objects of any realm
+/// (`KILN_C99_SHAPE_IS_PORTABLE`). A literal whose keys stayed realm-local would be built
+/// member by member every time.
+///
+/// The keys are found by walking the bytecode's stack like the validator does, labelling each slot
+/// with the constant that pushed it, and reading the key positions under each `NewObject`. The
+/// labels are exact for a key -- the compiler pushes a static key as `Const` directly beneath its
+/// value -- and approximate above it, where only values live; a mislabel can only add a constant
+/// to the table (a harmless registration) or miss one (a literal that is not cached), never make
+/// a site wrong.
+fn literal_key_constants(program: &Program, code: &[Instruction], keys: &mut Vec<u32>) {
+    let mut seen = vec![false; code.len()];
+    let mut work: Vec<(usize, Vec<Option<u32>>)> = vec![(0, Vec::new())];
+    while let Some((mut index, mut labels)) = work.pop() {
+        while index < code.len() && !seen[index] {
+            seen[index] = true;
+            let instruction = &code[index];
+            let Ok((next_height, terminal)) =
+                crate::validation::stack_effect(instruction, labels.len(), index)
+            else {
+                break;
+            };
+            match instruction {
+                Instruction::Const(constant) => {
+                    labels.push(Some(*constant));
+                }
+                Instruction::NewObject { count } => {
+                    let count = *count as usize;
+                    if labels.len() >= count * 2 {
+                        let base = labels.len() - count * 2;
+                        for pair in 0..count {
+                            if let Some(constant) = labels[base + pair * 2]
+                                && matches!(
+                                    program.constants.get(constant as usize),
+                                    Some(Constant::String(_))
+                                )
+                            {
+                                keys.push(constant);
+                            }
+                        }
+                    }
+                    labels.resize(next_height, None);
+                }
+                _ => labels.resize(next_height, None),
+            }
+            if terminal {
+                break;
+            }
+            match instruction {
+                Instruction::PushHandler(target) => {
+                    let mut handler = labels.clone();
+                    handler.push(None);
+                    work.push((*target as usize, handler));
+                }
+                Instruction::Jump(target) => {
+                    work.push((*target as usize, labels));
+                    break;
+                }
+                Instruction::JumpIfFalse(target)
+                | Instruction::JumpIfTruthy(target)
+                | Instruction::JumpIfNotNullish(target)
+                | Instruction::YieldStar(target)
+                | Instruction::JumpIfReturnSignal(target) => {
+                    work.push((*target as usize, labels.clone()));
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+    }
+}
+
+/// One canonical pointer per key the unit names. A load-time constructor registers the unit's
+/// constants into the process's shared key table before the first realm exists (ADR 0071) and
+/// fills the pointers from it once, for every realm; `{symbol}_keys_shared` records that, and the
+/// realm reset leaves such pointers alone. When registration could not vouch for every key -- a
+/// library loaded after a heap existed, or out of memory -- the pointers are filled at the first
+/// entry into each realm instead and cleared by that realm's `KILN_GC_PHASE_RESET`, as before.
+///
+/// The constructor names only this unit's own constants, so registration adds nothing to the
+/// unit's cache key that its content did not already decide, and no launcher, embedding host or
+/// shared-library entry point has to enumerate units: the linker's list of objects is the list.
 fn render_key_table(
     output: &mut String,
     program: &Program,
@@ -2724,18 +2816,22 @@ fn render_key_table(
         }
     }
     writeln!(output, "static int {symbol}_keys_ready;").unwrap();
+    writeln!(output, "static int {symbol}_keys_shared;").unwrap();
+    writeln!(
+        output,
+        "static const kiln_string *const {symbol}_key_sources[{}] = {{",
+        keys.len()
+    )
+    .unwrap();
+    for index in keys {
+        let Constant::String(_) = &program.constants[*index as usize] else {
+            unreachable!("verification rejects a non-string property name before emission")
+        };
+        writeln!(output, "    &{symbol}_string_{index},").unwrap();
+    }
+    writeln!(output, "}};").unwrap();
     writeln!(output, "static int {symbol}_intern_keys(void) {{").unwrap();
     if symbol == "ku" && keys.len() > 4 {
-        writeln!(
-            output,
-            "    static const kiln_string *const ku_static_keys[{}] = {{",
-            keys.len()
-        )
-        .unwrap();
-        for index in keys {
-            writeln!(output, "        &{symbol}_string_{index},").unwrap();
-        }
-        writeln!(output, "    }};").unwrap();
         writeln!(
             output,
             "    for (size_t i = 0; i < (size_t){}; ++i) {{",
@@ -2744,15 +2840,12 @@ fn render_key_table(
         .unwrap();
         writeln!(
             output,
-            "        if ((ku_keys[i] = kiln_c99_intern_static_key(ku_static_keys[i])) == NULL) return KILN_C99_OUT_OF_MEMORY;"
+            "        if ((ku_keys[i] = kiln_c99_intern_static_key(ku_key_sources[i])) == NULL) return KILN_C99_OUT_OF_MEMORY;"
         )
         .unwrap();
         writeln!(output, "    }}").unwrap();
     } else {
         for (i, index) in keys.iter().enumerate() {
-            let Constant::String(_) = &program.constants[*index as usize] else {
-                unreachable!("verification rejects a non-string property name before emission")
-            };
             // The key store is canonical headed keys now: intern the constant's header
             // directly, in either width. The Latin1 bridge and its UTF-16 refusal are gone.
             if symbol == "ku" {
@@ -2773,6 +2866,37 @@ fn render_key_table(
     writeln!(
         output,
         "    {symbol}_keys_ready = 1;\n    return KILN_C99_OK;\n}}"
+    )
+    .unwrap();
+    // Registration. `ku` registers straight into its key array; any other symbol's keys are
+    // separate statics, filled from a local array only once every key is known to be shared.
+    writeln!(
+        output,
+        "__attribute__((constructor)) static void {symbol}_register_keys(void) {{"
+    )
+    .unwrap();
+    if symbol == "ku" {
+        writeln!(
+            output,
+            "    if (!kiln_c99_register_static_keys(ku_key_sources, ku_keys, (size_t){})) return;",
+            keys.len()
+        )
+        .unwrap();
+    } else {
+        writeln!(output, "    const kiln_string *shared[{}];", keys.len()).unwrap();
+        writeln!(
+            output,
+            "    if (!kiln_c99_register_static_keys({symbol}_key_sources, shared, (size_t){})) return;",
+            keys.len()
+        )
+        .unwrap();
+        for (i, index) in keys.iter().enumerate() {
+            writeln!(output, "    {symbol}_key_{index} = shared[{i}];").unwrap();
+        }
+    }
+    writeln!(
+        output,
+        "    {symbol}_keys_shared = 1;\n    {symbol}_keys_ready = 1;\n}}"
     )
     .unwrap();
 }
@@ -2942,10 +3066,11 @@ fn render_unit_roots(
     )
     .unwrap();
     if keyed {
-        // The canonical pointers belong to the realm's intern table, which dies with the realm.
+        // Unless registration made them shared, the canonical pointers belong to the realm's
+        // intern table, which dies with the realm.
         writeln!(
             output,
-            "    if (phase == KILN_GC_PHASE_RESET) {symbol}_keys_ready = 0;"
+            "    if (phase == KILN_GC_PHASE_RESET && !{symbol}_keys_shared) {symbol}_keys_ready = 0;"
         )
         .unwrap();
     }
@@ -3622,7 +3747,7 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
 }\n\
 static __attribute__((unused)) inline int ku_new_object_literal_fast(kiln_val *out, const kiln_shape **lit_shape, const kiln_val *pairs, size_t count) {\n\
     const kiln_shape *shape = __atomic_load_n(lit_shape, __ATOMIC_ACQUIRE);\n\
-    if (KILN_LIKELY(shape != NULL && count <= KILN_C99_INLINE_SLOTS && KILN_C99_SHAPES_ARE_THIS_REALMS())) {\n\
+    if (KILN_LIKELY(shape != NULL && count <= KILN_C99_INLINE_SLOTS)) {\n\
         uint32_t mask = ku_compute_literal_mask(pairs, count);\n\
         if (KILN_LIKELY(shape->double_slots_mask == mask)) {\n\
             kiln_value built;\n\
@@ -3640,7 +3765,7 @@ static __attribute__((unused)) inline int ku_new_object_literal_fast(kiln_val *o
     int status = kiln_c99_val_new_object_literal(out, pairs, count);\n\
     if (KILN_LIKELY(status == KILN_C99_OK && count <= KILN_C99_INLINE_SLOTS && KILN_VAL_IS_OBJECT(*out))) {\n\
         kiln_object *obj = (kiln_object *)KILN_VAL_PTR(*out);\n\
-        if (obj->shape != NULL && obj->shape->property_count == count && obj->slots == obj->inline_slots && obj->properties == NULL && obj->elements == NULL && obj->prototype.tag == KILN_VALUE_UNDEFINED) {\n\
+        if (obj->shape != NULL && KILN_C99_SHAPE_IS_PORTABLE(obj->shape) && obj->shape->property_count == count && obj->slots == obj->inline_slots && obj->properties == NULL && obj->elements == NULL && obj->prototype.tag == KILN_VALUE_UNDEFINED) {\n\
             __atomic_store_n(lit_shape, (const kiln_shape *)obj->shape, __ATOMIC_RELEASE);\n\
         }\n\
     }\n\
@@ -3650,6 +3775,17 @@ static __attribute__((unused)) inline int ku_new_object_literal_fast(kiln_val *o
 }
 
 fn render(
+    program: &Program,
+    program_hash: u64,
+    symbol: &str,
+    policy: &EmissionPolicy,
+) -> Result<String, EmitError> {
+    parallel::with_original_source(program, || {
+        render_positioned(program, program_hash, symbol, policy)
+    })
+}
+
+fn render_positioned(
     program: &Program,
     program_hash: u64,
     symbol: &str,
@@ -4385,13 +4521,39 @@ fn render_module(
     commonjs: bool,
     diagnostic_site: &str,
 ) -> Result<RenderedModule, EmitError> {
+    // `parallelMap` site records name positions in the module as written; emission packs the
+    // source below. See `parallel::SiteRecord`.
+    parallel::with_original_source(&module.program, || {
+        render_module_positioned(
+            module,
+            program_hash,
+            symbol,
+            policy,
+            commonjs,
+            diagnostic_site,
+        )
+    })
+}
+
+fn render_module_positioned(
+    module: &ModuleProgram,
+    program_hash: u64,
+    symbol: &str,
+    policy: &EmissionPolicy,
+    commonjs: bool,
+    diagnostic_site: &str,
+) -> Result<RenderedModule, EmitError> {
     let program = &module.program;
     let should_chunk = policy.compact && program.functions.len() > 500;
     // Compact graph modules are each compiled as their own translation unit. Private identifiers
     // therefore do not need the link-visible content hash; retain it only on exported adapters.
     // Chunked modules must retain the module symbol prefix so their non-static chunk symbols
     // do not collide with other chunked modules in the same binary.
-    let unit_symbol = if policy.compact && !should_chunk { "ku" } else { symbol };
+    let unit_symbol = if policy.compact && !should_chunk {
+        "ku"
+    } else {
+        symbol
+    };
     let plan = validate_program(program).expect("render called after validation");
     let callables = produces_references(program) || policy.compact;
     // What the compiler said, padded with the strict answer. A `ModuleProgram` assembled by hand
@@ -5719,6 +5881,9 @@ fn hash_module_with_seed(module: &ModuleProgram, seed: u64) -> u64 {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod parallel_tests;
 
 /// The reserved key an instance stores its class's brand under, derived from a private name.
 ///

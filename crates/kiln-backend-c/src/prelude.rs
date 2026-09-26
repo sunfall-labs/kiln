@@ -2606,7 +2606,9 @@ const _: () = assert_refusals_name_themselves(
 /// out at the `kiln_c99_static_text(prefix, strlen(prefix))` call in definitions.c.
 /// Seven left on 2026-09-26 with the `node:http` lazy-header probes (six header-buffer scans,
 /// now `memchr`) and the request-method table (lengths now stored beside the names).
-pub const C_STRING_LENGTH_SITES: usize = 72;
+/// One added the same day by `kiln_c99_register_builtin_keys` (surface.c), which measures a
+/// surface row's `name`: a C string literal out of the generated table, as its other readers do.
+pub const C_STRING_LENGTH_SITES: usize = 73;
 
 /// How far the `strlen(` scan may skip after reading the last byte of its seven-byte window:
 /// the Horspool shift, as `refusal_scan_shift` is for the refusal scan, so the const evaluator
@@ -4589,10 +4591,6 @@ pub fn runtime_prelude_header() -> &'static str {
                 "static const kiln_object *kiln_c99_object_prototype_store;",
                 "extern const kiln_object *kiln_c99_object_prototype_store __attribute__((visibility(\"hidden\")));",
             ),
-            (
-                "static uint32_t kiln_c99_heaps_made;",
-                "extern uint32_t kiln_c99_heaps_made __attribute__((visibility(\"hidden\")));",
-            ),
         ] {
             assert!(text.contains(definition), "{definition} moved");
             text = text.replace(definition, declaration);
@@ -4679,7 +4677,6 @@ fn build_runtime_prelude_source(src: &str) -> String {
         "kiln_c99_builtin_store_epoch",
         "kiln_c99_proto_epoch",
         "kiln_c99_object_prototype_store",
-        "kiln_c99_heaps_made",
     ];
 
     for line in src.lines() {
@@ -4783,15 +4780,15 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_proto_epoch", C99StateOwner::Realm),
     // This realm's Object.prototype store, scanned live by remembered read misses.
     ("kiln_c99_object_prototype_store", C99StateOwner::Realm),
-    // How many heaps the process has made: whether a remembered shape can name this realm's keys.
-    ("kiln_c99_heaps_made", C99StateOwner::Process),
     // Per thread, and trusted only for the heap it was built under: the `node:http` layouts.
     ("kiln_c99_node_http_layouts", C99StateOwner::Realm),
     ("kiln_c99_gc_stress_checks", C99StateOwner::Process),
     ("kiln_c99_introspect_pending", C99StateOwner::Process),
     ("kiln_c99_introspect_armed", C99StateOwner::Process),
-    ("kiln_c99_root_shape", C99StateOwner::Constant),
-    // How many shapes the tree holds, which bounds it. Shapes outlive realms like the root does.
+    // The process-shared block (ADR 0071): shared keys and the shape root, one per process.
+    // Each unit caches the pointer to it; the block itself is the provider archive's.
+    ("kiln_c99_shared_block", C99StateOwner::Process),
+    // How many shapes this prelude has minted, which bounds the tree (see `shapes.c`).
     ("kiln_c99_shape_total", C99StateOwner::Process),
     ("kiln_c99_speculate_mode", C99StateOwner::Process),
     // ADR 0068: whether this process installs kiln's own members, read from the environment once.

@@ -130,7 +130,9 @@ static void kiln_c99_gc_aligned_free(void *aligned);
  * carries -- so `property->key == key` is the whole of a key comparison and a linear scan never
  * touches key bytes. The table is the heap's because the heap is the one struct every
  * translation unit shares: two units each keeping their own would have two canonical pointers
- * for one name, which is exactly the situation this exists to end.
+ * for one name, which is exactly the situation this exists to end. Constant keys live one level
+ * further out, in the process's shared table (ADR 0071; see `kiln_shared_key_table`), so that
+ * every realm's constant keys are the same pointers; this table holds the rest.
  *
  * An entry is *pinned* when its bytes are immortal (a unit's constant table, a prelude literal,
  * a symbol's reserved key) or when the table itself has undertaken to keep a block alive because
@@ -252,6 +254,16 @@ typedef struct kiln_gc_nursery {
     kiln_gc_ptrset regions;
 } kiln_gc_nursery;
 
+/* One realm-local edge out of a shared shape (ADR 0071): the child is the heap's own, so the edge
+ * cannot live in the shared parent, which every realm reads and none may point into another's
+ * memory. A `key` of NULL is the parent's count row: `child` then holds how many realm-local
+ * edges the parent has in this heap, for the same fan-out ceiling a shape's own edges obey. */
+typedef struct kiln_c99_local_edge {
+    const kiln_shape *parent;
+    const kiln_string *key;
+    kiln_shape *child;
+} kiln_c99_local_edge;
+
 typedef struct kiln_gc_heap {
     const kiln_gc_hooks *hooks;
     kiln_gc_block *head; /* large blocks only; slab blocks are found by walking slabs */
@@ -293,6 +305,15 @@ typedef struct kiln_gc_heap {
      * KILN_C99_HOT_KEYS. NULL means "not interned in this heap yet"; the table is per-heap
      * because a canonical pointer from one realm means nothing in another. */
     const kiln_string *hot_keys[KILN_C99_HOT_KEY_COUNT];
+    /* ADR 0071. A process-unique number for this heap, never reused, for a cache that must know
+     * which heap it was built under when a freed heap's address can come back as another's. */
+    uint64_t serial;
+    /* Every realm-local shape this heap made, freed with it; and the side table of realm-local
+     * edges out of shared shapes (see `kiln_c99_local_edge`). */
+    kiln_shape *local_shapes;
+    kiln_c99_local_edge *local_edges;
+    size_t local_edge_capacity;
+    size_t local_edge_count;
     /* Mid-turn collection (perf/gc-mid-turn). The collector used to run only between turns,
      * when no frame of the program is live and the realm's roots are the whole root set. A
      * synchronous loop then never had its garbage reclaimed: it spilled out of the nursery into
@@ -331,6 +352,119 @@ typedef struct kiln_gc_heap {
 static const kiln_gc_hooks kiln_c99_gc_hooks;
 /* The heap a unit uses when no realm is active: the prelude's own tests. It never collects. */
 static kiln_gc_heap kiln_c99_gc_fallback;
+
+/* ---- Process-wide shared state (ADR 0071) --------------------------------------------------
+ *
+ * Constant keys and the shapes built from them mean the same thing in every realm, so they are
+ * kept once per process. The prelude is emitted per translation unit with internal linkage, so
+ * the block that holds them cannot be a static here -- that would be one per unit -- and is
+ * reserved by the provider archive instead (`kiln_realm_process_shared`), which every unit of the
+ * process links once. The block starts zeroed; the first unit to reach it stamps `layout`.
+ *
+ * Writers take `lock`, a spin lock held only across a table insert or a shape allocation. Readers
+ * take nothing: a published key table or shape edge is complete before the release store that
+ * makes it reachable, and is never changed or freed afterwards. */
+#define KILN_C99_PROCESS_LAYOUT (UINT64_C(0x6b696c6e00010000) | (uint64_t)sizeof(struct kiln_shared_state))
+
+/* The shared key table: open addressing, never shrunk, never deleted from. A grown table is a new
+ * allocation published whole; the one it replaces is left in place for any reader still probing
+ * it (tables only double, so everything ever left behind is less than the live one). */
+typedef struct kiln_shared_key_table {
+    size_t capacity; /* a power of two */
+    size_t count;
+    kiln_key_entry entries[];
+} kiln_shared_key_table;
+
+typedef struct kiln_shared_state {
+    uint64_t layout;
+    uint32_t lock;
+    /* Heaps registered and not yet torn down. Registration (`kiln_c99_register_static_keys`)
+     * adds to the shared table only while this is zero, and a constant first met at run time
+     * joins it only while the heap interning it is the only live one: either way no spelling is
+     * ever a shared key and some live realm's own key at once (see `kiln_c99_intern_static_key`). */
+    uint32_t live_heaps;
+    /* Set once the built-ins' keys are registered, by whichever prelude copy got there first. */
+    uint32_t builtins_registered;
+    uint64_t next_heap_serial;
+    kiln_shared_key_table *keys;
+    /* The empty key, headed like every other so `kiln_c99_key_len` reads zero from it. One for the
+     * process rather than one per unit, so "" is one key across units too. */
+    kiln_string empty_key;
+    uint8_t empty_bytes[8];
+    /* The root of the shape tree. */
+    kiln_shape root;
+} kiln_shared_state;
+
+/* This unit's pointer to the process block, set once it is initialised. */
+static kiln_shared_state *kiln_c99_shared_block;
+
+static void kiln_c99_process_lock(kiln_shared_state *process) {
+    while (__atomic_exchange_n(&process->lock, 1u, __ATOMIC_ACQUIRE) != 0u) {
+        while (__atomic_load_n(&process->lock, __ATOMIC_RELAXED) != 0u) {
+        }
+    }
+}
+
+static void kiln_c99_process_unlock(kiln_shared_state *process) {
+    __atomic_store_n(&process->lock, 0u, __ATOMIC_RELEASE);
+}
+
+static kiln_shared_state *kiln_c99_process_slow(void) {
+    kiln_shared_state *process = (kiln_shared_state *)kiln_realm_process_shared(sizeof *process);
+    uint64_t layout;
+    if (process == NULL) {
+        fputs("kiln: the runtime archive reserves too little process-shared storage for this "
+              "prelude; rebuild the native provider\n",
+              stderr);
+        abort();
+    }
+    layout = __atomic_load_n(&process->layout, __ATOMIC_ACQUIRE);
+    if (layout != KILN_C99_PROCESS_LAYOUT) {
+        kiln_c99_process_lock(process);
+        layout = process->layout;
+        if (layout == 0) {
+            process->empty_key.unit_len = 0;
+            process->empty_key.flags = KILN_STRING_LATIN1;
+            process->empty_key.data = process->empty_bytes;
+            process->root.shared = 1;
+            layout = KILN_C99_PROCESS_LAYOUT;
+            __atomic_store_n(&process->layout, layout, __ATOMIC_RELEASE);
+        }
+        kiln_c99_process_unlock(process);
+        if (layout != KILN_C99_PROCESS_LAYOUT) {
+            /* Two units built from different preludes in one process: their shared layouts
+             * disagree, and a shape or key one of them publishes would be misread by the other. */
+            fputs("kiln: units built from different runtime preludes share this process\n", stderr);
+            abort();
+        }
+    }
+    __atomic_store_n(&kiln_c99_shared_block, process, __ATOMIC_RELEASE);
+    return process;
+}
+
+static inline kiln_shared_state *kiln_c99_process(void) {
+    kiln_shared_state *process = __atomic_load_n(&kiln_c99_shared_block, __ATOMIC_ACQUIRE);
+    return KILN_LIKELY(process != NULL) ? process : kiln_c99_process_slow();
+}
+
+/* A heap joins the count of live heaps when it becomes a realm's (or the fallback), and leaves
+ * it at teardown. Registration also gives it its serial. */
+static void kiln_c99_gc_heap_register(kiln_gc_heap *heap) {
+    kiln_shared_state *process = kiln_c99_process();
+    kiln_c99_process_lock(process);
+    process->live_heaps += 1;
+    heap->serial = ++process->next_heap_serial;
+    kiln_c99_process_unlock(process);
+}
+
+static void kiln_c99_gc_heap_unregister(kiln_gc_heap *heap) {
+    kiln_shared_state *process = kiln_c99_process();
+    if (heap->serial == 0) return;
+    kiln_c99_process_lock(process);
+    if (process->live_heaps != 0) process->live_heaps -= 1;
+    kiln_c99_process_unlock(process);
+    heap->serial = 0;
+}
 
 /* Widen the heap's address bounds to cover [base, base + size). */
 static inline void kiln_c99_gc_bound(kiln_gc_heap *heap, const void *base, size_t size) {
@@ -469,7 +603,6 @@ static void kiln_c99_nursery_destroy(kiln_gc_nursery *nursery) {
 
 static void kiln_c99_gc_heap_init(kiln_gc_heap *heap) {
     const char *setting;
-    __atomic_fetch_add(&kiln_c99_heaps_made, 1u, __ATOMIC_RELAXED);
     memset(heap, 0, sizeof *heap);
     heap->hooks = &kiln_c99_gc_hooks;
     heap->floor = KILN_GC_DEFAULT_FLOOR;
@@ -776,6 +909,7 @@ static kiln_gc_heap *kiln_c99_gc_heap_uncached(void) {
             kiln_c99_gc_heap_init(&kiln_c99_gc_fallback);
             kiln_c99_gc_fallback.enabled = 0;
             kiln_c99_gc_fallback.fallback = 1;
+            kiln_c99_gc_heap_register(&kiln_c99_gc_fallback);
         }
         return &kiln_c99_gc_fallback;
     }
@@ -796,7 +930,10 @@ static kiln_gc_heap *kiln_c99_gc_heap_uncached(void) {
      * kiln_c99_gc_hooks, so the `introspect` hook the archive calls reads the same copy of
      * kiln_c99_introspect_pending that this unit's handler writes. The prelude is emitted per
      * unit with internal linkage, so arming anywhere else would arm one flag and poll another. */
-    else kiln_c99_introspect_armed = kiln_c99_introspect_arm();
+    else {
+        kiln_c99_introspect_armed = kiln_c99_introspect_arm();
+        kiln_c99_gc_heap_register(candidate);
+    }
     return kiln_c99_gc_lane_attached(attached);
 }
 
@@ -1766,24 +1903,29 @@ static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
  * Three entry points, and the difference between them is the whole design:
  *
  *   kiln_c99_intern        canonical pointer, inserting. The one a *write* uses.
- *   kiln_c99_intern_static canonical pointer, inserting, for bytes that never die; pins.
+ *   kiln_c99_intern_static canonical pointer, inserting, for a constant of the program; shared
+ *                          across realms when sound, else pinned in the realm's table.
  *   kiln_c99_interned      canonical pointer or NULL, never inserting. The one a *read* uses,
  *                          because storage is total: a spelling the table has never seen is a
  *                          key no object anywhere has, and the read can skip the scan.
  *
+ * Two tables answer them (ADR 0071): the process's shared table of constant keys, consulted
+ * first, and the realm heap's own table of keys made at run time, second. A spelling is never in
+ * both while its realm lives, so the first answer is the only one.
+ *
  * Canonical pointers are distinct as pointers: a block is adopted as canonical only when its
  * size is exactly the key's length, so two keys can never share an address with different
- * lengths, and the empty key is one static byte rather than whichever empty string came first. */
-/* The empty key, headed like every other so `kiln_c99_key_len` reads zero from it. */
-static const struct kiln_c99_key_empty_storage {
-    kiln_string header;
-    uint8_t bytes[1];
-} kiln_c99_key_empty_storage = {{0, KILN_STRING_LATIN1, kiln_c99_key_empty_storage.bytes}, {0}};
-#define kiln_c99_key_empty (&kiln_c99_key_empty_storage.header)
+ * lengths, and the empty key is one process-wide header rather than whichever empty string came
+ * first. */
+/* The empty key: one for the process, in the shared block (see `kiln_c99_process`). */
+#define kiln_c99_key_empty ((const kiln_string *)&kiln_c99_process()->empty_key)
 static void kiln_c99_gc_mark_block(kiln_gc_heap *heap, const void *payload);
 static kiln_string *kiln_c99_gc_alloc_key_copy(const kiln_string *view);
 static const kiln_string *kiln_c99_intern_key(const kiln_string *string);
 static const kiln_string *kiln_c99_intern_static_key(const kiln_string *string);
+static const kiln_string *kiln_c99_intern_pinned_key(const kiln_string *string);
+static int kiln_c99_register_static_keys(const kiln_string *const *keys, const kiln_string **out,
+                                         size_t count);
 
 /* `KILN_KEYS_CHECK=1`: every pointer-identity scan is re-run by bytes and a disagreement aborts
  * naming the key. The acceptance test for "interning is total", not a mode to ship. Read once
@@ -1903,11 +2045,99 @@ static void kiln_c99_key_delete_at(kiln_key_table *table, size_t hole) {
     }
 }
 
+/* ---- The shared key table (ADR 0071) -------------------------------------------------------
+ *
+ * Every lookup consults the shared table first and the realm's own table second; a spelling is
+ * never in both while the realm is alive (see `kiln_c99_intern_static_key` for why), so the first
+ * answer found is the only one. A shared key is a malloc'd headed string outside every heap: the
+ * collector's lookups do not find it and so never mark, sweep or purge it, like any constant. */
+static const kiln_string *kiln_c99_shared_key_probe(const kiln_string *string, uint64_t hash) {
+    const kiln_shared_key_table *table =
+        __atomic_load_n(&kiln_c99_process()->keys, __ATOMIC_ACQUIRE);
+    size_t mask;
+    size_t at;
+    if (table == NULL) return NULL;
+    mask = table->capacity - 1;
+    at = (size_t)hash & mask;
+    for (;;) {
+        const kiln_key_entry *entry = &table->entries[at];
+        const kiln_string *candidate = __atomic_load_n(&entry->string, __ATOMIC_ACQUIRE);
+        if (candidate == NULL) return NULL;
+        if (entry->hash == hash && kiln_string_equal(candidate, string)) return candidate;
+        at = (at + 1) & mask;
+    }
+}
+
+/* Whether `ikey` -- already canonical -- is a shared key: its own spelling finds it in the shared
+ * table. The empty key is the process's, so it counts. */
+static int kiln_c99_key_is_shared(const kiln_string *ikey) {
+    if (ikey == NULL) return 0;
+    if (ikey->unit_len == 0) return ikey == kiln_c99_key_empty;
+    return kiln_c99_shared_key_probe(ikey, kiln_c99_key_hash(ikey)) == ikey;
+}
+
+static void kiln_c99_shared_key_place(kiln_shared_key_table *table, const kiln_string *string,
+                                      uint64_t hash) {
+    size_t mask = table->capacity - 1;
+    size_t at = (size_t)hash & mask;
+    while (table->entries[at].string != NULL) at = (at + 1) & mask;
+    table->entries[at].hash = hash;
+    table->entries[at].pinned = 1;
+    __atomic_store_n(&table->entries[at].string, string, __ATOMIC_RELEASE);
+    table->count += 1;
+}
+
+/* Insert under the process lock. The copy is made before it is placed, and placed with a release
+ * store, so a reader that sees the pointer sees the bytes; a table that must grow is rebuilt
+ * whole and published with one store. */
+static const kiln_string *kiln_c99_shared_key_insert(kiln_shared_state *process,
+                                                     const kiln_string *string, uint64_t hash) {
+    kiln_shared_key_table *table = process->keys;
+    kiln_string *copy;
+    size_t storage;
+    uint32_t enc = string->flags & (KILN_STRING_LATIN1 | KILN_STRING_UTF16);
+    if (!kiln_string_storage_size(string->unit_len, enc, &storage) ||
+        storage > SIZE_MAX - sizeof *copy - 1)
+        return NULL;
+    if (table == NULL || (table->count + 1) * 2 > table->capacity) {
+        size_t capacity = table == NULL ? 1024 : table->capacity * 2;
+        kiln_shared_key_table *grown;
+        size_t index;
+        if (capacity > (SIZE_MAX - sizeof *grown) / sizeof(kiln_key_entry)) return NULL;
+        grown = (kiln_shared_key_table *)calloc(1, sizeof *grown + capacity * sizeof(kiln_key_entry));
+        if (grown == NULL) return NULL;
+        grown->capacity = capacity;
+        if (table != NULL) {
+            for (index = 0; index < table->capacity; ++index)
+                if (table->entries[index].string != NULL)
+                    kiln_c99_shared_key_place(grown, table->entries[index].string,
+                                              table->entries[index].hash);
+        }
+        __atomic_store_n(&process->keys, grown, __ATOMIC_RELEASE);
+        table = grown;
+    }
+    /* `storage` counts the header; the bytes follow it, then a NUL for `%s` diagnostics. */
+    copy = (kiln_string *)malloc(storage + 1);
+    if (copy == NULL) return NULL;
+    copy->unit_len = string->unit_len;
+    copy->flags = enc;
+    copy->data = (const void *)(copy + 1);
+    if (storage > sizeof *copy) memcpy((void *)copy->data, string->data, storage - sizeof *copy);
+    ((char *)copy)[storage] = '\0';
+    kiln_c99_shared_key_place(table, copy, hash);
+    return copy;
+}
+
 const kiln_string *kiln_c99_interned_key_in(kiln_gc_heap *heap, const kiln_string *string) {
     const kiln_key_entry *entry;
+    const kiln_string *shared;
+    uint64_t hash;
     if (string == NULL || string->unit_len == 0) return kiln_c99_key_empty;
+    hash = kiln_c99_key_hash(string);
+    shared = kiln_c99_shared_key_probe(string, hash);
+    if (shared != NULL) return shared;
     if (heap == NULL) return NULL;
-    entry = kiln_c99_key_probe(&heap->keys, string, kiln_c99_key_hash(string));
+    entry = kiln_c99_key_probe(&heap->keys, string, hash);
     return entry == NULL ? NULL : entry->string;
 }
 
@@ -1968,10 +2198,13 @@ const kiln_string *kiln_c99_intern_key(const kiln_string *string) {
     uint64_t hash;
     kiln_key_entry *entry;
     kiln_string *copy;
+    const kiln_string *shared;
     if (string == NULL || string->unit_len == 0) return kiln_c99_key_empty;
+    hash = kiln_c99_key_hash(string);
+    shared = kiln_c99_shared_key_probe(string, hash);
+    if (shared != NULL) return shared;
     heap = kiln_c99_gc_heap();
     if (heap == NULL) return NULL;
-    hash = kiln_c99_key_hash(string);
     entry = kiln_c99_key_probe(&heap->keys, string, hash);
     if (entry != NULL) return entry->string;
     copy = kiln_c99_gc_alloc_key_copy(string);
@@ -1979,21 +2212,22 @@ const kiln_string *kiln_c99_intern_key(const kiln_string *string) {
     return kiln_c99_key_insert(&heap->keys, copy, hash, 0);
 }
 
-/* For a spelling that must stay canonical for the realm's whole life: a unit's constant, a
- * symbol's reserved key. The bytes are copied once into a headed tenured block and the entry is
- * pinned, so the collector marks the copy and the caller's storage is never borrowed -- a
- * literal's address is not a key, and the caller must use the pointer returned here. NULL only
- * when the table or the heap cannot grow; a unit that gets NULL for one of its keys fails its
- * entry with out-of-memory rather than run a site with a pointer that is not canonical. */
-const kiln_string *kiln_c99_intern_static_key(const kiln_string *string) {
+/* A spelling that must stay canonical for the realm's whole life but is not a constant of the
+ * program -- a symbol's reserved key, which a realm makes as many of as it likes. The shared table
+ * still answers first; otherwise the realm's own entry is pinned (a new one is copied into a
+ * tenured block), so the collector marks the copy and the caller's storage is never borrowed. */
+const kiln_string *kiln_c99_intern_pinned_key(const kiln_string *string) {
     kiln_gc_heap *heap;
     uint64_t hash;
     kiln_key_entry *entry;
     kiln_string *copy;
+    const kiln_string *shared;
     if (string == NULL || string->unit_len == 0) return kiln_c99_key_empty;
+    hash = kiln_c99_key_hash(string);
+    shared = kiln_c99_shared_key_probe(string, hash);
+    if (shared != NULL) return shared;
     heap = kiln_c99_gc_heap();
     if (heap == NULL) return NULL;
-    hash = kiln_c99_key_hash(string);
     entry = kiln_c99_key_probe(&heap->keys, string, hash);
     if (entry != NULL) {
         entry->pinned = 1;
@@ -2002,6 +2236,109 @@ const kiln_string *kiln_c99_intern_static_key(const kiln_string *string) {
     copy = kiln_c99_gc_alloc_key_copy(string);
     if (copy == NULL) return NULL;
     return kiln_c99_key_insert(&heap->keys, copy, hash, 1);
+}
+
+/* A constant of the program: a unit's constant-table key, a prelude literal. These are what the
+ * shared table is for (ADR 0071), and the answer is a shared key whenever that is sound: the
+ * caller must use the pointer returned here, never its own literal's address.
+ *
+ * Every constant a linked unit names, and the built-ins' names, were registered before the first
+ * heap (see `kiln_c99_register_static_keys`), so for them the first probe answers, shared, however
+ * many realms are alive. What follows is the fallback for a constant nobody registered -- a
+ * prelude literal outside the registered tables, or a unit whose registration came after a heap
+ * existed -- and it keeps step 1's rule, because registration cannot vouch for these.
+ *
+ * Sound means no live realm already has the spelling as a key of its own, because a realm that
+ * did would then find the shared key first and lose every property stored under its own. The
+ * calling realm's table is checked directly; any other live realm's cannot be, so the spelling
+ * joins the shared table only while the caller's heap is the only live one. Otherwise -- a second
+ * realm is alive, or this realm made the spelling at run time before any unit named it -- the
+ * key is this realm's own, pinned, exactly as every constant key was before shared keys. NULL
+ * only when a table or the heap cannot grow; a unit that gets NULL for one of its keys fails its
+ * entry with out-of-memory rather than run a site with a pointer that is not canonical. */
+const kiln_string *kiln_c99_intern_static_key(const kiln_string *string) {
+    kiln_gc_heap *heap;
+    uint64_t hash;
+    const kiln_string *shared;
+    kiln_shared_state *process;
+    if (string == NULL || string->unit_len == 0) return kiln_c99_key_empty;
+    hash = kiln_c99_key_hash(string);
+    shared = kiln_c99_shared_key_probe(string, hash);
+    if (shared != NULL) return shared;
+    heap = kiln_c99_gc_heap();
+    if (heap == NULL) return NULL;
+    if (kiln_c99_key_probe(&heap->keys, string, hash) == NULL) {
+        process = kiln_c99_process();
+        kiln_c99_process_lock(process);
+        shared = kiln_c99_shared_key_probe(string, hash);
+        if (shared == NULL && process->live_heaps <= 1 && heap->serial != 0)
+            shared = kiln_c99_shared_key_insert(process, string, hash);
+        kiln_c99_process_unlock(process);
+        if (shared != NULL) return shared;
+    }
+    return kiln_c99_intern_pinned_key(string);
+}
+
+/* ---- Registration: the program's constants, before the first realm (ADR 0071) --------------
+ *
+ * Every unit registers its constant keys from a load-time constructor (`{sym}_register_keys`,
+ * emitted beside its key table), and the prelude registers the built-ins' own from one of its
+ * own (`kiln_c99_register_builtin_keys`, in `surface.c`). Constructors run before `main` -- and a
+ * shared library's run when it is loaded -- so the linker's own list of the objects it linked is
+ * the enumeration: no launcher, embedding host or library entry point has to name its units, and
+ * a unit's cache key depends on nothing but the unit.
+ *
+ * Only while no heap is live. A heap that exists may already hold one of these spellings as a key
+ * of its own, and a shared key published over it would hide every property stored under it; a
+ * registration that comes too late (a library loaded into a process whose realms are running)
+ * does nothing and says so, and those constants take the run-time path in
+ * `kiln_c99_intern_static_key` exactly as before. 1 means every key named is now a shared key
+ * (the empty key needs no entry: it is the process's already); 0 means too late, or out of
+ * memory, and that some may not be. */
+static int kiln_c99_register_static_keys_locked(kiln_shared_state *process,
+                                                const kiln_string *const *keys,
+                                                const kiln_string **out, size_t count) {
+    size_t index;
+    if (process->live_heaps != 0) return 0;
+    for (index = 0; index < count; ++index) {
+        const kiln_string *key = keys[index];
+        const kiln_string *shared;
+        uint64_t hash;
+        if (key == NULL) return 0;
+        if (key->unit_len == 0) {
+            shared = &process->empty_key;
+        } else {
+            hash = kiln_c99_key_hash(key);
+            shared = kiln_c99_shared_key_probe(key, hash);
+            if (shared == NULL) shared = kiln_c99_shared_key_insert(process, key, hash);
+            if (shared == NULL) return 0;
+        }
+        if (out != NULL) out[index] = shared;
+    }
+    return 1;
+}
+
+/* `out`, when given, receives each key's shared pointer: the unit's own key array, filled once
+ * for every realm. */
+int kiln_c99_register_static_keys(const kiln_string *const *keys, const kiln_string **out,
+                                  size_t count) {
+    kiln_shared_state *process = kiln_c99_process();
+    int registered;
+    kiln_c99_process_lock(process);
+    registered = kiln_c99_register_static_keys_locked(process, keys, out, count);
+    kiln_c99_process_unlock(process);
+    return registered;
+}
+
+/* Byte spellings, for the prelude's own tables of C strings. */
+static int kiln_c99_register_static_text(kiln_shared_state *process, const char *bytes, size_t len) {
+    kiln_string view;
+    const kiln_string *key = &view;
+    if (bytes == NULL || len > UINT32_MAX) return 1;
+    view.unit_len = (uint32_t)len;
+    view.flags = KILN_STRING_LATIN1;
+    view.data = bytes;
+    return kiln_c99_register_static_keys_locked(process, &key, NULL, 1);
 }
 
 /* A string block released by hand (`kiln_c99_gc_release`) must not stay canonical. */
@@ -2764,6 +3101,8 @@ static void kiln_c99_gc_begin(kiln_gc_heap *heap) {
 #define KILN_GC_SLAB_CLASSES \
     ((KILN_GC_SLAB_CLASS_MAX - KILN_GC_SLAB_CLASS_MIN) / KILN_GC_SLAB_CLASS_STEP + 1)
 
+static void kiln_c99_gc_retain_survivor(kiln_gc_block *block);
+
 static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
     kiln_gc_block *block = heap->head;
     kiln_gc_slab *slab = heap->all_slabs;
@@ -2793,6 +3132,7 @@ static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
             kiln_c99_gc_ptrset_remove(&heap->large_table, block);
             free(block);
         } else if (orphan_marked) {
+            kiln_c99_gc_retain_survivor(block);
             kiln_c99_gc_unlink(heap, block);
             kiln_c99_gc_ptrset_remove(&heap->large_table, block);
         } else {
@@ -2819,6 +3159,7 @@ static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
                 slab->free_head = slot;
                 if (++slab->free_count == 1) kiln_c99_gc_slab_link_free(heap, slab);
             } else if (orphan_marked) {
+                kiln_c99_gc_retain_survivor(slot);
                 had_survivor = 1;
             } else {
                 survived += slot->size;
@@ -3080,6 +3421,57 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
     heap->collecting = 0;
 }
 
+/* A teardown survivor (a result the caller reads after `kiln_realm_destroy`) keeps its shape:
+ * mark that realm-local shape and its realm-local ancestors retained, so the free below leaks
+ * them instead. Shared shapes are never freed and need no mark. */
+static void kiln_c99_shape_retain(kiln_shape *shape) {
+    while (shape != NULL && !shape->shared && !shape->retained) {
+        shape->retained = 1;
+        shape = shape->parent;
+    }
+}
+
+static void kiln_c99_gc_retain_survivor(kiln_gc_block *block) {
+    if ((block->kind & KILN_GC_KIND_MASK) == KILN_GC_OBJECT)
+        kiln_c99_shape_retain(((kiln_object *)(block + 1))->shape);
+}
+
+/* Free every realm-local shape this heap made, and its side table (ADR 0071). A retained shape
+ * survives, but loses its edges: the children they name may be freed here, and a transition from
+ * a dead realm's survivor would make a new child rather than follow one. */
+/* How many shapes this prelude has minted and not freed; `kiln_c99_shape_edge_room` bounds it. */
+static uint32_t kiln_c99_shape_total;
+
+static void kiln_c99_gc_free_local_shapes(kiln_gc_heap *heap) {
+    kiln_shape *shape = heap->local_shapes;
+    while (shape != NULL) {
+        kiln_shape *next = shape->owned_next;
+        kiln_shape_transition *edge = shape->transitions;
+        /* A local shape's index; its replaced predecessors were freed as it grew. */
+        free(shape->edge_table);
+        shape->edge_table = NULL;
+        while (edge != NULL) {
+            kiln_shape_transition *after = edge->next_transition;
+            free(edge);
+            edge = after;
+        }
+        if (shape->retained) {
+            shape->transitions = NULL;
+            shape->num_transitions = 0;
+            shape->owned_next = NULL;
+        } else {
+            free(shape);
+            __atomic_fetch_sub(&kiln_c99_shape_total, 1u, __ATOMIC_RELAXED);
+        }
+        shape = next;
+    }
+    heap->local_shapes = NULL;
+    free(heap->local_edges);
+    heap->local_edges = NULL;
+    heap->local_edge_capacity = 0;
+    heap->local_edge_count = 0;
+}
+
 static void kiln_c99_gc_teardown_begin(void *opaque) {
     /* Realm state that names an object of this heap. */
     kiln_c99_object_prototype_store = NULL;
@@ -3152,6 +3544,8 @@ static void kiln_c99_gc_teardown_end(void *opaque) {
     free(heap->slab_table.table);
     free(heap->stack);
     free(heap->keys.entries);
+    kiln_c99_gc_free_local_shapes(heap);
+    kiln_c99_gc_heap_unregister(heap);
     /* Teardown does not run what is left in the lane: a realm being destroyed has no turn to run
      * a job in, and the values are about to be freed with the rest of the heap. */
     free(heap->jobs);
@@ -3315,17 +3709,3 @@ static size_t kiln_c99_gc_alloc_text_run(size_t count, const size_t *lens, char 
     return count;
 }
 
-static kiln_shape kiln_c99_root_shape = {
-    NULL, /* parent */
-    NULL, /* ikey */
-    0,    /* slot_index */
-    0,    /* property_count */
-    0,    /* num_transitions */
-    {NULL}, /* keys */
-    {NULL, NULL}, /* inline_trans_ikey */
-    {NULL, NULL}, /* inline_trans_next */
-    NULL, /* transitions */
-    0,    /* has_symbol_key */
-    0,    /* double_slots_mask */
-    NULL  /* edge_table */
-};

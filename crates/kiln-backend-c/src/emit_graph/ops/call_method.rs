@@ -49,6 +49,87 @@ fn typed_callback(
     })
 }
 
+/// The `parallelMap` decision at one call site: the proto whose parallel chunk the site may
+/// run, or the first rule that kept it sequential, with the site's position -- one function,
+/// so the lowering below and the record `--explain-parallel` reads are the same answer.
+///
+/// The order is the order the lowering tests: the unit's plan, the arguments, the callback's
+/// identity, its typed entry, then the proto's own verdict (`parallel::parallel_verdict`,
+/// narrowed by the clone check in `lib.rs`).
+fn parallel_site(
+    plan: &crate::direct::CallPlan,
+    program: &kiln_ir::Program,
+    enclosing: Option<u32>,
+    defs: &std::collections::HashMap<ValueId, &GraphOp>,
+    args: &[ValueId],
+) -> (crate::parallel::SiteRecord, Option<u32>) {
+    use crate::parallel::{Reason, Refusal, SiteRecord};
+    let target = args.first().and_then(|a| plan.known.get(a)).copied();
+    // Where the site is, even where the plan knows no callee (a generic unit knows none): the
+    // closure written at the call.
+    let written = args.first().and_then(|a| match defs.get(a) {
+        Some(GraphOp::MakeFunction { index, .. }) => Some(*index),
+        _ => None,
+    });
+    let (line, column) = SiteRecord::locate(program, enclosing, target.or(written));
+    let mut record = SiteRecord {
+        line,
+        column,
+        refusal: None,
+        captures: 0,
+        at: None,
+    };
+    let refuse = |record: &mut SiteRecord, refusal: Refusal| {
+        if let (Some(cb), Some(name)) = (target, refusal.detail.as_deref())
+            && matches!(
+                refusal.reason,
+                Reason::CapturesReassigned | Reason::CapturesUnresolved | Reason::WritesCapture
+            )
+        {
+            record.at = SiteRecord::find_name(program, cb, name);
+        }
+        record.refusal = Some(refusal);
+    };
+    if plan.generic_only {
+        refuse(&mut record, Refusal::new(Reason::GenericOnly));
+        return (record, None);
+    }
+    if args.len() > 1 {
+        refuse(&mut record, Refusal::new(Reason::ExtraArguments));
+        return (record, None);
+    }
+    let Some(target) = target else {
+        refuse(&mut record, Refusal::new(Reason::CallbackUnknown));
+        return (record, None);
+    };
+    let verdict = plan.parallel.get(target as usize).cloned();
+    if let Some(Err(refusal)) = verdict {
+        refuse(&mut record, refusal);
+        return (record, None);
+    }
+    // The typed entry the sequential lowering and the clone's references hang off.
+    if typed_callback(plan, program, args[0], &[1, 2]).is_none() {
+        refuse(&mut record, Refusal::new(Reason::NotTyped));
+        return (record, None);
+    }
+    match verdict {
+        Some(Ok(shape))
+            if plan
+                .parallel_safe
+                .get(target as usize)
+                .copied()
+                .unwrap_or(false) =>
+        {
+            record.captures = shape.captures.len();
+            (record, Some(target))
+        }
+        _ => {
+            refuse(&mut record, Refusal::new(Reason::CloneRejected));
+            (record, None)
+        }
+    }
+}
+
 /// The typed entry's own argument list, in its declared order: depth, then whatever
 /// `TypedNeeds` says it reaches for beyond its parameters (upvalues, the receiver `vrecv`, a
 /// `NULL` receiver-shape row -- this call site keeps none, exactly as the direct `Call` arm
@@ -113,7 +194,41 @@ fn emit_map_typed(
             "kiln_val r_elem = {symbol}_fn_{target}_t({call_args}); \
              if (KILN_UNLIKELY(r_elem == KILN_VAL_TYPED_FAIL)) {typed_failed} \
              if (built_arr->is_numeric && !KILN_VAL_IS_NUMBER(r_elem)) built_arr->is_numeric = 0; \
-             out_elems[idx] = r_elem;"
+             out_elems[idx] = r_elem; \
+             built_arr->count = idx + 1;"
+        )
+    };
+    // A callback that reaches the runtime can run anything, the receiver's own methods
+    // included: it may grow the array (reallocating its elements), shrink it, or store a
+    // non-number or a hole into it. The element is then read at its visit, an index past the
+    // current length is a hole, and an element that is no longer a number goes through the
+    // boxed body -- `map`'s own steps. A callback that reaches nothing keeps the plain loop.
+    let (elements, element, step) = if c.needs.runtime {
+        (
+            String::new(),
+            "arr->elements[idx]".to_owned(),
+            format!(
+                "if (KILN_UNLIKELY(idx >= arr->count || !KILN_VAL_IS_NUMBER(arr->elements[idx]))) {{ \
+                     if (idx >= arr->count || arr->elements[idx] == KILN_VAL_HOLE) {{ \
+                         out_elems[idx] = KILN_VAL_HOLE; built_arr->is_numeric = 0; built_arr->count = idx + 1; continue; \
+                     }} \
+                     kiln_val vargs[3] = {{ arr->elements[idx], kiln_c99_val_from_double((double)idx), v{o} }}; \
+                     kiln_val prod = KILN_VAL_UNDEFINED; \
+                     int status; \
+                     if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
+                     else status = kiln_c99_invoke_closure(host, &prod, plain, vrecv, vargs, (size_t)3, depth, thrown, NULL, 0); \
+                     if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ {check} }} \
+                     if (built_arr->is_numeric && !KILN_VAL_IS_NUMBER(prod)) built_arr->is_numeric = 0; \
+                     out_elems[idx] = prod; built_arr->count = idx + 1; continue; \
+                 }}"
+            ),
+        )
+    } else {
+        (
+            "const kiln_val * restrict in_elems = (const kiln_val * restrict)arr->elements;"
+                .to_owned(),
+            "in_elems[idx]".to_owned(),
+            String::new(),
         )
     };
     let (header, footer) = if known_arr {
@@ -152,22 +267,27 @@ fn emit_map_typed(
                      int status = kiln_c99_new_array_with_capacity(&built_val, count0, 1); \
                      if (status != KILN_C99_OK) return status; \
                      kiln_array *built_arr = kiln_c99_array_of(built_val); \
-                     const kiln_val * restrict in_elems = (const kiln_val * restrict)arr->elements; \
+                     {elements} \
                      kiln_val * restrict out_elems = (kiln_val * restrict)built_arr->elements; \
                      for (size_t idx = 0; idx < count0; ++idx) {{ \
-                         double d_elem; memcpy(&d_elem, &in_elems[idx], sizeof(d_elem)); \
+                         {step} \
+                         double d_elem; memcpy(&d_elem, &{element}, sizeof(d_elem)); \
                          {result} \
                      }} \
                      built_arr->count = count0; \
                      v{v} = kiln_val_from_boundary(built_val); \
                      handled = 1; \
                  }} else if (!plain->generator) {{ \
+                     /* The length is read once: a callback that grows the array is not visited \
+                      * past it (and would otherwise write past the result's capacity), and one \
+                      * that shrinks it leaves holes, as `map` does. */ \
+                     size_t count0 = arr->count; \
                      kiln_value built_val; \
-                     int status = kiln_c99_new_array_with_capacity(&built_val, arr->count, arr->is_numeric); \
+                     int status = kiln_c99_new_array_with_capacity(&built_val, count0, arr->is_numeric); \
                      if (status != KILN_C99_OK) return status; \
                      kiln_array *built_arr = kiln_c99_array_of(built_val); \
-                     for (size_t idx = 0; idx < arr->count; ++idx) {{ \
-                         if (arr->elements[idx] == KILN_VAL_HOLE) {{ \
+                     for (size_t idx = 0; idx < count0; ++idx) {{ \
+                         if (idx >= arr->count || arr->elements[idx] == KILN_VAL_HOLE) {{ \
                              built_arr->elements[built_arr->count++] = KILN_VAL_HOLE; \
                              built_arr->is_numeric = 0; \
                              continue; \
@@ -610,6 +730,13 @@ pub(super) fn emit_call_method(
         _ => String::new(),
     };
     let diagnostic_source = diagnostic_source(diagnostic_site);
+    // Every `parallelMap` site says, in the C, what was decided for it and why; see
+    // `parallel::SiteRecord`.
+    let parallel_site = (key_str == "parallelMap").then(|| {
+        let (record, target) = parallel_site(plan, program, ctx.self_index, ctx.defs, args);
+        writeln!(output, "    {}", record.marker()).unwrap();
+        target
+    });
     if plan.generic_only {
         let n = argc.max(1);
         let init = if args.is_empty() {
@@ -936,8 +1063,8 @@ pub(super) fn emit_call_method(
             (String::new(), String::new())
         };
         let (guard2, load2) = if argc >= 2 {
-            let (g0, l0) = load_arg(args[0], "d0");
-            let (g1, l1) = load_arg(args[1], "d1");
+            let (g0, l0) = load_arg(args[0], "ma0");
+            let (g1, l1) = load_arg(args[1], "ma1");
             let guard = match (g0.is_empty(), g1.is_empty()) {
                 (true, true) => String::new(),
                 (false, true) => g0,
@@ -1127,7 +1254,7 @@ pub(super) fn emit_call_method(
                 "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
                              {guard2}{{ \
                                  {load2} \
-                                 v{v} = kiln_c99_val_from_double(pow(d0, d1)); \
+                                 v{v} = kiln_c99_val_from_double(pow(ma0, ma1)); \
                                  handled = 1; \
                              }} \
                          }}",
@@ -1140,7 +1267,7 @@ pub(super) fn emit_call_method(
                 "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
                              {guard2}{{ \
                                  {load2} \
-                                 double res = (isnan(d0) || isnan(d1)) ? NAN : ((d0 < d1 || (d0 == 0.0 && d1 == 0.0 && signbit(d0))) ? d0 : d1); \
+                                 double res = (isnan(ma0) || isnan(ma1)) ? NAN : ((ma0 < ma1 || (ma0 == 0.0 && ma1 == 0.0 && signbit(ma0))) ? ma0 : ma1); \
                                  v{v} = kiln_c99_val_from_double(res); \
                                  handled = 1; \
                              }} \
@@ -1154,7 +1281,7 @@ pub(super) fn emit_call_method(
                 "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
                              {guard2}{{ \
                                  {load2} \
-                                 double res = (isnan(d0) || isnan(d1)) ? NAN : ((d0 > d1 || (d0 == 0.0 && d1 == 0.0 && !signbit(d0))) ? d0 : d1); \
+                                 double res = (isnan(ma0) || isnan(ma1)) ? NAN : ((ma0 > ma1 || (ma0 == 0.0 && ma1 == 0.0 && !signbit(ma0))) ? ma0 : ma1); \
                                  v{v} = kiln_c99_val_from_double(res); \
                                  handled = 1; \
                              }} \
@@ -1204,7 +1331,7 @@ pub(super) fn emit_call_method(
                     "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
                                  {guard2}{{ \
                                      {load2} \
-                                     v{v} = kiln_c99_val_from_double({func_name}(d0, d1)); \
+                                     v{v} = kiln_c99_val_from_double({func_name}(ma0, ma1)); \
                                      handled = 1; \
                                  }} \
                              }}",
@@ -1614,50 +1741,68 @@ pub(super) fn emit_call_method(
     // Both lowerings of `parallelMap` stand down when the realm withholds kiln's extensions
     // (ADR 0068): the call then goes through the ordinary lookup, which misses, and throws the
     // TypeError Node throws for a method that is not there.
-    let parallel_pool_intrinsic = (key_str == "parallelMap" && argc == 1)
-        .then(|| typed_callback(plan, program, args[0], &[1, 2]))
+    let parallel_pool_intrinsic = parallel_site
         .flatten()
-        .filter(|c| {
-            c.returns_double
-                && plan
-                    .parallel_safe
-                    .get(c.target as usize)
-                    .copied()
-                    .unwrap_or(false)
-        })
-        .map(|c| {
-            let target = c.target;
+        .map(|target| {
+            // Tier 1 (ADR 0069): the captured bindings the callback reads, each written once in
+            // the unit, are read here on the realm thread -- after the closure is known to be
+            // the target, so its upvalue table is the one the proof is about -- and must all be
+            // numbers; otherwise `handled` stays clear and the sequential lowering answers.
+            // Nothing can write them while the pool runs: the callback writes nothing and the
+            // realm thread is blocked in the call.
+            let captures = crate::emit_graph::parallel_captures(plan, target as usize);
+            let (env_decl, env_ptr, env_failed) = if captures.is_empty() {
+                (
+                    "int pmap_failed = 0; int pmap_caps_ok = 1;".to_owned(),
+                    "&pmap_failed",
+                    "pmap_failed",
+                )
+            } else {
+                let mut decl = format!(
+                    "struct {{ int failed; double caps[{}]; }} pmap_env; pmap_env.failed = 0; int pmap_caps_ok = 1;",
+                    captures.len()
+                );
+                for (j, k) in captures.iter().enumerate() {
+                    decl.push_str(&format!(
+                        " {{ kiln_val pmap_cap = *(const kiln_val *)KILN_VAL_PTR(plain->upvalues[{k}]); if (KILN_VAL_IS_NUMBER(pmap_cap)) memcpy(&pmap_env.caps[{j}], &pmap_cap, sizeof(double)); else pmap_caps_ok = 0; }}"
+                    ));
+                }
+                (decl, "&pmap_env", "pmap_env.failed")
+            };
             format!(
                 "if (!handled && kiln_c99_kiln_extensions_on() && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
                      void *ptr = KILN_VAL_PTR(v{o}); \
                      if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                          kiln_array *arr = (kiln_array *)ptr; \
                          kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                         if (arr->is_numeric && kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
+                         if (arr->is_numeric && kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
+                             {env_decl} \
+                             if (pmap_caps_ok) {{ \
                              size_t count0 = arr->count; \
                              kiln_value built_val; \
                              int status = kiln_c99_new_array_with_capacity(&built_val, count0, 1); \
                              if (status != KILN_C99_OK) return status; \
                              kiln_array *built_arr = kiln_c99_array_of(built_val); \
-                             int pmap_failed = 0; \
                              const kiln_val * restrict in_elems = (const kiln_val * restrict)arr->elements; \
                              kiln_val * restrict out_elems = (kiln_val * restrict)built_arr->elements; \
-                             if (kiln_parallel_map(in_elems, count0, out_elems, {symbol}_pmap_{target}, &pmap_failed) == 0 && !pmap_failed) {{ \
+                             if (kiln_parallel_map(in_elems, count0, out_elems, {symbol}_pmap_{target}, {env_ptr}) == 0 && !{env_failed}) {{ \
                                  built_arr->count = count0; \
                                  v{v} = kiln_val_from_boundary(built_val); \
                                  handled = 1; \
+                             }} \
                              }} \
                          }} \
                      }} else if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY) {{ \
                          kiln_typed_array *view = (kiln_typed_array *)ptr; \
                          kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
                          if (kiln_c99_builtin_store_epoch == 0 && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
+                             {env_decl} \
+                             if (pmap_caps_ok) {{ \
                              size_t count0 = view->length; \
                              kiln_value built_val; \
                              int status = kiln_c99_typed_alloc_ex(&built_val, view->kind, count0, 0); \
                              if (status != KILN_C99_OK) return status; \
                              kiln_typed_array *built_view = kiln_c99_typed_array_of(built_val); \
-                             int pmap_failed = 0; \
                              const void * restrict src_bytes = (const void * restrict)(view->buffer->bytes + view->byte_offset); \
                              void * restrict dst_bytes = (void * restrict)(built_view->buffer->bytes + built_view->byte_offset); \
                              kiln_parallel_chunk_fn chunk_fn = NULL; \
@@ -1674,15 +1819,16 @@ pub(super) fn emit_call_method(
                              default: break; \
                              }} \
                              if (chunk_fn) {{ \
-                                 if (kiln_parallel_map(src_bytes, count0, dst_bytes, chunk_fn, &pmap_failed) == 0 && !pmap_failed) {{ \
+                                 if (kiln_parallel_map(src_bytes, count0, dst_bytes, chunk_fn, {env_ptr}) == 0 && !{env_failed}) {{ \
                                      v{v} = kiln_val_from_boundary(built_val); \
                                      handled = 1; \
                                  }} \
                              }} else {{ \
-                                 if (kiln_parallel_map(view, count0, built_view, {symbol}_pmap_typed_{target}, &pmap_failed) == 0 && !pmap_failed) {{ \
+                                 if (kiln_parallel_map(view, count0, built_view, {symbol}_pmap_typed_{target}, {env_ptr}) == 0 && !{env_failed}) {{ \
                                      v{v} = kiln_val_from_boundary(built_val); \
                                      handled = 1; \
                                  }} \
+                             }} \
                              }} \
                          }} \
                      }} \
@@ -1693,6 +1839,18 @@ pub(super) fn emit_call_method(
             )
         });
 
+    // `parallelMap`'s `this` is `map`'s: the thisArg, else undefined -- which a sloppy callback
+    // sees as the global object. A sloppy callback given a primitive thisArg would see it boxed;
+    // that case is left to the generic call below rather than lowered here.
+    let (this_arg, this_ok) = if argc >= 2 {
+        let t = args[1].0;
+        (
+            format!("v{t}"),
+            format!("plain->arrow || plain->strict || KILN_VAL_IS_NULLISH(v{t})"),
+        )
+    } else {
+        ("KILN_VAL_UNDEFINED".to_owned(), "1".to_owned())
+    };
     let parallel_map_intrinsic = if key_str == "parallelMap" && argc >= 1 {
         Some(format!(
             "if (!handled && kiln_c99_kiln_extensions_on() && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
@@ -1700,23 +1858,26 @@ pub(super) fn emit_call_method(
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                              kiln_array *arr = (kiln_array *)ptr; \
                              kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                             if (!plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                             if (!plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok})) {{ \
+                                 /* `map`, element for element: the length read once, each element \
+                                  * read when it is visited (a callback may grow, shrink or \
+                                  * reallocate the array), the result's length kept current so the \
+                                  * collector sees every value stored so far, and `this` the \
+                                  * thisArg, or undefined. */ \
+                                 size_t count0 = arr->count; \
                                  kiln_value built_val; \
-                                 int status = kiln_c99_new_array_with_capacity(&built_val, arr->count, arr->is_numeric); \
+                                 int status = kiln_c99_new_array_with_capacity(&built_val, count0, arr->is_numeric); \
                                  if (status != KILN_C99_OK) return status; \
                                  kiln_array *built_arr = kiln_c99_array_of(built_val); \
-                                 built_arr->count = arr->count; \
-                                 kiln_val vrecv = plain->arrow ? plain->captured_this : v{o}; \
+                                 kiln_val vrecv = plain->arrow ? plain->captured_this : {this_arg}; \
                                  if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
-                                 const kiln_val * restrict in_elems = (const kiln_val * restrict)arr->elements; \
-                                 kiln_val * restrict out_elems = (kiln_val * restrict)built_arr->elements; \
-                                 for (size_t idx = 0; idx < arr->count; ++idx) {{ \
-                                     if (in_elems[idx] == KILN_VAL_HOLE) {{ \
-                                         out_elems[idx] = KILN_VAL_HOLE; \
+                                 for (size_t idx = 0; idx < count0; ++idx) {{ \
+                                     if (idx >= arr->count || arr->elements[idx] == KILN_VAL_HOLE) {{ \
+                                         built_arr->elements[built_arr->count++] = KILN_VAL_HOLE; \
                                          built_arr->is_numeric = 0; \
                                          continue; \
                                      }} \
-                                     kiln_val vargs[3] = {{ in_elems[idx], kiln_c99_val_from_double((double)idx), v{o} }}; \
+                                     kiln_val vargs[3] = {{ arr->elements[idx], kiln_c99_val_from_double((double)idx), v{o} }}; \
                                      kiln_val prod = KILN_VAL_UNDEFINED; \
                                      int status; \
                                      if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
@@ -1727,7 +1888,7 @@ pub(super) fn emit_call_method(
                                      if (built_arr->is_numeric && !KILN_VAL_IS_NUMBER(prod)) {{ \
                                          built_arr->is_numeric = 0; \
                                      }} \
-                                     out_elems[idx] = prod; \
+                                     built_arr->elements[built_arr->count++] = prod; \
                                  }} \
                                  v{v} = kiln_val_from_boundary(built_val); \
                                  handled = 1; \
@@ -1735,12 +1896,12 @@ pub(super) fn emit_call_method(
                          }} else if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY) {{ \
                              kiln_typed_array *view = (kiln_typed_array *)ptr; \
                              kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                             if (!plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                             if (!plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok})) {{ \
                                  kiln_value built_val; \
                                  int status = kiln_c99_typed_alloc(&built_val, view->kind, view->length); \
                                  if (status != KILN_C99_OK) return status; \
                                  kiln_typed_array *built_view = kiln_c99_typed_array_of(built_val); \
-                                 kiln_val vrecv = plain->arrow ? plain->captured_this : v{o}; \
+                                 kiln_val vrecv = plain->arrow ? plain->captured_this : {this_arg}; \
                                  if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
                                  for (size_t idx = 0; idx < view->length; ++idx) {{ \
                                      kiln_val vargs[3] = {{ kiln_c99_val_from_double(kiln_c99_typed_get(view, idx)), kiln_c99_val_from_double((double)idx), v{o} }}; \
@@ -1767,7 +1928,9 @@ pub(super) fn emit_call_method(
             o = object.0,
             a0 = args[0].0,
             v = v,
-            check = check
+            check = check,
+            this_arg = this_arg,
+            this_ok = this_ok,
         ))
     } else {
         None

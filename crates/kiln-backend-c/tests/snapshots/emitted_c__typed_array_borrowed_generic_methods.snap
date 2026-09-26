@@ -1,5 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 1244
 expression: body(&unit)
 ---
 /* Program hash: 59a72d05a23a0c8a; bytecode version: 6. */
@@ -25,6 +26,13 @@ static const kiln_string *kiln_module_59a72d05a23a0c8ab2fcab3810349835_key_3;
 static const kiln_string *kiln_module_59a72d05a23a0c8ab2fcab3810349835_key_4;
 static const kiln_string *kiln_module_59a72d05a23a0c8ab2fcab3810349835_key_5;
 static int kiln_module_59a72d05a23a0c8ab2fcab3810349835_keys_ready;
+static int kiln_module_59a72d05a23a0c8ab2fcab3810349835_keys_shared;
+static const kiln_string *const kiln_module_59a72d05a23a0c8ab2fcab3810349835_key_sources[4] = {
+    &kiln_module_59a72d05a23a0c8ab2fcab3810349835_string_2,
+    &kiln_module_59a72d05a23a0c8ab2fcab3810349835_string_3,
+    &kiln_module_59a72d05a23a0c8ab2fcab3810349835_string_4,
+    &kiln_module_59a72d05a23a0c8ab2fcab3810349835_string_5,
+};
 static int kiln_module_59a72d05a23a0c8ab2fcab3810349835_intern_keys(void) {
     if ((kiln_module_59a72d05a23a0c8ab2fcab3810349835_key_2 = kiln_c99_intern_static_key(&kiln_module_59a72d05a23a0c8ab2fcab3810349835_string_2)) == NULL) return KILN_C99_OUT_OF_MEMORY;
     if ((kiln_module_59a72d05a23a0c8ab2fcab3810349835_key_3 = kiln_c99_intern_static_key(&kiln_module_59a72d05a23a0c8ab2fcab3810349835_string_3)) == NULL) return KILN_C99_OUT_OF_MEMORY;
@@ -33,8 +41,18 @@ static int kiln_module_59a72d05a23a0c8ab2fcab3810349835_intern_keys(void) {
     kiln_module_59a72d05a23a0c8ab2fcab3810349835_keys_ready = 1;
     return KILN_C99_OK;
 }
+__attribute__((constructor)) static void kiln_module_59a72d05a23a0c8ab2fcab3810349835_register_keys(void) {
+    const kiln_string *shared[4];
+    if (!kiln_c99_register_static_keys(kiln_module_59a72d05a23a0c8ab2fcab3810349835_key_sources, shared, (size_t)4)) return;
+    kiln_module_59a72d05a23a0c8ab2fcab3810349835_key_2 = shared[0];
+    kiln_module_59a72d05a23a0c8ab2fcab3810349835_key_3 = shared[1];
+    kiln_module_59a72d05a23a0c8ab2fcab3810349835_key_4 = shared[2];
+    kiln_module_59a72d05a23a0c8ab2fcab3810349835_key_5 = shared[3];
+    kiln_module_59a72d05a23a0c8ab2fcab3810349835_keys_shared = 1;
+    kiln_module_59a72d05a23a0c8ab2fcab3810349835_keys_ready = 1;
+}
 static void kiln_module_59a72d05a23a0c8ab2fcab3810349835_gc_roots(void *heap, void *context, int phase) {
-    if (phase == KILN_GC_PHASE_RESET) kiln_module_59a72d05a23a0c8ab2fcab3810349835_keys_ready = 0;
+    if (phase == KILN_GC_PHASE_RESET && !kiln_module_59a72d05a23a0c8ab2fcab3810349835_keys_shared) kiln_module_59a72d05a23a0c8ab2fcab3810349835_keys_ready = 0;
     kiln_c99_gc_unit_roots(heap, context, phase);
 }
 static inline int kiln_module_59a72d05a23a0c8ab2fcab3810349835_fn_0(kiln_call_context *ctx, kiln_val * restrict result, kiln_val * restrict upvalues, const kiln_val * restrict receiver_ptr, const kiln_val * restrict args, size_t argc);

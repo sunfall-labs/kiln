@@ -378,7 +378,14 @@ pub fn emit_function_from_graph_with_profile(
             } else {
                 plan.typed_needs[index]
             };
-            let (result, params) = typed_signature(proto, returns_number, needs);
+            let (result, mut params) = typed_signature(proto, returns_number, needs);
+            if super::parallel_clone() {
+                // Tier 1 (ADR 0069): each captured binding the clone reads arrives as a
+                // `double` after the parameters, read and guarded once on the realm thread.
+                for k in super::parallel_captures(plan, index) {
+                    params.push_str(&format!(", double cap{k}"));
+                }
+            }
             // A restartable typed entry is the fast clone's body with a typed signature: no
             // runtime call survives in it, so it inlines where a method call enters it by
             // name, and the receiver the caller matched is the receiver it reads.

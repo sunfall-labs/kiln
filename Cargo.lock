@@ -1290,6 +1290,7 @@ dependencies = [
  "kiln-native-number-abi",
  "kiln-native-runtime",
  "memchr",
+ "proptest",
  "regress",
  "serde",
  "serde_json",

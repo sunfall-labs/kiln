@@ -1103,7 +1103,11 @@ static void kiln_c99_site_learn_miss(kiln_c99_site *site, kiln_val target, const
     void *ptr = KILN_VAL_PTR(target);
     if (ptr == NULL || kiln_c99_gc_payload_kind(ptr) != KILN_GC_OBJECT) return;
     object = (const kiln_object *)ptr;
-    if (object->shape == NULL || object->properties != NULL || object->elements != NULL ||
+    /* Only shared shapes (ADR 0071): a realm-local shape is freed with its heap, and a later
+     * realm's shape at the same address must never match an entry learned from it. A shared
+     * shape is never freed and means the same layout in every realm. */
+    if (object->shape == NULL || !object->shape->shared || object->properties != NULL ||
+        object->elements != NULL ||
         object->error_brand || object->arguments_brand || object->module_namespace) {
         return;
     }
@@ -1128,7 +1132,10 @@ static void kiln_c99_site_learn_miss(kiln_c99_site *site, kiln_val target, const
             return;
         }
         if (step->shape != NULL) {
-            if (step->properties != NULL || kiln_c99_shape_find_slot(step->shape, ikey, NULL)) return;
+            if (!step->shape->shared || step->properties != NULL ||
+                kiln_c99_shape_find_slot(step->shape, ikey, NULL)) {
+                return;
+            }
             levels[depth] = step->shape;
         } else {
             /* Bounded, since every hit scans it. */

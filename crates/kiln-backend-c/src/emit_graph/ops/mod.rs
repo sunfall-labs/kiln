@@ -411,6 +411,24 @@ pub(super) fn emit_graph_op(
             )
             .unwrap();
         }
+        // The parallel clone (tier 1, ADR 0069): a captured binding written once arrives as the
+        // `double` the call site read and guarded on the realm thread; the worker never touches
+        // the cell.
+        GraphOp::LoadUpvalue(index) if ctx.parallel => {
+            let d_stmt = if live_typed {
+                format!("d{v} = cap{index}; ")
+            } else {
+                String::new()
+            };
+            writeln!(
+                output,
+                "    {d_stmt}v{v} = kiln_c99_val_from_double(cap{index});"
+            )
+            .unwrap();
+            if live_typed_int {
+                writeln!(output, "    i{v} = (int64_t)cap{index};").unwrap();
+            }
+        }
         GraphOp::LoadUpvalue(_) if spec.arrays.contains(&vid) => {
             writeln!(output, "    v{v} = kiln_spec_{v};").unwrap();
         }
@@ -1207,7 +1225,7 @@ pub(super) fn emit_graph_op(
                     }
                     writeln!(
                         output,
-                        "    {{ static const kiln_shape *lit_shape = NULL; kiln_value built; int status = kiln_c99_new_object(&built); if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; kiln_object *obj = kiln_c99_object_of(built); {mask_expr}if (KILN_LIKELY(lit_shape != NULL{mask_guard} && KILN_C99_SHAPES_ARE_THIS_REALMS())) {{{direct_stores} obj->shape = (kiln_shape *)lit_shape; }} else {{{defines} if (status == KILN_C99_OK && obj->shape != NULL && obj->shape->property_count == {count} && obj->slots == obj->inline_slots && obj->properties == NULL && obj->elements == NULL && obj->prototype.tag == KILN_VALUE_UNDEFINED) {{ lit_shape = obj->shape; }} }} v{v} = kiln_val_from_boundary(built); }}"
+                        "    {{ static const kiln_shape *lit_shape = NULL; kiln_value built; int status = kiln_c99_new_object(&built); if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; kiln_object *obj = kiln_c99_object_of(built); {mask_expr}if (KILN_LIKELY(lit_shape != NULL{mask_guard})) {{{direct_stores} obj->shape = (kiln_shape *)lit_shape; }} else {{{defines} if (status == KILN_C99_OK && obj->shape != NULL && KILN_C99_SHAPE_IS_PORTABLE(obj->shape) && obj->shape->property_count == {count} && obj->slots == obj->inline_slots && obj->properties == NULL && obj->elements == NULL && obj->prototype.tag == KILN_VALUE_UNDEFINED) {{ lit_shape = obj->shape; }} }} v{v} = kiln_val_from_boundary(built); }}"
                     ).unwrap();
                     return;
                 }

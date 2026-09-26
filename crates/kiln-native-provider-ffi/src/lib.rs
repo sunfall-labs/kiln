@@ -2888,6 +2888,32 @@ mod realm {
         })
     }
 
+    /// Bytes reserved for the prelude's process-wide shared state (ADR 0071).
+    const PROCESS_SHARED_BYTES: usize = 4096;
+
+    /// The prelude's process-wide block: shared keys and the shape root. Plain zeroed storage
+    /// whose layout the prelude owns and stamps; the archive only guarantees there is one, at one
+    /// address, for the whole process -- which a prelude static cannot, because the prelude is
+    /// emitted per translation unit with internal linkage.
+    #[repr(C, align(64))]
+    struct ProcessShared(std::cell::UnsafeCell<[u8; PROCESS_SHARED_BYTES]>);
+
+    // SAFETY: the archive never reads or writes the bytes; the prelude synchronizes every access
+    // to them itself (a spin lock for writers, acquire/release publication for readers).
+    unsafe impl Sync for ProcessShared {}
+
+    static PROCESS_SHARED: ProcessShared =
+        ProcessShared(std::cell::UnsafeCell::new([0; PROCESS_SHARED_BYTES]));
+
+    /// The process-wide block, or null when the prelude asks for more than is reserved.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn kiln_realm_process_shared(size: u64) -> *mut c_void {
+        if size > PROCESS_SHARED_BYTES as u64 {
+            return std::ptr::null_mut();
+        }
+        PROCESS_SHARED.0.get().cast()
+    }
+
     /// The active realm's collector heap, or null: one thread-local load, no lookup and no
     /// unwind guard, because the allocator asks on every allocation.
     #[unsafe(no_mangle)]
@@ -6731,6 +6757,9 @@ mod realm {
         };
         (realm, kiln_realm_generation_slot, realm_generation_slot) => {
             const _: extern "C" fn() -> *const u64 = kiln_realm_generation_slot;
+        };
+        (realm, kiln_realm_process_shared, realm_process_shared) => {
+            const _: extern "C" fn(u64) -> *mut c_void = kiln_realm_process_shared;
         };
         (realm, kiln_realm_gc_attach, realm_gc_attach) => {
             const _: unsafe extern "C" fn(*const GcHooks, *mut c_void, *mut *mut c_void) -> i32 = kiln_realm_gc_attach;
