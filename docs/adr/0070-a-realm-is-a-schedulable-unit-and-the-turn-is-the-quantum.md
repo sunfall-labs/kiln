@@ -113,6 +113,16 @@ allocates. At that cost, a realm per actor, per connection or per tenant is prac
 granularity Erlang processes and goroutines give. The first measurement (plan issue 01) records the
 starting point.
 
+The starting point, measured at `ba4d1890` on Linux x86-64: a realm costs about 1.2 MB of private
+memory for a hello-world program and 2.3 MB for the ten-line HTTP server, on top of 7-10 MB of
+file-backed code that is already shared, and about 1.1 ms of the 1.5-1.9 ms from process start to
+the first line of user code. The bootstrap's content is small, 164-214 KB of collector objects plus
+181-295 KB of shapes and interned keys, but it touches about 1.5 MB of nursery chunks and slabs
+before its first collection. With the bootstrap shared, what is left is allocation granularity (a
+256 KiB nursery chunk and a 128 KiB slab, about 0.4 MB) and the emitted inline-cache arrays, which
+are declared at full size (1.1-3.1 MB of zero-filled static storage); both must shrink by an order
+of magnitude to reach tens of kilobytes.
+
 ## Consequences
 
 - One mechanism replaces five. `WorkerPool`, the separate Rayon pool, the fork-only scaling path and
