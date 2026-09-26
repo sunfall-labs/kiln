@@ -1436,7 +1436,7 @@ mod tests {
                 .push((event.kind, event.data.to_vec()));
             if event.kind == HttpEventKind::RequestHead {
                 let mut engine = self.engine.borrow_mut();
-                assert!(engine.start_response(self.resource, event.id, 201, b"x-n\01\0", 1));
+                assert!(engine.start_response(self.resource, event.id, 201, b"x-n\x001\0", 1));
                 let mut body = b"got ".to_vec();
                 body.extend_from_slice(event.data);
                 engine
