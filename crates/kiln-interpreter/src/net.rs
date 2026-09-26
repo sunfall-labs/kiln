@@ -28,6 +28,9 @@ pub(crate) struct NodeServerState {
     pub(crate) timeout_milliseconds: f64,
     pub(crate) streams: Vec<NodeConnection>,
     pub(crate) object: Option<Weak<RefCell<ObjectData>>>,
+    /// A fetch-style (`serve`) server: its connections take requests whole and its handler is
+    /// called with strings and bytes instead of an IncomingMessage and a ServerResponse.
+    pub(crate) fetch: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
