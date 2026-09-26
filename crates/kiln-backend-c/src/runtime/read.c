@@ -537,6 +537,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             *out = kiln_c99_method(KILN_C99_METHOD_SLICE);
             return KILN_C99_OK;
         }
+        {
+            int found;
+            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE, key,
+                                                       ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+        }
         if (kiln_c99_is_array_buffer_member(intrinsic_key, intrinsic_len)) {
             KILN_C99_REFUSE("an ArrayBuffer.prototype member this backend has not implemented");
         }
@@ -1406,11 +1412,16 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                    : kiln_c99_same_name_key(key, "valueOf") ? KILN_C99_METHOD_OBJECT_VALUE_OF
                        : 0;
         }
-        if (code == 0 && target.bits == KILN_C99_BUILTIN_OBJECT_PROTOTYPE) {
-            int found;
-            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_OBJECT_PROTOTYPE,
+        if (code == 0) {
+            int found = 0;
+            int status = kiln_c99_prototype_store_read(host, target.bits,
                                                        key, ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
+            if (target.bits != KILN_C99_BUILTIN_OBJECT_PROTOTYPE) {
+                status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_OBJECT_PROTOTYPE,
+                                                       key, ikey, out, depth, thrown, &found);
+                if (status != KILN_C99_OK || found) return status;
+            }
         }
         /* `RangeError.name` is how `error.constructor.name` gets its answer, which is the ordinary
          * way a program asks what kind of error it caught. A namespace is not a constructor and
@@ -1440,7 +1451,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                           {KILN_C99_BUILTIN_FUNCTION_PROTOTYPE, KILN_C99_BUILTIN_FUNCTION},
                           {KILN_C99_BUILTIN_PROMISE_PROTOTYPE, KILN_C99_BUILTIN_PROMISE},
                           {KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE, KILN_C99_BUILTIN_DATA_VIEW},
-                          {KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE, KILN_C99_BUILTIN_ARRAY_BUFFER}};
+                          {KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE, KILN_C99_BUILTIN_ARRAY_BUFFER},
+                          {KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER_PROTOTYPE, KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER}};
             size_t owner;
             for (owner = 0; owner < sizeof owners / sizeof *owners; ++owner) {
                 if (target.bits == owners[owner].table) {
@@ -1557,6 +1569,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 {KILN_C99_BUILTIN_PROMISE, KILN_C99_BUILTIN_PROMISE_PROTOTYPE},
                 {KILN_C99_BUILTIN_DATA_VIEW, KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE},
                 {KILN_C99_BUILTIN_ARRAY_BUFFER, KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE},
+                {KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER, KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER_PROTOTYPE},
                 {KILN_C99_BUILTIN_SYMBOL, KILN_C99_BUILTIN_SYMBOL_PROTOTYPE}};
             size_t pair;
             for (pair = 0; pair < sizeof prototypes / sizeof *prototypes; ++pair) {
@@ -1664,6 +1677,18 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                     return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                                 "get byteLength: receiver does not have the required internal slot");
                 }
+                if (kiln_c99_same_name_key(key, "detached")) {
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                                "Method get ArrayBuffer.prototype.detached called on incompatible receiver");
+                }
+                if (kiln_c99_same_name_key(key, "resizable")) {
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                                "Method get ArrayBuffer.prototype.resizable called on incompatible receiver");
+                }
+                if (kiln_c99_same_name_key(key, "maxByteLength")) {
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                                "Method get ArrayBuffer.prototype.maxByteLength called on incompatible receiver");
+                }
                 if (kiln_c99_is_array_buffer_member(intrinsic_key, intrinsic_len)) {
                     KILN_C99_REFUSE("an ArrayBuffer.prototype member this backend has not implemented");
                 }
@@ -1684,6 +1709,62 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 KILN_C99_ABSENT("not a member of Error.prototype: toString and constructor are "
                                 "answered above, name and message from the bootstrap-defined store",
                                 out);
+            }
+            if (target.bits == KILN_C99_BUILTIN_REGEXP_PROTOTYPE) {
+                if (kiln_c99_same_name_key(key, "flags")) {
+                    *out = kiln_c99_copy_text("", 0);
+                    return KILN_C99_OK;
+                }
+                if (kiln_c99_same_name_key(key, "source")) {
+                    *out = kiln_c99_copy_text("(?:)", 4);
+                    return KILN_C99_OK;
+                }
+            }
+            if ((target.bits == KILN_C99_BUILTIN_REGEXP_PROTOTYPE && (
+                    kiln_c99_same_name_key(key, "global") ||
+                    kiln_c99_same_name_key(key, "ignoreCase") ||
+                    kiln_c99_same_name_key(key, "multiline") ||
+                    kiln_c99_same_name_key(key, "dotAll") ||
+                    kiln_c99_same_name_key(key, "hasIndices") ||
+                    kiln_c99_same_name_key(key, "unicode") ||
+                    kiln_c99_same_name_key(key, "unicodeSets") ||
+                    kiln_c99_same_name_key(key, "sticky") ||
+                    kiln_c99_same_name_key(key, "name"))) ||
+                (target.bits == KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER_PROTOTYPE &&
+                    kiln_c99_same_name_key(key, "name")) ||
+                (target.bits == KILN_C99_BUILTIN_ITERATOR_PROTOTYPE &&
+                    kiln_c99_same_name_key(key, "name"))) {
+                KILN_C99_ABSENT("not a member of this prototype: prototype is an object without a name", out);
+            }
+            if (target.bits == KILN_C99_BUILTIN_SET_PROTOTYPE && kiln_c99_same_name_key(key, "size")) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Method get Set.prototype.size called on incompatible receiver");
+            }
+            if (target.bits == KILN_C99_BUILTIN_MAP_PROTOTYPE && kiln_c99_same_name_key(key, "size")) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Method get Map.prototype.size called on incompatible receiver");
+            }
+            if (target.bits == KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER_PROTOTYPE) {
+                if (kiln_c99_same_name_key(key, "constructor")) {
+                    *out = kiln_c99_builtin(KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER);
+                    return KILN_C99_OK;
+                }
+                if (kiln_c99_same_name_key(key, "byteLength")) {
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                                "Method get SharedArrayBuffer.prototype.byteLength called on incompatible receiver");
+                }
+                if (kiln_c99_same_name_key(key, "maxByteLength")) {
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                                "Method get SharedArrayBuffer.prototype.maxByteLength called on incompatible receiver");
+                }
+                if (kiln_c99_same_name_key(key, "growable")) {
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                                "Method get SharedArrayBuffer.prototype.growable called on incompatible receiver");
+                }
+            }
+            if (target.bits == KILN_C99_BUILTIN_OBJECT_PROTOTYPE && kiln_c99_same_name_key(key, "__proto__")) {
+                *out = kiln_c99_null();
+                return KILN_C99_OK;
             }
 
         }

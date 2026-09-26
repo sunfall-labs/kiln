@@ -1,5 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 804
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -239,6 +240,7 @@ KILN_VALUE_RETURN_SIGNAL = 28
 #define KILN_C99_BUILTIN_CRYPTO 100
 #define KILN_C99_BUILTIN_BIG_INT64_ARRAY_PROTOTYPE 101
 #define KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE 102
+#define KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER_PROTOTYPE 103
 #define KILN_C99_METHOD_ARRAY_AT 200
 #define KILN_C99_METHOD_ARRAY_FIND 201
 #define KILN_C99_METHOD_ARRAY_FIND_INDEX 202

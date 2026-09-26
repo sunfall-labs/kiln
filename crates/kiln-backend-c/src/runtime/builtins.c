@@ -110,6 +110,7 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE: return "Float64Array";
     case KILN_C99_BUILTIN_BIG_INT64_ARRAY_PROTOTYPE: return "BigInt64Array";
     case KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE: return "BigUint64Array";
+    case KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER_PROTOTYPE: return "SharedArrayBuffer";
     case KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE: return "ArrayBuffer";
     default: {
         /* Every other tag is an error constructor; a tag with no name at all is a tag added
@@ -137,6 +138,7 @@ static int kiln_c99_builtin_length(uint64_t builtin, double *out) {
     case KILN_C99_BUILTIN_ASYNC_DISPOSABLE_STACK:
     case KILN_C99_BUILTIN_TEMPORAL_PLAIN_TIME:
     case KILN_C99_BUILTIN_TEMPORAL_DURATION:
+    case KILN_C99_BUILTIN_ITERATOR:
         *out = 0.0;
         return 1;
 
