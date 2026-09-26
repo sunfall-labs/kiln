@@ -37,7 +37,7 @@ static int kiln_c99_new_proxy(kiln_value *out, kiln_value target, kiln_value han
 
 static int kiln_c99_new_collection(kiln_value *out, int is_map, int is_weak) {
     kiln_collection *collection =
-        (kiln_collection *)kiln_c99_gc_alloc(KILN_GC_COLLECTION, sizeof *collection);
+        (kiln_collection *)kiln_c99_gc_alloc_hot(KILN_GC_COLLECTION, sizeof *collection, 0);
     if (collection == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
@@ -58,13 +58,23 @@ static int kiln_c99_new_collection(kiln_value *out, int is_map, int is_weak) {
  * header; hashing it as if it were a byte span folds the header's first bytes into the key and
  * makes an equal Latin1/UTF16 pair land in different buckets. */
 static uint64_t kiln_c99_collection_string_hash(const kiln_string *string) {
+    if (string == NULL || string->unit_len == 0 || string->data == NULL) return 0;
     const uint64_t mix = UINT64_C(0xff51afd7ed558ccd);
-    size_t length = string == NULL ? 0 : string->unit_len;
+    size_t length = string->unit_len;
     uint64_t hash = UINT64_C(0x9e3779b97f4a7c15) ^ (uint64_t)length;
     size_t index;
-    for (index = 0; index < length; ++index) {
-        hash = (hash ^ kiln_string_unit_at(string, index)) * mix;
-        hash ^= hash >> 29;
+    if (KILN_LIKELY(!kiln_string_is_utf16(string))) {
+        const uint8_t *bytes = (const uint8_t *)string->data;
+        for (index = 0; index < length; ++index) {
+            hash = (hash ^ (uint64_t)bytes[index]) * mix;
+            hash ^= hash >> 29;
+        }
+    } else {
+        const uint16_t *units = (const uint16_t *)string->data;
+        for (index = 0; index < length; ++index) {
+            hash = (hash ^ (uint64_t)units[index]) * mix;
+            hash ^= hash >> 29;
+        }
     }
     return hash ^ (hash >> 32);
 }

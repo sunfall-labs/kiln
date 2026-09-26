@@ -126,8 +126,14 @@ kiln_val kiln_c99_val_slice_string(const kiln_string *source, size_t start, size
     if (start == 0 && len == source->unit_len) {
         return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, source);
     }
-    if (len == 1 && !kiln_string_is_utf16(source)) {
-        return kiln_c99_val_single_char(((const unsigned char *)kiln_string_latin1(source))[start]);
+    if (len == 1) {
+        if (!kiln_string_is_utf16(source)) {
+            return kiln_c99_val_single_char(((const unsigned char *)kiln_string_latin1(source))[start]);
+        }
+        uint16_t unit = ((const uint16_t *)source->data)[start];
+        if (unit < 0x100u) {
+            return kiln_c99_val_single_char((unsigned char)unit);
+        }
     }
     while (kiln_string_is_sliced(source)) {
         const kiln_sliced_string *sliced_src = (const kiln_sliced_string *)source;
@@ -461,7 +467,7 @@ static int kiln_c99_split_ascii_byte(kiln_value *result, const char *bytes, size
 static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, uint64_t code,
                                          kiln_value receiver, const kiln_value *args, size_t argc,
                                          int depth, kiln_value *thrown) {
-    const kiln_string *receiver_string = receiver.ptr == NULL ? NULL : (const kiln_string *)receiver.ptr;
+    const kiln_string *receiver_string = receiver.ptr == NULL ? &kiln_c99_empty_string : (const kiln_string *)receiver.ptr;
     /* These methods need one UTF-16 code unit, not a materialised string. Keep argument
      * coercion here so a numeric index is never first converted to text merely because the
      * bulk path prepares a possible needle. */
@@ -486,59 +492,260 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
                                                            : kiln_c99_number(0.0 / 0.0);
             return KILN_C99_OK;
         }
-        *result = code == KILN_C99_METHOD_CHAR_CODE_AT ? kiln_c99_number((double)unit)
-                                                        : kiln_c99_from_units(&unit, 1);
+        if (code == KILN_C99_METHOD_CHAR_CODE_AT) {
+            *result = kiln_c99_number((double)unit);
+        } else {
+            *result = kiln_val_to_boundary(kiln_c99_val_from_unit(unit));
+        }
         return KILN_C99_OK;
     }
 
-    if (receiver_string != NULL && !kiln_string_is_utf16(receiver_string)) {
-        if (code == KILN_C99_METHOD_STRING_SLICE || code == KILN_C99_METHOD_SUBSTRING) {
-            int relative = (code == KILN_C99_METHOD_STRING_SLICE);
-            size_t start = kiln_c99_unit_position(argc > 0 ? args[0] : kiln_c99_undefined(), receiver_string->unit_len, 0, relative);
-            size_t end = kiln_c99_unit_position(argc > 1 ? args[1] : kiln_c99_undefined(), receiver_string->unit_len, receiver_string->unit_len, relative);
-            if (!relative && start > end) {
-                size_t swap = start;
-                start = end;
-                end = swap;
-            } else if (relative && start > end) {
-                /* `slice` clamps a reversed range to the start; only `substring` swaps it. */
-                end = start;
-            }
-            kiln_val v = kiln_c99_val_slice_string(receiver_string, start, end > start ? end - start : 0);
-            if (v == KILN_VAL_UNDEFINED) return KILN_C99_OUT_OF_MEMORY;
-            *result = kiln_val_to_boundary(v);
+    if (code == KILN_C99_METHOD_STRING_TO_STRING ||
+        code == KILN_C99_METHOD_STRING_VALUE_OF ||
+        code == KILN_C99_METHOD_STRING_NORMALIZE) {
+        *result = receiver;
+        return KILN_C99_OK;
+    }
+
+    if (code == KILN_C99_METHOD_STRING_LOCALE_COMPARE) {
+        kiln_value other = argc > 0 ? kiln_c99_text(args[0]) : kiln_c99_from_units(NULL, 0);
+        if (other.tag != KILN_VALUE_STRING) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        *result = kiln_c99_number((double)kiln_c99_string_compare(receiver, other));
+        return KILN_C99_OK;
+    }
+
+    if (code == KILN_C99_METHOD_STRING_CODE_POINT_AT) {
+        double position = argc > 0 ? kiln_c99_as_number(args[0]) : 0.0;
+        if (position != position) position = 0.0;
+        position = trunc(position);
+        if (position < 0.0 || position >= (double)receiver_string->unit_len) {
+            *result = kiln_c99_undefined();
             return KILN_C99_OK;
         }
-        if (code == KILN_C99_METHOD_STRING_INDEX_OF || code == KILN_C99_METHOD_STRING_INCLUDES) {
-            kiln_value needle_arg = argc > 0 ? args[0] : kiln_c99_undefined();
-            kiln_value shown = kiln_c99_text(needle_arg);
-            const kiln_string *shown_string = shown.ptr == NULL ? NULL : (const kiln_string *)shown.ptr;
-            if (shown.tag == KILN_VALUE_STRING && kiln_c99_string_is_ascii(shown) &&
-                shown_string != NULL && !kiln_string_is_utf16(shown_string)) {
-                size_t from = kiln_c99_unit_position(argc > 1 ? args[1] : kiln_c99_undefined(), receiver_string->unit_len, 0, 0);
-                if (shown.len == 0) {
-                    double at = from > receiver_string->unit_len ? (double)receiver_string->unit_len : (double)from;
-                    if (code == KILN_C99_METHOD_STRING_INDEX_OF) *result = kiln_c99_number(at);
-                    else *result = kiln_c99_boolean(1);
-                    return KILN_C99_OK;
-                }
-                if (from >= receiver_string->unit_len) {
-                    if (code == KILN_C99_METHOD_STRING_INDEX_OF) *result = kiln_c99_number(-1.0);
-                    else *result = kiln_c99_boolean(0);
-                    return KILN_C99_OK;
-                }
-                const char *found = kiln_c99_memmem(
-                    (const char *)kiln_string_latin1(receiver_string) + from,
-                    receiver_string->unit_len - from,
-                    (const char *)kiln_string_latin1(shown_string), shown_string->unit_len);
-                if (code == KILN_C99_METHOD_STRING_INDEX_OF) {
-                    *result = kiln_c99_number(found != NULL ? (double)(found - (const char *)kiln_string_latin1(receiver_string)) : -1.0);
-                } else {
-                    *result = kiln_c99_boolean(found != NULL);
-                }
+        size_t pos = (size_t)position;
+        uint16_t lead = kiln_string_unit_at(receiver_string, pos);
+        if (lead >= 0xD800 && lead <= 0xDBFF && pos + 1 < receiver_string->unit_len) {
+            uint16_t trail = kiln_string_unit_at(receiver_string, pos + 1);
+            if (trail >= 0xDC00 && trail <= 0xDFFF) {
+                *result = kiln_c99_number(
+                    (double)(0x10000u + (((uint32_t)lead - 0xD800u) << 10) +
+                             ((uint32_t)trail - 0xDC00u)));
                 return KILN_C99_OK;
             }
         }
+        *result = kiln_c99_number((double)lead);
+        return KILN_C99_OK;
+    }
+
+    if (code == KILN_C99_METHOD_STRING_SLICE || code == KILN_C99_METHOD_SUBSTRING) {
+        int relative = (code == KILN_C99_METHOD_STRING_SLICE);
+        size_t start = kiln_c99_unit_position(argc > 0 ? args[0] : kiln_c99_undefined(), receiver_string->unit_len, 0, relative);
+        size_t end = kiln_c99_unit_position(argc > 1 ? args[1] : kiln_c99_undefined(), receiver_string->unit_len, receiver_string->unit_len, relative);
+        if (!relative && start > end) {
+            size_t swap = start;
+            start = end;
+            end = swap;
+        } else if (relative && start > end) {
+            /* `slice` clamps a reversed range to the start; only `substring` swaps it. */
+            end = start;
+        }
+        kiln_val v = kiln_c99_val_slice_string(receiver_string, start, end > start ? end - start : 0);
+        if (v == KILN_VAL_UNDEFINED) return KILN_C99_OUT_OF_MEMORY;
+        *result = kiln_val_to_boundary(v);
+        return KILN_C99_OK;
+    }
+
+    if (code == KILN_C99_METHOD_STRING_SUBSTR) {
+        double relative = argc > 0 ? kiln_c99_as_number(args[0]) : 0.0;
+        size_t start;
+        size_t taken;
+        if (relative != relative) relative = 0.0;
+        relative = trunc(relative);
+        if (relative < 0.0) {
+            double from = (double)receiver_string->unit_len + relative;
+            start = from < 0.0 ? 0 : (size_t)from;
+        } else {
+            start = relative > (double)receiver_string->unit_len ? receiver_string->unit_len : (size_t)relative;
+        }
+        if (argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED) {
+            double wanted = kiln_c99_as_number(args[1]);
+            if (isnan(wanted) || wanted < 0.0) {
+                taken = 0;
+            } else {
+                taken = wanted > (double)(receiver_string->unit_len - start) ? receiver_string->unit_len - start : (size_t)wanted;
+            }
+        } else {
+            taken = receiver_string->unit_len - start;
+        }
+        kiln_val v = kiln_c99_val_slice_string(receiver_string, start, taken);
+        if (v == KILN_VAL_UNDEFINED) return KILN_C99_OUT_OF_MEMORY;
+        *result = kiln_val_to_boundary(v);
+        return KILN_C99_OK;
+    }
+
+    if (code == KILN_C99_METHOD_TRIM || code == KILN_C99_METHOD_TRIM_START || code == KILN_C99_METHOD_TRIM_END) {
+        size_t start = 0;
+        size_t end = receiver_string->unit_len;
+        if (code != KILN_C99_METHOD_TRIM_END) {
+            while (start < end && kiln_c99_is_trimmed(kiln_string_unit_at(receiver_string, start))) {
+                start += 1;
+            }
+        }
+        if (code != KILN_C99_METHOD_TRIM_START) {
+            while (end > start && kiln_c99_is_trimmed(kiln_string_unit_at(receiver_string, end - 1))) {
+                end -= 1;
+            }
+        }
+        kiln_val v = kiln_c99_val_slice_string(receiver_string, start, end > start ? end - start : 0);
+        if (v == KILN_VAL_UNDEFINED) return KILN_C99_OUT_OF_MEMORY;
+        *result = kiln_val_to_boundary(v);
+        return KILN_C99_OK;
+    }
+
+    if (code == KILN_C99_METHOD_STARTS_WITH || code == KILN_C99_METHOD_ENDS_WITH ||
+        code == KILN_C99_METHOD_STRING_INDEX_OF || code == KILN_C99_METHOD_STRING_INCLUDES ||
+        code == KILN_C99_METHOD_LAST_INDEX_OF) {
+        kiln_value needle_arg = argc > 0 ? args[0] : kiln_c99_undefined();
+        kiln_value shown = kiln_c99_text(needle_arg);
+        if (shown.tag != KILN_VALUE_STRING) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        const kiln_string *shown_string = shown.ptr == NULL ? &kiln_c99_empty_string : (const kiln_string *)shown.ptr;
+        size_t h_len = receiver_string->unit_len;
+        size_t n_len = shown_string->unit_len;
+        int h_u16 = kiln_string_is_utf16(receiver_string);
+        int n_u16 = kiln_string_is_utf16(shown_string);
+
+        if (code == KILN_C99_METHOD_STARTS_WITH) {
+            size_t start = kiln_c99_unit_position(argc > 1 ? args[1] : kiln_c99_undefined(), h_len, 0, 0);
+            if (n_len > h_len - start) {
+                *result = kiln_c99_boolean(0);
+                return KILN_C99_OK;
+            }
+            if (!h_u16 && !n_u16) {
+                *result = kiln_c99_boolean(memcmp((const char *)kiln_string_latin1(receiver_string) + start, (const char *)kiln_string_latin1(shown_string), n_len) == 0);
+                return KILN_C99_OK;
+            }
+            if (h_u16 && n_u16) {
+                *result = kiln_c99_boolean(memcmp((const uint16_t *)receiver_string->data + start, (const uint16_t *)shown_string->data, n_len * sizeof(uint16_t)) == 0);
+                return KILN_C99_OK;
+            }
+            int match = 1;
+            for (size_t i = 0; i < n_len; ++i) {
+                if (kiln_string_unit_at(receiver_string, start + i) != kiln_string_unit_at(shown_string, i)) {
+                    match = 0;
+                    break;
+                }
+            }
+            *result = kiln_c99_boolean(match);
+            return KILN_C99_OK;
+        }
+
+        if (code == KILN_C99_METHOD_ENDS_WITH) {
+            size_t end = kiln_c99_unit_position(argc > 1 ? args[1] : kiln_c99_undefined(), h_len, h_len, 0);
+            if (n_len > end) {
+                *result = kiln_c99_boolean(0);
+                return KILN_C99_OK;
+            }
+            size_t start = end - n_len;
+            if (!h_u16 && !n_u16) {
+                *result = kiln_c99_boolean(memcmp((const char *)kiln_string_latin1(receiver_string) + start, (const char *)kiln_string_latin1(shown_string), n_len) == 0);
+                return KILN_C99_OK;
+            }
+            if (h_u16 && n_u16) {
+                *result = kiln_c99_boolean(memcmp((const uint16_t *)receiver_string->data + start, (const uint16_t *)shown_string->data, n_len * sizeof(uint16_t)) == 0);
+                return KILN_C99_OK;
+            }
+            int match = 1;
+            for (size_t i = 0; i < n_len; ++i) {
+                if (kiln_string_unit_at(receiver_string, start + i) != kiln_string_unit_at(shown_string, i)) {
+                    match = 0;
+                    break;
+                }
+            }
+            *result = kiln_c99_boolean(match);
+            return KILN_C99_OK;
+        }
+
+        if (code == KILN_C99_METHOD_STRING_INDEX_OF || code == KILN_C99_METHOD_STRING_INCLUDES) {
+            size_t from = kiln_c99_unit_position(argc > 1 ? args[1] : kiln_c99_undefined(), h_len, 0, 0);
+            if (n_len == 0) {
+                double at = from > h_len ? (double)h_len : (double)from;
+                *result = (code == KILN_C99_METHOD_STRING_INDEX_OF) ? kiln_c99_number(at) : kiln_c99_boolean(1);
+                return KILN_C99_OK;
+            }
+            if (from >= h_len || n_len > h_len - from) {
+                *result = (code == KILN_C99_METHOD_STRING_INDEX_OF) ? kiln_c99_number(-1.0) : kiln_c99_boolean(0);
+                return KILN_C99_OK;
+            }
+            double at = -1.0;
+            if (!h_u16 && !n_u16) {
+                const char *found = kiln_c99_memmem((const char *)kiln_string_latin1(receiver_string) + from, h_len - from, (const char *)kiln_string_latin1(shown_string), n_len);
+                at = found != NULL ? (double)(found - (const char *)kiln_string_latin1(receiver_string)) : -1.0;
+            } else if (h_u16 && n_u16) {
+                at = kiln_c99_units_find((const uint16_t *)receiver_string->data, h_len, (const uint16_t *)shown_string->data, n_len, from);
+            } else {
+                uint16_t first = kiln_string_unit_at(shown_string, 0);
+                size_t max_start = h_len - n_len;
+                for (size_t i = from; i <= max_start; ++i) {
+                    if (kiln_string_unit_at(receiver_string, i) == first) {
+                        size_t j = 1;
+                        while (j < n_len && kiln_string_unit_at(receiver_string, i + j) == kiln_string_unit_at(shown_string, j)) ++j;
+                        if (j == n_len) { at = (double)i; break; }
+                    }
+                }
+            }
+            if (code == KILN_C99_METHOD_STRING_INDEX_OF) {
+                *result = kiln_c99_number(at);
+            } else {
+                *result = kiln_c99_boolean(at >= 0.0);
+            }
+            return KILN_C99_OK;
+        }
+
+        if (code == KILN_C99_METHOD_LAST_INDEX_OF) {
+            double requested = argc > 1 ? kiln_c99_as_number(args[1]) : 0.0 / 0.0;
+            size_t limit;
+            if (argc <= 1 || isnan(requested)) {
+                limit = h_len;
+            } else if (requested < 0.0) {
+                limit = 0;
+            } else {
+                limit = requested > (double)h_len ? h_len : (size_t)requested;
+            }
+            if (n_len == 0) {
+                *result = kiln_c99_number((double)limit);
+                return KILN_C99_OK;
+            }
+            if (n_len > h_len) {
+                *result = kiln_c99_number(-1.0);
+                return KILN_C99_OK;
+            }
+            size_t max_start = h_len - n_len;
+            if (limit > max_start) limit = max_start;
+            double at = -1.0;
+            for (size_t i = limit + 1; i > 0; --i) {
+                size_t pos = i - 1;
+                int match = 1;
+                for (size_t j = 0; j < n_len; ++j) {
+                    if (kiln_string_unit_at(receiver_string, pos + j) != kiln_string_unit_at(shown_string, j)) {
+                        match = 0;
+                        break;
+                    }
+                }
+                if (match) {
+                    at = (double)pos;
+                    break;
+                }
+            }
+            *result = kiln_c99_number(at);
+            return KILN_C99_OK;
+        }
+    }
+
+    if (receiver_string != NULL && !kiln_string_is_utf16(receiver_string)) {
         if (code == KILN_C99_METHOD_SPLIT) {
             kiln_value sep = argc > 0 ? args[0] : kiln_c99_undefined();
             /* A limit of zero answers the empty array before anything else is asked. `ToUint32`

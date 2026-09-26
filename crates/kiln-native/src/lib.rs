@@ -497,8 +497,9 @@ fn configure_release_module_compile(options: &mut CompileOptions, generic_only: 
     if generic_only {
         // Generic bodies are deliberately used for the largest modules, where optimizing them
         // makes small real-world bundles materially slower despite reducing object size. Keep
-        // this path at O0; whole-program DCE and release stripping provide the safe size wins.
-        options.extra_args.push("-O0".into());
+        // this path at O0 by default, or respect KILN_GENERIC_OPT (e.g. 1, 2, 3, z).
+        let opt = std::env::var("KILN_GENERIC_OPT").unwrap_or_else(|_| "0".into());
+        options.extra_args.push(format!("-O{opt}").into());
         // Clang treats an explicit O0 as its Debug configuration and otherwise injects UBSan
         // calls that the release link intentionally does not carry.
         options.extra_args.push("-fno-sanitize=undefined".into());
@@ -519,11 +520,15 @@ fn configure_release_size_module_compile(options: &mut CompileOptions) {
     options.extra_args.push("-fvisibility=hidden".into());
 }
 
-fn release_module_compile_identity(generic_only: bool) -> &'static str {
+fn release_module_compile_identity(generic_only: bool) -> String {
     if generic_only {
-        "generic-o0-nosan-nosections"
+        if let Ok(opt) = std::env::var("KILN_GENERIC_OPT") {
+            format!("generic-o{opt}-nosan-nosections")
+        } else {
+            "generic-o0-nosan-nosections".into()
+        }
     } else {
-        "o2"
+        "o2".into()
     }
 }
 
@@ -989,9 +994,9 @@ impl NativeBuilder {
         let module_opt = if profile == NativeProfile::Release {
             release_module_compile_identity(emission.generic_only)
         } else if profile == NativeProfile::ReleaseSize {
-            release_size_module_compile_identity()
+            release_size_module_compile_identity().to_string()
         } else {
-            "profile-default"
+            "profile-default".to_string()
         };
         let object_options = Digest::hash(
             format!(
@@ -1791,9 +1796,9 @@ impl NativeBuilder {
                         if profile == NativeProfile::Release {
                             release_module_compile_identity(generic_only)
                         } else if profile == NativeProfile::ReleaseSize {
-                            release_size_module_compile_identity()
+                            release_size_module_compile_identity().to_string()
                         } else {
-                            "profile-default"
+                            "profile-default".to_string()
                         }
                     )
                     .as_bytes(),
@@ -2432,9 +2437,9 @@ impl NativeBuilder {
                         if profile == NativeProfile::Release {
                             release_module_compile_identity(generic_only)
                         } else if profile == NativeProfile::ReleaseSize {
-                            release_size_module_compile_identity()
+                            release_size_module_compile_identity().to_string()
                         } else {
-                            "profile-default"
+                            "profile-default".to_string()
                         }
                     )
                     .as_bytes(),

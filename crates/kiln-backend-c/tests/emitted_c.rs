@@ -1000,9 +1000,10 @@ fn runtime_prelude_size() {
     // plus the headed provider signatures (JSON/regexp/symbol), the diagnostic function key,
     // and the hoisted 16-byte string header both emission modes share. Net about +1,800 lines
     // of overloads and adapters; no block is emitted twice (every test translation unit in
-    // `src/tests.rs` compiles the whole prelude exactly once). 48,500.
+    // Widened on 2026-09-25, at 49,081 lines: WPT WinterTC conformance additions and
+    // polymorphic inline caching (PIC) fast paths across dynamic property reads and writes.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 48_500;
+    const CEILING_LINES: usize = 50_000;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

@@ -95,7 +95,7 @@ pub(super) fn emit_get_property(
         if crate::compact_diagnostic_site(diagnostic_site) {
             writeln!(
                 output,
-                "    KU_READ_PROPERTY(v{v}, v{o}, {symbol}_key_{name}, {key_len}, NULL, {pc}, \"{label}\", {unwind});{typed_sync}",
+                "    {{ static kiln_c99_site site = {{0}}; KU_READ_PROPERTY(v{v}, v{o}, {symbol}_key_{name}, {key_len}, &site, {pc}, \"{label}\", {unwind});{typed_sync} }}",
                 o = object.0,
             )
             .unwrap();
@@ -361,13 +361,20 @@ pub(super) fn emit_get_property(
     } else {
         format!(
             "else if (shape != NULL) {{ \
-                uint32_t slot = UINT32_MAX; \
-                if (shape == site.entries[1].shape) slot = site.entries[1].slot; \
-                else if (shape == site.entries[2].shape) slot = site.entries[2].slot; \
-                else if (shape == site.entries[3].shape) slot = site.entries[3].slot; \
-                if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity)) {{ \
-                    v{v} = slot < KILN_C99_INLINE_SLOTS ? obj->inline_slots[slot] : obj->slots[slot]; \
-                    handled = 1; \
+                for (int i = 1; i < (int)site.pic_count && i < 4; ++i) {{ \
+                    if (shape == site.entries[i].shape) {{ \
+                        if (site.entries[i].holder == NULL) {{ \
+                            uint32_t slot = site.entries[i].slot; \
+                            if (slot < obj->slot_capacity) {{ v{v} = obj->slots[slot]; handled = 1; break; }} \
+                            else if (slot == UINT32_MAX && site.entries[i].epoch == kiln_c99_proto_epoch) {{ v{v} = KILN_VAL_UNDEFINED; handled = 1; break; }} \
+                        }} else {{ \
+                            const kiln_object *first = site.entries[i].via != NULL ? site.entries[i].via : site.entries[i].holder; \
+                            if (site.entries[i].epoch == kiln_c99_proto_epoch && obj->prototype.tag == KILN_VALUE_OBJECT && (const kiln_object *)(uintptr_t)obj->prototype.bits == first) {{ \
+                                v{v} = site.entries[i].holder_shape != NULL ? site.entries[i].holder->slots[site.entries[i].holder_slot] : site.entries[i].holder_val; \
+                                handled = 1; break; \
+                            }} \
+                        }} \
+                    }} \
                 }} \
             }}"
         )
@@ -380,13 +387,25 @@ pub(super) fn emit_get_property(
                     const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); \
                     const kiln_shape *shape = obj->shape; \
                     if (KILN_LIKELY(shape != NULL && shape == site.entries[0].shape)) {{ \
-                        uint32_t s0 = site.entries[0].slot; \
-                        if (KILN_LIKELY(s0 < KILN_C99_INLINE_SLOTS)) {{ \
-                            v{v} = obj->inline_slots[s0]; \
-                            handled = 1; \
-                        }} else if (KILN_LIKELY(s0 < obj->slot_capacity)) {{ \
-                            v{v} = obj->slots[s0]; \
-                            handled = 1; \
+                        if (KILN_LIKELY(site.entries[0].holder == NULL)) {{ \
+                            uint32_t s0 = site.entries[0].slot; \
+                            if (KILN_LIKELY(s0 < obj->slot_capacity)) {{ \
+                                v{v} = obj->slots[s0]; \
+                                handled = 1; \
+                            }} else if (s0 == UINT32_MAX && site.entries[0].epoch == kiln_c99_proto_epoch) {{ \
+                                v{v} = KILN_VAL_UNDEFINED; \
+                                handled = 1; \
+                            }} \
+                        }} else {{ \
+                            const kiln_object *first = site.entries[0].via != NULL ? site.entries[0].via : site.entries[0].holder; \
+                            if (KILN_LIKELY(site.entries[0].epoch == kiln_c99_proto_epoch && \
+                                            obj->prototype.tag == KILN_VALUE_OBJECT && \
+                                            (const kiln_object *)(uintptr_t)obj->prototype.bits == first)) {{ \
+                                v{v} = site.entries[0].holder_shape != NULL \
+                                           ? site.entries[0].holder->slots[site.entries[0].holder_slot] \
+                                           : site.entries[0].holder_val; \
+                                handled = 1; \
+                            }} \
                         }} \
                     }} {poly_read} \
                 }} \
@@ -555,7 +574,7 @@ pub(super) fn emit_set_property(
         if crate::compact_diagnostic_site(diagnostic_site) {
             writeln!(
                 output,
-                "    KU_WRITE_PROPERTY(v{o}, {symbol}_key_{name}, v{val}, {strict}, NULL, {pc}, \"{label}\", {unwind}); {assign_v}{typed_sync}",
+                "    {{ static kiln_c99_site site = {{0}}; KU_WRITE_PROPERTY(v{o}, {symbol}_key_{name}, v{val}, {strict}, &site, {pc}, \"{label}\", {unwind}); {assign_v}{typed_sync} }}",
                 o = object.0,
                 val = value.0,
                 assign_v = assign_v.trim_end(),
@@ -594,8 +613,7 @@ pub(super) fn emit_set_property(
                 else if (shape == site.entries[3].shape && site.entries[3].transition_to == NULL) slot = site.entries[3].slot; \
                 if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity && !obj->frozen)) {{ \
                     kiln_c99_prototype_touched(obj); \
-                    if (slot < KILN_C99_INLINE_SLOTS) obj->inline_slots[slot] = v{val}; \
-                    else obj->slots[slot] = v{val}; \
+                    obj->slots[slot] = v{val}; \
                     {assign_v}\
                     handled = 1; \
                 }} \
@@ -611,11 +629,7 @@ pub(super) fn emit_set_property(
                     const kiln_shape *shape = obj->shape; \
                     if (KILN_LIKELY(shape != NULL && shape == site.entries[0].shape && site.entries[0].transition_to == NULL)) {{ \
                         uint32_t s0 = site.entries[0].slot; \
-                        if (KILN_LIKELY(s0 < KILN_C99_INLINE_SLOTS && !obj->frozen)) {{ \
-                            kiln_c99_prototype_touched(obj); obj->inline_slots[s0] = v{val}; \
-                            {assign_v}\
-                            handled = 1; \
-                        }} else if (KILN_LIKELY(s0 < obj->slot_capacity && !obj->frozen)) {{ \
+                        if (KILN_LIKELY(s0 < obj->slot_capacity && !obj->frozen)) {{ \
                             kiln_c99_prototype_touched(obj); obj->slots[s0] = v{val}; \
                             {assign_v}\
                             handled = 1; \

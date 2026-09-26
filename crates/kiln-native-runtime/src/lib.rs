@@ -309,6 +309,14 @@ static inline int kiln_string_compare_units(const kiln_string *left, const kiln_
     size_t index;
     size_t common;
     if (left == NULL || right == NULL) return left == right ? 0 : (left == NULL ? -1 : 1);
+    if (!kiln_string_is_utf16(left) && !kiln_string_is_utf16(right)) {
+        common = left->unit_len < right->unit_len ? left->unit_len : right->unit_len;
+        if (common > 0) {
+            int cmp = memcmp(left->data, right->data, common);
+            if (cmp != 0) return cmp < 0 ? -1 : 1;
+        }
+        return left->unit_len == right->unit_len ? 0 : (left->unit_len < right->unit_len ? -1 : 1);
+    }
     common = left->unit_len < right->unit_len ? left->unit_len : right->unit_len;
     for (index = 0; index < common; ++index) {
         uint16_t a = kiln_string_unit_at(left, index);

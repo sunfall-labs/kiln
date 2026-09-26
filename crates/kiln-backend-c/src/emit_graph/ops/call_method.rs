@@ -644,7 +644,7 @@ pub(super) fn emit_call_method(
             if argc == 0 {
                 writeln!(
                     output,
-                    "    KU_CALL_METHOD(v{v}, v{o}, NULL, 0, {key}, NULL, {pc}, \"{label}\", {unwind});{sync_number}"
+                    "    {{ static kiln_c99_site site = {{0}}; KU_CALL_METHOD(v{v}, v{o}, NULL, 0, {key}, &site, {pc}, \"{label}\", {unwind});{sync_number} }}"
                 )
                 .unwrap();
             } else {
@@ -653,7 +653,7 @@ pub(super) fn emit_call_method(
                 }
                 writeln!(
                     output,
-                    "    KU_CALL_METHOD(v{v}, v{o}, ku_args, {argc}, {key}, NULL, {pc}, \"{label}\", {unwind});{sync_number}"
+                    "    {{ static kiln_c99_site site = {{0}}; KU_CALL_METHOD(v{v}, v{o}, ku_args, {argc}, {key}, &site, {pc}, \"{label}\", {unwind});{sync_number} }}"
                 )
                 .unwrap();
             }
@@ -3061,25 +3061,15 @@ pub(super) fn emit_call_method(
                                 handled = 1; \
                             }} \
                         }} else if (cached_fn != 0 && KILN_VAL_IS_METHOD(cached_fn) && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
-                            kiln_value bself = kiln_val_to_boundary(v{o}); \
-                            kiln_value bargs[{n}]; \
-                            {prep_args}for (size_t bi = 0; bi < {argc}; ++bi) bargs[bi] = kiln_val_to_boundary(call_args[bi]); \
-                            kiln_value bresult = kiln_c99_undefined(); \
-                            int status = kiln_c99_invoke_method(host, &bresult, KILN_VAL_METHOD_ID(cached_fn), bself, {argc} > 0 ? bargs : NULL, (size_t){argc}, depth, thrown); \
+                            {prep_args}int status = kiln_c99_val_invoke_cached_method(host, KILN_VAL_METHOD_ID(cached_fn), v{o}, call_args, (size_t){argc}, depth, thrown, &v{v}); \
                             {check} \
-                            v{v} = kiln_val_from_boundary(bresult); \
                             handled = 1; \
                         }} \
                     }} \
                 }} \
                 if (!handled && kiln_c99_cached_method_matches(&site, v{o}) && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
-                    kiln_value bself = kiln_val_to_boundary(v{o}); \
-                    kiln_value bargs[{n}]; \
-                    {prep_args}for (size_t bi = 0; bi < {argc}; ++bi) bargs[bi] = kiln_val_to_boundary(call_args[bi]); \
-                    kiln_value bresult = kiln_c99_undefined(); \
-                    int status = kiln_c99_invoke_method(host, &bresult, site.cached_method, bself, {argc} > 0 ? bargs : NULL, (size_t){argc}, depth, thrown); \
+                    {prep_args}int status = kiln_c99_val_invoke_cached_method(host, site.cached_method, v{o}, call_args, (size_t){argc}, depth, thrown, &v{v}); \
                     {check} \
-                    v{v} = kiln_val_from_boundary(bresult); \
                     handled = 1; \
                 }} \
                 if (!handled) {{ \
