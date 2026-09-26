@@ -1424,8 +1424,10 @@ static int kiln_c99_node_fetch_request(kiln_node_socket *socket, const kiln_real
                                                   (size_t)event->target_len);
     if (arguments[0].tag != KILN_VALUE_STRING || arguments[1].tag != KILN_VALUE_STRING)
         return KILN_C99_OUT_OF_MEMORY;
-    /* `name NUL value NUL` per header, kept as one string; `Request.headers` parses it the
-     * first time a handler reads it. */
+    /* The header list in its wire form, `\nname:value` per field, kept as one string: it is
+     * the representation `Headers` itself holds, so nothing parses it until a handler asks. The
+     * target above is the URL the engine built from the Host field (the bare target when there
+     * was none). */
     arguments[2] = kiln_c99_copy_text((const char *)event->headers, (size_t)event->headers_len);
     if (arguments[2].tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
     if (event->data_len != 0) {
@@ -1437,8 +1439,8 @@ static int kiln_c99_node_fetch_request(kiln_node_socket *socket, const kiln_real
 }
 
 /* `fetchRespond(resource, id, status, headers, body)`: a whole response in one call, where
- * `headers` is the `name NUL value NUL` flattening the engine parses straight into Hyper's map
- * and `body` a string or a byte view. Answers false, without throwing, when the connection is
+ * `headers` is the header list's wire form (`\nname:value` per field), which the engine parses
+ * straight into Hyper's map on a fetch-style connection, and `body` a string or a byte view. Answers false, without throwing, when the connection is
  * gone -- an asynchronous handler can outlive its client. */
 static int kiln_c99_node_fetch_respond(kiln_value *result, const kiln_value *args, size_t argc,
                                        kiln_value *thrown) {

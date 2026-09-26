@@ -10041,8 +10041,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     }
 
     /// A request for a fetch-style (`serve`) server: the engine took it whole, and the handler
-    /// gets `(method, target, headers, body, resource, id)` -- the flattened `name NUL value NUL`
-    /// header block as one string, the body as a Buffer or `undefined` -- exactly as the native
+    /// gets `(method, url, headers, body, resource, id)` -- the URL the engine built (the bare
+    /// target when there was no Host field), the header list's wire form (`\nname:value` per
+    /// field) as one string, the body as a Buffer or `undefined` -- exactly as the native
     /// backend's `kiln_c99_node_fetch_request` hands them over. Nothing Node-shaped is built.
     fn dispatch_http_fetch_request(
         &mut self,
@@ -10079,7 +10080,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     }
 
     /// `fetchRespond(resource, id, status, headers, body)`: the whole response in one call, with
-    /// `headers` the `name NUL value NUL` flattening. False, not a throw, once the connection is
+    /// `headers` the header list's wire form (`\nname:value` per field). False, not a throw, once the connection is
     /// gone -- an asynchronous handler can outlive its client.
     fn http_fetch_respond(
         &mut self,
@@ -10103,19 +10104,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 message: "Invalid status code".into(),
             });
         }
-        let flattened = match arguments.get(3) {
+        // The header list in its wire form, handed to the engine as the bytes it is.
+        let headers = match arguments.get(3) {
             None | Some(Value::Undefined) => String::new(),
             Some(value) => value.to_display_string(),
         };
-        let mut headers = Vec::new();
-        let mut fields = flattened.split('\0');
-        while let Some(name) = fields.next() {
-            if name.is_empty() {
-                break;
-            }
-            let Some(value) = fields.next() else { break };
-            headers.push((name.to_owned(), value.to_owned()));
-        }
         let body = node_body_bytes(arguments.get(4))?;
         let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
             instruction,
@@ -10123,21 +10116,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         })?;
         let resource = kiln_host_abi::ResourceId::new(resource);
         // SAFETY: the realm's HTTP runtime outlives every call the realm makes.
-        let started = unsafe {
-            ActiveHttpRuntime::start_response(
+        let sent = unsafe {
+            ActiveHttpRuntime::fetch_respond(
                 &mut *runtime,
                 resource,
                 id,
                 status as u16,
-                headers,
-                16 * 1024,
+                headers.as_bytes(),
+                body,
             )
         };
-        // SAFETY: as above.
-        let ended = started
-            && unsafe { ActiveHttpRuntime::end_response(&mut *runtime, resource, id, body) }
-                .is_some();
-        Ok(Value::Boolean(ended))
+        Ok(Value::Boolean(sent))
     }
 
     fn dispatch_http_request_head(

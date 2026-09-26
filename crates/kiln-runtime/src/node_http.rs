@@ -205,7 +205,9 @@ impl HttpHeaders {
         Self { raw: None, entries }
     }
 
-    /// The `name NUL value NUL` block the engine flattened, when the headers came from one.
+    /// The block the engine flattened, when the headers came from one: `name NUL value NUL`, or
+    /// the header-list wire form on a connection that takes requests whole (a fetch-style
+    /// server), which only ever reads it through this. The other readers here assume NUL form.
     pub fn raw(&self) -> Option<&[u8]> {
         self.raw.as_deref()
     }

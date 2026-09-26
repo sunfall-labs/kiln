@@ -105,7 +105,9 @@ pub struct HttpEvent<'a> {
     pub target: &'a [u8],
     /// `ResponseHead` only: the status text.
     pub reason: &'a [u8],
-    /// `name NUL value NUL` per header, the shape the private C ABI already consumes.
+    /// The header block. On a connection that takes requests whole (a fetch-style `serve`
+    /// server) it is the header-list wire form, `\nname:value` per field ([`flatten_header_wire`]);
+    /// otherwise `name NUL value NUL` per header ([`flatten_header_map`]).
     pub headers: &'a [u8],
     pub data: &'a [u8],
     pub message: &'a [u8],
@@ -335,6 +337,8 @@ pub(crate) struct ConnectionShared {
     requests: RefCell<HashMap<u64, Rc<ResponseSlot>>>,
     /// The flattened request headers of the request being dispatched, reused per request.
     header_scratch: RefCell<Vec<u8>>,
+    /// A whole request's URL (see [`request_url`]), reused per request.
+    url_scratch: RefCell<Vec<u8>>,
     shutdown: Notify,
     closing: Cell<bool>,
     /// An abort has been requested and its `Closed` has not been published yet. Counted as
@@ -798,6 +802,7 @@ impl HttpServerEngine {
             dispatcher: Rc::new(Dispatcher::new(resource, dispatch)),
             requests: RefCell::new(HashMap::default()),
             header_scratch: RefCell::new(Vec::with_capacity(1024)),
+            url_scratch: RefCell::new(Vec::with_capacity(128)),
             shutdown: Notify::new(),
             closing: Cell::new(false),
             abort_pending: Cell::new(false),
@@ -821,8 +826,9 @@ impl HttpServerEngine {
         self.connections.borrow().contains_key(&resource)
     }
 
-    /// Record the head of a response. `headers` is the private ABI's `name NUL value NUL`
-    /// flattening; an invalid name or value refuses the head.
+    /// Record the head of a response. `headers` is the connection's header block: the wire form
+    /// ([`parse_header_wire`]) on a connection that takes requests whole, `name NUL value NUL`
+    /// otherwise. An invalid name or value refuses the head.
     pub fn start_response(
         &mut self,
         resource: ResourceId,
@@ -831,13 +837,45 @@ impl HttpServerEngine {
         headers: &[u8],
         high_water_mark: usize,
     ) -> bool {
-        let Some(slot) = self.slot(resource, id) else {
-            return false;
+        let (slot, whole) = {
+            let table = self.connections.borrow();
+            let Some(connection) = table.get(&resource) else {
+                return false;
+            };
+            let Some(slot) = connection.shared.requests.borrow().get(&id).cloned() else {
+                return false;
+            };
+            (slot, connection.shared.dispatcher.whole_requests())
         };
-        let Some(headers) = parse_flattened_headers(headers) else {
+        let parsed = if whole {
+            parse_header_wire(headers)
+        } else {
+            parse_flattened_headers(headers)
+        };
+        let Some(headers) = parsed else {
             return false;
         };
         slot.start(status, headers, high_water_mark)
+    }
+
+    /// A fetch-style connection's whole response in one call: the head, its headers in the
+    /// header-list wire form, and the complete body. False when the request is gone or the head
+    /// is refused.
+    pub fn respond(
+        &mut self,
+        resource: ResourceId,
+        id: u64,
+        status: u16,
+        headers: &[u8],
+        body: Bytes,
+    ) -> bool {
+        let Some((shared, slot)) = self.shared_and_slot(resource, id) else {
+            return false;
+        };
+        let Some(headers) = parse_header_wire(headers) else {
+            return false;
+        };
+        slot.start(status, headers, 16 * 1024) && slot.end(&shared, id, body).is_some()
     }
 
     pub fn write_response(
@@ -972,13 +1010,6 @@ impl HttpServerEngine {
                     + usize::from(connection.shared.abort_pending.get())
             })
             .sum()
-    }
-
-    fn slot(&self, resource: ResourceId, id: u64) -> Option<Rc<ResponseSlot>> {
-        let table = self.connections.borrow();
-        let connection = table.get(&resource)?;
-        let requests = connection.shared.requests.borrow();
-        requests.get(&id).cloned()
     }
 
     pub fn pipe_request(&mut self, resource: ResourceId, id: u64) -> bool {
@@ -1172,12 +1203,25 @@ async fn handle(
     } else {
         Bytes::new()
     };
-    {
+    let host = {
         let mut scratch = shared.header_scratch.borrow_mut();
-        flatten_header_map(&parts.headers, &mut scratch);
-    }
+        if whole {
+            flatten_header_wire(&parts.headers, &mut scratch)
+        } else {
+            flatten_header_map(&parts.headers, &mut scratch);
+            None
+        }
+    };
     let dispatched = {
         let scratch = shared.header_scratch.borrow();
+        let mut url_scratch = shared.url_scratch.borrow_mut();
+        // A fetch-style handler is given the URL, not the target.
+        let target = if whole {
+            let host = host.map_or(&b""[..], |range| &scratch[range]);
+            request_url(&parts.uri, host, target, &mut url_scratch)
+        } else {
+            target
+        };
         let head = HttpEvent {
             keep_alive,
             version_minor: u8::from(!http_10),
@@ -1337,6 +1381,80 @@ fn unavailable() -> EngineResponse {
     }
 }
 
+/// A whole request's URL, for a fetch-style handler: an origin-form target (a path, or `*`)
+/// behind `http://` and the Host field, so the language concatenates nothing. Any other target
+/// (absolute-form from a proxy client, or an HTTP/2 request, whose URI carries its scheme and
+/// authority; authority-form) is handed over as rendered, and so is an origin-form target with no
+/// Host field (HTTP/1.0), for the language to complete with the listening authority -- it is the
+/// one case that starts with `/` or `*`.
+///
+/// `host` is the first Host field's value, empty when there is none.
+fn request_url<'a>(
+    uri: &hyper::Uri,
+    host: &[u8],
+    target: &'a [u8],
+    into: &'a mut Vec<u8>,
+) -> &'a [u8] {
+    if host.is_empty() || uri.scheme().is_some() || uri.path_and_query().is_none() {
+        return target;
+    }
+    into.clear();
+    into.reserve(7 + host.len() + target.len());
+    into.extend_from_slice(b"http://");
+    into.extend_from_slice(host);
+    into.extend_from_slice(target);
+    into
+}
+
+/// The header-list wire form both directions of a fetch-style connection use: `\nname:value`
+/// per field, in map order, with nothing before the first field or after the last. Hyper's names
+/// are lowercase tokens and its values hold no CR, LF or NUL, so a field starts exactly where
+/// `\n` + name + `:` occurs, and a value runs to the next `\n`.
+///
+/// Answers where the first Host field's value lies in `into`, which the request's URL is built
+/// from, so the map is not searched for it again.
+pub(crate) fn flatten_header_wire(
+    headers: &HeaderMap,
+    into: &mut Vec<u8>,
+) -> Option<std::ops::Range<usize>> {
+    into.clear();
+    let needed: usize = headers
+        .iter()
+        .map(|(name, value)| name.as_str().len() + value.as_bytes().len() + 2)
+        .sum();
+    into.reserve(needed);
+    let mut host = None;
+    for (name, value) in headers {
+        into.push(b'\n');
+        into.extend_from_slice(name.as_str().as_bytes());
+        into.push(b':');
+        let start = into.len();
+        into.extend_from_slice(value.as_bytes());
+        if host.is_none() && name == hyper::header::HOST {
+            host = Some(start..into.len());
+        }
+    }
+    host
+}
+
+/// [`flatten_header_wire`]'s form back into a header map, refusing anything Hyper would refuse
+/// (a name that is not a token, a value with CR, LF or NUL) and a block that does not start
+/// with a field separator. The value is everything after the first `:`, taken as is: the
+/// language normalized it already.
+pub(crate) fn parse_header_wire(bytes: &[u8]) -> Option<HeaderMap> {
+    let Some(rest) = bytes.strip_prefix(b"\n") else {
+        return bytes.is_empty().then(HeaderMap::new);
+    };
+    let mut headers = HeaderMap::new();
+    for field in rest.split(|byte| *byte == b'\n') {
+        let colon = field.iter().position(|byte| *byte == b':')?;
+        let name = HeaderName::from_bytes(&field[..colon]).ok()?;
+        let value = HeaderValue::from_bytes(&field[colon + 1..]).ok()?;
+        headers.append(name, value);
+    }
+    Some(headers)
+}
+
 pub(crate) fn flatten_header_map(headers: &HeaderMap, into: &mut Vec<u8>) {
     into.clear();
     let needed: usize = headers
@@ -1427,6 +1545,8 @@ mod tests {
         engine: Rc<RefCell<HttpServerEngine>>,
         resource: ResourceId,
         events: RefCell<Vec<(HttpEventKind, Vec<u8>)>>,
+        /// Each head's target (the URL, on a whole-request connection) and header block.
+        heads: RefCell<Vec<(Vec<u8>, Vec<u8>)>>,
     }
 
     impl HttpDispatch for Whole {
@@ -1435,8 +1555,13 @@ mod tests {
                 .borrow_mut()
                 .push((event.kind, event.data.to_vec()));
             if event.kind == HttpEventKind::RequestHead {
+                self.heads
+                    .borrow_mut()
+                    .push((event.target.to_vec(), event.headers.to_vec()));
                 let mut engine = self.engine.borrow_mut();
-                assert!(engine.start_response(self.resource, event.id, 201, b"x-n\x001\0", 1));
+                // The NUL form is not this connection's: refused, and the slot is still open.
+                assert!(!engine.start_response(self.resource, event.id, 201, b"x-n\x001\0", 1));
+                assert!(engine.start_response(self.resource, event.id, 201, b"\nx-n:1\nx-n:2", 1));
                 let mut body = b"got ".to_vec();
                 body.extend_from_slice(event.data);
                 engine
@@ -1466,6 +1591,7 @@ mod tests {
                 engine: Rc::clone(&engine),
                 resource,
                 events: RefCell::new(Vec::new()),
+                heads: RefCell::new(Vec::new()),
             });
             assert!(engine.borrow_mut().attach(
                 resource,
@@ -1483,7 +1609,7 @@ mod tests {
                 .expect("request writes");
             let text = read_until_complete(&mut client, b"got abcde").await;
             assert!(text.starts_with("HTTP/1.1 201 Created\r\n"), "{text}");
-            assert!(text.contains("x-n: 1\r\n"), "{text}");
+            assert!(text.contains("x-n: 1\r\nx-n: 2\r\n"), "{text}");
             // A request without a body costs no wait at all.
             client
                 .write_all(b"GET /b HTTP/1.1\r\nhost: x\r\n\r\n")
@@ -1502,6 +1628,17 @@ mod tests {
                 .map(|(_, data)| data.clone())
                 .collect();
             assert_eq!(heads, vec![b"abcde".to_vec(), Vec::new()]);
+            // The handler is given the URL and the header list in wire form.
+            assert_eq!(
+                *whole.heads.borrow(),
+                vec![
+                    (
+                        b"http://x/a".to_vec(),
+                        b"\nhost:x\ntransfer-encoding:chunked".to_vec()
+                    ),
+                    (b"http://x/b".to_vec(), b"\nhost:x".to_vec()),
+                ]
+            );
             assert!(
                 events.iter().all(|(kind, _)| !matches!(
                     kind,
@@ -1892,6 +2029,73 @@ mod tests {
         let http1 = HttpServerEngine::with_http3(false);
         assert!(http3.http3);
         assert!(!http1.http3);
+    }
+
+    #[test]
+    fn the_header_wire_form_round_trips_and_refuses_what_hyper_refuses() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("example.com:80"));
+        headers.append("set-cookie", HeaderValue::from_static("a=1"));
+        headers.append("set-cookie", HeaderValue::from_static("b=2; Path=/"));
+        headers.insert("x-empty", HeaderValue::from_static(""));
+        let mut wire = Vec::new();
+        let host = flatten_header_wire(&headers, &mut wire).expect("a Host field");
+        assert_eq!(&wire[host], b"example.com:80");
+        assert_eq!(
+            wire,
+            b"\nhost:example.com:80\nset-cookie:a=1\nset-cookie:b=2; Path=/\nx-empty:".to_vec()
+        );
+        assert_eq!(parse_header_wire(&wire), Some(headers));
+        assert_eq!(parse_header_wire(b""), Some(HeaderMap::new()));
+        // Names are taken as tokens (and lowercased by Hyper); a value keeps every byte.
+        let parsed = parse_header_wire(b"\nContent-Type:text/plain; a=b:c").expect("parses");
+        assert_eq!(parsed["content-type"], "text/plain; a=b:c");
+        for refused in [
+            &b"host:x"[..],
+            b"\nno-colon",
+            b"\nbad name:v",
+            b"\n:v",
+            b"\nx:a\rb",
+            b"\nx:a\0b",
+            b"\nx:1\n",
+        ] {
+            assert_eq!(parse_header_wire(refused), None, "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn a_whole_requests_url_is_built_from_the_host_field() {
+        let parts = |head: &str| {
+            let mut request = Request::builder();
+            let mut lines = head.split('\n');
+            let (method, uri) = lines.next().expect("line").split_once(' ').expect("target");
+            request = request.method(method).uri(uri);
+            for line in lines {
+                let (name, value) = line.split_once(':').expect("field");
+                request = request.header(name, value);
+            }
+            request.body(()).expect("request builds").into_parts().0
+        };
+        let url = |head: &str| {
+            let parts = parts(head);
+            let target = match (parts.uri.scheme(), parts.uri.path_and_query()) {
+                (None, Some(path)) => path.as_str().to_owned(),
+                _ => parts.uri.to_string(),
+            };
+            let mut wire = Vec::new();
+            let host = flatten_header_wire(&parts.headers, &mut wire);
+            let host = host.map_or(&b""[..], |range| &wire[range]);
+            let mut scratch = Vec::new();
+            String::from_utf8(request_url(&parts.uri, host, target.as_bytes(), &mut scratch).to_vec())
+                .expect("utf-8")
+        };
+        assert_eq!(url("GET /a?b=1\nhost:h:81"), "http://h:81/a?b=1");
+        assert_eq!(url("OPTIONS *\nhost:h"), "http://h*");
+        // No Host field (HTTP/1.0), or an empty one: the target, for the language to complete.
+        assert_eq!(url("GET /a"), "/a");
+        assert_eq!(url("GET /a\nhost:"), "/a");
+        // An absolute-form target is the URL already, whatever Host says.
+        assert_eq!(url("GET http://p.test/x\nhost:h"), "http://p.test/x");
     }
 
     #[test]
