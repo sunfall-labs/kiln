@@ -91,3 +91,11 @@ The targets in the second and last rows are the ones to measure first; issue 01 
 
 ADR 0070 was accepted on 2026-09-26; nothing here waits on a decision except the two API ADRs
 (11, 12).
+
+## Performance checks owed
+
+Changes to hot paths landed while the machine was loaded by parallel builds, so their benchmarks
+were inconclusive. They are re-measured together on a quiet machine before this plan closes:
+
+- `036d288d` the executor split (issue 03);
+- the shared keys and shapes of issue 04 steps 1 and 2.

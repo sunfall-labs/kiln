@@ -15,6 +15,10 @@ within noise of before on one realm, and `scripts/native.sh` at 0 diverged.
    interned once per process into a shared, immutable table before the first realm starts;
    `kiln_c99_intern_static` resolves into it. Run-time keys stay in the realm's table. The shared
    table is consulted first.
+1b. **Register constant keys before the first realm.** Step 1 shares a constant key only while a
+   single heap is live, because nothing registers a program's constants before `kiln_realm_create`.
+   The launcher registers every unit's constant keys (and the built-ins') into the shared table
+   before the first realm starts, so every realm's constants are shared, as ADR 0071 says.
 2. **Shared shapes.** `kiln_c99_root_shape` becomes the one process-wide root, which it already
    is by accident. A transition by a shared key from a shared shape is shared, inserted by
    compare-and-swap, never freed; any other transition is realm-local and belongs to the heap.
