@@ -26,7 +26,7 @@ are unchanged.
 
 ## Done when
 
-- Snapshots under `crates/kiln-backend-c/tests/snapshots` regenerated and the diff reviewed:
+- Snapshots under `crates/native/kiln-backend-c/tests/snapshots` regenerated and the diff reviewed:
   expected changes are the key declarations, the body prologue, the roots reset line, and the
   four instruction forms.
 - `emission_is_deterministic_within_a_process` and `equal_programs_emit_equal_units` still pass

@@ -4,7 +4,7 @@ Status: completed
 Feature: cfg-optimizations
 
 ## Objectives
-1. In `crates/kiln-backend-c/src/graph.rs`:
+1. In `crates/native/kiln-backend-c/src/graph.rs`:
    - Implement `fold_conditional_branches(graph: &mut FunctionGraph) -> bool`:
      - Constant truthy/falsy evaluation on `Terminator::Branch` and `Terminator::BranchNotNullish`.
      - Update `terminator` to `Terminator::Jump(target)` and `successors` to `vec![target]`.
@@ -14,7 +14,7 @@ Feature: cfg-optimizations
      - Prune unreachable blocks from `graph.blocks`.
      - Filter predecessors and Phi inputs in surviving blocks.
    - Integrate `fold_conditional_branches` into `build_function_graph` optimization pipeline.
-2. In `crates/kiln-backend-c/src/graph.rs` tests:
+2. In `crates/native/kiln-backend-c/src/graph.rs` tests:
    - Add unit tests for `fold_conditional_branches` (truthy, falsy, nullish, phi simplification, unreachable block pruning).
 3. Verify:
    - `mbx test -p kiln-backend-c --lib`

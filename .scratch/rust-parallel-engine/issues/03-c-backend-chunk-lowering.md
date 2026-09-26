@@ -11,7 +11,7 @@ Calling Rust across FFI on every array element introduces prohibitive indirect c
 
 ## Requirements
 0. First, the gate: a backend predicate proving the callback allocates nothing and reads no heap object but its input element (numeric arithmetic over a numeric array, no upvalue reads of heap values, builtin calls from a fixed allowlist). `is_pure()` was not that predicate and was deleted on 2026-09-06. Anything the predicate rejects is refused with the reason named, following `conformance/native/*-refuses.ts`.
-1. Update `crates/kiln-backend-c/src/emit_graph/ops/call_method.rs` for `parallelMap` to generate a static C chunk worker function with inlined, unboxed closure execution.
+1. Update `crates/native/kiln-backend-c/src/emit_graph/ops/call_method.rs` for `parallelMap` to generate a static C chunk worker function with inlined, unboxed closure execution.
 2. Pass the chunk worker function pointer and array slice pointers into `kiln_parallel_map`.
 3. Implement `parallelReduce` in `call_method.rs` generating a static C chunk reducer function and passing it to `kiln_parallel_reduce`.
 4. Lower `%TypedArray%.prototype.sort` and numeric array `sort` on large arrays to `kiln_parallel_sort`.

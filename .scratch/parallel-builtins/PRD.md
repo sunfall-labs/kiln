@@ -15,7 +15,7 @@ ownership transfer (realms issue 10). Issues 01 to 05 here do not depend on any 
 ## Problem
 
 `Array.prototype.parallelMap` and the typed-array `parallelMap`s exist in both engines. The native
-backend runs a callback in parallel only when `crates/kiln-backend-c/src/parallel.rs` proves it
+backend runs a callback in parallel only when `crates/native/kiln-backend-c/src/parallel.rs` proves it
 takes numbers, returns a number, and touches nothing else: no captured variable, no property read,
 no allocation, no call except a listed `Math` function. Almost nothing a developer writes
 qualifies. The rest runs sequentially and correctly, but with no benefit and no explanation.

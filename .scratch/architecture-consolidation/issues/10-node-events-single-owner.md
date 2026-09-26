@@ -3,9 +3,9 @@
 Status: ready-for-agent
 Blocked by: 07, 08
 
-`EventEmitter` exists three times: `crates/kiln-builtins/src/node/events.ts`,
-`crates/kiln-interpreter/src/events.rs`, and the event-emitter section of
-`crates/kiln-backend-c/src/runtime/node.c`. Make the TypeScript the only one, per ADR 0060's
+`EventEmitter` exists three times: `crates/semantics/kiln-builtins/src/node/events.ts`,
+`crates/interp/kiln-interpreter/src/events.rs`, and the event-emitter section of
+`crates/native/kiln-backend-c/src/runtime/node.c`. Make the TypeScript the only one, per ADR 0060's
 delete-on-migrate rule.
 
 First find out what the Rust and C copies are still used for. The likely answer is the objects the

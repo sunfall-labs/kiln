@@ -19,7 +19,7 @@ A single `ModuleGraph → ModuleGraph` reduction both engines consume:
 
 ## Design (narrowest seam)
 
-New on `ModuleGraph` (`crates/kiln-module-graph/src/lib.rs`):
+New on `ModuleGraph` (`crates/compile/kiln-module-graph/src/lib.rs`):
 
 ```rust
 pub struct LiveDemand {

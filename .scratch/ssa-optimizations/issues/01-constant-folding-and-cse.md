@@ -4,12 +4,12 @@ Status: completed
 Feature: ssa-optimizations
 
 ## Objectives
-1. In `crates/kiln-backend-c/src/graph.rs`:
+1. In `crates/native/kiln-backend-c/src/graph.rs`:
    - Implement `fold_constants(graph: &mut FunctionGraph)` with `fold_unary` and `fold_binary`.
    - Generalize `eliminate_common_subexpressions` to run on single-block functions (`if graph.blocks.is_empty() { return; }`).
    - Add `CseKey::Phi(BlockId, Vec<(BlockId, ValueId)>)` to deduplicate identical Phis in the same basic block.
    - Insert `fold_constants(&mut graph)` into `build_function_graph` optimization pipeline.
-2. In `crates/kiln-backend-c/src/graph.rs` tests:
+2. In `crates/native/kiln-backend-c/src/graph.rs` tests:
    - Add unit tests for unary and binary constant folding.
    - Add unit test for single-block CSE.
    - Add unit test for identical Phi deduplication.

@@ -19,7 +19,7 @@ drive still paid `checkpoint_http` per turn for connections that no longer neede
 ## Scope
 
 1. HTTP client connections become Hyper client tasks over a `HostTransport`
-   (`crates/kiln-runtime/src/http_client.rs`), dispatching response events directly.
+   (`crates/host/kiln-runtime/src/http_client.rs`), dispatching response events directly.
 2. The interpreter's server and client paths attach through the same engines with a *queued*
    dispatch that the interpreter's checkpoint drains (the adapter shape ADR 0046 names for it).
 3. `ScriptedHost` hands over a scripted duplex, so replay stays deterministic on paused Tokio time.

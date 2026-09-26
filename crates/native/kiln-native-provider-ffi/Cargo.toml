@@ -1,0 +1,79 @@
+[package]
+name = "kiln-native-provider-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+# Workspace tests consume the ordinary Rust library. Packaging overrides this with
+# `cargo rustc --crate-type staticlib`, applying the native runtime's unwind, PIC, and generic-CPU
+# policy to this crate and its complete dependency graph without changing workspace profiles.
+crate-type = ["rlib"]
+
+[features]
+# Realm entry is always present: this archive is the private Rust implementation package shipped
+# with native artifacts. The larger semantic engines remain opt-in so ordinary workspace tests do
+# not compile code used only by generated native programs.
+default = ["realm", "realm-http"]
+realm = ["dep:kiln-runtime"]
+# Hyper-backed HTTP server/client engines inside `kiln-runtime`. On by default so the
+# default build is behavior-identical to before; the common archive disables default
+# features and enables `realm`, `regexp`, `bigint`, and `json` without `realm-http`. This works because the
+# `kiln-runtime` dependency below sets `default-features = false`: without it, the
+# slim `--no-default-features` selection would still unify `kiln-runtime/http` back
+# on through the dependency's own defaults.
+realm-http = ["kiln-runtime/http"]
+regexp = ["dep:regress"]
+bigint = ["dep:num-bigint", "dep:num-traits"]
+# `Temporal` over the same adapter the interpreter links, so the two engines cannot disagree about
+# a calendar (ADR 0025, ADR 0029 §4).
+temporal = ["dep:kiln-temporal"]
+# `JSON.parse` as a tape, from the same crate the interpreter walks (ADR 0025 again).
+json = ["dep:kiln-json"]
+# ICU4X segmentation behind the scalar provider ABI. The JavaScript-visible facade stays compiled
+# source; this feature supplies only the boundary engine it cannot implement cheaply itself.
+intl = ["dep:kiln-intl"]
+# `parallelMap`'s fork-join: a private Rayon pool that runs an emitted C chunk worker over index
+# ranges (ADR 0058, application 2). Rust owns the pool, the chunk size and the sequential floor.
+parallel = ["dep:rayon"]
+# Dynamic calls and same-thread callback closures for the native `node:ffi` capability. libffi is
+# linked into the one provider archive, never into compiler crates or generated application units.
+ffi = ["dep:libc", "dep:libffi"]
+
+[dependencies]
+kiln-native-provider-contract = { workspace = true }
+kiln-number-core = { workspace = true }
+kiln-host-abi = { workspace = true }
+hashbrown = { version = "0.16.1", default-features = false, features = ["equivalent"] }
+kiln-string = { workspace = true }
+kiln-node-path = { workspace = true }
+kiln-url = { workspace = true }
+# Path-only (not workspace-inherited): Cargo forbids `default-features` on an inherited
+# edge, and this edge must default off so the slim `--no-default-features` build does
+# not unify `kiln-runtime/http` back on through the dependency's own defaults. Every
+# other workspace member keeps the inherited edge with HTTP on.
+kiln-runtime = { path = "../../host/kiln-runtime", optional = true, default-features = false }
+# The calendar engine, wrapped by the adapter that already keeps `temporal_rs` out of every public
+# signature -- which is what lets it cross a C ABI as scalars and an opaque handle.
+kiln-temporal = { workspace = true, optional = true }
+kiln-json = { workspace = true, optional = true }
+kiln-intl = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
+libffi = { workspace = true, optional = true }
+# The regexp engine's allocation-only shape. The interpreter links the same crate, which is the
+# whole point: two engines running one implementation cannot disagree about a backreference.
+regress = { version = "0.12", default-features = false, features = [
+	"backend-pikevm",
+	"alloc",
+	"utf16",
+], optional = true }
+# The arbitrary-precision integers in their allocation-only shape -- the same crate the interpreter
+# links, for the same reason `regress` is: two implementations of one exactly-specified thing agree
+# until one of them has a bug, and then nothing can tell which.
+num-bigint = { version = "0.4", default-features = false, optional = true }
+num-traits = { version = "0.2", default-features = false, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

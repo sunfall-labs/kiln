@@ -15,7 +15,7 @@ that closed before the await -- reads as success to a shell or CI.
 The interpreter already knows: `run_node_event_loop_until_module` returns with
 `module_outcome()` still `None` when the loop has nothing left to run. That is the moment to
 report it the way node does, with the warning on stderr and status 13, from
-`execute_module_in_runtime_mode_with_session` (`crates/kiln-interpreter/src/lib.rs`, after
+`execute_module_in_runtime_mode_with_session` (`crates/interp/kiln-interpreter/src/lib.rs`, after
 the event loop, where a rejected outcome is already turned into an uncaught error).
 
 Acceptance: `kiln run` and `kiln run --native` agree on the status for the one-liner above;

@@ -48,10 +48,10 @@ In emitted C99 code, each such unmerged block introduces:
    - SSA dominance is strictly maintained: all definitions in A precede appended definitions in B; uses in B of A's definitions remain valid intra-block uses.
    - CFG symmetry is preserved: `succ.predecessors` and `A.successors` mirror each other.
    - Full pass through `verify_function_graph`.
-   - Zero changes to C runtime prelude (`crates/kiln-backend-c/src/runtime/`).
+   - Zero changes to C runtime prelude (`crates/native/kiln-backend-c/src/runtime/`).
 
 ## Verification Criteria
-1. Unit tests in `crates/kiln-backend-c/src/graph.rs` verifying sequential block merging, verifier pass, and edge cases.
+1. Unit tests in `crates/native/kiln-backend-c/src/graph.rs` verifying sequential block merging, verifier pass, and edge cases.
 2. `mbx test -p kiln-backend-c --lib` passes with 100% success.
 3. `mbx test -p kiln-backend-c --test emitted_c` passes (review snapshots).
 4. `mbx test -p kiln-native` passes.

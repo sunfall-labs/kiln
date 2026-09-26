@@ -10,7 +10,7 @@ Landed 2026-09-06 as the surface both engines actually implement (ADR 0058 revis
 Developers require clean, ergonomic concurrency primitives that do not rely on non-standard syntax or compiler forks. All types and functions must typecheck cleanly under standard, unpatched `tsc --strict`.
 
 ## Requirements
-1. Implement ambient type declarations and runtime bindings in `crates/kiln-builtin-surface` under module `@kiln/concurrency`:
+1. Implement ambient type declarations and runtime bindings in `crates/semantics/kiln-builtin-surface` under module `@kiln/concurrency`:
    - `Actor`: Base class marking an isolated state machine.
    - `spawnActor<T>(ctor, ...args): ActorRef<T>`: Spawns an actor realm and returns a typed proxy.
    - `ActorRef<T>`: Mapped type wrapping all synchronous and asynchronous methods in `Promise<Awaited<R>>`.

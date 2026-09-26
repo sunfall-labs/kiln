@@ -5,9 +5,9 @@ Branch: `feat/ambient-ts-prelude`
 
 ## Problem Statement
 
-ADR 0005 and `AGENTS.md` ("Freeze `prelude_core.c` (Phase 5.1)") require new built-ins to be written in TypeScript with intrinsics rather than expanding the C prelude (`crates/kiln-backend-c/src/runtime/`). Adding built-ins to C is an explicit review refusal.
+ADR 0005 and `AGENTS.md` ("Freeze `prelude_core.c` (Phase 5.1)") require new built-ins to be written in TypeScript with intrinsics rather than expanding the C prelude (`crates/native/kiln-backend-c/src/runtime/`). Adding built-ins to C is an explicit review refusal.
 
-While Phase 5.2 successfully migrated Node built-in modules (`node:*`) to pure TypeScript in `crates/kiln-builtins/src/node/*.ts`, ECMAScript global built-ins and prototype methods (`Uint8Array.prototype`, `JSON`) have lacked an ambient TypeScript runtime prelude. As a result, recent changes had begun writing complex JavaScript semantics (options parsing, revivers/replacers) directly in C, causing cache invalidation and maintenance debt.
+While Phase 5.2 successfully migrated Node built-in modules (`node:*`) to pure TypeScript in `crates/semantics/kiln-builtins/src/node/*.ts`, ECMAScript global built-ins and prototype methods (`Uint8Array.prototype`, `JSON`) have lacked an ambient TypeScript runtime prelude. As a result, recent changes had begun writing complex JavaScript semantics (options parsing, revivers/replacers) directly in C, causing cache invalidation and maintenance debt.
 
 ## Architecture
 

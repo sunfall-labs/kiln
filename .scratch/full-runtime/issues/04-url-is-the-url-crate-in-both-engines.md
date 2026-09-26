@@ -59,7 +59,7 @@ node; `app2.mjs` (the HTTP service with a string-URL client) runs natively; `ben
 ## Outcome (2026-09-19)
 
 Landed as designed, natively: `kiln_url_parse` and `kiln_url_set` in the provider (ABI 39),
-the `URL`/`URLSearchParams` classes in `crates/kiln-builtins/src/url.ts` over four intrinsics,
+the `URL`/`URLSearchParams` classes in `crates/semantics/kiln-builtins/src/url.ts` over four intrinsics,
 `web.c`'s hand parser gone. `probes/url.mjs`, `probes/url2.mjs` (setters, mutation, statics,
 IPv6, file URLs) and the in-handler probe are byte-identical to node; `probes/app2.mjs` -- the
 HTTP service with a string-URL client -- runs natively. `conformance/native/url-surface.mjs` and

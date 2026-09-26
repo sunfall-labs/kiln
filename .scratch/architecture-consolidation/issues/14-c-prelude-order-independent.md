@@ -2,7 +2,7 @@
 
 Status: ready-for-agent
 
-`crates/kiln-backend-c/src/runtime/README.md`: "Order is load-bearing." The domain files are
+`crates/native/kiln-backend-c/src/runtime/README.md`: "Order is load-bearing." The domain files are
 concatenated by `runtime_parts!` and `core_parts!` in `prelude.rs`, and a definition used before
 its declaration breaks the build depending on file order.
 

@@ -6,7 +6,7 @@ Feature: removable-declarations
 ## Problem Statement
 In closed-world builds (such as native compilation of bundles and applications like ghui or Node packages), Kiln tracks `RemovableDeclaration` to omit un-demanded module-level declarations and their associated functions.
 
-However, `removable_declaration_names` in `crates/kiln-ir/src/compile.rs` previously recognized only:
+However, `removable_declaration_names` in `crates/compile/kiln-ir/src/compile.rs` previously recognized only:
 - Declarations with no initializer (`let x;`)
 - Functions (`const f = function() {}`)
 - Classes without heritage (`class C {}`)
@@ -21,7 +21,7 @@ As a result, in large libraries (e.g. `lodash`, `core-js`, `ajv`, `dayjs`, `post
 
 ## Goal & Architecture
 1. **Purity Evaluation**:
-   Introduce `is_removable_expression(expr: &Expression) -> bool` in `crates/kiln-ir/src/compile.rs` to recognize side-effect-free initializers:
+   Introduce `is_removable_expression(expr: &Expression) -> bool` in `crates/compile/kiln-ir/src/compile.rs` to recognize side-effect-free initializers:
    - `ExpressionKind::Literal(_)`
    - `ExpressionKind::Function(_)`
    - `ExpressionKind::Class(class)` if `removable_class_evaluation(class)`

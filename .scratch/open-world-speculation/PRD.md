@@ -10,9 +10,9 @@ In open-world execution (modules with dynamic imports, `eval`, or external depen
 ## Architecture & Design
 Leverage Kiln's sound speculation model:
 - Check `kiln_c99_builtin_store_epoch == 0` for speculative built-in inlining (single-cycle branch prediction).
-- In `crates/kiln-backend-c/src/emit_graph/body.rs`, refine `boxed_uses` so operands to pure operations and specialized built-ins are not marked as `used`, allowing them to live purely in hardware registers (`d{id}` and `i{id}`).
-- In `crates/kiln-backend-c/src/emit_graph/ops/call_method.rs`, inline fast paths for `Array.isArray` and `Number.*` predicates.
-- In `crates/kiln-backend-c/src/emit_graph/clones.rs`, include the full pure Math surface in restartable fast clones.
+- In `crates/native/kiln-backend-c/src/emit_graph/body.rs`, refine `boxed_uses` so operands to pure operations and specialized built-ins are not marked as `used`, allowing them to live purely in hardware registers (`d{id}` and `i{id}`).
+- In `crates/native/kiln-backend-c/src/emit_graph/ops/call_method.rs`, inline fast paths for `Array.isArray` and `Number.*` predicates.
+- In `crates/native/kiln-backend-c/src/emit_graph/clones.rs`, include the full pure Math surface in restartable fast clones.
 
 ## Scope
 - **Tier 1**:

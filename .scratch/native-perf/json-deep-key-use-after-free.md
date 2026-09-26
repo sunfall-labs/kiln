@@ -10,7 +10,7 @@ the keys are all different:
     KILN_GC_STRESS=1 <the built binary>                                  # depth 40, 64, 200 differ
 
 The keys come back as another key's bytes. Depth 8 through 33 are fine; the failure begins above
-`KILN_JSON_BUILD_LOCAL_FRAMES` (32, `crates/kiln-backend-c/src/runtime/json.c:800`), which is
+`KILN_JSON_BUILD_LOCAL_FRAMES` (32, `crates/native/kiln-backend-c/src/runtime/json.c:800`), which is
 where the build frames leave the machine stack and stop being found by the conservative scan.
 
 **Not new, and today's work made it better.** At `aa9c512c`, this session's base, the same probe

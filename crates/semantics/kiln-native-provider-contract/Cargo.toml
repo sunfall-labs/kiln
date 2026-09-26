@@ -1,0 +1,18 @@
+[package]
+name = "kiln-native-provider-contract"
+version.workspace = true
+edition.workspace = true
+license = "MIT AND BSL-1.0"
+repository.workspace = true
+
+[dependencies]
+kiln-digest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "kiln-native-provider-contract"
+path = "src/main.rs"
+
+[dev-dependencies]
+kiln-number-core = { workspace = true }

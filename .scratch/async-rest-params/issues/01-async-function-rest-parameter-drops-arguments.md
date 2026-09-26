@@ -41,7 +41,7 @@ async method each with a rest parameter, called directly, through `apply`, and t
 
 The rest array was built after the split, from an argument list the driver did not carry. An
 async function is the one suspending shape whose parameter binding is *not* run at the call:
-`binds_at_call` in `crates/kiln-backend-c/src/lib.rs` excludes it deliberately, so that an
+`binds_at_call` in `crates/native/kiln-backend-c/src/lib.rs` excludes it deliberately, so that an
 instantiation failure rejects the promise rather than throwing out of the call, which leaves its
 prologue -- `RestArguments` among it -- to run inside the first `kiln_c99_async_step`. That step
 entered the body with `NULL, 0` for the argument list, so `RestArguments`' loop

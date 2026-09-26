@@ -10,14 +10,14 @@ of them.
 
 ## How
 
-- `crates/kiln-runtime/src/lib.rs`: add `open_server_connections()` and `open_client_connections()`
+- `crates/host/kiln-runtime/src/lib.rs`: add `open_server_connections()` and `open_client_connections()`
   beside the existing `has_open_server_connections`. `requests_in_flight()` is already public.
-- `crates/kiln-native-number-abi/src/lib.rs`: add
+- `crates/semantics/kiln-native-provider-contract/src/abi.rs`: add
   `(realm, kiln_realm_runtime_report, realm_runtime_report);` to `provider_abi_registry!`, bump
   `PROVIDER_ABI_VERSION` 28 → 29, and update the shape test (86 exports).
-- `crates/kiln-backend-c/src/lib.rs`: add the `realm_runtime_report` arm to
+- `crates/native/kiln-backend-c/src/lib.rs`: add the `realm_runtime_report` arm to
   `provider_c_declaration!`. Do not hand-write an `extern`.
-- `crates/kiln-native-number-ffi/src/lib.rs`: implement it and pin the signature in
+- `crates/native/kiln-native-provider-ffi/src/lib.rs`: implement it and pin the signature in
   `assert_provider_export!`.
 
 ## Shape

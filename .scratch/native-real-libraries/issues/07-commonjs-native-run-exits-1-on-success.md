@@ -43,13 +43,13 @@ completed with `undefined` and exited 0.
 
 ## The fix
 
-- `crates/kiln-native-runtime/src/lib.rs`: the launcher declines to write a value the boundary
+- `crates/native/kiln-native-runtime/src/lib.rs`: the launcher declines to write a value the boundary
   cannot carry, and does not treat declining as a failure. An unrepresentable result is an absent
   result -- exactly what the `Option<HostValue>` on the reading side already models.
-- `crates/kiln-native/src/lib.rs`: `decode_run_result` reads an absent file after a successful
+- `crates/native/kiln-native/src/lib.rs`: `decode_run_result` reads an absent file after a successful
   process as `None`, and still reports any other read error. Regression test:
   `native_commonjs_object_exports_finish_successfully_with_no_scalar_result`.
-- `crates/kiln-cli/src/commands.rs`: `unwrap_or(1)` is gone. `None` has one meaning on this wire
+- `crates/tools/kiln-cli/src/commands.rs`: `unwrap_or(1)` is gone. `None` has one meaning on this wire
   -- the process was ended by a signal and never chose a status -- so the CLI says that in a note
   and exits 128, the shell's base for "died on a signal", rather than inventing 1 or 0.
 - `scripts/native.sh` and `scripts/thirdparty.sh` compare exit status alongside the bytes.

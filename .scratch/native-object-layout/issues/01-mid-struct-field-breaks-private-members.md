@@ -131,7 +131,7 @@ native measurement taken across a prelude change.
 
 ## Resolution
 
-`error_brand` was moved beside `arguments_brand` in `crates/kiln-backend-c/src/runtime/prelude_types.h`.
+`error_brand` was moved beside `arguments_brand` in `crates/native/kiln-backend-c/src/runtime/prelude_types.h`.
 The issue was verified to be a cache/build-freshness artifact (see confounds above) and the DefineNamedProperty
 accessor override fix (`a17db759`). Conformance probe `conformance/native/private-constructor-static-call.js`
 was added to guarantee 3-way parity across Node, interpreter, and native backend.

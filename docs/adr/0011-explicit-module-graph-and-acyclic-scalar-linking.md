@@ -28,7 +28,7 @@ is still being prepared for ECMAScript's instantiate-then-evaluate semantics.
 
 ### Oxc linkage ends in owned HIR
 
-`frontend-oxc` is the only crate that sees Oxc types. It lowers the complete static linkage record
+`kiln-frontend-oxc` is the only crate that sees Oxc types. It lowers the complete static linkage record
 into `kiln-hir`: requested-module occurrences retain statement and specifier spans, request kind,
 and type-only status; imports retain source, imported name, local name, both spans, and type-only
 status; exports retain their visible name, origin, source where applicable, spans, and type-only
@@ -137,7 +137,7 @@ for the future cell-based ABI without collapsing all modules into one generated 
 
 ## Consequences
 
-- Oxc upgrades remain localized to `frontend-oxc`; downstream crates consume owned, stable linkage
+- Oxc upgrades remain localized to `kiln-frontend-oxc`; downstream crates consume owned, stable linkage
   data rather than arena-borrowed parser records.
 - The resolver is predictable and safe for the initial project model, but users must write explicit
   filenames and cannot use packages until a higher-level resolver policy exists.

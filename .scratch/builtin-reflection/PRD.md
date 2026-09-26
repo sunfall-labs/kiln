@@ -12,11 +12,11 @@ The native C backend currently has two reflection refusals in `scripts/native.sh
 ## Architecture
 
 1. **Built-in Callable Arity (`kiln_c99_builtin_length`)**:
-   - In `crates/kiln-backend-c/src/runtime/builtins.c`, implement `kiln_c99_builtin_length(uint64_t builtin, double *out)` reflecting standard ECMAScript constructor and function arities (matching `crates/kiln-interpreter/src/lib.rs:native_length()`).
+   - In `crates/native/kiln-backend-c/src/runtime/builtins.c`, implement `kiln_c99_builtin_length(uint64_t builtin, double *out)` reflecting standard ECMAScript constructor and function arities (matching `crates/interp/kiln-interpreter/src/lib.rs:native_length()`).
    - In `read.c`, when reading `"length"` on a non-namespace `KILN_VALUE_BUILTIN`, consult `kiln_c99_builtin_length()`. If found, return `kiln_c99_number(length)`. Unknown/unmodeled callables continue to safely refuse.
 
 2. **ArrayBuffer Prototype Linkage (`KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE`)**:
-   - In `crates/kiln-backend-c/src/prelude.rs`, define `KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE` and register it.
+   - In `crates/native/kiln-backend-c/src/prelude.rs`, define `KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE` and register it.
    - In `read.c`, add `{KILN_C99_BUILTIN_ARRAY_BUFFER, KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE}` to the `prototypes[]` table, and route prototype property reads through the existing `ArrayBuffer` member table.
    - Ensure `typeof ArrayBuffer.prototype === "object"` and constructor is `ArrayBuffer`.
 

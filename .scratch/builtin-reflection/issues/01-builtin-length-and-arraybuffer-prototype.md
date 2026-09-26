@@ -10,7 +10,7 @@ Implement built-in callable arity lookup and ArrayBuffer.prototype linkage in th
 ### Tasks
 
 1. **ArrayBuffer Prototype Built-in**:
-   - Define `KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE` in `crates/kiln-backend-c/src/prelude.rs`.
+   - Define `KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE` in `crates/native/kiln-backend-c/src/prelude.rs`.
    - Update `builtins.c` for `kiln_c99_builtin_name(KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE) -> "ArrayBuffer"`.
    - Add `{KILN_C99_BUILTIN_ARRAY_BUFFER, KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE}` in `prototypes[]` in `read.c`.
    - In `read.c`, handle `KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE` by delegating to the `ArrayBuffer` member table (`slice`, `constructor`, `is_array_buffer_member`).

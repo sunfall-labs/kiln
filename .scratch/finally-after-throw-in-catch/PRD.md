@@ -9,5 +9,5 @@ When a `catch` block threw an exception, its accompanying `finally` block was sk
 
 ## Resolution
 
-- In `crates/kiln-ir/src/compile.rs`: linked catch block exception exit points to execute the enclosing finally block before rethrowing.
+- In `crates/compile/kiln-ir/src/compile.rs`: linked catch block exception exit points to execute the enclosing finally block before rethrowing.
 - Verified in both interpreter and C backend.

@@ -25,7 +25,7 @@ Triage: bug, language semantics, both engines. The fix is in the compiler's hand
 catch body must remain protected by the finally handler until the finally runs.
 
 Status: resolved · Severity: high
-- In `crates/kiln-ir/src/compile.rs` (`try_statement`):
+- In `crates/compile/kiln-ir/src/compile.rs` (`try_statement`):
   - When `has_finalizer` is true and a `catch` handler is present, emit a nested `PushHandler` around the catch clause's body.
   - If the catch clause's body finishes normally, pop the handler and emit the normal finally block.
   - If the catch clause's body throws, jump to a dedicated catch-exception landing pad: execute the finally block, and (if the finally block does not terminate with `return` or `throw`) re-throw the catch exception outwards to enclosing handlers.

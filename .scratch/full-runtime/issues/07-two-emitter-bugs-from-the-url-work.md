@@ -20,6 +20,6 @@ this[STATE] = { c: parseRecord(input, base), sp: undefined, input: undefined, ba
 
 The same class as a user program under `native-release-size` (also generic-only) is correct,
 so the trigger is something about the bootstrap module -- its size, its `compact` emission, or
-the intrinsic being a `Direct` method value. `crates/kiln-builtins/src/url.ts` keeps the hoist
+the intrinsic being a `Direct` method value. `crates/semantics/kiln-builtins/src/url.ts` keeps the hoist
 with a comment pointing here; the repro is to fold it back and run
 `.scratch/full-runtime/probes/url.mjs` natively.

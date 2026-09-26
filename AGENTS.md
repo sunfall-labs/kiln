@@ -148,6 +148,13 @@ or an explicit `--path` subtree in a single `kiln test`, and that one process ha
 until it filled the disk. The script applies the cap to either form; do not point `kiln test` at the
 corpus by hand.
 
+The Test262 runners also bound interpreter worker concurrency within that process. They use at
+most one Rayon worker per GiB of the configured memory cap (at least one), further bounded by
+available CPUs and positive `KILN_JOBS` / `RAYON_NUM_THREADS` settings. At the default 4 GiB cap,
+that means at most four workers. This is a scheduling allowance, not a per-test memory guarantee;
+the hard process cap remains in force. Letting Rayon use every CPU can exhaust the capped address
+space through overlapping test allocations and worker stacks even when each test fits alone.
+
 **Keep the corpus outside `/tmp`.** A scratchpad checkout under `/private/tmp` is on borrowed time:
 macOS's periodic cleaner empties it on a day boundary, and on 2026-09-04 it took the whole
 checkout, `.git` included, in the middle of a session. Keep one at
@@ -214,7 +221,7 @@ died on `path.dirname` that way for weeks.
 
 So the prelude C may not hand back `undefined` from a read by writing it. Use `KILN_C99_ABSENT`,
 whose reason names the membership predicate that proves the name is really absent in the language,
-and add the row to `ABSENT_ANSWER_SITES` in `crates/kiln-backend-c/src/lib.rs`. Both are `const`
+and add the row to `ABSENT_ANSWER_SITES` in `crates/native/kiln-backend-c/src/lib.rs`. Both are `const`
 assertions: writing it by hand does not compile, and neither does a new site without a row.
 
 That gate cannot check whether a predicate is *complete*, because completeness is a question about
@@ -235,7 +242,7 @@ by name" is a state to leave, in the order the thirdparty corpus and the invento
 
 Native generated-C, object, runtime and link keys include the content digests of the prelude
 source or header they consume. The backend emitter build fingerprint also participates in the
-generated-module key. Editing `crates/kiln-backend-c/src/runtime/` therefore creates cache misses
+generated-module key. Editing `crates/native/kiln-backend-c/src/runtime/` therefore creates cache misses
 for the affected layers; an ordinary build does not require manual cache deletion. The native
 tests use a separate cache root under `target/kiln-test-cache`, but it follows the same content
 addressing rules.
@@ -253,7 +260,7 @@ result file. `mise run gate` gets this right; a hand-run does not unless you cop
 
 ## The native number provider is a staticlib, and `cargo build` does not build it
 
-`crates/kiln-native-number-ffi` declares `crate-type = ["rlib"]`, which is what workspace tests
+`crates/native/kiln-native-provider-ffi` declares `crate-type = ["rlib"]`, which is what workspace tests
 consume. The `.a` that emitted C links against is a *different* build of the same crate —
 `cargo rustc --crate-type staticlib --features regexp,bigint,temporal`, with its own RUSTFLAGS —
 produced by `scripts/package-native-number-provider.sh`.
@@ -298,7 +305,7 @@ Adding a built-in method or function to `prelude_core.c` is a review refusal.
 Existing C built-ins are migrated to TypeScript in Phase 5.2.
 
 `prelude_core.c` and `prelude_runtime.c` were later split, as a pure move, into the domain files
-under `crates/kiln-backend-c/src/runtime/` (see `runtime/README.md` for the list and the order,
+under `crates/native/kiln-backend-c/src/runtime/` (see `runtime/README.md` for the list and the order,
 which is load-bearing). The freeze applies to all of them: a built-in added to any file in that
 directory is the same review refusal.
 

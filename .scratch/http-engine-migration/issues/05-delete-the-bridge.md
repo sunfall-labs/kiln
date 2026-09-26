@@ -4,9 +4,9 @@ Status: done
 
 Once nothing attaches through the bridge, delete it rather than leaving it as a fallback:
 
-- `crates/kiln-runtime/src/http_transport.rs` (the duplex bridge, `HttpStreamAction`,
+- `crates/host/kiln-runtime/src/http_transport.rs` (the duplex bridge, `HttpStreamAction`,
   `HttpHostOp`, `HttpCloseCapability`, `HttpResourceId`).
-- `crates/kiln-runtime/src/hyper_http.rs` (both halves: `client_connection`,
+- `crates/host/kiln-runtime/src/hyper_http.rs` (both halves: `client_connection`,
   `event_connection`, the channel event vocabulary).
 - In `lib.rs`: `RuntimeHttpConnection`, `start_http1_connection*`,
   `start_http1_client_connection`, `start_http_connection_close*`, `poll_http_connection*`,

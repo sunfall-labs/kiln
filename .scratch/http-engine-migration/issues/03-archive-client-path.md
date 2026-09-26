@@ -2,7 +2,7 @@
 
 Status: done
 
-`crates/kiln-native-number-ffi/src/lib.rs` (the runtime archive generated C links against) still
+`crates/native/kiln-native-provider-ffi/src/lib.rs` (the runtime archive generated C links against) still
 runs `HttpRole::Client` connections through the bridge: `attach_http` starts a bridged
 connection, `checkpoint_http` pumps every client connection after every turn, `apply_http_actions`
 lowers transport actions to host operations, `route_completion` routes their completions, and
@@ -26,7 +26,7 @@ through `CloseResource`) stays; `registered_http_connection_rejects_raw_hostops_
 ## Comments
 
 - Done in `9471372` ("Archive: attach HTTP clients through the engine and delete the
-  checkpoint loop"). Net -761 lines in `crates/kiln-native-number-ffi/src/lib.rs`. All 13
+  checkpoint loop"). Net -761 lines in `crates/native/kiln-native-provider-ffi/src/lib.rs`. All 13
   `kiln-native` node:http fixtures pass, including both close-contract tests.
 - The archive's dispatch had been putting an error's message in the view's `reason` slot while
   the generated kind-9 handler reads `data`; it now fills both.

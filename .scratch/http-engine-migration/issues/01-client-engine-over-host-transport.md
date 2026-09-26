@@ -6,7 +6,7 @@ Status: done
 Hyper's reads become `TcpRead` host operations, its writes become `TcpWrite`s, and the realm
 learns about the response through an unbounded channel it drains at a checkpoint.
 
-Replace it with `HttpClientEngine` (`crates/kiln-runtime/src/http_client.rs`), shaped like the
+Replace it with `HttpClientEngine` (`crates/host/kiln-runtime/src/http_client.rs`), shaped like the
 server engine in `http_engine.rs`:
 
 - `attach(resource, transport, dispatch)` spawns one task that performs the Hyper handshake over
@@ -30,6 +30,6 @@ dispatch implementation serves both roles (the archive's C event view already do
 ## Comments
 
 - Done in `a871b5c` ("Add the Hyper client engine over host transports and the queued
-  adapter"). `crates/kiln-runtime/src/http_client.rs`; tests cover a complete body declaring
+  adapter"). `crates/host/kiln-runtime/src/http_client.rs`; tests cover a complete body declaring
   its length, a streamed body chunking, sequential reuse with the `reusable` flag, an idle peer
   close publishing only `Closed`, and an abort failing the outstanding request before `Closed`.

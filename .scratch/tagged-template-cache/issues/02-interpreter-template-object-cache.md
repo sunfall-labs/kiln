@@ -12,7 +12,7 @@ Implement `Instruction::LoadTemplateObject(site_index)` in `kiln-interpreter` wi
 
 ## Details
 
-1. In `crates/kiln-interpreter/`:
+1. In `crates/interp/kiln-interpreter/`:
    - Store initialized template objects per realm and site index: e.g. `template_objects: HashMap<(RealmId, UnitId, u32), Value>` or a per-unit vector of cached `Option<Value>`.
    - On handling `Instruction::LoadTemplateObject(site_index)`:
      - Check if the site is already cached. If so, push the cached `Value` onto the operand stack.

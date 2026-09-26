@@ -11,7 +11,7 @@ Branch: `main`
 
 ## Resolution
 
-1. Updated `crates/kiln-builtin-surface/src/lib.rs` to order `Array` statics as `["isArray", "from", "fromAsync", "of", "@@species"]`, matching ECMAScript §23.1.2 and Node v26.
+1. Updated `crates/semantics/kiln-builtin-surface/src/lib.rs` to order `Array` statics as `["isArray", "from", "fromAsync", "of", "@@species"]`, matching ECMAScript §23.1.2 and Node v26.
 2. Updated `scripts/differential.sh` to properly classify non-zero exit statuses containing `could not execute module` or multiline diagnostics as refusals.
 3. Verified:
    - `./scripts/differential.sh`: 114 matched, 4 refused, 0 diverged.

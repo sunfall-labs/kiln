@@ -36,7 +36,7 @@ It does **not** need `KILN_GC_STRESS`; a plain run crashes.
 
 ## Where to look
 
-`kiln_c99_val_read_property`'s regexp-exec path in `crates/kiln-backend-c/src/runtime/boxed.c`
+`kiln_c99_val_read_property`'s regexp-exec path in `crates/native/kiln-backend-c/src/runtime/boxed.c`
 caches match state on the regexp object, and the cache is a fixed 32 groups:
 
 ```c

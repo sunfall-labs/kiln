@@ -29,7 +29,7 @@ with other agents, so +/-5% is noise here):
 | small (200 B), per parse | 0.58 us best / 0.60 median | 0.60 us best / 0.63 median | 2.49 us | 1.45 us |
 | large (2.2 MB), per parse | 8.9 ms best / 10.1 median | 9.2 ms best / 10.2 median | 12.4 ms | 10.8 ms |
 
-Reader alone (`crates/kiln-json/tests/timing.rs`, release): small 0.149 us, large 1.70 ms. So on
+Reader alone (`crates/semantics/kiln-json/tests/timing.rs`, release): small 0.149 us, large 1.70 ms. So on
 native the Rust side is ~19% of the large parse and ~25% of the small one; the rest is the C heap.
 
 Profile after, large native (1912 samples): heap and collector ~47% (`gc_lookup_slab` 193,
@@ -142,7 +142,7 @@ this brief.
 Also filed: `issues/01-embedded-nul-key-truncation.md` (both native readers cut a parsed key at
 an embedded NUL; the interpreter and node do not).
 
-## The scalar scanner (`crates/kiln-json/src/scalar.rs`)
+## The scalar scanner (`crates/semantics/kiln-json/src/scalar.rs`)
 
 One pass over a copy of the input: escaped strings are decoded in place at their own offset,
 unescaped ones are referenced where they lie, numbers are validated and converted in the same

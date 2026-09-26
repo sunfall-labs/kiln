@@ -4,7 +4,7 @@ Status: done
 
 ## What
 
-Add to `kiln_gc_heap` (prelude, `crates/kiln-backend-c/src/lib.rs`) an open-addressed table
+Add to `kiln_gc_heap` (prelude, `crates/native/kiln-backend-c/src/lib.rs`) an open-addressed table
 mapping key bytes to one canonical pointer, and three entry points:
 
 - `kiln_c99_intern(bytes, len)` — canonical pointer, inserting. Adopts a `KILN_GC_STRING` block

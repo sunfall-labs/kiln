@@ -9,7 +9,7 @@ Resolved in `kiln-interpreter`:
 - Missing module exports also reject with `TypeError` via `Ok(Err(...))` rather than machine error.
 - The returned Promise settles with `Settled::Rejected(...)`, allowing `.catch(...)` and `try { await import(...) } catch` to run.
 - Unhandled rejections surface as standard uncaught promise rejections reporting to stderr with exit code 1.
-- Added interpreter unit tests in `crates/kiln-interpreter/src/tests.rs`, differential probe in `conformance/differential/dynamic-import.js`, and native refusal probe in `conformance/native/dynamic-import-refuses.js`.
+- Added interpreter unit tests in `crates/interp/kiln-interpreter/src/tests.rs`, differential probe in `conformance/differential/dynamic-import.js`, and native refusal probe in `conformance/native/dynamic-import-refuses.js`.
 
 **CORRECTION (same session).** This was first written as "silent, no diagnostic, exit 0". That
 was wrong, and the error was in the probe rather than in kiln. The probes piped output through

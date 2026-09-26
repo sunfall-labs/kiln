@@ -9,6 +9,6 @@ When `mise run gate` executed under full machine build load, `kiln-native` tests
 
 ## Resolution
 
-In `crates/kiln-native/src/worker.rs`:
+In `crates/native/kiln-native/src/worker.rs`:
 - Replaced the fixed 12-attempt loop (capping at ~626ms) with a 10-second deadline in `retry_while_executable_is_busy`.
 - Added `busy_retry_tests` to ensure windows exceeding 1,500ms cleanly succeed.

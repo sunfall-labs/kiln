@@ -5,14 +5,14 @@ PRD: `../PRD.md`
 
 ## Description
 
-1. In `crates/kiln-builtins/src/node/crypto.ts`:
+1. In `crates/semantics/kiln-builtins/src/node/crypto.ts`:
    - Implement base64 / base64url encoding in `Hash.prototype.digest(encoding)` and `Hmac.prototype.digest(encoding)`.
    - When `encoding === 'base64'` or `encoding === 'base64url'`, return the encoded string.
    - When `encoding === 'utf8'` or `'utf-8'`, return UTF-8 string.
    - When `encoding === 'latin1'` or `'binary'`, return Latin1 string.
    - When no encoding is passed, return a Buffer.
 
-2. In `crates/kiln-builtins/src/node/stream.ts`:
+2. In `crates/semantics/kiln-builtins/src/node/stream.ts`:
    - Add `eventNames(): (string | symbol)[]` to the internal `EventEmitter` class.
    - Fix `Readable.prototype.push` and `Readable.prototype.read` state handling and `'readable'` event emission.
 

@@ -11,7 +11,7 @@ the process you most want to interrogate is the one that has gone quiet.
 
 ## How
 
-In `drive_async` (`crates/kiln-native-number-ffi/src/lib.rs`), cap the park delay at 200 ms when
+In `drive_async` (`crates/native/kiln-native-provider-ffi/src/lib.rs`), cap the park delay at 200 ms when
 both hold:
 
 - the realm keeps the host's wall clock (`NativeClock::Wall`), and

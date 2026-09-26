@@ -5,7 +5,7 @@ Branch: `feat/yield-star-delegation`
 
 ## Problem Statement
 
-`yield*` (`crates/kiln-ir/src/compile.rs:3257`, `yield_delegate`) currently lowers to a simple loop invoking `iterator.next()`. ECMA-262 §14.4.14 (`YieldExpression: yield * AssignmentExpression`) defines a three-way delegation protocol forwarding `.return()` and `.throw()` completions from the outer generator to the inner iterator.
+`yield*` (`crates/compile/kiln-ir/src/compile.rs:3257`, `yield_delegate`) currently lowers to a simple loop invoking `iterator.next()`. ECMA-262 §14.4.14 (`YieldExpression: yield * AssignmentExpression`) defines a three-way delegation protocol forwarding `.return()` and `.throw()` completions from the outer generator to the inner iterator.
 
 ## Impact
 

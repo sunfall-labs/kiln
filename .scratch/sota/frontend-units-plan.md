@@ -4,7 +4,7 @@ Status: pending Luna implementation after JSON work.
 
 ## Ownership
 
-Coordinate before editing frontend-oxc, kiln-hir, kiln-ir, graph/module adapters, and interpreter source/name seams. Native agent owns backend-C migration; property agent owns the property-family interpreter edits. Use a new owned worktree and append commits.
+Coordinate before editing kiln-frontend-oxc, kiln-hir, kiln-ir, graph/module adapters, and interpreter source/name seams. Native agent owns backend-C migration; property agent owns the property-family interpreter edits. Use a new owned worktree and append commits.
 
 ## Required slices
 
@@ -20,7 +20,7 @@ Node-oracle fixtures should print charCodeAt arrays, not rendered strings. Cover
 
 ## Known current locations
 
-- frontend-oxc/src/lib.rs: name_anonymous_function calls still pass key.to_lossy_string; Class.inferred_name remains Option<String>.
+- kiln-frontend-oxc/src/lib.rs: name_anonymous_function calls still pass key.to_lossy_string; Class.inferred_name remains Option<String>.
 - frontend auto-accessor lowering: storage = format!("%accessor:{}", key.to_lossy_string()).
 - kiln-hir ImportName/ExportName currently Name(String); public export-name APIs return scalar strings.
 - kiln-interpreter namespace_entries converts property names lossily; eval/ShadowRealm source calls still convert lossily.

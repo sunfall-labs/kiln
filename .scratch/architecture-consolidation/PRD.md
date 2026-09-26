@@ -89,11 +89,11 @@ several sessions write to `main` at once and a long-lived move branch conflicts 
 | # | title | status |
 | --- | --- | --- |
 | 01 | [Settle the proposed ADRs](issues/01-settle-proposed-adrs.md) | resolved |
-| 02 | [Split `kiln-interpreter/src/lib.rs` into modules](issues/02-split-interpreter-lib.md) | ready-for-agent |
-| 03 | [Split the other oversized files](issues/03-split-other-oversized-files.md) | ready-for-agent |
+| 02 | [Split `kiln-interpreter/src/lib.rs` into modules](issues/02-split-interpreter-lib.md) | resolved |
+| 03 | [Split the other oversized files](issues/03-split-other-oversized-files.md) | resolved |
 | 04 | [A README for every crate](issues/04-crate-readmes.md) | ready-for-agent |
-| 05 | [Layer check test](issues/05-layer-check-test.md) | ready-for-agent |
-| 06 | [Remove the layer inversions and move crates into layer directories](issues/06-remove-inversions-and-move-crates.md) | ready-for-agent |
+| 05 | [Layer check test](issues/05-layer-check-test.md) | resolved |
+| 06 | [Remove the layer inversions and move crates into layer directories](issues/06-remove-inversions-and-move-crates.md) | resolved |
 | 07 | [Ownership inventory and the duplicate count](issues/07-ownership-inventory-and-ratchet.md) | ready-for-agent |
 | 08 | [The primitive table and `kiln:primitives`](issues/08-primitive-table-and-channel.md) | ready-for-agent |
 | 09 | [Retire `process.__kilnNativeModules`](issues/09-retire-kiln-native-modules.md) | ready-for-agent |
@@ -106,3 +106,10 @@ several sessions write to `main` at once and a long-lived move branch conflicts 
 | 16 | [Move the scripts to `cargo xtask`](issues/16-scripts-to-xtask.md) | ready-for-agent |
 | 17 | [One test entry point](issues/17-one-test-entry-point.md) | ready-for-agent |
 | 18 | [Housekeeping](issues/18-housekeeping.md) | ready-for-agent |
+
+## Implementation progress
+
+2026-09-26: Structural issues 02, 03, 05 and 06 are resolved. The initial Test262 allocation abort
+reproduced on unchanged HEAD and was fixed by bounding worker concurrency within the existing
+memory cap. The final full gate is green. The other PRD issues are not included in this change.
+See [verification](verification.md) and [quality and resource review](quality-and-resource-review.md).

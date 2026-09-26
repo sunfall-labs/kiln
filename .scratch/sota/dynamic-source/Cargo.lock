@@ -397,7 +397,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "frontend-oxc"
+name = "kiln-frontend-oxc"
 version = "0.0.0"
 dependencies = [
  "kiln-hir",
@@ -1152,7 +1152,7 @@ dependencies = [
 name = "kiln-auto-harness"
 version = "0.0.0"
 dependencies = [
- "frontend-oxc",
+ "kiln-frontend-oxc",
  "kiln-hir",
  "kiln-interpreter",
  "kiln-ir",

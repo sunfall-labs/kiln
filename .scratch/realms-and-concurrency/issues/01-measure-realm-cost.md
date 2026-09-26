@@ -11,7 +11,7 @@ Two numbers ADR 0070 rests on, measured before anything changes.
    Linux profiling setup. The bootstrap heap is what the shared immutable region (08) removes from
    every realm after the first.
 2. **What state is process-global.** An inventory of every mutable static in
-   `crates/kiln-backend-c/src/runtime/*.c` (about 45 on 2026-09-26), every kind of static the
+   `crates/native/kiln-backend-c/src/runtime/*.c` (about 45 on 2026-09-26), every kind of static the
    emitter writes into generated code (about 57), `kiln_namespaces`, and every Rust `static` or
    `thread_local!` in `kiln-runtime` and the provider. For each: what it holds and whether it is
    realm state, a cache, or genuinely process-wide.
@@ -111,11 +111,11 @@ thread-local), **(b)** a cache that can be validated per realm (the `kiln_c99_gc
 `runtime/heap.c:706-740`: a `_Thread_local` trusted only while `kiln_realm_generation()` matches),
 **(c)** genuinely process-wide (constants built once, env-derived config, signal and tty state,
 provider handles that are never freed). The existing ownership manifest
-`C99_MUTABLE_STATE_OWNERS` (`crates/kiln-backend-c/src/prelude.rs:4628`) already names an owner for
+`C99_MUTABLE_STATE_OWNERS` (`crates/native/kiln-backend-c/src/prelude.rs:4628`) already names an owner for
 most prelude statics; its owners are mapped here (Realm and Frame -> a, Constant/Process/
 TestFixture -> c) except where the reading below disagrees.
 
-**C runtime, `crates/kiln-backend-c/src/runtime/*.c, *.h`: 54 mutable statics.**
+**C runtime, `crates/native/kiln-backend-c/src/runtime/*.c, *.h`: 54 mutable statics.**
 
 | file:line | name | holds | class |
 | --- | --- | --- | --- |
@@ -149,7 +149,7 @@ manifest already lists: the 13 `kiln_c99_diagnostic_*` (prelude.rs:2758-2776; a)
 `end` (c).
 
 **Emitted code: 44 kinds of mutable static across about 56 emission points** in
-`crates/kiln-backend-c/src` and `crates/kiln-native/src`. No emitted static is covered by the
+`crates/native/kiln-backend-c/src` and `crates/native/kiln-native/src`. No emitted static is covered by the
 ownership manifest, which only matches `kiln_c99_` names, and none calls
 `kiln_realm_generation()`; the only generation check reachable from emitted caches is the
 built-in path inside the prelude's `kiln_c99_site` (`cached_generation`, boxed.c:50, :1046).

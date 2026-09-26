@@ -4,9 +4,9 @@ This is a review artifact, not an implementation.
 
 ## Existing contract
 
-`kiln-interpreter::EvalSource.source` and `SourceCompiler` carry `&str`. The dynamic entry points in `crates/kiln-interpreter/src/lib.rs` currently call `StringUnits::to_lossy_string()` before that boundary. Oxc's `Parser`, `Lexer::Source`, AST `StringLiteral`/`TemplateElement`, and spans all operate on a valid UTF-8 `&str`; spans are byte offsets into that same text. Oxc has no UTF-16 source constructor in the pinned 0.147 APIs.
+`kiln-interpreter::EvalSource.source` and `SourceCompiler` carry `&str`. The dynamic entry points in `crates/interp/kiln-interpreter/src/lib.rs` currently call `StringUnits::to_lossy_string()` before that boundary. Oxc's `Parser`, `Lexer::Source`, AST `StringLiteral`/`TemplateElement`, and spans all operate on a valid UTF-8 `&str`; spans are byte offsets into that same text. Oxc has no UTF-16 source constructor in the pinned 0.147 APIs.
 
-Oxc's existing escaped-surrogate support is sufficient for well-formed source text: the lexer marks escaped literals with `lone_surrogates`, stores a reversible U+FFFD-plus-hex sentinel in `Str`, and `frontend-oxc::oxc_string_units` restores UTF-16 units. This covers `eval("\\uD800")`, escaped template contents, and escaped property keys without a dynamic source rewrite.
+Oxc's existing escaped-surrogate support is sufficient for well-formed source text: the lexer marks escaped literals with `lone_surrogates`, stores a reversible U+FFFD-plus-hex sentinel in `Str`, and `kiln-frontend-oxc::oxc_string_units` restores UTF-16 units. This covers `eval("\\uD800")`, escaped template contents, and escaped property keys without a dynamic source rewrite.
 
 ## Bounded implementation shape
 
@@ -26,7 +26,7 @@ A String value containing a raw lone surrogate anywhere in dynamic source is ref
 
 ## Expected files if implemented
 
-- `crates/kiln-interpreter/src/lib.rs`: one source conversion helper and the five dynamic call sites/function source assembly.
-- `crates/kiln-interpreter/src/tests.rs`: escaped source success, raw-unit explicit refusal, escaped invalid-outside-literal SyntaxError, and Function source spelling/reflection.
-- `crates/kiln-string/src/lib.rs`: only if the existing shared owner lacks a borrow-first scalar view; add a small `with_scalar_str`/checked conversion API rather than a second string type.
-- `crates/frontend-oxc/src/lib.rs`: no parser rewrite; retain and test the existing Oxc sentinel decoder.
+- `crates/interp/kiln-interpreter/src/lib.rs`: one source conversion helper and the five dynamic call sites/function source assembly.
+- `crates/interp/kiln-interpreter/src/tests.rs`: escaped source success, raw-unit explicit refusal, escaped invalid-outside-literal SyntaxError, and Function source spelling/reflection.
+- `crates/foundation/kiln-string/src/lib.rs`: only if the existing shared owner lacks a borrow-first scalar view; add a small `with_scalar_str`/checked conversion API rather than a second string type.
+- `crates/syntax/kiln-frontend-oxc/src/lib.rs`: no parser rewrite; retain and test the existing Oxc sentinel decoder.

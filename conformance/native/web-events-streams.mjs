@@ -1,6 +1,6 @@
 // The WHATWG event and stream classes node puts on every global object: real in both engines
 // since 2026-09-19 (the interpreter published hollow stubs, the native backend nothing). Every
-// line here is node-identical in both engines; see crates/kiln-builtins/src/web_events_streams.ts.
+// line here is node-identical in both engines; see crates/semantics/kiln-builtins/src/web_events_streams.ts.
 const e = new Event("ping", { cancelable: true }); console.log(e.type, e.cancelable, e.defaultPrevented, e.eventPhase, Event.AT_TARGET, Object.keys(e).length, String(e), typeof e.timeStamp);
 const t = new EventTarget(); const seen = [];
 t.addEventListener("ping", (ev) => { seen.push("a:" + (ev.target === t) + ":" + (ev.currentTarget === t)); ev.preventDefault(); });

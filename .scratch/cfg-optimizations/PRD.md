@@ -49,4 +49,4 @@ Even after constant folding evaluates condition expressions to compile-time cons
    - Full workspace test pass (`kiln-backend-c`, `kiln-native`).
    - Native parity (`scripts/native.sh`) and thirdparty bundles (`scripts/thirdparty.sh`).
    - Quick gate (`mise run gate-quick`).
-   - Zero changes to C runtime prelude (`crates/kiln-backend-c/src/runtime/`).
+   - Zero changes to C runtime prelude (`crates/native/kiln-backend-c/src/runtime/`).

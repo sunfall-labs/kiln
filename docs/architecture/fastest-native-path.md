@@ -150,7 +150,7 @@ On that graph the following are ordinary dataflow passes rather than pattern mat
   A call site materialises its arguments into a small local array at the call and nowhere else,
   so nothing is address-taken across the body.
 - **The 28 fusers are deleted.** Every one of them is a special case of "emit this expression
-  tree from the graph". The snapshot tests under `crates/kiln-backend-c/tests/snapshots` are the
+  tree from the graph". The snapshot tests under `crates/native/kiln-backend-c/tests/snapshots` are the
   record of what they produced and become the record of what the graph produces.
 
 The diagnostics discipline (`kiln_c99_note_refusal` after every instruction) is kept in the

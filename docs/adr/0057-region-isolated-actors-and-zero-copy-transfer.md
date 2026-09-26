@@ -86,7 +86,7 @@ await worker.send(transfer(graph));
 
 #### TypeScript Typing Contract (Valid under `tsc --strict`)
 
-The ambient declarations in `crates/kiln-builtin-surface` define:
+The ambient declarations in `crates/semantics/kiln-builtin-surface` define:
 
 ```typescript
 declare module "@kiln/concurrency" {

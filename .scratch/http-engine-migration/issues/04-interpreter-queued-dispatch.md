@@ -2,7 +2,7 @@
 
 Status: done
 
-The interpreter (`crates/kiln-interpreter/src/lib.rs`) reaches HTTP through
+The interpreter (`crates/interp/kiln-interpreter/src/lib.rs`) reaches HTTP through
 `ActiveHttpRuntime`, and every method of that seam today returns `HttpStreamAction`s the
 interpreter lowers to host operations and tracks as `PendingNodeRequest::Stream`.
 

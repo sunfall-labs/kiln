@@ -27,7 +27,7 @@ fn compile_dynamic(
 }
 
 fn run_dynamic_case(label: &str, source: &str, expect_refusal: bool) {
-    let dynamic_module = compile_module(&frontend_oxc::parse_with_goal(
+    let dynamic_module = compile_module(&kiln_frontend_oxc::parse_with_goal(
         "dynamic.js",
         source,
         SourceGoal::Script,
@@ -90,7 +90,7 @@ eval(high);
 
     let accessor_source =
         include_str!("../../../conformance/native/inferred-name-auto-accessor.ts");
-    let accessor_module = compile_module(&frontend_oxc::parse_with_goal(
+    let accessor_module = compile_module(&kiln_frontend_oxc::parse_with_goal(
         "inferred-name-auto-accessor.ts",
         accessor_source,
         SourceGoal::Script,

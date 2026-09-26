@@ -12,11 +12,11 @@ The drive loop is Rust; the dump is C. Rust needs a way to enter the prelude at 
 pointer whose first word is the prelude's hooks table, and calls through it at the safepoint.
 Add one entry.
 
-- `crates/kiln-backend-c/src/runtime/prelude_types.h`: `int (*introspect)(void *heap);` last in
+- `crates/native/kiln-backend-c/src/runtime/prelude_types.h`: `int (*introspect)(void *heap);` last in
   `kiln_gc_hooks`.
-- `crates/kiln-backend-c/src/runtime/prelude_runtime.c`: `KILN_GC_HOOKS_VERSION` 1 → 2, and the
+- `crates/native/kiln-backend-c/src/runtime/prelude_runtime.c`: `KILN_GC_HOOKS_VERSION` 1 → 2, and the
   new function in the table initialiser.
-- `crates/kiln-native-number-ffi/src/lib.rs`: the field on `GcHooks`, `GC_HOOKS_VERSION` 1 → 2, the
+- `crates/native/kiln-native-provider-ffi/src/lib.rs`: the field on `GcHooks`, `GC_HOOKS_VERSION` 1 → 2, the
   `kiln_realm_gc_attach` validation, and `introspect_if_requested(realm)` called from
   `drive_async` immediately after `collect_if_due(realm)`.
 

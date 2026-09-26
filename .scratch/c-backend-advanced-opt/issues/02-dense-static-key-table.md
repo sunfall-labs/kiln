@@ -4,7 +4,7 @@ Status: closed
 Feature: c-backend-advanced-opt
 
 ## Objectives
-1. In `crates/kiln-backend-c/src/lib.rs` (`render_key_table`):
+1. In `crates/native/kiln-backend-c/src/lib.rs` (`render_key_table`):
    - When `symbol == "ku"`, emit `static const kiln_string *const ku_static_keys[] = { &ku_string_0, ... };` and an intern loop:
      ```c
      for (size_t i = 0; i < sizeof(ku_static_keys)/sizeof(ku_static_keys[0]); ++i) {

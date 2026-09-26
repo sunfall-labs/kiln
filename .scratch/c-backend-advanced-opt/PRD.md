@@ -18,17 +18,17 @@ While Kiln achieves SOTA execution performance across many workloads, profiling 
 ## Architecture & Implementation Plan
 
 ### Issue 01: SSA Proven Type Completeness & Redundant Object Guard Pruning
-- In `crates/kiln-backend-c/src/graph.rs`: Add `GraphOp::NewObject { .. } => Some(Proven::Object)` to `proven_types_with_bounds`.
-- In `crates/kiln-backend-c/src/direct.rs`: Extend `intrinsic_results` to recognize:
+- In `crates/native/kiln-backend-c/src/graph.rs`: Add `GraphOp::NewObject { .. } => Some(Proven::Object)` to `proven_types_with_bounds`.
+- In `crates/native/kiln-backend-c/src/direct.rs`: Extend `intrinsic_results` to recognize:
   - `CallMethod` of `map`, `filter`, `slice` on arrays and `split` on strings as producing Arrays (`Proven::Object`).
   - `CallMethod` of `substring`, `slice`, `join` on strings/arrays as producing Strings (`Proven::String`).
   - `CallMethod` of `indexOf`, `lastIndexOf`, `push` as producing Integers (`Proven::Int`).
   - `.length` reads on results of array/string producing operations as `Proven::Int`.
-- In `crates/kiln-backend-c/src/emit_graph/ops/properties.rs`:
+- In `crates/native/kiln-backend-c/src/emit_graph/ops/properties.rs`:
   - When `object` is proven to be `Proven::Object` (via `defs` or `proven`), elide the redundant `if (KILN_VAL_IS_OBJECT(v{o}))` guard or simplify the fast-path condition.
 
 ### Issue 02: Dense Static Key Table Compaction
-- In `crates/kiln-backend-c/src/lib.rs` (`render_key_table`):
+- In `crates/native/kiln-backend-c/src/lib.rs` (`render_key_table`):
   - For `symbol == "ku"`, emit `static const kiln_string *const ku_static_keys[] = { &ku_string_0, ... };` and an intern loop:
     ```c
     for (size_t i = 0; i < sizeof(ku_static_keys)/sizeof(ku_static_keys[0]); ++i) {
@@ -47,4 +47,4 @@ While Kiln achieves SOTA execution performance across many workloads, profiling 
 3. `scripts/native.sh` parity passes with 206 matched, 0 diverged.
 4. `scripts/thirdparty.sh` bundles pass with 22/22 matched.
 5. Zero regressions in `mise run gate-quick`.
-6. Phase 5.1 C prelude freeze in `crates/kiln-backend-c/src/runtime/` strictly preserved.
+6. Phase 5.1 C prelude freeze in `crates/native/kiln-backend-c/src/runtime/` strictly preserved.

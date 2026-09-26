@@ -18,7 +18,7 @@ typeof Buffer.prototype     // "undefined" in both; node: "object"
 What each engine has today:
 
 * Interpreter: a Buffer is a `Uint8Array` with `toString` hijacked for *every* `Uint8Array`
-  (`crates/kiln-interpreter/src/buffer.rs`); `Buffer.isBuffer(new Uint8Array(1))` is `true`;
+  (`crates/interp/kiln-interpreter/src/buffer.rs`); `Buffer.isBuffer(new Uint8Array(1))` is `true`;
   `Buffer.from(text, encoding)` ignores the encoding (`Buffer.from("ff", "hex")` is the two
   bytes of `"ff"`); the statics are `from`, `alloc`, `isBuffer`, `byteLength`, `concat`.
 * Native: a typed array with `is_buffer` set; `toString` is the one instance method
@@ -35,7 +35,7 @@ start, end)`, `write(string, offset, length, encoding)`, `swap16/32/64`, `toLoca
 
 One TypeScript prototype for both engines, per ADR 0005 / 0063 rule 4: build
 `Buffer.prototype = Object.create(Uint8Array.prototype)` with the members above in a shared
-bootstrap (`crates/kiln-builtins/src/web.ts` is what both engines run in node mode today),
+bootstrap (`crates/semantics/kiln-builtins/src/web.ts` is what both engines run in node mode today),
 over the encode/decode intrinsics the engines already have for `toString`.
 
 What each engine needs underneath:
@@ -58,7 +58,7 @@ which is its own bug and a smaller one than this.
 
 ## What landed
 
-`crates/kiln-builtins/src/buffer.ts`, appended to `WEB_BOOTSTRAP_SOURCE` so both engines run it
+`crates/semantics/kiln-builtins/src/buffer.ts`, appended to `WEB_BOOTSTRAP_SOURCE` so both engines run it
 in Node mode: `Buffer.prototype = Object.create(Uint8Array.prototype)` with the sixty-odd
 members, the hex/base64/latin1/utf16le codecs in TypeScript, and `from`/`alloc`/`concat`/
 `byteLength`/`compare`/`isEncoding`/`copyBytesFrom` over the engines' statics. The decoder is

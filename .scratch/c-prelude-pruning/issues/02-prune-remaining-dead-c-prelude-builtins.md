@@ -4,7 +4,7 @@ Feature: c-prelude-pruning
 # 02 - Prune Remaining Dead C Prelude Built-in Implementations
 
 ## Context
-Following the completion of Phase 5.2 TypeScript built-ins (`crates/kiln-builtins/src/node/*.ts`), several legacy C runtime implementations and dispatch cases were left behind in `crates/kiln-backend-c/src/runtime/`.
+Following the completion of Phase 5.2 TypeScript built-ins (`crates/semantics/kiln-builtins/src/node/*.ts`), several legacy C runtime implementations and dispatch cases were left behind in `crates/native/kiln-backend-c/src/runtime/`.
 These include:
 - `node:async_hooks` C remnants (`kiln_c99_new_async_local_storage`, `NODE_ASYNC_RESOURCE*`, `NODE_ASYNC_LOCAL_STORAGE`, `NODE_ALS_*`) in `platform.c`, `foundation.c`, `calls.c`, and `dispatch.c`.
 - `node:os` C remnants (`NODE_OS_HOSTNAME`, `NODE_OS_HOMEDIR`, `NODE_OS_TMPDIR`, `NODE_OS_NETWORK_INTERFACES`) in `dispatch.c` and `methods.c`.

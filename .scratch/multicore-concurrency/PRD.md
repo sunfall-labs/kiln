@@ -28,11 +28,11 @@ By combining Kiln's ahead-of-time (AOT) C compiler with its Rust/Tokio runtime, 
 
 ## Scope
 
-1. **Engine Foundation (`crates/kiln-runtime` & `crates/kiln-backend-c`):**
+1. **Engine Foundation (`crates/host/kiln-runtime` & `crates/native/kiln-backend-c`):**
    * Multi-realm hosting on Tokio worker threads: background threads run disjoint `Realm` instances sharing the native binary's compiled `.text` and `.rodata` segments (~1–2 MB RSS per worker).
    * $O(1)$ GC block splicing: unlinks a doubly-linked `kiln_c99_gc_block` chain from Realm A and splices it into Realm B's heap header (< 5 nanoseconds, zero bytes copied).
    * Native work-stealing loop (`__kiln_parallel_for`) over Tokio/Rayon worker pools.
-2. **Base TypeScript Surface (`@kiln/concurrency` in `crates/kiln-builtin-surface`):**
+2. **Base TypeScript Surface (`@kiln/concurrency` in `crates/semantics/kiln-builtin-surface`):**
    * `Actor` base class with mapped `ActorRef<T>` proxy types (automatically wrapping synchronous methods in `Promise<Awaited<R>>`).
    * `isolate<T>()` and `transfer<T>()` using phantom nominal brands for static transfer verification.
    * `Array.prototype.parallelMap()`.
@@ -41,7 +41,7 @@ By combining Kiln's ahead-of-time (AOT) C compiler with its Rust/Tokio runtime, 
    * `KilnWorkerPool.layer`: Drop-in replacement for `@effect/experimental/WorkerPool`, farming out tasks to in-process Tokio Realms via $O(1)$ GC block splicing.
    * `KilnNativeScheduler`: Implements Effect's `Scheduler` interface, driving fibers on Tokio's M:N work-stealing pool and linking fiber interruption tokens to native atomic cancellation flags.
    * Dual-mode portability: Runs via native host-ops in Kiln, with automatic fallback to `node:worker_threads` when running in Vitest/Node.
-4. **Compiler Passes (`crates/kiln-hir` & `crates/kiln-backend-c`):**
+4. **Compiler Passes (`crates/syntax/kiln-hir` & `crates/native/kiln-backend-c`):**
    * Region escape analysis: Proves that expressions passed to `isolate()` have no remaining aliases in the local lexical scope.
    * Purity verification: Checks that closures passed to `parallelMap()` and pure `Effect.forEach()` have no mutable outer-scope captures (`Effect::Pure` in ADR 0056).
    * Direct C11 loop lowering: Compiles pure parallel iterations directly to native scalar C work-stealing loops.

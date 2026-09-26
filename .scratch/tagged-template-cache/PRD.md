@@ -15,7 +15,7 @@ function go() { return tag`k`; }
 go() === go()      // true in every other engine; false in kiln
 ```
 
-`ExpressionKind::TemplateStrings` (`crates/kiln-ir/src/compile.rs`) emits instructions that allocate a fresh cooked array, allocate a raw array, freeze both, and attach `raw` from scratch on *every single evaluation*.
+`ExpressionKind::TemplateStrings` (`crates/compile/kiln-ir/src/compile.rs`) emits instructions that allocate a fresh cooked array, allocate a raw array, freeze both, and attach `raw` from scratch on *every single evaluation*.
 
 ## Impact
 

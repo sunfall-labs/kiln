@@ -5,10 +5,10 @@ PRD: `../PRD.md`
 
 ## Description
 
-1. In `crates/kiln-interpreter/src/buffer.rs`:
+1. In `crates/interp/kiln-interpreter/src/buffer.rs`:
    - Added `"base64"` and `"base64url"` arms to `buffer_to_string`, dispatching to `crate::to_base64_text(&bytes, url, omit_padding)`.
 
-2. In `crates/kiln-backend-c/src/runtime/node_support.c`:
+2. In `crates/native/kiln-backend-c/src/runtime/node_support.c`:
    - Added `"base64"` and `"base64url"` decoding support in `KILN_C99_METHOD_BUFFER_TO_STRING` delegating to `kiln_c99_uint8_to_base64_raw`.
 
 3. Tests:

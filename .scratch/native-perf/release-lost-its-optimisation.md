@@ -17,12 +17,12 @@ Two independent causes, both from the batch that landed today, and each alone is
 
 ## 1. Release emits the compact body, which has no specialization in it
 
-`crates/kiln-native/src/lib.rs` sets, at four sites:
+`crates/native/kiln-native/src/lib.rs` sets, at four sites:
 
     emission.compact = options.profile != NativeProfile::Profile;
 
 so every profile except `native-profile` is compact. Compact is not only shorter symbol names:
-`crates/kiln-backend-c/src/lib.rs:1147` gates the fast clone on `!policy.compact`, and `compact`
+`crates/native/kiln-backend-c/src/lib.rs:1147` gates the fast clone on `!policy.compact`, and `compact`
 is passed into `direct::DirectPlan::plan`, so a compact unit has **no fast clone, no versioned
 body, no typed entry and no type twins**. The emitted C for `bench/cpu/loop.mjs` is 317 lines with
 no `double` or `int64_t` declaration anywhere in it; every operation runs boxed through the

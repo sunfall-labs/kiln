@@ -2,7 +2,7 @@
 
 **Role:** implementer. **State:** open. **Found:** 2026-09-07, reviewing the promise job lane.
 
-`crates/kiln-interpreter/src/lib.rs` (around 10973): a `RuntimeTurn::Completion` is followed by
+`crates/interp/kiln-interpreter/src/lib.rs` (around 10973): a `RuntimeTurn::Completion` is followed by
 `while let Some(next) = runtime.take_next_ready_completion()`, so when several host operations
 finish in the same turn their callbacks run one after another with **no microtask checkpoint
 between them**. node drains the microtask queue after each completion.

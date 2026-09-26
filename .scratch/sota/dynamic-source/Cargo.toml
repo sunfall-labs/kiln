@@ -6,11 +6,11 @@ edition = "2024"
 [workspace]
 
 [dependencies]
-frontend-oxc = { path = "../../../crates/frontend-oxc" }
-kiln-hir = { path = "../../../crates/kiln-hir" }
-kiln-ir = { path = "../../../crates/kiln-ir" }
-kiln-interpreter = { path = "../../../crates/kiln-interpreter" }
-kiln-runtime = { path = "../../../crates/kiln-runtime" }
+kiln-frontend-oxc = { path = "../../../crates/syntax/kiln-frontend-oxc" }
+kiln-hir = { path = "../../../crates/syntax/kiln-hir" }
+kiln-ir = { path = "../../../crates/compile/kiln-ir" }
+kiln-interpreter = { path = "../../../crates/interp/kiln-interpreter" }
+kiln-runtime = { path = "../../../crates/host/kiln-runtime" }
 
 [[bin]]
 name = "dynamic-main"

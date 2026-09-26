@@ -8,7 +8,7 @@ Answer "where does this live?" from the inventory:
 ```
 $ kiln explain EventEmitter.prototype.on
 owner:     bootstrap TypeScript (ADR 0060 kind 7)
-source:    crates/kiln-builtins/src/node/events.ts:112
+source:    crates/semantics/kiln-builtins/src/node/events.ts:112
 engines:   none (uses primitives: none)
 refusal:   no
 tests:     conformance/node/events-*.js (14), conformance/native/events-on.js

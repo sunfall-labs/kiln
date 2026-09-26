@@ -9,4 +9,4 @@ Branch: `fix/run-parser-module-goal`
 
 ## Resolution
 
-Updated `parse` in `crates/frontend-oxc/src/lib.rs` to set `.with_module(true)` for non-`.cjs` files, ensuring parse-time early error checks match runtime module semantics.
+Updated `parse` in `crates/syntax/kiln-frontend-oxc/src/lib.rs` to set `.with_module(true)` for non-`.cjs` files, ensuring parse-time early error checks match runtime module semantics.

@@ -154,7 +154,7 @@ dictionaries with unbounded keys. Weak entries cost one block lookup per entry p
   unchanged and no ABI version moves. `kiln_c99_keys_check_mode` is a new prelude static, listed
   as test-fixture state in the ADR 0036 manifest.
 - Every emitted unit gains its key table, a reset line in its roots function, a prologue line in
-  its body, and a static per site. The snapshot diff under `crates/kiln-backend-c/tests/snapshots`
+  its body, and a static per site. The snapshot diff under `crates/native/kiln-backend-c/tests/snapshots`
   is exactly those lines and the seven instruction forms.
 - `KILN_KEYS_CHECK=1` joins `KILN_GC_STRESS=1` as an acceptance mode for the native corpus.
 - The interpreter's object model is unchanged, and the two engines still print the same bytes for

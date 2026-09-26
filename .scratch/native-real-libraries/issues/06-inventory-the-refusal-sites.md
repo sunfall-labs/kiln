@@ -62,5 +62,5 @@ move that ended the builtin-surface class of bug: not a test someone remembers t
 assertion that cannot be ignored, with the reason written where the gap is.
 
 Sequenced deliberately after the current native work lands, because it touches on the order of a
-hundred sites in `crates/kiln-backend-c/src/lib.rs` and would conflict with anything else editing
+hundred sites in `crates/native/kiln-backend-c/src/lib.rs` and would conflict with anything else editing
 that file.

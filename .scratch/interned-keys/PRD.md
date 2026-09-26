@@ -160,7 +160,7 @@ Working tree at the final commit; binary `target/debug/kiln` rebuilt from it (mt
 | `scripts/native.sh` | FINAL_NATIVE |
 | `KILN_GC_STRESS=1 KILN_KEYS_CHECK=1 scripts/native.sh` | FINAL_NATIVE_STRESS |
 | `.scratch/perf/probe.mjs` interpreted vs native | FINAL_PROBE |
-| `cargo clippy --workspace --offline` | **fails on main too**: `crates/kiln-native-number-ffi/src/lib.rs:680` `Some(epoch + started.elapsed())` under `deny(clippy::arithmetic_side_effects)`; untouched by this branch |
+| `cargo clippy --workspace --offline` | **fails on main too**: `crates/native/kiln-native-provider-ffi/src/lib.rs:680` `Some(epoch + started.elapsed())` under `deny(clippy::arithmetic_side_effects)`; untouched by this branch |
 | `cargo fmt --check` | clean |
 
 ### Perf: `.scratch/perf/app-props.mjs`, four client processes x sixteen connections x five seconds
