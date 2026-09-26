@@ -96,9 +96,12 @@ use io_uring::{IoUring, Probe, cqueue, opcode, squeue, types};
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-/// Whether `KILN_IO` unset (or `auto`) selects io_uring. Off: the ring saves syscalls under
-/// load but costs latency on an idle connection (a parked realm is woken through task work,
-/// `EINTR` and a second `epoll_wait`), and it is the newer path.
+/// Whether `KILN_IO` unset (or `auto`) selects io_uring. Off for now. Measured on Linux 7.2
+/// (loopback, one pinned core, node:http hello): under saturating keep-alive load the ring
+/// takes 0.1 syscalls per request against epoll's 2.0 and 25-40% less server CPU per request,
+/// but with the lighter node-driven load the difference was within noise, only one kernel has
+/// been validated, and io_uring's wake-up behaviour has already proved kernel-specific (see
+/// "Parking"). Flip it once an LTS kernel (6.1/6.6) and a multi-worker run agree.
 pub const AUTO_SELECTS_URING: bool = false;
 
 const SQ_ENTRIES: u32 = 256;
