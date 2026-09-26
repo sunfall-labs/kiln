@@ -1,7 +1,6 @@
 # 07. Ownership inventory and the duplicate count
 
 Status: ready-for-agent
-Blocked by: 01 (ADR 0060)
 
 ADR 0060 calls for an ownership inventory; none exists yet. Build it, generated where possible:
 

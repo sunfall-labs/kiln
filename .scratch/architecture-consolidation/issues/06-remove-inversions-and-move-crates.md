@@ -1,7 +1,7 @@
 # 06. Remove the layer inversions and move crates into layer directories
 
 Status: ready-for-agent
-Blocked by: 01 (ADR 0066), 05
+Blocked by: 05
 
 In this order, each its own change:
 

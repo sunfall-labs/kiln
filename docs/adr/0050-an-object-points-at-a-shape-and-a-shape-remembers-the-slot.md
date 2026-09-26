@@ -2,7 +2,11 @@
 
 ## Status
 
-Proposed. The successor ADR 0047 names in *What the next step is*, and the last large item on the
+Accepted, 2026-09-26, as built: objects point at shapes with transitions in
+`crates/kiln-backend-c/src/runtime/shapes.c`. Settled by the project owner on what the code already
+does.
+
+Originally proposed. The successor ADR 0047 names in *What the next step is*, and the last large item on the
 native object model. Nothing here has to undo ADR 0047: the intern table is what a transition tree
 keys its edges by, and the per-site slot cache becomes a per-site *shape* cache.
 

@@ -1,6 +1,6 @@
 # 01. Choose the Node service corpus
 
-Status: ready-for-human
+Status: resolved
 
 About twenty applications, chosen for what people deploy on Node rather than for what kiln already
 runs. Each is a small but realistic app written against the package's documented API, or an
@@ -37,10 +37,18 @@ upstream example used unmodified, pinned by lockfile. Proposed set, to be cut or
 **Stretch: M4** (issue 15): Next.js `output: "standalone"`, React Router / Remix server build,
 NestJS (decorators, `reflect-metadata`), OpenTelemetry auto-instrumentation, Prisma.
 
-Native addons (`bcrypt`, `better-sqlite3`, `sharp`) are deliberately **not** in the corpus as passes.
+Native addons (`bcrypt`, `better-sqlite3`, `sharp`) are deliberately **not** in the corpus as
+passes.
 One of them is included as an expected refusal to test issue 06's message.
 
 ## Acceptance
 
 - A final list in this file, with each app's package versions and the one-line reason it is in.
 - Each tier 1 app has a named owner or is marked unowned.
+
+## Resolution, 2026-09-26
+
+Accepted as proposed by the project owner: the eleven tier 1 apps, the seven tier 2 apps, and the
+stretch set. Package versions are pinned when each app is added to `conformance/apps` (issue 02).
+Because native addons now have a route (ADR 0067 §4, issue 17), the expected-refusal addon app
+becomes a real corpus app once issue 17 lands.

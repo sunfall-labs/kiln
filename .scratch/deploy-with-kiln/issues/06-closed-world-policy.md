@@ -1,6 +1,6 @@
 # 06. Closed-world policy: dynamic code, addons, module patching
 
-Status: ready-for-human
+Status: resolved
 
 A native build is closed-world; a Node app sometimes is not. Decide, in an ADR, what `kiln build`
 does with each of these, because each one is a different answer and users will hit all of them:
@@ -21,3 +21,19 @@ end state. The ADR records which ones are debts and which are permanent, with th
 
 - An accepted ADR covering every row, numbered with `ls docs/adr/` checked first.
 - Issue 05's refusal message for each shape follows the ADR's wording.
+
+## Resolution, 2026-09-26
+
+Decided by the project owner and recorded as ADR 0067:
+
+| shape | decision |
+| --- | --- |
+| generated code | precompile natively when the source is known at build time; otherwise ADR 0051's evaluator |
+| computed `require` | include a provably finite set; accept a declared list; otherwise refuse naming the call site |
+| optional dependencies | behave as Node does: `MODULE_NOT_FOUND` at run time, no build refusal |
+| native addons | load through N-API over `node:ffi`: the subset `bcrypt`, `better-sqlite3` and `sharp` use, after M2; refuse naming the package and an alternative until then |
+| module patching | refuse now, as a debt; a build-time instrumentation hook in a later ADR |
+| files read at run time | embed provable paths and declared assets; otherwise read from disk beside the binary, with a build warning naming the path |
+
+Follow-on work: issue 16 (the build behaviours), issue 17 (N-API), issue 18 (the instrumentation
+hook).

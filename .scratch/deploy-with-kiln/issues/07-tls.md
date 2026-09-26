@@ -1,7 +1,6 @@
 # 07. TLS
 
 Status: ready-for-agent
-Blocked by: architecture-consolidation issue 01 (ADR 0060/0065 decide where this code lives)
 
 There is no `node:tls`, and `node:https` throws "requires a TLS host capability that this realm does
 not provide". This blocks outbound HTTPS, managed databases that require TLS, and HTTPS servers.

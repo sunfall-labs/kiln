@@ -78,6 +78,7 @@ increases the duplicate count and the gate refuses it.
 | --- | --- | --- |
 | M1 | "an HTTP framework app, native, at 1/8 the memory" | Express, Fastify, Hono, with published numbers |
 | M2 | "a typical REST API with Postgres and Redis" | + TLS, crypto, `pg`, `ioredis`, an ORM, JWT auth |
+| M2+ | "native addons load" | the N-API subset `bcrypt`, `better-sqlite3` and `sharp` use (issue 17) |
 | M3 | "most Node services" | 15 of the ~20 corpus apps |
 | M4 | "even the hard ones" | the stretch set: SSR framework builds, NestJS, OpenTelemetry |
 
@@ -96,27 +97,42 @@ increases the duplicate count and the gate refuses it.
 1. **Choose the corpus and build the harness** (01, 02). Everything else is measured against it.
 2. **M1** (03, 04, 05): the three frameworks native, unbundled projects building, refusals that
    name the package.
-3. **Decisions that shape M2 onward** (06, 10): the closed-world policy and the multicore default.
+3. **Decisions that shape M2 onward** (06, 10, 13): settled 2026-09-26. See "Decisions" below.
 4. **M2** (07, 08, 09): TLS, crypto, the data layer.
 5. **Publish** (11, 12), as soon as M1 passes rather than at the end. The table is the product.
 6. **Keep going** (13, 14, 15): the deployment story, the weekly burn-down, the stretch apps.
+
+## Decisions
+
+Settled by the project owner on 2026-09-26:
+
+| question | decision | where |
+| --- | --- | --- |
+| the corpus | the proposed tiers, as written | issue 01 |
+| dynamic code, computed `require`, optional deps, addons, patching, run-time files | as ADR 0067 | issue 06 |
+| multicore default | one realm; `kiln build --workers=<n\|auto>`; per-core and whole-machine numbers side by side | issue 10 |
+| C toolchain | host compiler preferred; a pinned `zig cc` downloaded when there is none or it cannot build the target | issue 13 |
+| first deploy artifact | static musl binaries, Linux x86_64 and arm64 | issue 13 |
 
 ## Issues
 
 | # | title | status |
 | --- | --- | --- |
-| 01 | [Choose the Node service corpus](issues/01-choose-the-corpus.md) | ready-for-human |
+| 01 | [Choose the Node service corpus](issues/01-choose-the-corpus.md) | resolved |
 | 02 | [The app harness](issues/02-app-harness.md) | ready-for-agent |
 | 03 | [Express, Fastify and Hono run natively](issues/03-frameworks-native.md) | ready-for-agent |
 | 04 | [`kiln build` on an unbundled project](issues/04-build-unbundled-projects.md) | ready-for-agent |
 | 05 | [Refusals name the package and the import chain](issues/05-refusals-name-the-package.md) | ready-for-agent |
-| 06 | [Closed-world policy: dynamic code, addons, module patching](issues/06-closed-world-policy.md) | ready-for-human |
+| 06 | [Closed-world policy: dynamic code, addons, module patching](issues/06-closed-world-policy.md) | resolved (ADR 0067) |
 | 07 | [TLS](issues/07-tls.md) | ready-for-agent |
 | 08 | [The crypto surface services use](issues/08-crypto-surface.md) | ready-for-agent |
 | 09 | [The data layer](issues/09-data-layer.md) | ready-for-agent |
-| 10 | [The multicore default](issues/10-multicore-default.md) | ready-for-human |
+| 10 | [The multicore default](issues/10-multicore-default.md) | ready-for-agent |
 | 11 | [Per-app benchmarks against Node and Bun](issues/11-per-app-benchmarks.md) | ready-for-agent |
 | 12 | [The compatibility page](issues/12-compatibility-page.md) | ready-for-agent |
-| 13 | [The deployment story](issues/13-deployment-story.md) | ready-for-human |
+| 13 | [The deployment story](issues/13-deployment-story.md) | ready-for-agent |
 | 14 | [The weekly burn-down](issues/14-weekly-burn-down.md) | ready-for-agent |
 | 15 | [The stretch apps](issues/15-stretch-apps.md) | needs-triage |
+| 16 | [The closed-world build behaviours of ADR 0067](issues/16-closed-world-build-behaviours.md) | ready-for-agent |
+| 17 | [N-API: the subset real addons use](issues/17-n-api-subset.md) | ready-for-agent |
+| 18 | [A build-time instrumentation hook](issues/18-build-time-instrumentation-hook.md) | needs-triage |

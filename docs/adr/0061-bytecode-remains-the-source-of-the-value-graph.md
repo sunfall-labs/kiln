@@ -2,7 +2,10 @@
 
 ## Status
 
-Proposed, 2026-09-13.
+Accepted, 2026-09-26, as built: the value graph is constructed from bytecode and no
+HIR-to-value-graph path exists. Settled by the project owner on what the code already does.
+
+Originally proposed, 2026-09-13.
 
 Reaffirms ADR 0007 (versioned interpreter bytecode) and ADR 0056 (the C backend
 abstract-interprets bytecode into a Value Graph). Refines ADR 0056 by

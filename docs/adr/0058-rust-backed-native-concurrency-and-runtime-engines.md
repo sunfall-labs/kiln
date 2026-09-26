@@ -2,7 +2,10 @@
 
 ## Status
 
-Proposed. This revision (2026-09-06) replaces the same-day draft, which cited a superseded ADR,
+Accepted, 2026-09-26, as built: JSON and `parallelMap` are Rust behind the provider, and ADR 0060
+generalises the rule. Settled by the project owner on what the code already does.
+
+Originally proposed. This revision (2026-09-06) replaces the same-day draft, which cited a superseded ADR,
 a stale ABI version, two methods that do not exist and a vectorization consequence the emitter
 cannot deliver. The rule is the same; the claims are now the ones the code supports.
 

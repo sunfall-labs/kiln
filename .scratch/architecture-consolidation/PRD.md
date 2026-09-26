@@ -16,7 +16,8 @@ silent `undefined` (ADR 0063). What undermines them is execution. Measured on 20
 - **The TypeScript migration adds instead of replacing.** From 2026-09-05 to 09-26 the bootstrap
   TypeScript grew 0 → 14.5k lines while the C runtime grew 33k → 45k and interpreter `lib.rs` grew
   46k → 50k.
-- **The seam between the TypeScript built-ins and the engines is undeclared.** Built-ins capture public
+- **The seam between the TypeScript built-ins and the engines is undeclared.** Built-ins capture
+  public
   members at bootstrap (`date.ts` reads `Date.prototype.getTime`) or look up host functions by
   string on `process.__kilnNativeModules`, which user code can see.
 - **Files are too big to iterate on.** `kiln-interpreter/src/lib.rs` is 49,652 lines, and
@@ -44,12 +45,12 @@ place fail to build.
 
 | ADR | What it decides | State |
 | --- | --- | --- |
-| 0060 (revised 2026-09-26) | one owner per semantic operation; migration deletes what it replaces; the number of members implemented more than once can only go down | Proposed |
-| 0059 | intrinsics are ordinary realm objects, built from one description | Proposed |
-| 0065 | engines implement a declared primitive set; built-ins are TypeScript over it | Proposed |
-| 0066 | crates belong to layers; dependencies point down | Proposed |
+| 0060 (revised 2026-09-26) | one owner per semantic operation; migration deletes what it replaces; the number of members implemented more than once can only go down | Accepted 2026-09-26 |
+| 0059 | intrinsics are ordinary realm objects, built from one description | Accepted 2026-09-26 |
+| 0065 | engines implement a declared primitive set; built-ins are TypeScript over it | Accepted 2026-09-26 |
+| 0066 | crates belong to layers; dependencies point down | Accepted 2026-09-26 |
 
-Issue 01 settles these. Everything marked *Blocked by: 01* waits for it.
+Issue 01 settled these on 2026-09-26; nothing in this plan is waiting on a decision.
 
 ## Success measures
 
@@ -87,7 +88,7 @@ several sessions write to `main` at once and a long-lived move branch conflicts 
 
 | # | title | status |
 | --- | --- | --- |
-| 01 | [Settle the proposed ADRs](issues/01-settle-proposed-adrs.md) | ready-for-human |
+| 01 | [Settle the proposed ADRs](issues/01-settle-proposed-adrs.md) | resolved |
 | 02 | [Split `kiln-interpreter/src/lib.rs` into modules](issues/02-split-interpreter-lib.md) | ready-for-agent |
 | 03 | [Split the other oversized files](issues/03-split-other-oversized-files.md) | ready-for-agent |
 | 04 | [A README for every crate](issues/04-crate-readmes.md) | ready-for-agent |
@@ -102,6 +103,6 @@ several sessions write to `main` at once and a long-lived move branch conflicts 
 | 13 | [Remove panics that user code can reach in the interpreter](issues/13-interpreter-panics.md) | ready-for-agent |
 | 14 | [Make the C prelude order-independent](issues/14-c-prelude-order-independent.md) | ready-for-agent |
 | 15 | [Build the provider staticlib through Cargo](issues/15-provider-staticlib-via-cargo.md) | ready-for-agent |
-| 16 | [Move the gate scripts to `cargo xtask`](issues/16-scripts-to-xtask.md) | ready-for-human |
+| 16 | [Move the scripts to `cargo xtask`](issues/16-scripts-to-xtask.md) | ready-for-agent |
 | 17 | [One test entry point](issues/17-one-test-entry-point.md) | ready-for-agent |
 | 18 | [Housekeeping](issues/18-housekeeping.md) | ready-for-agent |

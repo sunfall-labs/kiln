@@ -2,7 +2,9 @@
 
 ## Status
 
-Proposed, 2026-09-26.
+Accepted, 2026-09-26. Decided by the project owner.
+
+Originally proposed, 2026-09-26.
 
 Makes concrete ADR 0005's rule that built-ins are "written against HostOps and nothing else", and
 supplies the mechanism behind ADR 0060's bootstrap-TypeScript owner kind. Extends ADR 0054 and
