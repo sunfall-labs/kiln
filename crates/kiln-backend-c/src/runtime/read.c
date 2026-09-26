@@ -165,16 +165,6 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 return kiln_c99_call(host, out, object->properties[index].getter, target, NULL, 0,
                                      depth, thrown);
             }
-            /* Lazy HTTP headers live behind a hidden pointer only `node:http`
-             * installs. Without the HTTP group the pointer can never exist,
-             * so this probe is compiled out (see `retained_method_groups`). */
-#if KILN_RETAIN_GROUP_NODE_HTTP
-            (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
-                                                &intrinsic_len);
-            if (intrinsic_key != NULL && kiln_c99_node_materialize_header(current, intrinsic_key, intrinsic_len, out)) {
-                return KILN_C99_OK;
-            }
-#endif
             current = object->prototype;
         }
         /* An iterator helper's chain ends at `Iterator.prototype`, which is a method table rather

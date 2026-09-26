@@ -2088,7 +2088,16 @@ static int kiln_c99_val_call_method_view(kiln_host *host, kiln_val receiver, con
         }
         if (status != KILN_C99_OK) return status;
 
-        if (site != NULL && KILN_VAL_IS_METHOD(method)) {
+        /* A runtime method found on an ordinary object -- `res.end` on a `node:http` response,
+         * `emitter.on` -- is remembered where it lives, like any other prototype member, by the
+         * shape branch below. The receiver-tag cache is for receivers whose tag alone decides
+         * the method (a string, an array, a builtin namespace); `kiln_c99_cached_method_matches`
+         * never matches an object, so recording one there only made every later call through
+         * this site miss it first and then resolve the method by name again. */
+        if (site != NULL && KILN_VAL_IS_METHOD(method) &&
+            !(KILN_VAL_IS_OBJECT(receiver) &&
+              kiln_c99_gc_kind_of_ptr(KILN_VAL_PTR(receiver)) == KILN_GC_OBJECT &&
+              ((const kiln_object *)KILN_VAL_PTR(receiver))->shape != NULL)) {
             site->cached_tag = (uint8_t)kiln_val_to_boundary(receiver).tag;
             site->cached_method = KILN_VAL_METHOD_ID(method);
             site->has_cached_method = 1;

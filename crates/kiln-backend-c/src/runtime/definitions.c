@@ -750,19 +750,6 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
         if (object->shape != NULL) {
             kiln_c99_ensure_dictionary(object);
         }
-        /* See the note at the matching probe in `read.c`: without the HTTP
-         * group no headers object can exist, so this is compiled out. */
-#if KILN_RETAIN_GROUP_NODE_HTTP
-        {
-            char intrinsic_buffer[256];
-            const char *intrinsic_key;
-            size_t intrinsic_len;
-            if (kiln_c99_intrinsic_ascii_view(view, intrinsic_buffer, &intrinsic_key,
-                                              &intrinsic_len)) {
-                kiln_c99_node_materialize_header(store, intrinsic_key, intrinsic_len, NULL);
-            }
-        }
-#endif
         for (index = 0; index < object->count; ++index) {
             kiln_property property;
             if (!kiln_c99_same_key_view(&object->properties[index], view)) {
@@ -896,16 +883,6 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
         }
         for (index = 0; index < object->count && !*found; ++index) {
             *found = kiln_c99_same_key_view(&object->properties[index], view);
-        }
-        if (!*found) {
-            char intrinsic_buffer[256];
-            const char *intrinsic_key;
-            size_t intrinsic_len;
-            if (kiln_c99_intrinsic_ascii_view(view, intrinsic_buffer, &intrinsic_key,
-                                              &intrinsic_len) &&
-                kiln_c99_node_has_lazy_header(target, intrinsic_key, intrinsic_len)) {
-                *found = 1;
-            }
         }
         return KILN_C99_OK;
     case KILN_VALUE_ARRAY:

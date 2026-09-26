@@ -259,7 +259,6 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
         *out = built;
         return KILN_C99_OK;
     }
-    kiln_c99_node_materialize_all_headers(target);
     /* `OrdinaryOwnPropertyKeys`: the string keys, then the symbol keys, each in insertion order.
      * Two passes because the order is part of the answer -- a copy that walks them reproduces
      * it, and the specification puts every symbol after every name. */
