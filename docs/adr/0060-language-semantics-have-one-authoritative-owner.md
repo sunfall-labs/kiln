@@ -2,7 +2,10 @@
 
 ## Status
 
-Proposed, 2026-09-13. Revised 2026-09-26, before acceptance: adds bootstrap TypeScript as an
+Accepted, 2026-09-26. Decided by the project owner, with the revision below, alongside ADR 0059, ADR
+0065 and ADR 0066.
+
+Originally proposed, 2026-09-13. Revised 2026-09-26, before acceptance: adds bootstrap TypeScript as an
 owner kind, makes a migration delete what it replaces, and makes the duplicate count a ratchet. The
 revision is argued in "Migration deletes what it replaces" below.
 

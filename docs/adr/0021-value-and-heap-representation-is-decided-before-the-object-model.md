@@ -2,7 +2,11 @@
 
 ## Status
 
-**Proposed.** Like 0018, this lands entirely in files the Codex session owns — `kiln-ir`,
+**Superseded by ADR 0053** (2026-09-26). Its first property, one machine word inside emitted code
+and the interpreter, is what ADR 0053's NaN-boxed representation decided and built. The text below
+is kept as the argument that led there.
+
+Originally **proposed**. Like 0018, this lands entirely in files the Codex session owns — `kiln-ir`,
 `kiln-backend-c`, `kiln-interpreter` — so it is a position to argue rather than a decision taken.
 
 It decides nothing about *when* an object model is built. It fixes four properties any object model

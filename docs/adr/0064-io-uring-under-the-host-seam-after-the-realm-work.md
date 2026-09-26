@@ -2,7 +2,11 @@
 
 ## Status
 
-Proposed. This revision (2026-09-26) replaces the same-day draft titled "Pluggable Linux io_uring
+Proposed. Settled by the project owner on 2026-09-26 as waiting on the implementation branch;
+that branch (`perf/http-fast-path`) has since landed with the measurements below, so this ADR is
+ready to be accepted or rejected.
+
+This revision (2026-09-26) replaces the same-day draft titled "Pluggable Linux io_uring
 completion engine for high-throughput HTTP". That draft proposed `monoio` and `monoio-http` behind
 a compile-time `linux-uring` feature, on the strength of throughput figures that the load client
 had capped and projections that nothing measured. The measurements below replace them.
