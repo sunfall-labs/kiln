@@ -48,7 +48,24 @@ pub mod node_net;
 pub mod node_stream;
 pub mod scripted_transport;
 pub use scripted_transport::{ScriptedTransport, ScriptedTransportLog};
+/// The Linux io_uring transport behind `take_transport` (ADR 0046); see the module docs.
+#[cfg(target_os = "linux")]
+pub mod uring;
 pub mod worker_pool;
+#[cfg(target_os = "linux")]
+pub use uring::IoPreference;
+
+/// One `KILN_HTTP_TRACE` line, available with or without the Hyper engine.
+#[allow(dead_code)]
+pub(crate) fn http_trace_line(line: std::fmt::Arguments<'_>) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let enabled = *ENABLED.get_or_init(|| {
+        std::env::var_os("KILN_HTTP_TRACE").is_some_and(|value| !value.is_empty() && value != "0")
+    });
+    if enabled {
+        eprintln!("[kiln-http] {line}");
+    }
+}
 pub use worker_pool::{
     ActorHandler, ActorId, DEFAULT_MAILBOX_CAPACITY, WorkerError, WorkerPool, WorkerRealmHandle,
 };
@@ -2111,6 +2128,9 @@ pub struct TokioHost {
     failure: Option<RuntimeFailure>,
     shutdown: bool,
     fs: Option<Box<dyn kiln_host_abi::FileSystemOps>>,
+    /// The io_uring every taken transport goes on when that backend is selected.
+    #[cfg(target_os = "linux")]
+    uring: uring::HostRing,
     _not_send: PhantomData<Rc<()>>,
 }
 
@@ -2212,8 +2232,17 @@ impl TokioHost {
             failure: None,
             shutdown: false,
             fs: None,
+            #[cfg(target_os = "linux")]
+            uring: uring::HostRing::new(),
             _not_send: PhantomData,
         }
+    }
+
+    /// Choose the transport backend for connections handed to the HTTP engines, overriding
+    /// `KILN_IO`. Only affects transports taken after the call.
+    #[cfg(target_os = "linux")]
+    pub fn set_io_preference(&mut self, preference: IoPreference) {
+        self.uring.set_preference(preference);
     }
 
     pub fn with_fs(mut self, fs: Box<dyn kiln_host_abi::FileSystemOps>) -> Self {
@@ -3049,6 +3078,8 @@ impl RealmHostProvider for TokioHost {
         self.pending.clear();
         self.ready.clear();
         self.resources.clear();
+        #[cfg(target_os = "linux")]
+        self.uring.shutdown();
     }
 
     fn start_on_realm(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
@@ -3157,6 +3188,19 @@ impl RealmHostProvider for TokioHost {
                 referenced: false,
             },
         );
+        #[cfg(target_os = "linux")]
+        if let Some(ring) = self.uring.ring() {
+            // Leave Tokio's reactor (one EPOLL_CTL_DEL) and hand the socket to the ring.
+            return match stream.into_std() {
+                Ok(stream) => match ring.register(std::os::fd::OwnedFd::from(stream)) {
+                    Ok(stream) => Some(HostTransport(Box::new(stream))),
+                    Err(fd) => TcpStream::from_std(std::net::TcpStream::from(fd))
+                        .ok()
+                        .map(|stream| HostTransport(Box::new(stream))),
+                },
+                Err(_) => None,
+            };
+        }
         Some(HostTransport(Box::new(stream)))
     }
 
