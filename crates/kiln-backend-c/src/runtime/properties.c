@@ -186,6 +186,90 @@ static int kiln_c99_has_inherited_setter_or_readonly(kiln_value proto) {
     return 0;
 }
 
+/* The exact form of the test above, for one key: whether a write of `key` that finds nothing on
+ * the receiver itself would be taken by the prototype chain -- a setter (or a getter with none)
+ * under that key, or a non-writable data property of that name -- instead of creating an own
+ * data property. It walks the chain exactly as `kiln_c99_put_mode_key`'s slow path does, so the
+ * two cannot disagree: a level that never held an accessor or a read-only property is skipped by
+ * pointer, and a writable data property found first shadows everything above it.
+ *
+ * The coarse test answers for the whole prototype, which made every instance of a class with a
+ * single getter (`Request`, `Response`, `Headers`, every class with `get [Symbol.toStringTag]`)
+ * a dictionary object from its first field on. */
+static int kiln_c99_inherited_write_blocked(kiln_value proto, const kiln_string *ikey,
+                                            const kiln_string *key) {
+    kiln_value current = proto;
+    size_t steps;
+    for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
+        kiln_object *walked;
+        if (current.tag != KILN_VALUE_OBJECT) return 0;
+        walked = kiln_c99_object_of(current);
+        if (walked->accessor_count != 0 || walked->read_only_seen) {
+            size_t index = kiln_c99_own_index_key(walked, ikey, key);
+            if (index != walked->count) {
+                if (!walked->properties[index].accessor) {
+                    return !walked->properties[index].writable;
+                }
+                return 1;
+            }
+        }
+        current = walked->prototype;
+    }
+    return 1;
+}
+
+/* Whether a transitioning store an inline-cache entry remembers may run on `object`: nothing on
+ * its prototype chain intercepts the entry's key. The coarse walk answers for most objects. For
+ * one whose chain holds accessors, the exact answer is remembered in the entry under the
+ * prototype epoch: every level walked is flagged as a cache holder, so any change to one of them
+ * -- an accessor defined, a property made read-only, a prototype relinked -- moves the epoch, and
+ * the receiver's own link is compared by pointer. `key` NULL means the caller has no canonical
+ * key at hand and takes the coarse answer. */
+static __attribute__((noinline)) int kiln_c99_transition_store_clear_slow(
+    kiln_c99_site *site, kiln_c99_pic_entry *entry, const kiln_object *object,
+    const kiln_string *ikey, const kiln_string *key);
+
+static inline int kiln_c99_transition_store_clear(kiln_c99_site *site, kiln_c99_pic_entry *entry,
+                                                  const kiln_object *object,
+                                                  const kiln_string *ikey,
+                                                  const kiln_string *key) {
+    kiln_value proto = object->prototype;
+    if (proto.tag != KILN_VALUE_OBJECT) return 1;
+    if (KILN_LIKELY(entry->holder == NULL && entry->epoch == kiln_c99_proto_epoch &&
+                    entry->via == kiln_c99_object_of(proto))) {
+#ifdef KILN_IC_CHECK
+        if (key != NULL && kiln_c99_inherited_write_blocked(proto, ikey, key)) {
+            fputs("kiln: inline-cache oracle: a cached transitioning store is intercepted under an unmoved epoch; a mutation path forgot kiln_c99_prototype_touched\n", stderr);
+            __builtin_trap();
+        }
+#endif
+        return 1;
+    }
+    if (!kiln_c99_has_inherited_setter_or_readonly(proto)) return 1;
+    return kiln_c99_transition_store_clear_slow(site, entry, object, ikey, key);
+}
+
+static __attribute__((noinline)) int kiln_c99_transition_store_clear_slow(
+    kiln_c99_site *site, kiln_c99_pic_entry *entry, const kiln_object *object,
+    const kiln_string *ikey, const kiln_string *key) {
+    kiln_value proto = object->prototype;
+    kiln_value current;
+    size_t steps;
+    if (key == NULL || entry->holder != NULL) return 0;
+    if (kiln_c99_inherited_write_blocked(proto, ikey, key)) return 0;
+    current = proto;
+    for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH && current.tag == KILN_VALUE_OBJECT;
+         ++steps) {
+        kiln_object *walked = kiln_c99_object_of(current);
+        walked->cache_holder = 1;
+        current = walked->prototype;
+    }
+    entry->via = kiln_c99_object_of(proto);
+    entry->epoch = kiln_c99_proto_epoch;
+    kiln_c99_gc_register_site(site);
+    return 1;
+}
+
 /* A write to an existing key replaces it in place, so insertion order is the order of first
  * appearance -- which is the order `Object.keys` reports and the order a console prints. */
 /* `ikey` as for `kiln_c99_get_ikey`: a compiled site's canonical pointer, or NULL to look it
@@ -419,7 +503,9 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
             }
         } else if (!object->not_extensible &&
                    (object->prototype.tag == KILN_VALUE_UNDEFINED ||
-                    !kiln_c99_has_inherited_setter_or_readonly(object->prototype))) {
+                    !kiln_c99_has_inherited_setter_or_readonly(object->prototype) ||
+                    (ikey != NULL &&
+                     !kiln_c99_inherited_write_blocked(object->prototype, ikey, key)))) {
             double index_num = kiln_c99_key_index_key(key);
             if (index_num < 0.0) {
                 kiln_shape *next_shape = NULL;
