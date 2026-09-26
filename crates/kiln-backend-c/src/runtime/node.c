@@ -428,7 +428,7 @@ static int kiln_c99_node_set_hidden_pointer(kiln_value object, const char *key, 
 static int kiln_c99_is_node_hidden_key(const char *key, size_t key_len) {
     static const char *const names[] = {
         "@@node:socket", "@@node:server", "@@node:client", "@@node:response",
-        "@@node:lazy-headers", "@@kiln:node:is-file", "@@kiln:node:is-directory",
+        "@@kiln:node:is-file", "@@kiln:node:is-directory",
         "@@kiln:node:is-symlink",
     };
     size_t index;
@@ -448,10 +448,16 @@ static int kiln_c99_is_node_hidden_key(const char *key, size_t key_len) {
 
 static void *kiln_c99_node_hidden_pointer(kiln_value object, const char *key, size_t key_len) {
     kiln_property *slot = kiln_c99_own_private(object, key, key_len);
-    if (slot == NULL || slot->value.tag != KILN_VALUE_OBJECT ||
-        slot->value.len != 0xFFFFFFFFu)
-        return NULL;
-    return (void *)(uintptr_t)slot->value.bits;
+    void *pointer;
+    if (slot == NULL || slot->value.tag != KILN_VALUE_OBJECT) return NULL;
+    pointer = (void *)(uintptr_t)slot->value.bits;
+    if (slot->value.len == 0xFFFFFFFFu) return pointer;
+    /* A layout-built request or response keeps its pointer in a shaped slot as a plain
+     * object-tagged word, and moving that object to dictionary mode leaves exactly that here
+     * (see the layouts below). Accepted only when the block really is a response. */
+    if (pointer != NULL && kiln_c99_gc_kind_of_ptr(pointer) == KILN_GC_NODE_RESPONSE)
+        return pointer;
+    return NULL;
 }
 
 static int kiln_c99_ascii_case_equal(const char *a, size_t a_len, const char *b, size_t b_len) {
@@ -467,95 +473,529 @@ static int kiln_c99_ascii_case_equal(const char *a, size_t a_len, const char *b,
     return 1;
 }
 
-static int kiln_c99_node_materialize_header(kiln_value headers_obj, const char *key, size_t key_len, kiln_value *out) {
-    if (headers_obj.tag != KILN_VALUE_OBJECT) return 0;
-    kiln_object *obj = kiln_c99_object_of(headers_obj);
-    if (obj->shape != NULL) kiln_c99_ensure_dictionary(obj);
-    if (obj->properties == NULL) return 0;
-    kiln_node_response *resp = (kiln_node_response *)kiln_c99_node_hidden_pointer(headers_obj, "@@node:lazy-headers", 19);
-    size_t at = 0;
-    if (resp == NULL || resp->request_headers == NULL) return 0;
-    while (at < resp->request_headers_len) {
-        const char *hname = resp->request_headers + at;
-        size_t hname_len = strlen(hname);
-        const char *hval;
-        size_t hval_len;
-        at += hname_len + 1;
-        if (at > resp->request_headers_len) break;
-        hval = resp->request_headers + at;
-        hval_len = strlen(hval);
-        at += hval_len + 1;
-        if (at > resp->request_headers_len) break;
-        if (kiln_c99_ascii_case_equal(hname, hname_len, key, key_len)) {
-            char *owned_name = hname_len == 0 ? NULL : kiln_c99_gc_alloc_text(hname_len);
-            if (hname_len != 0 && owned_name != NULL) {
-                memcpy(owned_name, hname, hname_len);
+/* ---------------------------------------------------------------------------------------------
+ * The `node:http` request and response a server hands its listener, built from fixed layouts.
+ *
+ * Every request builds the same two objects: an `IncomingMessage` with the response's hidden
+ * pointer, `method`, `url`, `socket`, `connection` and `complete`, and a `ServerResponse` with
+ * the pointer, `req`, `socket`, `connection`, `statusCode`, `headersSent` and `writableEnded`.
+ * Building them a property at a time interned and hashed every name, walked the prototype chain
+ * for a setter before every write, grew a property list by doubling, and left both objects in
+ * dictionary mode, where no call site could cache `res.end` or `req.url` -- per request, for
+ * answers that never change. Here the keys are pinned once per heap (ADR 0047's "pre-interned
+ * static per prelude literal key"), each layout is one shape chain built once per heap
+ * (ADR 0050), and an instance is a fresh object pointed at the chain's last shape with its slots
+ * stored by index: no hashing, no transition search, no property list, no `malloc`.
+ *
+ * The objects are fresh every request. An earlier revision recycled one pair per keep-alive
+ * socket and reset it with nine `delete`s; that was both the costliest step in the path and
+ * observably wrong -- a request a program kept (a log, a queue, a closure) changed its `url`
+ * under it when the next request arrived, and own properties a handler added (`req.user`,
+ * `res.locals`) leaked into the next request on the same socket.
+ *
+ * The chains hang off the root shape's *parent* link only: the root's own transition table is
+ * bounded (32 edges, ADR 0050) and a program exhausts it long before its first request, so these
+ * are not registered there. A handler that adds a member extends the chain the ordinary way.
+ *
+ * The hidden pointer sits in slot 0 as an object-tagged word, which is what keeps the response
+ * block alive while a program holds either object (the tracer marks it). A `delete` or an
+ * attribute change moves an object to dictionary mode and turns that slot into an ordinary
+ * property holding the same pointer; `kiln_c99_node_response_of` and
+ * `kiln_c99_node_hidden_pointer` accept both forms.
+ *
+ * The fields a program may write (`statusCode`) or that the runtime updates (`headersSent`,
+ * `writableEnded`, `complete`) are ordinary own data properties at a fixed index. The runtime
+ * writes them in place when the index still holds that key as a data property, and through the
+ * ordinary `put` otherwise, so a program that deletes or redefines one keeps its answer.
+ * ------------------------------------------------------------------------------------------- */
+enum {
+    KILN_C99_NODE_REQ_RESPONSE,
+    KILN_C99_NODE_REQ_METHOD,
+    KILN_C99_NODE_REQ_URL,
+    KILN_C99_NODE_REQ_SOCKET,
+    KILN_C99_NODE_REQ_CONNECTION,
+    KILN_C99_NODE_REQ_COMPLETE,
+    KILN_C99_NODE_REQ_COUNT
+};
+enum {
+    KILN_C99_NODE_RES_RESPONSE,
+    KILN_C99_NODE_RES_REQ,
+    KILN_C99_NODE_RES_SOCKET,
+    KILN_C99_NODE_RES_CONNECTION,
+    KILN_C99_NODE_RES_STATUS_CODE,
+    KILN_C99_NODE_RES_HEADERS_SENT,
+    KILN_C99_NODE_RES_WRITABLE_ENDED,
+    KILN_C99_NODE_RES_COUNT
+};
+
+typedef struct {
+    /* The heap the pinned keys and shapes below belong to; another heap (realm) rebuilds. */
+    const void *heap;
+    const kiln_string *request_keys[KILN_C99_NODE_REQ_COUNT];
+    const kiln_string *response_keys[KILN_C99_NODE_RES_COUNT];
+    kiln_shape *request_shape;
+    kiln_shape *response_shape;
+    /* The listener store `kiln_c99_node_event` keeps on an emitter, looked for on every emit. */
+    const kiln_string *events_key;
+} kiln_node_http_layout;
+
+/* Per thread, like the realm cache it follows: a worker's realm runs on its own thread with its
+ * own heap, and the heap pointer inside says which one the keys and shapes belong to. */
+static _Thread_local kiln_node_http_layout kiln_c99_node_http_layouts;
+
+/* A shape chain spelling `keys` in order. Realm-lifetime like every other shape; rebuilt only
+ * when a different heap asks, which a process does once per realm. */
+static kiln_shape *kiln_c99_node_layout_shape(const kiln_string *const *keys, size_t count) {
+    kiln_shape *parent = &kiln_c99_root_shape;
+    size_t index;
+    for (index = 0; index < count; ++index) {
+        kiln_shape *next = (kiln_shape *)calloc(1, sizeof *next);
+        if (next == NULL) return NULL;
+        next->parent = parent;
+        next->ikey = keys[index];
+        next->slot_index = (uint32_t)index;
+        next->property_count = (uint32_t)index + 1;
+        memcpy((void *)next->keys, (const void *)parent->keys, index * sizeof *next->keys);
+        next->keys[index] = keys[index];
+        next->has_symbol_key = parent->has_symbol_key || kiln_c99_key_is_reserved(keys[index]);
+        next->double_slots_mask = 0;
+        /* An edge from our own previous shape, so a program that happens to build the same
+         * member sequence from it meets the same shape instead of forking one. */
+        if (index != 0) {
+            parent->inline_trans_ikey[0] = keys[index];
+            parent->inline_trans_next[0] = next;
+            parent->num_transitions = 1;
+        }
+        parent = next;
+    }
+    return parent;
+}
+
+static int kiln_c99_node_http_layout_ready(const kiln_node_http_layout **out) {
+    static const struct { const char *text; size_t len; } request_names[KILN_C99_NODE_REQ_COUNT] = {
+        {"@@node:response", 15}, {"method", 6}, {"url", 3}, {"socket", 6}, {"connection", 10},
+        {"complete", 8}};
+    static const struct { const char *text; size_t len; } response_names[KILN_C99_NODE_RES_COUNT] = {
+        {"@@node:response", 15}, {"req", 3}, {"socket", 6}, {"connection", 10},
+        {"statusCode", 10}, {"headersSent", 11}, {"writableEnded", 13}};
+    kiln_node_http_layout *layout = &kiln_c99_node_http_layouts;
+    const void *heap = kiln_c99_gc_heap();
+    size_t index;
+    if (heap == NULL) return KILN_C99_OUT_OF_MEMORY;
+    if (layout->heap == heap) {
+        *out = layout;
+        return KILN_C99_OK;
+    }
+    layout->heap = NULL;
+    /* Pinned: shapes are plain memory the collector never traces, so the key table itself has
+     * to keep these blocks alive for as long as the heap lives. */
+    for (index = 0; index < KILN_C99_NODE_REQ_COUNT; ++index) {
+        layout->request_keys[index] =
+            kiln_c99_intern_static(request_names[index].text, request_names[index].len);
+        if (layout->request_keys[index] == NULL) return KILN_C99_OUT_OF_MEMORY;
+    }
+    for (index = 0; index < KILN_C99_NODE_RES_COUNT; ++index) {
+        layout->response_keys[index] =
+            kiln_c99_intern_static(response_names[index].text, response_names[index].len);
+        if (layout->response_keys[index] == NULL) return KILN_C99_OUT_OF_MEMORY;
+    }
+    layout->events_key = kiln_c99_intern_static("@@node:events", 13);
+    if (layout->events_key == NULL) return KILN_C99_OUT_OF_MEMORY;
+    layout->request_shape = kiln_c99_node_layout_shape(layout->request_keys, KILN_C99_NODE_REQ_COUNT);
+    layout->response_shape =
+        kiln_c99_node_layout_shape(layout->response_keys, KILN_C99_NODE_RES_COUNT);
+    if (layout->request_shape == NULL || layout->response_shape == NULL)
+        return KILN_C99_OUT_OF_MEMORY;
+    layout->heap = heap;
+    *out = layout;
+    return KILN_C99_OK;
+}
+
+/* A fresh object on `shape`, linked to `prototype`, with the hidden response pointer in slot 0
+ * and every other slot undefined. Nothing here can run program code or collect: the object is
+ * new, and the rest is stores. */
+static int kiln_c99_node_http_instance(kiln_value *out, kiln_value prototype, kiln_shape *shape,
+                                       kiln_node_response *response) {
+    kiln_object *object;
+    int status = kiln_c99_new_object(out);
+    if (status != KILN_C99_OK) return status;
+    object = kiln_c99_object_of(*out);
+    object->shape = shape;
+    object->slots[0] = KILN_VAL_TAG_PTR(KILN_TAG_OBJECT_PREFIX, response);
+    if (kiln_c99_can_be_prototype(prototype)) object->prototype = prototype;
+    return KILN_C99_OK;
+}
+
+/* A pointer read back from a hidden slot, in either form the object may hold it: the marked
+ * word `kiln_c99_node_set_hidden_pointer` writes, or the plain object-tagged word a layout-built
+ * slot becomes when its object moves to dictionary mode. The second is accepted only when the
+ * block really is a response, since that conversion is the one way it can arise. */
+static void *kiln_c99_node_hidden_pointer_value(kiln_value value) {
+    void *pointer;
+    if (value.tag != KILN_VALUE_OBJECT) return NULL;
+    pointer = (void *)(uintptr_t)value.bits;
+    if (value.len == 0xFFFFFFFFu) return pointer;
+    if (pointer != NULL && kiln_c99_gc_kind_of_ptr(pointer) == KILN_GC_NODE_RESPONSE)
+        return pointer;
+    return NULL;
+}
+
+/* The response a request or response object carries, read from the layout's slot 0 before
+ * falling back to the by-name lookup every other object needs. */
+static kiln_node_response *kiln_c99_node_response_of(kiln_value receiver) {
+    if (receiver.tag == KILN_VALUE_OBJECT) {
+        const kiln_object *object = kiln_c99_object_of(receiver);
+        const kiln_node_http_layout *layout = &kiln_c99_node_http_layouts;
+        const kiln_string *key = layout->response_keys[KILN_C99_NODE_RES_RESPONSE];
+        if (layout->heap != NULL && key != NULL) {
+            if (object->shape != NULL) {
+                if (object->shape->property_count != 0 && object->shape->keys[0] == key &&
+                    object->slot_capacity != 0 && KILN_VAL_IS_OBJECT(object->slots[0]))
+                    return (kiln_node_response *)KILN_VAL_PTR(object->slots[0]);
+            } else if (object->count != 0 && object->properties[0].key == key) {
+                return (kiln_node_response *)kiln_c99_node_hidden_pointer_value(
+                    object->properties[0].value);
             }
-            kiln_value val = kiln_c99_copy_text(hval, hval_len);
-            kiln_c99_put(NULL, headers_obj, owned_name, hname_len, val, 0, NULL);
-            if (out != NULL) *out = val;
+        }
+    }
+    return (kiln_node_response *)kiln_c99_node_hidden_pointer(receiver, "@@node:response", 15);
+}
+
+/* Store a runtime-owned member (`headersSent`, `writableEnded`, `complete`, `statusCode`) the
+ * way an assignment would: in place when slot `index` still holds `key` as a plain data member,
+ * and through the ordinary `put` when the program has moved, deleted or redefined it. */
+static int kiln_c99_node_layout_store(kiln_value target, size_t index, const kiln_string *key,
+                                      kiln_value value) {
+    if (target.tag == KILN_VALUE_OBJECT) {
+        kiln_object *object = kiln_c99_object_of(target);
+        if (object->shape != NULL) {
+            if (index < object->shape->property_count && object->shape->keys[index] == key &&
+                index < object->slot_capacity && !object->frozen) {
+                object->slots[index] = kiln_val_from_boundary(value);
+                return KILN_C99_OK;
+            }
+        } else if (index < object->count && object->properties[index].key == key &&
+                   !object->properties[index].accessor && object->properties[index].writable &&
+                   !object->frozen) {
+            object->properties[index].value = value;
+            return KILN_C99_OK;
+        }
+    }
+    return kiln_c99_put(NULL, target, (const char *)kiln_string_latin1(key), key->unit_len, value,
+                        0, NULL);
+}
+
+/* The value of the plain data member `key` at slot `index`, or 0 when the program has moved
+ * it and the caller must read it the ordinary way. */
+static int kiln_c99_node_layout_load(kiln_value target, size_t index, const kiln_string *key,
+                                     kiln_value *out) {
+    if (target.tag == KILN_VALUE_OBJECT) {
+        const kiln_object *object = kiln_c99_object_of(target);
+        if (object->shape != NULL) {
+            if (index < object->shape->property_count && object->shape->keys[index] == key &&
+                index < object->slot_capacity) {
+                *out = kiln_val_to_boundary(object->slots[index]);
+                return 1;
+            }
+        } else if (index < object->count && object->properties[index].key == key &&
+                   !object->properties[index].accessor) {
+            *out = object->properties[index].value;
             return 1;
         }
     }
     return 0;
 }
 
-static void kiln_c99_node_materialize_all_headers(kiln_value headers_obj) {
-    if (headers_obj.tag != KILN_VALUE_OBJECT) return;
-    kiln_object *obj = kiln_c99_object_of(headers_obj);
-    if (obj->shape != NULL) kiln_c99_ensure_dictionary(obj);
-    if (obj->properties == NULL) return;
-    kiln_node_response *resp = (kiln_node_response *)kiln_c99_node_hidden_pointer(headers_obj, "@@node:lazy-headers", 19);
+/* ---- the request's header bytes ---------------------------------------------------------- */
+
+/* The head event's header buffer belongs to the runtime, which reuses it for the next request
+ * on the connection: a `req.headers` first read after the listener returned -- after an
+ * `await`, in a timer, from a request a program kept -- would read another request's headers,
+ * or freed memory. Called when the head dispatch returns; a request whose headers were already
+ * read has nothing borrowed left. */
+static int kiln_c99_node_request_headers_keep(kiln_node_response *response) {
+    char *owned;
+    if (response == NULL || response->request_headers == NULL || response->request_headers_owned)
+        return KILN_C99_OK;
+    if (response->request_headers_len == 0) {
+        response->request_headers = NULL;
+        return KILN_C99_OK;
+    }
+    owned = (char *)malloc(response->request_headers_len);
+    if (owned == NULL) {
+        response->request_headers = NULL;
+        response->request_headers_len = 0;
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    memcpy(owned, response->request_headers, response->request_headers_len);
+    response->request_headers = owned;
+    response->request_headers_owned = 1;
+    return KILN_C99_OK;
+}
+
+typedef struct {
+    const char *name;
+    size_t name_len;
+    const char *value;
+    size_t value_len;
+} kiln_c99_node_header_field;
+
+static int kiln_c99_node_header_name_order(const kiln_c99_node_header_field *left,
+                                           const kiln_c99_node_header_field *right) {
+    size_t length = left->name_len < right->name_len ? left->name_len : right->name_len;
+    int order = length == 0 ? 0 : memcmp(left->name, right->name, length);
+    if (order != 0) return order;
+    return left->name_len < right->name_len ? -1 : left->name_len > right->name_len ? 1 : 0;
+}
+
+/* `req.headers` from the flattened bytes, with the interpreter's answer (`HttpHeaders::
+ * headers_object`): names lowercased, one property per name in byte order of the name, and a
+ * repeated field joined with ", " in arrival order. The runtime already lowercases names; the
+ * lowering here is for a buffer that did not. */
+static int kiln_c99_node_request_headers_object(kiln_node_response *response, kiln_value *out) {
+    kiln_c99_node_header_field inline_fields[16];
+    kiln_c99_node_header_field *fields = inline_fields;
+    size_t count = 0;
+    size_t capacity = sizeof inline_fields / sizeof inline_fields[0];
     size_t at = 0;
-    int dummy;
-    if (resp == NULL || resp->request_headers == NULL) return;
-    kiln_c99_delete(NULL, headers_obj, "@@node:lazy-headers", 19, &dummy, 0, NULL);
-    while (at < resp->request_headers_len) {
-        const char *hname = resp->request_headers + at;
-        size_t hname_len = strlen(hname);
-        const char *hval;
-        size_t hval_len;
-        at += hname_len + 1;
-        if (at > resp->request_headers_len) break;
-        hval = resp->request_headers + at;
-        hval_len = strlen(hval);
-        at += hval_len + 1;
-        if (at > resp->request_headers_len) break;
-        if (kiln_c99_own_index(obj, NULL, hname, hname_len) == obj->count) {
-            char *owned_name = hname_len == 0 ? NULL : kiln_c99_gc_alloc_text(hname_len);
-            if (hname_len != 0 && owned_name != NULL) {
-                memcpy(owned_name, hname, hname_len);
+    size_t index;
+    int status;
+    const char *bytes = response == NULL ? NULL : response->request_headers;
+    size_t len = response == NULL ? 0 : response->request_headers_len;
+    status = kiln_c99_new_object_with_capacity(out, 8);
+    if (status != KILN_C99_OK) return status;
+    while (bytes != NULL && at < len) {
+        const char *name = bytes + at;
+        const char *name_end = (const char *)memchr(name, '\0', len - at);
+        const char *value;
+        const char *value_end;
+        if (name_end == NULL) break;
+        value = name_end + 1;
+        if ((size_t)(value - bytes) >= len) break;
+        value_end = (const char *)memchr(value, '\0', len - (size_t)(value - bytes));
+        if (value_end == NULL) break;
+        at = (size_t)(value_end - bytes) + 1;
+        if (name_end == name) continue;
+        if (count == capacity) {
+            kiln_c99_node_header_field *grown;
+            size_t next = capacity * 2;
+            grown = (kiln_c99_node_header_field *)malloc(next * sizeof *grown);
+            if (grown == NULL) {
+                if (fields != inline_fields) free(fields);
+                return KILN_C99_OUT_OF_MEMORY;
             }
-            kiln_c99_put(NULL, headers_obj, owned_name, hname_len,
-                         kiln_c99_copy_text(hval, hval_len), 0, NULL);
+            memcpy(grown, fields, count * sizeof *fields);
+            if (fields != inline_fields) free(fields);
+            fields = grown;
+            capacity = next;
         }
+        fields[count].name = name;
+        fields[count].name_len = (size_t)(name_end - name);
+        fields[count].value = value;
+        fields[count].value_len = (size_t)(value_end - value);
+        ++count;
+    }
+    /* Insertion sort: stable, so repeats keep their arrival order for the join below, and a
+     * request carries a dozen fields, not a thousand. */
+    for (index = 1; index < count; ++index) {
+        kiln_c99_node_header_field moving = fields[index];
+        size_t hole = index;
+        while (hole > 0 && kiln_c99_node_header_name_order(&fields[hole - 1], &moving) > 0) {
+            fields[hole] = fields[hole - 1];
+            --hole;
+        }
+        fields[hole] = moving;
+    }
+    status = KILN_C99_OK;
+    for (index = 0; status == KILN_C99_OK && index < count;) {
+        size_t run = index + 1;
+        size_t total = fields[index].value_len;
+        char name_buffer[64];
+        char *name = fields[index].name_len <= sizeof name_buffer
+                         ? name_buffer
+                         : (char *)malloc(fields[index].name_len);
+        size_t byte;
+        kiln_value value;
+        kiln_property *slot;
+        while (run < count && fields[run].name_len == fields[index].name_len &&
+               memcmp(fields[run].name, fields[index].name, fields[index].name_len) == 0) {
+            total += 2 + fields[run].value_len;
+            ++run;
+        }
+        if (name == NULL) {
+            status = KILN_C99_OUT_OF_MEMORY;
+            break;
+        }
+        for (byte = 0; byte < fields[index].name_len; ++byte)
+            name[byte] = (char)tolower((unsigned char)fields[index].name[byte]);
+        if (run == index + 1) {
+            value = kiln_c99_copy_text(fields[index].value, fields[index].value_len);
+        } else {
+            char *joined = (char *)malloc(total == 0 ? 1 : total);
+            size_t written = 0;
+            size_t part;
+            if (joined == NULL) {
+                if (name != name_buffer) free(name);
+                status = KILN_C99_OUT_OF_MEMORY;
+                break;
+            }
+            for (part = index; part < run; ++part) {
+                if (part != index) {
+                    joined[written++] = ',';
+                    joined[written++] = ' ';
+                }
+                memcpy(joined + written, fields[part].value, fields[part].value_len);
+                written += fields[part].value_len;
+            }
+            value = kiln_c99_copy_text(joined, written);
+            free(joined);
+        }
+        if (value.tag != KILN_VALUE_STRING) {
+            status = KILN_C99_OUT_OF_MEMORY;
+        } else {
+            /* An own definition, not an assignment: a header named `__proto__` is a header. */
+            status = kiln_c99_own_slot(*out, name, fields[index].name_len, &slot);
+            if (status == KILN_C99_OK) slot->value = value;
+        }
+        if (name != name_buffer) free(name);
+        index = run;
+    }
+    if (fields != inline_fields) free(fields);
+    return status;
+}
+
+/* ---- the response head the program is building ------------------------------------------ */
+
+/* A string as UTF-8 bytes. An all-ASCII Latin-1 string (every header name, nearly every value)
+ * is borrowed as is; anything else is converted into `*owned`, which the caller frees. */
+static int kiln_c99_node_utf8_bytes(kiln_value text, const char **bytes, size_t *len,
+                                    uint8_t **owned) {
+    const kiln_string *string;
+    *owned = NULL;
+    if (text.tag != KILN_VALUE_STRING || text.ptr == NULL) return KILN_C99_INVALID_ARGUMENT;
+    string = (const kiln_string *)text.ptr;
+    if (!kiln_string_is_utf16(string)) {
+        const uint8_t *latin1 = kiln_string_latin1(string);
+        size_t index;
+        for (index = 0; index < string->unit_len; ++index) {
+            if (latin1[index] >= 0x80) break;
+        }
+        if (index == string->unit_len) {
+            *bytes = string->unit_len == 0 ? "" : (const char *)latin1;
+            *len = string->unit_len;
+            return KILN_C99_OK;
+        }
+    }
+    if (kiln_c99_string_to_utf8_lossy(text, owned, len) != KILN_C99_OK)
+        return KILN_C99_OUT_OF_MEMORY;
+    *bytes = *len == 0 ? "" : (const char *)*owned;
+    return KILN_C99_OK;
+}
+
+/* The entry for `name` (ASCII case-insensitive) in the flattened head: its offset, the offset
+ * of its value, and the offset just past it. Answers 0 when there is none. */
+static int kiln_c99_node_out_find(const kiln_node_response *response, const char *name,
+                                  size_t name_len, size_t *entry, size_t *value_at,
+                                  size_t *end) {
+    size_t at = 0;
+    const char *bytes = response->out_headers;
+    size_t len = response->out_headers_len;
+    while (at < len) {
+        const char *here = bytes + at;
+        const char *name_end = (const char *)memchr(here, '\0', len - at);
+        const char *value;
+        const char *value_end;
+        if (name_end == NULL) return 0;
+        value = name_end + 1;
+        value_end = (const char *)memchr(value, '\0', len - (size_t)(value - bytes));
+        if (value_end == NULL) return 0;
+        if (kiln_c99_ascii_case_equal(here, (size_t)(name_end - here), name, name_len)) {
+            *entry = at;
+            *value_at = (size_t)(value - bytes);
+            *end = (size_t)(value_end - bytes) + 1;
+            return 1;
+        }
+        at = (size_t)(value_end - bytes) + 1;
+    }
+    return 0;
+}
+
+static int kiln_c99_node_out_reserve(kiln_node_response *response, size_t needed) {
+    return kiln_c99_reserve((void **)&response->out_headers, &response->out_headers_capacity,
+                            needed, 1);
+}
+
+/* `setHeader`'s edit: a name already present keeps its spelling and position and takes the
+ * new value; a new name is appended. The interpreter's `HttpResponseState::headers` rule. */
+static int kiln_c99_node_out_set(kiln_node_response *response, const char *name,
+                                 size_t name_len, const char *value, size_t value_len) {
+    size_t entry, value_at, end;
+    if (kiln_c99_node_out_find(response, name, name_len, &entry, &value_at, &end)) {
+        size_t old_value_len = end - 1 - value_at;
+        size_t tail = response->out_headers_len - end;
+        size_t next_len = response->out_headers_len - old_value_len + value_len;
+        (void)entry;
+        if (value_len > old_value_len &&
+            kiln_c99_node_out_reserve(response, next_len) != KILN_C99_OK)
+            return KILN_C99_OUT_OF_MEMORY;
+        memmove(response->out_headers + value_at + value_len + 1,
+                response->out_headers + end, tail);
+        if (value_len != 0) memcpy(response->out_headers + value_at, value, value_len);
+        response->out_headers[value_at + value_len] = '\0';
+        response->out_headers_len = next_len;
+        return KILN_C99_OK;
+    }
+    if (name_len > SIZE_MAX / 2 || value_len > SIZE_MAX / 2 - name_len - 2 ||
+        kiln_c99_node_out_reserve(response, response->out_headers_len + name_len + value_len + 2) !=
+            KILN_C99_OK)
+        return KILN_C99_OUT_OF_MEMORY;
+    if (name_len != 0)
+        memcpy(response->out_headers + response->out_headers_len, name, name_len);
+    response->out_headers_len += name_len;
+    response->out_headers[response->out_headers_len++] = '\0';
+    if (value_len != 0)
+        memcpy(response->out_headers + response->out_headers_len, value, value_len);
+    response->out_headers_len += value_len;
+    response->out_headers[response->out_headers_len++] = '\0';
+    return KILN_C99_OK;
+}
+
+static void kiln_c99_node_out_remove(kiln_node_response *response, const char *name,
+                                     size_t name_len) {
+    size_t entry, value_at, end;
+    while (kiln_c99_node_out_find(response, name, name_len, &entry, &value_at, &end)) {
+        memmove(response->out_headers + entry, response->out_headers + end,
+                response->out_headers_len - end);
+        response->out_headers_len -= end - entry;
     }
 }
 
-static int kiln_c99_node_has_lazy_header(kiln_value headers_obj, const char *key, size_t key_len) {
-    if (headers_obj.tag != KILN_VALUE_OBJECT) return 0;
-    kiln_object *obj = kiln_c99_object_of(headers_obj);
-    if (obj->shape != NULL) kiln_c99_ensure_dictionary(obj);
-    if (obj->properties == NULL) return 0;
-    kiln_node_response *resp = (kiln_node_response *)kiln_c99_node_hidden_pointer(headers_obj, "@@node:lazy-headers", 19);
-    size_t at = 0;
-    if (resp == NULL || resp->request_headers == NULL) return 0;
-    while (at < resp->request_headers_len) {
-        const char *hname = resp->request_headers + at;
-        size_t hname_len = strlen(hname);
-        const char *hval;
-        size_t hval_len;
-        at += hname_len + 1;
-        if (at > resp->request_headers_len) break;
-        hval = resp->request_headers + at;
-        hval_len = strlen(hval);
-        at += hval_len + 1;
-        if (at > resp->request_headers_len) break;
-        if (kiln_c99_ascii_case_equal(hname, hname_len, key, key_len)) {
-            return 1;
-        }
+/* `setHeader(name, value)` and one member of `writeHead`'s object: both are converted to text
+ * the way the interpreter's `to_display_string` does, then edited into the head. */
+static int kiln_c99_node_out_set_values(kiln_node_response *response, kiln_value name,
+                                        kiln_value value) {
+    const char *name_bytes;
+    const char *value_bytes;
+    size_t name_len;
+    size_t value_len;
+    uint8_t *name_owned;
+    uint8_t *value_owned;
+    int status;
+    name = kiln_c99_text(name);
+    value = kiln_c99_text(value);
+    if (name.tag != KILN_VALUE_STRING || value.tag != KILN_VALUE_STRING)
+        return KILN_C99_OUT_OF_MEMORY;
+    status = kiln_c99_node_utf8_bytes(name, &name_bytes, &name_len, &name_owned);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_node_utf8_bytes(value, &value_bytes, &value_len, &value_owned);
+    if (status != KILN_C99_OK) {
+        free(name_owned);
+        return status;
     }
-    return 0;
+    status = kiln_c99_node_out_set(response, name_bytes, name_len, value_bytes, value_len);
+    free(name_owned);
+    free(value_owned);
+    return status;
 }
 
 static int kiln_c99_node_client_try_start(kiln_node_client_request *request) {
@@ -611,6 +1051,34 @@ static int kiln_c99_node_emit(kiln_host *host, kiln_value object, const char *ev
                               kiln_value *thrown) {
     kiln_value payload[2];
     kiln_value ignored;
+    /* No listener was ever registered on this object -- `end` on a request and `finish` on a
+     * response nearly always. `kiln_c99_node_event` answers `emit` with false for exactly this
+     * state without looking at the name, so the name need not be allocated to ask. */
+    if (object.tag == KILN_VALUE_OBJECT) {
+        const kiln_object *store = kiln_c99_object_of(object);
+        const kiln_node_http_layout *layout = &kiln_c99_node_http_layouts;
+        if (layout->heap != NULL && layout->heap == kiln_c99_gc_heap()) {
+            /* The pinned key is the canonical pointer, so either representation is searched by
+             * pointer, and a shaped emitter stays shaped. */
+            int listening = 0;
+            if (store->shape != NULL) {
+                uint32_t slot;
+                listening = kiln_c99_shape_find_slot(store->shape, layout->events_key, &slot);
+            } else {
+                size_t index;
+                for (index = 0; index < store->count; ++index) {
+                    if (store->properties[index].key == layout->events_key) {
+                        listening = store->properties[index].value.tag == KILN_VALUE_ARRAY;
+                        break;
+                    }
+                }
+            }
+            if (!listening) return KILN_C99_OK;
+        } else {
+            kiln_property *state = kiln_c99_own_private(object, "@@node:events", 13);
+            if (state == NULL || state->value.tag != KILN_VALUE_ARRAY) return KILN_C99_OK;
+        }
+    }
     payload[0] = kiln_c99_copy_text(event, strlen(event));
     payload[1] = argument;
     return kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMIT, object, payload,
@@ -825,8 +1293,10 @@ static const char kiln_c99_transfer_encoding_chunked[] = "chunked";
 static const char kiln_c99_slash[] = "/";
 
 static kiln_value kiln_c99_node_http_target_text(const char *bytes, size_t len) {
+    static _Thread_local kiln_value slash;
     if (len == 1 && bytes[0] == '/') {
-        return kiln_c99_static_text(kiln_c99_slash, 1);
+        if (slash.tag != KILN_VALUE_STRING) slash = kiln_c99_static_text(kiln_c99_slash, 1);
+        return slash;
     }
     return kiln_c99_copy_text(bytes, len);
 }
@@ -837,13 +1307,18 @@ static kiln_value kiln_c99_node_http_target_text(const char *bytes, size_t len) 
  * back can be this unit's own literal rather than a fresh block per request. An extension method
  * -- the registry is open -- still copies, so nothing depends on the list being complete. */
 static kiln_value kiln_c99_node_http_method_text(const char *bytes, size_t len) {
-    static const char *const known[] = {"GET",     "POST",    "PUT",  "DELETE", "HEAD",
-                                        "OPTIONS", "PATCH",   "CONNECT", "TRACE"};
+    static const struct { const char *name; size_t len; } known[] = {
+        {"GET", 3}, {"POST", 4}, {"PUT", 3},     {"DELETE", 6},  {"HEAD", 4},
+        {"OPTIONS", 7}, {"PATCH", 5}, {"CONNECT", 7}, {"TRACE", 5}};
+    /* The answer for each, made once: `kiln_c99_static_text` scans its table to find it. */
+    static _Thread_local kiln_value made[sizeof known / sizeof known[0]];
     size_t index;
     for (index = 0; index < sizeof known / sizeof known[0]; ++index) {
-        const char *name = known[index];
-        if (name[0] == bytes[0] && strlen(name) == len && memcmp(name, bytes, len) == 0) {
-            return kiln_c99_static_text(name, len);
+        if (known[index].len == len && known[index].name[0] == bytes[0] &&
+            memcmp(known[index].name, bytes, len) == 0) {
+            if (made[index].tag != KILN_VALUE_STRING)
+                made[index] = kiln_c99_static_text(known[index].name, len);
+            return made[index];
         }
     }
     return kiln_c99_copy_text(bytes, len);
@@ -865,6 +1340,21 @@ static int kiln_c99_node_http_byte_span(kiln_value value, kiln_c99_node_byte_spa
     out->text = kiln_c99_undefined();
     out->owned = NULL;
     if (value.tag == KILN_VALUE_STRING) {
+        /* An ASCII body is its own UTF-8 and is borrowed; `value` is the caller's argument,
+         * which stays rooted for the whole host call. */
+        const kiln_string *string = (const kiln_string *)value.ptr;
+        if (string != NULL && !kiln_string_is_utf16(string)) {
+            const uint8_t *latin1 = kiln_string_latin1(string);
+            size_t index;
+            for (index = 0; index < string->unit_len; ++index) {
+                if (latin1[index] >= 0x80) break;
+            }
+            if (index == string->unit_len) {
+                out->bytes = string->unit_len == 0 ? (const uint8_t *)"" : latin1;
+                out->len = string->unit_len;
+                return KILN_C99_OK;
+            }
+        }
         return kiln_c99_string_to_utf8_lossy(value, &out->owned, &out->len) == KILN_C99_OK
                    ? (out->bytes = out->owned, KILN_C99_OK)
                    : KILN_C99_OUT_OF_MEMORY;
@@ -1002,181 +1492,87 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
     if (event->kind == 1 && socket->server != NULL && socket->server->fetch_mode)
         return kiln_c99_node_fetch_request(socket, event, exception);
     if (event->kind == 1) {
-        int recycled = 0;
-        if (socket->recycled_response != NULL && socket->recycled_response->ended) {
-            response = socket->recycled_response;
-            socket->recycled_response = NULL;
-            recycled = 1;
-        } else {
-            response = (kiln_node_response *)kiln_c99_gc_calloc(KILN_GC_NODE_RESPONSE,
-                                                                sizeof *response);
-            if (response == NULL) return KILN_C99_OUT_OF_MEMORY;
-        }
-        if (recycled) {
-            if (response->request_headers_owned && response->request_headers != NULL) {
-                free(response->request_headers);
-                response->request_headers = NULL;
-                response->request_headers_owned = 0;
-            }
-            response->socket = socket;
-            response->request_id = event->id;
-            response->status = 200;
-            response->started = 0;
-            response->ended = 0;
-            response->url_used = 0;
-            response->target_ptr = (const char *)event->target;
-            response->target_len = (size_t)event->target_len;
-            request = response->request;
-
+        const kiln_node_http_layout *layout;
+        kiln_value prototype;
+        kiln_value response_prototype;
+        status = kiln_c99_node_http_layout_ready(&layout);
+        if (status == KILN_C99_OK) status = kiln_c99_node_incoming_message_prototype(&prototype);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_callable_prototype(
+                kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE), &response_prototype);
+        if (status != KILN_C99_OK) return status;
+        response = (kiln_node_response *)kiln_c99_gc_calloc(KILN_GC_NODE_RESPONSE,
+                                                            sizeof *response);
+        if (response == NULL) return KILN_C99_OUT_OF_MEMORY;
+        response->socket = socket;
+        response->request_id = event->id;
+        response->status = 200;
+        response->target_ptr = (const char *)event->target;
+        response->target_len = (size_t)event->target_len;
+        /* Borrowed for the dispatch only: `kiln_c99_node_request_headers_keep` below copies
+         * what the listener did not consume before the runtime reuses the buffer. */
+        if (event->headers_len != 0) {
             response->request_headers = (char *)event->headers;
-            response->request_headers_len = event->headers_len;
-            response->request_headers_owned = 0;
-
-            status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_METHOD,
-                                       kiln_c99_node_http_method_text(
-                                           (const char *)event->method,
-                                           (size_t)event->method_len));
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_URL,
-                                           kiln_c99_node_http_target_text(
-                                               (const char *)event->target,
-                                               (size_t)event->target_len));
-            if (status == KILN_C99_OK && !event->version_minor) {
-                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION,
-                                                   kiln_c99_static_text(kiln_c99_http_version_10, 3));
-                if (status == KILN_C99_OK)
-                    status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION_MINOR,
-                                                       kiln_c99_number(0.0));
-            }
-            if (status == KILN_C99_OK) {
-                int dummy;
-                kiln_c99_delete(NULL, request, "headers", 7, &dummy, 0, NULL);
-                kiln_c99_delete(NULL, request, "complete", 8, &dummy, 0, NULL);
-                kiln_c99_delete(NULL, request, "httpVersion", 11, &dummy, 0, NULL);
-                kiln_c99_delete(NULL, request, "httpVersionMinor", 16, &dummy, 0, NULL);
-                kiln_c99_delete(NULL, request, "@@node:events", 13, &dummy, 0, NULL);
-                kiln_c99_delete(NULL, response->object, "statusCode", 10, &dummy, 0, NULL);
-                kiln_c99_delete(NULL, response->object, "headersSent", 11, &dummy, 0, NULL);
-                kiln_c99_delete(NULL, response->object, "writableEnded", 13, &dummy, 0, NULL);
-                kiln_c99_delete(NULL, response->object, "@@node:events", 13, &dummy, 0, NULL);
-            }
-
-            if (status == KILN_C99_OK && response->headers.tag == KILN_VALUE_OBJECT) {
-                kiln_object *hdr_obj = kiln_c99_object_of(response->headers);
-                hdr_obj->count = 0;
-                hdr_obj->shape = &kiln_c99_root_shape;
-                hdr_obj->slots = hdr_obj->inline_slots;
-                hdr_obj->slot_capacity = KILN_C99_INLINE_SLOTS;
-                for (size_t slot_i = 0; slot_i < KILN_C99_INLINE_SLOTS; ++slot_i) {
-                    hdr_obj->inline_slots[slot_i] = KILN_VAL_UNDEFINED;
-                }
-            }
-        } else {
-            response->socket = socket;
-            response->request_id = event->id;
-            response->status = 200;
-            response->url_used = 0;
-            response->target_ptr = (const char *)event->target;
-            response->target_len = (size_t)event->target_len;
-            status = kiln_c99_new_object_with_capacity_tenured(&request, 6);
-            if (status == KILN_C99_OK) {
-                kiln_value prototype;
-                status = kiln_c99_node_incoming_message_prototype(&prototype);
-                if (status == KILN_C99_OK) status = kiln_c99_set_prototype(request, prototype);
-            }
-            if (status == KILN_C99_OK)
-                status = kiln_c99_node_set_hidden_pointer(request, "@@node:response", 15, response);
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_METHOD,
-                                           kiln_c99_node_http_method_text(
-                                               (const char *)event->method,
-                                               (size_t)event->method_len));
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_URL,
-                                           kiln_c99_node_http_target_text(
-                                               (const char *)event->target,
-                                               (size_t)event->target_len));
-            if (status == KILN_C99_OK && !event->version_minor) {
-                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION,
-                                                   kiln_c99_static_text(kiln_c99_http_version_10, 3));
-                if (status == KILN_C99_OK)
-                    status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION_MINOR,
-                                                       kiln_c99_number(0.0));
-            }
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_SOCKET, socket->object);
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_CONNECTION, socket->object);
-            if (status == KILN_C99_OK && event->headers_len != 0) {
-                response->request_headers = (char *)event->headers;
-                response->request_headers_len = event->headers_len;
-                response->request_headers_owned = 0;
-            }
-            if (status == KILN_C99_OK)
-                status = kiln_c99_new_object_with_capacity_tenured(&response->object, 6);
-            if (status == KILN_C99_OK) status = kiln_c99_new_object_tenured(&response->headers);
-            if (status == KILN_C99_OK) {
-                kiln_value prototype;
-                status = kiln_c99_callable_prototype(
-                    kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE), &prototype);
-                if (status == KILN_C99_OK)
-                    status = kiln_c99_set_prototype(response->object, prototype);
-            }
-            if (status == KILN_C99_OK)
-                status = kiln_c99_node_set_hidden_pointer(response->object, "@@node:response", 15,
-                                                          response);
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data(response->object, "req", 3, request);
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data_hot_key(response->object, KILN_C99_HOT_KEY_SOCKET, socket->object);
-            if (status == KILN_C99_OK)
-                status = kiln_c99_own_data_hot_key(response->object, KILN_C99_HOT_KEY_CONNECTION, socket->object);
-            if (status == KILN_C99_OK) {
-                /* Room for `pathname`, `searchParams`, and the `_input`/`_base` the class's
-                 * getters parse from; the params object holds `get` and the raw query twice. */
-                status = kiln_c99_new_object_with_capacity_tenured(&response->url_object, 6);
-                if (status == KILN_C99_OK)
-                    status = kiln_c99_new_object_with_capacity_tenured(&response->search_params_object, 4);
-                if (status == KILN_C99_OK)
-                    status = kiln_c99_put_hot_key(NULL, response->search_params_object, KILN_C99_HOT_KEY_GET,
-                                                  kiln_c99_method(KILN_C99_METHOD_URL_SEARCH_PARAMS_GET), 0, NULL);
-                if (status == KILN_C99_OK)
-                    status = kiln_c99_put_hot_key(NULL, response->url_object, KILN_C99_HOT_KEY_SEARCH_PARAMS,
-                                                  response->search_params_object, 0, NULL);
-                /* The two are instances of the bootstrap's `URL` and `URLSearchParams`: their
-                 * prototypes come from the realm slots `__kilnUrlAdopt` filled, so the class's
-                 * getters answer for them (`web.c`, `kiln_c99_url_fast_raw`). Two pointer
-                 * stores, no allocation. */
-                if (status == KILN_C99_OK) {
-                    kiln_value *proto;
-                    status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_URL_PROTOTYPE, &proto);
-                    if (status == KILN_C99_OK && proto->tag == KILN_VALUE_OBJECT)
-                        status = kiln_c99_set_prototype(response->url_object, *proto);
-                    if (status == KILN_C99_OK)
-                        status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_URL_SEARCH_PARAMS_PROTOTYPE, &proto);
-                    if (status == KILN_C99_OK && proto->tag == KILN_VALUE_OBJECT)
-                        status = kiln_c99_set_prototype(response->search_params_object, *proto);
-                }
-            }
+            response->request_headers_len = (size_t)event->headers_len;
         }
+        status = kiln_c99_node_http_instance(&request, prototype, layout->request_shape,
+                                             response);
         if (status != KILN_C99_OK) return status;
         response->request = request;
+        {
+            /* The target copy is the one allocation among these values, so it is made before
+             * the slots are written rather than between two writes through one pointer. */
+            kiln_value url = kiln_c99_node_http_target_text((const char *)event->target,
+                                                            (size_t)event->target_len);
+            kiln_val *slots = kiln_c99_object_of(request)->slots;
+            if (url.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+            slots[KILN_C99_NODE_REQ_METHOD] = kiln_val_from_boundary(kiln_c99_node_http_method_text(
+                (const char *)event->method, (size_t)event->method_len));
+            slots[KILN_C99_NODE_REQ_URL] = kiln_val_from_boundary(url);
+            slots[KILN_C99_NODE_REQ_SOCKET] = kiln_val_from_boundary(socket->object);
+            slots[KILN_C99_NODE_REQ_CONNECTION] = kiln_val_from_boundary(socket->object);
+            slots[KILN_C99_NODE_REQ_COMPLETE] = KILN_VAL_FALSE;
+        }
+        if (!event->version_minor) {
+            status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION,
+                                               kiln_c99_static_text(kiln_c99_http_version_10, 3));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION_MINOR,
+                                                   kiln_c99_number(0.0));
+            if (status != KILN_C99_OK) return status;
+        }
+        status = kiln_c99_node_http_instance(&response->object, response_prototype,
+                                             layout->response_shape, response);
+        if (status != KILN_C99_OK) return status;
+        {
+            kiln_val *slots = kiln_c99_object_of(response->object)->slots;
+            slots[KILN_C99_NODE_RES_REQ] = kiln_val_from_boundary(request);
+            slots[KILN_C99_NODE_RES_SOCKET] = kiln_val_from_boundary(socket->object);
+            slots[KILN_C99_NODE_RES_CONNECTION] = kiln_val_from_boundary(socket->object);
+            slots[KILN_C99_NODE_RES_STATUS_CODE] = kiln_val_from_boundary(kiln_c99_number(200.0));
+            slots[KILN_C99_NODE_RES_HEADERS_SENT] = KILN_VAL_FALSE;
+            slots[KILN_C99_NODE_RES_WRITABLE_ENDED] = KILN_VAL_FALSE;
+        }
         response->next = socket->responses;
         socket->responses = response;
         {
             kiln_value arguments[2] = {request, response->object};
-            if (!kiln_c99_is_callable(socket->server->connection_listener))
-                return KILN_C99_OK;
+            int kept;
+            if (!kiln_c99_is_callable(socket->server->connection_listener)) {
+                return kiln_c99_node_request_headers_keep(response);
+            }
             kiln_c99_active_http_response = response;
             status = kiln_c99_call(socket->host, &ignored, socket->server->connection_listener,
                                   socket->server->object, arguments, 2, 0, exception);
             kiln_c99_active_http_response = NULL;
-            return status;
+            kept = kiln_c99_node_request_headers_keep(response);
+            return status != KILN_C99_OK ? status : kept;
         }
     }
     if (event->kind == 2 || event->kind == 3) {
         for (response = socket->responses; response != NULL; response = response->next) {
             if (response->request_id == event->id) {
+                const kiln_node_http_layout *layout;
                 if (event->kind == 2) {
                     kiln_value data;
                     status = kiln_c99_buffer_from_bytes(&data, event->data, event->data_len);
@@ -1184,8 +1580,11 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                     return kiln_c99_node_emit(socket->host, response->request, "data", data, 1,
                                               0, exception);
                 }
-                status = kiln_c99_put(NULL, response->request, "complete", 8,
-                                      kiln_c99_boolean(1), 0, NULL);
+                status = kiln_c99_node_http_layout_ready(&layout);
+                if (status == KILN_C99_OK)
+                    status = kiln_c99_node_layout_store(
+                        response->request, KILN_C99_NODE_REQ_COMPLETE,
+                        layout->request_keys[KILN_C99_NODE_REQ_COMPLETE], kiln_c99_boolean(1));
                 if (status != KILN_C99_OK) return status;
                 return kiln_c99_node_emit(socket->host, response->request, "end",
                                           kiln_c99_undefined(), 0, 0, exception);
@@ -1199,18 +1598,6 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                 status = kiln_c99_node_emit(socket->host, response->object, "finish",
                                             kiln_c99_undefined(), 0, 0, exception);
                 kiln_c99_node_unlink_response(response);
-                if (socket->recycled_response != NULL &&
-                    socket->recycled_response != response) {
-                    if (socket->recycled_response->request_headers_owned &&
-                        socket->recycled_response->request_headers != NULL) {
-                        free(socket->recycled_response->request_headers);
-                        socket->recycled_response->request_headers = NULL;
-                        socket->recycled_response->request_headers_owned = 0;
-                    }
-                }
-                socket->recycled_response = response;
-                kiln_c99_own_data_hot_key(response->request, KILN_C99_HOT_KEY_URL,
-                                          kiln_c99_static_text(kiln_c99_slash, 1));
                 return status;
             }
         }
@@ -1340,7 +1727,6 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
         int status;
         socket->closing = 1;
         socket->closed = 1;
-        socket->recycled_response = NULL;
         kiln_c99_node_unlink_socket(socket);
         if (kiln_c99_node_socket_ready_state(socket, "closed", 6) != KILN_C99_OK)
             KILN_C99_REFUSE("a socket ready state that could not be recorded");
@@ -1587,7 +1973,6 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             int status;
             socket->close_request = 0;
             socket->closed = 1;
-            socket->recycled_response = NULL;
             kiln_c99_node_unlink_socket(socket);
             if (kiln_c99_node_socket_ready_state(socket, "closed", 6) != KILN_C99_OK)
                 KILN_C99_REFUSE("a socket ready state that could not be recorded");
@@ -2789,7 +3174,7 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
     kiln_node_response *response;
     if (code == KILN_C99_METHOD_NODE_HTTP_FETCH_RESPOND)
         return kiln_c99_node_fetch_respond(result, args, argc, thrown);
-    response = (kiln_node_response *)kiln_c99_node_hidden_pointer(receiver, "@@node:response", 15);
+    response = kiln_c99_node_response_of(receiver);
     (void)depth;
     if (code == KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER ||
         code == KILN_C99_METHOD_NODE_HTTP_CREATE_FETCH_SERVER ||
@@ -2968,7 +3353,6 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
          * writable data property the eager build used to leave behind.  So a program sees an
          * accessor only until it touches `headers` once, and every read after the first is a
          * plain property read rather than a call. */
-        kiln_property *slot;
         kiln_value built;
         int status;
         if (receiver.tag != KILN_VALUE_OBJECT)
@@ -2976,258 +3360,238 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         if (code == KILN_C99_METHOD_NODE_REQUEST_HEADERS_SET) {
             built = argc > 0 ? args[0] : kiln_c99_undefined();
         } else {
-            status = kiln_c99_new_object_with_capacity(&built, 8);
+            status = kiln_c99_node_request_headers_object(response, &built);
             if (status != KILN_C99_OK) return status;
-            if (response != NULL && response->request_headers != NULL &&
-                response->request_headers_len != 0) {
-                status = kiln_c99_node_set_hidden_pointer(built, "@@node:lazy-headers", 19,
-                                                          response);
-                if (status != KILN_C99_OK) return status;
-                kiln_c99_node_materialize_all_headers(built);
-            }
         }
-        status = kiln_c99_own_slot(receiver, "headers", 7, &slot);
+        /* The bytes now live in the object (or were replaced by the program's own): nothing
+         * reads them again. */
+        if (response != NULL && response->request_headers != NULL) {
+            if (response->request_headers_owned) free(response->request_headers);
+            response->request_headers = NULL;
+            response->request_headers_len = 0;
+            response->request_headers_owned = 0;
+        }
+        /* The accessor lives on the prototype; the first get or set defines the plain, writable,
+         * enumerable own data property every read after sees -- a definition, which neither
+         * reaches the inherited setter nor moves a shaped request to dictionary mode. */
+        status = kiln_c99_define_computed(
+            receiver, kiln_c99_static_text("headers", 7), built);
         if (status != KILN_C99_OK) return status;
-        /* This slot is the accessor `define_accessor` installed when the request was built; the
-         * first get or set reaches here and replaces it with the plain data property every read
-         * after sees. */
-        if (slot->accessor) {
-            kiln_c99_object_of(receiver)->accessor_count -= 1;
-        }
-        slot->accessor = 0;
-        slot->getter = kiln_c99_undefined();
-        slot->setter = kiln_c99_undefined();
-        slot->writable = 1;
-        slot->configurable = 1;
-        slot->enumerable = 1;
-        slot->value = built;
         *result = built;
         return KILN_C99_OK;
     }
     if (response == NULL) return kiln_c99_throw_not_a(thrown, receiver, "ServerResponse");
     if (code == KILN_C99_METHOD_NODE_RESPONSE_SET_HEADER) {
-        kiln_value name = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
-        kiln_value value = kiln_c99_text(argc > 1 ? args[1] : kiln_c99_undefined());
-        uint8_t *name_owned = NULL;
-        size_t name_len = 0;
-        int encode_status = kiln_c99_string_to_utf8_lossy(name, &name_owned, &name_len);
-        const char *name_bytes = (const char *)name_owned;
-        if (name.tag != KILN_VALUE_STRING || encode_status != KILN_C99_OK) {
-            free(name_owned);
-            return encode_status == KILN_C99_OK ? KILN_C99_OUT_OF_MEMORY : encode_status;
-        }
-        char *normalized = name_len == 0 ? NULL : kiln_c99_gc_alloc_text(name_len);
-        size_t index;
-        int status;
-        if (name_len != 0 && normalized == NULL) {
-            free(name_owned);
-            return KILN_C99_OUT_OF_MEMORY;
-        }
-        for (index = 0; index < name_len; ++index)
-            normalized[index] = (char)tolower((unsigned char)name_bytes[index]);
-        status = kiln_c99_put(NULL, response->headers, normalized, name_len, value, 0, NULL);
-        free(name_owned);
+        int status = kiln_c99_node_out_set_values(response,
+                                                  argc > 0 ? args[0] : kiln_c99_undefined(),
+                                                  argc > 1 ? args[1] : kiln_c99_undefined());
+        if (status != KILN_C99_OK) return status;
         *result = receiver;
-        return status;
+        return KILN_C99_OK;
     }
     if (code == KILN_C99_METHOD_NODE_RESPONSE_GET_HEADER ||
         code == KILN_C99_METHOD_NODE_RESPONSE_HAS_HEADER ||
         code == KILN_C99_METHOD_NODE_RESPONSE_REMOVE_HEADER) {
         kiln_value name = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
-        kiln_object *headers = kiln_c99_object_of(response->headers);
-        uint8_t *name_owned = NULL;
-        size_t name_len = 0;
-        int encode_status = kiln_c99_string_to_utf8_lossy(name, &name_owned, &name_len);
-        const char *name_bytes = (const char *)name_owned;
-        if (name.tag != KILN_VALUE_STRING || encode_status != KILN_C99_OK) {
-            free(name_owned);
-            return encode_status == KILN_C99_OK ? KILN_C99_OUT_OF_MEMORY : encode_status;
-        }
-        size_t index;
-        size_t byte;
-        char *normalized = name_len == 0 ? NULL : kiln_c99_gc_alloc_text(name_len);
-        if (headers->shape != NULL) {
-            kiln_c99_ensure_dictionary(headers);
-            if (code == KILN_C99_METHOD_NODE_RESPONSE_REMOVE_HEADER) {
-                headers->shape = NULL;
-            }
-        }
-        if (name_len != 0 && normalized == NULL) {
-            free(name_owned);
-            return KILN_C99_OUT_OF_MEMORY;
-        }
-        for (byte = 0; byte < name_len; ++byte)
-            normalized[byte] = (char)tolower((unsigned char)name_bytes[byte]);
-        for (index = 0; index < headers->count; ++index) {
-            kiln_property *property = &headers->properties[index];
-            if (kiln_string_equals_ascii(property->key, normalized, name_len)) {
-                if (code == KILN_C99_METHOD_NODE_RESPONSE_REMOVE_HEADER) {
-                    headers->shape = NULL;
-                    if (index + 1 < headers->count)
-                        memmove(&headers->properties[index], &headers->properties[index + 1],
-                                (headers->count - index - 1) * sizeof *headers->properties);
-                    headers->count -= 1;
-                    *result = kiln_c99_undefined();
-                } else if (code == KILN_C99_METHOD_NODE_RESPONSE_HAS_HEADER) {
-                    *result = kiln_c99_boolean(1);
-                } else {
-                    *result = property->value;
-                }
-                free(name_owned);
-                return KILN_C99_OK;
-            }
+        const char *name_bytes;
+        size_t name_len;
+        uint8_t *name_owned;
+        size_t entry, value_at, end;
+        int status;
+        if (name.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+        status = kiln_c99_node_utf8_bytes(name, &name_bytes, &name_len, &name_owned);
+        if (status != KILN_C99_OK) return status;
+        if (code == KILN_C99_METHOD_NODE_RESPONSE_REMOVE_HEADER) {
+            kiln_c99_node_out_remove(response, name_bytes, name_len);
+            *result = kiln_c99_undefined();
+        } else if (!kiln_c99_node_out_find(response, name_bytes, name_len, &entry, &value_at,
+                                           &end)) {
+            *result = code == KILN_C99_METHOD_NODE_RESPONSE_HAS_HEADER ? kiln_c99_boolean(0)
+                                                                       : kiln_c99_undefined();
+        } else if (code == KILN_C99_METHOD_NODE_RESPONSE_HAS_HEADER) {
+            *result = kiln_c99_boolean(1);
+        } else {
+            *result = kiln_c99_copy_text(response->out_headers + value_at, end - 1 - value_at);
+            if (result->tag != KILN_VALUE_STRING) status = KILN_C99_OUT_OF_MEMORY;
         }
         free(name_owned);
-        *result = code == KILN_C99_METHOD_NODE_RESPONSE_HAS_HEADER
-                      ? kiln_c99_boolean(0)
-                      : kiln_c99_undefined();
-        return KILN_C99_OK;
+        return status;
     }
     if (code == KILN_C99_METHOD_NODE_RESPONSE_GET_HEADERS) {
-        kiln_object *headers = kiln_c99_object_of(response->headers);
+        /* A null-prototype dictionary keyed by lowercased name, as the interpreter answers, so a
+         * header called `constructor` is a header and never inherited behaviour. */
         kiln_value copy;
-        size_t index;
-        int status;
-        if (headers->shape != NULL) {
-            kiln_c99_ensure_dictionary(headers);
-        }
-        status = kiln_c99_new_object(&copy);
-        for (index = 0; status == KILN_C99_OK && index < headers->count; ++index) {
-            kiln_property *property = &headers->properties[index];
-            status = kiln_c99_put_mode_key(NULL, copy, property->key, property->key,
-                                           property->value, 0, 0, NULL);
+        size_t at = 0;
+        int status = kiln_c99_new_object(&copy);
+        if (status == KILN_C99_OK) status = kiln_c99_set_prototype(copy, kiln_c99_null());
+        while (status == KILN_C99_OK && at < response->out_headers_len) {
+            const char *name = response->out_headers + at;
+            const char *name_end = (const char *)memchr(
+                name, '\0', response->out_headers_len - at);
+            const char *value;
+            const char *value_end;
+            char name_buffer[64];
+            char *lowered;
+            size_t name_len;
+            size_t byte;
+            kiln_value text;
+            kiln_property *slot;
+            if (name_end == NULL) break;
+            value = name_end + 1;
+            value_end = (const char *)memchr(
+                value, '\0', response->out_headers_len - (size_t)(value - response->out_headers));
+            if (value_end == NULL) break;
+            at = (size_t)(value_end - response->out_headers) + 1;
+            name_len = (size_t)(name_end - name);
+            lowered = name_len <= sizeof name_buffer ? name_buffer : (char *)malloc(name_len);
+            if (lowered == NULL) return KILN_C99_OUT_OF_MEMORY;
+            for (byte = 0; byte < name_len; ++byte)
+                lowered[byte] = (char)tolower((unsigned char)name[byte]);
+            text = kiln_c99_copy_text(value, (size_t)(value_end - value));
+            if (text.tag != KILN_VALUE_STRING) {
+                status = KILN_C99_OUT_OF_MEMORY;
+            } else {
+                status = kiln_c99_own_slot(copy, lowered, name_len, &slot);
+                if (status == KILN_C99_OK) slot->value = text;
+            }
+            if (lowered != name_buffer) free(lowered);
         }
         if (status != KILN_C99_OK) return status;
         *result = copy;
         return KILN_C99_OK;
     }
-    if (code == KILN_C99_METHOD_NODE_RESPONSE_WRITE_HEAD) {
-        double status = kiln_c99_as_number(argc > 0 ? args[0] : kiln_c99_undefined());
-        if (!(status >= 100.0 && status <= 999.0 && floor(status) == status))
-            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
-                                        "Invalid status code");
-        response->status = (uint16_t)status;
-        status = kiln_c99_put(NULL, response->object, "statusCode", 10,
-                              kiln_c99_number((double)response->status), 0, NULL);
+    {
+        const kiln_node_http_layout *layout;
+        int status = kiln_c99_node_http_layout_ready(&layout);
         if (status != KILN_C99_OK) return status;
-        status = kiln_c99_put(NULL, response->object, "headersSent", 11,
-                              kiln_c99_boolean(1), 0, NULL);
-        if (status != KILN_C99_OK) return status;
-        if (argc > 1 && args[1].tag == KILN_VALUE_OBJECT) {
-            kiln_object *provided = kiln_c99_object_of(args[1]);
-            size_t index;
-            if (provided->shape != NULL) {
-                kiln_c99_ensure_dictionary(provided);
-            }
-            for (index = 0; index < provided->count; ++index) {
-                kiln_property *property = &provided->properties[index];
-                if (property->enumerable) {
-                    status = kiln_c99_put_mode_key(NULL, response->headers, property->key,
-                                                   property->key,
-                                                   kiln_c99_text(property->value), 0, 0, NULL);
-                    if (status != KILN_C99_OK) return status;
+        if (code == KILN_C99_METHOD_NODE_RESPONSE_WRITE_HEAD) {
+            double requested = kiln_c99_as_number(argc > 0 ? args[0] : kiln_c99_undefined());
+            if (!(requested >= 100.0 && requested <= 999.0 && floor(requested) == requested))
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                            "Invalid status code");
+            response->status = (uint16_t)requested;
+            status = kiln_c99_node_layout_store(response->object, KILN_C99_NODE_RES_STATUS_CODE,
+                                                layout->response_keys[KILN_C99_NODE_RES_STATUS_CODE],
+                                                kiln_c99_number(requested));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_node_layout_store(
+                    response->object, KILN_C99_NODE_RES_HEADERS_SENT,
+                    layout->response_keys[KILN_C99_NODE_RES_HEADERS_SENT], kiln_c99_boolean(1));
+            if (status != KILN_C99_OK) return status;
+            if (argc > 1 && args[1].tag == KILN_VALUE_OBJECT) {
+                /* The object's own enumerable data members in property order, read in place:
+                 * an object literal is shaped, and converting it to dictionary mode to walk it
+                 * would slow every later read of the program's own object. */
+                kiln_value provided = args[1];
+                kiln_object *object = kiln_c99_object_of(provided);
+                size_t index;
+                if (object->shape != NULL && object->elements != NULL)
+                    kiln_c99_ensure_dictionary(object);
+                if (object->shape != NULL) {
+                    for (index = 0; status == KILN_C99_OK &&
+                                    index < object->shape->property_count; ++index) {
+                        const kiln_string *key = object->shape->keys[index];
+                        if (kiln_c99_key_is_reserved(key) || index >= object->slot_capacity)
+                            continue;
+                        status = kiln_c99_node_out_set_values(
+                            response, kiln_c99_stable_key_value(key),
+                            kiln_val_to_boundary(object->slots[index]));
+                        /* The walk reads the object after a conversion that can allocate, so the
+                         * object is re-read rather than trusted across it. */
+                        object = kiln_c99_object_of(provided);
+                        if (object->shape == NULL) break;
+                    }
                 }
+                if (object->shape == NULL) {
+                    for (index = 0; status == KILN_C99_OK && index < object->count; ++index) {
+                        kiln_property *property = &object->properties[index];
+                        if (!property->enumerable || property->accessor) continue;
+                        status = kiln_c99_node_out_set_values(
+                            response,
+                            kiln_c99_stable_key_value(property->key),
+                            property->value);
+                        object = kiln_c99_object_of(provided);
+                    }
+                }
+                if (status != KILN_C99_OK) return status;
             }
+            *result = receiver;
+            return KILN_C99_OK;
         }
-        /* Node's writeHead commits the header block, so a later end(body) can no longer declare a
-         * length and Node writes Transfer-Encoding: chunked into the block instead. Recording it
-         * keeps the committed head identical to Node's; Hyper still owns the encoding and drops
-         * the header where no body is allowed. */
-        if (response->headers.tag == KILN_VALUE_OBJECT) {
-            kiln_object *headers_obj = kiln_c99_object_of(response->headers);
-            if (headers_obj->shape != NULL) {
-                kiln_c99_ensure_dictionary(headers_obj);
-            }
-        }
-        *result = receiver;
-        return KILN_C99_OK;
-    }
-    if (code == KILN_C99_METHOD_NODE_RESPONSE_WRITE) {
-        kiln_value arg = argc > 0 ? args[0] : kiln_c99_undefined();
-        kiln_c99_node_byte_span span;
-        int status;
-        status = kiln_c99_node_http_byte_span(arg, &span);
-        if (status != KILN_C99_OK) return status;
-        if (response->ended)
-        {
-            kiln_c99_node_http_byte_span_release(&span);
-            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
-                                        "write after end");
-        }
-        if (!response->started) {
-            kiln_text flattened;
-            kiln_realm_http_response framed;
-            status = kiln_c99_node_flatten_headers(kiln_c99_object_of(response->headers),
-                                                   &flattened);
-            if (status != KILN_C99_OK) return status;
-            memset(&framed, 0, sizeof framed);
-            framed.status = response->status;
-            framed.headers = (const uint8_t *)flattened.bytes;
-            framed.headers_len = flattened.len;
-            status = kiln_realm_http_response_start_active(response->socket->resource,
-                                                           response->request_id, &framed, 16384);
-            free(flattened.bytes);
-            if (status != KILN_C99_OK) return status;
-            response->started = 1;
-            status = kiln_c99_put(NULL, response->object, "headersSent", 11,
-                                  kiln_c99_boolean(1), 0, NULL);
-            if (status != KILN_C99_OK) return status;
-        }
-        status = kiln_realm_http_response_write_active(response->socket->resource,
-                                                       response->request_id,
-                                                       span.bytes, span.len);
-        kiln_c99_node_http_byte_span_release(&span);
-        if (status < KILN_C99_OK) return status;
-        *result = kiln_c99_boolean(status == KILN_C99_OK);
-        return KILN_C99_OK;
-    }
-    if (code == KILN_C99_METHOD_NODE_RESPONSE_END) {
-        kiln_object *headers;
-        kiln_text flattened = {NULL, 0, 0};
-        kiln_realm_http_response framed;
-        int status;
-        if (response->ended) { *result = receiver; return KILN_C99_OK; }
-        if (!response->started) {
-            headers = kiln_c99_object_of(response->headers);
-            status = kiln_c99_node_flatten_headers(headers, &flattened);
-            if (status != KILN_C99_OK) return status;
-            memset(&framed, 0, sizeof framed);
-            framed.status = response->status;
-            framed.headers = (const uint8_t *)flattened.bytes;
-            framed.headers_len = flattened.len;
-            status = kiln_realm_http_response_start_active(response->socket->resource,
-                                                           response->request_id, &framed, 16384);
-            free(flattened.bytes);
-            if (status != KILN_C99_OK) return status;
-            response->started = 1;
-            status = kiln_c99_put(NULL, response->object, "headersSent", 11,
-                                  kiln_c99_boolean(1), 0, NULL);
-            if (status != KILN_C99_OK) return status;
-        }
-        {
+        if (code == KILN_C99_METHOD_NODE_RESPONSE_WRITE ||
+            code == KILN_C99_METHOD_NODE_RESPONSE_END) {
             kiln_value arg = argc > 0 ? args[0] : kiln_c99_undefined();
             kiln_c99_node_byte_span span;
+            if (response->ended) {
+                if (code == KILN_C99_METHOD_NODE_RESPONSE_END) {
+                    *result = receiver;
+                    return KILN_C99_OK;
+                }
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR, "write after end");
+            }
+            if (!response->started) {
+                /* `res.statusCode = 404; res.end()` is how most handlers set a status, so the
+                 * head reads the member rather than the last `writeHead`. */
+                kiln_realm_http_response framed;
+                kiln_value code_value;
+                double requested;
+                if (!kiln_c99_node_layout_load(response->object, KILN_C99_NODE_RES_STATUS_CODE,
+                                               layout->response_keys[KILN_C99_NODE_RES_STATUS_CODE],
+                                               &code_value)) {
+                    status = kiln_c99_get(host, response->object, "statusCode", 10, &code_value,
+                                          depth, thrown);
+                    if (status != KILN_C99_OK) return status;
+                }
+                requested = kiln_c99_as_number(code_value);
+                if (!(requested >= 100.0 && requested <= 999.0 && floor(requested) == requested))
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                                "Invalid status code");
+                response->status = (uint16_t)requested;
+                memset(&framed, 0, sizeof framed);
+                framed.status = response->status;
+                framed.headers = (const uint8_t *)response->out_headers;
+                framed.headers_len = response->out_headers_len;
+                status = kiln_realm_http_response_start_active(response->socket->resource,
+                                                               response->request_id, &framed,
+                                                               16384);
+                if (status != KILN_C99_OK) return status;
+                response->started = 1;
+                status = kiln_c99_node_layout_store(
+                    response->object, KILN_C99_NODE_RES_HEADERS_SENT,
+                    layout->response_keys[KILN_C99_NODE_RES_HEADERS_SENT], kiln_c99_boolean(1));
+                if (status != KILN_C99_OK) return status;
+            }
             status = kiln_c99_node_http_byte_span(arg, &span);
             if (status != KILN_C99_OK) return status;
+            if (code == KILN_C99_METHOD_NODE_RESPONSE_WRITE) {
+                status = kiln_realm_http_response_write_active(response->socket->resource,
+                                                               response->request_id,
+                                                               span.bytes, span.len);
+                kiln_c99_node_http_byte_span_release(&span);
+                if (status < KILN_C99_OK) return status;
+                *result = kiln_c99_boolean(status == KILN_C99_OK);
+                return KILN_C99_OK;
+            }
             status = kiln_realm_http_response_end_active(response->socket->resource,
-                                                         response->request_id,
-                                                         span.bytes, span.len);
+                                                         response->request_id, span.bytes,
+                                                         span.len);
             kiln_c99_node_http_byte_span_release(&span);
-        }
-        if (status < KILN_C99_OK) return status;
-        response->ended = 1;
-        status = kiln_c99_put(NULL, response->object, "writableEnded", 13,
-                              kiln_c99_boolean(1), 0, NULL);
-        if (status != KILN_C99_OK) return status;
-        if (response->socket->close_after_responses &&
-            !kiln_c99_node_has_unended_response(response->socket)) {
-            response->socket->close_after_responses = 0;
-            status = kiln_realm_http_server_close_active(
-                response->socket->resource, KILN_REALM_HTTP_CLOSE_GRACEFUL);
+            if (status < KILN_C99_OK) return status;
+            response->ended = 1;
+            status = kiln_c99_node_layout_store(
+                response->object, KILN_C99_NODE_RES_WRITABLE_ENDED,
+                layout->response_keys[KILN_C99_NODE_RES_WRITABLE_ENDED], kiln_c99_boolean(1));
             if (status != KILN_C99_OK) return status;
+            if (response->socket->close_after_responses &&
+                !kiln_c99_node_has_unended_response(response->socket)) {
+                response->socket->close_after_responses = 0;
+                status = kiln_realm_http_server_close_active(
+                    response->socket->resource, KILN_REALM_HTTP_CLOSE_GRACEFUL);
+                if (status != KILN_C99_OK) return status;
+            }
+            *result = receiver;
+            return KILN_C99_OK;
         }
-        *result = receiver;
-        return KILN_C99_OK;
     }
     KILN_C99_REFUSE("a Node HTTP method this backend has not implemented");
 }
