@@ -1947,14 +1947,7 @@ impl ModuleGraph {
         {
             // ECMAScript built-in prototypes in every mode, as the native runtime has it:
             // Date.prototype, %TypedArray%.prototype, Error subclasses, Annex B, and DisposableStack.
-            let common_ts_builtins = format!(
-                "{}\n{}\n{}\n{}\n{}",
-                kiln_builtins::DATE_BOOTSTRAP_SOURCE,
-                kiln_builtins::TYPEDARRAY_BOOTSTRAP_SOURCE,
-                kiln_builtins::ERRORS_BOOTSTRAP_SOURCE,
-                kiln_builtins::ANNEXB_BOOTSTRAP_SOURCE,
-                kiln_builtins::DISPOSABLE_BOOTSTRAP_SOURCE,
-            );
+            let common_ts_builtins = kiln_builtins::common_bootstrap_source();
             let source = if node {
                 format!(
                     "{common_ts_builtins}\n{}\n{}",

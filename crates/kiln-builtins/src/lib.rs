@@ -1269,9 +1269,31 @@ pub const ANNEXB_BOOTSTRAP_SOURCE: &str = include_str!("annexb.ts");
 /// `DisposableStack` and `AsyncDisposableStack` (ES2024 / Stage 3 Explicit Resource Management).
 pub const DISPOSABLE_BOOTSTRAP_SOURCE: &str = include_str!("disposable.ts");
 
+/// Part of every realm's bootstrap, in both interpreter and native execution.
+/// Includes Date.prototype, %TypedArray%.prototype, Error subclasses, Annex B, and DisposableStack.
+pub fn common_bootstrap_source() -> String {
+    format!(
+        "{}\n{}\n{}\n{}\n{}",
+        DATE_BOOTSTRAP_SOURCE,
+        TYPEDARRAY_BOOTSTRAP_SOURCE,
+        ERRORS_BOOTSTRAP_SOURCE,
+        ANNEXB_BOOTSTRAP_SOURCE,
+        DISPOSABLE_BOOTSTRAP_SOURCE,
+    )
+}
+
 #[cfg(test)]
 mod web_tests {
     use super::*;
+
+    #[test]
+    fn common_bootstrap_compiles_as_single_unit() {
+        let source = common_bootstrap_source();
+        let hir = frontend_oxc::parse("@kiln/common-bootstrap.ts", &source);
+        let program = kiln_ir::compile_module(&hir)
+            .expect("common bootstrap should compile to IR as a single unit without error");
+        assert!(!program.program.code.is_empty());
+    }
 
     #[test]
     fn typedarray_bootstrap_compiles_cleanly() {
