@@ -1269,16 +1269,41 @@ pub const ANNEXB_BOOTSTRAP_SOURCE: &str = include_str!("annexb.ts");
 /// `DisposableStack` and `AsyncDisposableStack` (ES2024 / Stage 3 Explicit Resource Management).
 pub const DISPOSABLE_BOOTSTRAP_SOURCE: &str = include_str!("disposable.ts");
 
+/// `RegExp.prototype` accessors and `RegExp.escape` (ECMAScript specification / ES2025).
+pub const REGEXP_BOOTSTRAP_SOURCE: &str = include_str!("regexp.ts");
+
+/// `ArrayBuffer.prototype` and `SharedArrayBuffer.prototype` extensions.
+pub const ARRAYBUFFER_BOOTSTRAP_SOURCE: &str = include_str!("arraybuffer.ts");
+
+/// `Map.prototype.getOrInsert` and `Map.prototype.getOrInsertComputed` (TC39 Stage 3).
+pub const MAPUPSERT_BOOTSTRAP_SOURCE: &str = include_str!("mapupsert.ts");
+
+/// `Promise.try`, `Promise.allKeyed`, and `Promise.allSettledKeyed`.
+pub const PROMISE_BOOTSTRAP_SOURCE: &str = include_str!("promise.ts");
+
+/// `Iterator` combinators (`concat`, `zip`, `zipKeyed`) and `Iterator.prototype` methods (`chunks`, `windows`, `join`, `[Symbol.dispose]`).
+pub const ITERATOR_BOOTSTRAP_SOURCE: &str = include_str!("iterator.ts");
+
+/// `Object.seal`, `Object.isSealed`, `Reflect.isExtensible`, `Reflect.preventExtensions`, `Reflect.setPrototypeOf`.
+pub const OBJECT_REFLECT_BOOTSTRAP_SOURCE: &str = include_str!("object_reflect.ts");
+
 /// Part of every realm's bootstrap, in both interpreter and native execution.
-/// Includes Date.prototype, %TypedArray%.prototype, Error subclasses, Annex B, and DisposableStack.
+/// Includes Date.prototype, %TypedArray%.prototype, Error subclasses, Annex B, DisposableStack,
+/// RegExp.prototype, ArrayBuffer/SharedArrayBuffer, Map.upsert, Promise extensions, Iterator extensions, and Object/Reflect extensions.
 pub fn common_bootstrap_source() -> String {
     format!(
-        "{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         DATE_BOOTSTRAP_SOURCE,
         TYPEDARRAY_BOOTSTRAP_SOURCE,
         ERRORS_BOOTSTRAP_SOURCE,
         ANNEXB_BOOTSTRAP_SOURCE,
         DISPOSABLE_BOOTSTRAP_SOURCE,
+        REGEXP_BOOTSTRAP_SOURCE,
+        ARRAYBUFFER_BOOTSTRAP_SOURCE,
+        MAPUPSERT_BOOTSTRAP_SOURCE,
+        PROMISE_BOOTSTRAP_SOURCE,
+        ITERATOR_BOOTSTRAP_SOURCE,
+        OBJECT_REFLECT_BOOTSTRAP_SOURCE,
     )
 }
 
@@ -1292,6 +1317,54 @@ mod web_tests {
         let hir = frontend_oxc::parse("@kiln/common-bootstrap.ts", &source);
         let program = kiln_ir::compile_module(&hir)
             .expect("common bootstrap should compile to IR as a single unit without error");
+        assert!(!program.program.code.is_empty());
+    }
+
+    #[test]
+    fn regexp_bootstrap_compiles_cleanly() {
+        let hir = frontend_oxc::parse("@kiln/regexp-bootstrap.ts", REGEXP_BOOTSTRAP_SOURCE);
+        let program = kiln_ir::compile_module(&hir)
+            .expect("regexp bootstrap should compile to IR without error");
+        assert!(!program.program.code.is_empty());
+    }
+
+    #[test]
+    fn arraybuffer_bootstrap_compiles_cleanly() {
+        let hir = frontend_oxc::parse("@kiln/arraybuffer-bootstrap.ts", ARRAYBUFFER_BOOTSTRAP_SOURCE);
+        let program = kiln_ir::compile_module(&hir)
+            .expect("arraybuffer bootstrap should compile to IR without error");
+        assert!(!program.program.code.is_empty());
+    }
+
+    #[test]
+    fn mapupsert_bootstrap_compiles_cleanly() {
+        let hir = frontend_oxc::parse("@kiln/mapupsert-bootstrap.ts", MAPUPSERT_BOOTSTRAP_SOURCE);
+        let program = kiln_ir::compile_module(&hir)
+            .expect("mapupsert bootstrap should compile to IR without error");
+        assert!(!program.program.code.is_empty());
+    }
+
+    #[test]
+    fn promise_bootstrap_compiles_cleanly() {
+        let hir = frontend_oxc::parse("@kiln/promise-bootstrap.ts", PROMISE_BOOTSTRAP_SOURCE);
+        let program = kiln_ir::compile_module(&hir)
+            .expect("promise bootstrap should compile to IR without error");
+        assert!(!program.program.code.is_empty());
+    }
+
+    #[test]
+    fn iterator_bootstrap_compiles_cleanly() {
+        let hir = frontend_oxc::parse("@kiln/iterator-bootstrap.ts", ITERATOR_BOOTSTRAP_SOURCE);
+        let program = kiln_ir::compile_module(&hir)
+            .expect("iterator bootstrap should compile to IR without error");
+        assert!(!program.program.code.is_empty());
+    }
+
+    #[test]
+    fn object_reflect_bootstrap_compiles_cleanly() {
+        let hir = frontend_oxc::parse("@kiln/object-reflect-bootstrap.ts", OBJECT_REFLECT_BOOTSTRAP_SOURCE);
+        let program = kiln_ir::compile_module(&hir)
+            .expect("object_reflect bootstrap should compile to IR without error");
         assert!(!program.program.code.is_empty());
     }
 

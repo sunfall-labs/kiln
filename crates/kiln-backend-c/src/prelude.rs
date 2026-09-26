@@ -1736,28 +1736,25 @@ builtin_backlog! {
     ("Object", "groupBy",
      "answered by the runtime bootstrap in TypeScript, from the constructor's store; no row"),
     ("Object", "seal",
-     "sealing is weaker than freezing; answering freeze would be a silent wrong answer"),
+     "answered by the runtime bootstrap in TypeScript, from the constructor's store; no row"),
     ("Object", "isSealed",
-     "sealing is weaker than freezing; answering isFrozen would be a silent wrong answer"),
+     "answered by the runtime bootstrap in TypeScript, from the constructor's store; no row"),
     ("Array", "fromAsync",
-     "not implemented; needs the async-iterator protocol"),
+     "answered by the runtime bootstrap in TypeScript, from the constructor's store; no row"),
     ("Promise", "try",
-     "not implemented"),
+     "answered by the runtime bootstrap in TypeScript, from the constructor's store; no row"),
     ("JSON", "rawJSON",
      "not implemented; the raw-JSON marker has no representation in this value kernel"),
     ("JSON", "isRawJSON",
      "not implemented; the raw-JSON marker has no representation in this value kernel"),
     ("Reflect", "setPrototypeOf",
-     "answers a boolean where Object.setPrototypeOf answers the target, so it is not the \
-              same operation under another name"),
+     "answered by the runtime bootstrap in TypeScript, from the namespace's store; no row"),
     ("Reflect", "isExtensible",
-     "the object model carries extensibility now, but Reflect answers a boolean where \
-              Object answers the target, and the two need separate codes"),
+     "answered by the runtime bootstrap in TypeScript, from the namespace's store; no row"),
     ("Reflect", "preventExtensions",
-     "the object model carries extensibility now, but Reflect answers a boolean where \
-              Object answers the target, and the two need separate codes"),
+     "answered by the runtime bootstrap in TypeScript, from the namespace's store; no row"),
     ("RegExp", "escape",
-     "not implemented"),
+     "answered by the runtime bootstrap in TypeScript, from the constructor's store; no row"),
     ("Error", "isError",
      "not implemented"),
     ("BigInt", "asIntN",
@@ -1767,14 +1764,11 @@ builtin_backlog! {
     ("Map", "groupBy",
      "answered by the runtime bootstrap in TypeScript, from the constructor's store; no row"),
     ("Iterator", "concat",
-     "not implemented; it walks a list of iterables in turn, so its helper holds a cursor over \
-              several sources where every helper here holds one"),
+     "answered by the runtime bootstrap in TypeScript, from the constructor's store; no row"),
     ("Iterator", "zip",
-     "not implemented; it steps several sources per `next` and has a padding and \
-              longest/shortest mode this backend has nowhere to put"),
+     "answered by the runtime bootstrap in TypeScript, from the constructor's store; no row"),
     ("Iterator", "zipKeyed",
-     "not implemented; the keyed twin of `zip`, and blocked on the same missing multi-source \
-              helper"),
+     "answered by the runtime bootstrap in TypeScript, from the constructor's store; no row"),
     ("Buffer", "constants",
      "not implemented; the constants namespace object has no representation here"),
     ("Math", "f16round",
@@ -1782,11 +1776,9 @@ builtin_backlog! {
     ("%TypedArray%", "@@species",
      "not implemented; the intrinsic is not a value this backend hands back"),
     ("Promise", "allKeyed",
-     "not implemented; a proposal the interpreter carries and node does not, refused by name \
-              rather than read as undefined"),
+     "answered by the runtime bootstrap in TypeScript, from the constructor's store; no row"),
     ("Promise", "allSettledKeyed",
-     "not implemented; a proposal the interpreter carries and node does not, refused by name \
-              rather than read as undefined"),
+     "answered by the runtime bootstrap in TypeScript, from the constructor's store; no row"),
     ("%TypedArrayConstructor%", "of",
      "answered from the receiver's element kind, not from a row"),
     ("%TypedArrayConstructor%", "from",
@@ -2124,14 +2116,14 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     },
     AbsentAnswer {
         function: "kiln_c99_get_own_kind",
-        sites: 24,
+        sites: 25,
         proved_by: "one membership predicate per receiver kind -- kiln_c99_is_array_member, \
                     kiln_c99_is_string_member, kiln_c99_is_date_member, \
                     kiln_c99_is_collection_member and the kiln_c99_collection_kind_member \
                     beneath it, which answers for a collection *prototype* the same way \
                     (a name belonging to a sibling kind -- `Map.prototype.add` -- is absent \
                     rather than unbuilt), kiln_c99_is_array_buffer_member, \
-                    kiln_c99_is_typed_array_member, and BUILTIN_SURFACE plus \
+                    kiln_c99_is_typed_array_member, RegExp.prototype without name, and BUILTIN_SURFACE plus \
                     BUILTIN_SURFACE_BACKLOG for the table-driven built-ins. These are the lists \
                     the two engines can disagree about, and \
                     scripts/native-surface-inventory.py --gate is what measures them",
@@ -3162,6 +3154,7 @@ enum kiln_value_tag {
 #define KILN_C99_BUILTIN_CRYPTO 100
 #define KILN_C99_BUILTIN_BIG_INT64_ARRAY_PROTOTYPE 101
 #define KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE 102
+#define KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER_PROTOTYPE 103
 
 /* Array methods, part two.
  *
