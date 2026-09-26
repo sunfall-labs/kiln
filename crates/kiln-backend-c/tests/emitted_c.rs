@@ -1002,8 +1002,13 @@ fn runtime_prelude_size() {
     // of overloads and adapters; no block is emitted twice (every test translation unit in
     // Widened on 2026-09-25, at 49,081 lines: WPT WinterTC conformance additions and
     // polymorphic inline caching (PIC) fast paths across dynamic property reads and writes.
+    // Widened on 2026-09-26, at 50,061 lines (49,418 at ca3b20a8): the HTTP fast path of ADR
+    // 0064 -- serve()'s whole-request dispatch and one-crossing fetchRespond plus shape-keeping
+    // class instances past accessor prototypes (+220), node:http req/res built from fixed shaped
+    // layouts (+337) -- and main's builtins over the same days (+85). Measured per branch; the
+    // three deltas sum to the total, so nothing is emitted twice.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 50_000;
+    const CEILING_LINES: usize = 51_000;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
