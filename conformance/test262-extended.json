@@ -2,7 +2,7 @@
   "schema": 1,
   "test262_commit": "771005236e88a909635104e03ba12559688c0172",
   "source_snapshot": "27718bf25c281ee4106b6e0aa6fb54fc7f8ad6e997c2216caf49fc4041a2be82",
-  "selection": "Files with any variant >= 500 ms in the recorded 2026-09-26 full gate. All variants stay together. Timings schedule work; this committed list alone selects extended coverage.",
+  "selection": "Files with any variant >= 500 ms in the recorded 2026-09-26 full gate, minus the three Map/Set iterator-close files fixed and promoted on 2026-09-27. All variants stay together. Timings schedule work; this committed list alone selects extended coverage.",
   "chunks": {
     "annexB/built-ins": {
       "expected": {
@@ -38,18 +38,6 @@
       "files": {
         "zip/basic-longest.js": 1474,
         "zipKeyed/basic-longest.js": 1744
-      }
-    },
-    "built-ins/Map": {
-      "expected": {
-        "passed": 0,
-        "failed": 4,
-        "unsupported": 0,
-        "skipped": 0
-      },
-      "files": {
-        "iterator-close-after-set-failure.js": 4727,
-        "iterator-close-failure-after-set-failure.js": 3854
       }
     },
     "built-ins/RegExp": {
@@ -508,17 +496,6 @@
         "property-escapes/generated/White_Space.js": 1678,
         "property-escapes/generated/XID_Continue.js": 1735,
         "property-escapes/generated/XID_Start.js": 1709
-      }
-    },
-    "built-ins/Set": {
-      "expected": {
-        "passed": 0,
-        "failed": 2,
-        "unsupported": 0,
-        "skipped": 0
-      },
-      "files": {
-        "set-iterator-close-after-add-failure.js": 1326
       }
     },
     "built-ins/TypedArray": {
