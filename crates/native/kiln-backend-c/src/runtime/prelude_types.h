@@ -466,6 +466,55 @@ typedef struct kiln_typed_array {
     int is_buffer;
 } kiln_typed_array;
 
+/* Element `index` of a view whose kind is a Number kind (not `KILN_TYPED_BIG_INT64` or
+ * `KILN_TYPED_BIG_UINT64`), for the emitted element reads that have already checked `index <
+ * view->length` and that the buffer is not detached. A view never outgrows its buffer (no buffer
+ * here is resizable), so what is left is the load. `kiln_c99_typed_get` is the same read for a
+ * caller that has checked nothing; it lives in the prelude object, so a loop over a view paid a
+ * call into another object and a second bounds proof per element -- 6 ns a read, against node's
+ * half nanosecond. Little-endian by assembly, as there, which the compiler folds to one load. */
+static inline double kiln_typed_load(const kiln_typed_array *view, size_t index) {
+    const uint8_t *bytes = view->buffer->bytes + view->byte_offset;
+    uint32_t bits32;
+    uint64_t bits64;
+    int32_t signed32;
+    float float32;
+    double float64;
+    switch (view->kind) {
+    case KILN_TYPED_UINT8:
+    case KILN_TYPED_UINT8_CLAMPED:
+    default: return (double)bytes[index];
+    case KILN_TYPED_INT8: return (double)(int8_t)bytes[index];
+    case KILN_TYPED_INT16:
+        bytes += index * 2;
+        return (double)(int16_t)((uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8));
+    case KILN_TYPED_UINT16:
+        bytes += index * 2;
+        return (double)(uint16_t)((uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8));
+    case KILN_TYPED_INT32:
+    case KILN_TYPED_UINT32:
+    case KILN_TYPED_FLOAT32:
+        bytes += index * 4;
+        bits32 = (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) | ((uint32_t)bytes[2] << 16) |
+                 ((uint32_t)bytes[3] << 24);
+        if (view->kind == KILN_TYPED_UINT32) return (double)bits32;
+        if (view->kind == KILN_TYPED_INT32) {
+            memcpy(&signed32, &bits32, sizeof signed32);
+            return (double)signed32;
+        }
+        memcpy(&float32, &bits32, sizeof float32);
+        return (double)float32;
+    case KILN_TYPED_FLOAT64:
+        bytes += index * 8;
+        bits64 = (uint64_t)bytes[0] | ((uint64_t)bytes[1] << 8) | ((uint64_t)bytes[2] << 16) |
+                 ((uint64_t)bytes[3] << 24) | ((uint64_t)bytes[4] << 32) |
+                 ((uint64_t)bytes[5] << 40) | ((uint64_t)bytes[6] << 48) |
+                 ((uint64_t)bytes[7] << 56);
+        memcpy(&float64, &bits64, sizeof float64);
+        return float64;
+    }
+}
+
 /* A `DataView`: a window onto a byte buffer that has no element kind of its own.
  *
  * The buffer is *borrowed*, exactly as a typed array borrows one -- `new DataView(b).buffer === b`

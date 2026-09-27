@@ -908,6 +908,7 @@ typedef struct kiln_typed_buffer {
 typedef struct kiln_ffi_value {
 typedef int32_t (*kiln_ffi_dispatch_fn)(void *context, const kiln_ffi_value *arguments,
 typedef struct kiln_typed_array {
+static inline double kiln_typed_load(const kiln_typed_array *view, size_t index) {
 typedef struct kiln_data_view {
 typedef int (*kiln_host_call_fn)(void *context, uint16_t operation, uint16_t argc,
 typedef struct kiln_host {
