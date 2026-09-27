@@ -211,6 +211,7 @@ declare_ts_builtins! {
             "EOL",
             "arch",
             "availableParallelism",
+            "constants",
             "cpus",
             "default",
             "devNull",
@@ -1179,6 +1180,7 @@ declare_ts_builtins! {
             "W_OK",
             "X_OK",
             "default",
+            "signals",
         ],
     },
     V8 {
