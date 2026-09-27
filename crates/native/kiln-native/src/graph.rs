@@ -663,20 +663,6 @@ pub(super) fn emit_native_graph_module(
     emit_native_graph_module_with_policy(node, logical_path, &policy.emission())
 }
 
-// This wrapper decides which backend entry to call. Its source joins the backend source
-// fingerprint so an uncommitted emitter edit cannot be hidden by an input-cache hit.
-pub(super) static GRAPH_EMISSION_WRAPPER_ID: std::sync::LazyLock<Digest> =
-    std::sync::LazyLock::new(|| {
-        Digest::hash(
-            concat!(
-                include_str!("lib.rs"),
-                include_str!("graph.rs"),
-                include_str!("shared_graph.rs")
-            )
-            .as_bytes(),
-        )
-    });
-
 /// Cache before graph construction/C rendering, rather than hashing the rendered C first.
 /// Only ordinary code modules with the split prelude use this cache: builtin materializers,
 /// JSON and self-contained runtime bodies continue through their existing source identities.
@@ -686,6 +672,7 @@ pub(super) fn cached_graph_module(
     node: &kiln_module_graph::ModuleNode,
     logical_path: &str,
     policy: &EmissionPolicy,
+    profile: NativeProfile,
     emit: impl FnOnce() -> Result<kiln_backend_c::CModule, NativeError>,
 ) -> Result<(kiln_backend_c::CModule, bool), NativeError> {
     if !policy.decoupled_prelude
@@ -698,26 +685,57 @@ pub(super) fn cached_graph_module(
     // to IR or policy automatically participate, including source spans, strictness, exports,
     // type profiles and closed-world liveness. This is a versioned internal cache encoding,
     // not a public serialization format. Representation changes can only cause cache misses.
+    let (input, effective_policy) = source_module_input_id(node, logical_path, policy, profile);
+    cached_emitted_module(
+        cache,
+        target,
+        input,
+        *graph_source_emitter::SOURCE_EMITTER_ID,
+        || graph_source_emitter::emit(node, logical_path, &effective_policy),
+    )
+}
+
+pub(super) fn source_module_input_id(
+    node: &kiln_module_graph::ModuleNode,
+    logical_path: &str,
+    policy: &EmissionPolicy,
+    profile: NativeProfile,
+) -> (Digest, EmissionPolicy) {
+    // Hash the final policy, including profile-dependent code-shape decisions. This ensures
+    // profile, IR, source kind, path and every effective policy field participate in the key.
+    let effective_policy = graph_source_emitter::effective_policy(node, policy, profile);
     let input = Digest::hash(
-        format!("{:?}", (&node.program, node.source, logical_path, policy)).as_bytes(),
+        format!(
+            "{:?}",
+            (
+                &node.program,
+                &node.program.program.source,
+                node.source,
+                logical_path,
+                profile,
+                &effective_policy
+            )
+        )
+        .as_bytes(),
     );
-    cached_emitted_module(cache, target, input, emit)
+    (input, effective_policy)
 }
 
 fn cached_emitted_module(
     cache: &ArtifactCache,
     target: &str,
     input: Digest,
+    emitter_id: Digest,
     emit: impl FnOnce() -> Result<kiln_backend_c::CModule, NativeError>,
 ) -> Result<(kiln_backend_c::CModule, bool), NativeError> {
     let cache_key = NativeArtifactFamily::ModuleSource.source_key(
         target,
-        Digest::hash(b"native-graph-emission-input-v4"),
+        Digest::hash(b"native-graph-emission-input-v5"),
         [
             input,
             prelude_header_digest(),
             Digest::hash(kiln_backend_c::C_EMITTER_BUILD_ID.as_bytes()),
-            *GRAPH_EMISSION_WRAPPER_ID,
+            emitter_id,
         ],
     );
     match cache.lookup(&cache_key)? {
@@ -968,13 +986,10 @@ pub(super) fn native_builtin_bootstrap_module(
         )
         .as_bytes(),
     );
-    let (c_module, hit) = cached_emitted_module(cache, target, input, || {
-        Ok(emit_module_with_logical_path_and_policy(
-            program,
-            LOGICAL_PATH,
-            bootstrap_policy,
-        )?)
-    })?;
+    let (c_module, hit) =
+        cached_emitted_module(cache, target, input, *bootstrap_emitter::EMITTER_ID, || {
+            bootstrap_emitter::emit(program, LOGICAL_PATH, &bootstrap_policy)
+        })?;
     Ok((c_module, program, compiled.provider_capabilities, hit))
 }
 

@@ -53,8 +53,6 @@ static WORK_COUNTER: AtomicU64 = AtomicU64::new(0);
 static MATERIALIZE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const RELEASE_PRELUDE_COMPILE_IDENTITY: &[u8] = b"vectorize=off\0slp-vectorize=off";
-const MAX_RELEASE_SPECIALIZED_MODULE_INSTRUCTIONS: usize = 512;
-const MAX_RELEASE_SPECIALIZED_MODULE_FUNCTIONS: usize = 16;
 
 /// The cache families emitted by this crate. Keeping the family catalogue beside the key
 /// construction code makes cache GC follow the producer automatically when a stage is added.
@@ -306,17 +304,6 @@ fn cache_identity(
 /// speed rather than run speed, so a pooled site there would buy little and cost emission and
 /// compile time on every edit; the answer is identical either way. Their sites say
 /// `dev-profile`, naming `--profile native-release`.
-fn parallel_in_generic(profile: NativeProfile) -> bool {
-    !matches!(profile, NativeProfile::Dev | NativeProfile::Check)
-}
-
-fn release_module_uses_generic_bodies(module: &ModuleProgram, policy: &EmissionPolicy) -> bool {
-    let (instructions, functions) =
-        kiln_backend_c::retained_module_size(module, policy.live_module_slots.as_deref());
-    functions > MAX_RELEASE_SPECIALIZED_MODULE_FUNCTIONS
-        || instructions > MAX_RELEASE_SPECIALIZED_MODULE_INSTRUCTIONS
-}
-
 /// Map a native build profile to liveness selection: only release-style
 /// builds drop the development arm of the exact two-arm production
 /// dispatcher; development, measurement, and interpreter reduction keep
@@ -502,19 +489,12 @@ fn emit_graph_module_for_profile(
     policy: &EmissionPolicy,
     profile: NativeProfile,
 ) -> Result<kiln_backend_c::CModule, NativeError> {
-    let mut policy = policy.clone();
-    policy.parallel_in_generic = parallel_in_generic(profile);
-    if profile == NativeProfile::Release {
-        policy.generic_only = release_module_uses_generic_bodies(&node.program, &policy);
-        // Issue 14: such a module is compiled at -O0 for build time; its parallel workers go to
-        // a unit of their own, compiled like a specialized module (`module_units`).
-        policy.parallel_workers_unit = policy.generic_only;
-    } else if profile == NativeProfile::ReleaseSize {
-        policy.generic_only = true;
-        policy.omit_source = true;
+    let policy = graph_source_emitter::effective_policy(node, policy, profile);
+    if matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs) {
+        graph_source_emitter::emit(node, logical_path, &policy)
+    } else {
+        emit_native_graph_module_with_policy(node, logical_path, &policy)
     }
-    policy.compact = profile != NativeProfile::Profile;
-    emit_native_graph_module_with_policy(node, logical_path, &policy)
 }
 
 fn configure_release_prelude_compile(options: &mut CompileOptions) {
@@ -1731,6 +1711,7 @@ impl NativeBuilder {
                 node,
                 &logical_path,
                 &module_emission,
+                options.profile,
                 || {
                     emit_graph_module_for_profile(
                         node,
@@ -2303,6 +2284,7 @@ impl NativeBuilder {
                 node,
                 &logical_path,
                 &module_emission,
+                options.profile,
                 || {
                     emit_graph_module_for_profile(
                         node,
@@ -3009,6 +2991,14 @@ impl NativeBuilder {
 
 mod graph;
 use graph::*;
+mod bootstrap_emitter;
+mod graph_source_emitter;
+use graph_source_emitter::parallel_in_generic;
+#[cfg(test)]
+use graph_source_emitter::{
+    release_module_uses_generic_bodies, MAX_RELEASE_SPECIALIZED_MODULE_FUNCTIONS,
+    MAX_RELEASE_SPECIALIZED_MODULE_INSTRUCTIONS,
+};
 mod shared_graph;
 use shared_graph::*;
 

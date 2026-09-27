@@ -48,92 +48,121 @@ fn graph_emission_cache_hits_persist_and_all_input_classes_invalidate() {
         compact: true,
         ..Default::default()
     };
+    let profile = NativeProfile::Dev;
     let cache_path = project.path.join("emission-cache");
     let cache = ArtifactCache::new(&cache_path);
-    // Release selection can change generic_only after the input cache key is computed.
-    let selected_policy = EmissionPolicy {
-        generic_only: !policy.generic_only,
-        ..policy.clone()
-    };
-    let expected = emit_native_graph_module_with_policy(node, "main.js", &selected_policy).unwrap();
-    let (first, first_hit) =
-        cached_graph_module(&cache, "test-target", node, "main.js", &policy, || {
-            Ok(expected.clone())
-        })
-        .unwrap();
+    let (_, effective_policy) = source_module_input_id(node, "main.js", &policy, profile);
+    let expected = graph_source_emitter::emit(node, "main.js", &effective_policy).unwrap();
+    let (first, first_hit) = cached_graph_module(
+        &cache,
+        "test-target",
+        node,
+        "main.js",
+        &policy,
+        profile,
+        || panic!("eligible Source emission must use the fingerprinted emitter"),
+    )
+    .unwrap();
     assert!(!first_hit);
     assert_eq!(first, expected);
     // A fresh cache object must hit without entering the emitter at all.
     let reopened = ArtifactCache::new(&cache_path);
-    let (cached, cache_hit) =
-        cached_graph_module(&reopened, "test-target", node, "main.js", &policy, || {
-            panic!("unchanged module was emitted again")
-        })
-        .unwrap();
+    let (cached, cache_hit) = cached_graph_module(
+        &reopened,
+        "test-target",
+        node,
+        "main.js",
+        &policy,
+        profile,
+        || panic!("unchanged module was emitted again"),
+    )
+    .unwrap();
     assert!(cache_hit);
     assert_eq!(cached, expected);
+    let (_, other_target_hit) = cached_graph_module(
+        &reopened,
+        "other-target",
+        node,
+        "main.js",
+        &policy,
+        profile,
+        || panic!("target-distinct cold cache entry must emit"),
+    )
+    .unwrap();
+    assert!(
+        !other_target_hit,
+        "target identity must remain part of the cache key"
+    );
 
-    let mut cases = Vec::new();
+    let baseline = source_module_input_id(node, "main.js", &policy, profile).0;
+    let mut identities = vec![baseline];
     let mut changed = node.clone();
     changed.program.program.constants[0] = Constant::Number(2.0_f64.to_bits());
-    cases.push((changed, policy.clone(), "main.js", "test-target"));
+    identities.push(source_module_input_id(&changed, "main.js", &policy, profile).0);
     let mut changed = node.clone();
     changed.program.program.source = "// changed observable source".into();
-    cases.push((changed, policy.clone(), "main.js", "test-target"));
+    identities.push(source_module_input_id(&changed, "main.js", &policy, profile).0);
     let mut changed = node.clone();
     changed.program.strictness.body = !changed.program.strictness.body;
-    cases.push((changed, policy.clone(), "main.js", "test-target"));
+    identities.push(source_module_input_id(&changed, "main.js", &policy, profile).0);
     let mut changed = node.clone();
     changed.program.exports[0].exported = "renamed".into();
-    cases.push((changed, policy.clone(), "main.js", "test-target"));
+    identities.push(source_module_input_id(&changed, "main.js", &policy, profile).0);
     let mut changed = node.clone();
     changed
         .program
         .link_facts
         .immutable_bindings
         .push("value".into());
-    cases.push((changed, policy.clone(), "main.js", "test-target"));
+    identities.push(source_module_input_id(&changed, "main.js", &policy, profile).0);
     let mut changed = node.clone();
     changed.source = ModuleSource::CommonJs;
-    cases.push((changed, policy.clone(), "main.js", "test-target"));
-    cases.push((node.clone(), policy.clone(), "other.js", "test-target"));
-    cases.push((node.clone(), policy.clone(), "main.js", "other-target"));
-    for change in 0..10 {
+    identities.push(source_module_input_id(&changed, "main.js", &policy, profile).0);
+    identities.push(source_module_input_id(node, "other.js", &policy, profile).0);
+    for change in 0..9 {
         let mut changed = policy.clone();
         match change {
-            0 => changed.compact = false,
-            1 => changed.host_clock = true,
-            2 => changed.entropy = kiln_backend_c::EmissionEntropyPolicy::Seeded(3),
-            3 => changed.timezone = kiln_backend_c::EmissionStringPolicy::Named("UTC".into()),
-            4 => changed.locale = kiln_backend_c::EmissionStringPolicy::Host,
-            5 => changed.type_profile_record = true,
-            6 => changed.type_profile = Some(Arc::new(Default::default())),
-            7 => changed.live_module_slots = Some(Arc::new(BTreeSet::new())),
-            8 => changed.live_module_slots = Some(Arc::new(BTreeSet::from([0]))),
-            9 => changed.generic_only = true,
+            0 => changed.host_clock = true,
+            1 => changed.entropy = kiln_backend_c::EmissionEntropyPolicy::Seeded(3),
+            2 => changed.timezone = kiln_backend_c::EmissionStringPolicy::Named("UTC".into()),
+            3 => changed.locale = kiln_backend_c::EmissionStringPolicy::Host,
+            4 => changed.type_profile_record = true,
+            5 => changed.type_profile = Some(Arc::new(Default::default())),
+            6 => changed.live_module_slots = Some(Arc::new(BTreeSet::new())),
+            7 => changed.live_module_slots = Some(Arc::new(BTreeSet::from([0]))),
+            8 => changed.generic_only = true,
             _ => unreachable!(),
         }
-        cases.push((node.clone(), changed, "main.js", "test-target"));
+        identities.push(source_module_input_id(node, "main.js", &changed, profile).0);
     }
-    for (index, (node, policy, path, target)) in cases.iter().enumerate() {
-        let calls = std::cell::Cell::new(0);
-        let (actual, cache_hit) = cached_graph_module(&cache, target, node, path, policy, || {
-            calls.set(calls.get() + 1);
-            Ok(expected.clone())
-        })
-        .unwrap();
-        assert!(!cache_hit, "input case {index} reported a cache hit");
-        assert_eq!(calls.get(), 1, "input case {index} reused stale output");
-        assert_eq!(actual, expected);
-    }
+    identities.push(source_module_input_id(node, "main.js", &policy, NativeProfile::Check).0);
+    identities.push(source_module_input_id(node, "main.js", &policy, NativeProfile::Release).0);
+    let unique = identities
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        unique.len(),
+        identities.len(),
+        "an input class reused a cache identity"
+    );
+
     let mut embedded = policy.clone();
     embedded.decoupled_prelude = false;
     let calls = std::cell::Cell::new(0);
     for _ in 0..2 {
-        cached_graph_module(&cache, "test-target", node, "main.js", &embedded, || {
-            calls.set(calls.get() + 1);
-            Ok(expected.clone())
-        })
+        cached_graph_module(
+            &cache,
+            "test-target",
+            node,
+            "main.js",
+            &embedded,
+            profile,
+            || {
+                calls.set(calls.get() + 1);
+                Ok(expected.clone())
+            },
+        )
         .unwrap();
     }
     assert_eq!(
@@ -141,6 +170,25 @@ fn graph_emission_cache_hits_persist_and_all_input_classes_invalidate() {
         2,
         "embedded runtime sources must bypass this cache"
     );
+}
+
+#[test]
+fn source_emitter_fingerprint_excludes_graph_orchestration() {
+    let source = include_str!("../graph_source_emitter.rs");
+    assert_eq!(
+        *graph_source_emitter::SOURCE_EMITTER_ID,
+        Digest::hash(source.as_bytes())
+    );
+    assert!(source.contains("pub(super) fn emit("));
+    assert!(!source.contains("cached_graph_module"));
+    assert!(!source.contains("build_graph("));
+
+    let bootstrap_source = include_str!("../bootstrap_emitter.rs");
+    assert_eq!(
+        *bootstrap_emitter::EMITTER_ID,
+        Digest::hash(bootstrap_source.as_bytes())
+    );
+    assert!(bootstrap_source.contains("emit_module_with_logical_path_and_policy"));
 }
 
 #[test]
