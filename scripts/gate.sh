@@ -258,7 +258,10 @@ fi
 wait_background
 # Timings are meaningful only after the CPU-heavy correctness lanes have joined.
 if [[ $QUICK -eq 0 ]]; then
-    step "thirdparty baseline" ./scripts/thirdparty.sh --bench
+    # Bundle builds can spend the full released gate budget, while each nested kiln build stays
+    # single-worker. The benchmark harness still runs the built binaries serially for stable
+    # timing and comparison.
+    step "thirdparty baseline" env KILN_THIRDPARTY_BUILD_JOBS="$GATE_JOBS" KILN_JOBS=1 RAYON_NUM_THREADS=1 ./scripts/thirdparty.sh --bench
     step "facts baseline" ./scripts/facts-baseline.sh --check
 fi
 

@@ -216,7 +216,8 @@ measured = {}
 regressions = []
 gains = []
 
-max_workers = min(len(bundle_names), int(os.environ.get("KILN_JOBS", os.cpu_count() or 4)))
+build_jobs = os.environ.get("KILN_THIRDPARTY_BUILD_JOBS", os.environ.get("KILN_JOBS", os.cpu_count() or 4))
+max_workers = min(len(bundle_names), int(build_jobs))
 if max_workers > 16:
     max_workers = 16
 elif max_workers < 1:
