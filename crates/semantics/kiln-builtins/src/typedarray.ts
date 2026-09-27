@@ -924,54 +924,45 @@ delete (globalThis as any).__kilnTypedArrayOutOfBounds;
     });
   }
 
-  // Search
-  defineMethod("indexOf", indexOf);
-  defineMethod("lastIndexOf", lastIndexOf);
-  defineMethod("includes", includes);
-
-  // Predicates / Searchers
+  // In the order node's `Reflect.ownKeys(%TypedArray%.prototype)` reports them: key order is
+  // observable, and a program that lists the prototype should see the same list in every engine.
+  defineMethod("entries", entries);
+  defineMethod("keys", keys);
+  defineMethod("values", values);
+  defineMethod("at", at);
+  defineMethod("copyWithin", copyWithin);
+  defineMethod("every", every);
+  defineMethod("fill", fill);
+  defineMethod("filter", filter);
   defineMethod("find", find);
   defineMethod("findIndex", findIndex);
   defineMethod("findLast", findLast);
   defineMethod("findLastIndex", findLastIndex);
-  defineMethod("some", some);
-  defineMethod("every", every);
-
-  // Reducers / Iterators
   defineMethod("forEach", forEach);
+  defineMethod("includes", includes);
+  defineMethod("indexOf", indexOf);
+  defineMethod("join", join);
+  defineMethod("lastIndexOf", lastIndexOf);
   defineMethod("map", map);
-  defineMethod("filter", filter);
+  defineMethod("reverse", reverse);
   defineMethod("reduce", reduce);
   defineMethod("reduceRight", reduceRight);
-  defineMethod("join", join);
-  defineMethod("entries", entries);
-  defineMethod("keys", keys);
-  defineMethod("values", values);
-  if (typeof Symbol !== "undefined" && Symbol.iterator) {
-    defineMethod(Symbol.iterator, values);
-  }
-
-  // Mutators / Copiers
-  defineMethod("slice", slice);
-  defineMethod("subarray", subarray);
   defineMethod("set", set);
-  defineMethod("copyWithin", copyWithin);
-  defineMethod("fill", fill);
-  defineMethod("reverse", reverse);
+  defineMethod("slice", slice);
+  defineMethod("some", some);
   defineMethod("sort", sort);
-
-  // ES2023 change-by-copy
-  defineMethod("at", at);
+  defineMethod("subarray", subarray);
   defineMethod("toReversed", toReversed);
   defineMethod("toSorted", toSorted);
   defineMethod("with", withMethod);
-
-  // Additional %TypedArray%.prototype methods
+  defineMethod("toLocaleString", toLocaleString);
   defineMethod(
     "toString",
     typeof Array.prototype.toString === "function" ? Array.prototype.toString : toStringMethod
   );
-  defineMethod("toLocaleString", toLocaleString);
+  if (typeof Symbol !== "undefined" && Symbol.iterator) {
+    defineMethod(Symbol.iterator, values);
+  }
 
   // kiln's own members (ADR 0068): declared in `kiln_builtin_surface::KILN_EXTENSIONS`, installed
   // only when the realm installs extensions (`extensions.ts`), and non-enumerable like the rest.

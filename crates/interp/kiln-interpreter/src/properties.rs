@@ -2127,8 +2127,6 @@ pub(super) const REG_EXP_MEMBERS: intrinsic_members::NamedMembers =
         "toString",
         "test",
     ]);
-pub(super) const DATE_MEMBERS: intrinsic_members::NamedMembers =
-    intrinsic_members::NamedMembers::new(&["getTime", "setTime"]);
 pub(super) const ARRAY_BUFFER_MEMBERS: intrinsic_members::NamedMembers =
     intrinsic_members::NamedMembers::new(&["slice", "sliceToImmutable", "transferToImmutable"]);
 pub(super) const DATA_VIEW_MEMBERS: intrinsic_members::NamedMembers =
@@ -2260,9 +2258,12 @@ pub(super) fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'stati
         | PrototypeTable::Set
         | PrototypeTable::WeakMap
         | PrototypeTable::WeakSet
-        | PrototypeTable::SharedArrayBuffer => &[],
+        | PrototypeTable::SharedArrayBuffer
+        // `getTime` and `setTime` are still answered by the table, for the shared
+        // `Date.prototype` to capture, and listed by the realm's store once it has redefined
+        // them -- in the order it defines every member, which is node's.
+        | PrototypeTable::Date => &[],
         PrototypeTable::RegExp => REG_EXP_MEMBERS.names(),
-        PrototypeTable::Date => DATE_MEMBERS.names(),
         PrototypeTable::ArrayBuffer => ARRAY_BUFFER_MEMBERS.names(),
         PrototypeTable::DataView => DATA_VIEW_MEMBERS.names(),
         PrototypeTable::Iterator => ITERATOR_MEMBERS.names(),
