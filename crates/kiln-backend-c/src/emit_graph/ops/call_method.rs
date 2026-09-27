@@ -842,10 +842,6 @@ pub(super) fn emit_call_method(
                     let pfx = format!("{symbol}_fn_{fn_id}_v{v}_t_{i}");
                     let shape_var = format!("{pfx}_shape");
                     let row_var = format!("{pfx}_row");
-                    let proto_var = format!("{pfx}_proto");
-                    let epoch_var = format!("{pfx}_epoch");
-                    let upvalues_var = format!("{pfx}_upvalues");
-                    let fn_var = format!("{pfx}_fn");
 
                     let needs = plan.typed_needs[i as usize];
                     let mut call_args = String::from("depth + 1");
@@ -859,11 +855,11 @@ pub(super) fn emit_call_method(
                     // callee's own table after the first call, so the callee does no lookup.
                     let (row_arg, row_learn) = if needs.row {
                         let columns = plan.receiver_columns.get(i as usize).copied().unwrap_or(0);
-                        call_args.push_str(&format!(", obj->shape != NULL && obj->shape == {shape_var} ? {row_var} : NULL"));
+                        call_args.push_str(", {ROW}");
                         (
                             String::new(),
                             format!(
-                                " if (obj->shape != {shape_var}) {{ const uint32_t *__r = kiln_c99_recv_row({symbol}_fn_{i}_typed_recv_shape, &{symbol}_fn_{i}_typed_recv_slot[0][0], {columns}, obj->shape); if (__r != NULL) {{ {shape_var} = obj->shape; {row_var} = __r; }} }} {proto_var} = obj->prototype.tag == KILN_VALUE_OBJECT ? obj->prototype.bits : 0; {epoch_var} = kiln_c99_site_callee_is_inherited(&site, obj) ? kiln_c99_proto_epoch : UINT64_MAX; {upvalues_var} = plain->upvalues;"
+                                " if (obj->shape != {shape_var}) {{ const uint32_t *__r = kiln_c99_recv_row({symbol}_fn_{i}_typed_recv_shape, &{symbol}_fn_{i}_typed_recv_slot[0][0], {columns}, obj->shape); if (__r != NULL) {{ {shape_var} = obj->shape; {row_var} = __r; }} }}"
                             ),
                         )
                     } else {
@@ -885,24 +881,40 @@ pub(super) fn emit_call_method(
                     let failed = format!(
                         "{{ int status = kiln_c99_typed_status; if (status == KILN_C99_THROWN) *thrown = kiln_c99_typed_thrown; {diag} {typed_check} }}"
                     );
-                    // The closure that last entered this candidate here is remembered, and a
-                    // cached callee equal to it is that closure: the site just read it live
-                    // from where the method lives. Its body is then known without a load.
+                    // ADR 0071: the candidate is recognised by its code, never by a closure
+                    // object -- the site just read the callee live from where the method lives,
+                    // and its body pointer says which function it is; the upvalues are that
+                    // closure's own.
                     let matched = format!(
-                        "(cached_fn == {fn_var} || (plain->body == (kiln_body_fn){symbol}_fn_{i} && ({fn_var} = cached_fn) != 0)) && kiln_typed_ok"
+                        "plain->body == (kiln_body_fn){symbol}_fn_{i} && kiln_typed_ok"
                     );
                     let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
                     let box_stmt = if need_box { format!(" v{v} = kiln_c99_val_from_double(kiln_typed_d);") } else { String::new() };
-                    if plan.typed_returns[i as usize] {
-                        let twin = if typed { format!(" d{v} = kiln_typed_d; kiln_twin = 1;") } else { String::new() };
-                        let int_twin = if typed_int { format!(" i{v} = (int64_t)kiln_typed_d; kiln_twin = 1;") } else { String::new() };
+                    let invoke = |row: &str, learn: &str| -> String {
+                        let call_args = call_args.replace("{ROW}", row);
+                        if plan.typed_returns[i as usize] {
+                            let twin = if typed { format!(" d{v} = kiln_typed_d; kiln_twin = 1;") } else { String::new() };
+                            let int_twin = if typed_int { format!(" i{v} = (int64_t)kiln_typed_d; kiln_twin = 1;") } else { String::new() };
+                            format!(
+                                "double kiln_typed_d = {symbol}_fn_{i}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(kiln_typed_d))) {failed} else {{{box_stmt}{twin}{int_twin}{learn} }}"
+                            )
+                        } else {
+                            format!(
+                                "kiln_val kiln_typed_r = {symbol}_fn_{i}_t({call_args}); if (KILN_UNLIKELY(kiln_typed_r == KILN_VAL_TYPED_FAIL)) {failed} else {{ v{v} = kiln_typed_r;{learn} }}"
+                            )
+                        }
+                    };
+                    if needs.row {
+                        // The receiver's shape is the one whose row this site remembered: the
+                        // row goes in known, so the callee's own lookup folds away.
+                        let known = invoke("__row", "");
+                        let learning = invoke("NULL", &row_learn);
                         format!(
-                            "if ({matched}) {{ double kiln_typed_d = {symbol}_fn_{i}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(kiln_typed_d))) {failed} else {{{box_stmt}{twin}{int_twin}{row_learn} }} handled = 1; }} else "
+                            "if ({matched}) {{ if (obj->shape != NULL && obj->shape == {shape_var}) {{ const uint32_t *__row = {row_var}; if (__row == NULL) __builtin_unreachable(); {known} }} else {{ {learning} }} handled = 1; }} else "
                         )
                     } else {
-                        format!(
-                            "if ({matched}) {{ kiln_val kiln_typed_r = {symbol}_fn_{i}_t({call_args}); if (KILN_UNLIKELY(kiln_typed_r == KILN_VAL_TYPED_FAIL)) {failed} else {{ v{v} = kiln_typed_r;{row_learn} }} handled = 1; }} else "
-                        )
+                        let plain_call = invoke("", "");
+                        format!("if ({matched}) {{ {plain_call} handled = 1; }} else ")
                     }
                 })
                 .collect();
@@ -914,76 +926,6 @@ pub(super) fn emit_call_method(
         "int kiln_typed_ok = !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH; (void)kiln_typed_ok; ".to_owned()
     };
     let typed_remembered = typed_guard_decl;
-    // The shape-first entry. Once the generic arm below has entered a typed candidate for a
-    // receiver shape -- through the site's validated cache -- the shape, the receiver's own
-    // prototype link and the prototype epoch of that moment name the callee outright: the same
-    // three facts the cache's own hit checks, without the entry walk, the closure checks or the
-    // callee compare. A mutation anywhere a cache reads through moves the epoch and sends the
-    // site back through the generic arm, which restamps.
-    let typed_fast: String = typed_candidates
-        .iter()
-        .copied()
-        .filter(|&i| plan.typed_needs[i as usize].row)
-        .enumerate()
-        .map(|(k, i)| {
-            let pfx = format!("{symbol}_fn_{fn_id}_v{v}_t_{i}");
-            let shape_var = format!("{pfx}_shape");
-            let row_var = format!("{pfx}_row");
-            let upvalues_var = format!("{pfx}_upvalues");
-
-            let needs = plan.typed_needs[i as usize];
-            let mut call_args = String::from("depth + 1");
-            if needs.upvalues {
-                call_args.push_str(&format!(", {upvalues_var}"));
-            }
-            if needs.receiver {
-                call_args.push_str(&format!(", v{}", object.0));
-            }
-            call_args.push_str(", __row");
-            if needs.runtime {
-                call_args.push_str(", host, thrown");
-            }
-            for a in args {
-                if ctx.live_numbers.contains(a) {
-                    call_args.push_str(&format!(", d{}", a.0));
-                } else if ctx.live_ints.contains(a) {
-                    call_args.push_str(&format!(", (double)i{}", a.0));
-                } else {
-                    call_args.push_str(&format!(", d{}", a.0));
-                }
-            }
-            let failed = format!(
-                "{{ int status = kiln_c99_typed_status; if (status == KILN_C99_THROWN) *thrown = kiln_c99_typed_thrown; {diag} {typed_check} }}"
-            );
-            // `{shape_var}` starts NULL and is reset to NULL on a prototype epoch change, and an
-            // object in dictionary mode has a NULL shape: without the first test the two matched,
-            // the NULL row went to `__builtin_unreachable()`, and a class getter calling a method
-            // on `this` crashed the program (`get href() { return this._components()[0]; }`).
-            let guard = if k == 0 {
-                format!("if (obj->shape != NULL && obj->shape == {shape_var})")
-            } else {
-                format!("else if (obj->shape != NULL && obj->shape == {shape_var})")
-            };
-            let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
-            let box_stmt = if need_box { format!(" v{v} = kiln_c99_val_from_double(kiln_typed_d);") } else { String::new() };
-            if plan.typed_returns[i as usize] {
-                let twin = if typed { format!(" d{v} = kiln_typed_d; kiln_twin = 1;") } else { String::new() };
-                let int_twin = if typed_int { format!(" i{v} = (int64_t)kiln_typed_d; kiln_twin = 1;") } else { String::new() };
-                format!(
-                    "{guard} {{ const uint32_t *__row = {row_var}; if (__row == NULL) __builtin_unreachable(); double kiln_typed_d = {symbol}_fn_{i}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(kiln_typed_d))) {failed} else {{{box_stmt}{twin}{int_twin} }} handled = 1; }} "
-                )
-            } else {
-                format!(
-                    "{guard} {{ const uint32_t *__row = {row_var}; if (__row == NULL) __builtin_unreachable(); kiln_val kiln_typed_r = {symbol}_fn_{i}_t({call_args}); if (KILN_UNLIKELY(kiln_typed_r == KILN_VAL_TYPED_FAIL)) {failed} else {{ v{v} = kiln_typed_r; }} handled = 1; }} "
-                )
-            }
-        })
-        .collect();
-    let typed_fast_block = if typed_fast.is_empty() {
-        String::new()
-    } else {
-        format!("{typed_fast} ")
-    };
     let by_name: String = candidates
                 .iter()
                 .filter(|i| !typed_candidates.contains(i))
@@ -3200,7 +3142,6 @@ pub(super) fn emit_call_method(
                 {await_resolve_s}{math_s}{array_is_array_s}{number_predicate_s}{push_s}{regex_s}{map_s}{parallel_pool_s}{parallel_map_s}{filter_s}{reduce_s}{slice_s}{join_s}{split_s}{index_of_s}{substring_s}{collection_s}{json_s}{sort_s}{array_extra_s}{string_extra_s}{iterator_s} \
                 if (!handled && KILN_VAL_IS_OBJECT(v{o})) {{ \
                     const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); if (obj == NULL) __builtin_unreachable(); \
-                    {typed_fast_block}\
                     if (!handled && site.pic_count > 0) {{ \
                         kiln_val cached_fn = kiln_c99_site_cached_callee(&site, obj); \
                         if (cached_fn != 0 && KILN_VAL_IS_CLOSURE(cached_fn)) {{ \

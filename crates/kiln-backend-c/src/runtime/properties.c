@@ -218,12 +218,78 @@ static int kiln_c99_inherited_write_blocked(kiln_value proto, const kiln_string 
     return 1;
 }
 
+#define KILN_C99_PATH_NONE 0
+#define KILN_C99_PATH_FOUND 1
+#define KILN_C99_PATH_ABSENT 2
+
+/* The path from `object` for canonical `key`, stated as a cache entry states it (ADR 0071):
+ * `entry`'s `depth` and levels are filled in as the walk goes. FOUND: the key is a data property
+ * of the level at `depth` (1 or 2), whose slot -- or, in list mode, index, where the record must
+ * carry the canonical pointer -- is `proto_slot`, and `*holder` is that level. ABSENT: no level up
+ * to `depth` has the key and the last one's prototype link is not an object; `absent` is set.
+ * NONE for anything else: an accessor or a refused record, a level that is not an ordinary
+ * object, a key deeper than two steps, a level that cannot be named, a reserved key. `object`'s
+ * own properties are the caller's to have checked. */
+static int kiln_c99_pic_learn_path(kiln_c99_pic_entry *entry, const kiln_object *object,
+                                   const kiln_string *key, const kiln_object **holder) {
+    const kiln_object *level = object;
+    uint32_t d;
+    if (key == NULL || kiln_c99_key_is_reserved(key) || kiln_c99_same_name_key(key, "__proto__")) {
+        return KILN_C99_PATH_NONE;
+    }
+    entry->key = key;
+    for (d = 0; d < 2; ++d) {
+        const kiln_object *candidate;
+        if (level->prototype.tag != KILN_VALUE_OBJECT) break;
+        candidate = (const kiln_object *)(uintptr_t)level->prototype.bits;
+        if (candidate == NULL || kiln_c99_gc_kind_of_ptr((void *)candidate) != KILN_GC_OBJECT) {
+            return KILN_C99_PATH_NONE;
+        }
+        entry->depth = (uint8_t)(d + 1);
+        if (candidate->shape != NULL) {
+            uint32_t slot;
+            entry->level_shape[d] = candidate->shape;
+            entry->level_token[d] = 0;
+            if (kiln_c99_shape_find_slot(candidate->shape, key, &slot)) {
+                if (slot >= candidate->slot_capacity) return KILN_C99_PATH_NONE;
+                entry->proto_slot = slot;
+                *holder = candidate;
+                return KILN_C99_PATH_FOUND;
+            }
+        } else {
+            size_t i;
+            for (i = 0; i < candidate->count && candidate->properties != NULL; ++i) {
+                const kiln_property *property = &candidate->properties[i];
+                if (property->key == key || kiln_string_equal(property->key, key)) {
+                    if (property->key != key || property->accessor || property->refused) {
+                        return KILN_C99_PATH_NONE;
+                    }
+                    /* The holder is named by the key its record carries, not by a token. */
+                    entry->level_shape[d] = NULL;
+                    entry->level_token[d] = 0;
+                    entry->proto_slot = (uint32_t)i;
+                    *holder = candidate;
+                    return KILN_C99_PATH_FOUND;
+                }
+            }
+            /* A list-mode level the key is not on: only its layout token can say it has not
+             * gained the key since. */
+            if (!kiln_c99_pic_name_level(candidate, &entry->level_shape[d], &entry->level_token[d])) {
+                return KILN_C99_PATH_NONE;
+            }
+        }
+        level = candidate;
+    }
+    if (level->prototype.tag == KILN_VALUE_OBJECT) return KILN_C99_PATH_NONE;
+    entry->absent = 1;
+    return KILN_C99_PATH_ABSENT;
+}
+
 /* Whether a transitioning store an inline-cache entry remembers may run on `object`: nothing on
  * its prototype chain intercepts the entry's key. The coarse walk answers for most objects. For
- * one whose chain holds accessors, the exact answer is remembered in the entry under the
- * prototype epoch: every level walked is flagged as a cache holder, so any change to one of them
- * -- an accessor defined, a property made read-only, a prototype relinked -- moves the epoch, and
- * the receiver's own link is compared by pointer. `key` NULL means the caller has no canonical
+ * one whose chain holds accessors, the exact answer is remembered in the entry as a path (ADR
+ * 0071): the key is on none of the levels up to where the chain ends, each named by shape or
+ * layout token and checked live from the receiver. `key` NULL means the caller has no canonical
  * key at hand and takes the coarse answer. */
 static __attribute__((noinline)) int kiln_c99_transition_store_clear_slow(
     kiln_c99_site *site, kiln_c99_pic_entry *entry, const kiln_object *object,
@@ -235,15 +301,17 @@ static inline int kiln_c99_transition_store_clear(kiln_c99_site *site, kiln_c99_
                                                   const kiln_string *key) {
     kiln_value proto = object->prototype;
     if (proto.tag != KILN_VALUE_OBJECT) return 1;
-    if (KILN_LIKELY(entry->holder == NULL && entry->epoch == kiln_c99_proto_epoch &&
-                    entry->via == kiln_c99_object_of(proto))) {
+    if (entry->absent) {
+        const kiln_object *end = kiln_c99_pic_path(entry, object);
+        if (KILN_LIKELY(end != NULL && end->prototype.tag != KILN_VALUE_OBJECT)) {
 #ifdef KILN_IC_CHECK
-        if (key != NULL && kiln_c99_inherited_write_blocked(proto, ikey, key)) {
-            fputs("kiln: inline-cache oracle: a cached transitioning store is intercepted under an unmoved epoch; a mutation path forgot kiln_c99_prototype_touched\n", stderr);
-            __builtin_trap();
-        }
+            if (key != NULL && kiln_c99_inherited_write_blocked(proto, ikey, key)) {
+                fputs("kiln: inline-cache oracle: a cached transitioning store is intercepted along an unchanged path; a mutation path forgot kiln_c99_prototype_touched\n", stderr);
+                __builtin_trap();
+            }
 #endif
-        return 1;
+            return 1;
+        }
     }
     if (!kiln_c99_has_inherited_setter_or_readonly(proto)) return 1;
     return kiln_c99_transition_store_clear_slow(site, entry, object, ikey, key);
@@ -252,21 +320,23 @@ static inline int kiln_c99_transition_store_clear(kiln_c99_site *site, kiln_c99_
 static __attribute__((noinline)) int kiln_c99_transition_store_clear_slow(
     kiln_c99_site *site, kiln_c99_pic_entry *entry, const kiln_object *object,
     const kiln_string *ikey, const kiln_string *key) {
-    kiln_value proto = object->prototype;
-    kiln_value current;
-    size_t steps;
-    if (key == NULL || entry->holder != NULL) return 0;
-    if (kiln_c99_inherited_write_blocked(proto, ikey, key)) return 0;
-    current = proto;
-    for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH && current.tag == KILN_VALUE_OBJECT;
-         ++steps) {
-        kiln_object *walked = kiln_c99_object_of(current);
-        walked->cache_holder = 1;
-        current = walked->prototype;
+    kiln_c99_pic_entry path;
+    const kiln_object *holder = NULL;
+    if (key == NULL) return 0;
+    if (kiln_c99_inherited_write_blocked(object->prototype, ikey, key)) return 0;
+    /* Clear. Remember why when the key is absent along a path of at most two levels. */
+    memset(&path, 0, sizeof path);
+    if (ikey != NULL &&
+        kiln_c99_pic_learn_path(&path, object, ikey, &holder) == KILN_C99_PATH_ABSENT) {
+        entry->depth = path.depth;
+        entry->level_shape[0] = path.level_shape[0];
+        entry->level_shape[1] = path.level_shape[1];
+        entry->level_token[0] = path.level_token[0];
+        entry->level_token[1] = path.level_token[1];
+        entry->key = path.key;
+        entry->absent = 1;
+        kiln_c99_site_learned(site);
     }
-    entry->via = kiln_c99_object_of(proto);
-    entry->epoch = kiln_c99_proto_epoch;
-    kiln_c99_gc_register_site(site);
     return 1;
 }
 

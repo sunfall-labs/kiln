@@ -364,17 +364,9 @@ pub(super) fn emit_get_property(
             "else if (shape != NULL) {{ \
                 for (int i = 1; i < (int)site.pic_count && i < 4; ++i) {{ \
                     if (shape == site.entries[i].shape) {{ \
-                        if (site.entries[i].holder == NULL) {{ \
-                            uint32_t slot = site.entries[i].slot; \
-                            if (slot < obj->slot_capacity) {{ v{v} = obj->slots[slot]; handled = 1; break; }} \
-                            else if (slot == UINT32_MAX && site.entries[i].epoch == kiln_c99_proto_epoch) {{ v{v} = KILN_VAL_UNDEFINED; handled = 1; break; }} \
-                        }} else {{ \
-                            const kiln_object *first = site.entries[i].via != NULL ? site.entries[i].via : site.entries[i].holder; \
-                            if (site.entries[i].epoch == kiln_c99_proto_epoch && obj->prototype.tag == KILN_VALUE_OBJECT && (const kiln_object *)(uintptr_t)obj->prototype.bits == first) {{ \
-                                v{v} = site.entries[i].holder_shape != NULL ? site.entries[i].holder->slots[site.entries[i].holder_slot] : site.entries[i].holder_val; \
-                                handled = 1; break; \
-                            }} \
-                        }} \
+                        uint32_t slot = site.entries[i].slot; \
+                        if (slot < obj->slot_capacity) {{ v{v} = obj->slots[slot]; handled = 1; break; }} \
+                        if (kiln_c99_pic_inherited(&site.entries[i], obj, &v{v})) {{ handled = 1; break; }} \
                     }} \
                 }} \
             }}"
@@ -388,25 +380,12 @@ pub(super) fn emit_get_property(
                     const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); \
                     const kiln_shape *shape = obj->shape; \
                     if (KILN_LIKELY(shape != NULL && shape == site.entries[0].shape)) {{ \
-                        if (KILN_LIKELY(site.entries[0].holder == NULL)) {{ \
-                            uint32_t s0 = site.entries[0].slot; \
-                            if (KILN_LIKELY(s0 < obj->slot_capacity)) {{ \
-                                v{v} = obj->slots[s0]; \
-                                handled = 1; \
-                            }} else if (s0 == UINT32_MAX && site.entries[0].epoch == kiln_c99_proto_epoch) {{ \
-                                v{v} = KILN_VAL_UNDEFINED; \
-                                handled = 1; \
-                            }} \
-                        }} else {{ \
-                            const kiln_object *first = site.entries[0].via != NULL ? site.entries[0].via : site.entries[0].holder; \
-                            if (KILN_LIKELY(site.entries[0].epoch == kiln_c99_proto_epoch && \
-                                            obj->prototype.tag == KILN_VALUE_OBJECT && \
-                                            (const kiln_object *)(uintptr_t)obj->prototype.bits == first)) {{ \
-                                v{v} = site.entries[0].holder_shape != NULL \
-                                           ? site.entries[0].holder->slots[site.entries[0].holder_slot] \
-                                           : site.entries[0].holder_val; \
-                                handled = 1; \
-                            }} \
+                        uint32_t s0 = site.entries[0].slot; \
+                        if (KILN_LIKELY(s0 < obj->slot_capacity)) {{ \
+                            v{v} = obj->slots[s0]; \
+                            handled = 1; \
+                        }} else if (kiln_c99_pic_inherited(&site.entries[0], obj, &v{v})) {{ \
+                            handled = 1; \
                         }} \
                     }} {poly_read} \
                 }} \

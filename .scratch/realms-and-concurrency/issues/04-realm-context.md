@@ -30,6 +30,16 @@ within noise of before on one realm, and `scripts/native.sh` at 0 diverged.
    built-in. `lit_shape`, `kiln_sp_shape_*` and the receiver rows are shape-only already and become
    sound once shapes are shared. `kiln_c99_gc_register_site` loses its reason to exist for entries
    that hold no objects.
+3b. **Shapes carry attributes, so prototypes have shapes.** Step 3 made method caches correct across
+   realms but slowed method calls (class-poly about 1.9x): a class prototype's methods are
+   non-enumerable, shapes describe only enumerable data properties, so prototypes live in list
+   mode, and a realm-independent method cache must load the closure and check its code on every
+   call; list-mode steps also fall back to a per-realm `layout_token`, which ping-pongs between
+   realms sharing a site. Give shapes property attributes (writable, enumerable, configurable,
+   accessor) so class prototypes and other attribute-bearing objects are shaped, then state method
+   caches as receiver shape -> prototype shape -> slot, checking the loaded closure's code.
+   Acceptance: class-poly back to its pre-step-3 time or better; `layout_token` gone or unused for
+   class prototypes; `scripts/native.sh`, `native-stress` and thirdparty unchanged.
 4. **Atomic publication and reclamation.** One-word cache state is written and read atomically;
    wider state is an immutable record swapped by compare-and-swap; a replaced record is retired and
    freed once every scheduler thread has passed a turn boundary (quiescent-state reclamation).

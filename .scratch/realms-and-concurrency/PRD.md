@@ -97,6 +97,9 @@ ADR 0070 was accepted on 2026-09-26; nothing here waits on a decision except the
 
 ## Performance checks owed
 
+One known regression, owned by issue 04 step 3b: class-poly about 1.9x slower after step 3
+(`fb335976`), from method caches that must load the closure while class prototypes lack shapes.
+
 Changes to hot paths landed while the machine was loaded by parallel builds, so their benchmarks
 were inconclusive. They are re-measured together on a quiet machine before this plan closes:
 
