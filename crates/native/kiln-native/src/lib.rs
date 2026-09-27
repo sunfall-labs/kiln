@@ -7,9 +7,11 @@
 mod number_provider;
 pub mod shared_publication;
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -3072,9 +3074,19 @@ impl NativeBuilder {
         match self.lookup(key)? {
             Lookup::Hit(artifact) => Ok((artifact.bytes, artifact.digest, true, Duration::ZERO)),
             Lookup::Miss => {
-                let bucket = usize::from(key.digest().as_bytes()[0]);
-                let _process_lock = OBJECT_COMPILE_LOCKS[bucket].lock();
-                let (lock_file, lock_path) = self.object_compile_lock_file(bucket)?;
+                let file_bucket = usize::from(key.digest().as_bytes()[0]);
+                let (lock_file, lock_path) = self.object_compile_lock_file(file_bucket)?;
+                let canonical_lock_path =
+                    fs::canonicalize(&lock_path).map_err(|source| NativeError::Io {
+                        operation: "resolve native object compile lock",
+                        path: lock_path.clone(),
+                        source,
+                    })?;
+                let mut hasher = DefaultHasher::new();
+                canonical_lock_path.hash(&mut hasher);
+                let process_bucket =
+                    (hasher.finish() % OBJECT_COMPILE_LOCK_BUCKETS as u64) as usize;
+                let _process_lock = OBJECT_COMPILE_LOCKS[process_bucket].lock();
                 lock_file.lock().map_err(|source| NativeError::Io {
                     operation: "lock native object compile bucket",
                     path: lock_path,
