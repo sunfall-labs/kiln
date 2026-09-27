@@ -54,9 +54,29 @@ const MAX_FILES: usize = 10_000;
 const MAX_READ_THREADS: usize = 8;
 
 fn read_threads() -> usize {
-    std::thread::available_parallelism()
-        .map_or(MAX_READ_THREADS, |cores| cores.get())
-        .min(MAX_READ_THREADS)
+    let cores = std::thread::available_parallelism().map_or(MAX_READ_THREADS, |cores| cores.get());
+    let kiln_jobs = std::env::var("KILN_JOBS").ok();
+    let rayon_threads = std::env::var("RAYON_NUM_THREADS").ok();
+    bounded_threads(
+        MAX_READ_THREADS,
+        cores,
+        [kiln_jobs.as_deref(), rayon_threads.as_deref()],
+    )
+}
+
+/// Bound this private pool by its own ceiling, the available CPU count, and any positive caller
+/// limits. This is a per-pool limit, not a process-wide CPU guarantee.
+fn bounded_threads(max_threads: usize, cores: usize, requested: [Option<&str>; 2]) -> usize {
+    let mut threads = max_threads.max(1).min(cores.max(1));
+    for count in requested
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.parse::<usize>().ok())
+        .filter(|count| *count > 0)
+    {
+        threads = threads.min(count);
+    }
+    threads
 }
 
 pub struct Walk {
@@ -823,6 +843,32 @@ pub(crate) fn is_discoverable(root: &Path, path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_read_pool_honors_positive_caller_limits() {
+        assert_eq!(bounded_threads(MAX_READ_THREADS, 32, [None, None]), 8);
+        assert_eq!(bounded_threads(MAX_READ_THREADS, 2, [Some("16"), None]), 2);
+        assert_eq!(
+            bounded_threads(MAX_READ_THREADS, 32, [Some("16"), Some("1")]),
+            1
+        );
+        assert_eq!(
+            bounded_threads(MAX_READ_THREADS, 32, [Some("2"), Some("4")]),
+            2
+        );
+    }
+
+    #[test]
+    fn source_read_pool_ignores_invalid_and_nonpositive_limits() {
+        for value in [Some("0"), Some("-1"), Some("nope")] {
+            assert_eq!(bounded_threads(MAX_READ_THREADS, 32, [value, None]), 8);
+        }
+        assert_eq!(bounded_threads(MAX_READ_THREADS, 0, [None, None]), 1);
+        assert_eq!(
+            bounded_threads(MAX_READ_THREADS, 32, [Some("9999"), None]),
+            8
+        );
+    }
 
     /// A throwaway tree under the OS temp directory, removed when the test ends.
     struct Tree(PathBuf);
