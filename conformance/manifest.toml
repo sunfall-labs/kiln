@@ -1526,6 +1526,9 @@ E1
 E-on2 true 0
 E2
 T 4 3 true 4
+"""
+
+[[test]]
 id = "regress/r18-worker-threads-receive-message"
 requires_host = "node"
 group = "regress"
