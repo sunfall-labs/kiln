@@ -158,6 +158,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     streams: Vec::new(),
                     object: None,
                     fetch: false,
+                    close_deferred: false,
                 }));
                 let object = node_server_object(&state);
                 self.register_node_server(&state);
@@ -912,6 +913,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     streams: Vec::new(),
                     object: None,
                     fetch: native == Native::NodeHttpCreateFetchServer,
+                    close_deferred: false,
                 }));
                 let object = node_server_object(&state);
                 self.register_node_server(&state);
@@ -1183,7 +1185,21 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             ServerAction::Listening(_) => {
                 self.emit_http_server(state, "listening", vec![], instruction)
             }
-            ServerAction::Close => self.emit_http_server(state, "close", vec![], instruction),
+            ServerAction::Close => {
+                // Node emits `close` once the listener is closed *and* every connection has
+                // ended: `server.close(() => process.exit(0))` must not cut off the requests it
+                // is draining (realms issue 23). The last connection's `Closed` emits it.
+                {
+                    let mut server = state.borrow_mut();
+                    if server.protocol == ServerProtocol::Http
+                        && server.streams.iter().any(|stream| !stream.closed)
+                    {
+                        server.close_deferred = true;
+                        return Ok(());
+                    }
+                }
+                self.emit_http_server(state, "close", vec![], instruction)
+            }
             ServerAction::Connection(accepted) => {
                 let protocol = state.borrow().protocol;
                 let (socket_state, socket) = if protocol == ServerProtocol::Http {
@@ -1669,6 +1685,15 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             || stream.request.is_some()
                             || stream.response.is_some()
                     });
+                    let emit_close = server_state.close_deferred
+                        && server_state.streams.iter().all(|stream| stream.closed);
+                    if emit_close {
+                        server_state.close_deferred = false;
+                    }
+                    drop(server_state);
+                    if emit_close {
+                        self.emit_http_server(server, "close", vec![], instruction)?;
+                    }
                 }
             }
         }
@@ -3499,6 +3524,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             streams: vec![connection],
                             object: None,
                             fetch: false,
+                            close_deferred: false,
                         }));
                         {
                             let mut socket_state = socket_state.borrow_mut();

@@ -898,6 +898,9 @@ impl GraphExecutor<'_> {
         let outcome = self.execute_mode_in(host, limits, capabilities, node);
         // The realm is over, and so are the workers it started and did not wait for.
         kiln_runtime::workers::finish_children();
+        // And so are its signal subscriptions (realms issue 23): a daemon or a test runner goes
+        // on to other programs, and a signal must not be taken on behalf of one that has ended.
+        kiln_runtime::signals::release_thread();
         outcome
     }
 

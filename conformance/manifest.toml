@@ -2004,3 +2004,57 @@ expected_stdout = """
 live-7
 done
 """
+
+[[test]]
+id = "regress/r37-signal-events"
+requires_host = "node"
+group = "regress"
+source = "regress/r37-signal-events.js"
+status = "runnable"
+features = ["process-signals", "process-kill", "event-loop-order", "next-tick", "promise-jobs"]
+catches = """
+`process.on(signal)` and `process.kill` as node has them (realms issue 23), recorded from node 26.8.1. A listener turns the signal into an event emitted from the poll phase -- after the script's ticks and promise jobs, before its immediates -- with `(name, number)` and `process` as `this`, one event per arrival, a `once` listener removed before the next. `SIGKILL` and `SIGSTOP` throw node's `uv_signal_start EINVAL` from `on` and add nothing; `process.kill` throws `ERR_UNKNOWN_SIGNAL`, `ERR_INVALID_ARG_TYPE` and the `kill` errno errors node does, and signal 0 probes. Until 2026-09-27 neither engine had signal events and `process.kill` answered `true` without sending anything (the native one emitted the event synchronously instead).\
+"""
+expected_stdout = """
+SIGKILL: Error EINVAL -22 uv_signal_start uv_signal_start EINVAL
+SIGKILL listeners 0
+SIGSTOP: uv_signal_start EINVAL
+unknown: TypeError ERR_UNKNOWN_SIGNAL Unknown signal: SIGNOPE
+pid: TypeError ERR_INVALID_ARG_TYPE The "pid" argument must be of type number. Received type string ('abc')
+bad number: Error EINVAL -22 kill kill EINVAL
+no such process: ESRCH -3 kill kill ESRCH
+kill 0 answers true
+kill answers true
+script end
+tick
+promise job
+SIGUSR2 #1: SIGUSR2 number true this=true
+tick inside SIGUSR2 #1
+promise job inside SIGUSR2 #1
+once SIGHUP, listeners left 1
+on SIGHUP
+immediate
+SIGUSR2 #2: SIGUSR2 number true this=true
+tick inside SIGUSR2 #2
+promise job inside SIGUSR2 #2
+on SIGHUP
+second immediate
+"""
+
+[[test]]
+id = "regress/r38-signal-drain"
+requires_host = "node"
+group = "regress"
+source = "regress/r38-signal-drain.js"
+status = "runnable"
+features = ["process-signals", "node-http", "server-close", "graceful-shutdown"]
+catches = """
+Graceful shutdown (realms issue 23), recorded from node 26.8.1: a `SIGTERM` listener closes the server while a request is in flight; the response still goes out, `server.close`'s callback runs only once the last connection has ended, and the program ends by itself instead of dying of the signal. The interpreter called the close callback as soon as the listener closed, before the in-flight response -- so `server.close(() => process.exit(0))` cut it off -- and a natively built program with a signal listener never ended in a virtual-clock realm (an unreferenced wait kept the drive parked after the last connection closed).\
+"""
+expected_stdout = """
+request /work
+SIGTERM: closing the server
+responding
+server closed after the last connection
+client got done
+"""

@@ -91,6 +91,7 @@ pub const EMITTED_MUTABLE_STATE_OWNERS: &[(&str, EmittedStateOwner)] = &[
     ("kiln_cli_thread_worker", EmittedStateOwner::ThreadCache),
     ("kiln_cli_thread_workers", EmittedStateOwner::Process),
     ("kiln_threads_stop_signals", EmittedStateOwner::Process),
+    ("kiln_threads_grace_signal", EmittedStateOwner::Process),
     // Library paths a dynamic `@opentui/core` import tries: string literals, never written.
     ("opentui_candidates", EmittedStateOwner::Constant),
     // The shared-library wrapper: this thread's pointers into the realm context of the body

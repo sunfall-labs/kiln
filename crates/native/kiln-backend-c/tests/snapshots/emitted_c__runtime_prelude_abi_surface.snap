@@ -2728,6 +2728,10 @@ int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code
 #define KILN_C99_WORKER_OP_REAP 13
 #define KILN_C99_WORKER_OP_STDIO 14
 #define KILN_C99_WORKER_OP_REPORT_ERROR 15
+#define KILN_C99_WORKER_OP_SIGNAL_NUMBER 16
+#define KILN_C99_WORKER_OP_SIGNAL_LISTEN 17
+#define KILN_C99_WORKER_OP_SIGNAL_UNHANDLED 18
+#define KILN_C99_WORKER_OP_KILL 19
 static uint64_t kiln_c99_worker_word(const kiln_value *args, size_t argc, size_t at) {
 static int kiln_c99_worker_tokens(kiln_value list, int copy, kiln_worker_token **out,
 static int kiln_c99_worker_value(kiln_worker_token *token, kiln_value *out) {

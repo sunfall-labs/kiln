@@ -9,6 +9,7 @@
 //! more than a translation, a transferred `ArrayBuffer`, whose bytes move with the message.
 
 use super::*;
+use kiln_runtime::signals;
 use kiln_runtime::workers::{self, Message, Token, WorkerEntry, WorkerSpec};
 
 const OP_CHANNEL: u32 = 1;
@@ -25,6 +26,11 @@ const OP_SELF: u32 = 11;
 const OP_CANCEL_WAIT: u32 = 12;
 const OP_REAP: u32 = 13;
 const OP_STDIO: u32 = 14;
+// Process signals (`kiln_runtime::signals`, realms issue 23); 15 is the native backend's error report.
+const OP_SIGNAL_NUMBER: u32 = 16;
+const OP_SIGNAL_LISTEN: u32 = 17;
+const OP_SIGNAL_UNHANDLED: u32 = 18;
+const OP_KILL: u32 = 19;
 
 /// A moved `ArrayBuffer`'s store, as this engine boxes it into a [`Token::Moved`].
 struct MovedBytes(Vec<u8>);
@@ -132,6 +138,38 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     worker.write_stdio(endpoint_of(first) == 2, text.clone());
                 }
                 Value::Undefined
+            }
+            OP_SIGNAL_NUMBER => {
+                let index = first.map_or(-1.0, Value::as_number);
+                let number = if index >= 0.0 && index.is_finite() {
+                    signals::number(index as u32)
+                } else {
+                    0
+                };
+                Value::Number(f64::from(number))
+            }
+            // The endpoint, or the errno negated.
+            OP_SIGNAL_LISTEN => {
+                let signal = first.map_or(-1.0, Value::as_number);
+                let signal = if signal.is_finite() {
+                    signal as i32
+                } else {
+                    -1
+                };
+                match signals::listen(signal) {
+                    Ok(endpoint) => Value::Number(endpoint as f64),
+                    Err(errno) => Value::Number(-f64::from(errno)),
+                }
+            }
+            OP_SIGNAL_UNHANDLED => {
+                signals::unhandled(endpoint_of(first));
+                Value::Undefined
+            }
+            // `kill(pid, signal)`: 0, or the errno.
+            OP_KILL => {
+                let pid = first.map_or(0.0, Value::as_number);
+                let signal = arguments.get(2).map_or(0.0, Value::as_number);
+                Value::Number(f64::from(signals::kill(pid as i32, signal as i32)))
             }
             _ => {
                 return Err(ExecutionError::Host {

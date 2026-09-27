@@ -50,6 +50,7 @@ pub mod node_http_agent;
 pub mod node_net;
 pub mod node_stream;
 pub mod scripted_transport;
+pub mod signals;
 pub use scripted_transport::{ScriptedTransport, ScriptedTransportLog};
 /// The Linux io_uring transport behind `take_transport` (ADR 0046); see the module docs.
 #[cfg(target_os = "linux")]

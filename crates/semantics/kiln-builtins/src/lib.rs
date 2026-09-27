@@ -1242,10 +1242,14 @@ declare_ts_builtins! {
     },
 }
 
-/// The Node-mode bootstrap both engines run before user code: the WHATWG web classes, then
+/// The Node-mode bootstrap both engines run before user code: the WHATWG web classes, `process`
+/// signal events and `process.kill` (realms issue 23), then
 /// `Buffer.prototype` over each engine's branded `Uint8Array` (issue 08 of `.scratch/full-runtime`).
 pub const WEB_BOOTSTRAP_SOURCE: &str = concat!(
     include_str!("web.ts"),
+    "\n",
+    // Before `web_events_streams.ts`, which deletes the port primitives this reads.
+    include_str!("signals.ts"),
     "\n",
     include_str!("web_events_streams.ts"),
     "\n",

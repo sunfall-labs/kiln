@@ -66,6 +66,9 @@ pub mod kind {
     pub const INIT: u32 = 6;
     /// The parent asked the worker to stop (`worker.terminate()`).
     pub const TERMINATE: u32 = 7;
+    /// A process signal arrived for a realm listening to it (`crate::signals`); one number
+    /// token, the signal.
+    pub const SIGNAL: u32 = 8;
 }
 
 /// One element of a message.
@@ -232,6 +235,15 @@ pub fn channel() -> (u64, u64) {
     ports.endpoints.insert(a, Endpoint::new(b));
     ports.endpoints.insert(b, Endpoint::new(a));
     (a, b)
+}
+
+/// A new endpoint with no peer: something the runtime itself posts to with [`enqueue`] (a
+/// realm's subscription to a process signal, `crate::signals`).
+pub fn endpoint() -> u64 {
+    let mut ports = ports();
+    let port = ports.allocate();
+    ports.endpoints.insert(port, Endpoint::new(0));
+    port
 }
 
 /// Post `message` from `from` to its peer. `false` when `from` is closed or has no peer, and the
@@ -424,7 +436,10 @@ impl WorkerContext {
     /// Send text the worker wrote to one of its standard streams to the parent.
     pub fn write_stdio(&self, stderr: bool, text: StringUnits) {
         let kind = if stderr { kind::STDERR } else { kind::STDOUT };
-        enqueue(self.parent, Message::new(kind, value_tokens(Token::String(text))));
+        enqueue(
+            self.parent,
+            Message::new(kind, value_tokens(Token::String(text))),
+        );
     }
 
     /// Report the exception that is ending this worker; its tokens are the TypeScript's error
@@ -521,10 +536,25 @@ thread_local! {
     static EXIT_REQUEST: Cell<Option<i32>> = const { Cell::new(None) };
 }
 
+thread_local! {
+    /// This main thread's realm is one of several in the process (`KILN_WORKERS` thread mode):
+    /// its `process.exit` ends the realm, and the launcher decides what that means for the rest.
+    static OWNS_EXIT: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Make `process.exit` on this main thread end its realm rather than the process, as it does a
+/// worker's: [`request_exit`] records the code and the realm unwinds to its launcher. Called on
+/// each realm thread of `KILN_WORKERS` thread mode, where a C `exit` from one realm would tear
+/// the process down under the others (realms issue 23).
+pub fn own_exits() {
+    OWNS_EXIT.with(|owns| owns.set(true));
+}
+
 /// A worker's program asked to end with `code` (`process.exit`, or its parent's `terminate`):
-/// `false` on a main thread, where ending is the process's to do.
+/// `false` on a main thread, where ending is the process's to do -- unless the thread's realm
+/// owns its exit ([`own_exits`]).
 pub fn request_exit(code: i32) -> bool {
-    if current().is_none() {
+    if current().is_none() && !OWNS_EXIT.with(Cell::get) {
         return false;
     }
     EXIT_REQUEST.with(|request| {
@@ -533,6 +563,11 @@ pub fn request_exit(code: i32) -> bool {
         }
     });
     true
+}
+
+/// Whether this thread's program has asked to end ([`request_exit`]), without taking it.
+pub fn exit_requested() -> bool {
+    EXIT_REQUEST.with(|request| request.get().is_some())
 }
 
 /// The exit a worker's program asked for, if it asked; taken once.
@@ -559,7 +594,10 @@ where
     let control = spec.control;
     let parent = {
         let mut ports = ports();
-        let parent = ports.endpoints.get(&spec.port).map_or(0, |endpoint| endpoint.peer);
+        let parent = ports
+            .endpoints
+            .get(&spec.port)
+            .map_or(0, |endpoint| endpoint.peer);
         if let Some(endpoint) = ports.endpoints.get_mut(&parent) {
             endpoint.awaits_exit = true;
         }
@@ -615,11 +653,18 @@ where
     TERMINATE.with(|slot| slot.set(Some(flag)));
     CURRENT.with(|current| *current.borrow_mut() = Some(Arc::clone(&context)));
     let port = context.spec.port;
-    enqueue(context.parent, Message::new(kind::ONLINE, value_tokens(Token::Undefined)));
+    enqueue(
+        context.parent,
+        Message::new(kind::ONLINE, value_tokens(Token::Undefined)),
+    );
     let code = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(Arc::clone(&context))))
         .unwrap_or(1);
     // Node reports 1 for a worker it stopped, whatever the worker was doing when it stopped.
-    let code = if context.terminate_requested() { 1 } else { code };
+    let code = if context.terminate_requested() {
+        1
+    } else {
+        code
+    };
     finish_children();
     enqueue(
         context.parent,
@@ -651,7 +696,10 @@ pub fn terminate(key: u64) -> bool {
         (Arc::clone(&record.terminate), record.control)
     };
     terminate.store(true, Ordering::Release);
-    enqueue(control, Message::new(kind::TERMINATE, value_tokens(Token::Undefined)));
+    enqueue(
+        control,
+        Message::new(kind::TERMINATE, value_tokens(Token::Undefined)),
+    );
     interrupt_waits(key);
     true
 }

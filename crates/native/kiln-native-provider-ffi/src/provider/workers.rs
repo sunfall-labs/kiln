@@ -14,6 +14,7 @@
 
 use super::{INVALID_ARGUMENT, KilnString, validate_string};
 use core::ffi::{c_char, c_void};
+use kiln_runtime::signals;
 use kiln_runtime::workers::{self, Message, Token, WorkerEntry, WorkerSpec};
 use kiln_string::{StringUnits, StringView};
 use std::sync::Arc;
@@ -59,6 +60,14 @@ const OP_TERMINATE: u32 = 10;
 const OP_REAP: u32 = 13;
 /// Report the exception ending this worker to its parent (the launcher's, not the program's).
 const OP_REPORT_ERROR: u32 = 15;
+// Process signals (`kiln_runtime::signals`, realms issue 23).
+const OP_SIGNAL_NUMBER: u32 = 16;
+const OP_SIGNAL_LISTEN: u32 = 17;
+const OP_SIGNAL_UNHANDLED: u32 = 18;
+const OP_KILL: u32 = 19;
+/// Not the TypeScript's: the thread-mode launcher's signal thread handing a signal to the
+/// realms that listen for it.
+const OP_SIGNAL_DELIVER: u32 = 20;
 
 /// A transferred `ArrayBuffer`'s block, owned by the message until a realm adopts it.
 struct NativeBlock {
@@ -350,7 +359,11 @@ pub unsafe extern "C" fn kiln_worker_message_free(message: *mut c_void) {
 }
 
 /// The scalar operations: a new channel (`out[0]`, `out[1]`), closing a port, a port's state,
-/// terminating and forgetting a worker (by its runtime key).
+/// terminating and forgetting a worker (by its runtime key); and process signals: a signal's
+/// number by its portable index, subscribing (`out[0]` the endpoint, or 0 and the errno in
+/// `out[1]`), giving a subscription up unhandled, `kill` (`a` is the pid in its low 32 bits and
+/// the signal above them; `out[0]` the errno or 0), and delivering a signal (`out[0]` how many
+/// realms took it).
 ///
 /// # Safety
 ///
@@ -374,6 +387,30 @@ pub unsafe extern "C" fn kiln_worker_op(op: u32, a: u64, out: *mut u64) -> i32 {
             OP_STATE => write(0, u64::from(workers::state(a))),
             OP_TERMINATE => write(0, u64::from(workers::terminate(a))),
             OP_REAP => workers::reap(a),
+            OP_SIGNAL_NUMBER => {
+                let number = signals::number(u32::try_from(a).unwrap_or(u32::MAX));
+                write(0, u64::try_from(number).unwrap_or(0));
+            }
+            OP_SIGNAL_LISTEN => match signals::listen(i32::try_from(a).unwrap_or(-1)) {
+                Ok(endpoint) => {
+                    write(0, endpoint);
+                    write(1, 0);
+                }
+                Err(errno) => {
+                    write(0, 0);
+                    write(1, u64::try_from(errno).unwrap_or(0));
+                }
+            },
+            OP_SIGNAL_UNHANDLED => signals::unhandled(a),
+            OP_KILL => {
+                let pid = a as u32 as i32;
+                let signal = (a >> 32) as u32 as i32;
+                write(0, u64::try_from(signals::kill(pid, signal)).unwrap_or(0));
+            }
+            OP_SIGNAL_DELIVER => {
+                let delivered = signals::deliver(i32::try_from(a).unwrap_or(-1));
+                write(0, delivered as u64);
+            }
             _ => return INVALID_ARGUMENT,
         }
         0
@@ -586,7 +623,13 @@ pub unsafe extern "C" fn kiln_worker_stdio(stream: u32, bytes: *const u8, len: u
 /// 0 is answered and the caller unwinds. On a main thread, 1: the caller ends the process.
 #[unsafe(no_mangle)]
 pub extern "C" fn kiln_worker_exit(code: i32) -> i32 {
-    if workers::request_exit(code) { 0 } else { 1 }
+    if workers::request_exit(code) {
+        // A realm parked while a connection's callback asked to end must see it now.
+        super::realm::wake_active_drive();
+        0
+    } else {
+        1
+    }
 }
 
 /// The code a worker's realm asked to end with (`process.exit`, `terminate`): 1 and the code in

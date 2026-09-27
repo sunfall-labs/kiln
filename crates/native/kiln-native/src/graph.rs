@@ -2740,6 +2740,9 @@ typedef int (*kiln_worker_runner_fn)(const uint8_t *entry, uint64_t entry_len, i
                                      uint64_t argc, const char *const *argv);
 extern int kiln_worker_set_runner(kiln_worker_runner_fn runner);
 extern int kiln_worker_exit_code(int32_t *out);
+/* The runtime's scalar port and signal operations; the thread-mode signal thread hands a signal to
+ * the realms listening for it through op 20 (`kiln_runtime::signals::deliver`, realms issue 23). */
+extern int kiln_worker_op(uint32_t op, uint64_t a, uint64_t *out);
 extern int kiln_worker_stdio(uint32_t stream, const uint8_t *bytes, uint64_t len);
 typedef struct kiln_worker_token {
     uint32_t kind;
@@ -3869,6 +3872,10 @@ static int kiln_cli_run_realm_as(int argc, char **argv, int writes_result, FILE 
     int status;
     int destroy_status;
     int unsettled_entry = 0;
+    /* `process.exit(code)` in a thread-mode realm (realms issue 23): the code, and whether it
+     * was asked for. */
+    int32_t exit_requested = 0;
+    int exit_asked = 0;
     if (graph == NULL) {
         kiln_cli_warn("kiln: out of memory for the module graph", NULL);
         return 1;
@@ -3948,6 +3955,15 @@ static int kiln_cli_run_realm_as(int argc, char **argv, int writes_result, FILE 
         }
         return kiln_cli_end_worker_realm(realm, graph, code);
     }
+    /* `process.exit(code)` in a realm of `KILN_WORKERS` thread mode ends that realm, not the
+     * process (realms issue 23): the runtime recorded the code and the realm unwound here. The
+     * launcher decides what the code means for the other realms, as the supervisor does for a
+     * process-mode worker's. */
+    if (kiln_worker_exit_code(&exit_requested) == 1) {
+        exit_asked = 1;
+        status = 0;
+        writes_result = 0;
+    }
     /* Graph module entries carry the original thrown value across the module ABI so dynamic
      * import and catch preserve language identity. Only now, after the graph and its turn loop
      * have established that the value is uncaught, attach the native refusal provenance. A
@@ -3979,6 +3995,7 @@ static int kiln_cli_run_realm_as(int argc, char **argv, int writes_result, FILE 
     }
     destroy_status = kiln_realm_destroy(realm);
     free(graph);
+    if (exit_asked) return (int)exit_requested;
     /* Every failure folds to 1, the way a refusal does; 13 is the one status a program's caller
      * is told apart by, as `process.exit(code)` is. */
     if (unsettled_entry) return 13;
@@ -4202,8 +4219,10 @@ static int kiln_cli_http3_enabled(int argc, char **argv) {
  *
  *  - forwards SIGTERM, SIGINT, SIGHUP and SIGQUIT to every live worker, stops restarting, waits
  *    for all of them, then dies of the same signal (or exits 128+signal when it is PID 1, where
- *    a default action never fires). A worker receives exactly the signal a single-process
- *    server would, so it behaves exactly as one does. `docker stop` therefore drains every
+ *    a default action never fires) -- unless every worker handled it (`process.on('SIGTERM')`,
+ *    realms issue 23) and exited by itself, when the supervisor exits as they did: 0 for a clean
+ *    drain. A worker receives exactly the signal a single-process server would, so it behaves
+ *    exactly as one does. `docker stop` therefore drains every
  *    worker before PID 1 exits and the namespace is torn down. SIGUSR1 (the introspection dump)
  *    is forwarded without stopping anything.
  *  - gives the drain a deadline: a worker still alive KILN_WORKERS_GRACE_MS (default
@@ -4405,6 +4424,10 @@ static int kiln_sup_run(int argc, char **argv, long workers) {
     size_t signal_index;
     long index, live = 0;
     int stopping = 0, stop_signal = 0, exit_status = 0;
+    /* After a forwarded stop signal: whether any worker died of a signal (it had no listener, or
+     * the grace deadline killed it), and the first non-zero status of one that exited on its own
+     * (a listener drained it, realms issue 23). */
+    int drained_by_signal = 0, drained_status = 0;
     long long grace_ms = kiln_sup_grace_ms(), kill_at = -1;
     if (pids == NULL || started == NULL || restart_at == NULL || streak == NULL) return 1;
     if (pipe(kiln_sup_pipe) != 0) {
@@ -4533,7 +4556,12 @@ static int kiln_sup_run(int argc, char **argv, long workers) {
             pids[index] = 0;
             live -= 1;
             /* The drain: whatever a worker dies of now, it was asked to stop. */
-            if (stopping) continue;
+            if (stopping) {
+                if (WIFSIGNALED(status)) drained_by_signal = 1;
+                else if (WIFEXITED(status) && WEXITSTATUS(status) != 0 && drained_status == 0)
+                    drained_status = WEXITSTATUS(status);
+                continue;
+            }
             if (WIFEXITED(status)) {
                 if (WEXITSTATUS(status) == 0) continue;
                 fprintf(stderr, "kiln: worker %ld (pid %ld) exited with status %d; stopping the other workers\n",
@@ -4566,6 +4594,10 @@ static int kiln_sup_run(int argc, char **argv, long workers) {
     free(started);
     free(restart_at);
     free(streak);
+    /* Every worker handled the signal (`process.on('SIGTERM')`) and exited by itself: the
+     * supervisor ends as they did -- 0 for a clean drain -- as one process that handled it
+     * would. */
+    if (stop_signal != 0 && !drained_by_signal) return drained_status;
     if (stop_signal != 0) {
         /* Die the way a single-process server does. As PID 1 the default action never fires,
          * so fall through to the shell's spelling of the same thing. */
@@ -4592,13 +4624,21 @@ static int kiln_sup_run(int argc, char **argv, long workers) {
  *    runtime hands each accepted connection to the member with the fewest open connections
  *    (round-robin among ties) rather than the kernel hashing it over N SO_REUSEPORT sockets.
  *  - Signals. SIGTERM, SIGINT, SIGHUP and SIGQUIT are blocked in every realm thread and taken by
- *    one thread here, which ends the process by the same signal -- every realm at once, which is
- *    what forwarding the signal to N workers that each die of it amounts to -- or with
- *    128+signal as PID 1, where a default action never fires. SIGUSR1 is left alone.
+ *    one thread here. A realm listening for the signal (`process.on('SIGTERM')`, realms issue
+ *    23) gets it as an event, delivered to every realm that listens, and drains; the process
+ *    ends when all of them have finished, or KILN_WORKERS_GRACE_MS after the first such signal
+ *    by that signal's default action -- the status the supervisor exits with once its deadline
+ *    has killed the workers (143 for SIGTERM). With no listener the thread ends the
+ *    process by the same signal -- every realm at once, which is what forwarding the signal to
+ *    N workers that each die of it amounts to -- or with 128+signal as PID 1, where a default
+ *    action never fires. A realm without a listener beside realms with one keeps running until
+ *    they finish or the deadline passes. Other signals go to listening realms through the
+ *    runtime's own handler.
  *  - Exit statuses, by the supervisor's rule: a realm that finishes with 0 is done and the
  *    others keep serving; one that finishes with anything else (an uncaught error's 1, an
- *    unsettled top-level await's 13) ends the process with that status at once, and
- *    `process.exit(n)` in any realm ends the process with n, as it did one worker there.
+ *    unsettled top-level await's 13) ends the process with that status at once.
+ *    `process.exit(n)` ends its realm with n (the runtime records it and the realm unwinds to
+ *    `kiln_cli_run_realm_as`), and the same rule applies to n, as it would to one worker there.
  *  - Crashes. There is nothing to restart: a realm that crashes (a segfault, an abort, the OOM
  *    killer) takes every realm with it, because they are one process. That is what
  *    KILN_WORKERS_MODE=process is for.
@@ -4607,11 +4647,11 @@ static int kiln_sup_run(int argc, char **argv, long workers) {
  *    result file. */
 static sigset_t kiln_threads_stop_signals;
 
-static void *kiln_threads_wait_for_stop(void *argument) {
-    int sig = 0;
-    (void)argument;
-    while (sigwait(&kiln_threads_stop_signals, &sig) != 0) {
-    }
+/* End the process the way the stop signal `sig` would have: its default action, or 128+sig as
+ * PID 1, where a default action never fires. */
+static void kiln_threads_die_of(int sig) {
+    fflush(stdout);
+    fflush(stderr);
     if (getpid() == 1) _exit(128 + sig);
     {
         struct sigaction action;
@@ -4626,6 +4666,62 @@ static void *kiln_threads_wait_for_stop(void *argument) {
         raise(sig);
     }
     _exit(128 + sig);
+}
+
+/* The stop signal the realms took, for the grace deadline below. */
+static volatile sig_atomic_t kiln_threads_grace_signal = SIGTERM;
+
+/* The grace deadline after a stop signal the realms took (realms issue 23): as process mode's
+ * supervisor does for its workers, a process whose realms have not all finished by then is
+ * ended, says so, and exits as the signal would have made it (143 for SIGTERM). */
+static void *kiln_threads_grace(void *argument) {
+    long long grace_ms = (long long)(intptr_t)argument;
+    struct timespec rest;
+    rest.tv_sec = (time_t)(grace_ms / 1000);
+    rest.tv_nsec = (long)(grace_ms % 1000) * 1000000L;
+    while (nanosleep(&rest, &rest) != 0 && errno == EINTR) {
+    }
+    fprintf(stderr, "kiln: workers did not stop within %lld ms; ending the process\n", grace_ms);
+    kiln_threads_die_of((int)kiln_threads_grace_signal);
+    return NULL;
+}
+
+static void *kiln_threads_wait_for_stop(void *argument) {
+    int sig = 0;
+    int grace_armed = 0;
+    (void)argument;
+    for (;;) {
+        uint64_t taken[2] = {0, 0};
+        while (sigwait(&kiln_threads_stop_signals, &sig) != 0) {
+        }
+        /* A realm listening for the signal (`process.on('SIGTERM')`) takes it as an event and
+         * drains; the process then ends when every realm has finished, as N process-mode workers
+         * that each handled it would, or at the grace deadline. With no listener anywhere, the
+         * signal does what it does to one process. */
+        if (kiln_worker_op(20, (uint64_t)sig, taken) == 0 && taken[0] > 0) {
+            if (!grace_armed) {
+                pthread_t timer;
+                pthread_attr_t attributes;
+                long long grace_ms = kiln_sup_grace_ms();
+                grace_armed = 1;
+                kiln_threads_grace_signal = sig;
+                if (grace_ms == 0) {
+                    fprintf(stderr, "kiln: workers did not stop within 0 ms; ending the process\n");
+                    kiln_threads_die_of(sig);
+                }
+                if (pthread_attr_init(&attributes) == 0) {
+                    pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
+                    if (pthread_create(&timer, &attributes, kiln_threads_grace,
+                                       (void *)(intptr_t)grace_ms) != 0)
+                        fputs("kiln: cannot start the grace timer; workers may outlive it\n", stderr);
+                    pthread_attr_destroy(&attributes);
+                }
+            }
+            continue;
+        }
+        break;
+    }
+    kiln_threads_die_of(sig);
     return NULL;
 }
 

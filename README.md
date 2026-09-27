@@ -98,7 +98,11 @@ either, and a binary built without the flag runs one realm.
 With more than one worker the first process is a supervisor that runs no JavaScript itself (on
 POSIX; Windows always runs one realm). It forwards `SIGTERM`, `SIGINT`, `SIGHUP` and `SIGQUIT` to
 every worker, waits for all of them, and then exits by the same signal (`128+signal` as PID 1), so
-`docker stop` drains every worker; `SIGUSR1` is forwarded without stopping anything. A worker still
+`docker stop` drains every worker; `SIGUSR1` is forwarded without stopping anything. A worker with
+a listener for the signal -- `process.on('SIGTERM', () => server.close(() => process.exit(0)))`,
+node's graceful shutdown, which works the same in a single realm -- takes it as an event and
+drains; when every worker has exited by itself the supervisor exits as they did (0 for a clean
+drain) instead of by the signal. A worker still
 running `KILN_WORKERS_GRACE_MS` after the stop began (default 10000; 0 kills at once) gets
 `SIGKILL`, sent to its process group. Each worker runs in a process group of its own, so Ctrl-C at
 a terminal reaches it once, through the supervisor, rather than once from the terminal and again
@@ -123,11 +127,14 @@ connections over N `SO_REUSEPORT` sockets -- which, measured with 16 connections
 left six workers with none and two with three. Each realm's own `process.env` has
 `KILN_WORKER_INDEX` and `KILN_WORKER_COUNT` (a copy of the process environment plus those two, as a
 node worker thread gets a copy of its parent's; the process environment itself is not changed),
-and worker 0 writes the result file. `SIGTERM`, `SIGINT`, `SIGHUP` and `SIGQUIT` end the process by
-the same signal, every realm at once -- what forwarding it to N workers that each die of it
-amounts to -- and with `128+signal` as PID 1, so `docker stop` works the same in both modes. A
-realm finishing with 0 leaves the others serving; one finishing with any other status, or calling
-`process.exit(n)`, ends the process with that status. **A realm that crashes takes every realm
+and worker 0 writes the result file. `SIGTERM`, `SIGINT`, `SIGHUP` and `SIGQUIT` go to every realm
+that listens for them (`process.on('SIGTERM')`), which drains; the process then ends when every
+realm has finished, or by the signal `KILN_WORKERS_GRACE_MS` after it arrived. With no listener
+they end the process by the same signal, every realm at once -- what forwarding it to N workers
+that each die of it amounts to -- and with `128+signal` as PID 1, so `docker stop` works the same
+in both modes. A realm finishing with 0, or calling `process.exit(0)`, leaves the others serving;
+one finishing with any other status, or calling `process.exit(n)`, ends the process with that
+status. **A realm that crashes takes every realm
 with it**, and nothing restarts it: crash isolation is what process mode is for.
 
 Process mode is the default (`KILN_WORKERS_MODE=process`, or unset). Measured on 16 hardware
