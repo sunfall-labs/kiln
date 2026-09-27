@@ -1,8 +1,8 @@
 {
   "chunks": {
     "annexB/built-ins": {
-      "failed": 128,
-      "passed": 354
+      "failed": 118,
+      "passed": 364
     },
     "annexB/language": {
       "failed": 51,
@@ -13,16 +13,16 @@
       "passed": 0
     },
     "built-ins/AggregateError": {
-      "failed": 10,
-      "passed": 40
+      "failed": 8,
+      "passed": 42
     },
     "built-ins/Array": {
-      "failed": 217,
-      "passed": 5900
+      "failed": 215,
+      "passed": 5902
     },
     "built-ins/ArrayBuffer": {
-      "failed": 26,
-      "passed": 416
+      "failed": 24,
+      "passed": 418
     },
     "built-ins/ArrayIteratorPrototype": {
       "failed": 8,
@@ -101,8 +101,8 @@
       "passed": 10
     },
     "built-ins/Iterator": {
-      "failed": 88,
-      "passed": 1220
+      "failed": 58,
+      "passed": 1250
     },
     "built-ins/JSON": {
       "failed": 52,
@@ -117,8 +117,8 @@
       "passed": 18
     },
     "built-ins/Math": {
-      "failed": 36,
-      "passed": 618
+      "failed": 34,
+      "passed": 620
     },
     "built-ins/NaN": {
       "failed": 0,
@@ -133,8 +133,8 @@
       "passed": 671
     },
     "built-ins/Object": {
-      "failed": 175,
-      "passed": 6627
+      "failed": 173,
+      "passed": 6629
     },
     "built-ins/Promise": {
       "failed": 130,
@@ -149,8 +149,8 @@
       "passed": 302
     },
     "built-ins/RegExp": {
-      "failed": 152,
-      "passed": 3604
+      "failed": 134,
+      "passed": 3622
     },
     "built-ins/RegExpStringIteratorPrototype": {
       "failed": 14,
@@ -165,24 +165,24 @@
       "passed": 18
     },
     "built-ins/ShadowRealm": {
-      "failed": 8,
-      "passed": 116
+      "failed": 6,
+      "passed": 118
     },
     "built-ins/SharedArrayBuffer": {
-      "failed": 6,
-      "passed": 202
+      "failed": 4,
+      "passed": 204
     },
     "built-ins/String": {
-      "failed": 170,
-      "passed": 2273
+      "failed": 164,
+      "passed": 2279
     },
     "built-ins/StringIteratorPrototype": {
       "failed": 2,
       "passed": 12
     },
     "built-ins/SuppressedError": {
-      "failed": 10,
-      "passed": 34
+      "failed": 8,
+      "passed": 36
     },
     "built-ins/Symbol": {
       "failed": 10,
@@ -197,8 +197,8 @@
       "passed": 18
     },
     "built-ins/TypedArray": {
-      "failed": 269,
-      "passed": 2607
+      "failed": 175,
+      "passed": 2701
     },
     "built-ins/TypedArrayConstructors": {
       "failed": 122,
@@ -377,8 +377,8 @@
       "passed": 3
     },
     "language/expressions": {
-      "failed": 340,
-      "passed": 20630
+      "failed": 338,
+      "passed": 20632
     },
     "language/function-code": {
       "failed": 4,
@@ -401,8 +401,8 @@
       "passed": 535
     },
     "language/import": {
-      "failed": 104,
-      "passed": 24
+      "failed": 103,
+      "passed": 25
     },
     "language/keywords": {
       "failed": 0,
@@ -417,8 +417,8 @@
       "passed": 1025
     },
     "language/module-code": {
-      "failed": 61,
-      "passed": 538
+      "failed": 47,
+      "passed": 552
     },
     "language/punctuators": {
       "failed": 0,
@@ -477,8 +477,8 @@
       "passed": 6
     },
     "staging/sm": {
-      "failed": 617,
-      "passed": 1979
+      "failed": 607,
+      "passed": 1987
     },
     "staging/source-phase-imports": {
       "failed": 0,
