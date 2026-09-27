@@ -3,7 +3,14 @@
 //! Keep this file focused: its digest is part of the persistent generated-C identity. Build
 //! orchestration and unrelated graph helpers belong in `lib.rs` and `graph.rs`, not here.
 
-use super::*;
+use super::{NativeError, NativeProfile};
+use kiln_artifact_cache::Digest;
+use kiln_backend_c::{
+    EmissionPolicy, emit_commonjs_module_with_logical_path_and_policy,
+    emit_module_with_logical_path_and_policy,
+};
+use kiln_ir::ModuleProgram;
+use kiln_module_graph::ModuleSource;
 
 pub(super) const MAX_RELEASE_SPECIALIZED_MODULE_INSTRUCTIONS: usize = 512;
 pub(super) const MAX_RELEASE_SPECIALIZED_MODULE_FUNCTIONS: usize = 16;
