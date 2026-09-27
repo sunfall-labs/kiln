@@ -69,7 +69,7 @@
       let accumulator = initial;
       for (let k = start; k < end; k++) {
         if (k in O) {
-          accumulator = callback.call(undefined, accumulator, O[k], k, O);
+          accumulator = callback(accumulator, O[k], k, O);
         }
       }
       level.push(accumulator);
@@ -81,7 +81,7 @@
       const next: any[] = [];
       let i = 0;
       for (; i + 1 < level.length; i += 2) {
-        next.push(combine.call(undefined, level[i], level[i + 1]));
+        next.push(combine(level[i], level[i + 1]));
       }
       if (i < level.length) {
         next.push(level[i]);

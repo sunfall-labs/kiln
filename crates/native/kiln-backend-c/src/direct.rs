@@ -599,25 +599,37 @@ impl DirectPlan {
                 if let GraphOp::CallMethod { name, args, .. } = op
                     && let Some(Constant::String(key)) = program.constants.get(*name as usize)
                 {
-                    // The family's pooled lowerings (parallel issue 10) call the clones of the
-                    // callbacks at these positions, like `parallelMap`'s; a `parallelSort`
+                    // A family site (parallel issues 10 and 15) calls the typed entries of its
+                    // callbacks twice over: the pooled lowering's clones hang off them, and when
+                    // the pool declines the site runs the sequential method's own loop --
+                    // `map`'s, `filter`'s, or `parallelReduce`'s tree -- which enters them like
+                    // any `map` site does. `parallelFlatMap` has only the pooled lowering (its
+                    // callback must be parallel-safe to be referenced), and a `parallelSort`
                     // comparator is never called there, only recognised.
                     if let Some(method) = key
                         .to_scalar_string()
                         .ok()
                         .and_then(|k| crate::parallel::ParallelMethod::from_name(&k))
-                        .filter(|m| {
-                            !matches!(
-                                m,
-                                crate::parallel::ParallelMethod::Map
-                                    | crate::parallel::ParallelMethod::Sort
-                            )
-                        })
                     {
-                        for &(position, arities) in method.callbacks(args.len()) {
+                        let sequential: &[(usize, &[u32])] = match (method, args.len()) {
+                            (
+                                crate::parallel::ParallelMethod::Map
+                                | crate::parallel::ParallelMethod::Filter,
+                                1 | 2,
+                            ) => &[(0, &[1, 2])],
+                            (crate::parallel::ParallelMethod::Reduce, 3) => {
+                                &[(0, &[2, 3]), (1, &[2])]
+                            }
+                            (crate::parallel::ParallelMethod::FlatMap, _) => {
+                                method.callbacks(args.len())
+                            }
+                            _ => &[],
+                        };
+                        for &(position, arities) in sequential {
                             if let Some(&target) = plan.known.get(&args[position])
-                                && parallel_safe[target as usize]
                                 && arities.contains(&params[target as usize])
+                                && (method != crate::parallel::ParallelMethod::FlatMap
+                                    || parallel_safe[target as usize])
                             {
                                 targets.push(target);
                             }
@@ -626,19 +638,8 @@ impl DirectPlan {
                     }
                     let arities: &[u32] = match (key.to_scalar_string().ok().as_deref(), args.len())
                     {
-                        (Some("map"), 1) | (Some("filter"), 1) => &[1, 2],
+                        (Some("map"), 1 | 2) | (Some("filter"), 1 | 2) => &[1, 2],
                         (Some("reduce"), 2) => &[2],
-                        // `parallelMap`'s pooled lowering calls the typed entry from its chunk
-                        // worker (ADR 0058, application 2); the callback is referenced only when
-                        // its body may run there, so a non-qualifying one gets no dead entry.
-                        (Some("parallelMap"), 1)
-                            if plan
-                                .known
-                                .get(&args[0])
-                                .is_some_and(|&t| parallel_safe[t as usize]) =>
-                        {
-                            &[1, 2]
-                        }
                         _ => continue,
                     };
                     if let Some(&target) = plan.known.get(&args[0])

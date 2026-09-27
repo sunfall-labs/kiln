@@ -126,3 +126,7 @@ each becomes a measured row, with every column, when its tier lands.
 - `js/pool.mjs`, `js/pool-worker.mjs` -- the `worker_threads` pool.
 - `go/` -- one Go program with a subcommand per workload.
 - `results-<date>.md` -- one file per recorded baseline.
+- `fallback/run.sh [kiln]` -- each parallel method with its pool declined against its sequential
+  method (parallel issue 15), per array kind: the two columns should be within noise. One small
+  program per method (`fallback/<method>.mjs`), so each stays under the release profile's
+  specialization limits.

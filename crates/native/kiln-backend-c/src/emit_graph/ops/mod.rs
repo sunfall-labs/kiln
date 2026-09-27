@@ -1,5 +1,6 @@
 mod arithmetic;
 mod call_method;
+mod callback_loops;
 mod properties;
 
 use super::clones::typed_fail;
