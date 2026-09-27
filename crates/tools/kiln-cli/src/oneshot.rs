@@ -110,8 +110,8 @@ mod tests {
     use crate::backend::{SourceResponse, SyncCommit};
     use crate::commands;
     use kiln_proto::{
-        source_digest, NodeModuleFormat, NodeRequestKind, NodeSourceFormat, PackageResolution,
-        ResolutionMap, SourceHash, StepBudget,
+        NodeModuleFormat, NodeRequestKind, NodeSourceFormat, PackageResolution, ResolutionMap,
+        SourceHash, StepBudget, source_digest,
     };
 
     // These four tests execute the same canonical HTTP programs from fresh project roots. Their
