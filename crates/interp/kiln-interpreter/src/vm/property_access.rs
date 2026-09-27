@@ -304,12 +304,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // wraps, which is what makes a stack trace through one readable.
             // A bound function reports the arity still to be supplied and prefixes the name of
             // what it wraps, which is what makes a stack trace through one readable.
+            //
+            // It owns no `prototype` (BoundFunctionCreate defines none), so the name is inherited
+            // from its [[Prototype]], which is its target's: a bound derived class answers with
+            // its parent's `prototype`, an ordinary function's with nothing (issue 28).
             Value::Bound(bound) => bound
                 .properties
                 .borrow()
                 .get(name)
                 .or_else(|| identity_property(target, name))
-                .unwrap_or_else(|| function_property(&self.intrinsics, name, value_realm(target))),
+                .unwrap_or_else(|| {
+                    if name == "prototype" {
+                        return self.property(&prototype_of(&bound.target), name);
+                    }
+                    function_property(&self.intrinsics, name, value_realm(target))
+                }),
             // A wrapped function answers from its own store first -- which is where the `name`
             // and `length` copied off the target live -- and from `Function.prototype`
             // otherwise, so `call`, `apply`, `bind` and `toString` all work on one. No

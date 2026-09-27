@@ -2172,3 +2172,44 @@ g h i j m
 1 x,__proto__ true
 bound foo
 """
+
+[[test]]
+id = "regress/r44-prototype-assigned-undefined"
+group = "regress"
+source = "regress/r44-prototype-assigned-undefined.js"
+status = "runnable"
+features = ["functions", "prototype", "classes", "class-heritage"]
+catches = """
+`F.prototype = undefined` sticks (parallel-builtins issue 28, item 3), recorded from node 26.8.1: the native backend's undefined `prototype` slot meant \"not created yet\", so the read after the assignment made a fresh object and `class U extends F {}` defined a class where node throws. `new F()` with a primitive `prototype` inherits `Object.prototype` (the interpreter linked the primitive; native linked `null` for `null`).\
+"""
+expected_stdout = """
+undefined true true
+TypeError
+true
+true
+true true
+again again
+again
+object true
+"""
+
+[[test]]
+id = "regress/r45-extends-bound-function"
+group = "regress"
+source = "regress/r45-extends-bound-function.js"
+status = "runnable"
+features = ["bound-functions", "prototype", "classes", "class-heritage"]
+catches = """
+A bound function's `prototype` (parallel-builtins issue 28, item 4), recorded from node 26.8.1: it owns none and inherits the name from its target's [[Prototype]], so `class U extends f.bind() {}` is a `TypeError` for an ordinary function and a bound derived class answers with its parent's `prototype`. The native backend refused the read; the interpreter answered undefined for a bound derived class.\
+"""
+expected_stdout = """
+undefined false false
+TypeError
+undefined
+undefined
+TypeError
+true
+defines
+own true
+undefined
+"""

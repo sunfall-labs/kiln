@@ -1153,6 +1153,35 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 *out = kiln_c99_number(remaining > 0.0 ? remaining : 0.0);
                 return KILN_C99_OK;
             }
+            if (kiln_c99_same_name_key(key, "prototype")) {
+                /* BoundFunctionCreate defines no `prototype`, so the name is inherited from the
+                 * bound function's [[Prototype]], which is its target's: a derived class's parent
+                 * answers with its own, `Function.prototype` with nothing. Refusing here stopped
+                 * `class U extends f.bind() {}` where the language throws a TypeError (issue 28). */
+                kiln_value parent;
+                int found = 0;
+                int status = kiln_c99_invoke_method(host, &parent,
+                                                    KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF,
+                                                    kiln_c99_undefined(), &bound->target, 1,
+                                                    depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                if (parent.tag == KILN_VALUE_BUILTIN &&
+                    parent.bits == KILN_C99_BUILTIN_FUNCTION_PROTOTYPE) {
+                    status = kiln_c99_prototype_store_read(host,
+                                                           KILN_C99_BUILTIN_FUNCTION_PROTOTYPE,
+                                                           key, ikey, out, depth, thrown, &found);
+                    if (status != KILN_C99_OK || found) return status;
+                }
+                if (parent.tag == KILN_VALUE_NULL ||
+                    (parent.tag == KILN_VALUE_BUILTIN &&
+                     parent.bits == KILN_C99_BUILTIN_FUNCTION_PROTOTYPE)) {
+                    KILN_C99_ABSENT("a bound function owns no `prototype` (BoundFunctionCreate "
+                                    "defines none), and neither a null [[Prototype]] nor "
+                                    "`Function.prototype` without one in its store has it",
+                                    out);
+                }
+                return kiln_c99_get_key(host, parent, key, ikey, out, depth, thrown);
+            }
             KILN_C99_REFUSE("a member of a bound function other than name and length");
         }
         if (target.tag == KILN_VALUE_METHOD &&

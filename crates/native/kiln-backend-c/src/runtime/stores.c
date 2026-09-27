@@ -38,11 +38,17 @@ static double kiln_c99_array_index(kiln_value key) {
  *
  * It carries `constructor` back to the function, which is what makes `x.constructor === C` true
  * and what a console reads to print `C {}` rather than `{}`. The two point at each other, so a
- * constructor that is never collected keeps its prototype alive -- and nothing here collects. */
+ * constructor that is never collected keeps its prototype alive -- and nothing here collects.
+ *
+ * An undefined slot means "not created yet"; a program's own `f.prototype = undefined` is stored
+ * as a hole instead (properties.c), because it has to stick: materialising a fresh object for it
+ * let `class U extends f {}` define a class where the language throws (issue 28). */
 static int kiln_c99_prototype_object(kiln_value function, kiln_value *out) {
     kiln_closure *closure = kiln_c99_closure_of(function);
     kiln_value prototype = kiln_c99_closure_prototype(closure);
-    if (prototype.tag == KILN_VALUE_UNDEFINED) {
+    if (prototype.tag == KILN_VALUE_HOLE) {
+        prototype = kiln_c99_undefined();
+    } else if (prototype.tag == KILN_VALUE_UNDEFINED) {
         /* A region closure's is the realm's (realms issue 08): its slot is in the realm context. */
         kiln_value *slot = kiln_c99_closure_prototype_slot(closure);
         int status;

@@ -7,6 +7,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// ordinary function never used as a constructor never allocates one.
     pub(super) fn instantiate(&mut self, closure: &Rc<Closure>) -> Value {
         let prototype = prototype_object(closure);
+        // `F.prototype = undefined` (or any primitive) is substituted with `Object.prototype`, as
+        // `instantiate_for` below does; linking the primitive left `new F()` inheriting nothing.
+        let prototype = if is_reflect_target(&prototype) {
+            prototype
+        } else {
+            Value::Native(
+                Native::PrototypeOf(PrototypeTable::Object),
+                RealmId::PRIMARY,
+            )
+        };
         let mut instance = ObjectData::default();
         instance.set_prototype(prototype);
         Value::Object(Rc::new(RefCell::new(instance)))

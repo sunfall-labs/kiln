@@ -2174,7 +2174,7 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     },
     AbsentAnswer {
         function: "kiln_c99_get_own_kind",
-        sites: 25,
+        sites: 26,
         proved_by: "one membership predicate per receiver kind -- kiln_c99_is_array_member, \
                     kiln_c99_is_string_member, kiln_c99_is_date_member, \
                     kiln_c99_is_collection_member and the kiln_c99_collection_kind_member \
@@ -2182,7 +2182,10 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
                     (a name belonging to a sibling kind -- `Map.prototype.add` -- is absent \
                     rather than unbuilt), kiln_c99_is_array_buffer_member, \
                     kiln_c99_is_typed_array_member, RegExp.prototype without name, and BUILTIN_SURFACE plus \
-                    BUILTIN_SURFACE_BACKLOG for the table-driven built-ins. These are the lists \
+                    BUILTIN_SURFACE_BACKLOG for the table-driven built-ins. A bound function's \
+                    `prototype` is decided by BoundFunctionCreate, which defines none, so it is \
+                    absent when its [[Prototype]] is null or a `Function.prototype` whose store \
+                    lacks it. These are the lists \
                     the two engines can disagree about, and \
                     scripts/native-surface-inventory.py --gate is what measures them",
     },

@@ -448,7 +448,12 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
             }
             slot = kiln_c99_closure_prototype_slot(closure);
             if (slot == NULL) return KILN_C99_OUT_OF_MEMORY;
-            *slot = value;
+            /* The slot's undefined means "not created yet" (`kiln_c99_prototype_object`), so an
+             * assigned undefined is kept as a hole, which that function reads back as the
+             * undefined the program wrote rather than as a request to make one. */
+            *slot = value.tag == KILN_VALUE_UNDEFINED
+                        ? kiln_c99_value(KILN_VALUE_HOLE, 0, NULL, 0)
+                        : value;
             return KILN_C99_OK;
         }
         {

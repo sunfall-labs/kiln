@@ -535,6 +535,14 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     if (status != KILN_C99_OK) {
         return status;
     }
+    /* GetPrototypeFromConstructor substitutes `Object.prototype` for a `prototype` that is not an
+     * object -- an assigned undefined or null among them -- and an unrecorded link is that. A null
+     * link would mean `Object.create(null)`, which is not what `new` builds. */
+    if (prototype.tag == KILN_VALUE_NULL || prototype.tag == KILN_VALUE_BOOLEAN ||
+        prototype.tag == KILN_VALUE_NUMBER || prototype.tag == KILN_VALUE_STRING ||
+        prototype.tag == KILN_VALUE_SYMBOL || prototype.tag == KILN_VALUE_BIGINT) {
+        prototype = kiln_c99_undefined();
+    }
     kiln_c99_object_of(instance)->prototype = prototype;
     /* Inside the body being constructed, `new.target` is the constructor the `new` named -- and
      * the call below is the one that installs it, so the flag that makes `super()` keep it has to
@@ -994,6 +1002,16 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
         return status;
     }
     *answer = 0;
+    /* A `prototype` that is not an object -- `F.prototype = undefined` now reads back as the
+     * undefined it is (issue 28) -- matches nothing. Walking on would compare it with the
+     * undefined an ordinary object's unrecorded link holds and answer true. OrdinaryHasInstance
+     * throws a TypeError here; that is not modelled, and false is what it answered before. */
+    if (prototype.tag == KILN_VALUE_UNDEFINED || prototype.tag == KILN_VALUE_NULL ||
+        prototype.tag == KILN_VALUE_BOOLEAN || prototype.tag == KILN_VALUE_NUMBER ||
+        prototype.tag == KILN_VALUE_STRING || prototype.tag == KILN_VALUE_SYMBOL ||
+        prototype.tag == KILN_VALUE_BIGINT) {
+        return KILN_C99_OK;
+    }
     current = value;
     {
         /* An array or a collection built by `super()` in a derived constructor carries its
