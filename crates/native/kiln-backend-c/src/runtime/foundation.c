@@ -182,6 +182,7 @@ static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, s
 static kiln_value kiln_c99_undefined(void);
 static kiln_value kiln_c99_null(void);
 static kiln_value kiln_c99_boolean(int value);
+static int kiln_c99_kiln_extensions_on(void);
 static kiln_value kiln_c99_number(double value);
 static kiln_value kiln_c99_uninitialized(void);
 static kiln_value kiln_c99_builtin(uint64_t code);

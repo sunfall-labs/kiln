@@ -133,6 +133,9 @@ pub struct NativeRealmPolicy {
     pub timezone: NativeStringPolicy,
     pub locale: NativeStringPolicy,
     pub type_profile_path: Option<PathBuf>,
+    /// Never install kiln's own members (ADR 0068), whatever `KILN_EXTENSIONS` says when the
+    /// binary runs: `kiln build --no-kiln-extensions`.
+    pub no_kiln_extensions: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -159,7 +162,14 @@ impl NativeRealmPolicy {
             timezone: NativeStringPolicy::Deterministic,
             locale: NativeStringPolicy::Deterministic,
             type_profile_path: None,
+            no_kiln_extensions: false,
         }
+    }
+
+    /// The same policy for a binary that never installs kiln's own members (ADR 0068).
+    pub const fn without_kiln_extensions(mut self, without: bool) -> Self {
+        self.no_kiln_extensions = without;
+        self
     }
 
     pub const fn with_entropy(mut self, entropy: NativeEntropyPolicy) -> Self {
@@ -210,6 +220,7 @@ impl NativeRealmPolicy {
             live_module_slots: None,
             compile_regex: None,
             omit_source: false,
+            no_kiln_extensions: self.no_kiln_extensions,
         }
     }
 

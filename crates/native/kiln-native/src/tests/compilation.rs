@@ -1261,7 +1261,11 @@ fn native_build_launcher_supports_workers_auto() {
     };
     let project = TestDirectory::new("kiln-native-workers-auto");
     let entry = project.path.join("main.mjs");
-    fs::write(&entry, "console.log('workers-ok');").expect("write fixture");
+    fs::write(
+        &entry,
+        "console.log(`workers-ok ${process.env.KILN_WORKER_INDEX}/${process.env.KILN_WORKER_COUNT}`);",
+    )
+    .expect("write fixture");
     let graph = ModuleGraph::build_node(
         &entry,
         NodeRuntimeResolver::new(&project.path).expect("node resolver"),
@@ -1284,6 +1288,34 @@ fn native_build_launcher_supports_workers_auto() {
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("workers-ok"));
+
+    // Every supervised worker learns its index and the count before its realm starts; worker 0
+    // is one of them (the supervisor runs no realm), and a worker that exits 0 is not restarted.
+    let out = Command::new(&report.output)
+        .env("KILN_WORKERS", "3")
+        .output_when_launchable()
+        .expect("run native executable with KILN_WORKERS=3");
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut lines: Vec<&str> = stdout.lines().collect();
+    lines.sort_unstable();
+    assert_eq!(
+        lines,
+        ["workers-ok 0/3", "workers-ok 1/3", "workers-ok 2/3"]
+    );
+
+    // A single realm sets neither variable, so the program sees the environment node would.
+    let out = Command::new(&report.output)
+        .env_remove("KILN_WORKERS")
+        .env_remove("KILN_WORKER_INDEX")
+        .env_remove("KILN_WORKER_COUNT")
+        .output_when_launchable()
+        .expect("run native executable without KILN_WORKERS");
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "workers-ok undefined/undefined"
+    );
 }
 
 #[test]

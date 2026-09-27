@@ -2,9 +2,9 @@
 
 ## Status
 
-Accepted. Not implemented. This records the shape before the work starts, in the same spirit as
-ADR 0016 — the choice is cheap to make now and expensive to reverse once the split has been
-half-made in one direction.
+Accepted. Implemented (2026-09-26; see *What step 4 did*, below). This recorded the shape before
+the work started, in the same spirit as ADR 0016 — the choice is cheap to make now and expensive
+to reverse once the split has been half-made in one direction.
 
 ## Context
 
@@ -135,7 +135,7 @@ per-entry cost.
    *Done.*
 2. Split the operations to match the types, so the fence is structural. *Done.*
 3. Stop the checkpoint from parking. *Done.*
-4. Flip the drive to `async fn` and delete the `_in_context` family.
+4. Flip the drive to `async fn` and delete the `_in_context` family. *Done.*
 
 Step 2 moved the nineteen executor-free operations onto `impl RealmState` and left the
 twenty-two that park on `impl RealmRuntime`. Membership was not chosen by hand: an operation
@@ -183,3 +183,45 @@ that applies no actions and drains no events still ends it, and readiness that n
 still discovered where it always was: the drive's own await parks, and the work resumes through
 `poll_http_tasks_after_wake`. Confirmed by conformance at 45/45 and `scripts/native.sh` at 53
 matched, 0 diverged - the gate that a previous, unsound attempt at this hung for ten minutes.
+
+## What step 4 did
+
+Most of the flip landed with the bridge's deletion (f9ea9574): the native drive became one
+`block_on` around an `async fn`, and the eleven `_in_context` twins went. What that left was the
+question they answered, asked in one place instead of eleven — `Executor::run` checked
+`Handle::try_current()` and either ran the operation or wrapped it in a `block_on` — and the
+adapter still reached the realm through a `RefCell<RealmRuntime>` plus a raw `*mut RealmRuntime`
+thread-local, taken with `as_ptr()`, so that callbacks could get at the executor while the drive
+had the realm. Step 4 finished both.
+
+- `Executor` is a public type that owns the Tokio runtime, the `LocalSet`, the paused-clock flag
+  and the metric stream; all four are properties of a runtime, not of a realm. It has one parking
+  entry (`block_on`) and one non-parking one (`scope`, which makes the executor ambient through
+  `Runtime::enter` and `LocalSet::enter`). Both guards nest, so nothing asks "am I in context".
+- `RealmState` is built by `RealmState::new(host, capabilities)` with no executor, and every
+  operation that spawns or registers I/O — `start_host_op`, the HTTP attaches, `http_close` —
+  lives on it and expects to run inside a drive. `RealmRuntime` is now `Rc<Executor>` plus a
+  `RealmState`, with a wrapper of the same name for each such operation that enters `scope`
+  first; the interpreter, daemon, conformance and worker pool call it unchanged.
+- The native adapter holds `Rc<Executor>` and `RefCell<RealmState>` side by side.
+  `kiln_realm_drive` enters the executor once and the drive borrows the state one synchronous
+  step at a time; every callback from generated C reaches it through the active realm and a
+  `try_borrow_mut`. `ACTIVE_RUNTIME`, `ActiveRuntime` and every `as_ptr()` into the runtime are
+  gone, so a re-entrant borrow now fails with `RUNTIME_ERROR` instead of aliasing.
+
+The drive does not hold one `&mut RealmState` across its awaits, and cannot: Hyper tasks run the
+language while the drive is parked, and the language calls back into the state. What it holds for
+its lifetime is exclusive ownership of the cell; the borrow checker's part of the argument is that
+no path to the state bypasses it.
+
+Measured on the ten-line server (`bench/server/serve.mjs`, `native-release`): one
+`kiln_realm_enter` and one `kiln_realm_drive` for 2,000 requests, so executor entries per request
+are 1/2,000 (counted with breakpoints). Tokio's `park_count` is about 2 per request before and
+after, and throughput is unchanged within noise (c=16: 14,156 / 15,168 rps before, 14,983 /
+14,702 after, two clean interleaved rounds). The small service (`bench/server/app.mjs` under
+`drive-mix.mjs`, c=16) costs the same server CPU per request on both sides, within the noise of a
+machine at load average 13 to 17 (61.7 / 50.4 / 49.0 µs before, 62.2 / 52.5 after in the rounds
+not disturbed by other work). The throughput this ADR was after was earned by the
+earlier steps; this one is the structural half, and the first step of ADR 0070: the state is now
+an owned value any executor can drive, apart from the HTTP tasks already spawned on one.
+

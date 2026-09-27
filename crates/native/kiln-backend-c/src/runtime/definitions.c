@@ -974,6 +974,13 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
         if (kiln_c99_typed_prototype_own_key(target, view, NULL, found, &enumerable)) {
             return KILN_C99_OK;
         }
+        /* A kiln extension this process withholds (ADR 0068) is a member the description names
+         * and the realm left out, so its absence is known rather than a gap: `false`, as Node. */
+        if (!kiln_string_is_utf16(view) &&
+            kiln_c99_extension_withheld(target.bits, (const char *)kiln_string_latin1(view),
+                                        view->unit_len)) {
+            return KILN_C99_OK;
+        }
         /* The names the table answers to, asked the same way `getOwnPropertyNames` asks so the
          * two cannot disagree. A hit is a member the program can reach and is therefore own; a
          * miss is not proof of absence, because the table is still growing, so it refuses. */

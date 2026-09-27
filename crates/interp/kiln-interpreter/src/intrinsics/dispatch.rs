@@ -1730,8 +1730,9 @@ pub(crate) fn call_native(
                 let rounded = (value + 0.5).floor();
                 // A negative input that rounds to zero gives *negative* zero, which the floor
                 // has already thrown away. Only `Object.is` and `1 / x` can see the difference,
-                // and a console shows it, so it is worth putting back.
-                if rounded == 0.0 && value < 0.0 {
+                // and a console shows it, so it is worth putting back. Negative zero itself is
+                // one of them: -0 < 0 is false, so the sign bit is the test.
+                if rounded == 0.0 && value.is_sign_negative() {
                     -0.0
                 } else {
                     rounded

@@ -108,6 +108,11 @@ pub struct CallPlan {
     /// parallel clone on a worker thread -- once `set_parallel` has confirmed the clone's emitted
     /// text reaches no host, receiver, upvalue or heap.
     pub parallel_safe: Vec<bool>,
+    /// Per proto: the `parallelMap` verdict behind `parallel_safe` -- the captures a qualifying
+    /// callback reads, or the first rule it failed -- shared by every plan, so the call site
+    /// that acts on the decision and `--explain-parallel` read one answer.
+    pub parallel:
+        std::sync::Arc<Vec<Result<crate::parallel::ParallelShape, crate::parallel::Refusal>>>,
     /// Per proto: how many columns its receiver-shape cache has -- the names its body reads
     /// of `this` -- so a call site can look a row up in the callee's table.
     pub receiver_columns: Vec<usize>,
@@ -133,6 +138,10 @@ pub struct CallPlan {
 pub struct DirectPlan {
     pub functions: Vec<CallPlan>,
     pub typed: Vec<Option<CallPlan>>,
+    /// Per proto: the plan its parallel clone (`_p`) is emitted from, where the callback
+    /// qualifies for `parallelMap`. The typed plan's seeds plus the captured reads of
+    /// `parallel::ParallelShape`, which the clone receives as `double`s the call site guarded.
+    pub parallel: Vec<Option<CallPlan>>,
     pub entry: CallPlan,
 }
 
@@ -153,6 +162,12 @@ impl DirectPlan {
             // specifically to keep emission proportional to their bytecode, so do not compute
             // speculative facts only to erase them below.
             let function_count = graphs.len();
+            let generic_verdicts = std::sync::Arc::new(vec![
+                Err(crate::parallel::Refusal::new(
+                    crate::parallel::Reason::GenericOnly
+                ));
+                function_count
+            ]);
             let plan = || CallPlan {
                 compact,
                 compile_regex,
@@ -162,6 +177,7 @@ impl DirectPlan {
                 typed_needs: vec![TypedNeeds::default(); function_count],
                 typed_entries: vec![false; function_count],
                 parallel_safe: vec![false; function_count],
+                parallel: generic_verdicts.clone(),
                 receiver_columns: vec![0; function_count],
                 fast: vec![false; function_count],
                 available: vec![true; function_count],
@@ -171,6 +187,7 @@ impl DirectPlan {
             return Self {
                 functions: (0..function_count).map(|_| plan()).collect(),
                 typed: vec![None; function_count],
+                parallel: vec![None; function_count],
                 entry: plan(),
             };
         }
@@ -325,15 +342,84 @@ impl DirectPlan {
             }
         }
 
-        let parallel_safe: Vec<bool> = graphs
+        // The `parallelMap` verdict per proto (ADR 0058 application 2, ADR 0069 tier 1): the
+        // source rules of `parallel::parallel_verdict`, then a typed entry, then a number
+        // returned on every path with the parameters and the captured reads assumed numbers --
+        // the assumption the call site's run-time guard makes true before any chunk runs.
+        //
+        // Only a proto some `parallelMap` site is known to be called with is considered: every
+        // other would carry a parallel clone and its chunk workers that nothing calls.
+        let mut parallel_callbacks: HashSet<u32> = HashSet::new();
+        for (graph, known) in graphs
+            .iter()
+            .zip(&known.functions)
+            .chain(std::iter::once((entry, &known.entry)))
+        {
+            for (_, op) in graph.blocks.iter().flat_map(|b| b.operations.iter()) {
+                if let GraphOp::CallMethod { name, args, .. } = op
+                    && let Some(Constant::String(key)) = program.constants.get(*name as usize)
+                    && key == "parallelMap"
+                    && let Some(&target) = args.first().and_then(|a| known.known.get(a))
+                {
+                    parallel_callbacks.insert(target);
+                }
+            }
+        }
+        let mut parallel_seeds: Vec<Option<HashMap<ValueId, Proven>>> = vec![None; graphs.len()];
+        let parallel_verdicts: Vec<
+            Result<crate::parallel::ParallelShape, crate::parallel::Refusal>,
+        > = graphs
             .iter()
             .enumerate()
             .map(|(i, g)| {
-                typed_eligible[i]
-                    && typed_returns[i]
-                    && crate::parallel::parallel_safe(g, &program.functions[i], program)
+                use crate::parallel::{Reason, Refusal};
+                if !parallel_callbacks.contains(&(i as u32)) {
+                    return Err(Refusal::new(Reason::CallbackUnknown));
+                }
+                let shape = crate::parallel::parallel_verdict(
+                    g,
+                    &program.functions[i],
+                    program,
+                    &known.captures[i],
+                )?;
+                if !typed_eligible[i] {
+                    return Err(Refusal::new(Reason::NotTyped));
+                }
+                let mut seeds: HashMap<ValueId, Proven> = g
+                    .initial_locals
+                    .iter()
+                    .take(params[i] as usize)
+                    .map(|&v| (v, Proven::Number))
+                    .collect();
+                seeds.extend(shape.captured_values.iter().map(|&v| (v, Proven::Number)));
+                seeds.extend(intrinsics[i].iter().map(|(&v, &k)| (v, k)));
+                let (proven, _) = settle(
+                    g,
+                    seeds.clone(),
+                    &function_sites[i],
+                    &typed_eligible,
+                    &typed_returns,
+                    &params,
+                    &length_bounds[i],
+                );
+                let returns_number = g
+                    .blocks
+                    .iter()
+                    .filter(|b| b.is_reachable_from_entry(g.entry_block))
+                    .all(|b| match &b.terminator {
+                        Terminator::Return(Some(v)) => proven.get(v).is_some_and(|k| k.is_number()),
+                        Terminator::Return(None) => false,
+                        _ => true,
+                    });
+                if !returns_number {
+                    return Err(Refusal::new(Reason::ReturnsNonNumber));
+                }
+                parallel_seeds[i] = Some(seeds);
+                Ok(shape)
             })
             .collect();
+        let parallel_safe: Vec<bool> = parallel_verdicts.iter().map(Result::is_ok).collect();
+        let parallel_verdicts = std::sync::Arc::new(parallel_verdicts);
         let plan_for = |graph: &FunctionGraph,
                         known: &KnownValues,
                         sites: &[Site],
@@ -382,6 +468,7 @@ impl DirectPlan {
                 typed_needs: vec![TypedNeeds::default(); graphs.len()],
                 typed_entries: vec![false; graphs.len()],
                 parallel_safe: parallel_safe.clone(),
+                parallel: parallel_verdicts.clone(),
                 receiver_columns: vec![0; graphs.len()],
                 fast: vec![false; graphs.len()],
                 available: vec![true; graphs.len()],
@@ -420,6 +507,20 @@ impl DirectPlan {
                     seeds.insert(vid, Proven::Number);
                 }
                 seeds.extend(intrinsics[i].iter().map(|(&v, &k)| (v, k)));
+                Some(plan_for(
+                    g,
+                    &known.functions[i],
+                    &function_sites[i],
+                    seeds,
+                    &length_bounds[i],
+                ))
+            })
+            .collect();
+        let parallel: Vec<Option<CallPlan>> = graphs
+            .iter()
+            .enumerate()
+            .map(|(i, g)| {
+                let seeds = parallel_seeds[i].clone()?;
                 Some(plan_for(
                     g,
                     &known.functions[i],
@@ -577,12 +678,14 @@ impl DirectPlan {
         let mut plan = DirectPlan {
             functions,
             typed,
+            parallel,
             entry: entry_plan,
         };
         for plan in plan
             .functions
             .iter_mut()
             .chain(plan.typed.iter_mut().flatten())
+            .chain(plan.parallel.iter_mut().flatten())
             .chain(std::iter::once(&mut plan.entry))
         {
             plan.typed_entries = typed_entries.clone();
@@ -597,6 +700,7 @@ impl DirectPlan {
             .functions
             .iter_mut()
             .chain(self.typed.iter_mut().flatten())
+            .chain(self.parallel.iter_mut().flatten())
             .chain(std::iter::once(&mut self.entry))
         {
             plan.fast = fast.to_vec();
@@ -609,6 +713,7 @@ impl DirectPlan {
             .functions
             .iter_mut()
             .chain(self.typed.iter_mut().flatten())
+            .chain(self.parallel.iter_mut().flatten())
             .chain(std::iter::once(&mut self.entry))
         {
             plan.available = available.to_vec();
@@ -624,6 +729,7 @@ impl DirectPlan {
             .functions
             .iter_mut()
             .chain(self.typed.iter_mut().flatten())
+            .chain(self.parallel.iter_mut().flatten())
             .chain(std::iter::once(&mut self.entry))
         {
             plan.receiver_columns = columns.to_vec();
@@ -635,6 +741,7 @@ impl DirectPlan {
             .functions
             .iter_mut()
             .chain(self.typed.iter_mut().flatten())
+            .chain(self.parallel.iter_mut().flatten())
             .chain(std::iter::once(&mut self.entry))
         {
             plan.typed_needs = needs.to_vec();
@@ -646,6 +753,7 @@ impl DirectPlan {
             .functions
             .iter_mut()
             .chain(self.typed.iter_mut().flatten())
+            .chain(self.parallel.iter_mut().flatten())
             .chain(std::iter::once(&mut self.entry))
         {
             plan.should_chunk = should_chunk;
@@ -659,22 +767,37 @@ impl DirectPlan {
     pub fn parallel_chunk(&self, index: u32) -> bool {
         let i = index as usize;
         self.has_typed_entry(index)
-            && self.entry.typed_returns.get(i).copied().unwrap_or(false)
+            && self.parallel.get(i).is_some_and(Option::is_some)
             && self.entry.parallel_safe.get(i).copied().unwrap_or(false)
     }
 
     /// Narrow `parallel_safe` to the protos whose parallel clone was emitted and scanned clean
     /// (`lib.rs`), in every body's plan, so a `parallelMap` site anywhere reads the final answer.
     pub fn set_parallel(&mut self, admitted: &[bool]) {
+        let verdicts: Vec<_> = self
+            .entry
+            .parallel
+            .iter()
+            .enumerate()
+            .map(|(i, verdict)| match verdict {
+                Ok(_) if !admitted.get(i).copied().unwrap_or(false) => Err(
+                    crate::parallel::Refusal::new(crate::parallel::Reason::CloneRejected),
+                ),
+                other => other.clone(),
+            })
+            .collect();
+        let verdicts = std::sync::Arc::new(verdicts);
         for plan in self
             .functions
             .iter_mut()
             .chain(self.typed.iter_mut().flatten())
+            .chain(self.parallel.iter_mut().flatten())
             .chain(std::iter::once(&mut self.entry))
         {
             for (i, ok) in plan.parallel_safe.iter_mut().enumerate() {
                 *ok = *ok && admitted.get(i).copied().unwrap_or(false);
             }
+            plan.parallel = verdicts.clone();
         }
     }
 
@@ -912,6 +1035,8 @@ struct KnownValues {
 struct Known {
     functions: Vec<KnownValues>,
     entry: KnownValues,
+    /// Per proto, per upvalue index: what the unit knows about the binding it captures.
+    captures: Vec<Vec<crate::parallel::Capture>>,
 }
 
 /// What a stored value is, for the binding rule.
@@ -1239,9 +1364,48 @@ fn known_callees(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGr
     }
 
     // Known values: the closures themselves, the reads of known bindings, and what aliases them.
+    // Every captured binding's writes, for `parallelMap`'s tier 1: a declaration's hoisted
+    // `undefined` (a store of `undefined` in the owner's entry block ahead of every other
+    // store) is not a write; any other store is. A poisoned unit -- a write this walk cannot
+    // place -- resolves nothing.
+    let captures: Vec<Vec<crate::parallel::Capture>> = (0..graphs.len() as u32)
+        .map(|f| {
+            (0..program.functions[f as usize].upvalues.len() as u32)
+                .map(|k| {
+                    let Some(binding) = resolve(program, &parent, f, k) else {
+                        return crate::parallel::Capture::Unresolved;
+                    };
+                    if poisoned {
+                        return crate::parallel::Capture::Unresolved;
+                    }
+                    let all = stores.get(&binding).map(Vec::as_slice).unwrap_or(&[]);
+                    let entry_block = graph_of(binding.owner).entry_block;
+                    let in_entry = |s: &Store| s.owner == binding.owner && s.block == entry_block;
+                    // The first store in the owner's entry block that is not `undefined`; a
+                    // hoisted `undefined` ahead of it initializes rather than writes.
+                    let first_real = all
+                        .iter()
+                        .filter(|s| in_entry(s) && s.stored != Stored::Undefined)
+                        .map(|s| s.position)
+                        .min()
+                        .unwrap_or(usize::MAX);
+                    let writes = all
+                        .iter()
+                        .filter(|s| {
+                            !(in_entry(s)
+                                && s.stored == Stored::Undefined
+                                && s.position < first_real)
+                        })
+                        .count();
+                    crate::parallel::Capture::Writes(writes)
+                })
+                .collect()
+        })
+        .collect();
     let mut known = Known {
         functions: vec![KnownValues::default(); graphs.len()],
         entry: KnownValues::default(),
+        captures,
     };
     fn values_of(known: &mut Known, owner: Owner) -> &mut KnownValues {
         match owner {

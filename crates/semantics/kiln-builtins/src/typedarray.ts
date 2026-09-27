@@ -935,5 +935,13 @@
     typeof Array.prototype.toString === "function" ? Array.prototype.toString : toStringMethod
   );
   defineMethod("toLocaleString", toLocaleString);
-  defineMethod("parallelMap", parallelMap);
+
+  // kiln's own members (ADR 0068): declared in `kiln_builtin_surface::KILN_EXTENSIONS`, installed
+  // only when the realm installs extensions (`extensions.ts`), and non-enumerable like the rest.
+  function defineExtension(name: string, fn: any): void {
+    if (kilnExtensions) {
+      defineMethod(name, fn);
+    }
+  }
+  defineExtension("parallelMap", parallelMap);
 })();

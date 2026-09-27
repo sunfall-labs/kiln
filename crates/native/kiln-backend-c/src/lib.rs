@@ -96,6 +96,9 @@ pub struct EmissionPolicy {
     pub compile_regex: Option<bool>,
     /// Omit embedded JavaScript source text for closures (Function.prototype.toString returns [native code]).
     pub omit_source: bool,
+    /// Build a binary that never installs kiln's own members (ADR 0068), whatever its
+    /// `KILN_EXTENSIONS` says at run time: `kiln build --no-kiln-extensions`.
+    pub no_kiln_extensions: bool,
 }
 
 impl EmissionPolicy {
@@ -1340,12 +1343,16 @@ fn render_functions(
     // if its text names none of the host, `thrown`, the receiver, the upvalue table, a shape row,
     // or the collector: the same reading `typed_needs` does above, as the machine's own check
     // that a chunk worker calling this clone reaches nothing a realm thread owns.
+    //
+    // The clone is emitted from the proto's parallel plan (`direct.parallel`), which assumes the
+    // captured reads of tier 1 are numbers: the clone takes them as `double` parameters after
+    // its own, and the call site guards them on the realm thread before any chunk runs.
     let mut parallel_clones: Vec<Option<String>> = vec![None; program.functions.len()];
-    for (index, typed) in direct.typed.iter().enumerate() {
-        let Some(typed) = typed else {
+    for (index, parallel) in direct.parallel.iter().enumerate() {
+        let Some(typed) = parallel else {
             continue;
         };
-        if !(typed.typed_returns[index] && typed.parallel_safe[index]) {
+        if direct.typed[index].is_none() || !typed.parallel_safe[index] {
             continue;
         }
         let proto = &program.functions[index];
@@ -1785,6 +1792,7 @@ fn render_functions(
                     symbol,
                     index,
                     proto.parameter_count,
+                    &emit_graph::parallel_captures(&direct.entry, index),
                     should_chunk,
                 );
             }
@@ -2692,9 +2700,16 @@ fn property_key_constants(program: &Program) -> Vec<u32> {
     keys
 }
 
-/// One canonical pointer per key the unit names, filled at the first entry into a realm and
-/// cleared by the unit's `KILN_GC_PHASE_RESET` when that realm is destroyed. Interned as static:
-/// the constant table outlives every heap, so the entry is pinned and nothing is copied.
+/// One canonical pointer per key the unit names. A load-time constructor registers the unit's
+/// constants into the process's shared key table before the first realm exists (ADR 0071) and
+/// fills the pointers from it once, for every realm; `{symbol}_keys_shared` records that, and the
+/// realm reset leaves such pointers alone. When registration could not vouch for every key -- a
+/// library loaded after a heap existed, or out of memory -- the pointers are filled at the first
+/// entry into each realm instead and cleared by that realm's `KILN_GC_PHASE_RESET`, as before.
+///
+/// The constructor names only this unit's own constants, so registration adds nothing to the
+/// unit's cache key that its content did not already decide, and no launcher, embedding host or
+/// shared-library entry point has to enumerate units: the linker's list of objects is the list.
 fn render_key_table(
     output: &mut String,
     program: &Program,
@@ -2722,18 +2737,22 @@ fn render_key_table(
         }
     }
     writeln!(output, "static int {symbol}_keys_ready;").unwrap();
+    writeln!(output, "static int {symbol}_keys_shared;").unwrap();
+    writeln!(
+        output,
+        "static const kiln_string *const {symbol}_key_sources[{}] = {{",
+        keys.len()
+    )
+    .unwrap();
+    for index in keys {
+        let Constant::String(_) = &program.constants[*index as usize] else {
+            unreachable!("verification rejects a non-string property name before emission")
+        };
+        writeln!(output, "    &{symbol}_string_{index},").unwrap();
+    }
+    writeln!(output, "}};").unwrap();
     writeln!(output, "static int {symbol}_intern_keys(void) {{").unwrap();
     if symbol == "ku" && keys.len() > 4 {
-        writeln!(
-            output,
-            "    static const kiln_string *const ku_static_keys[{}] = {{",
-            keys.len()
-        )
-        .unwrap();
-        for index in keys {
-            writeln!(output, "        &{symbol}_string_{index},").unwrap();
-        }
-        writeln!(output, "    }};").unwrap();
         writeln!(
             output,
             "    for (size_t i = 0; i < (size_t){}; ++i) {{",
@@ -2742,15 +2761,12 @@ fn render_key_table(
         .unwrap();
         writeln!(
             output,
-            "        if ((ku_keys[i] = kiln_c99_intern_static_key(ku_static_keys[i])) == NULL) return KILN_C99_OUT_OF_MEMORY;"
+            "        if ((ku_keys[i] = kiln_c99_intern_static_key(ku_key_sources[i])) == NULL) return KILN_C99_OUT_OF_MEMORY;"
         )
         .unwrap();
         writeln!(output, "    }}").unwrap();
     } else {
         for (i, index) in keys.iter().enumerate() {
-            let Constant::String(_) = &program.constants[*index as usize] else {
-                unreachable!("verification rejects a non-string property name before emission")
-            };
             // The key store is canonical headed keys now: intern the constant's header
             // directly, in either width. The Latin1 bridge and its UTF-16 refusal are gone.
             if symbol == "ku" {
@@ -2771,6 +2787,37 @@ fn render_key_table(
     writeln!(
         output,
         "    {symbol}_keys_ready = 1;\n    return KILN_C99_OK;\n}}"
+    )
+    .unwrap();
+    // Registration. `ku` registers straight into its key array; any other symbol's keys are
+    // separate statics, filled from a local array only once every key is known to be shared.
+    writeln!(
+        output,
+        "__attribute__((constructor)) static void {symbol}_register_keys(void) {{"
+    )
+    .unwrap();
+    if symbol == "ku" {
+        writeln!(
+            output,
+            "    if (!kiln_c99_register_static_keys(ku_key_sources, ku_keys, (size_t){})) return;",
+            keys.len()
+        )
+        .unwrap();
+    } else {
+        writeln!(output, "    const kiln_string *shared[{}];", keys.len()).unwrap();
+        writeln!(
+            output,
+            "    if (!kiln_c99_register_static_keys({symbol}_key_sources, shared, (size_t){})) return;",
+            keys.len()
+        )
+        .unwrap();
+        for (i, index) in keys.iter().enumerate() {
+            writeln!(output, "    {symbol}_key_{index} = shared[{i}];").unwrap();
+        }
+    }
+    writeln!(
+        output,
+        "    {symbol}_keys_shared = 1;\n    {symbol}_keys_ready = 1;\n}}"
     )
     .unwrap();
 }
@@ -2940,10 +2987,11 @@ fn render_unit_roots(
     )
     .unwrap();
     if keyed {
-        // The canonical pointers belong to the realm's intern table, which dies with the realm.
+        // Unless registration made them shared, the canonical pointers belong to the realm's
+        // intern table, which dies with the realm.
         writeln!(
             output,
-            "    if (phase == KILN_GC_PHASE_RESET) {symbol}_keys_ready = 0;"
+            "    if (phase == KILN_GC_PHASE_RESET && !{symbol}_keys_shared) {symbol}_keys_ready = 0;"
         )
         .unwrap();
     }
@@ -3263,6 +3311,9 @@ fn render_emission_policy(output: &mut String, policy: &EmissionPolicy) {
         u8::from(policy.host_clock)
     )
     .unwrap();
+    if policy.no_kiln_extensions {
+        output.push_str("#define KILN_REALM_NO_EXTENSIONS 1\n");
+    }
     match policy.entropy {
         EmissionEntropyPolicy::Deterministic => {}
         EmissionEntropyPolicy::Seeded(seed) => {
@@ -3649,6 +3700,17 @@ fn render(
     symbol: &str,
     policy: &EmissionPolicy,
 ) -> Result<String, EmitError> {
+    parallel::with_original_source(program, || {
+        render_positioned(program, program_hash, symbol, policy)
+    })
+}
+
+fn render_positioned(
+    program: &Program,
+    program_hash: u64,
+    symbol: &str,
+    policy: &EmissionPolicy,
+) -> Result<String, EmitError> {
     let plan = validate_program(program).expect("render called after validation");
     let mut compacted;
     let program = if policy.compact || policy.omit_source {
@@ -3868,6 +3930,28 @@ fn scan_referenced_functions(texts: &[String], symbol: &str, total_funcs: usize)
 }
 
 fn render_module(
+    module: &ModuleProgram,
+    program_hash: u64,
+    symbol: &str,
+    policy: &EmissionPolicy,
+    commonjs: bool,
+    diagnostic_site: &str,
+) -> Result<RenderedModule, EmitError> {
+    // `parallelMap` site records name positions in the module as written; emission packs the
+    // source below. See `parallel::SiteRecord`.
+    parallel::with_original_source(&module.program, || {
+        render_module_positioned(
+            module,
+            program_hash,
+            symbol,
+            policy,
+            commonjs,
+            diagnostic_site,
+        )
+    })
+}
+
+fn render_module_positioned(
     module: &ModuleProgram,
     program_hash: u64,
     symbol: &str,
@@ -4485,6 +4569,9 @@ mod identity;
 use identity::*;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod parallel_tests;
 
 /// The reserved key an instance stores its class's brand under, derived from a private name.
 ///

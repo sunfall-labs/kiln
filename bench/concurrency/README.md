@@ -1,0 +1,103 @@
+# Concurrency benchmarks: kiln against node, bun and Go
+
+One command reproduces the table:
+
+```sh
+bench/concurrency/run.sh            # 3 interleaved rounds, about 8-10 minutes
+bench/concurrency/run.sh --quick    # 1 round, fewer sizes, about 3 minutes
+bench/concurrency/run.sh --only messages,server
+```
+
+It builds a release `kiln` if there is none (`mbx build --release -p kiln-cli`), builds the kiln
+programs with `--node --profile native-release` and the Go program once, outside every
+measurement, and writes `results-<date>.md` here with the machine details beside the numbers. The
+raw records (every round, every metric, the load average before each job) go to
+`target/bench-concurrency/<timestamp>/raw.json`. It needs `node`, `bun`, `oha` and `python3` on
+`PATH`; Go comes from `PATH` when a working `go` is there and otherwise from
+`mise exec go@latest`, which downloads into mise's cache without changing any configuration.
+
+This is issue 13 of `.scratch/realms-and-concurrency/`: the suite is extended as each issue lands,
+and a "not available" cell becomes a number when the feature it names exists.
+
+## How it measures
+
+The rules are `CLAUDE.md`'s "Benchmarking: time the work, not the launcher":
+
+- **Warm, repeated, inside the process.** Every program times itself with `performance.now()`,
+  runs a cold iteration first and reports it apart, and reports a median of warm iterations.
+  Process start is only ever measured where process start is the question (the `KILN_WORKERS`
+  rows).
+- **Interleaved rounds, medians.** Each round runs every job once, rotating the runtime order, so
+  a background build that starts mid-run hurts every column. A cell is the median across rounds;
+  a leading `~` marks one whose rounds spread by more than 25% of their median. The machine is
+  shared, so the load average before each job is recorded and summarised in the results.
+- **Answers are compared.** Every case prints a checksum (a sum of the replies, of the lookups, of
+  the mapped values). A cell whose checksum differs from the reference runtime's (Go where it runs
+  the case, else node) did different work: it is excluded and named under "Divergences", never
+  shown as a time. A fast wrong answer reads exactly like a win.
+- **Memory from the right place.** In-process `VmRSS` deltas for workers that are threads (node,
+  bun, Go); the process's peak resident set (`wait4` rusage) for whole runs; and the summed PSS of
+  the process tree for anything that forks (kiln `KILN_WORKERS`, node `cluster`, bun
+  `reusePort`), because a sum of RSS counts the shared binary text once per process.
+
+The kiln interpreter is not measured here: its realm clock is virtual (ADR 0044) and every row
+below is about the native runtime.
+
+## The workloads
+
+| # | workload | node / bun | Go | kiln today |
+| --- | --- | --- | --- | --- |
+| 1 | **Worker start**: start a worker and get one message back; memory per added worker with 1, 10, 100 alive | `worker_threads` `Worker` (`js/start.mjs`) | goroutine + channel | **not available**: no `worker_threads` (issue 06). Nearest equivalent measured instead: `KILN_WORKERS=N` processes (`js/kiln-start.mjs`), spawn to exit, one line per worker, PSS of the held tree |
+| 2 | **Messages**: ping-pong round trip and one-way throughput of a short object; a ~1 MB object graph; a 16 MB `ArrayBuffer` copied vs transferred | across a `Worker` (`js/messages.mjs`), and in one realm over `MessageChannel` (`js/inrealm.mjs`) | channels; the graph deep-copied (the structured-clone equivalent) and by reference | **in-realm `MessageChannel` only** (`js/inrealm.mjs`), labelled; cross-thread: not available |
+| 3 | **Shared read-only dataset**: a 50 MB `Float64Array` lookup table, N workers each doing 2M pseudo-random lookups | copied to each worker, or one `SharedArrayBuffer` (`js/shared.mjs`) | one slice every goroutine reads | **not available**: no workers, and no shared immutable region yet (issue 08) |
+| 4 | **Many tasks**: 10, 1,000, 100,000 concurrent tasks, each waking 10 times on a 10 ms timer | async functions + `setTimeout` in one realm (`js/tasks.mjs`) | goroutines + `time.Sleep` | async tasks **in one realm**, labelled (a realm per task comes with issues 05 and 09) |
+| 5 | **Data-parallel map** over 10M numbers: a compute-heavy callback, and a light one | `Array.prototype.map`; a `worker_threads` pool of one worker per core that copies each slice in and transfers it back (`js/pmap-pool.mjs`) | a loop; goroutines over sub-slices | `map`, and `parallelMap` (ADR 0058) natively, plus `parallelMap` with `KILN_PARALLELISM=1` to show whether the parallel lowering ran |
+| 6 | **Server at all cores**: hello-world HTTP under `oha` | node `cluster` (`js/cluster.mjs`); bun `Bun.serve({ reusePort })` in one process per core (`js/bun-serve.mjs`) | `net/http` | `KILN_WORKERS=auto` process mode (a supervisor plus one realm process per core, `js/serve.mjs`); `KILN_WORKERS=1` for scale |
+
+Details that matter when reading the numbers:
+
+- **1.** The node/bun start is measured from `new Worker` to the first `message` event; each worker
+  is terminated before the next starts, so it is start cost, not pool reuse. "Memory per added
+  worker" is the RSS delta over the process before any worker was started, divided by N. The kiln
+  process rows are wall time from spawn to the exit of the whole tree (supervisor included when
+  N > 1) and PSS of the held-alive tree; "per added worker" is `(PSS(N) - PSS(1)) / (N - 1)`, so
+  it includes a share of the supervisor. The node and bun "process start" row times the same
+  one-line program as a whole process, for context against `KILN_WORKERS=1`.
+- **2.** The one-way case sends 100,000 messages across threads but 10,000 in one realm, because
+  kiln's in-realm channel runs at thousands of messages per second and 100,000 would take minutes.
+  The per-message rate is what is compared. The 16 MB rows are a round trip: copied both ways, or
+  transferred both ways.
+- **3.** Setup is from the first send until every worker holds the table, with the workers already
+  started; the copy row pays one structured clone per worker, the `SharedArrayBuffer` row none.
+  JavaScript can share bytes, never an object graph -- the gap the shared immutable region (08) is
+  for.
+- **4.** The floor is 100 ms (10 ticks of 10 ms); everything above it is scheduling. Peak RSS
+  includes each runtime's baseline.
+- **5.** The pool rows include copying the input into typed arrays: that is what a pool of isolates
+  has to pay. kiln's `parallelMap` accepts only callbacks its typed pool can prove numeric (ADR
+  0058); others fall back to the sequential lowering and the `KILN_PARALLELISM=1` row then matches
+  the default one.
+- **6.** `oha` runs on the same machine and competes for the same cores, so absolute rps is a
+  property of this box; the columns are comparable with each other. Requests `oha` cancels at the
+  deadline are not counted as errors.
+
+## What "not available" means
+
+It means the runtime has no way to express the workload yet, not that it failed. Today (after
+issue 07, `1e46b859`) kiln has one realm per process: no `worker_threads` (`Worker` refuses),
+no port between realms, no shared immutable region, and realms are not yet cheap enough to run one
+per task. Each of those is an issue in `.scratch/realms-and-concurrency/issues/`, and the row
+fills in when it lands: 06 (`worker_threads`) turns on workloads 1-3 for kiln, 07 adds a thread
+mode to workload 6, 08 fills workload 3, 05 and 09 turn workload 4 into a realm per task, and 10
+adds a transfer row to 2.
+
+A kiln build that fails is reported as a failure with the compiler's first error, not as "not
+available".
+
+## Files
+
+- `run.sh` -- entry point; `run.py` -- builds, runs, aggregates, renders.
+- `js/` -- the node/bun/kiln programs; `js/common.mjs` holds the shared workload pieces (the small
+  message, the graph, the table, the map callback) so every runtime does the same work.
+- `go/` -- one Go program with a subcommand per workload, printing the same JSON lines.
+- `results-<date>.md` -- one file per recorded baseline.

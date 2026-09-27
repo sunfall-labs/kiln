@@ -100,7 +100,7 @@ fn tokio_host_process_cancellation_kills_and_reaps_the_child() {
         },
         true,
     );
-    let executor = runtime.drive_executor();
+    let executor = Rc::clone(runtime.executor());
     let mut pid = None;
     for _ in 0..100 {
         executor.block_on(yield_to_tasks());
@@ -158,7 +158,7 @@ fn tokio_host_shutdown_kills_and_reaps_a_pending_process() {
     );
     let mut pid = None;
     for _ in 0..100 {
-        runtime.drive_executor().block_on(yield_to_tasks());
+        Rc::clone(runtime.executor()).block_on(yield_to_tasks());
         if let Ok(contents) = fs::read_to_string(&marker) {
             pid = Some(contents.trim().parse::<i32>().expect("child PID"));
             break;
@@ -205,7 +205,7 @@ fn tokio_host_shutdown_drains_a_process_after_last_op_cancellation() {
     );
     let mut pid = None;
     for _ in 0..100 {
-        runtime.drive_executor().block_on(yield_to_tasks());
+        Rc::clone(runtime.executor()).block_on(yield_to_tasks());
         if let Ok(contents) = fs::read_to_string(&marker) {
             pid = Some(contents.trim().parse::<i32>().expect("child PID"));
             break;
@@ -1445,7 +1445,7 @@ fn uring_listener_accepts_raw_streams_that_serve_discrete_io() {
         next_host_completion(&mut runtime).expect("close");
     }
     // The listener is really closed once the ring cancels its accept.
-    runtime.drive_executor().block_on(async {
+    Rc::clone(runtime.executor()).block_on(async {
         tokio::time::sleep(Duration::from_millis(20)).await;
     });
     assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());

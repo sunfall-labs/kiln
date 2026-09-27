@@ -720,6 +720,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Value::Native(Native::NodeBufferToString, realm),
             );
         }
+        // Whether this realm installs kiln's own members (ADR 0068), for the shared bootstrap's
+        // `%TypedArray%.prototype`, which installs its extension itself. Captured and deleted by
+        // `kiln-builtins/src/extensions.ts` before any other bootstrap line runs.
+        globals.set_non_enumerable(
+            "__kilnExtensions",
+            Value::Boolean(kiln_builtin_surface::kiln_extensions_installed()),
+        );
         // The four bridges the shared `URL` (`kiln-builtins/src/url.ts`) captures and deletes;
         // the URL bootstrap runs in every mode, as the native runtime's does.
         for (name, native) in [

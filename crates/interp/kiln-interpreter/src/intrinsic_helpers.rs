@@ -891,7 +891,7 @@ pub(super) fn number_method_value(
 
 /// The methods a number primitive exposes.
 pub(super) fn number_property(name: &str) -> Value {
-    let Some(member) = kiln_builtin_surface::find_prototype_member(
+    let Some(member) = kiln_builtin_surface::installed_prototype_member(
         kiln_builtin_surface::PrototypeId::Number,
         name,
     ) else {
@@ -909,9 +909,10 @@ pub(super) fn number_property(name: &str) -> Value {
 }
 
 pub(super) fn array_property(name: &str) -> Value {
-    let Some(member) =
-        kiln_builtin_surface::find_prototype_member(kiln_builtin_surface::PrototypeId::Array, name)
-    else {
+    let Some(member) = kiln_builtin_surface::installed_prototype_member(
+        kiln_builtin_surface::PrototypeId::Array,
+        name,
+    ) else {
         return Value::Undefined;
     };
     match member.binding {

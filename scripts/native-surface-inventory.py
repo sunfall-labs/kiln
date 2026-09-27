@@ -248,6 +248,11 @@ class Receiver:
     # A receiver node has and neither engine publishes. It is never probed natively -- there is
     # nothing to probe -- and counts as missing in both engines, every member of it.
     node_only: bool = False
+    # Members that are kiln's own (ADR 0068): published by default and gone under
+    # `KILN_EXTENSIONS=0`. Measured the same way as everything else -- the interpreter enumerated a
+    # second time with the switch set, and the difference is the list -- so this tool still names
+    # no member itself. They are reported in a column of their own, never as "extra".
+    kiln_extensions: list[str] = field(default_factory=list)
 
 
 class Runner:
@@ -259,7 +264,9 @@ class Runner:
         self.native_runs = 0
         self.errors: list[str] = []
 
-    def run(self, source: str, *, native: bool, node: bool, tag: str) -> tuple[list[str], str | None]:
+    def run(
+        self, source: str, *, native: bool, node: bool, tag: str, env: dict[str, str] | None = None
+    ) -> tuple[list[str], str | None]:
         """Run one generated program, retrying anything that is not a clean answer or a refusal.
 
         Returns (printed lines, refusal text or None). A refusal is the measurement and is never
@@ -271,7 +278,7 @@ class Runner:
         class.
         """
         for attempt in range(3):
-            lines, refusal, ok = self._attempt(source, native=native, node=node, tag=tag)
+            lines, refusal, ok = self._attempt(source, native=native, node=node, tag=tag, env=env)
             if ok:
                 return lines, refusal
         self.errors.append(f"{tag}: {refusal}")
@@ -304,7 +311,7 @@ class Runner:
         return proc.stdout.splitlines()
 
     def _attempt(
-        self, source: str, *, native: bool, node: bool, tag: str
+        self, source: str, *, native: bool, node: bool, tag: str, env: dict[str, str] | None = None
     ) -> tuple[list[str], str | None, bool]:
         suffix = ".cjs" if node else ".js"
         path = self.workdir / f"{tag}{suffix}"
@@ -325,6 +332,7 @@ class Runner:
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
+                env={**os.environ, **env} if env else None,
             )
         except subprocess.TimeoutExpired:
             # A timed-out run is not a measurement. Say so rather than filing its partial output.
@@ -499,7 +507,9 @@ def enumerate_interpreter(runner: Runner) -> dict[str, Receiver]:
             rec.interpreted[name] = value
 
     collect = COLLECT % {"describe": DESCRIBE}
-    source = ENUMERATE_GLOBALS % {"collect": collect, "hook": js_string(HOST_HOOK_PREFIX), "skip": "[]"}
+    source = globals_source = ENUMERATE_GLOBALS % {
+        "collect": collect, "hook": js_string(HOST_HOOK_PREFIX), "skip": "[]"
+    }
     # Under the adapter, because that is what a program sees: node is the target of both engines
     # (ADR 0063) and node has `process`, `Buffer` and `fetch` on every global object. Measured
     # without it until 2026-09-19, the far gap counted those as missing on `globalThis` and never
@@ -514,7 +524,7 @@ def enumerate_interpreter(runner: Runner) -> dict[str, Receiver]:
         f'{{ console.log("U\\t" + {js_string(spec)} + "\\t" + String(e)); }}'
         for spec in NODE_SPECIFIERS
     )
-    source = ENUMERATE_NAMESPACES % {"collect": collect, "requires": requires}
+    source = namespaces_source = ENUMERATE_NAMESPACES % {"collect": collect, "requires": requires}
     lines, refusal = runner.run(source, native=False, node=True, tag="enumerate-namespaces")
     if refusal is not None:
         sys.exit(f"the interpreter could not enumerate the node namespaces: {refusal}")
@@ -526,6 +536,25 @@ def enumerate_interpreter(runner: Runner) -> dict[str, Receiver]:
 
     for rec in receivers.values():
         rec.names = sorted(set(rec.names))
+
+    # The same two walks with kiln's own members switched off (ADR 0068). What disappears is what
+    # the engines declare as an extension; asking rather than reading keeps this file free of
+    # member names, and it proves the switch removes exactly those members while it is at it.
+    without: dict[str, set[str]] = {}
+    for tag, walk in (("globals", globals_source), ("namespaces", namespaces_source)):
+        lines, refusal = runner.run(
+            walk, native=False, node=True, tag=f"enumerate-{tag}-without-extensions",
+            env={"KILN_EXTENSIONS": "0"},
+        )
+        if refusal is not None:
+            sys.exit(f"the interpreter could not enumerate its {tag} without extensions: {refusal}")
+        for line in lines:
+            parts = line.split("\t")
+            if len(parts) == 4 and parts[0] == "M":
+                without.setdefault(parts[1], set()).add(parts[2])
+    for key, rec in receivers.items():
+        if key in without:
+            rec.kiln_extensions = sorted(set(rec.names) - without[key])
     return receivers
 
 
@@ -667,11 +696,12 @@ def wintertc_rows(receivers: dict[str, Receiver]) -> list[tuple[str, str, str, s
 def against_node(rec: Receiver) -> dict[str, dict[str, list[str]]]:
     """Each engine against node, per member: `missing` (node has it, the engine does not --
     for the native backend a refusal or an `undefined` both count), `differs` (both answer,
-    differently), `extra` (the engine has it and node does not). A node-only receiver is missing
-    in both engines, whole."""
+    differently), `extra` (the engine has it and node does not), `extension` (the engine has it,
+    node does not, and it is one of kiln's own members, declared as such -- ADR 0068 -- so it is
+    intentional rather than drift). A node-only receiver is missing in both engines, whole."""
     out = {
-        "interpreter": {"missing": [], "differs": [], "extra": []},
-        "native": {"missing": [], "differs": [], "extra": []},
+        "interpreter": {"missing": [], "differs": [], "extra": [], "extension": []},
+        "native": {"missing": [], "differs": [], "extra": [], "extension": []},
     }
     if rec.node_names is None:
         return out
@@ -688,11 +718,12 @@ def against_node(rec: Receiver) -> dict[str, dict[str, list[str]]]:
             out["native"]["missing"].append(name)
         elif native != want:
             out["native"]["differs"].append(name)
+    extensions = set(rec.kiln_extensions)
     for name in sorted(set(rec.interpreted) - node_names):
-        out["interpreter"]["extra"].append(name)
+        out["interpreter"]["extension" if name in extensions else "extra"].append(name)
     for name in sorted(set(rec.native) - node_names):
         if rec.native[name] != "undefined":
-            out["native"]["extra"].append(name)
+            out["native"]["extension" if name in extensions else "extra"].append(name)
     return out
 
 
@@ -1185,6 +1216,7 @@ def main() -> int:
             rec.node_names = row.get("node_names")
             rec.self_node = row.get("self_node", {})
             rec.node_only = row.get("node_only", False)
+            rec.kiln_extensions = row.get("kiln_extensions", [])
             receivers[key] = rec
         runner = Runner(kiln, root, root, args.timeout)
         runner.errors = saved.get("errors", [])
@@ -1252,6 +1284,7 @@ def main() -> int:
             "node_names": receivers[key].node_names,
             "self_node": receivers[key].self_node,
             "node_only": receivers[key].node_only,
+            "kiln_extensions": receivers[key].kiln_extensions,
         }
         for key in order
     }
@@ -1347,12 +1380,19 @@ def render(receivers: dict[str, Receiver], order: list[str], runner: Runner) -> 
         "the same enumeration run under node, and each engine held to it. *Missing* is a member "
         "node has and the engine does not (natively, a refusal or an `undefined` both count); "
         "*differs* is both answering and not alike; *extra* is a member the engine publishes and "
-        "node does not."
+        "node does not; a *kiln extension* is one of those that kiln declares as its own (ADR "
+        "0068) -- intentional, non-enumerable, and gone under `KILN_EXTENSIONS=0` -- so it is "
+        "counted apart and never as drift."
     )
     add("")
     add("| | Interpreter | Native |")
     add("| --- | ---: | ---: |")
-    for cls, label in (("missing", "missing (node has it)"), ("differs", "differs from node"), ("extra", "extra (node lacks it)")):
+    for cls, label in (
+        ("missing", "missing (node has it)"),
+        ("differs", "differs from node"),
+        ("extra", "extra (node lacks it)"),
+        ("extension", "kiln extension (ADR 0068; intentional)"),
+    ):
         i = sum(len(versus[k]["interpreter"][cls]) for k in measured)
         n = sum(len(versus[k]["native"][cls]) for k in measured)
         add(f"| {label} | {i} | {n} |")
@@ -1380,6 +1420,14 @@ def render(receivers: dict[str, Receiver], order: list[str], runner: Runner) -> 
         add("Receivers node has and the interpreter does not publish (its list taken with the node adapter too), with node's member counts; the native backend was asked about each, and its answers are in the table above:")
         add("")
         add(", ".join(f"`{key}` ({len(receivers[key].node_names or [])})" for key in node_only))
+        add("")
+    extensions = sorted(
+        {(k, n) for k in measured for e in ("interpreter", "native") for n in versus[k][e]["extension"]}
+    )
+    if extensions:
+        add("kiln extensions (ADR 0068): members kiln declares as its own, published by both engines by default and removed by `KILN_EXTENSIONS=0` or `kiln build --no-kiln-extensions`:")
+        add("")
+        add(", ".join(f"`{k}.{n}`" for k, n in extensions))
         add("")
     extra_i = [(k, n) for k in measured for n in versus[k]["interpreter"]["extra"]]
     if extra_i:

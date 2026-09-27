@@ -1,5 +1,6 @@
 ---
 source: crates/native/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 804
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -912,6 +913,7 @@ typedef void (*kiln_gc_roots_fn)(void *heap, void *context, int phase);
 typedef struct kiln_gc_hooks {
 extern void *kiln_realm_gc_current_heap(void);
 extern const uint64_t *kiln_realm_generation_slot(void);
+extern void *kiln_realm_process_shared(uint64_t size);
 extern int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap);
 extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
 extern int kiln_realm_gc_mark_roots(void *heap);
@@ -1161,6 +1163,7 @@ static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, s
 static kiln_value kiln_c99_undefined(void);
 static kiln_value kiln_c99_null(void);
 static kiln_value kiln_c99_boolean(int value);
+static int kiln_c99_kiln_extensions_on(void);
 static kiln_value kiln_c99_number(double value);
 static kiln_value kiln_c99_uninitialized(void);
 static kiln_value kiln_c99_builtin(uint64_t code);
@@ -1579,9 +1582,20 @@ static const size_t kiln_c99_hot_key_len[KILN_C99_HOT_KEY_COUNT] = {
 #undef KILN_C99_HOT_KEY_LEN
 typedef struct kiln_nursery_chunk {
 typedef struct kiln_gc_nursery {
+typedef struct kiln_c99_local_edge {
 typedef struct kiln_gc_heap {
 static const kiln_gc_hooks kiln_c99_gc_hooks;
 static kiln_gc_heap kiln_c99_gc_fallback;
+#define KILN_C99_PROCESS_LAYOUT (UINT64_C(0x6b696c6e00010000) | (uint64_t)sizeof(struct kiln_shared_state))
+typedef struct kiln_shared_key_table {
+typedef struct kiln_shared_state {
+static kiln_shared_state *kiln_c99_shared_block;
+static void kiln_c99_process_lock(kiln_shared_state *process) {
+static void kiln_c99_process_unlock(kiln_shared_state *process) {
+static kiln_shared_state *kiln_c99_process_slow(void) {
+static inline kiln_shared_state *kiln_c99_process(void) {
+static void kiln_c99_gc_heap_register(kiln_gc_heap *heap) {
+static void kiln_c99_gc_heap_unregister(kiln_gc_heap *heap) {
 static inline void kiln_c99_gc_bound(kiln_gc_heap *heap, const void *base, size_t size) {
 static int kiln_c99_gc_stress_checks;
 #define KILN_NURSERY_HEADER ((sizeof(kiln_nursery_chunk) + 63) & ~(size_t)63)
@@ -1684,12 +1698,13 @@ static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_alloc_pointer_free(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_alloc_tenured(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
-static const struct kiln_c99_key_empty_storage {
-#define kiln_c99_key_empty (&kiln_c99_key_empty_storage.header)
+#define kiln_c99_key_empty ((const kiln_string *)&kiln_c99_process()->empty_key)
 static void kiln_c99_gc_mark_block(kiln_gc_heap *heap, const void *payload);
 static kiln_string *kiln_c99_gc_alloc_key_copy(const kiln_string *view);
 static const kiln_string *kiln_c99_intern_key(const kiln_string *string);
 static const kiln_string *kiln_c99_intern_static_key(const kiln_string *string);
+static const kiln_string *kiln_c99_intern_pinned_key(const kiln_string *string);
+static int kiln_c99_register_static_keys(const kiln_string *const *keys, const kiln_string **out,
 static int kiln_c99_keys_check_mode = -1;
 static int kiln_c99_keys_checked(void) {
 static uint64_t kiln_c99_key_hash(const kiln_string *string) {
@@ -1698,6 +1713,10 @@ static void kiln_c99_key_place(kiln_key_table *table, kiln_key_entry entry) {
 static int kiln_c99_key_grow(kiln_key_table *table) {
 static const kiln_string *kiln_c99_key_insert(kiln_key_table *table, const kiln_string *string,
 static void kiln_c99_key_delete_at(kiln_key_table *table, size_t hole) {
+static const kiln_string *kiln_c99_shared_key_probe(const kiln_string *string, uint64_t hash) {
+static int kiln_c99_key_is_shared(const kiln_string *ikey) {
+static void kiln_c99_shared_key_place(kiln_shared_key_table *table, const kiln_string *string,
+static const kiln_string *kiln_c99_shared_key_insert(kiln_shared_state *process,
 const kiln_string *kiln_c99_interned_key_in(kiln_gc_heap *heap, const kiln_string *string) {
 const kiln_string *kiln_c99_interned_key(const kiln_string *string) {
 static kiln_string *kiln_c99_gc_alloc_key_copy(const kiln_string *view) {
@@ -1706,7 +1725,11 @@ static const kiln_string *kiln_c99_interned_in(kiln_gc_heap *heap, const char *b
 static const kiln_string *kiln_c99_interned(const char *bytes, size_t len) {
 static const kiln_string *kiln_c99_intern_static(const char *bytes, size_t len) {
 const kiln_string *kiln_c99_intern_key(const kiln_string *string) {
+const kiln_string *kiln_c99_intern_pinned_key(const kiln_string *string) {
 const kiln_string *kiln_c99_intern_static_key(const kiln_string *string) {
+static int kiln_c99_register_static_keys_locked(kiln_shared_state *process,
+int kiln_c99_register_static_keys(const kiln_string *const *keys, const kiln_string **out,
+static int kiln_c99_register_static_text(kiln_shared_state *process, const char *bytes, size_t len) {
 static void kiln_c99_key_forget(kiln_gc_heap *heap, const kiln_string *string) {
 static void kiln_c99_key_mark_pinned(kiln_gc_heap *heap) {
 static void kiln_c99_key_purge(kiln_gc_heap *heap) {
@@ -1731,11 +1754,15 @@ static void kiln_c99_gc_finalize(kiln_gc_block *block) {
 static void kiln_c99_gc_drain(kiln_gc_heap *heap) {
 static void kiln_c99_gc_begin(kiln_gc_heap *heap) {
 #define KILN_GC_SLAB_CLASSES \
+static void kiln_c99_gc_retain_survivor(kiln_gc_block *block);
 static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
 static size_t kiln_c99_nursery_settle(kiln_gc_heap *heap, char *base, char *limit,
 static void kiln_c99_nursery_spare(kiln_gc_heap *heap, kiln_nursery_chunk *chunk) {
 static void kiln_c99_gc_mark_promise_jobs(kiln_gc_heap *heap) {
 static void kiln_c99_gc_collect(void *opaque, int force) {
+static void kiln_c99_shape_retain(kiln_shape *shape) {
+static void kiln_c99_gc_retain_survivor(kiln_gc_block *block) {
+static void kiln_c99_gc_free_local_shapes(kiln_gc_heap *heap) {
 static void kiln_c99_gc_teardown_begin(void *opaque) {
 static void kiln_c99_gc_teardown_end(void *opaque) {
 static void kiln_c99_gc_hook_mark_value(void *opaque, const void *value) {
@@ -1745,13 +1772,25 @@ static void kiln_c99_gc_result_roots(void *opaque, void *context, int phase) {
 static char *kiln_c99_gc_alloc_text(size_t len) {
 static char *kiln_c99_gc_alloc_text_tenured(size_t len) {
 static size_t kiln_c99_gc_alloc_text_run(size_t count, const size_t *lens, char **out) {
-static kiln_shape kiln_c99_root_shape = {
-static struct kiln_shape *kiln_c99_shape_root(void) {
+static inline struct kiln_shape *kiln_c99_shape_root(void) {
 static int kiln_c99_shape_find_slot(const kiln_shape *shape, const kiln_string *ikey, uint32_t *out_slot) {
 static uint32_t kiln_c99_shape_slot_named(const kiln_shape *shape, const char *bytes, size_t len) {
 static void kiln_c99_pin_interned_key(const kiln_string *ikey) {
 static int kiln_c99_is_class_brand_key(const kiln_string *key) {
-static int kiln_c99_shape_transition(kiln_shape *current, const kiln_string *ikey, int is_double, kiln_shape **out_shape) {
+static kiln_shape *kiln_c99_shape_inline_edge(const kiln_shape *current, uint32_t count,
+static kiln_shape *kiln_c99_shape_list_edge(const kiln_shape *current, const kiln_string *ikey,
+static size_t kiln_c99_local_edge_home(const kiln_shape *parent, const kiln_string *key,
+static kiln_c99_local_edge *kiln_c99_local_edge_row(const kiln_gc_heap *heap,
+static void kiln_c99_local_edge_place(kiln_c99_local_edge *rows, size_t capacity,
+static int kiln_c99_local_edge_reserve(kiln_gc_heap *heap) {
+static uint32_t kiln_c99_local_edge_count(const kiln_gc_heap *heap, const kiln_shape *parent) {
+static int kiln_c99_local_edge_insert(kiln_gc_heap *heap, const kiln_shape *parent,
+static int kiln_c99_shape_edge_room(uint32_t edges, const kiln_string *ikey, int unbounded) {
+static kiln_shape *kiln_c99_shape_child(kiln_shape *current, const kiln_string *ikey,
+static int kiln_c99_shape_link(kiln_shape *current, const kiln_string *ikey, kiln_shape *next) {
+static int kiln_c99_shape_add(kiln_shape *current, const kiln_string *ikey, int is_double,
+static int kiln_c99_shape_transition_ex(kiln_shape *current, const kiln_string *ikey,
+static int kiln_c99_shape_transition(kiln_shape *current, const kiln_string *ikey, int is_double,
 static int kiln_c99_ensure_dictionary(kiln_object *object) {
 static int kiln_c99_new_object(kiln_value *out) {
 static int kiln_c99_new_object_with_capacity(kiln_value *out, size_t capacity) {
@@ -2033,6 +2072,7 @@ static uint64_t kiln_c99_lookup_method_group(const char *key, size_t key_len, ui
 static uint64_t kiln_c99_lookup_method(const char *key, size_t key_len, uint64_t first,
 static uint64_t kiln_c99_iterator_prototype_method(const char *key, size_t key_len) {
 static int kiln_c99_iterator_prototype_gap(const char *key, size_t key_len) {
+static int kiln_c99_extension_withheld(uint64_t builtin, const char *key, size_t key_len);
 static uint64_t kiln_c99_array_method(const char *key, size_t key_len) {
 static int kiln_c99_is_array_member(const char *key, size_t key_len) {
 static int kiln_c99_is_date_member(const char *key, size_t key_len) {
@@ -2053,6 +2093,8 @@ static uint64_t kiln_c99_string_method(const char *key, size_t key_len) {
 typedef struct {
 static const kiln_builtin_member kiln_c99_builtin_members[] = {
 #define KILN_C99_SURFACE_MEMBER_COUNT \
+static const unsigned char kiln_c99_builtin_member_is_extension[] = {
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
 typedef struct {
 static const kiln_builtin_gap kiln_c99_builtin_backlog[] = {
 static void *kiln_c99_node_hidden_pointer(kiln_value object, const char *key, size_t key_len);
@@ -2060,6 +2102,13 @@ static int kiln_c99_val_call(kiln_host *host, kiln_val callee, const kiln_val *a
 int kiln_c99_get_array_unscopables(kiln_value *out);
 static const char *kiln_c99_builtin_owner_name(uint64_t builtin) {
 static int kiln_c99_backlog_names(const char *owner, const char *key, size_t key_len) {
+static int kiln_c99_kiln_extensions_state;
+static int kiln_c99_kiln_extensions_on(void) {
+#if defined(KILN_REALM_NO_EXTENSIONS)
+#else
+#endif
+static int kiln_c99_builtin_row_withheld(size_t row) {
+static int kiln_c99_extension_withheld(uint64_t builtin, const char *key, size_t key_len) {
 static int kiln_c99_has_surface(uint64_t builtin) {
 typedef struct kiln_builtin_member_entry {
 static kiln_builtin_member_entry kiln_c99_builtin_member_index[KILN_C99_SURFACE_MEMBER_COUNT];
@@ -2073,6 +2122,12 @@ static uint64_t kiln_c99_surface_method(uint64_t builtin, const char *key, size_
 static const char *kiln_c99_surface_method_name(uint64_t code) {
 static int kiln_c99_surface_value(uint64_t builtin, const char *key, size_t key_len,
 static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, size_t key_len) {
+static int kiln_c99_node_register_keys(kiln_shared_state *process);
+#define KILN_C99_OBJECT_BUILDING_KEYS(X)                                                          \
+static void kiln_c99_register_builtin_keys(void) __attribute__((constructor));
+static void kiln_c99_register_builtin_keys(void) {
+#define KILN_C99_REGISTER_OBJECT_BUILDING_KEY(text)                                               \
+#undef KILN_C99_REGISTER_OBJECT_BUILDING_KEY
 void kiln_c99_publish_diagnostic(void);
 static kiln_value kiln_c99_builtin(uint64_t code) {
 static int kiln_c99_is_callable(kiln_value value) {
@@ -2261,6 +2316,10 @@ enum {
 typedef struct {
 static _Thread_local kiln_node_http_layout kiln_c99_node_http_layouts;
 static kiln_shape *kiln_c99_node_layout_shape(const kiln_string *const *keys, size_t count) {
+typedef struct {
+static const kiln_node_layout_name kiln_c99_node_request_names[KILN_C99_NODE_REQ_COUNT] = {
+static const kiln_node_layout_name kiln_c99_node_response_names[KILN_C99_NODE_RES_COUNT] = {
+static int kiln_c99_node_register_keys(kiln_shared_state *process) {
 static int kiln_c99_node_http_layout_ready(const kiln_node_http_layout **out) {
 static int kiln_c99_node_http_instance(kiln_value *out, kiln_value prototype, kiln_shape *shape,
 static void *kiln_c99_node_hidden_pointer_value(kiln_value value) {

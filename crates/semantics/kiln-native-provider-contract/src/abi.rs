@@ -102,6 +102,7 @@ macro_rules! provider_abi_registry {
             (realm, kiln_realm_runtime_report, realm_runtime_report);
             (realm, kiln_realm_gc_current_heap, realm_gc_current_heap);
             (realm, kiln_realm_generation_slot, realm_generation_slot);
+            (realm, kiln_realm_process_shared, realm_process_shared);
             (realm, kiln_realm_gc_attach, realm_gc_attach);
             (realm, kiln_realm_gc_register_roots, realm_gc_register_roots);
             (realm, kiln_realm_gc_unregister_roots, realm_gc_unregister_roots);
@@ -204,7 +205,7 @@ macro_rules! provider_export_names {
 }
 
 /// Version of the private provider ABI represented by [`provider_abi_registry!`].
-pub const PROVIDER_ABI_VERSION: u32 = 41;
+pub const PROVIDER_ABI_VERSION: u32 = 42;
 
 /// Canonical ordered export names required in a packaged provider manifest.
 pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_names);
@@ -223,7 +224,9 @@ mod tests {
 
     #[test]
     fn registry_has_the_packaged_contract_shape() {
-        // 35 keeps the same export set but adds the distinct boolean scalar kind to node:ffi;
+        // 42 and 114 exports: `kiln_realm_process_shared` joined when shared keys and shapes
+        // (ADR 0071) moved into one process-wide block every unit reaches through the archive.
+        // Before that, 35 keeps the same export set but adds the distinct boolean scalar kind to node:ffi;
         // an older provider would interpret that kind as unsupported. Before that, 34 and 97
         // exports added the seven node:ffi provider operations. Before that, 33 and 90 exports:
         // `kiln_realm_set_promise_lane` joined when the promise job queue
@@ -240,8 +243,8 @@ mod tests {
         // one realm the other's cache. A shipped archive built before any of these does not export
         // the newer symbol, and the version is how a resolver knows to rebuild rather than to fail
         // at link time.
-        assert_eq!(PROVIDER_ABI_VERSION, 41);
-        assert_eq!(PROVIDER_EXPORTS.len(), 113);
+        assert_eq!(PROVIDER_ABI_VERSION, 42);
+        assert_eq!(PROVIDER_EXPORTS.len(), 114);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_ffi_last_error"));
     }
