@@ -203,9 +203,6 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 *out = kiln_c99_builtin(KILN_C99_BUILTIN_ITERATOR);
                 return KILN_C99_OK;
             }
-            if (kiln_c99_iterator_prototype_gap(intrinsic_key, intrinsic_len)) {
-                KILN_C99_REFUSE("an Iterator.prototype helper this backend has not implemented");
-            }
         }
         /* The chain ends at `Object.prototype`, whose members every object has -- unless the
          * program asked for a bare dictionary with `Object.create(null)`, which is exactly what
@@ -693,11 +690,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             if (status != KILN_C99_OK || found) return status;
             (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
                                                 &intrinsic_len);
-            uint64_t method = kiln_c99_typed_prototype_method(intrinsic_key, intrinsic_len);
-            if (method != 0) {
-                *out = kiln_c99_method(method);
-                return KILN_C99_OK;
-            }
+            uint64_t method;
             if (kiln_c99_is_typed_array_member(view->kind == KILN_TYPED_UINT8, intrinsic_key, intrinsic_len)) {
                 /* A real member this backend has not grown yet. `undefined` would be a
                  * silent wrong answer -- the program would call it and get a TypeError
@@ -1323,11 +1316,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                         if (status != KILN_C99_OK || found) return status;
                     }
                 }
-                uint64_t method = kiln_c99_typed_prototype_method(intrinsic_key, intrinsic_len);
-                if (method != 0) {
-                    *out = kiln_c99_method(method);
-                    return KILN_C99_OK;
-                }
+                uint64_t method;
                 if (kiln_c99_is_typed_array_member(concrete && typed_kind == KILN_TYPED_UINT8,
                                                    intrinsic_key, intrinsic_len)) {
                     KILN_C99_REFUSE("a typed-array member this backend has not implemented");

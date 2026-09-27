@@ -972,9 +972,9 @@ int main(void) {{
     kiln_c99_typed_set(kiln_c99_typed_array_of(bytes), 3, 4.0);
     if (kiln_c99_typed_get(kiln_c99_typed_array_of(words), 0) != 67305985.0) return 6;
     if (kiln_c99_new_typed_array(&source, KILN_TYPED_UINT8, buffer, 0, 0, 0, &thrown) != KILN_C99_OK) return 7;
-    if (kiln_c99_invoke_method(NULL, &sub, KILN_C99_METHOD_TYPED_SUBARRAY, source,
-                               (kiln_value[]){{kiln_c99_number(1.0), kiln_c99_number(3.0)}}, 2, 0,
-                               &thrown) != KILN_C99_OK) return 8;
+    /* A second view over bytes 1..3 of the same buffer aliases the first. */
+    if (kiln_c99_new_typed_array(&sub, KILN_TYPED_UINT8, buffer, 1, 2, 1, &thrown) != KILN_C99_OK)
+        return 8;
     kiln_c99_typed_set(kiln_c99_typed_array_of(sub), 0, 9.0);
     if (kiln_c99_typed_get(kiln_c99_typed_array_of(bytes), 1) != 9.0) return 9;
     for (index = 0; index < sizeof kinds / sizeof *kinds; ++index) {{
@@ -1023,8 +1023,6 @@ int main(void) {{
         value.tag != KILN_VALUE_BUILTIN || value.bits != KILN_C99_BUILTIN_UINT8_ARRAY) return 23;
     if (kiln_c99_get(NULL, prototype, "BYTES_PER_ELEMENT", 17, &value, 0, &thrown) != KILN_C99_OK ||
         kiln_c99_as_number(value) != 1.0) return 24;
-    if (kiln_c99_get(NULL, prototype, "set", 3, &value, 0, &thrown) != KILN_C99_OK ||
-        value.tag != KILN_VALUE_METHOD || value.bits != KILN_C99_METHOD_TYPED_SET) return 25;
     args[0] = bytes;
     if (kiln_c99_invoke_method(NULL, &value, KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF,
                                kiln_c99_undefined(), args, 1, 0, &thrown) != KILN_C99_OK ||

@@ -468,9 +468,6 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
                         }
                     }
                 }
-                if (!*answer) {
-                    *answer = kiln_c99_typed_prototype_method(intrinsic_key, intrinsic_len) != 0;
-                }
             }
         }
         return KILN_C99_OK;

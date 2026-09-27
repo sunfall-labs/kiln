@@ -927,30 +927,12 @@
                                           : 0.0 / 0.0);
             return KILN_C99_OK;
         }
+        /* `Date.UTC`, and the two representation operations the shared `Date.prototype`
+         * (`kiln-builtins/src/date.ts`) captures at realm start and builds every other member on
+         * (ADR 0060, ADR 0065). */
         case KILN_C99_METHOD_DATE_UTC:
         case KILN_C99_METHOD_GET_TIME:
-        case KILN_C99_METHOD_GET_FULL_YEAR:
-        case KILN_C99_METHOD_GET_MONTH:
-        case KILN_C99_METHOD_GET_DATE:
-        case KILN_C99_METHOD_GET_DAY:
-        case KILN_C99_METHOD_GET_HOURS:
-        case KILN_C99_METHOD_GET_MINUTES:
-        case KILN_C99_METHOD_GET_SECONDS:
-        case KILN_C99_METHOD_GET_MILLISECONDS:
-        case KILN_C99_METHOD_GET_TIMEZONE_OFFSET:
-        case KILN_C99_METHOD_TO_ISO_STRING:
-        case KILN_C99_METHOD_TO_JSON:
-        case KILN_C99_METHOD_DATE_TO_STRING:
-        case KILN_C99_METHOD_SET_TIME:
-        case KILN_C99_METHOD_SET_FULL_YEAR:
-        case KILN_C99_METHOD_SET_MONTH:
-        case KILN_C99_METHOD_SET_DATE:
-        case KILN_C99_METHOD_SET_HOURS:
-        case KILN_C99_METHOD_SET_MINUTES:
-        case KILN_C99_METHOD_SET_SECONDS:
-        case KILN_C99_METHOD_SET_MILLISECONDS: {
-            kiln_date_parts parts;
-            double time;
+        case KILN_C99_METHOD_SET_TIME: {
             if (code == KILN_C99_METHOD_DATE_UTC) {
                 double fields[7];
                 for (index = 0; index < 7; ++index) {
@@ -969,18 +951,16 @@
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                             "this is not a Date object.");
             }
-            time = kiln_c99_date_time(receiver);
             if (code == KILN_C99_METHOD_GET_TIME) {
-                *result = kiln_c99_number(time);
+                *result = kiln_c99_number(kiln_c99_date_time(receiver));
                 return KILN_C99_OK;
             }
-            if (code == KILN_C99_METHOD_SET_TIME) {
+            {
                 double written = argc > 0 ? kiln_c99_as_number(args[0]) : 0.0 / 0.0;
                 *(double *)(uintptr_t)receiver.bits = written;
                 *result = kiln_c99_number(written);
                 return KILN_C99_OK;
             }
-            KILN_C99_REFUSE("a Date method this backend has not implemented");
         }
         case KILN_C99_METHOD_ITERATOR_SELF:
             *result = receiver;
@@ -2400,56 +2380,6 @@
                 }
             }
             *result = built;
-            return KILN_C99_OK;
-        }
-        if (code == KILN_C99_METHOD_TYPED_SUBARRAY) {
-            size_t start = kiln_c99_relative_index(argc > 0 ? args[0] : kiln_c99_undefined(),
-                                                   view->length, 0);
-            size_t end = kiln_c99_relative_index(argc > 1 ? args[1] : kiln_c99_undefined(),
-                                                 view->length, view->length);
-            kiln_typed_array *sub =
-                (kiln_typed_array *)kiln_c99_gc_alloc(KILN_GC_TYPED_ARRAY, sizeof *sub);
-            if (sub == NULL) return KILN_C99_OUT_OF_MEMORY;
-            sub->buffer = view->buffer;
-            sub->byte_offset = view->byte_offset + start * kiln_c99_typed_width(view->kind);
-            sub->length = end >= start ? end - start : 0;
-            sub->kind = view->kind;
-            sub->is_buffer = view->is_buffer;
-            *result = kiln_c99_value(KILN_VALUE_TYPED_ARRAY, (uint64_t)(uintptr_t)sub, NULL, 0);
-            return KILN_C99_OK;
-        }
-        if (code == KILN_C99_METHOD_TYPED_SET) {
-            size_t offset = 0;
-            size_t count;
-            double *items;
-            if (argc == 0 || (args[0].tag != KILN_VALUE_ARRAY &&
-                              args[0].tag != KILN_VALUE_TYPED_ARRAY)) {
-                KILN_C99_REFUSE("TypedArray.prototype.set needs an array or a typed array to copy from");
-            }
-            if (argc > 1) {
-                status = kiln_c99_to_index(args[1], &offset, thrown);
-                if (status != KILN_C99_OK) return status;
-            }
-            count = args[0].tag == KILN_VALUE_ARRAY
-                        ? kiln_c99_array_of(args[0])->count
-                        : kiln_c99_typed_array_of(args[0])->length;
-            if (offset > view->length || count > view->length - offset) {
-                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
-                                            "offset is out of bounds");
-            }
-            if (count > ((size_t)-1) / sizeof *items) return KILN_C99_OUT_OF_MEMORY;
-            items = (double *)malloc((count == 0 ? 1 : count) * sizeof *items);
-            if (items == NULL) return KILN_C99_OUT_OF_MEMORY;
-            for (index = 0; index < count; ++index) {
-                items[index] = args[0].tag == KILN_VALUE_ARRAY
-                                   ? kiln_c99_as_number(kiln_val_to_boundary(kiln_c99_array_of(args[0])->elements[index]))
-                                   : kiln_c99_typed_get(kiln_c99_typed_array_of(args[0]), index);
-            }
-            for (index = 0; index < count; ++index) {
-                kiln_c99_typed_set(view, offset + index, items[index]);
-            }
-            free(items);
-            *result = kiln_c99_undefined();
             return KILN_C99_OK;
         }
     }

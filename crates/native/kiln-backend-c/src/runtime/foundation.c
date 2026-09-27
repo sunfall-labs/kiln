@@ -200,7 +200,6 @@ static int32_t kiln_c99_temporal_kind_of_builtin(uint64_t builtin);
 static uint64_t kiln_c99_temporal_builtin_of(kiln_value value);
 /* These helpers are defined in later concatenated runtime units.  Keep their headed
  * declarations here so a caller cannot silently fall back to an implicit byte-key ABI. */
-static uint64_t kiln_c99_typed_prototype_method(const char *key, size_t key_len);
 static kiln_value kiln_c99_key_value(const kiln_string *view, const kiln_string **canonical);
 static kiln_value kiln_c99_stable_key_value(const kiln_string *stable);
 static int kiln_c99_symbol_of_key_view(const kiln_string *key, kiln_value *out);

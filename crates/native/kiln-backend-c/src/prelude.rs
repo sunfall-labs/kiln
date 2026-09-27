@@ -710,18 +710,6 @@ method_ids! {
     (KILN_C99_METHOD_GENERATOR_RETURN, 72, Generic; 0, 0),
     (KILN_C99_METHOD_GENERATOR_SELF, 73, Generic; 0, 0),
     (KILN_C99_METHOD_GET_TIME, 74, Generic; 0, 0),
-    (KILN_C99_METHOD_GET_FULL_YEAR, 75, Generic; 0, 0),
-    (KILN_C99_METHOD_GET_MONTH, 76, Generic; 0, 0),
-    (KILN_C99_METHOD_GET_DATE, 77, Generic; 0, 0),
-    (KILN_C99_METHOD_GET_DAY, 78, Generic; 0, 0),
-    (KILN_C99_METHOD_GET_HOURS, 79, Generic; 0, 0),
-    (KILN_C99_METHOD_GET_MINUTES, 80, Generic; 0, 0),
-    (KILN_C99_METHOD_GET_SECONDS, 81, Generic; 0, 0),
-    (KILN_C99_METHOD_GET_MILLISECONDS, 82, Generic; 0, 0),
-    (KILN_C99_METHOD_GET_TIMEZONE_OFFSET, 83, Generic; 0, 0),
-    (KILN_C99_METHOD_TO_ISO_STRING, 84, Generic; 0, 0),
-    (KILN_C99_METHOD_TO_JSON, 85, Generic; 0, 0),
-    (KILN_C99_METHOD_DATE_TO_STRING, 86, Generic; 0, 0),
     (KILN_C99_METHOD_DATE_NOW, 87, Generic; 0, 0),
     (KILN_C99_METHOD_DATE_UTC, 88, Generic; 0, 0),
     (KILN_C99_METHOD_DATE_PARSE, 89, Generic; 0, 0),
@@ -832,9 +820,6 @@ method_ids! {
     (KILN_C99_METHOD_REGEXP_TO_STRING, 174, Generic; 0, 0),
     (KILN_C99_METHOD_COLLECTION_ITERATOR_NEXT, 175, Generic; 0, 0),
     (KILN_C99_METHOD_PRIMITIVE_TO_STRING, 176, Generic; 0, 0),
-    (KILN_C99_METHOD_TYPED_SUBARRAY, 230, Direct; 0x3, 0),
-    (KILN_C99_METHOD_TYPED_SET, 231, Direct; 0x2, 0),
-    (KILN_C99_METHOD_TYPED_FILL, 232, Direct; 0, 0),
     (KILN_C99_METHOD_TYPED_OF, 233, Direct; 0, 0),
     (KILN_C99_METHOD_TYPED_FROM, 234, Direct; 0, 0),
     (KILN_C99_METHOD_ARRAY_GENERIC_MAP, 235, Direct; 0, 0),
@@ -1016,16 +1001,9 @@ method_ids! {
     (KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS, 337, Temporal; 0, 0),
     (KILN_C99_METHOD_TEMPORAL_LAST, 337, Temporal; 0, 0),
     (KILN_C99_METHOD_SET_TIME, 177, Generic, DateSetter; 0, 0),
-    (KILN_C99_METHOD_SET_FULL_YEAR, 178, Generic, DateSetter; 0, 0),
-    (KILN_C99_METHOD_SET_MONTH, 179, Generic, DateSetter; 0, 0),
-    (KILN_C99_METHOD_SET_DATE, 180, Generic, DateSetter; 0, 0),
-    (KILN_C99_METHOD_SET_HOURS, 181, Generic, DateSetter; 0, 0),
-    (KILN_C99_METHOD_SET_MINUTES, 182, Generic, DateSetter; 0, 0),
-    (KILN_C99_METHOD_SET_SECONDS, 183, Generic, DateSetter; 0, 0),
-    (KILN_C99_METHOD_SET_MILLISECONDS, 184, Generic, DateSetter; 0, 0),
     // `DataView.prototype`. `Direct` because the whole block is answered by one handler the
     // dispatcher reaches through a range test, which is what the group means here -- the same
-    // arrangement `KILN_C99_METHOD_TYPED_SUBARRAY` and its neighbours already use.
+    // arrangement `KILN_C99_METHOD_TYPED_OF` and its neighbours already use.
     (KILN_C99_METHOD_DATA_VIEW_GET_INT8, 447, Direct; 0, 0),
     (KILN_C99_METHOD_DATA_VIEW_GET_UINT8, 448, Direct; 0, 0),
     (KILN_C99_METHOD_DATA_VIEW_GET_INT16, 449, Direct; 0, 0),
@@ -3507,18 +3485,6 @@ enum kiln_value_tag {
  * that happen to agree. */
 "#,
     emit_method_define!(KILN_C99_METHOD_GET_TIME),
-    emit_method_define!(KILN_C99_METHOD_GET_FULL_YEAR),
-    emit_method_define!(KILN_C99_METHOD_GET_MONTH),
-    emit_method_define!(KILN_C99_METHOD_GET_DATE),
-    emit_method_define!(KILN_C99_METHOD_GET_DAY),
-    emit_method_define!(KILN_C99_METHOD_GET_HOURS),
-    emit_method_define!(KILN_C99_METHOD_GET_MINUTES),
-    emit_method_define!(KILN_C99_METHOD_GET_SECONDS),
-    emit_method_define!(KILN_C99_METHOD_GET_MILLISECONDS),
-    emit_method_define!(KILN_C99_METHOD_GET_TIMEZONE_OFFSET),
-    emit_method_define!(KILN_C99_METHOD_TO_ISO_STRING),
-    emit_method_define!(KILN_C99_METHOD_TO_JSON),
-    emit_method_define!(KILN_C99_METHOD_DATE_TO_STRING),
     emit_method_define!(KILN_C99_METHOD_DATE_NOW),
     emit_method_define!(KILN_C99_METHOD_DATE_UTC),
     emit_method_define!(KILN_C99_METHOD_DATE_PARSE),
@@ -3798,9 +3764,6 @@ enum kiln_value_tag {
  * Library code reaches for it constantly on values it has already coerced. */
 "#,
     emit_method_define!(KILN_C99_METHOD_PRIMITIVE_TO_STRING),
-    emit_method_define!(KILN_C99_METHOD_TYPED_SUBARRAY),
-    emit_method_define!(KILN_C99_METHOD_TYPED_SET),
-    emit_method_define!(KILN_C99_METHOD_TYPED_FILL),
     r#"/* The two statics a concrete view constructor carries. Kept below the string block that
  * begins at 240, which `kiln_c99_invoke_method` routes by range. */
 "#,
@@ -3974,13 +3937,6 @@ enum kiln_value_tag {
  * is full. */
 "#,
     emit_method_define!(KILN_C99_METHOD_SET_TIME),
-    emit_method_define!(KILN_C99_METHOD_SET_FULL_YEAR),
-    emit_method_define!(KILN_C99_METHOD_SET_MONTH),
-    emit_method_define!(KILN_C99_METHOD_SET_DATE),
-    emit_method_define!(KILN_C99_METHOD_SET_HOURS),
-    emit_method_define!(KILN_C99_METHOD_SET_MINUTES),
-    emit_method_define!(KILN_C99_METHOD_SET_SECONDS),
-    emit_method_define!(KILN_C99_METHOD_SET_MILLISECONDS),
     r#"
 /* The iterator helpers. 470..481 is a name range -- `kiln_c99_lookup_method` walks it to answer
  * `Iterator.prototype.map` -- and 470..484 is the dispatch range. A helper's own `next` and
@@ -4215,15 +4171,6 @@ static uint64_t kiln_c99_iterator_prototype_method(const char *key, size_t key_l
                                   KILN_C99_METHOD_ITERATOR_INCLUDES);
 }
 
-/* A member the language puts on `Iterator.prototype` that this backend has not built.
- *
- * `chunks`, `windows` and `join` are now answered by bootstrap TypeScript in iterator.ts. */
-static int kiln_c99_iterator_prototype_gap(const char *key, size_t key_len) {
-    (void)key;
-    (void)key_len;
-    return 0;
-}
-
 static int kiln_c99_extension_withheld(uint64_t builtin, const char *key, size_t key_len);
 
 /* An array's methods by name. A kiln extension the realm withholds (ADR 0068) is not one of them,
@@ -4385,21 +4332,6 @@ static int kiln_c99_is_string_member(const char *key, size_t key_len) {
     return 0;
 }
 
-/* The fixed-length subset inherited from `%TypedArray%.prototype`.
- *
- * `%TypedArray%.prototype` is deliberately *not* `Array.prototype`: it shares the readers and the
- * two in-place rearrangements, and it has none of the methods that change a length, because a
- * view's length is its buffer's and cannot change. That is why the table is written out here
- * rather than delegating to `kiln_c99_array_method`, which would hand out `push` -- a name node
- * answers `undefined` for and a program feature-detects on. */
-static uint64_t kiln_c99_typed_prototype_method(const char *key, size_t key_len) {
-    /* Most %TypedArray%.prototype methods are answered by typedarray.ts from the
-     * prototype's store. Only raw C ABI primitives (subarray and set) have fallback codes. */
-    if (kiln_c99_same_name(key, key_len, "subarray")) return KILN_C99_METHOD_TYPED_SUBARRAY;
-    if (kiln_c99_same_name(key, key_len, "set")) return KILN_C99_METHOD_TYPED_SET;
-    return 0;
-}
-
 /* Whether a name is a member of `%TypedArray%.prototype` *in the language*, which is a different
  * question from whether this backend implements it -- the same distinction
  * `kiln_c99_is_string_member` draws, and for the same reason.
@@ -4427,12 +4359,10 @@ static int kiln_c99_is_typed_array_member(int byte_view, const char *key, size_t
 /* Whether a name is a member of `ArrayBuffer.prototype` *in the language* that this backend does
  * not answer -- the same question `kiln_c99_is_typed_array_member` asks one type over. */
 static int kiln_c99_is_array_buffer_member(const char *key, size_t key_len) {
-    /* detached is answered by the instance read; transfer and transferToFixedLength by arraybuffer.ts
-     * over __kilnArrayBufferDetach; maxByteLength and resizable are absent (no resizable buffers). */
-    static const char *const members[] = {"immutable",
-                                          "resize",
-                                          "sliceToImmutable",
-                                          "transferToImmutable"};
+    /* detached is answered by the instance read; resize, transfer and transferToFixedLength by
+     * arraybuffer.ts from the prototype's store; maxByteLength and resizable are absent (no
+     * resizable buffers). */
+    static const char *const members[] = {"immutable", "sliceToImmutable", "transferToImmutable"};
     size_t index;
     for (index = 0; index < sizeof members / sizeof *members; ++index) {
         if (kiln_c99_same_name(key, key_len, members[index])) {
