@@ -132,6 +132,11 @@ pub(crate) fn read_all(
         Ok((path.clone(), text))
     };
 
+    // Do not start a per-process Rayon pool to read one source. Snapshot substitution and
+    // indexed order are identical on this serial path.
+    if files.len() <= 1 {
+        return paths.iter().zip(files).map(read).collect();
+    }
     match read_pool() {
         Some(pool) => pool.install(|| paths.par_iter().zip(files).map(read).collect()),
         None => paths.iter().zip(files).map(read).collect(),
@@ -208,20 +213,30 @@ pub(crate) fn digest_all(
         Ok((path.clone(), source_digest(&text), key))
     };
 
-    let digested: Vec<Digested> = match read_pool() {
-        Some(pool) => pool.install(|| {
-            paths
-                .par_iter()
-                .zip(files)
-                .map(digest)
-                .collect::<Result<Vec<_>>>()
-        }),
-        None => paths
+    // A one-source command has no parallel read work. Avoid starting the source-read pool for one
+    // digest, which only creates workers the process exits with immediately.
+    let digested: Vec<Digested> = if files.len() <= 1 {
+        paths
             .iter()
             .zip(files)
             .map(digest)
-            .collect::<Result<Vec<_>>>(),
-    }?;
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        match read_pool() {
+            Some(pool) => pool.install(|| {
+                paths
+                    .par_iter()
+                    .zip(files)
+                    .map(digest)
+                    .collect::<Result<Vec<_>>>()
+            }),
+            None => paths
+                .iter()
+                .zip(files)
+                .map(digest)
+                .collect::<Result<Vec<_>>>(),
+        }?
+    };
 
     let entries = digested
         .iter()
@@ -1567,6 +1582,33 @@ mod tests {
 
         assert_eq!(texts[0], (overridden, "export const x = 2;\n".to_owned()));
         assert_eq!(texts[1].1, "export const x = 1;\n");
+    }
+
+    #[test]
+    fn one_file_reads_and_digests_keep_the_source_snapshot() {
+        let tree = Tree::new("single-source-snapshot");
+        tree.file("main.ts");
+        let walk = collect(&tree.0).expect("walk succeeds");
+        let path = crate::commands::canonical_path(&tree.0.join("main.ts")).expect("canonical");
+        let snapshot = "export const x = 2;\n";
+
+        let texts = read_all(&tree.0, &walk.files, Some((&path, snapshot)))
+            .expect("read the source snapshot");
+        assert_eq!(texts, vec![(path.clone(), snapshot.to_owned())]);
+
+        let digests = digest_all(&tree.0, &walk.files, Some((&path, snapshot)))
+            .expect("digest the source snapshot");
+        assert_eq!(digests, vec![(path, source_digest(snapshot))]);
+        assert!(
+            read_all(&tree.0, &[], None)
+                .expect("empty read is empty")
+                .is_empty()
+        );
+        assert!(
+            digest_all(&tree.0, &[], None)
+                .expect("empty digest is empty")
+                .is_empty()
+        );
     }
 
     #[test]

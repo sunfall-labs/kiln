@@ -89,6 +89,14 @@ where
     F: Fn(usize) -> Result<T, NativeError> + Send + Sync,
     T: Send,
 {
+    // A one-module build has no parallel work to distribute. Keep the same panic conversion and
+    // index order without creating this process's four-worker emission pool.
+    if count <= 1 {
+        return (0..count)
+            .map(|index| run_worker(stage, || work(index)))
+            .collect();
+    }
+
     let run = || {
         (0..count)
             .into_par_iter()
@@ -140,6 +148,30 @@ pub(crate) fn decode_run_result(
             path: path.to_path_buf(),
             message: error.to_string(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_and_single_item_emission_stay_ordered_and_catch_panics() {
+        let empty = emit_indexed::<usize, _>(0, "empty emission", |_| panic!("must not run"))
+            .expect("empty emission succeeds");
+        assert!(empty.is_empty());
+
+        let single = emit_indexed(1, "single emission", |index| Ok(index + 7))
+            .expect("single emission succeeds");
+        assert_eq!(single, vec![7]);
+
+        let panic = emit_indexed::<usize, _>(1, "single emission", |_| panic!("worker failure"));
+        assert!(matches!(
+            panic,
+            Err(NativeError::WorkerPanic {
+                stage: "single emission"
+            })
+        ));
+    }
 }
 
 /// Run a freshly linked executable, waiting out the kernel's `ETXTBSY` if it fires.
