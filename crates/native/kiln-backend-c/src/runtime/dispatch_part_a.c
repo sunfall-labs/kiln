@@ -1907,6 +1907,9 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
           argc > 0 && args[0].tag == KILN_VALUE_REGEXP) ||
          ((code == KILN_C99_METHOD_REPLACE || code == KILN_C99_METHOD_REPLACE_ALL) && argc > 1 &&
           kiln_c99_is_callable(args[1])))) {
+        if (code == KILN_C99_METHOD_SPLIT) {
+            return kiln_c99_string_pattern_split(host, result, receiver, args, argc, depth, thrown);
+        }
         return kiln_c99_string_pattern(host, result, code, receiver, args, argc, depth, thrown);
     }
     if (code == KILN_C99_METHOD_ERROR_TO_STRING) {
@@ -2754,13 +2757,35 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 return KILN_C99_OUT_OF_MEMORY;
             }
             bytes = kiln_c99_string_ascii_bytes(text, &len);
-            if (bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
+            char *owned = NULL;
+            if (bytes == NULL) {
+                /* A UTF-16 subject (parallel issue 30): it used to answer "out of memory". Every
+                 * unit either grammar can consume is ASCII, so what they read is the leading
+                 * white space (Unicode's included, which only a UTF-16 string can hold) and then
+                 * the ASCII run after it; the first other unit ends the number wherever it is. */
+                const kiln_string *units = (const kiln_string *)text.ptr;
+                size_t at = 0, end, index;
+                if (units == NULL) return KILN_C99_OUT_OF_MEMORY;
+                while (at < units->unit_len && kiln_c99_is_trimmed(kiln_string_unit_at(units, at))) {
+                    at += 1;
+                }
+                end = at;
+                while (end < units->unit_len && kiln_string_unit_at(units, end) < 0x80) end += 1;
+                owned = (char *)malloc(end - at + 1);
+                if (owned == NULL) return KILN_C99_OUT_OF_MEMORY;
+                for (index = at; index < end; ++index) {
+                    owned[index - at] = (char)kiln_string_unit_at(units, index);
+                }
+                bytes = owned;
+                len = end - at;
+            }
             if (code == KILN_C99_METHOD_PARSE_INT) {
                 *result = kiln_c99_number(
                     kiln_c99_parse_int_bytes(bytes, len, argc > 1 ? kiln_c99_as_number(args[1]) : 0.0));
             } else {
                 *result = kiln_c99_number(kiln_c99_parse_float_bytes(bytes, len));
             }
+            free(owned);
             return KILN_C99_OK;
         }
 #if KILN_RETAIN_GROUP_MATH_NUMBER

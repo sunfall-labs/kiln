@@ -2786,6 +2786,7 @@ static kiln_value kiln_c99_from_units(const uint16_t *units, size_t count) {
 kiln_val kiln_c99_val_slice_string(const kiln_string *source, size_t start, size_t len) {
 static int kiln_c99_copy_string_slice(const kiln_string *source, size_t start, size_t end,
 static double kiln_c99_units_find(const uint16_t *haystack, size_t haystack_len,
+static void kiln_c99_split_limit(kiln_value pieces, const kiln_value *args, size_t argc) {
 static int kiln_c99_is_trimmed(uint16_t unit) {
 static int kiln_c99_same_value_zero(kiln_value left, kiln_value right) {
 static size_t kiln_c99_relative_index(kiln_value value, size_t length, size_t fallback) {
@@ -2794,6 +2795,8 @@ int kiln_c99_split_string_ascii_byte(kiln_value *result, const kiln_string *sour
 static int kiln_c99_split_ascii_byte(kiln_value *result, const char *bytes, size_t byte_len,
 static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_match_result(kiln_host *host, kiln_value *out, const uint16_t *units,
+static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t code,
+static int kiln_c99_string_pattern_split(kiln_host *host, kiln_value *result, kiln_value receiver,
 static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_install_event_emitter_methods(kiln_value target) {
 static int kiln_c99_install_readable_methods(kiln_value target) {

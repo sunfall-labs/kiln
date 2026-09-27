@@ -1706,7 +1706,8 @@ pub(super) fn parse_int(arguments: &[Value]) -> Value {
     let text = arguments
         .first()
         .map_or_else(String::new, Value::to_display_string);
-    let text = text.trim();
+    // The language's white space, which is Unicode's plus U+FEFF (parallel issue 30).
+    let text = text.trim_matches(super::builtin_members::is_js_whitespace);
     let radix = match arguments.get(1).map(Value::as_number) {
         Some(radix) if radix.is_finite() && radix != 0.0 => radix.trunc(),
         _ => 0.0,
@@ -1749,7 +1750,7 @@ pub(super) fn parse_float(arguments: &[Value]) -> Value {
     let text = arguments
         .first()
         .map_or_else(String::new, Value::to_display_string);
-    let text = text.trim_start();
+    let text = text.trim_start_matches(super::builtin_members::is_js_whitespace);
     if text.starts_with("Infinity") || text.starts_with("+Infinity") {
         return Value::Number(f64::INFINITY);
     }
