@@ -499,6 +499,7 @@ static void *kiln_test_pmap_run(void *p) {
     job->chunk(job->in, job->out, job->start, job->end, job->ctx);
     return NULL;
 }
+size_t kiln_parallel_threads(void) { return 4; }
 int32_t kiln_parallel_map(const void *in, size_t count, void *out, kiln_parallel_chunk_fn chunk, void *ctx) {
     enum { THREADS = 4 };
     pthread_t threads[THREADS];
@@ -1235,5 +1236,151 @@ fn tier_2_reads_run_in_the_pool_and_match_the_sequential_methods() {
         })
         .collect();
     assert_eq!(tokens[..n], expected, "the products");
+    assert_eq!(calls, 2, "both sites took the pool:\n{stdout}");
+}
+
+/// Tier 3 (issue 08): callbacks that build strings and objects run in the pool, each chunk in
+/// its thread's arena, and the arenas join the heap: the built values read back as `map`'s. Records
+/// `{ p, q }`; `r => r.p + "|" + r.q` against `map`, and `r => ({ ...r, s: r.q })` read back
+/// through `.s` against `r => r.q`. The fixture's four threads really run the chunks concurrently,
+/// and both tier-3 sites took the pool.
+#[test]
+fn tier_3_builds_run_in_worker_arenas_and_match_the_sequential_methods() {
+    let mut constants = Constants::default();
+    let parallel_map = constants.string("parallelMap");
+    let map = constants.string("map");
+    let p = constants.string("p");
+    let q = constants.string("q");
+    let s = constants.string("s");
+    let bar = constants.string("|");
+    // `r => r.p + "|" + r.q`
+    let joined = || {
+        proto(
+            vec![
+                Instruction::LoadLocal(0),
+                Instruction::GetProperty(p),
+                Instruction::Const(bar),
+                Instruction::Binary(BinaryOp::Add),
+                Instruction::LoadLocal(0),
+                Instruction::GetProperty(q),
+                Instruction::Binary(BinaryOp::Add),
+                Instruction::Return,
+            ],
+            1,
+            Vec::new(),
+        )
+    };
+    // `r => ({ ...r, s: r.q })`
+    let enriched = proto(
+        vec![
+            Instruction::NewObject { count: 0 },
+            Instruction::LoadLocal(0),
+            Instruction::SpreadObject,
+            Instruction::Const(s),
+            Instruction::LoadLocal(0),
+            Instruction::GetProperty(q),
+            Instruction::DefineNamedProperty,
+            Instruction::Return,
+        ],
+        1,
+        Vec::new(),
+    );
+    let read = |name| {
+        proto(
+            vec![
+                Instruction::LoadLocal(0),
+                Instruction::GetProperty(name),
+                Instruction::Return,
+            ],
+            1,
+            Vec::new(),
+        )
+    };
+    let n = 64u32;
+    let mut code = Vec::new();
+    for k in 0..n {
+        code.push(Instruction::Const(p));
+        code.push(Instruction::Const(constants.number(f64::from(k) * 0.5)));
+        code.push(Instruction::Const(q));
+        code.push(Instruction::Const(constants.number(f64::from(k % 5))));
+        code.push(Instruction::NewObject { count: 2 });
+    }
+    code.push(Instruction::NewArray { count: n });
+    code.push(Instruction::StoreLocal(0));
+    code.extend([
+        Instruction::LoadLocal(0),
+        Instruction::MakeFunction(0),
+        Instruction::CallMethod {
+            name: parallel_map,
+            argc: 1,
+        },
+        Instruction::LoadLocal(0),
+        Instruction::MakeFunction(1),
+        Instruction::CallMethod { name: map, argc: 1 },
+        Instruction::LoadLocal(0),
+        Instruction::MakeFunction(2),
+        Instruction::CallMethod {
+            name: parallel_map,
+            argc: 1,
+        },
+        Instruction::MakeFunction(3),
+        Instruction::CallMethod { name: map, argc: 1 },
+        Instruction::LoadLocal(0),
+        Instruction::MakeFunction(4),
+        Instruction::CallMethod { name: map, argc: 1 },
+        Instruction::NewArray { count: 4 },
+        Instruction::Return,
+    ]);
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: constants.0,
+        code,
+        local_count: 1,
+        functions: vec![joined(), joined(), enriched, read(s), read(q)],
+        template_sites: Vec::new(),
+    };
+    let generated = emit_with_policy(&program, EmissionPolicy::default()).expect("emits");
+    // Both sites sit at the same (empty) source position, so their records are one.
+    let records = SiteRecord::parse_all(&generated.source);
+    assert_eq!(records.len(), 1, "{records:?}");
+    for record in &records {
+        assert!(
+            record.refusal.is_none() && record.alloc,
+            "a tier-3 site: {record:?}"
+        );
+    }
+    let wrapper = format!(
+        "int main(void) {{\n\
+             kiln_value result; size_t i;\n\
+             kiln_test_realm_active = 1;\n\
+             int status = {symbol}(NULL, &result);\n\
+             if (status != 0 || result.tag != KILN_VALUE_STRING) {{ printf(\"status %d tag %d\\n\", status, (int)result.tag); return 2; }}\n\
+             const kiln_string *text = (const kiln_string *)result.ptr;\n\
+             for (i = 0; i < text->unit_len; ++i) putchar((int)kiln_string_unit_at(text, i));\n\
+             printf(\"\\n%d\\n\", kiln_test_pmap_calls);\n\
+             return 0;\n\
+         }}\n",
+        symbol = generated.symbol,
+    );
+    let run = run_threaded(&generated, &wrapper);
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        run.status.success(),
+        "{:?}\n{stdout}{}",
+        run.status,
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let mut lines = stdout.lines();
+    let tokens: Vec<&str> = lines.next().unwrap_or_default().split(',').collect();
+    let calls: usize = lines
+        .next()
+        .and_then(|l| l.trim().parse().ok())
+        .unwrap_or(0);
+    let n = n as usize;
+    assert_eq!(tokens.len(), 4 * n, "{stdout}");
+    assert_eq!(tokens[..n], tokens[n..2 * n], "the joined strings are map's");
+    assert_eq!(tokens[2 * n..3 * n], tokens[3 * n..], "the built objects read back");
+    assert_eq!(tokens[3], "1.5|3", "{stdout}");
     assert_eq!(calls, 2, "both sites took the pool:\n{stdout}");
 }

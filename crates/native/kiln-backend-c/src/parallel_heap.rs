@@ -41,10 +41,20 @@ pub const HEAP_CHUNK_KINDS: [&str; 9] = [
 /// `filter`'s for one or two (the element, the index), `parallelReduce`'s fold for two or three
 /// (the accumulator, the element, the index) and its combine for two, and a key comparator's
 /// key and rank workers.
-pub fn heap_chunk_kinds(parameter_count: u32, key: bool) -> Vec<&'static str> {
+///
+/// A callback that builds values (tier 3, [`crate::parallel::HeapShape::allocates`]) gets only the
+/// array workers, whose chunks have arenas: every other worker would decline at its first
+/// allocation, and the sites that would call them refuse it at compile time.
+pub fn heap_chunk_kinds(parameter_count: u32, key: bool, allocates: bool) -> Vec<&'static str> {
     let mut kinds = Vec::new();
     if (1..=2).contains(&parameter_count) {
-        kinds.extend(["_hmap", "_hmap_typed", "_hfilt", "_hfilt_typed"]);
+        kinds.extend(["_hmap", "_hfilt"]);
+        if !allocates {
+            kinds.extend(["_hmap_typed", "_hfilt_typed"]);
+        }
+    }
+    if allocates {
+        return kinds;
     }
     if (2..=3).contains(&parameter_count) {
         kinds.extend(["_hfold", "_hfold_typed"]);
@@ -174,8 +184,9 @@ pub fn emit_heap_clone(
             values.insert(v.0);
         }
     }
-    let mut params =
-        String::from("const kiln_c99_par_env * restrict env, kiln_c99_par_site * restrict sites");
+    let mut params = String::from(
+        "const kiln_c99_par_env * restrict env, kiln_c99_par_site * restrict sites, kiln_c99_par_arena * restrict arena",
+    );
     for k in 0..parameters {
         write!(params, ", kiln_val p{k}").unwrap();
     }
@@ -184,7 +195,7 @@ pub fn emit_heap_clone(
         "static __attribute__((unused)) kiln_val {name}({params}) {{"
     )
     .unwrap();
-    output.push_str("    (void)env; (void)sites;\n");
+    output.push_str("    (void)env; (void)sites; (void)arena;\n");
     for v in &values {
         writeln!(output, "    kiln_val v{v} = KILN_VAL_UNDEFINED;").unwrap();
     }
@@ -196,8 +207,36 @@ pub fn emit_heap_clone(
         };
         writeln!(output, "    kiln_val l{slot} = {initial};").unwrap();
     }
-    // Named reads are numbered in emission order, one worker cache entry each.
+    // Named reads and member definitions are numbered in emission order, one worker cache entry
+    // each.
     let mut site = 0usize;
+    // A member definition (tier 3): a constant name the call site interned, through the worker's
+    // cache entry for it, or a computed key looked up per element.
+    let define = |output: &mut String, site: &mut usize, target: u32, key: u32, value: u32| {
+        let constant = defs.get(&ValueId(key)).and_then(|op| match op {
+            GraphOp::Const {
+                index,
+                constant: Constant::String(_),
+            } => shape.define_slot(*index),
+            _ => None,
+        });
+        match constant {
+            Some(j) => {
+                writeln!(
+                    output,
+                    "    if (KILN_UNLIKELY(!kiln_c99_par_define(arena, &sites[{s}], v{target}, env->defines[{j}], v{value}))) goto kiln_hfail;",
+                    s = *site
+                )
+                .unwrap();
+                *site += 1;
+            }
+            None => writeln!(
+                output,
+                "    if (KILN_UNLIKELY(!kiln_c99_par_define_computed(arena, v{target}, v{key}, v{value}))) goto kiln_hfail;"
+            )
+            .unwrap(),
+        }
+    };
     let entry = graph.entry_block;
     writeln!(output, "    goto kiln_hb_{};", entry.0).unwrap();
     for block in &blocks {
@@ -257,11 +296,72 @@ pub fn emit_heap_clone(
                     x = value.0
                 )
                 .unwrap(),
+                // `String` is only ever the callee of `String(x)`, emitted below.
+                GraphOp::LoadBuiltin(Builtin::String) => {
+                    writeln!(output, "    v{v} = KILN_VAL_UNDEFINED;").unwrap()
+                }
                 GraphOp::LoadBuiltin(_) => writeln!(
                     output,
                     "    v{v} = KILN_VAL_BUILTIN(KILN_C99_BUILTIN_MATH);"
                 )
                 .unwrap(),
+                GraphOp::Call { args, .. } => writeln!(
+                    output,
+                    "    if (KILN_UNLIKELY(!kiln_c99_par_to_string(arena, v{x}, &v{v}))) goto kiln_hfail;",
+                    x = args[0].0
+                )
+                .unwrap(),
+                GraphOp::NewObject { pairs, .. } => {
+                    writeln!(
+                        output,
+                        "    if (KILN_UNLIKELY(!kiln_c99_par_object(arena, &v{v}))) goto kiln_hfail;"
+                    )
+                    .unwrap();
+                    for (key, value) in pairs {
+                        define(output, &mut site, v, key.0, value.0);
+                    }
+                }
+                GraphOp::NewArray { elements, .. } => {
+                    if elements.is_empty() {
+                        writeln!(
+                            output,
+                            "    if (KILN_UNLIKELY(!kiln_c99_par_array(arena, NULL, 0, &v{v}))) goto kiln_hfail;"
+                        )
+                        .unwrap();
+                    } else {
+                        let list = elements
+                            .iter()
+                            .map(|e| format!("v{}", e.0))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        writeln!(
+                            output,
+                            "    {{ const kiln_val e[{n}] = {{ {list} }}; if (KILN_UNLIKELY(!kiln_c99_par_array(arena, e, {n}, &v{v}))) goto kiln_hfail; }}",
+                            n = elements.len()
+                        )
+                        .unwrap();
+                    }
+                }
+                GraphOp::Bridge {
+                    instruction: kiln_ir::Instruction::SpreadObject,
+                    operands,
+                    ..
+                } => writeln!(
+                    output,
+                    "    if (KILN_UNLIKELY(!kiln_c99_par_spread(arena, v{t}, v{x}))) goto kiln_hfail; v{v} = v{t};",
+                    t = operands[0].0,
+                    x = operands[1].0
+                )
+                .unwrap(),
+                GraphOp::Bridge {
+                    instruction: kiln_ir::Instruction::DefineNamedProperty,
+                    operands,
+                    ..
+                } => {
+                    let t = operands[0].0;
+                    define(output, &mut site, t, operands[1].0, operands[2].0);
+                    writeln!(output, "    v{v} = v{t};").unwrap();
+                }
                 GraphOp::LoadUpvalue(index) => {
                     let j = shape
                         .capture_slot(*index)
@@ -306,7 +406,10 @@ pub fn emit_heap_clone(
                         )
                     };
                     let line = match op {
-                        BinaryOp::Add => numeric("kiln_c99_val_from_double(a + b)"),
+                        // A string joins in the arena (tier 3), or declines without one.
+                        BinaryOp::Add => format!(
+                            "    if (KILN_UNLIKELY(!kiln_c99_par_add(arena, v{l}, v{r}, &v{v}))) goto kiln_hfail;"
+                        ),
                         BinaryOp::Subtract => numeric("kiln_c99_val_from_double(a - b)"),
                         BinaryOp::Multiply => numeric("kiln_c99_val_from_double(a * b)"),
                         BinaryOp::Divide => numeric("kiln_c99_val_from_double(a / b)"),
@@ -517,10 +620,13 @@ fn phi_copies(
 /// failure flag and stops. Their contracts, which the call sites in `call_method.rs` keep:
 ///
 /// - `_hmap`: `in` an array's elements, `out` the result's; a hole stays a hole (`map` does not
-///   call the callback there), an answer must be a number, a boolean, `undefined` or `null`, and
-///   anything but a number sets `env->mixed`.
+///   call the callback there), an answer is any value -- one the clone built lives in the chunk's
+///   arena (tier 3, `kiln_c99_par_arena_claim`) -- and anything but a number sets `env->mixed`.
 /// - `_hmap_typed`: `in` and `out` views; each answer converted as `ToNumber` converts it.
-/// - `_hfilt`/`_hfilt_typed`: `out` one byte per element, the answer's `ToBoolean` (0 for a hole).
+/// - `_hfilt`/`_hfilt_typed`: `out` one byte per element, the answer's `ToBoolean` (0 for a hole);
+///   `_hfilt`'s chunks have an arena for what the predicate builds.
+///
+/// Every other worker passes the clone no arena, and an allocation there declines.
 /// - `_hfold`/`_hfold_typed`: `parallelReduce`'s leaves (`in` a `struct { const void *elems;
 ///   size_t count; double initial; }`), holes skipped; every answer must be a number.
 /// - `_hcomb`: `out[k] = combine(in[2k], in[2k + 1])`, over doubles; the answer must be a number.
@@ -552,7 +658,13 @@ pub fn emit_heap_workers(
     memset(sites, 0, sizeof sites);\n\
     kiln_c99_par_frame frame;\n\
     kiln_c99_par_enter(env, &frame);\n\
-    int failed = 0;\n"
+    kiln_c99_par_arena *arena = {claim};\n\
+    int failed = 0;\n",
+            claim = if matches!(kind, "_hmap" | "_hfilt") {
+                "kiln_c99_par_arena_claim(env)"
+            } else {
+                "NULL"
+            }
         )
     };
     let tail = "    kiln_c99_par_leave(&frame);\n\
@@ -573,8 +685,8 @@ pub fn emit_heap_workers(
     for (size_t i = start; i < end; ++i) {{\n\
         kiln_val e = in_arr[i];\n\
         if (e == KILN_VAL_HOLE) {{ out_arr[i] = KILN_VAL_HOLE; mixed = 1; continue; }}\n\
-        kiln_val r = {clone}(env, sites, e{index_arg});\n\
-        if (KILN_UNLIKELY(r == KILN_VAL_TYPED_FAIL || !(KILN_VAL_IS_NUMBER(r) || KILN_VAL_IS_IMMEDIATE(r)))) {{ failed = 1; break; }}\n\
+        kiln_val r = {clone}(env, sites, arena, e{index_arg});\n\
+        if (KILN_UNLIKELY(r == KILN_VAL_TYPED_FAIL)) {{ failed = 1; break; }}\n\
         mixed |= !KILN_VAL_IS_NUMBER(r);\n\
         out_arr[i] = r;\n\
     }}\n\
@@ -588,7 +700,7 @@ pub fn emit_heap_workers(
     const kiln_typed_array *in_view = (const kiln_typed_array *)in;\n\
     kiln_typed_array *out_view = (kiln_typed_array *)out;\n\
     for (size_t i = start; i < end; ++i) {{\n\
-        kiln_val r = {clone}(env, sites, kiln_c99_val_from_double(kiln_typed_load(in_view, i)){index_arg});\n\
+        kiln_val r = {clone}(env, sites, arena, kiln_c99_val_from_double(kiln_typed_load(in_view, i)){index_arg});\n\
         double d;\n\
         if (KILN_UNLIKELY(r == KILN_VAL_TYPED_FAIL || !kiln_c99_par_number(r, &d))) {{ failed = 1; break; }}\n\
         kiln_c99_typed_set(out_view, i, d);\n\
@@ -604,7 +716,7 @@ pub fn emit_heap_workers(
     for (size_t i = start; i < end; ++i) {{\n\
         kiln_val e = in_arr[i];\n\
         if (e == KILN_VAL_HOLE) {{ keep[i] = 0; continue; }}\n\
-        kiln_val r = {clone}(env, sites, e{index_arg});\n\
+        kiln_val r = {clone}(env, sites, arena, e{index_arg});\n\
         if (KILN_UNLIKELY(r == KILN_VAL_TYPED_FAIL)) {{ failed = 1; break; }}\n\
         keep[i] = (uint8_t)kiln_c99_val_truthy(r);\n\
     }}\n{tail}",
@@ -617,7 +729,7 @@ pub fn emit_heap_workers(
     const kiln_typed_array *in_view = (const kiln_typed_array *)in;\n\
     uint8_t * restrict keep = (uint8_t * restrict)out;\n\
     for (size_t i = start; i < end; ++i) {{\n\
-        kiln_val r = {clone}(env, sites, kiln_c99_val_from_double(kiln_typed_load(in_view, i)){index_arg});\n\
+        kiln_val r = {clone}(env, sites, arena, kiln_c99_val_from_double(kiln_typed_load(in_view, i)){index_arg});\n\
         if (KILN_UNLIKELY(r == KILN_VAL_TYPED_FAIL)) {{ failed = 1; break; }}\n\
         keep[i] = (uint8_t)kiln_c99_val_truthy(r);\n\
     }}\n{tail}",
@@ -648,7 +760,7 @@ pub fn emit_heap_workers(
         for (size_t i = first; i < last; ++i) {{\n\
             kiln_val e = {element};\n\
             if (e == KILN_VAL_HOLE) continue;\n\
-            kiln_val r = {clone}(env, sites, kiln_c99_val_from_double(acc), e{fold_index});\n\
+            kiln_val r = {clone}(env, sites, arena, kiln_c99_val_from_double(acc), e{fold_index});\n\
             if (KILN_UNLIKELY(r == KILN_VAL_TYPED_FAIL || !KILN_VAL_IS_NUMBER(r))) {{ failed = 1; break; }}\n\
             memcpy(&acc, &r, sizeof acc);\n\
         }}\n\
@@ -664,7 +776,7 @@ pub fn emit_heap_workers(
     const double * restrict level = (const double * restrict)in;\n\
     double * restrict next = (double * restrict)out;\n\
     for (size_t k = start; k < end; ++k) {{\n\
-        kiln_val r = {clone}(env, sites, kiln_c99_val_from_double(level[2 * k]), kiln_c99_val_from_double(level[2 * k + 1]));\n\
+        kiln_val r = {clone}(env, sites, arena, kiln_c99_val_from_double(level[2 * k]), kiln_c99_val_from_double(level[2 * k + 1]));\n\
         if (KILN_UNLIKELY(r == KILN_VAL_TYPED_FAIL || !KILN_VAL_IS_NUMBER(r))) {{ failed = 1; break; }}\n\
         memcpy(&next[k], &r, sizeof next[k]);\n\
     }}\n{tail}",
@@ -679,7 +791,7 @@ pub fn emit_heap_workers(
     for (size_t i = start; i < end; ++i) {{\n\
         kiln_val e = in_arr[i];\n\
         if (KILN_UNLIKELY(e == KILN_VAL_HOLE || e == KILN_VAL_UNDEFINED)) {{ failed = 1; break; }}\n\
-        kiln_val r = {key_clone}(env, sites, e);\n\
+        kiln_val r = {key_clone}(env, sites, arena, e);\n\
         if (KILN_UNLIKELY(r == KILN_VAL_TYPED_FAIL || !KILN_VAL_IS_NUMBER(r))) {{ failed = 1; break; }}\n\
         memcpy(&keys[i], &r, sizeof keys[i]);\n\
         if (KILN_UNLIKELY(isnan(keys[i]))) {{ failed = 1; break; }}\n\

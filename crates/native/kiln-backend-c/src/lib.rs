@@ -1864,6 +1864,7 @@ fn render_functions(
             for kind in parallel_heap::heap_chunk_kinds(
                 program.functions[index].parameter_count,
                 heap.key.is_some(),
+                heap.allocates,
             ) {
                 writeln!(
                     output,
@@ -2150,7 +2151,11 @@ fn render_functions(
         // unit, compiled optimised, when there is one). The workers reach the heap only through
         // the prelude's `kiln_c99_par_*` readers, which the worker unit's header declares.
         if let Some((clone, heap)) = &heap_clones[index] {
-            let kinds = parallel_heap::heap_chunk_kinds(proto.parameter_count, heap.key.is_some());
+            let kinds = parallel_heap::heap_chunk_kinds(
+                proto.parameter_count,
+                heap.key.is_some(),
+                heap.allocates,
+            );
             if let Some((link, unit)) = workers.as_mut() {
                 unit.push_str(clone);
                 parallel_heap::emit_heap_workers(

@@ -134,6 +134,10 @@ pub enum Reason {
     /// in another module, or with `Object.defineProperty`) is found at run time instead: the
     /// read declines and the call runs sequentially.
     ReadsAccessor,
+    /// Tier 3: the callback builds values (an object or array literal, a spread, a string), which
+    /// only `parallelMap`, `parallelFilter` and `parallelFlatMap` keep: `parallelReduce` folds
+    /// numbers and `parallelSort` compares keys.
+    AllocatesForMethod,
 }
 
 impl Reason {
@@ -166,6 +170,7 @@ impl Reason {
         Reason::ArgumentShape,
         Reason::ComparatorUnproven,
         Reason::ReadsAccessor,
+        Reason::AllocatesForMethod,
     ];
 
     /// The stable code printed by `--explain-parallel`.
@@ -198,6 +203,7 @@ impl Reason {
             Reason::ArgumentShape => "argument-shape",
             Reason::ComparatorUnproven => "comparator-unproven",
             Reason::ReadsAccessor => "reads-accessor",
+            Reason::AllocatesForMethod => "allocates-for-method",
         }
     }
 
@@ -232,7 +238,10 @@ impl Reason {
             Reason::ReadsThis => "the callback reads `this`, `new.target` or `arguments`",
             Reason::ReadsProperty => "the callback reads a property or element",
             Reason::WritesProperty => "the callback writes a property or element",
-            Reason::Allocates => "the callback allocates",
+            Reason::Allocates => {
+                "the callback allocates what a pool thread does not build (tier 3 builds object \
+                 and array literals, spreads and strings)"
+            }
             Reason::Calls => "the callback calls something other than a listed Math function",
             Reason::ReturnsUndefined => "the callback can return undefined",
             Reason::ReturnsNonNumber => "the callback is not proven to return a number",
@@ -259,6 +268,10 @@ impl Reason {
             }
             Reason::ReadsAccessor => {
                 "the callback reads a property the program defines with a getter, which is a call"
+            }
+            Reason::AllocatesForMethod => {
+                "the callback builds values, which only parallelMap, parallelFilter and \
+                 parallelFlatMap keep (tier 3)"
             }
         }
     }
@@ -345,6 +358,18 @@ pub struct HeapShape {
     /// (descending), where `K` reads one element and nothing else varies between the two sides
     /// ([`key_comparator`]); the value is `K` applied to the first parameter.
     pub key: Option<(SortOrder, crate::graph::ValueId)>,
+    /// Tier 3 (parallel issue 08): the callback builds values -- an object or array literal, a
+    /// spread, `String(x)` or a template -- in its worker's arena.
+    pub allocates: bool,
+    /// Some `+` is not proven to add two numbers: on a string it joins, which allocates (in an
+    /// arena where the site gives its workers one, and declines where it does not).
+    pub concat: bool,
+    /// Some reachable `return` is proven a string, an object or a function: an answer only
+    /// `map`, `filter` and `flatMap` keep.
+    pub answers_value: bool,
+    /// The constant indices of the member names the body defines (object literal keys, the keys
+    /// of `{ ...r, k: v }`), in first-use order: the call site interns them before the pool starts.
+    pub defines: Vec<u32>,
 }
 
 impl HeapShape {
@@ -362,6 +387,36 @@ impl HeapShape {
     pub fn string_slot(&self, index: u32) -> Option<usize> {
         self.strings.iter().position(|&k| k == index)
     }
+
+    /// The position of the member name at constant `index` among the defined names.
+    pub fn define_slot(&self, index: u32) -> Option<usize> {
+        self.defines.iter().position(|&k| k == index)
+    }
+
+    /// Tier 3's label: the callback builds values (so its site keeps them in worker arenas).
+    pub fn builds(&self) -> bool {
+        self.allocates || self.concat
+    }
+}
+
+/// The most members an object literal a pool thread builds may have: the inline slots every
+/// object starts with (`KILN_C99_INLINE_SLOTS`). More would `malloc` slots, which the sequential
+/// literal does.
+pub const PARALLEL_OBJECT_MEMBERS: usize = 16;
+
+/// The most elements an array literal a pool thread builds may have: the elements an array keeps
+/// inside its own block (`KILN_C99_ARRAY_INBLOCK_MAX`).
+pub const PARALLEL_ARRAY_ELEMENTS: usize = 64;
+
+/// Whether a literal member name is one a pool thread defines as the sequential fast path does:
+/// not an index (which goes to elements), not `@`-prefixed (a symbol's spelling), not
+/// `__proto__`, not empty.
+pub fn plain_member_name(name: &str) -> bool {
+    let index = !name.is_empty()
+        && name.bytes().all(|b| b.is_ascii_digit())
+        && (name.len() == 1 || !name.starts_with('0'))
+        && name.parse::<u64>().is_ok_and(|n| n < u64::from(u32::MAX));
+    !name.is_empty() && !index && !name.starts_with('@') && name != "__proto__"
 }
 
 /// `Math`'s value properties: each is non-writable and non-configurable, so a read of one is the
@@ -458,6 +513,38 @@ pub fn heap_verdict(
             .map(|o| o.label.clone())
             .unwrap_or_else(|| "operation".to_owned())
     };
+    let defs: std::collections::HashMap<ValueId, &GraphOp> = graph
+        .blocks
+        .iter()
+        .flat_map(|b| b.operations.iter())
+        .map(|(v, op)| (*v, op))
+        .collect();
+    let string_builtin: std::collections::HashSet<ValueId> = defs
+        .iter()
+        .filter(|(_, op)| matches!(op, GraphOp::LoadBuiltin(Builtin::String)))
+        .map(|(v, _)| *v)
+        .collect();
+    // A member a literal defines: a constant name the sequential fast path defines by a
+    // transition (listed, for the call site to intern, with a worker cache entry), or a computed
+    // one (checked per element: an interned string that is a plain name, or the worker declines).
+    let member = |key: &ValueId, shape: &mut HeapShape| -> Option<Refusal> {
+        let Some(GraphOp::Const {
+            index,
+            constant: Constant::String(_),
+        }) = defs.get(key)
+        else {
+            return None;
+        };
+        let name = constant_name(program, *index).unwrap_or_default();
+        if !plain_member_name(&name) {
+            return Some(Refusal::with(Reason::Allocates, format!("the member `{name}`")));
+        }
+        if !shape.defines.contains(index) {
+            shape.defines.push(*index);
+        }
+        shape.sites += 1;
+        None
+    };
     let mut accessors: Option<std::collections::HashSet<String>> = None;
     let mut shape = HeapShape::default();
     for block in &graph.blocks {
@@ -494,6 +581,9 @@ pub fn heap_verdict(
                 | GraphOp::MarkUninitialized(_)
                 | GraphOp::CheckTdz { .. } => None,
                 GraphOp::LoadBuiltin(Builtin::Math) => None,
+                // Only as the callee of `String(x)` (a template's substitutions are that call),
+                // which the uses check below holds it to.
+                GraphOp::LoadBuiltin(Builtin::String) => None,
                 GraphOp::LoadBuiltin(_) => {
                     Some(Refusal::with(Reason::UnsupportedOperation, label(vid)))
                 }
@@ -566,10 +656,46 @@ pub fn heap_verdict(
                 GraphOp::SetComputed { .. } | GraphOp::SetComputedStrict { .. } => {
                     Some(Refusal::new(Reason::WritesProperty))
                 }
-                GraphOp::NewArray { .. }
-                | GraphOp::NewObject { .. }
-                | GraphOp::MakeFunction { .. }
-                | GraphOp::MakeCell(_) => Some(Refusal::with(Reason::Allocates, label(vid))),
+                // Tier 3: literals the worker builds in its arena, as the sequential literal
+                // builds them (`kiln_c99_par_object`, `kiln_c99_par_array`).
+                GraphOp::NewArray { elements, .. } => {
+                    shape.allocates = true;
+                    (elements.len() > PARALLEL_ARRAY_ELEMENTS).then(|| {
+                        Refusal::with(
+                            Reason::Allocates,
+                            format!("an array literal of {} elements", elements.len()),
+                        )
+                    })
+                }
+                GraphOp::NewObject { pairs, .. } => {
+                    shape.allocates = true;
+                    if pairs.len() > PARALLEL_OBJECT_MEMBERS {
+                        Some(Refusal::with(
+                            Reason::Allocates,
+                            format!("an object literal of {} members", pairs.len()),
+                        ))
+                    } else {
+                        pairs.iter().find_map(|(key, _)| member(key, &mut shape))
+                    }
+                }
+                GraphOp::Bridge {
+                    instruction: kiln_ir::Instruction::SpreadObject,
+                    ..
+                } => {
+                    shape.allocates = true;
+                    None
+                }
+                GraphOp::Bridge {
+                    instruction: kiln_ir::Instruction::DefineNamedProperty,
+                    operands,
+                    ..
+                } if operands.len() == 3 => {
+                    shape.allocates = true;
+                    member(&operands[1], &mut shape)
+                }
+                GraphOp::MakeFunction { .. } | GraphOp::MakeCell(_) => {
+                    Some(Refusal::with(Reason::Allocates, label(vid)))
+                }
                 GraphOp::LoadCell(_) | GraphOp::StoreCell { .. } => {
                     Some(Refusal::with(Reason::Allocates, "a cell"))
                 }
@@ -597,6 +723,14 @@ pub fn heap_verdict(
                         Some(Refusal::with(Reason::Calls, callee))
                     }
                 }
+                // `String(x)`: `ToString` of a primitive, into the arena.
+                GraphOp::Call { callee, args, .. }
+                    if args.len() == 1
+                        && matches!(defs.get(callee), Some(GraphOp::LoadBuiltin(Builtin::String))) =>
+                {
+                    shape.allocates = true;
+                    None
+                }
                 GraphOp::Call { .. } | GraphOp::New { .. } => {
                     Some(Refusal::with(Reason::Calls, label(vid)))
                 }
@@ -612,7 +746,34 @@ pub fn heap_verdict(
             }
         }
     }
-    // Rule 6: an answer the graph proves a string or an object is never one the pool can keep.
+    // `String` is loaded only to be called: any other use (`String.raw`, passing it on) is a
+    // read of a built-in the rules do not list.
+    for (vid, op) in graph.blocks.iter().flat_map(|b| b.operations.iter()) {
+        let used_otherwise = match op {
+            GraphOp::Call { callee, args, .. } => {
+                args.iter().any(|a| string_builtin.contains(a))
+                    || (string_builtin.contains(callee) && args.len() != 1)
+            }
+            other => other.operands().iter().any(|a| string_builtin.contains(a)),
+        };
+        if used_otherwise {
+            return Err(Refusal::with(Reason::UnsupportedOperation, label(vid)));
+        }
+    }
+    for block in graph.blocks.iter() {
+        match &block.terminator {
+            Terminator::Return(Some(v))
+            | Terminator::Branch { condition: v, .. }
+            | Terminator::BranchNotNullish { condition: v, .. }
+                if string_builtin.contains(v) =>
+            {
+                return Err(Refusal::with(Reason::UnsupportedOperation, "String"));
+            }
+            _ => {}
+        }
+    }
+    // Rule 6: an answer the graph proves a string, an object or a function is one only `map`,
+    // `filter` and `flatMap` keep; the site decides (`parallelReduce` and `parallelSort` refuse).
     let proven = crate::graph::proven_types(graph);
     for block in graph
         .blocks
@@ -625,9 +786,23 @@ pub fn heap_verdict(
                 Some(Proven::String | Proven::Object | Proven::Callable)
             )
         {
-            return Err(Refusal::new(Reason::ReturnsNonNumber));
+            shape.answers_value = true;
         }
     }
+    // A `+` of two operands not both proven numbers may join strings.
+    shape.concat = graph
+        .blocks
+        .iter()
+        .flat_map(|b| b.operations.iter())
+        .any(|(_, op)| match op {
+            GraphOp::Binary {
+                op: kiln_ir::BinaryOp::Add,
+                left,
+                right,
+            } => !(proven.get(left).is_some_and(Proven::is_number)
+                && proven.get(right).is_some_and(Proven::is_number)),
+            _ => false,
+        });
     shape.captures.sort_unstable();
     shape.key = key_comparator(graph, proto);
     Ok(shape)
@@ -1302,6 +1477,8 @@ pub struct SiteRecord {
     pub default_order: bool,
     /// Tier 2: a callback of the site reads the heap (its reads are guarded per element).
     pub heap: bool,
+    /// Tier 3: the callback builds values, which its workers keep in arenas.
+    pub alloc: bool,
 }
 
 thread_local! {
@@ -1494,7 +1671,9 @@ impl SiteRecord {
         if self.default_order {
             out.push_str(" order=default");
         }
-        if self.heap {
+        if self.alloc {
+            out.push_str(" tier=3");
+        } else if self.heap {
             out.push_str(" tier=2");
         }
         out.push_str(" */");
@@ -1529,6 +1708,7 @@ impl SiteRecord {
             at: None,
             default_order: false,
             heap: false,
+            alloc: false,
         };
         let mut parallel = None;
         let mut reason = None;
@@ -1546,7 +1726,10 @@ impl SiteRecord {
                 "detail" => detail = Some(unescape(value)),
                 "writes" => writes = value.parse().ok(),
                 "order" => record.default_order = value == "default",
-                "tier" => record.heap = value == "2",
+                "tier" => {
+                    record.heap = value == "2" || value == "3";
+                    record.alloc = value == "3";
+                }
                 "at" => {
                     let (l, c) = value.split_once(':')?;
                     record.at = Some((l.parse().ok()?, c.parse().ok()?));
@@ -1578,6 +1761,9 @@ impl SiteRecord {
             self.method.name()
         );
         match &self.refusal {
+            None if self.alloc => {
+                format!("{head}parallel (tier 3: builds values in worker arenas)\n")
+            }
             None if self.heap => format!("{head}parallel (tier 2: reads the heap)\n"),
             None if self.captures > 0 => {
                 format!("{head}parallel (tier 1: reads captured values)\n")
@@ -2114,6 +2300,7 @@ mod tests {
                 at: None,
                 default_order: false,
                 heap: false,
+                alloc: false,
             },
             SiteRecord {
                 method: ParallelMethod::Map,
@@ -2127,6 +2314,7 @@ mod tests {
                 at: Some((7, 54)),
                 default_order: false,
                 heap: false,
+                alloc: false,
             },
             SiteRecord {
                 method: ParallelMethod::Sort,
@@ -2137,6 +2325,7 @@ mod tests {
                 at: None,
                 default_order: true,
                 heap: false,
+                alloc: false,
             },
             SiteRecord {
                 method: ParallelMethod::Reduce,
@@ -2147,6 +2336,7 @@ mod tests {
                 at: None,
                 default_order: false,
                 heap: false,
+                alloc: false,
             },
             SiteRecord {
                 method: ParallelMethod::Filter,
@@ -2157,6 +2347,7 @@ mod tests {
                 at: None,
                 default_order: false,
                 heap: true,
+                alloc: false,
             },
         ];
         let c: String = records
@@ -2259,11 +2450,9 @@ mod tests {
             ]),
             Some(Reason::WritesProperty)
         );
+        // A closure is an allocation tier 3 does not build.
         assert_eq!(
-            refused(vec![
-                Instruction::NewObject { count: 0 },
-                Instruction::Return
-            ]),
+            refused(vec![Instruction::MakeFunction(0), Instruction::Return]),
             Some(Reason::Allocates)
         );
         assert_eq!(
@@ -2286,11 +2475,113 @@ mod tests {
             ]),
             Some(Reason::UnsupportedOperation)
         );
-        // An answer proven a string is never one the pool keeps.
+        // An answer proven a string is one only `map`, `filter` and `flatMap` keep: the verdict
+        // says so, and the site decides.
+        let string = heap(proto(vec![Instruction::Const(6), Instruction::Return], 1), None)
+            .expect("the site decides what a string answer means");
+        assert!(string.answers_value && !string.allocates);
+    }
+
+    #[test]
+    fn tier_3_builds_literals_spreads_and_strings() {
+        // `r => ({ ...r, x: r.x + "s" })`
+        let code = vec![
+            Instruction::NewObject { count: 0 },
+            Instruction::LoadLocal(0),
+            Instruction::SpreadObject,
+            Instruction::Const(4),
+            Instruction::LoadLocal(0),
+            Instruction::GetProperty(4),
+            Instruction::Const(6),
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::DefineNamedProperty,
+            Instruction::Return,
+        ];
+        assert_eq!(why(proto(code.clone(), 1)), Some(Reason::Allocates));
+        let shape = heap(proto(code, 1), None).expect("tier 3 admits the literal");
+        assert!(shape.allocates && shape.concat && shape.builds());
+        assert_eq!(shape.defines, vec![4], "the member the site interns");
+        assert_eq!(shape.sites, 2, "one read, one definition");
+        // `r => [r.x, String(r.x)]`
+        let listed = heap(
+            proto(
+                vec![
+                    Instruction::LoadLocal(0),
+                    Instruction::GetProperty(4),
+                    Instruction::LoadBuiltin(Builtin::String),
+                    Instruction::LoadLocal(0),
+                    Instruction::GetProperty(4),
+                    Instruction::Call { argc: 1 },
+                    Instruction::NewArray { count: 2 },
+                    Instruction::Return,
+                ],
+                1,
+            ),
+            None,
+        )
+        .expect("an array literal and String()");
+        assert!(listed.allocates && listed.defines.is_empty());
+        // `String` used as anything but the callee of `String(x)` is a built-in the rules do
+        // not list.
         assert_eq!(
-            refused(vec![Instruction::Const(6), Instruction::Return]),
-            Some(Reason::ReturnsNonNumber)
+            heap(
+                proto(
+                    vec![Instruction::LoadBuiltin(Builtin::String), Instruction::Return],
+                    1
+                ),
+                None
+            )
+            .err(),
+            Some(Reason::UnsupportedOperation)
         );
+        // More members than an object's inline slots, and a member named like an index.
+        let mut wide = Vec::new();
+        for _ in 0..17 {
+            wide.extend([Instruction::Const(4), Instruction::Const(0)]);
+        }
+        wide.extend([Instruction::NewObject { count: 17 }, Instruction::Return]);
+        assert_eq!(heap(proto(wide, 1), None).err(), Some(Reason::Allocates));
+        let mut index_named = program(&proto(Vec::new(), 1));
+        index_named.constants.push(Constant::String("0".into()));
+        let key = index_named.constants.len() as u32 - 1;
+        let callback = proto(
+            vec![
+                Instruction::Const(key),
+                Instruction::LoadLocal(0),
+                Instruction::NewObject { count: 1 },
+                Instruction::Return,
+            ],
+            1,
+        );
+        index_named.functions = vec![callback.clone()];
+        assert_eq!(
+            heap(callback, Some(index_named)).err(),
+            Some(Reason::Allocates)
+        );
+        assert!(plain_member_name("total") && !plain_member_name("12") && !plain_member_name(""));
+        assert!(plain_member_name("012") && !plain_member_name("__proto__"));
+    }
+
+    #[test]
+    fn reason_allocates_for_method() {
+        assert_eq!(
+            Reason::from_code("allocates-for-method"),
+            Some(Reason::AllocatesForMethod)
+        );
+        let record = SiteRecord {
+            method: ParallelMethod::Map,
+            line: 3,
+            column: 9,
+            refusal: None,
+            captures: 0,
+            at: None,
+            default_order: false,
+            heap: true,
+            alloc: true,
+        };
+        let parsed = SiteRecord::parse_all(&record.marker());
+        assert_eq!(parsed, vec![record.clone()], "tier 3 round-trips through the marker");
+        assert!(record.render("m.js").contains("parallel (tier 3: builds values in worker arenas)"));
     }
 
     #[test]
