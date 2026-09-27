@@ -19,6 +19,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -414,6 +415,96 @@ func main() {
 			}
 			return acc
 		}), value)
+	case "enrich-records":
+		price, qty, rating := floats(n), qtys(n), ratings(n)
+		type enriched struct{ price, qty, rating, total float64 }
+		bench(workload, budget, func() any {
+			out := make([]enriched, n)
+			each(b, func(_, lo, hi int) {
+				for i := lo; i < hi; i++ {
+					out[i] = enriched{price[i], qty[i], rating[i], price[i] * qty[i]}
+				}
+			})
+			return out
+		}, func(v any) string {
+			out := v.([]enriched)
+			total, rated := 0.0, 0.0
+			for _, r := range out {
+				total += r.total
+				rated += r.rating
+			}
+			return fmt.Sprintf("%d:%s:%s", len(out), num(total), num(rated))
+		})
+	case "flatmap-records":
+		price, qty := floats(n), qtys(n)
+		bench(workload, budget, func() any {
+			parts := make([][]float64, procs)
+			each(b, func(w, lo, hi int) {
+				part := make([]float64, 0, hi-lo)
+				for i := lo; i < hi; i++ {
+					if qty[i] > 4 {
+						part = append(part, price[i], qty[i])
+					}
+				}
+				parts[w] = part
+			})
+			total := 0
+			for _, part := range parts {
+				total += len(part)
+			}
+			out := make([]float64, 0, total)
+			for _, part := range parts {
+				out = append(out, part...)
+			}
+			return out
+		}, sums)
+	case "format-csv":
+		price, qty := floats(n), qtys(n)
+		bench(workload, budget, func() any {
+			out := make([]string, n)
+			each(b, func(_, lo, hi int) {
+				for i := lo; i < hi; i++ {
+					out[i] = strconv.Itoa(i) + "," + num(qty[i]) + "," + num(price[i])
+				}
+			})
+			return out
+		}, func(v any) string {
+			out := v.([]string)
+			chars, codes := 0, 0
+			for i, line := range out {
+				chars += len(line)
+				if i%997 == 0 {
+					codes += int(line[len(line)-1])
+				}
+			}
+			return fmt.Sprintf("%d:%d:%d", len(out), chars, codes)
+		})
+	case "parse-csv":
+		price, qty := floats(n), qtys(n)
+		lines := make([]string, n)
+		for i := range lines {
+			lines[i] = " " + strconv.Itoa(i) + "," + num(qty[i]) + "," + num(price[i]) + " "
+		}
+		bench(workload, budget, func() any {
+			out := make([][3]float64, n)
+			each(b, func(_, lo, hi int) {
+				for i := lo; i < hi; i++ {
+					fields := strings.Split(strings.TrimSpace(lines[i]), ",")
+					for j := range out[i] {
+						out[i][j], _ = strconv.ParseFloat(fields[j], 64)
+					}
+				}
+			})
+			return out
+		}, func(v any) string {
+			out := v.([][3]float64)
+			qtyTotal, priceTotal := 0.0, 0.0
+			for _, row := range out {
+				qtyTotal += row[1]
+				priceTotal += row[2]
+			}
+			return fmt.Sprintf("%d:%s:%s", len(out), num(qtyTotal), num(priceTotal))
+		})
 	default:
 		fmt.Fprintln(os.Stderr, "unknown workload", workload)
 		os.Exit(2)

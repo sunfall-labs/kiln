@@ -2,7 +2,7 @@
 // the records) and runs the same per-element code as the sequential programs.
 import { parentPort, workerData } from "node:worker_threads";
 
-const { workload, input, records, lo, hi } = workerData;
+const { workload, input, records, lines, lo, hi } = workerData;
 const xs = input.xs;
 const cut = workload === "filter" ? 250 : workload === "pipeline-column" ? 50000 : 20000;
 const fx = 1.0873;
@@ -59,6 +59,19 @@ function fold() {
   return acc;
 }
 
+function materialize() {
+  if (workload === "enrich-records") {
+    return records.map((r) => ({ ...r, total: r.price * r.qty }));
+  }
+  if (workload === "flatmap-records") {
+    return records.flatMap((r) => (r.qty > 4 ? [r.price, r.qty] : []));
+  }
+  if (workload === "format-csv") {
+    return records.map((r) => `${r.id},${r.qty},${r.price}`);
+  }
+  return lines.map((l) => l.trim().split(",").map(Number));
+}
+
 function merge(from, to, a, mid, b) {
   let i = a;
   let j = mid;
@@ -98,6 +111,8 @@ parentPort.on("message", (msg) => {
       const kept = filter();
       return parentPort.postMessage(kept, [kept.buffer]);
     }
+    case "materialize":
+      return parentPort.postMessage(materialize());
     case "sort":
       msg.a.set(xs.subarray(lo, hi), lo);
       msg.a.subarray(lo, hi).sort();

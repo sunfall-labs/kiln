@@ -66,12 +66,11 @@ from what the extra cores buy.
 The pool and Go are written the way a programmer who wanted the cores would write them, which is
 not always the same work as the methods:
 
-- The pool's inputs live in `SharedArrayBuffer`s built before the clock, so no call copies them to
-  the workers. `sort-records` cannot share its objects either: the pool sorts an index
-  permutation by the shared price column, and the main thread applies it to the records. Each call allocates its output (a fresh `SharedArrayBuffer` for map and sort;
-  per-worker `Float64Array`s transferred back and concatenated for filter), as `map` does.
-  Records as objects cannot be shared: each worker receives its slice once, at start-up, and
-  keeps it.
+- The pool's numeric inputs live in `SharedArrayBuffer`s built before the clock. Object records
+  and CSV lines are cloned to their workers once at start-up. `sort-records` sorts an index
+  permutation by the shared price column, and the main thread applies it to the records. Each
+  call allocates its output: a fresh `SharedArrayBuffer` for numeric map and sort, and per-worker
+  results returned and concatenated for filter and materialized rows.
 - **The pipelines are one fused loop per worker/goroutine** (score, test, add), where the methods
   make three passes and two intermediate arrays. That is what hand-written parallel code does,
   and it is why those two columns lead the pipeline rows.
@@ -100,8 +99,9 @@ All over 1,000,000 elements. The callbacks are written inline, identically, in e
 | `format-csv` | `records.map(r => `${r.id},${r.qty},${r.price}`)`: CSV lines | parallel (tier 3: number formatting and concatenation in arenas) |
 | `parse-csv` | `lines.map(l => l.trim().split(",").map(Number))`: parse CSV lines | parallel (tier 4: pure calls -- `trim`, `split`, `Number` on the workers) |
 
-The tier-3 and tier-4 rows have no `worker_threads` pool or Go twin yet (their cells read `--`): the
-comparison that matters for them is kiln's parallel method against its own and node's `map`.
+The tier-3 and tier-4 rows also have `worker_threads` pool and Go twins. They do the same
+per-element work and return new objects, arrays or strings on each call; the pool includes
+the cost of returning those results to its caller.
 
 The results file prints `kiln build --explain-parallel` for every program, so a reader sees which
 site ran parallel and, when one did not, the reason code.
