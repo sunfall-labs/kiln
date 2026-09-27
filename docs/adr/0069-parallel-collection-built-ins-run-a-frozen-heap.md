@@ -102,7 +102,9 @@ is sized to the available cores divided by the number of `KILN_WORKERS` processe
 ### Saying why
 
 `kiln build --explain-parallel` reports, for every parallel built-in call site, whether it runs in
-parallel and, if not, the exact capture, write, read or call that prevented it. A performance
+parallel and, if not, the exact capture, write, read or call that prevented it. `kiln check
+--explain-parallel` gives the same report without compiling, by running that build to the end of
+emission and stopping there. A performance
 decision is reported as precisely as a refusal is (ADR 0063).
 
 ## Consequences

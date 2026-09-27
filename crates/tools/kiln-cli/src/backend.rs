@@ -186,6 +186,28 @@ pub trait Backend: Send {
             other => Err(mismatch("NativeBuild", &other)),
         }
     }
+    /// `kiln check --explain-parallel`: the `parallel:` section of the native build at
+    /// `profile`, which the daemon stops after emission.
+    fn explain_parallel_at_view(
+        &mut self,
+        path: String,
+        project_root: String,
+        node: bool,
+        profile: NativeProfile,
+        source_view: SourceView,
+    ) -> Result<SourceResponse<String>> {
+        match self.request(Request::ExplainParallel {
+            path,
+            project_root,
+            node,
+            profile,
+            source_view,
+        })? {
+            Response::ParallelExplained { text } => Ok(SourceResponse::Ready(text)),
+            Response::StaleSourceView { current } => Ok(SourceResponse::Stale(current)),
+            other => Err(mismatch("ExplainParallel", &other)),
+        }
+    }
     #[allow(clippy::too_many_arguments)]
     fn native_run_at_view(
         &mut self,
@@ -336,6 +358,7 @@ fn name_of(response: &Response) -> &'static str {
         Response::NativeBuilt(_) => "NativeBuilt",
         Response::Stale { .. } => "Stale",
         Response::NativeSharedBuilt(_) => "NativeSharedBuilt",
+        Response::ParallelExplained { .. } => "ParallelExplained",
         Response::NativeRan(_) => "NativeRan",
         Response::Tested(_) => "Tested",
         Response::TestInventory(_) => "TestInventory",

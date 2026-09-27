@@ -107,6 +107,7 @@ pub fn dispatch<E: QueryEngine>(engine: &mut E, request: Request) -> (Response, 
             | Request::NativeBuild { .. }
             | Request::NativeBuildAtRevision { .. }
             | Request::NativeSharedBuild { .. }
+            | Request::ExplainParallel { .. }
             | Request::NativeRun { .. }
             | Request::Project { .. }
     ) {
@@ -238,6 +239,27 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
                 Next::Continue,
             )
         }
+        Request::ExplainParallel {
+            path,
+            project_root,
+            node,
+            profile,
+            source_view: _,
+        } => (
+            match native_graph(engine, resolutions, &path, &project_root, node) {
+                Ok(Some(graph)) => {
+                    native_explain_parallel_graph(&graph, &path, &project_root, profile, node)
+                }
+                Ok(None) => match native_program(engine, &path) {
+                    Ok(program) => {
+                        native_explain_parallel_program(&program, &path, &project_root, profile)
+                    }
+                    Err(message) => Response::Error { message },
+                },
+                Err(message) => Response::Error { message },
+            },
+            Next::Continue,
+        ),
         Request::NativeBuildAtRevision { .. } => (
             Response::Error {
                 message: "revision-pinned native builds require daemon snapshot handling".into(),
@@ -1838,6 +1860,58 @@ fn prepare_native_shared_build(
             ..kiln_native::NativeBuildOptions::default()
         },
     ))
+}
+
+/// `kiln check --explain-parallel` for a module graph: the same selection, reduction and
+/// emission `native_build_graph` runs for this profile, stopped before the C compiler, and the
+/// same `parallel:` section `--explain` renders from it.
+pub(crate) fn native_explain_parallel_graph(
+    graph: &ModuleGraph,
+    path: &str,
+    project_root: &str,
+    profile: NativeProfile,
+    node: bool,
+) -> Response {
+    let options = kiln_native::NativeBuildOptions {
+        profile: native_profile(profile),
+        realm: kiln_native::NativeRealmPolicy::host_clock(),
+        node,
+        ..kiln_native::NativeBuildOptions::default()
+    };
+    match discover_native_builder(Path::new(project_root)).and_then(|builder| {
+        builder
+            .parallel_sites_graph(graph, &options)
+            .map_err(|e| e.to_string())
+    }) {
+        Ok(sites) => Response::ParallelExplained {
+            text: kiln_backend_c::parallel::format_explain_section(&sites, path),
+        },
+        Err(message) => Response::Error { message },
+    }
+}
+
+/// [`native_explain_parallel_graph`] for an entry the daemon builds as a single program.
+pub(crate) fn native_explain_parallel_program(
+    program: &kiln_ir::Program,
+    path: &str,
+    project_root: &str,
+    profile: NativeProfile,
+) -> Response {
+    let options = kiln_native::NativeBuildOptions {
+        profile: native_profile(profile),
+        realm: kiln_native::NativeRealmPolicy::host_clock(),
+        ..kiln_native::NativeBuildOptions::default()
+    };
+    match discover_native_builder(Path::new(project_root)).and_then(|builder| {
+        builder
+            .parallel_sites(program, &options)
+            .map_err(|e| e.to_string())
+    }) {
+        Ok(sites) => Response::ParallelExplained {
+            text: kiln_backend_c::parallel::format_explain_section(&sites, path),
+        },
+        Err(message) => Response::Error { message },
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

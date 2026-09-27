@@ -3505,3 +3505,55 @@ int main(void) {{
     );
     assert_eq!(output.stdout, b"start\ntrue\n");
 }
+
+/// `kiln check --explain-parallel` asks `parallel_sites_graph`, which stops the build after
+/// emission. Its answer must be the build's, and it must not compile or link anything.
+#[test]
+fn parallel_sites_without_compiling_are_the_builds_own() {
+    use kiln_backend_c::parallel::Reason;
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping parallel-site planning: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-parallel-sites-only");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "const xs = [1, 2, 3, 4];\nlet bump = 1;\nbump = 2;\nconsole.log(xs.parallelMap(x => x * 2 + 1).join(','));\nconsole.log(xs.parallelMap(x => x + bump).join(','));\n",
+    )
+    .expect("write parallel-sites entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build parallel-sites graph");
+    let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
+    let options = NativeBuildOptions {
+        output: root.path.join("program"),
+        profile: NativeProfile::Release,
+        realm: NativeRealmPolicy::default(),
+        ..NativeBuildOptions::default()
+    };
+    let planned = builder
+        .parallel_sites_graph(&graph, &options)
+        .expect("plan parallel sites");
+    assert!(
+        !options.output.exists(),
+        "planning must not link an executable"
+    );
+    let sites: Vec<_> = planned.iter().flat_map(|(_, sites)| sites).collect();
+    assert_eq!(sites.len(), 2, "{planned:?}");
+    assert!(sites[0].refusal.is_none(), "{planned:?}");
+    assert_eq!(
+        sites[1].refusal.as_ref().map(|refusal| refusal.reason),
+        Some(Reason::CapturesReassigned),
+        "{planned:?}"
+    );
+    let built = builder
+        .build_graph(&graph, &options)
+        .expect("build parallel-sites graph");
+    assert_eq!(planned, built.parallel_sites);
+}

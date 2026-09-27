@@ -33,7 +33,7 @@ pub enum StepBudget {
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 33;
+pub const PROTOCOL_VERSION: u32 = 34;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -561,6 +561,19 @@ pub enum Request {
         profile: NativeProfile,
         source_view: SourceView,
     },
+    /// What every `parallelMap` site in this entry's native build would decide, without
+    /// compiling it: `kiln check --explain-parallel`. The daemon runs the build's own selection
+    /// and emission for `profile` and stops before the C compiler, so the answer is the one
+    /// `kiln build --explain-parallel` gives for the same profile. Answers
+    /// [`Response::ParallelExplained`].
+    ExplainParallel {
+        path: String,
+        project_root: String,
+        /// Enable the typed Node resolver and native runtime-module materializers.
+        node: bool,
+        profile: NativeProfile,
+        source_view: SourceView,
+    },
     /// Emit, compile, link, and execute one module through the native backend.
     NativeRun {
         path: String,
@@ -640,6 +653,10 @@ pub enum Response {
         current_revision: u64,
     },
     NativeSharedBuilt(NativeSharedLibrarySummary),
+    /// The `parallel:` section of the explanation, rendered as `kiln build --explain` prints it.
+    ParallelExplained {
+        text: String,
+    },
     NativeRan(NativeRunSummary),
     Tested(TestSummary),
     TestInventory(Vec<TestInventoryEntry>),
@@ -968,7 +985,7 @@ mod tests {
 
     #[test]
     fn current_protocol_run_step_budget_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 33);
+        assert_eq!(PROTOCOL_VERSION, 34);
 
         let requests = [
             (
@@ -1076,6 +1093,22 @@ mod tests {
                     "static_link": false,
                     "pgo_generate": null,
                     "pgo_use": null
+                }}),
+            ),
+            (
+                Request::ExplainParallel {
+                    path: "report.ts".to_owned(),
+                    project_root: "/project".to_owned(),
+                    node: false,
+                    profile: NativeProfile::Release,
+                    source_view: SourceView(4),
+                },
+                serde_json::json!({"ExplainParallel": {
+                    "path": "report.ts",
+                    "project_root": "/project",
+                    "node": false,
+                    "profile": "Release",
+                    "source_view": 4
                 }}),
             ),
             (

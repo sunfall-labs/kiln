@@ -590,8 +590,24 @@ fn native_output_path(
         .ok_or_else(|| Error::BadInput(format!("path is not valid UTF-8: {}", output.display())))
 }
 
-/// Check one file: push its current contents, ask for its summary, report the cost.
+/// The everyday `kiln check`: [`check_explaining`] without the parallel report.
+#[cfg(test)]
 pub fn check(backend: &mut dyn Backend, path: &Path, root: &Path, node: bool) -> Result<Output> {
+    check_explaining(backend, path, root, node, None)
+}
+
+/// Check one file: push its current contents, ask for its summary, report the cost. With
+/// `explain_parallel`, then append the `parallelMap` report of the native build at that profile
+/// (`kiln check --explain-parallel`), asked at the same source view the check answered.
+/// The daemon stops that build after emission, so nothing is compiled; a file with diagnostics
+/// gets no report, since there is no build to explain.
+pub fn check_explaining(
+    backend: &mut dyn Backend,
+    path: &Path,
+    root: &Path,
+    node: bool,
+    explain_parallel: Option<NativeProfile>,
+) -> Result<Output> {
     let display = path.display().to_string();
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
@@ -644,8 +660,25 @@ pub fn check(backend: &mut dyn Backend, path: &Path, root: &Path, node: bool) ->
         };
         render::diagnostic(&display, diagnostic, src)
     }));
+    let mut text = render::check(&display, &summary, &work, after.revision, elapsed);
+    if let Some(profile) = explain_parallel
+        && summary.diagnostics.is_empty()
+    {
+        let root_text = project_root_string(root)?;
+        match backend.explain_parallel_at_view(canonical, root_text, node, profile, source_view)? {
+            SourceResponse::Ready(section) => {
+                text.push_str(&render::parallel_explanation_only(&format!("\n{section}")));
+            }
+            SourceResponse::Stale(current) => {
+                return Err(Error::Protocol(format!(
+                    "sources changed during `kiln check --explain-parallel` (view {}); run it again",
+                    current.0
+                )));
+            }
+        }
+    }
     Ok(Output {
-        text: render::check(&display, &summary, &work, after.revision, elapsed),
+        text,
         error_text: String::new(),
         notes,
         exit_code: if summary.diagnostics.is_empty() { 0 } else { 1 },
@@ -1437,6 +1470,7 @@ mod tests {
                     Request::NativeBuild { .. } => "NativeBuild",
                     Request::NativeBuildAtRevision { .. } => "NativeBuildAtRevision",
                     Request::NativeSharedBuild { .. } => "NativeSharedBuild",
+                    Request::ExplainParallel { .. } => "ExplainParallel",
                     Request::NativeRun { .. } => "NativeRun",
                     Request::Test { .. } => "Test",
                     Request::TestInventory { .. } => "TestInventory",

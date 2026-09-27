@@ -380,10 +380,20 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             }
             report(built)
         }
-        Command::Check { path, node } => {
+        Command::Check {
+            path,
+            node,
+            explain_parallel,
+        } => {
             let node = auto_node(node);
             let mut backend = open(one_shot, &socket)?;
-            report(commands::check(backend.as_mut(), &path, &root, node)?)
+            report(commands::check_explaining(
+                backend.as_mut(),
+                &path,
+                &root,
+                node,
+                explain_parallel,
+            )?)
         }
         Command::Test {
             path,

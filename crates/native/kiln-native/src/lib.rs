@@ -478,6 +478,26 @@ fn dce_release_graph_to_fixpoint(
     Ok((graph, demand))
 }
 
+/// Every `parallelMap` site of a build and its decision, per module (its project-relative path;
+/// `<main>` for a single-program build), as `NativeBuildReport::parallel_sites` holds them.
+pub type ParallelSites = Vec<(String, Vec<kiln_backend_c::parallel::SiteRecord>)>;
+
+/// How far a build goes: to the executable, or to the end of emission, which is as far as
+/// anything needs to go to know what each `parallelMap` site decided.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BuildUntil {
+    Executable,
+    Emitted,
+}
+
+/// What a build that went [`BuildUntil`] somewhere produced. Made once per build and returned
+/// straight away, so the size of the larger variant costs nothing worth a box.
+#[allow(clippy::large_enum_variant)]
+enum Built {
+    Executable(NativeBuildReport),
+    Emitted(ParallelSites),
+}
+
 /// The `parallelMap` site records the emitter wrote into one generated module (all of its
 /// chunks), for `NativeBuildReport::parallel_sites`.
 fn parallel_sites_of(
@@ -961,6 +981,33 @@ impl NativeBuilder {
         program: &Program,
         options: &NativeBuildOptions,
     ) -> Result<NativeBuildReport, NativeError> {
+        match self.build_until(program, options, BuildUntil::Executable)? {
+            Built::Executable(report) => Ok(report),
+            Built::Emitted(_) => unreachable!("a build to the executable returns one"),
+        }
+    }
+
+    /// Every `parallelMap` site [`Self::build`] would lower and what it decided, without
+    /// compiling or linking: `kiln check --explain-parallel`. The build itself runs up to the
+    /// end of emission (through the same generated-C cache) and stops there, so the answer is
+    /// the one `kiln build --explain-parallel` reads off the C it compiles, by construction.
+    pub fn parallel_sites(
+        &self,
+        program: &Program,
+        options: &NativeBuildOptions,
+    ) -> Result<ParallelSites, NativeError> {
+        match self.build_until(program, options, BuildUntil::Emitted)? {
+            Built::Emitted(sites) => Ok(sites),
+            Built::Executable(report) => Ok(report.parallel_sites),
+        }
+    }
+
+    fn build_until(
+        &self,
+        program: &Program,
+        options: &NativeBuildOptions,
+        until: BuildUntil,
+    ) -> Result<Built, NativeError> {
         let total_started = Instant::now();
         let emit_started = Instant::now();
         let mut emission = options.realm.emission_executable();
@@ -994,6 +1041,9 @@ impl NativeBuilder {
                 vec![("<main>".to_owned(), sites)]
             }
         };
+        if until == BuildUntil::Emitted {
+            return Ok(Built::Emitted(parallel_sites));
+        }
         let launcher = launcher_source(&module.symbol)?;
         let emit_elapsed = emit_started.elapsed();
         let runtime = runtime_source();
@@ -1111,7 +1161,7 @@ impl NativeBuilder {
             if let Lookup::Hit(artifact) = self.lookup(&candidate_executable_key)? {
                 debug_assert_eq!(artifact.digest, Digest::hash(&artifact.bytes));
                 materialize(&options.output, &artifact.bytes, true)?;
-                return Ok(NativeBuildReport {
+                return Ok(Built::Executable(NativeBuildReport {
                     output: options.output.clone(),
                     module_symbol: module.symbol,
                     tool: identity,
@@ -1149,7 +1199,7 @@ impl NativeBuilder {
                     provider_capabilities,
                     required_provider_capabilities,
                     parallel_sites,
-                });
+                }));
             }
         }
 
@@ -1294,7 +1344,7 @@ impl NativeBuilder {
         debug_assert_eq!(executable_digest, Digest::hash(&executable));
         materialize(&options.output, &executable, true)?;
 
-        Ok(NativeBuildReport {
+        Ok(Built::Executable(NativeBuildReport {
             output: options.output.clone(),
             module_symbol: module.symbol,
             tool: identity,
@@ -1332,7 +1382,7 @@ impl NativeBuilder {
             provider_capabilities,
             required_provider_capabilities,
             parallel_sites,
-        })
+        }))
     }
 
     /// Build one scalar bytecode module as a shared library for an embedding host.
@@ -2237,6 +2287,31 @@ impl NativeBuilder {
         graph: &ModuleGraph,
         options: &NativeBuildOptions,
     ) -> Result<NativeBuildReport, NativeError> {
+        match self.build_graph_until(graph, options, BuildUntil::Executable)? {
+            Built::Executable(report) => Ok(report),
+            Built::Emitted(_) => unreachable!("a build to the executable returns one"),
+        }
+    }
+
+    /// [`Self::parallel_sites`] for a module graph: the same selection, reduction and
+    /// emission as [`Self::build_graph`], stopped before anything is compiled.
+    pub fn parallel_sites_graph(
+        &self,
+        graph: &ModuleGraph,
+        options: &NativeBuildOptions,
+    ) -> Result<ParallelSites, NativeError> {
+        match self.build_graph_until(graph, options, BuildUntil::Emitted)? {
+            Built::Emitted(sites) => Ok(sites),
+            Built::Executable(report) => Ok(report.parallel_sites),
+        }
+    }
+
+    fn build_graph_until(
+        &self,
+        graph: &ModuleGraph,
+        options: &NativeBuildOptions,
+        until: BuildUntil,
+    ) -> Result<Built, NativeError> {
         let native_plan = native_graph_plan(graph)?;
         let total_started = Instant::now();
         let emit_started = Instant::now();
@@ -2338,6 +2413,9 @@ impl NativeBuilder {
                 (!sites.is_empty()).then(|| (path.clone(), sites))
             })
             .collect();
+        if until == BuildUntil::Emitted {
+            return Ok(Built::Emitted(parallel_sites));
+        }
         let (bootstrap, bootstrap_program, bootstrap_generated_c_hit) =
             native_builtin_bootstrap_module(
                 &self.cache,
@@ -2618,7 +2696,7 @@ impl NativeBuilder {
                     });
                 }
                 let total_elapsed = total_started.elapsed();
-                return Ok(NativeBuildReport {
+                return Ok(Built::Executable(NativeBuildReport {
                     output: options.output.clone(),
                     module_symbol: modules[0].1.symbol.clone(),
                     tool: identity,
@@ -2653,7 +2731,7 @@ impl NativeBuilder {
                     provider_capabilities,
                     required_provider_capabilities,
                     parallel_sites,
-                });
+                }));
             }
         }
 
@@ -2830,7 +2908,7 @@ impl NativeBuilder {
                     path: graph.entry().to_path_buf(),
                 })
             })?;
-        Ok(NativeBuildReport {
+        Ok(Built::Executable(NativeBuildReport {
             output: options.output.clone(),
             module_symbol: entry_symbol,
             tool: identity,
@@ -2868,7 +2946,7 @@ impl NativeBuilder {
             provider_capabilities,
             required_provider_capabilities,
             parallel_sites,
-        })
+        }))
     }
 
     /// Build and execute a module graph with captured output.

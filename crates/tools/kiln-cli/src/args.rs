@@ -52,6 +52,10 @@ pub enum Command {
     Check {
         path: PathBuf,
         node: bool,
+        /// `--explain-parallel`: after the check, report every `parallelMap` site of the native
+        /// build at this profile and what it decided, from the build's own emission (stopped
+        /// before the C compiler). `None` without the flag.
+        explain_parallel: Option<NativeProfile>,
     },
     Run {
         path: PathBuf,
@@ -344,9 +348,9 @@ where
             "--node cannot be combined with `kiln test --parse-only`",
         ));
     }
-    if profile.is_some() && name != "build" && !native {
+    if profile.is_some() && name != "build" && !native && !(name == "check" && explain_parallel) {
         return Err(Error::usage(
-            "--profile only applies to native `kiln run` or `kiln build`",
+            "--profile only applies to native `kiln run`, `kiln build`, or `kiln check --explain-parallel`",
         ));
     }
     if march_native && name != "build" && !native {
@@ -398,9 +402,9 @@ where
             "--no-kiln-extensions cannot be combined with `kiln build --shared`",
         ));
     }
-    if explain_parallel && name != "build" {
+    if explain_parallel && name != "build" && name != "check" {
         return Err(Error::usage(
-            "--explain-parallel only applies to `kiln build`",
+            "--explain-parallel only applies to `kiln build` or `kiln check`",
         ));
     }
     // The native backend compiles the step counter out entirely, so a budget there would be a
@@ -415,6 +419,8 @@ where
         "check" => Command::Check {
             path: PathBuf::from(one_operand(&name, &mut positional)?),
             node,
+            // The default is `kiln build`'s, so the two explain the same build unless told not to.
+            explain_parallel: explain_parallel.then(|| profile.unwrap_or_default()),
         },
         "run" => {
             let Some(path) = positional.next() else {
@@ -664,6 +670,9 @@ options:
     --shared            with `build`, write a shared library for embedding
     --dry-run          with `cache gc`, report the sweep without deleting anything
     --output <path>    with `build`, write the native executable or shared library here
+    --explain-parallel with `build` or `check`, report every parallelMap call site and whether
+                       it runs in parallel, or the rule that kept it sequential.
+                       `check` answers without compiling; --profile picks the build
     --out <path>       with `test`, write schema-1 conformance results here
     --profile <name>   native-dev, native-check, native-release, native-release-size,
                        or native-profile (native-profile is native-release plus gprof
@@ -722,6 +731,7 @@ mod tests {
             Command::Check {
                 path: PathBuf::from("a.js"),
                 node: false,
+                explain_parallel: None,
             }
         );
     }
@@ -1038,6 +1048,7 @@ mod tests {
             Command::Check {
                 path: PathBuf::from("--weird-name.js"),
                 node: false,
+                explain_parallel: None,
             }
         );
     }
@@ -1153,7 +1164,35 @@ mod tests {
     }
 
     #[test]
-    fn explain_parallel_option_parses_for_build_only() {
+    fn explain_parallel_option_parses_for_check_with_builds_profile() {
+        let check = |args: &[&str]| match run(args).command {
+            Command::Check {
+                explain_parallel, ..
+            } => explain_parallel,
+            other => panic!("expected check, got {other:?}"),
+        };
+        assert_eq!(check(&["check", "a.ts"]), None);
+        assert_eq!(
+            check(&["check", "a.ts", "--explain-parallel"]),
+            Some(NativeProfile::default())
+        );
+        assert_eq!(
+            check(&[
+                "check",
+                "a.ts",
+                "--explain-parallel",
+                "--profile",
+                "native-release"
+            ]),
+            Some(NativeProfile::Release)
+        );
+        assert!(
+            usage_error(&["check", "a.ts", "--profile", "native-release"]).contains("--profile")
+        );
+    }
+
+    #[test]
+    fn explain_parallel_option_parses_for_build_and_check() {
         let Command::Build {
             explain,
             explain_parallel,
@@ -1165,7 +1204,7 @@ mod tests {
         assert!(explain_parallel);
         assert!(!explain);
         assert!(usage_error(&["run", "a.js", "--explain-parallel"]).contains("only applies"));
-        assert!(usage_error(&["check", "a.js", "--explain-parallel"]).contains("only applies"));
+        assert!(usage_error(&["test", "dir", "--explain-parallel"]).contains("only applies"));
     }
 
     #[test]
