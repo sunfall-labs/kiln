@@ -54,7 +54,7 @@ fn concurrent_misses_for_one_native_object_compile_once_and_share_the_cached_byt
     let root = TestDirectory::new("kiln-native-object-single-flight");
     let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
     let source = b"int kiln_single_flight_probe(void) { return 17; }\n";
-    let key = object_single_flight_key(&builder, &source);
+    let key = object_single_flight_key(&builder, source);
     let barrier = Barrier::new(CALLERS);
     let root_path = &root.path;
 
@@ -64,7 +64,6 @@ fn concurrent_misses_for_one_native_object_compile_once_and_share_the_cached_byt
                 let builder = &builder;
                 let barrier = &barrier;
                 let key = &key;
-                let source = &source;
                 scope.spawn(move || {
                     let caller = root_path.join(format!("caller-{index}"));
                     fs::create_dir_all(&caller).expect("create caller work directory");
@@ -157,9 +156,9 @@ fn failed_native_object_compile_releases_its_bucket_for_retry() {
     let root = TestDirectory::new("kiln-native-object-lock-retry");
     let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
     let source = b"int kiln_retry_probe(void) { return 23; }\n";
-    let key = object_single_flight_key(&builder, &source);
+    let key = object_single_flight_key(&builder, source);
     let source_path = root.path.join("probe.c");
-    fs::write(&source_path, &source).expect("write retry source");
+    fs::write(&source_path, source).expect("write retry source");
     let failed_object_path = root.path.join("failed.o");
     fs::create_dir(&failed_object_path).expect("make the first compiler output path invalid");
 
@@ -167,7 +166,7 @@ fn failed_native_object_compile_releases_its_bucket_for_retry() {
         builder
             .object(
                 &key,
-                &source,
+                source,
                 &source_path,
                 &failed_object_path,
                 &CompileOptions::default(),
@@ -179,7 +178,7 @@ fn failed_native_object_compile_releases_its_bucket_for_retry() {
     let (_, _, hit, _) = builder
         .object(
             &key,
-            &source,
+            source,
             &source_path,
             &root.path.join("retry.o"),
             &CompileOptions::default(),
