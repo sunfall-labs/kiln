@@ -472,11 +472,17 @@ pub fn accessor_names(program: &Program) -> std::collections::HashSet<String> {
 ///    write to a capture, no global, no `this`, no `arguments`.
 /// 5. Reads: `o.name` and `o[key]`, through the guarded readers in `prelude_types.h`; a name the
 ///    module defines as an accessor, or `__proto__`, refuses here ([`Reason::ReadsAccessor`]).
-///    `Math.<constant>` is the constant. No write, no allocation, no call other than a listed
-///    `Math` function and `String.prototype.charCodeAt`.
-/// 6. Every reachable `return` has a value, and none is proven a string or an object (what the
-///    answer must be -- a number for `map` and `reduce`, anything for `filter` -- is checked per
-///    element).
+///    `Math.<constant>` is the constant. No write, and no call other than a listed `Math`
+///    function, `String.prototype.charCodeAt` and `String(x)`.
+/// 6. Every reachable `return` has a value. One proven a string, an object or a function is
+///    recorded ([`HeapShape::answers_value`]): `map`, `filter` and `flatMap` keep it, and the
+///    site of `parallelReduce` or `parallelSort` refuses.
+/// 7. Tier 3 (parallel issue 08): allocation of what a worker builds in its arena -- object
+///    literals of at most [`PARALLEL_OBJECT_MEMBERS`] members whose constant names are plain
+///    ([`plain_member_name`]; computed ones are checked per element), `{ ...r }` and the members
+///    defined after it, array literals of at most [`PARALLEL_ARRAY_ELEMENTS`] elements,
+///    `String(x)` (a template's substitutions) and `+` on strings. A closure or a cell refuses
+///    ([`Reason::Allocates`]).
 pub fn heap_verdict(
     graph: &FunctionGraph,
     proto: &FunctionProto,
