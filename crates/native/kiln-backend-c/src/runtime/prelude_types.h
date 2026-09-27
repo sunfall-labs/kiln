@@ -1811,6 +1811,11 @@ static KILN_ALWAYS_INLINE inline uint32_t kiln_c99_gc_payload_kind(const void *p
 static inline const uint32_t *kiln_c99_recv_row(const kiln_shape **shapes, const uint32_t *slots,
                                                 size_t columns, const kiln_shape *shape) {
     size_t j;
+    /* No shape, no row. An unclaimed row's key is NULL too, and its columns are not slots: a
+     * receiver whose shape word reads NULL -- a `Date`, whose payload is not a shaped object --
+     * matched the first empty row and read `slots[UINT32_MAX]` (`Date.prototype[Symbol.
+     * toPrimitive]` reading `this.valueOf`, parallel-builtins issue 18). */
+    if (shape == NULL) return NULL;
     for (j = 0; j < 4; ++j) {
         const kiln_shape *row_shape = kiln_c99_slot_key(&shapes[j]);
         if (row_shape == shape) return slots + j * columns;
