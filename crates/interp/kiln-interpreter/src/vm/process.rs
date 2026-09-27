@@ -57,6 +57,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             other => other,
         };
         process.set("platform", Value::String(platform.to_owned().into()));
+        process.set("pid", Value::Number(f64::from(std::process::id())));
         process.set("version", Value::String("v22.0.0".to_owned().into()));
         process.set(
             "versions",

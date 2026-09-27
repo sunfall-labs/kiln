@@ -4078,6 +4078,9 @@ pub struct Realm<M = WorkId, T = WorkId> {
     phase: Phase,
     cancelled_timers: HashSet<TimerId, SequenceBuild>,
     active_timers: HashSet<TimerId, SequenceBuild>,
+    /// Whether a process warning has been written, after which node leaves off its
+    /// `--trace-warnings` hint.
+    warned: bool,
     _not_send: PhantomData<Rc<()>>,
 }
 
@@ -4133,6 +4136,7 @@ impl<M, T> Realm<M, T> {
             timers: TimerQueue::new(),
             io: VecDeque::new(),
             immediates: VecDeque::new(),
+            warned: false,
             // The finished end of a turn, so the first question starts one.
             phase: Phase::Check { remaining: 0 },
             cancelled_timers: HashSet::default(),
@@ -4213,6 +4217,57 @@ impl<M, T> Realm<M, T> {
     /// Removes the oldest queued microtask for execution by the realm owner.
     pub fn pop_microtask(&mut self) -> Option<M> {
         self.microtasks.pop_front()
+    }
+
+    /// Node's delay for `setTimeout` and `setInterval` (`lib/internal/timers.js`), and the
+    /// warning it writes: anything but a number of milliseconds from 1 to 2^31 - 1 is 1 ms, and
+    /// a NaN, a negative number or one too large says so on stderr. No delay at all (`undefined`)
+    /// is 1 ms without a word. Both engines ask this before arming a timer, so a zero-delay
+    /// timeout lands behind a 1 ms one armed first, as it does in node.
+    pub fn node_timer_delay(&mut self, requested_ms: Option<f64>) -> (Duration, Option<String>) {
+        const TIMEOUT_MAX_MS: f64 = 2_147_483_647.0;
+        let Some(after) = requested_ms else {
+            return (Duration::from_millis(1), None);
+        };
+        if (1.0..=TIMEOUT_MAX_MS).contains(&after) {
+            return (duration_from_milliseconds(after), None);
+        }
+        let spelled = || {
+            let mut digits = [0u8; kiln_number_core::MAX_FORMATTED_LEN];
+            let written = kiln_number_core::format_number(after, &mut digits).unwrap_or(0);
+            String::from_utf8_lossy(&digits[..written]).into_owned()
+        };
+        let warning = if after.is_nan() {
+            Some(("TimeoutNaNWarning", "NaN is not a number.".to_owned()))
+        } else if after > TIMEOUT_MAX_MS {
+            Some((
+                "TimeoutOverflowWarning",
+                format!("{} does not fit into a 32-bit signed integer.", spelled()),
+            ))
+        } else if after < 0.0 {
+            Some((
+                "TimeoutNegativeWarning",
+                format!("{} is a negative number.", spelled()),
+            ))
+        } else {
+            None
+        };
+        let warning = warning.map(|(name, message)| {
+            self.process_warning(name, &format!("{message}\nTimeout duration was set to 1."))
+        });
+        (Duration::from_millis(1), warning)
+    }
+
+    /// A process warning as node's default `warning` listener writes it to stderr: the
+    /// `--trace-warnings` hint follows the first one only.
+    pub fn process_warning(&mut self, name: &str, message: &str) -> String {
+        let mut text = format!("(node:{}) {name}: {message}\n", std::process::id());
+        if !std::mem::replace(&mut self.warned, true) {
+            text.push_str(
+                "(Use `node --trace-warnings ...` to show where the warning was created)\n",
+            );
+        }
+        text
     }
 
     /// Schedules a one-shot timer relative to the realm's current virtual time.

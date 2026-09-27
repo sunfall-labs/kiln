@@ -26,9 +26,39 @@ pub struct PromiseState {
     pub(super) settled: Option<Settled>,
     /// Reactions registered while still pending, in the order `then` was called.
     pub(super) reactions: Vec<Reaction>,
-    /// Whether a rejection has somewhere to go. A promise rejected with nothing attached is a
-    /// silent failure, which is worth reporting rather than dropping.
+    /// Whether a rejection has somewhere to go: the specification's [[PromiseIsHandled]].
     pub(super) handled: bool,
+    /// Where a rejection that nothing handled stands in node's tracking.
+    pub(super) rejection: RejectionReport,
+}
+
+/// Where a promise that rejected with nothing attached stands in node's unhandled-rejection
+/// tracking (`kiln-builtins/src/rejections.ts`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum RejectionReport {
+    /// Never rejected unhandled, or handled before its checkpoint ended.
+    #[default]
+    None,
+    /// Queued for the end of this checkpoint, unless something handles it first.
+    Waiting,
+    /// Handed to the tracking, so a handler attached now is `rejectionHandled`.
+    Reported,
+}
+
+/// The rejections a checkpoint has to report, beside the tracking that reports them.
+///
+/// One per realm session, like the job queues: a promise settled by one module's machine is
+/// reported by whichever machine ends the checkpoint.
+#[derive(Debug, Default)]
+pub(super) struct Rejections {
+    /// Promises rejected with nothing attached, in order, with their reasons. An entry whose
+    /// promise is no longer `Waiting` was handled in time and is skipped.
+    pub(super) rejected: Vec<(Rc<PromiseData>, Value)>,
+    /// `Reported` promises something has handled since.
+    pub(super) handled: Vec<Rc<PromiseData>>,
+    /// The shared tracking's entry point, registered by the realm bootstrap. Without one (a realm
+    /// with no bootstrap) the first rejection is reported as an uncaught exception.
+    pub(super) process: Option<Value>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -179,6 +209,7 @@ impl PromiseState {
                 settled: None,
                 reactions: Vec::new(),
                 handled: false,
+                rejection: RejectionReport::None,
             }),
             properties: RefCell::new(ObjectData::default()),
         })

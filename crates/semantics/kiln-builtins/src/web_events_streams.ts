@@ -110,6 +110,42 @@ delete (globalThis as any).__kilnQueueIo;
   const kDetail = Symbol("detail");
   const BUBBLES = 1, CANCELABLE = 2, COMPOSED = 4, DEFAULT_PREVENTED = 8, STOP = 16, STOP_IMMEDIATE = 32;
 
+  // Node's `util.inspect` spelling of a string (`strEscape`): single quotes unless the text has
+  // one, control characters escaped.
+  function inspectString(text: string): string {
+    let quote = "'";
+    if (text.includes("'")) {
+      if (!text.includes('"')) quote = '"';
+      else if (!text.includes("`") && !text.includes("${")) quote = "`";
+    }
+    let out = quote;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      const code = text.charCodeAt(i);
+      if (ch === quote || ch === "\\") out += "\\" + ch;
+      else if (code === 8) out += "\\b";
+      else if (code === 9) out += "\\t";
+      else if (code === 10) out += "\\n";
+      else if (code === 12) out += "\\f";
+      else if (code === 13) out += "\\r";
+      else if (code < 0x20 || code === 0x7f) out += "\\x" + (code < 16 ? "0" : "") + code.toString(16).toUpperCase();
+      else out += ch;
+    }
+    return out + quote;
+  }
+
+  // `util.inspect` of a flat object of primitives as node lays it out: on one line when it fits
+  // in `breakLength` (80 by default), with node's allowance for the braces and separators, and
+  // one entry a line otherwise.
+  function inspectFlat(entries: string[], options: any): string {
+    const breakLength = options && typeof options.breakLength === "number" ? options.breakLength : 80;
+    let total = entries.length + entries.length + 15;
+    for (const entry of entries) total += entry.length;
+    return total <= breakLength
+      ? "{ " + entries.join(", ") + " }"
+      : "{\n  " + entries.join(",\n  ") + "\n}";
+  }
+
   function eventThis(value: any): void {
     if (value === null || value === undefined || typeof value[kType] !== "string") {
       throw typeError("Value of \"this\" must be of type Event", "ERR_INVALID_THIS");
@@ -166,6 +202,19 @@ delete (globalThis as any).__kilnQueueIo;
       this.#flags = (this.#flags & ~(BUBBLES | CANCELABLE)) | (bubbles ? BUBBLES : 0) | (cancelable ? CANCELABLE : 0);
     }
     get [Symbol.toStringTag](): string { return "Event"; }
+
+    // Node's `util.inspect.custom`: the class and the four fields node shows.
+    [Symbol.for("nodejs.util.inspect.custom")](depth: number, options: any): string {
+      const name = this.constructor.name;
+      if (depth < 0) return name;
+      const timeStamp = this.#timeStamp;
+      return name + " " + inspectFlat([
+        "type: " + inspectString(this[kType]),
+        "defaultPrevented: " + this.defaultPrevented,
+        "cancelable: " + this.cancelable,
+        "timeStamp: " + (Object.is(timeStamp, -0) ? "-0" : String(timeStamp)),
+      ], options);
+    }
 
     static {
       dispatchTo = (target: any, event: Event, list: Listener[] | undefined): boolean => {

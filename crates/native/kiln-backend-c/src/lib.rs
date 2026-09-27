@@ -4733,6 +4733,17 @@ pub(crate) fn host_op_code(operation: HostOp) -> u16 {
     operation as u16
 }
 
+/// The call that reduces a host call's argument when it cannot cross the boundary, up to its
+/// operand: a console write shows it as node's console does, `util.inspect.custom` included;
+/// anything else as its plain inspection.
+pub(crate) fn host_argument_inspection(operation: HostOp) -> &'static str {
+    if matches!(operation, HostOp::WriteStdout | HostOp::WriteStderr) {
+        "kiln_c99_console_inspect(host, "
+    } else {
+        "kiln_c99_inspect("
+    }
+}
+
 mod identity;
 use identity::*;
 #[cfg(test)]

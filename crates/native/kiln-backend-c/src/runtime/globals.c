@@ -201,9 +201,16 @@ static int kiln_c99_process_object(kiln_value *out) {
         if (status == KILN_C99_OK)
             status = kiln_c99_put(NULL, *process, "release", 7, release, 0, NULL);
     }
-    if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, *process, "pid", 3,
-                              kiln_c99_number(1.0), 0, NULL);
+    /* The process's own, as the interpreter's is and as a process warning's `(node:<pid>)` says
+     * it (`Realm::process_warning`); 1 where there is no POSIX `getpid`. */
+    if (status == KILN_C99_OK) {
+#if defined(__unix__) || defined(__APPLE__)
+        double pid = (double)getpid();
+#else
+        double pid = 1.0;
+#endif
+        status = kiln_c99_put(NULL, *process, "pid", 3, kiln_c99_number(pid), 0, NULL);
+    }
     /* `process.features`, the same nine flags the interpreter answers (node has a longer list,
      * and these nine agree with it where kiln has the feature). */
     if (status == KILN_C99_OK) {
@@ -475,6 +482,8 @@ static int kiln_c99_global_object(kiln_value *out) {
                      /* Message delivery's checkpoint question, captured the same way. */
                      {"__kilnJobsPending", KILN_C99_METHOD_JOBS_PENDING_RAW},
                      {"__kilnQueueIo", KILN_C99_METHOD_QUEUE_IO_RAW},
+                     /* Node's unhandled-rejection tracking registers itself through this. */
+                     {"__kilnPromiseRejections", KILN_C99_METHOD_PROMISE_REJECTIONS_RAW},
                      /* `Buffer.prototype.toString`'s decoder, captured by the shared Buffer
                       * bootstrap (kiln-builtins/src/buffer.ts) without a call: the bootstrap
                       * runs in every Node-mode program, and a call into the Buffer group would

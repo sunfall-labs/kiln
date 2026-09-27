@@ -275,7 +275,7 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
     if (target.tag == KILN_VALUE_TYPED_ARRAY && index >= 0.0) {
         kiln_typed_array *view = kiln_c99_typed_array_of(target);
         if ((size_t)index < view->length) {
-            *out = kiln_c99_number(kiln_c99_typed_get(view, (size_t)index));
+            return kiln_c99_typed_element(view, (size_t)index, out);
         } else {
             *out = kiln_c99_undefined();
         }
@@ -366,6 +366,8 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
     }
     if (target.tag == KILN_VALUE_TYPED_ARRAY && index >= 0.0) {
         kiln_typed_array *view = kiln_c99_typed_array_of(target);
+        if (kiln_c99_typed_kind_is_bigint(view->kind))
+            return kiln_c99_typed_store(host, view, (size_t)index, value, depth, thrown);
         kiln_c99_typed_set(view, (size_t)index, kiln_c99_as_number(value));
         return KILN_C99_OK;
     }

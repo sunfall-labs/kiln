@@ -780,7 +780,11 @@ static kiln_value kiln_c99_text(kiln_value value) {
                 free(joined.bytes);
                 return kiln_c99_undefined();
             }
-            shown = kiln_c99_text(kiln_c99_number(kiln_c99_typed_get(view, index)));
+            if (kiln_c99_typed_element(view, index, &shown) != KILN_C99_OK) {
+                free(joined.bytes);
+                return kiln_c99_undefined();
+            }
+            shown = kiln_c99_text(shown);
             if (shown.tag != KILN_VALUE_STRING ||
                 kiln_c99_text_append(&joined, (const char *)kiln_string_latin1((const kiln_string *)shown.ptr),
                                      ((const kiln_string *)shown.ptr)->unit_len) != KILN_C99_OK) {

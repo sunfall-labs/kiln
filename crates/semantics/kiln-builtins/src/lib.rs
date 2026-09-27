@@ -1292,6 +1292,9 @@ pub const MAPUPSERT_BOOTSTRAP_SOURCE: &str = include_str!("mapupsert.ts");
 /// `Promise.try`, `Promise.allKeyed`, and `Promise.allSettledKeyed`.
 pub const PROMISE_BOOTSTRAP_SOURCE: &str = include_str!("promise.ts");
 
+/// Node's unhandled-rejection tracking over each engine's `__kilnPromiseRejections` hook.
+pub const REJECTIONS_BOOTSTRAP_SOURCE: &str = include_str!("rejections.ts");
+
 /// `Iterator` combinators (`concat`, `zip`, `zipKeyed`) and `Iterator.prototype` methods (`chunks`, `windows`, `join`, `[Symbol.dispose]`).
 pub const ITERATOR_BOOTSTRAP_SOURCE: &str = include_str!("iterator.ts");
 
@@ -1300,10 +1303,11 @@ pub const OBJECT_REFLECT_BOOTSTRAP_SOURCE: &str = include_str!("object_reflect.t
 
 /// Part of every realm's bootstrap, in both interpreter and native execution.
 /// Includes Date.prototype, %TypedArray%.prototype, Error subclasses, Annex B, DisposableStack,
-/// RegExp.prototype, ArrayBuffer/SharedArrayBuffer, structuredClone, Map.upsert, Promise extensions, Iterator extensions, and Object/Reflect extensions.
+/// RegExp.prototype, ArrayBuffer/SharedArrayBuffer, structuredClone, Map.upsert, Promise extensions, unhandled-rejection tracking, Iterator extensions, and Object/Reflect extensions.
 pub fn common_bootstrap_source() -> String {
-    format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+    // A list rather than a format string, so adding a source cannot leave the placeholders and
+    // the arguments out of step (two branches adding one each once merged into a mismatch).
+    [
         EXTENSIONS_BOOTSTRAP_SOURCE,
         DATE_BOOTSTRAP_SOURCE,
         TYPEDARRAY_BOOTSTRAP_SOURCE,
@@ -1316,9 +1320,11 @@ pub fn common_bootstrap_source() -> String {
         STRUCTURED_CLONE_BOOTSTRAP_SOURCE,
         MAPUPSERT_BOOTSTRAP_SOURCE,
         PROMISE_BOOTSTRAP_SOURCE,
+        REJECTIONS_BOOTSTRAP_SOURCE,
         ITERATOR_BOOTSTRAP_SOURCE,
         OBJECT_REFLECT_BOOTSTRAP_SOURCE,
-    )
+    ]
+    .join("\n")
 }
 
 #[cfg(test)]

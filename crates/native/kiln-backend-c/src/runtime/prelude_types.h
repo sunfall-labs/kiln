@@ -1632,6 +1632,10 @@ typedef struct kiln_reaction {
 
 typedef struct kiln_promise {
     int state;
+    /* [[PromiseIsHandled]], and where a rejection nothing handled stands in node's tracking
+     * (`KILN_C99_REJECTION_*`, promises.c). Both fit in the padding before `value`. */
+    unsigned char handled;
+    unsigned char rejection;
     kiln_value value;
     /* `inline_reaction` while at most one reaction waits -- the case for nearly every promise,
      * which one `await` or one `then` watches -- and a malloc'd array only past that. A pending
@@ -1644,6 +1648,13 @@ typedef struct kiln_promise {
     kiln_value properties;
     kiln_reaction inline_reaction;
 } kiln_promise;
+
+/* `kiln_promise.rejection`: never rejected unhandled (or handled in time); rejected with nothing
+ * attached and waiting for the end of the checkpoint; handed to node's tracking, so a handler
+ * attached now is `rejectionHandled`. */
+#define KILN_C99_REJECTION_NONE 0
+#define KILN_C99_REJECTION_WAITING 1
+#define KILN_C99_REJECTION_REPORTED 2
 
 #define KILN_C99_PENDING 0
 #define KILN_C99_FULFILLED 1

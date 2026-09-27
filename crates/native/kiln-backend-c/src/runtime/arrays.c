@@ -452,6 +452,67 @@ static double kiln_c99_typed_get(kiln_typed_array *view, size_t index) {
     return NAN;
 }
 
+/* Whether a view's elements are BigInts rather than Numbers. */
+static int kiln_c99_typed_kind_is_bigint(kiln_typed_kind kind) {
+    return kind == KILN_TYPED_BIG_INT64 || kind == KILN_TYPED_BIG_UINT64;
+}
+
+/* The eight bytes of element `index` of a view, little-endian as every view here is stored, or
+ * NULL past its end: the storage of a BigInt64Array or BigUint64Array element. */
+static uint8_t *kiln_c99_typed_bits_at(kiln_typed_array *view, size_t index) {
+    size_t at;
+    if (index >= view->length || view->byte_offset > view->buffer->byte_length ||
+        index > (((size_t)-1) - view->byte_offset) / 8) {
+        return NULL;
+    }
+    at = view->byte_offset + index * 8;
+    if (at > view->buffer->byte_length || 8 > view->buffer->byte_length - at) return NULL;
+    return view->buffer->bytes + at;
+}
+
+/* Element `index` as the language reads it: a BigInt from the two BigInt kinds, whose elements
+ * `kiln_c99_typed_get` has no double for, and a Number from the rest. */
+static int kiln_c99_typed_element(kiln_typed_array *view, size_t index, kiln_value *out) {
+    const uint8_t *bytes;
+    uint64_t bits = 0;
+    size_t shift;
+    if (!kiln_c99_typed_kind_is_bigint(view->kind)) {
+        *out = kiln_c99_number(kiln_c99_typed_get(view, index));
+        return KILN_C99_OK;
+    }
+    bytes = kiln_c99_typed_bits_at(view, index);
+    if (bytes == NULL) {
+        *out = kiln_c99_number(NAN);
+        return KILN_C99_OK;
+    }
+    for (shift = 0; shift < 8; ++shift) bits |= (uint64_t)bytes[shift] << (8 * shift);
+    return kiln_c99_u64_bigint(bits,
+                               view->kind == KILN_TYPED_BIG_INT64 && (bits >> 63) != 0, out);
+}
+
+/* Store a language value as element `index`: `ToBigInt` and the low sixty-four bits for the
+ * two BigInt kinds, `ToNumber` for the rest -- the conversion that can call back into the
+ * program, and throws for a Number stored into a BigInt view. */
+static int kiln_c99_typed_store(kiln_host *host, kiln_typed_array *view, size_t index,
+                                kiln_value value, int depth, kiln_value *thrown) {
+    uint8_t *bytes;
+    uint64_t bits;
+    size_t shift;
+    int status;
+    if (!kiln_c99_typed_kind_is_bigint(view->kind)) {
+        double number;
+        status = kiln_c99_to_number_checked(host, value, &number, depth, thrown);
+        if (status == KILN_C99_OK) kiln_c99_typed_set(view, index, number);
+        return status;
+    }
+    status = kiln_c99_to_bigint64_bits(host, value, &bits, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    bytes = kiln_c99_typed_bits_at(view, index);
+    if (bytes == NULL) return KILN_C99_OK;
+    for (shift = 0; shift < 8; ++shift) bytes[shift] = (uint8_t)(bits >> (8 * shift));
+    return KILN_C99_OK;
+}
+
 static void kiln_c99_typed_set(kiln_typed_array *view, size_t index, double value) {
     size_t width = kiln_c99_typed_width(view->kind);
     size_t at;
@@ -602,11 +663,30 @@ static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
     view->kind = kind;
     view->is_buffer = 0;
     for (index = 0; index < count; ++index) {
-        double item = source.tag == KILN_VALUE_ARRAY
-                          ? kiln_c99_as_number(kiln_val_to_boundary(kiln_c99_array_of(source)->elements[index]))
-                      : source.tag == KILN_VALUE_TYPED_ARRAY
-                          ? kiln_c99_typed_get(kiln_c99_typed_array_of(source), index)
-                          : 0.0;
+        double item;
+        if (kiln_c99_typed_kind_is_bigint(kind) ||
+            (source.tag == KILN_VALUE_TYPED_ARRAY &&
+             kiln_c99_typed_kind_is_bigint(kiln_c99_typed_array_of(source)->kind))) {
+            /* Either side a BigInt view: through the conversions that tell the two numeric
+             * types apart, and a TypeError where they meet. */
+            kiln_value element = kiln_c99_undefined();
+            int status = KILN_C99_OK;
+            if (source.tag == KILN_VALUE_ARRAY)
+                element = kiln_val_to_boundary(kiln_c99_array_of(source)->elements[index]);
+            else if (source.tag == KILN_VALUE_TYPED_ARRAY)
+                status = kiln_c99_typed_element(kiln_c99_typed_array_of(source), index, &element);
+            else
+                continue;
+            if (status == KILN_C99_OK)
+                status = kiln_c99_typed_store(NULL, view, index, element, 0, thrown);
+            if (status != KILN_C99_OK) return status;
+            continue;
+        }
+        item = source.tag == KILN_VALUE_ARRAY
+                   ? kiln_c99_as_number(kiln_val_to_boundary(kiln_c99_array_of(source)->elements[index]))
+               : source.tag == KILN_VALUE_TYPED_ARRAY
+                   ? kiln_c99_typed_get(kiln_c99_typed_array_of(source), index)
+                   : 0.0;
         kiln_c99_typed_set(view, index, item);
     }
     *out = kiln_c99_value(KILN_VALUE_TYPED_ARRAY, (uint64_t)(uintptr_t)view, NULL, 0);

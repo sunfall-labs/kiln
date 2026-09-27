@@ -203,6 +203,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_CLONE_DATA_RAW: return "__kilnCloneData";
     case KILN_C99_METHOD_JOBS_PENDING_RAW: return "__kilnJobsPending";
     case KILN_C99_METHOD_QUEUE_IO_RAW: return "__kilnQueueIo";
+    case KILN_C99_METHOD_PROMISE_REJECTIONS_RAW: return "__kilnPromiseRejections";
     case KILN_C99_METHOD_URL_SET_RAW: return "__kilnUrlSet";
     case KILN_C99_METHOD_URL_FAST_RAW: return "__kilnUrlFast";
     case KILN_C99_METHOD_URL_ADOPT_RAW: return "__kilnUrlAdopt";

@@ -81,7 +81,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             caught: None,
             fd_table: fs::VirtualFdTable::new(),
             uncaught_value: None,
-            unhandled: None,
+            rejections: Rejections::default(),
             module_suspension: None,
             module_completion: None,
             self_bindings: Vec::new(),

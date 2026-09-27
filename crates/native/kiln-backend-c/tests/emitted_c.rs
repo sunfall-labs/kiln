@@ -1025,8 +1025,10 @@ fn runtime_prelude_size() {
     // (+~140, most of it the comments saying what is per realm, per thread and per process).
     // Landed together on 2026-09-27: issue 15, realms issue 04 step 5 and step 3c (shapes record a
     // method's code) measure 52,312 lines as one tree; the three deltas are listed above.
+    // Realms issue 18 and 19 (2026-09-27): the promise's rejection tracking and its lane, the
+    // BigInt element reads and stores, and the console's `util.inspect.custom`: 52,748 lines.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 52_700;
+    const CEILING_LINES: usize = 53_000;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

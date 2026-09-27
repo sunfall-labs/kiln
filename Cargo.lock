@@ -1689,6 +1689,7 @@ dependencies = [
  "io-uring",
  "kiln-artifact-cache",
  "kiln-host-abi",
+ "kiln-number-core",
  "libc",
  "tokio",
  "tokio-metrics",

@@ -753,6 +753,9 @@ pub enum Native {
     /// `__kilnQueueIo(callback, argument)`: `callback(argument)` as an I/O callback, node's poll
     /// phase (`kiln_runtime::Realm::queue_io`), which is where a message port delivers.
     QueueIoRaw,
+    /// `__kilnPromiseRejections(process)`: registers the shared unhandled-rejection tracking
+    /// (`kiln-builtins/src/rejections.ts`), which the end of every microtask checkpoint calls.
+    PromiseRejectionsRaw,
     ArrayBufferIsView,
     /// `%TypedArray%`: the abstract constructor the nine view constructors inherit from.
     ///

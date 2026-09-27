@@ -834,6 +834,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             ("__kilnJobsPending", Native::JobsPendingRaw),
             // The poll phase's lane, where message delivery (the same file) is queued.
             ("__kilnQueueIo", Native::QueueIoRaw),
+            // Node's unhandled-rejection tracking registers itself here
+            // (`kiln-builtins/src/rejections.ts`).
+            ("__kilnPromiseRejections", Native::PromiseRejectionsRaw),
         ] {
             globals.set_non_enumerable(name, Value::Native(native, realm));
         }

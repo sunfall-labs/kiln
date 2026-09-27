@@ -59,6 +59,9 @@ enum Declaration {
     /// The program must run to completion and write exactly this.
     ExpectedStdout {
         expected: String,
+        /// The uncaught exception the program must end with, if any; see
+        /// [`crate::manifest::ManifestTest::expected_uncaught`].
+        uncaught: Option<String>,
         unavailable_reason: Option<String>,
         /// A host adapter without which this program cannot run at all; see
         /// [`crate::manifest::ManifestTest::requires_host`].
@@ -195,11 +198,16 @@ impl ConformanceTest {
             }],
             Declaration::ExpectedStdout {
                 expected,
+                uncaught,
                 unavailable_reason: None,
                 ..
             } => {
+                let expected = program::Expectation {
+                    stdout: expected,
+                    uncaught: uncaught.as_deref(),
+                };
                 if matches!(mode, RunMode::Node) {
-                    vec![program::run_node_against_expected_stdout(
+                    vec![program::run_node_against_expectation(
                         &self.path, expected, mode,
                     )]
                 } else {
@@ -226,6 +234,7 @@ impl ConformanceTest {
             features: test.features.clone(),
             declaration: Declaration::ExpectedStdout {
                 expected: test.expected_stdout.clone(),
+                uncaught: test.expected_uncaught.clone(),
                 unavailable_reason: resolution.unavailable_reason,
                 requires_host: test.requires_host.clone(),
             },

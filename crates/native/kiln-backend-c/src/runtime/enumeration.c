@@ -31,7 +31,9 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
         kiln_typed_array *view = kiln_c99_typed_array_of(source);
         /* Read each element at the moment it is visited: a view is live over its shared buffer. */
         for (index = 0; index < view->length; ++index) {
-            status = kiln_c99_array_push(target, kiln_c99_number(kiln_c99_typed_get(view, index)));
+            kiln_value element;
+            status = kiln_c99_typed_element(view, index, &element);
+            if (status == KILN_C99_OK) status = kiln_c99_array_push(target, element);
             if (status != KILN_C99_OK) {
                 return status;
             }

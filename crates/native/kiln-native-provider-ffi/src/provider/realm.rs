@@ -3999,16 +3999,24 @@ fn arm(
         let Some(work) = NativeWork::new(work, run, drop, matches!(arm, Arm::Interval(_))) else {
             return INVALID_ARGUMENT;
         };
-        let delay = |delay_ms: f64| {
-            if delay_ms.is_finite() && delay_ms > 0.0 {
-                duration_from_milliseconds(delay_ms)
-            } else {
-                std::time::Duration::ZERO
+        // Node's clamp, and its warning on this process's stderr.
+        let mut delay = |delay_ms: f64| {
+            let (delay, warning) = queue.node_timer_delay(Some(delay_ms));
+            if let Some(warning) = warning {
+                use std::io::Write as _;
+                let _ = std::io::stderr().write_all(warning.as_bytes());
             }
+            delay
         };
         let id = match arm {
-            Arm::Timeout(delay_ms) => queue.set_timeout(delay(delay_ms), work),
-            Arm::Interval(delay_ms) => queue.set_interval(delay(delay_ms), work),
+            Arm::Timeout(delay_ms) => {
+                let delay = delay(delay_ms);
+                queue.set_timeout(delay, work)
+            }
+            Arm::Interval(delay_ms) => {
+                let delay = delay(delay_ms);
+                queue.set_interval(delay, work)
+            }
             Arm::Immediate => queue.set_immediate(work),
             Arm::Io => queue.queue_io(work),
         };

@@ -435,6 +435,10 @@ typedef struct kiln_gc_heap {
      * realm's (Rust); this count is what `__kilnJobsPending` reads to answer "would a checkpoint
      * run anything now" without a call across the private ABI. */
     size_t next_ticks_queued;
+    /* Rejections waiting for the end of this checkpoint and reported rejections handled since:
+     * what the promise lane hands node's tracking once the queues are empty (promises.c). The
+     * lists themselves are realm slots, which the runtime already roots. */
+    size_t rejections_waiting;
     /* The realm context (ADR 0070, realms issue 04 step 5; `foundation.c`): the runtime's realm
      * state and every unit's module block, owned, marked and freed by this heap. */
     kiln_c99_realm_state realm;

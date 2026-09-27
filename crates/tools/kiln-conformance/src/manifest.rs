@@ -60,6 +60,10 @@ pub struct ManifestTest {
     pub requires_host: Option<String>,
     /// Exactly what the program must write, including its trailing newline.
     pub expected_stdout: String,
+    /// Text the report of the uncaught exception the program must end with contains -- node's
+    /// stderr summary line, for a program node ends with exit status 1 (an unhandled rejection,
+    /// say). Absent, the program must run to completion.
+    pub expected_uncaught: Option<String>,
 }
 
 /// Every test one manifest declares, together with the directory its paths resolve against.
@@ -279,6 +283,7 @@ fn read_test(table: &Table) -> Result<ManifestTest, UnlocatedError> {
         status: optional_string(table, "status")?.map(str::to_owned),
         requires_host: optional_string(table, "requires_host")?.map(str::to_owned),
         expected_stdout: required_string(table, "expected_stdout")?.to_owned(),
+        expected_uncaught: optional_string(table, "expected_uncaught")?.map(str::to_owned),
     })
 }
 

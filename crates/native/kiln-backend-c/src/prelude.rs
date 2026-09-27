@@ -1095,6 +1095,9 @@ method_ids! {
     // The realm's I/O lane, node's poll phase, where the same file queues a port's delivery;
     // the timer case of the generic dispatch, beside `setImmediate`.
     (KILN_C99_METHOD_QUEUE_IO_RAW, 535, Generic; 0, 0),
+    // Node's unhandled-rejection tracking registers itself here; captured and deleted by
+    // `kiln-builtins/src/rejections.ts`.
+    (KILN_C99_METHOD_PROMISE_REJECTIONS_RAW, 536, Direct; 0, 0),
     (KILN_C99_METHOD_PROCESS_EXIT, 513, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC, 514, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC, 515, Direct; 0, 0),
@@ -3711,6 +3714,7 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_CLONE_DATA_RAW),
     emit_method_define!(KILN_C99_METHOD_JOBS_PENDING_RAW),
     emit_method_define!(KILN_C99_METHOD_QUEUE_IO_RAW),
+    emit_method_define!(KILN_C99_METHOD_PROMISE_REJECTIONS_RAW),
     emit_method_define!(KILN_C99_METHOD_PROCESS_EXIT),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC),

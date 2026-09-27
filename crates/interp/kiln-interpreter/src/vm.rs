@@ -182,8 +182,8 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// A top-level throw captured for the graph loader before it is converted to an execution
     /// report. This remains inside the realm and never crosses the worker error boundary.
     pub(super) uncaught_value: Option<Value>,
-    /// A rejection that reached the end of the run with nothing attached to it.
-    pub(super) unhandled: Option<Value>,
+    /// The rejections this machine's checkpoint reports when it has no module session.
+    pub(super) rejections: Rejections,
     pub(super) module_suspension: Option<Rc<RefCell<ModuleSuspension>>>,
     pub(super) module_completion: Option<Rc<PromiseData>>,
     /// The cell a module's import of one of its own exports reads, beside the slot it shows.

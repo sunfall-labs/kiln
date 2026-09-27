@@ -34,7 +34,7 @@ const DIFF_EXCERPT_BYTES: usize = 160;
 /// corpus never observed.
 pub(crate) fn run_against_expected_stdout_with_worker(
     path: &Path,
-    expected: &str,
+    expected: Expectation<'_>,
     mode: RunMode,
     worker: Option<&mut InterpreterWorker>,
 ) -> VariantResult {
@@ -50,6 +50,34 @@ pub fn run_node_against_expected_stdout(
     expected: &str,
     mode: RunMode,
 ) -> VariantResult {
+    run_node_against_expectation(path, Expectation::stdout(expected), mode)
+}
+
+/// What a corpus program must do: write exactly `stdout`, and, when `uncaught` is set, end with
+/// an uncaught exception whose report contains it -- how node ends a program with exit status 1,
+/// which a recorded stdout alone cannot say.
+#[derive(Debug, Clone, Copy)]
+pub struct Expectation<'a> {
+    pub stdout: &'a str,
+    pub uncaught: Option<&'a str>,
+}
+
+impl<'a> Expectation<'a> {
+    /// A program that runs to completion and writes exactly `stdout`.
+    pub fn stdout(stdout: &'a str) -> Self {
+        Self {
+            stdout,
+            uncaught: None,
+        }
+    }
+}
+
+/// [`run_node_against_expected_stdout`] for a program that may be expected to fail.
+pub fn run_node_against_expectation(
+    path: &Path,
+    expected: Expectation<'_>,
+    mode: RunMode,
+) -> VariantResult {
     VariantResult {
         variant: Variant::Sloppy,
         result: if is_javascript_source(path) {
@@ -63,7 +91,7 @@ pub fn run_node_against_expected_stdout(
 /// Run a Node module through the production resolver, graph, linker, shared realm session, and
 /// Tokio-owned Adapter. Keeping this path in the corpus prevents a single-file test executor from
 /// becoming a second, easier-to-pass Node runtime that real programs never use.
-fn run_node_module(path: &Path, expected: &str, mode: RunMode) -> CaseResult {
+fn run_node_module(path: &Path, expected: Expectation<'_>, mode: RunMode) -> CaseResult {
     let started = Instant::now();
     if let Some(reason) = uninstalled_packages_requirement(path) {
         return skipped(&reason, started);
@@ -145,21 +173,20 @@ fn run_node_module(path: &Path, expected: &str, mode: RunMode) -> CaseResult {
     };
 
     let mut host = CaptureHost::new();
-    if let Err(error) = graph.execute_node(
-        &mut host,
-        ExecutionLimits::default(),
-        crate::source_compiler::capabilities(path.parent()),
-    ) {
-        let mut result = failed(DiagnosticPhase::Runtime, error.to_string(), started);
-        result.stdout = host.into_stdout();
-        return result;
-    }
-    judge_stdout(host.into_stdout(), expected, started)
+    let outcome = graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            crate::source_compiler::capabilities(path.parent()),
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string());
+    judge(outcome, host.into_stdout(), expected, started)
 }
 
 fn run_with_executor(
     path: &Path,
-    expected: &str,
+    expected: Expectation<'_>,
     mode: RunMode,
     node: bool,
     worker: Option<&mut InterpreterWorker>,
@@ -277,13 +304,44 @@ fn run_with_executor(
         )
         .map(|_| ())
     };
-    if let Err(error) = result {
-        let mut result = failed(DiagnosticPhase::Runtime, error.to_string(), started);
-        result.stdout = host.into_stdout();
-        return result;
-    }
+    judge(
+        result.map_err(|error| error.to_string()),
+        host.into_stdout(),
+        expected,
+        started,
+    )
+}
 
-    judge_stdout(host.into_stdout(), expected, started)
+/// How the run ended against how it was expected to: an uncaught exception is a failure unless
+/// the corpus recorded that one, as node's exit 1, and then the stdout before it is still judged.
+fn judge(
+    outcome: Result<(), String>,
+    stdout: String,
+    expected: Expectation<'_>,
+    started: Instant,
+) -> CaseResult {
+    match (outcome, expected.uncaught) {
+        (Err(error), Some(uncaught)) if error.contains(uncaught) => {}
+        (Err(error), _) => {
+            let mut result = failed(DiagnosticPhase::Runtime, error, started);
+            result.stdout = stdout;
+            return result;
+        }
+        (Ok(()), Some(uncaught)) => {
+            let mut result = failed(
+                DiagnosticPhase::Expectation,
+                format!(
+                    "expected the program to end with an uncaught exception reporting \
+                     `{uncaught}`, as node does, but it ran to completion"
+                ),
+                started,
+            );
+            result.stdout = stdout;
+            return result;
+        }
+        (Ok(()), None) => {}
+    }
+    judge_stdout(stdout, expected.stdout, started)
 }
 
 fn judge_stdout(stdout: String, expected: &str, started: Instant) -> CaseResult {
@@ -480,6 +538,14 @@ mod tests {
         mode: RunMode,
     ) -> VariantResult {
         on_a_program_stack(|| super::run_node_against_expected_stdout(path, expected, mode))
+    }
+
+    fn run_node_against_expectation(
+        path: &Path,
+        expected: Expectation<'_>,
+        mode: RunMode,
+    ) -> VariantResult {
+        on_a_program_stack(|| super::run_node_against_expectation(path, expected, mode))
     }
 
     #[test]
@@ -726,6 +792,46 @@ server.listen(0, '127.0.0.1', () => {
             "{parse_result:?}"
         );
         assert_eq!(result.result.outcome, Outcome::Pass, "{result:?}");
+    }
+
+    /// An expected uncaught exception is judged both ways: the recorded one passes, with the
+    /// stdout before it still compared, and a run that completes instead fails.
+    #[test]
+    fn an_expected_uncaught_exception_is_part_of_the_answer() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is after the epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "kiln-node-expected-uncaught-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("fixture directory is created");
+        let rejects = root.join("rejects.js");
+        let completes = root.join("completes.js");
+        fs::write(&rejects, "console.log(1);\nPromise.reject(new Error('boom'));\n")
+            .expect("fixture is written");
+        fs::write(&completes, "console.log(1);\n").expect("fixture is written");
+        let expected = Expectation {
+            stdout: "1\n",
+            uncaught: Some("Error: boom"),
+        };
+        let recorded = run_node_against_expectation(&rejects, expected, RunMode::Node);
+        let wrong_stdout = run_node_against_expectation(
+            &rejects,
+            Expectation {
+                stdout: "2\n",
+                ..expected
+            },
+            RunMode::Node,
+        );
+        let completed = run_node_against_expectation(&completes, expected, RunMode::Node);
+        let unexpected = run_node_against_expected_stdout(&rejects, "1\n", RunMode::Node);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(recorded.result.outcome, Outcome::Pass, "{recorded:?}");
+        assert_eq!(wrong_stdout.result.outcome, Outcome::Fail, "{wrong_stdout:?}");
+        assert_eq!(completed.result.outcome, Outcome::Fail, "{completed:?}");
+        assert_eq!(unexpected.result.outcome, Outcome::Fail, "{unexpected:?}");
     }
 
     #[test]

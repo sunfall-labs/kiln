@@ -13,7 +13,8 @@ use std::fmt::Write as _;
 use kiln_ir::{Constant, Instruction};
 
 use crate::{
-    c_string, diagnostic_source, host_op_code, instruction_diagnostic, private_brand_key_of,
+    c_string, diagnostic_source, host_argument_inspection, host_op_code, instruction_diagnostic,
+    private_brand_key_of,
 };
 
 pub(crate) struct TailContext<'a> {
@@ -611,7 +612,7 @@ pub(crate) fn emit_tail_instruction(
             if *argc == 0 {
                 writeln!(output, "    {{ kiln_value host_result; if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C(0), NULL, &host_result) != 0) return KILN_C99_HOST_ERROR; stack[sp++] = kiln_val_from_boundary(host_result); }}", host_op_code(*op)).unwrap()
             } else if *callables {
-                writeln!(output, "    {{ kiln_value host_result; kiln_value host_args[{argc}]; for (size_t i = 0; i < (size_t){argc}; i++) {{ kiln_value arg_val = kiln_val_to_boundary(stack[sp - {argc} + i]); if (kiln_c99_crosses_boundary(arg_val)) arg_val = kiln_c99_inspect(arg_val); host_args[i] = arg_val; }} if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C({argc}), host_args, &host_result) != 0) return KILN_C99_HOST_ERROR; sp -= {argc}; stack[sp++] = kiln_val_from_boundary(host_result); }}", host_op_code(*op)).unwrap()
+                writeln!(output, "    {{ kiln_value host_result; kiln_value host_args[{argc}]; for (size_t i = 0; i < (size_t){argc}; i++) {{ kiln_value arg_val = kiln_val_to_boundary(stack[sp - {argc} + i]); if (kiln_c99_crosses_boundary(arg_val)) arg_val = {}arg_val); host_args[i] = arg_val; }} if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C({argc}), host_args, &host_result) != 0) return KILN_C99_HOST_ERROR; sp -= {argc}; stack[sp++] = kiln_val_from_boundary(host_result); }}", host_argument_inspection(*op), host_op_code(*op)).unwrap()
             } else {
                 writeln!(output, "    {{ kiln_value host_result; kiln_value host_args[{argc}]; for (size_t i = 0; i < (size_t){argc}; i++) {{ host_args[i] = kiln_val_to_boundary(stack[sp - {argc} + i]); }} if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C({argc}), host_args, &host_result) != 0) return KILN_C99_HOST_ERROR; sp -= {argc}; stack[sp++] = kiln_val_from_boundary(host_result); }}", host_op_code(*op)).unwrap()
             }

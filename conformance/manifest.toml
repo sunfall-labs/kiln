@@ -1595,6 +1595,194 @@ immediate from immediate 1
 """
 
 [[test]]
+id = "regress/r20-unhandled-rejection-exits"
+requires_host = "node"
+group = "regress"
+source = "regress/r20-unhandled-rejection-exits.js"
+status = "runnable"
+features = ["promise-jobs", "next-tick", "unhandled-rejections"]
+catches = """
+Issue 18 of `.scratch/realms-and-concurrency`. A rejection nothing handled ends the program as \
+node's default `--unhandled-rejections=throw` does: reported once the checkpoint that left it is \
+over -- after the ticks and promise jobs, so a handler attached from either is in time -- as an \
+uncaught exception, exit status 1, before any timer runs. The native backend exited 0 without a \
+word until 2026-09-27.\
+"""
+expected_uncaught = "Error: boom"
+expected_stdout = """
+start
+tick
+caught in time
+then
+caught from a tick
+"""
+
+[[test]]
+id = "regress/r21-unhandled-rejection-non-error"
+requires_host = "node"
+group = "regress"
+source = "regress/r21-unhandled-rejection-non-error.js"
+status = "runnable"
+features = ["async-functions", "unhandled-rejections"]
+catches = """
+A reason that is not error-like is reported as node's `UnhandledPromiseRejection`, naming the \
+reason as V8's side-effect-free conversion does.\
+"""
+expected_uncaught = "UnhandledPromiseRejection: This error originated either by throwing inside of an async function without a catch block, or by rejecting a promise which was not handled with .catch(). The promise rejected with the reason \"42\"."
+expected_stdout = """
+after the call
+"""
+
+[[test]]
+id = "regress/r22-unhandled-rejection-events"
+requires_host = "node"
+group = "regress"
+source = "regress/r22-unhandled-rejection-events.js"
+status = "runnable"
+features = ["promise-jobs", "next-tick", "timers", "set-immediate", "unhandled-rejections"]
+catches = """
+Issue 18. `process.on("unhandledRejection")` sees `(reason, promise)` at node's \
+`processPromiseRejections` point and suppresses the default; what a handler queues runs before \
+the next report, a promise it handles is `rejectionHandled` on the next pass, and each macrotask \
+ends with its own report. Neither engine had the events before 2026-09-27.\
+"""
+expected_stdout = """
+tick
+caught in time
+unhandledRejection first
+unhandledRejection async
+tick from handler first
+tick from handler async
+job from handler first
+caught inside handler
+job from handler async
+rejectionHandled
+unhandledRejection second
+tick from handler second
+job from handler second
+timer 1
+tick after timer 1
+unhandledRejection from timer
+tick from handler from timer
+job from handler from timer
+timer 2
+immediate
+unhandledRejection from immediate
+tick from handler from immediate
+job from handler from immediate
+immediate 2
+"""
+
+[[test]]
+id = "regress/r23-rejection-handled-late"
+requires_host = "node"
+group = "regress"
+source = "regress/r23-rejection-handled-late.js"
+status = "runnable"
+features = ["promise-jobs", "timers", "unhandled-rejections", "process-warnings"]
+catches = """
+A reported rejection handled later with no `rejectionHandled` listener is node's \
+`PromiseRejectionHandledWarning`, a `warning` event from a tick.\
+"""
+expected_stdout = """
+unhandledRejection 1
+handled late
+caught
+warning PromiseRejectionHandledWarning Promise rejection was handled asynchronously (rejection id: 1)
+after
+"""
+
+[[test]]
+id = "regress/r24-unhandled-rejection-uncaught-exception"
+requires_host = "node"
+group = "regress"
+source = "regress/r24-unhandled-rejection-uncaught-exception.js"
+status = "runnable"
+features = ["promise-jobs", "async-functions", "unhandled-rejections"]
+catches = """
+Without an `unhandledRejection` listener the default mode throws, and an \
+`uncaughtException` listener takes the error with the origin `"unhandledRejection"`: the reason \
+itself when it is error-like, otherwise an `UnhandledPromiseRejection` with node's naming of it.\
+"""
+expected_stdout = """
+caught inner
+uncaughtException unhandledRejection UnhandledPromiseRejection ERR_UNHANDLED_REJECTION true
+The promise rejected with the reason "Symbol(s)".
+uncaughtException unhandledRejection UnhandledPromiseRejection ERR_UNHANDLED_REJECTION true
+The promise rejected with the reason "#<Custom>".
+uncaughtException unhandledRejection UnhandledPromiseRejection ERR_UNHANDLED_REJECTION true
+The promise rejected with the reason "#<Object>".
+uncaughtException unhandledRejection UnhandledPromiseRejection ERR_UNHANDLED_REJECTION true
+The promise rejected with the reason "[object Array]".
+uncaughtException unhandledRejection TypeError undefined true
+still running
+"""
+
+[[test]]
+id = "regress/r25-timer-delay-clamp"
+requires_host = "node"
+group = "regress"
+source = "regress/r25-timer-delay-clamp.js"
+status = "runnable"
+features = ["timers"]
+catches = """
+Issue 19. Node makes any `setTimeout`/`setInterval` delay outside 1 to 2^31 - 1 ms 1 ms (a \
+NaN, negative or overflowing one with a warning on stderr), so a zero-delay timer runs after a \
+1 ms one armed before it. Both engines ran it first until 2026-09-27.\
+"""
+expected_stdout = """
+one ms
+zero
+negative
+nan
+no delay
+half
+overflow
+one ms again
+interval at zero
+two ms
+three ms
+"""
+
+[[test]]
+id = "regress/r26-event-inspect-custom"
+requires_host = "node"
+group = "regress"
+source = "regress/r26-event-inspect-custom.js"
+status = "runnable"
+features = ["event-target", "util-inspect"]
+catches = """
+Issue 19. `Event.prototype[util.inspect.custom]` shows an event as node does, and a console \
+prints what an object's custom inspection answers (at the top level); `console.log(event)` \
+printed `Event {}` before 2026-09-27.\
+"""
+expected_stdout = """
+function
+Event {
+  type: 'ping',
+  defaultPrevented: true,
+  cancelable: true,
+  timeStamp: T
+}
+CustomEvent {
+  type: "it's",
+  defaultPrevented: false,
+  cancelable: false,
+  timeStamp: T
+}
+Tick {
+  type: 'a\\nb',
+  defaultPrevented: false,
+  cancelable: false,
+  timeStamp: T
+}
+MessageEvent
+Event { type: 'x', defaultPrevented: false, cancelable: false, timeStamp: T }
+custom at depth 2
+beside custom
+"""
+
+[[test]]
 id = "server/s08-binary-http-chunks"
 requires_host = "node"
 group = "server"

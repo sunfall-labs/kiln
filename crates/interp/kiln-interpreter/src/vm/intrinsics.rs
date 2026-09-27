@@ -638,8 +638,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     arguments: Vec::new(),
                     context: Rc::clone(&self.async_context),
                 };
-                let delay = duration_from_milliseconds(milliseconds.max(0.0));
-                self.with_realm_mut(|realm| realm.set_timeout(delay, timer));
+                // A timer like `setTimeout`'s, so 0 is node's 1 ms here too.
+                self.with_realm_mut(|realm| {
+                    let (delay, _) = realm.node_timer_delay(Some(milliseconds.max(0.0)));
+                    realm.set_timeout(delay, timer)
+                });
                 return Ok(signal);
             }
             // `AbortSignal.any(signals)`: one signal that follows whichever of them settles
@@ -1340,12 +1343,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // An immediate and an I/O callback have no delay, so their arguments start one
                 // earlier: `setImmediate(fn, x)` calls `fn(x)`.
                 let undelayed = matches!(native, Native::SetImmediate | Native::QueueIoRaw);
-                let delay = match arguments.get(1).map(Value::as_number) {
-                    // A negative, missing or NaN delay is zero: "as soon as possible", which is
-                    // still after everything already queued.
-                    Some(delay) if !undelayed && delay.is_finite() && delay > 0.0 => delay,
-                    _ => 0.0,
+                let (delay, warning) = if undelayed {
+                    (std::time::Duration::ZERO, None)
+                } else {
+                    let requested = match arguments.get(1) {
+                        None | Some(Value::Undefined) => None,
+                        Some(delay) => Some(delay.as_number()),
+                    };
+                    self.with_realm_mut(|realm| realm.node_timer_delay(requested))
                 };
+                if let Some(warning) = warning {
+                    let text = Value::String(warning.trim_end_matches('\n').to_owned().into());
+                    self.host
+                        .call(HostOp::WriteStderr, &[HostValue::from(text)])
+                        .map_err(|error| ExecutionError::Host {
+                            instruction,
+                            message: error.to_string(),
+                        })?;
+                }
                 let timer = Timer {
                     callback: arguments.first().cloned().unwrap_or(Value::Undefined),
                     // Everything after the delay is handed to the callback, which is how a
@@ -1357,7 +1372,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // Captured where the timer was set, not where it fires.
                     context: Rc::clone(&self.async_context),
                 };
-                let delay = duration_from_milliseconds(delay);
                 let id = self.with_realm_mut(|realm| match native {
                     Native::SetInterval => realm.set_interval(delay, timer),
                     Native::SetImmediate => realm.set_immediate(timer),
@@ -2961,15 +2975,31 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
                 Ok(Value::Undefined)
             }
-            // 4: a rejection nothing handled, which the loop reports at the end of this turn's
-            // checkpoint -- so a delivery ends its batch there, as node reports one before the
-            // next message.
-            Native::JobsPendingRaw => Ok(Value::Number(
-                self.with_realm(|realm| {
-                    f64::from(u8::from(realm.has_queued_next_ticks()))
-                        + 2.0 * f64::from(u8::from(realm.has_queued_microtasks()))
-                }) + 4.0 * f64::from(u8::from(self.unhandled.is_some())),
-            )),
+            // 4: a rejection to report (node's `hasRejectionToWarn`), which the end of this
+            // checkpoint does -- so a delivery ends its batch there, as node reports one before
+            // the next message.
+            Native::JobsPendingRaw => {
+                let rejections = self.with_rejections_mut(|rejections| {
+                    !rejections.rejected.is_empty() || !rejections.handled.is_empty()
+                });
+                Ok(Value::Number(
+                    self.with_realm(|realm| {
+                        f64::from(u8::from(realm.has_queued_next_ticks()))
+                            + 2.0 * f64::from(u8::from(realm.has_queued_microtasks()))
+                    }) + 4.0 * f64::from(u8::from(rejections)),
+                ))
+            }
+            // The first registration is the realm's own bootstrap; a later realm's (a
+            // `ShadowRealm`) reports through it.
+            Native::PromiseRejectionsRaw => {
+                let process = arguments.first().cloned().unwrap_or(Value::Undefined);
+                if is_callable(&process) {
+                    self.with_rejections_mut(|rejections| {
+                        rejections.process.get_or_insert(process);
+                    });
+                }
+                Ok(Value::Undefined)
+            }
             Native::ProcessNextTick => {
                 let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
                 if !is_callable(&callback) {

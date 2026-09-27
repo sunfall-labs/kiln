@@ -13,7 +13,7 @@ use crate::prelude::lookup_speculation_invariant;
 use crate::tail::{TailContext, emit_tail_instruction};
 use crate::{
     BuiltinLoad, builtin_load, closure_construction, compact_diagnostic_site, diagnostic_source,
-    host_op_code,
+    host_argument_inspection, host_op_code,
 };
 use kiln_ir::Instruction;
 use kiln_ir::Upvalue;
@@ -585,9 +585,10 @@ pub(super) fn emit_graph_op(
                 .unwrap();
             } else if !scalar_proto {
                 let mut init = String::new();
+                let inspect = host_argument_inspection(*op);
                 for (i, op_vid) in operands.iter().enumerate() {
                     init.push_str(&format!(
-                        " kiln_value a{i} = kiln_val_to_boundary(v{}); if (kiln_c99_crosses_boundary(a{i})) a{i} = kiln_c99_inspect(a{i}); host_args[{i}] = a{i};",
+                        " kiln_value a{i} = kiln_val_to_boundary(v{}); if (kiln_c99_crosses_boundary(a{i})) a{i} = {inspect}a{i}); host_args[{i}] = a{i};",
                         op_vid.0
                     ));
                 }

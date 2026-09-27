@@ -229,6 +229,7 @@ extern int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
 extern int kiln_c99_array_push(kiln_value target, kiln_value value);
 extern int kiln_c99_array_push_val(kiln_value target, kiln_val value);
 extern kiln_value kiln_c99_inspect(kiln_value value);
+extern kiln_value kiln_c99_console_inspect(kiln_host *host, kiln_value value);
 extern int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event, void *host, void *thrown);
 extern int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown);
 extern int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth, kiln_value *thrown);

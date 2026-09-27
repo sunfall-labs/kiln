@@ -419,7 +419,9 @@
                                     "promises");
                 }
                 inner = kiln_c99_promise_of(args[0]);
-                status = kiln_c99_new_settler(&adopt.on_fulfilled, receiver, 0);
+                status = kiln_c99_promise_observe(inner);
+                if (status == KILN_C99_OK)
+                    status = kiln_c99_new_settler(&adopt.on_fulfilled, receiver, 0);
                 if (status == KILN_C99_OK) {
                     status = kiln_c99_new_settler(&adopt.on_rejected, receiver, 1);
                 }
@@ -697,16 +699,16 @@
                 kiln_value produced = kiln_c99_undefined();
                 if (!finished) {
                     if (items.tag == KILN_VALUE_TYPED_ARRAY) {
-                        produced = part == 2 ? kiln_c99_number((double)position)
-                                             : kiln_c99_number(kiln_c99_typed_get(typed, position));
-                        if (part == 1) {
+                        kiln_value element = kiln_c99_undefined();
+                        if (part != 2) status = kiln_c99_typed_element(typed, position, &element);
+                        produced = part == 2 ? kiln_c99_number((double)position) : element;
+                        if (status == KILN_C99_OK && part == 1) {
                             status = kiln_c99_new_array(&produced);
                             if (status == KILN_C99_OK) {
                                 status = kiln_c99_array_push(produced, kiln_c99_number((double)position));
                             }
                             if (status == KILN_C99_OK) {
-                                status = kiln_c99_array_push(
-                                    produced, kiln_c99_number(kiln_c99_typed_get(typed, position)));
+                                status = kiln_c99_array_push(produced, element);
                             }
                         }
                     } else {
@@ -2357,7 +2359,10 @@
             for (index = 0; index < view->length; ++index) {
                 kiln_value visit[3];
                 kiln_value produced;
-                visit[0] = kiln_c99_number(kiln_c99_typed_get(view, index));
+                status = kiln_c99_typed_element(view, index, &visit[0]);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
                 visit[1] = kiln_c99_number((double)index);
                 visit[2] = receiver;
                 status = kiln_c99_call(host, &produced, callback, self_value, visit, 3, depth,

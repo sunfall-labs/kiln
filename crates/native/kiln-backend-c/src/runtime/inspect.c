@@ -417,8 +417,9 @@ static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth) {
             if (at != 0 && kiln_c99_text_append_c(text, ", ") != KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            if (kiln_c99_inspect_into(text, kiln_c99_number(kiln_c99_typed_get(view, at)),
-                                      depth + 1) != KILN_C99_OK) {
+            kiln_value element;
+            if (kiln_c99_typed_element(view, at, &element) != KILN_C99_OK ||
+                kiln_c99_inspect_into(text, element, depth + 1) != KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
         }
@@ -487,4 +488,31 @@ static kiln_value kiln_c99_inspect(kiln_value value) {
         return kiln_c99_undefined();
     }
     return kiln_c99_text_value(&text);
+}
+
+/* What a console prints for one argument: node's `util.inspect.custom` first -- an object with a
+ * callable `[Symbol.for("nodejs.util.inspect.custom")]` shows what it answers for
+ * `(depth, options, inspect)`, a string as it stands and anything else inspected in its place --
+ * then the ordinary inspection. Only at the top level, as the interpreter's `console_arguments`
+ * does it. A hook that throws, which one needing the `inspect` argument this does not pass will,
+ * leaves the value to the ordinary inspection. */
+static kiln_value kiln_c99_console_inspect(kiln_host *host, kiln_value value) {
+    static const char name[] = "nodejs.util.inspect.custom";
+    kiln_value symbol;
+    kiln_value hook = kiln_c99_undefined();
+    kiln_value shown = kiln_c99_undefined();
+    kiln_value thrown = kiln_c99_undefined();
+    kiln_value arguments[3];
+    if (host != NULL && kiln_c99_is_reference(value) &&
+        kiln_c99_symbol_for(&symbol, kiln_c99_copy_text(name, sizeof name - 1)) == KILN_C99_OK &&
+        kiln_c99_get_computed(host, value, symbol, &hook, 0, &thrown) == KILN_C99_OK &&
+        kiln_c99_is_callable(hook)) {
+        arguments[0] = kiln_c99_number(2.0);
+        arguments[2] = kiln_c99_undefined();
+        if (kiln_c99_new_object(&arguments[1]) == KILN_C99_OK &&
+            kiln_c99_call(host, &shown, hook, value, arguments, 3, 0, &thrown) == KILN_C99_OK) {
+            value = shown;
+        }
+    }
+    return kiln_c99_crosses_boundary(value) ? kiln_c99_inspect(value) : value;
 }

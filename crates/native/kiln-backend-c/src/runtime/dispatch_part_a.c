@@ -289,76 +289,82 @@ static int kiln_c99_data_view_method(kiln_host *host, kiln_value *result, uint64
     return KILN_C99_OK;
 }
 
+/* `ToBigInt` and then `BigInt.asUintN(64, _)`: the sixty-four bits a `setBigInt64`,
+ * `setBigUint64` or a BigInt64Array/BigUint64Array element store writes. */
+static int kiln_c99_to_bigint64_bits(kiln_host *host, kiln_value value, uint64_t *out, int depth,
+                                     kiln_value *thrown) {
+    int status;
+    /* `ToBigInt`, which accepts far less than `ToNumber` does: a BigInt, a boolean and a
+     * string that spells an integer, and a *number* not at all. `setBigInt64(0, 1)` is a
+     * TypeError rather than a one, because an implicit crossing between the two numeric
+     * towers is precisely what having two of them is meant to prevent.
+     *
+     * Reduced to a primitive here rather than by the coercion pass on the way in: that pass
+     * runs `ToNumber`, which is a TypeError on the one type these two accessors want. */
+    const void *mask = kiln_c99_bigint_uint64_mask();
+    void *wrapped = NULL;
+    void *converted = NULL;
+    int64_t high = 0;
+    uint64_t low = 0;
+    if (kiln_c99_is_reference(value)) {
+        status = kiln_c99_to_primitive(host, value, 0, &value, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+    }
+    if (value.tag == KILN_VALUE_BOOLEAN) {
+        /* `1n` and `0n`. Spelled through the parser because that is the only way this
+         * backend makes a BigInt out of nothing, and `kiln_bigint_from_double` is refused
+         * territory: it is the rounding door. */
+        static const unsigned char zero_one[] = "01";
+        if (kiln_bigint_parse(zero_one + (value.bits != 0 ? 1 : 0), 1, 10, &converted) != 0) {
+            KILN_C99_REFUSE("a boolean the BigInt provider would not parse");
+        }
+        value = kiln_c99_bigint_value(converted);
+    } else if (value.tag == KILN_VALUE_STRING) {
+        /* A string that is not an integer literal is a SyntaxError rather than a NaN, which
+         * is the answer `BigInt("x")` gives for the same reason: this type has no NaN to
+         * become. `kiln_bigint_parse` trims, so " 12 " is twelve. */
+        size_t value_len = 0;
+        const char *value_bytes = kiln_c99_string_ascii_bytes(value, &value_len);
+        if (value_bytes == NULL || value_len == 0 ||
+            kiln_bigint_parse((const unsigned char *)value_bytes, value_len, 10,
+                              &converted) != 0) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                        "Cannot convert this string to a BigInt");
+        }
+        value = kiln_c99_bigint_value(converted);
+    }
+    if (value.tag != KILN_VALUE_BIGINT) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Cannot convert this value to a BigInt");
+    }
+    /* Operation 7 is the provider's bitwise AND. `& (2n ** 64n - 1n)` is `BigInt.asUintN(64)`
+     * spelled with what the provider exports, and the wrap is the language's own: the two
+     * setters store the low sixty-four bits of *any* BigInt rather than refusing a wide one.
+     * `kiln_bigint_to_i128` alone would have called `2n ** 200n` out of range; after the mask
+     * the value is below 2^64 and always fits. */
+    if (mask == NULL ||
+        kiln_bigint_binary(7, (const void *)(uintptr_t)value.bits, mask, &wrapped) != 0 ||
+        kiln_bigint_to_i128(wrapped, &high, &low) != 0 || high != 0) {
+        /* `high != 0` is the mask having failed to do what its name says. Checked rather than
+         * cast away, because the alternative to noticing is storing the wrong eight bytes. */
+        KILN_C99_REFUSE("a BigInt that would not mask into sixty-four bits");
+    }
+    *out = low;
+    return KILN_C99_OK;
+}
+
 /* The bytes one `set` accessor is being asked to store, as an unsigned integer of its width.
  *
  * Its own function because the conversion is the half with an order to get right, and the only
  * half that can call back into the program. */
 static int kiln_c99_data_view_write_bits(kiln_host *host, uint64_t code, kiln_value value,
                                          uint64_t *out, int depth, kiln_value *thrown) {
-    int status;
     switch (code) {
     case KILN_C99_METHOD_DATA_VIEW_SET_BIG_INT64:
-    case KILN_C99_METHOD_DATA_VIEW_SET_BIG_UINT64: {
-        /* `ToBigInt`, which accepts far less than `ToNumber` does: a BigInt, a boolean and a
-         * string that spells an integer, and a *number* not at all. `setBigInt64(0, 1)` is a
-         * TypeError rather than a one, because an implicit crossing between the two numeric
-         * towers is precisely what having two of them is meant to prevent.
-         *
-         * Reduced to a primitive here rather than by the coercion pass on the way in: that pass
-         * runs `ToNumber`, which is a TypeError on the one type these two accessors want. */
-        const void *mask = kiln_c99_bigint_uint64_mask();
-        void *wrapped = NULL;
-        void *converted = NULL;
-        int64_t high = 0;
-        uint64_t low = 0;
-        if (kiln_c99_is_reference(value)) {
-            status = kiln_c99_to_primitive(host, value, 0, &value, depth, thrown);
-            if (status != KILN_C99_OK) {
-                return status;
-            }
-        }
-        if (value.tag == KILN_VALUE_BOOLEAN) {
-            /* `1n` and `0n`. Spelled through the parser because that is the only way this
-             * backend makes a BigInt out of nothing, and `kiln_bigint_from_double` is refused
-             * territory: it is the rounding door. */
-            static const unsigned char zero_one[] = "01";
-            if (kiln_bigint_parse(zero_one + (value.bits != 0 ? 1 : 0), 1, 10, &converted) != 0) {
-                KILN_C99_REFUSE("a boolean the BigInt provider would not parse");
-            }
-            value = kiln_c99_bigint_value(converted);
-        } else if (value.tag == KILN_VALUE_STRING) {
-            /* A string that is not an integer literal is a SyntaxError rather than a NaN, which
-             * is the answer `BigInt("x")` gives for the same reason: this type has no NaN to
-             * become. `kiln_bigint_parse` trims, so " 12 " is twelve. */
-            size_t value_len = 0;
-            const char *value_bytes = kiln_c99_string_ascii_bytes(value, &value_len);
-            if (value_bytes == NULL || value_len == 0 ||
-                kiln_bigint_parse((const unsigned char *)value_bytes, value_len, 10,
-                                  &converted) != 0) {
-                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
-                                            "Cannot convert this string to a BigInt");
-            }
-            value = kiln_c99_bigint_value(converted);
-        }
-        if (value.tag != KILN_VALUE_BIGINT) {
-            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
-                                        "Cannot convert this value to a BigInt");
-        }
-        /* Operation 7 is the provider's bitwise AND. `& (2n ** 64n - 1n)` is `BigInt.asUintN(64)`
-         * spelled with what the provider exports, and the wrap is the language's own: the two
-         * setters store the low sixty-four bits of *any* BigInt rather than refusing a wide one.
-         * `kiln_bigint_to_i128` alone would have called `2n ** 200n` out of range; after the mask
-         * the value is below 2^64 and always fits. */
-        if (mask == NULL ||
-            kiln_bigint_binary(7, (const void *)(uintptr_t)value.bits, mask, &wrapped) != 0 ||
-            kiln_bigint_to_i128(wrapped, &high, &low) != 0 || high != 0) {
-            /* `high != 0` is the mask having failed to do what its name says. Checked rather than
-             * cast away, because the alternative to noticing is storing the wrong eight bytes. */
-            KILN_C99_REFUSE("a BigInt that would not mask into sixty-four bits");
-        }
-        *out = low;
-        return KILN_C99_OK;
-    }
+    case KILN_C99_METHOD_DATA_VIEW_SET_BIG_UINT64:
+        return kiln_c99_to_bigint64_bits(host, value, out, depth, thrown);
     case KILN_C99_METHOD_DATA_VIEW_SET_FLOAT32: {
         float narrowed = (float)kiln_c99_as_number(value);
         uint32_t raw;
@@ -1342,6 +1348,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         return kiln_c99_clone_data_raw(result, args, argc);
     if (code == KILN_C99_METHOD_JOBS_PENDING_RAW)
         return kiln_c99_jobs_pending_raw(result);
+    if (code == KILN_C99_METHOD_PROMISE_REJECTIONS_RAW)
+        return kiln_c99_promise_rejections_raw(result, args, argc);
     if ((code & KILN_C99_FFI_DYNAMIC_BASE) != 0 ||
         code == KILN_C99_METHOD_NODE_FFI_DLOPEN ||
         code == KILN_C99_METHOD_NODE_FFI_GET_RAW_POINTER ||
@@ -1679,7 +1687,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             }
             for (index = 0; index < argc; ++index) {
                 reduced[index] = kiln_c99_crosses_boundary(args[index])
-                                     ? kiln_c99_inspect(args[index])
+                                     ? kiln_c99_console_inspect(host, args[index])
                                      : args[index];
             }
         }
@@ -1823,6 +1831,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         for (index = 0; index < items->count; ++index) {
             kiln_value element = kiln_val_to_boundary(items->elements[index]);
             double converted;
+            kiln_typed_array *view = kiln_c99_typed_array_of(*result);
             if (kiln_c99_is_callable(mapper)) {
                 kiln_value visit[2];
                 visit[0] = element;
@@ -1833,11 +1842,16 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     return status;
                 }
             }
+            if (kiln_c99_typed_kind_is_bigint(kind)) {
+                status = kiln_c99_typed_store(host, view, index, element, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                continue;
+            }
             status = kiln_c99_to_number_checked(host, element, &converted, depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }
-            kiln_c99_typed_set(kiln_c99_typed_array_of(*result), index, converted);
+            kiln_c99_typed_set(view, index, converted);
         }
         return KILN_C99_OK;
     }
@@ -2286,18 +2300,15 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
              * arguments start one earlier. */
             int undelayed =
                 code == KILN_C99_METHOD_SET_IMMEDIATE || code == KILN_C99_METHOD_QUEUE_IO_RAW;
-            if (!undelayed && argc > 1) {
+            /* `undefined` stays 0, which the realm makes node's silent 1 ms, as it does every
+             * delay it does not take (`Realm::node_timer_delay`). */
+            if (!undelayed && argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED) {
                 status = kiln_c99_to_number_checked(host, args[1], &delay, depth, thrown);
                 if (status != KILN_C99_OK) {
                     return status;
                 }
             }
             uint64_t id = 0;
-            /* A negative, missing or NaN delay is zero: "as soon as possible", which is still
-             * after everything already queued. */
-            if (!(isfinite(delay) && delay > 0.0)) {
-                delay = 0.0;
-            }
             {
                 /* No arguments past the delay, and a heap function: the function is the work
                  * (see `kiln_c99_timer_direct_run`). */
@@ -3228,7 +3239,9 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 status = kiln_c99_new_array(&built);
                 for (index = 0; index < view->length && status == KILN_C99_OK; ++index) {
                     kiln_value key = kiln_c99_text(kiln_c99_number((double)index));
-                    kiln_value value = kiln_c99_number(kiln_c99_typed_get(view, index));
+                    kiln_value value;
+                    status = kiln_c99_typed_element(view, index, &value);
+                    if (status != KILN_C99_OK) break;
                     if (code == KILN_C99_METHOD_OBJECT_KEYS) {
                         status = kiln_c99_array_push(built, key);
                     } else if (code == KILN_C99_METHOD_OBJECT_VALUES) {
