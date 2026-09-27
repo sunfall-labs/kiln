@@ -110,9 +110,30 @@ mod tests {
     use crate::backend::{SourceResponse, SyncCommit};
     use crate::commands;
     use kiln_proto::{
-        NodeModuleFormat, NodeRequestKind, NodeSourceFormat, PackageResolution, ResolutionMap,
-        SourceHash, StepBudget, source_digest,
+        source_digest, NodeModuleFormat, NodeRequestKind, NodeSourceFormat, PackageResolution,
+        ResolutionMap, SourceHash, StepBudget,
     };
+
+    // These four tests execute the same canonical HTTP programs from fresh project roots. Their
+    // assertions cover native behavior, not cache misses, so sharing content-addressed native
+    // artifacts avoids recompiling the prelude for every temporary fixture. Tests that assert
+    // cache behavior keep their private `.kiln/cache`; unsupported symlink setups fall back to
+    // that same private cache.
+    #[cfg(unix)]
+    fn share_native_semantic_cache(fixture: &std::path::Path) {
+        let shared = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../target/kiln-cli-native-semantic-cache");
+        let fixture_cache = fixture.join(".kiln/cache");
+        if std::fs::create_dir_all(&shared).is_err()
+            || std::fs::create_dir_all(fixture.join(".kiln")).is_err()
+        {
+            return;
+        }
+        let _ = std::os::unix::fs::symlink(shared, fixture_cache);
+    }
+
+    #[cfg(not(unix))]
+    fn share_native_semantic_cache(_fixture: &std::path::Path) {}
 
     #[test]
     fn concurrent_one_shot_sessions_have_private_socket_directories() {
@@ -283,6 +304,7 @@ server.listen(0, "127.0.0.1", () => {
         ));
         let _ = std::fs::remove_dir_all(&fixture);
         std::fs::create_dir_all(&fixture).expect("create native HTTP fixture");
+        share_native_semantic_cache(&fixture);
         let source = fixture.join("s01-http-hello.mjs");
         std::fs::copy(root.join("conformance/server/s01-http-hello.mjs"), &source)
             .expect("copy canonical native HTTP fixture");
@@ -316,6 +338,7 @@ server.listen(0, "127.0.0.1", () => {
         ));
         let _ = std::fs::remove_dir_all(&fixture);
         std::fs::create_dir_all(&fixture).expect("create native Node build fixture");
+        share_native_semantic_cache(&fixture);
         let source = fixture.join("s01-http-hello.mjs");
         let artifact = fixture.join("s01-http-hello");
         std::fs::copy(root.join("conformance/server/s01-http-hello.mjs"), &source)
@@ -362,6 +385,7 @@ server.listen(0, "127.0.0.1", () => {
         ));
         let _ = std::fs::remove_dir_all(&fixture);
         std::fs::create_dir_all(&fixture).expect("create native HTTP stream fixture");
+        share_native_semantic_cache(&fixture);
         let source = fixture.join("request-body-streams.mjs");
         std::fs::copy(
             root.join("conformance/server/s03-request-body-streams.mjs"),
@@ -402,6 +426,7 @@ server.listen(0, "127.0.0.1", () => {
         ));
         let _ = std::fs::remove_dir_all(&fixture);
         std::fs::create_dir_all(&fixture).expect("create native HTTP stream build fixture");
+        share_native_semantic_cache(&fixture);
         let source = fixture.join("request-body-streams.mjs");
         let artifact = fixture.join("request-body-streams");
         std::fs::copy(
