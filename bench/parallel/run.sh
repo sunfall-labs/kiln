@@ -6,7 +6,7 @@
 # usage: bench/parallel/run.sh [--quick] [--only map-heavy,sort-array,...]
 #                              [--out results.md] [--kiln path/to/kiln] [--go "go"]
 #
-# Builds a release `kiln` if there is none (mbx, never bare cargo), then hands over to run.py,
+# Refreshes the release `kiln` before measuring (mbx, never bare cargo), then hands over to run.py,
 # which builds the kiln programs (--profile native-release, --explain-parallel) and the Go program
 # once, outside every measurement, runs every job in interleaved rounds, and writes
 # bench/parallel/results-<date>.md plus the raw records under target/bench-parallel/.
@@ -26,13 +26,18 @@ for tool in node bun python3; do
 done
 
 kiln="$ROOT/target/release/kiln"
+explicit_kiln=0
 for arg in "$@"; do
-	if [[ ${prev:-} == --kiln ]]; then kiln="$arg"; fi
+	if [[ ${prev:-} == --kiln ]]; then kiln="$arg"; explicit_kiln=1; fi
 	prev="$arg"
 done
-if [[ ! -x $kiln ]]; then
-	echo "bench/parallel: building $kiln (mbx build --release -p kiln-cli)" >&2
+if (( ! explicit_kiln )); then
+	echo "bench/parallel: refreshing $kiln (mbx build --release -p kiln-cli)" >&2
 	mbx build --release -p kiln-cli
+fi
+if [[ ! -x $kiln ]]; then
+	echo "bench/parallel: kiln is not executable: $kiln" >&2
+	exit 1
 fi
 
 exec python3 "$HERE/run.py" "$@"

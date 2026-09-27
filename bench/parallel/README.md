@@ -11,7 +11,7 @@ bench/parallel/run.sh --quick    # 1 round, shorter budget, about 2 minutes
 bench/parallel/run.sh --only map-heavy,sort-array
 ```
 
-It builds a release `kiln` if there is none (`mbx build --release -p kiln-cli`), builds each kiln
+It refreshes the release `kiln` (`mbx build --release -p kiln-cli`) before measuring, builds each kiln
 program with `--node --profile native-release --explain-parallel` (three at a time) and the Go
 program once, all outside every measurement, and writes `results-<date>.md` here with the machine
 details, the load average and the compiler's per-site verdicts beside the numbers. The raw
