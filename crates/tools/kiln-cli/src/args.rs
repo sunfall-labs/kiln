@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::error::{Error, Result};
-use kiln_proto::{NativeProfile, StepBudget};
+use kiln_proto::{NativeProfile, RecordedWorkers, StepBudget};
 
 // `--interval` outlived the poll it was written for, but it now names the debounce window
 // rather than a cadence. Dropping it was the alternative, and it was tempting: one fewer
@@ -83,6 +83,8 @@ pub enum Command {
         explain: bool,
         /// Build a binary that never installs kiln's own members (ADR 0068).
         no_kiln_extensions: bool,
+        /// The worker count the binary uses when `KILN_WORKERS` is unset: `--workers=<n|auto>`.
+        workers: Option<RecordedWorkers>,
         /// Print only the `parallelMap` section of the explanation: every call site, whether
         /// it runs in parallel, and the rule that kept it sequential when it does not.
         explain_parallel: bool,
@@ -148,7 +150,7 @@ where
     let mut test_output: Option<PathBuf> = None;
     let mut profile: Option<NativeProfile> = None;
     let mut max_steps: Option<u64> = None;
-    let mut workers: Option<usize> = None;
+    let mut workers: Option<String> = None;
     let mut shared = false;
     let mut march_native = false;
     let mut explain = false;
@@ -255,16 +257,8 @@ where
                 max_steps = Some(parse_max_steps(&raw)?);
             }
             "--workers" => {
-                let raw = value_for(&flag, inline, &mut args)?;
-                let count: usize = raw.parse().map_err(|_| {
-                    Error::usage(format!(
-                        "invalid worker count `{raw}`: expected a positive integer"
-                    ))
-                })?;
-                if count == 0 {
-                    return Err(Error::usage("worker count must be at least 1"));
-                }
-                workers = Some(count);
+                // Validated below, once the command says whether `auto` means anything.
+                workers = Some(value_for(&flag, inline, &mut args)?);
             }
             "--explain" => {
                 explain = true;
@@ -383,8 +377,15 @@ where
             "--max-steps only applies to interpreted `kiln run`",
         ));
     }
-    if workers.is_some() && name != "run" {
-        return Err(Error::usage("--workers only applies to `kiln run`"));
+    if workers.is_some() && name != "run" && name != "build" {
+        return Err(Error::usage(
+            "--workers only applies to `kiln run` or `kiln build`",
+        ));
+    }
+    if workers.is_some() && shared {
+        return Err(Error::usage(
+            "--workers cannot be combined with `kiln build --shared`: a library has no launcher to record it in",
+        ));
     }
     if explain && name != "build" {
         return Err(Error::usage("--explain only applies to `kiln build`"));
@@ -434,7 +435,7 @@ where
                 native,
                 profile: profile.unwrap_or_default(),
                 steps: max_steps.map_or(StepBudget::Unmetered, StepBudget::Limited),
-                workers: workers.unwrap_or(1),
+                workers: workers.as_deref().map_or(Ok(1), parse_worker_count)?,
                 march_native,
                 static_link,
                 pgo_generate,
@@ -450,6 +451,7 @@ where
             march_native,
             explain,
             no_kiln_extensions,
+            workers: workers.as_deref().map(parse_recorded_workers).transpose()?,
             explain_parallel,
             static_link,
             pgo_generate,
@@ -698,6 +700,38 @@ exit status:
     2    the command line was wrong
 ";
 
+/// `kiln run --workers <n>`: how many realms the command itself runs.
+fn parse_worker_count(raw: &str) -> Result<usize> {
+    let count: usize = raw.parse().map_err(|_| {
+        Error::usage(format!(
+            "invalid worker count `{raw}`: expected a positive integer"
+        ))
+    })?;
+    if count == 0 {
+        return Err(Error::usage("worker count must be at least 1"));
+    }
+    Ok(count)
+}
+
+/// `kiln build --workers=<n|auto>`: the count recorded in the binary. `auto` is resolved where
+/// the binary runs; a number is taken as written, up to the launcher's own ceiling.
+fn parse_recorded_workers(raw: &str) -> Result<RecordedWorkers> {
+    if raw.eq_ignore_ascii_case("auto") {
+        return Ok(RecordedWorkers::Auto);
+    }
+    let count = parse_worker_count(raw).map_err(|_| {
+        Error::usage(format!(
+            "invalid worker count `{raw}`: expected `auto` or a positive integer"
+        ))
+    })?;
+    match u16::try_from(count) {
+        Ok(count @ 1..=1024) => Ok(RecordedWorkers::Count(count)),
+        _ => Err(Error::usage(format!(
+            "worker count `{raw}` is above the launcher's limit of 1024"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -757,6 +791,7 @@ mod tests {
                 explain_parallel: false,
                 explain: false,
                 no_kiln_extensions: false,
+                workers: None,
                 static_link: false,
                 pgo_generate: None,
                 pgo_use: None,
@@ -974,6 +1009,45 @@ mod tests {
             usage_error(&["run", "server.mjs", "--workers", "abc"]).contains("positive integer")
         );
         assert!(usage_error(&["check", "server.mjs", "--workers", "4"]).contains("only applies"));
+        assert!(
+            usage_error(&["run", "server.mjs", "--workers", "auto"]).contains("positive integer")
+        );
+    }
+
+    #[test]
+    fn build_workers_records_auto_or_a_count() {
+        assert!(matches!(
+            run(&["build", "server.mjs"]).command,
+            Command::Build { workers: None, .. }
+        ));
+        assert!(matches!(
+            run(&["build", "server.mjs", "--workers=auto"]).command,
+            Command::Build {
+                workers: Some(RecordedWorkers::Auto),
+                ..
+            }
+        ));
+        assert!(matches!(
+            run(&["build", "server.mjs", "--workers", "AUTO"]).command,
+            Command::Build {
+                workers: Some(RecordedWorkers::Auto),
+                ..
+            }
+        ));
+        assert!(matches!(
+            run(&["build", "server.mjs", "--workers=4"]).command,
+            Command::Build {
+                workers: Some(RecordedWorkers::Count(4)),
+                ..
+            }
+        ));
+        assert!(usage_error(&["build", "server.mjs", "--workers=0"]).contains("`auto` or"));
+        assert!(usage_error(&["build", "server.mjs", "--workers=many"]).contains("`auto` or"));
+        assert!(usage_error(&["build", "server.mjs", "--workers=2000"]).contains("1024"));
+        assert!(
+            usage_error(&["build", "lib.mjs", "--shared", "--workers=2"])
+                .contains("cannot be combined")
+        );
     }
 
     #[test]
@@ -1098,6 +1172,7 @@ mod tests {
                 explain_parallel: false,
                 explain: false,
                 no_kiln_extensions: false,
+                workers: None,
                 static_link: false,
                 pgo_generate: None,
                 pgo_use: None,
@@ -1115,6 +1190,7 @@ mod tests {
                 explain_parallel: false,
                 explain: false,
                 no_kiln_extensions: false,
+                workers: None,
                 static_link: false,
                 pgo_generate: None,
                 pgo_use: None,
@@ -1221,6 +1297,7 @@ mod tests {
                 explain_parallel: false,
                 explain: true,
                 no_kiln_extensions: false,
+                workers: None,
                 static_link: false,
                 pgo_generate: None,
                 pgo_use: None,
@@ -1243,6 +1320,7 @@ mod tests {
                 explain_parallel: false,
                 explain: false,
                 no_kiln_extensions: false,
+                workers: None,
                 static_link: true,
                 pgo_generate: None,
                 pgo_use: None,
@@ -1290,6 +1368,7 @@ mod tests {
                 explain_parallel: false,
                 explain: false,
                 no_kiln_extensions: false,
+                workers: None,
                 static_link: false,
                 pgo_generate: None,
                 pgo_use: Some(PathBuf::from("/tmp/pgo/profile.profdata")),

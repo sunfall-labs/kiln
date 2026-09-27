@@ -33,7 +33,7 @@ pub enum StepBudget {
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 34;
+pub const PROTOCOL_VERSION: u32 = 35;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -525,6 +525,10 @@ pub enum Request {
         /// when false, so a request that does not ask reads exactly as it did before.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         no_kiln_extensions: bool,
+        /// The worker count to record in the binary (`kiln build --workers`). Left off the wire
+        /// when absent; an older daemon would drop it silently, which is why the protocol moved.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workers: Option<RecordedWorkers>,
         #[serde(default)]
         static_link: bool,
         #[serde(default)]
@@ -704,6 +708,16 @@ pub enum NativeProfile {
     ReleaseSize,
     /// Release, plus profiler instrumentation. A wire-shape change, so PROTOCOL_VERSION moves.
     Profile,
+}
+
+/// A worker count recorded in a native binary by `kiln build --workers=<n|auto>`, used when
+/// `KILN_WORKERS` is unset where the binary runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RecordedWorkers {
+    /// One realm per online core of the machine that runs the binary.
+    Auto,
+    /// A fixed count, 1..=1024.
+    Count(u16),
 }
 
 /// Measurements and cache observability for one native build.
@@ -985,7 +999,7 @@ mod tests {
 
     #[test]
     fn current_protocol_run_step_budget_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 34);
+        assert_eq!(PROTOCOL_VERSION, 35);
 
         let requests = [
             (
@@ -1078,6 +1092,7 @@ mod tests {
                     source_view: SourceView(12),
                     explain: false,
                     no_kiln_extensions: false,
+                    workers: None,
                     static_link: false,
                     pgo_generate: None,
                     pgo_use: None,

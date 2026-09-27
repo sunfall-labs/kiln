@@ -15,8 +15,8 @@ use crate::error::{Error, Result};
 use crate::render::{self, Work};
 use crate::sources;
 use kiln_proto::{
-    NativeProfile, ResolutionMap, SourceDigest, SourceHash, SourceView, StepBudget, TestMode,
-    TestOutcome, TestSummary, source_digest,
+    NativeProfile, RecordedWorkers, ResolutionMap, SourceDigest, SourceHash, SourceView,
+    StepBudget, TestMode, TestOutcome, TestSummary, source_digest,
 };
 use serde_json::json;
 
@@ -338,6 +338,7 @@ pub fn build(
     node: bool,
     explain: bool,
     no_kiln_extensions: bool,
+    workers: Option<RecordedWorkers>,
     static_link: bool,
     pgo_generate: Option<&Path>,
     pgo_use: Option<&Path>,
@@ -422,6 +423,7 @@ pub fn build(
         node,
         explain,
         no_kiln_extensions,
+        workers,
         static_link,
         pgo_gen.clone(),
         pgo_u.clone(),
@@ -441,6 +443,7 @@ pub fn build(
                 node,
                 explain,
                 no_kiln_extensions,
+                workers,
                 static_link,
                 pgo_gen,
                 pgo_u,
@@ -453,6 +456,9 @@ pub fn build(
             }
         }
     };
+    if let Some(RecordedWorkers::Count(count)) = workers {
+        project_notes.push(fixed_worker_count_warning(count));
+    }
     Ok(Output {
         text: render::native_build(&display, &summary),
         error_text: String::new(),
@@ -462,6 +468,16 @@ pub fn build(
         value: None,
         source_view: Some(source_view),
     })
+}
+
+/// A recorded number forks that many workers on every machine the binary is copied to, which is
+/// the tie to the build machine the launcher reads `KILN_WORKERS` at startup to avoid.
+fn fixed_worker_count_warning(count: u16) -> String {
+    format!(
+        "warning: --workers={count} records a fixed count: this binary forks {count} workers on \
+         every machine it runs on, however many cores that is. `--workers=auto` sizes to the \
+         machine that runs it; `KILN_WORKERS` overrides either at run time."
+    )
 }
 
 /// Status reported for a native run whose process never chose one, because a signal ended it.
@@ -1965,6 +1981,7 @@ mod tests {
             false,
             false,
             false,
+            None,
             false,
             None,
             None,
@@ -2014,6 +2031,7 @@ mod tests {
             false,
             false,
             false,
+            None,
             false,
             None,
             None,
@@ -2065,6 +2083,7 @@ mod tests {
             false,
             true,
             false,
+            None,
             false,
             None,
             None,

@@ -6,8 +6,8 @@
 
 use kiln_proto::{
     CacheGcSummary, ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary,
-    NativeSharedLibrarySummary, ProjectSummary, Request, ResolutionMap, Response, RunSummary,
-    SourceHash, SourceView, Stats, StepBudget, SyncId, TestMode, TestSummary,
+    NativeSharedLibrarySummary, ProjectSummary, RecordedWorkers, Request, ResolutionMap, Response,
+    RunSummary, SourceHash, SourceView, Stats, StepBudget, SyncId, TestMode, TestSummary,
 };
 
 use crate::error::{Error, Result};
@@ -163,6 +163,7 @@ pub trait Backend: Send {
         node: bool,
         explain: bool,
         no_kiln_extensions: bool,
+        workers: Option<RecordedWorkers>,
         static_link: bool,
         pgo_generate: Option<String>,
         pgo_use: Option<String>,
@@ -176,6 +177,7 @@ pub trait Backend: Send {
             node,
             explain,
             no_kiln_extensions,
+            workers,
             static_link,
             pgo_generate,
             pgo_use,

@@ -89,17 +89,31 @@ number, and it is the one to beat. Absolute figures are about half the macOS tab
 which was taken on an unrecorded machine; the two are not comparable and neither is presented as
 the other. Full provenance is in `.scratch/server-throughput/measurements-2026-09-03.md`.
 
+A binary reads `KILN_WORKERS` when it starts, so one artifact is right on every machine it is
+copied to. `kiln build --workers=auto` records a default for when the variable is unset, still
+resolved against the cores of the machine that runs it; `kiln build --workers=<n>` records a fixed
+count and warns, because that ties the binary to the box that built it. `KILN_WORKERS` overrides
+either, and a binary built without the flag runs one realm.
+
 With more than one worker the first process is a supervisor that runs no JavaScript itself (on
 POSIX; Windows always runs one realm). It forwards `SIGTERM`, `SIGINT`, `SIGHUP` and `SIGQUIT` to
 every worker, waits for all of them, and then exits by the same signal (`128+signal` as PID 1), so
-`docker stop` drains every worker; `SIGUSR1` is forwarded without stopping anything. A worker that
-dies of a signal or exits non-zero is restarted with backoff (100 ms doubling to 2 s), and one that
-crashes six times in a row within five seconds of starting stops the server with its status; a
-worker that exits 0 is not restarted. Workers exit when the supervisor dies (Linux:
-`PR_SET_PDEATHSIG`; elsewhere a pipe each worker watches). Each worker sees
-`process.env.KILN_WORKER_INDEX` (`0`..`N-1`, kept across a restart) and `KILN_WORKER_COUNT`, in
-both engines; a single realm sets neither, so a program can run once-only startup work where the
-index is `0` or absent.
+`docker stop` drains every worker; `SIGUSR1` is forwarded without stopping anything. A worker still
+running `KILN_WORKERS_GRACE_MS` after the stop began (default 10000; 0 kills at once) gets
+`SIGKILL`, sent to its process group. Each worker runs in a process group of its own, so Ctrl-C at
+a terminal reaches it once, through the supervisor, rather than once from the terminal and again
+from the forward.
+
+An exit status is the program's answer and is never retried: a worker that exits 0 is finished
+and the others keep serving; one that exits non-zero (`process.exit(n)`, an uncaught error's 1, an
+unsettled top-level await's 13) stops every worker, and the supervisor exits with that status. A
+worker that dies of a signal the supervisor did not send -- a crash, the OOM killer, a `kill` of
+that one worker -- is restarted with backoff (100 ms doubling to 2 s), and one that crashes six
+times in a row within five seconds of starting stops the server with `128+signal`. Workers exit
+when the supervisor dies (Linux: `PR_SET_PDEATHSIG`; elsewhere a pipe each worker watches). Each
+worker sees `process.env.KILN_WORKER_INDEX` (`0`..`N-1`, kept across a restart) and
+`KILN_WORKER_COUNT`, in both engines; a single realm sets neither, so a program can run once-only
+startup work where the index is `0` or absent -- though a restarted worker 0 runs it again.
 
 On Linux 6.1 and newer, listeners and HTTP connections run on an io_uring owned by the realm's
 own Tokio runtime (multishot accept and receive, batched sends; no second executor). Older

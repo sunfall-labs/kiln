@@ -10,8 +10,8 @@ use kiln_module_eval::ModuleGraphExecution;
 use kiln_module_graph::ModuleGraph;
 use kiln_proto::{
     Diagnostic, FileId, ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary,
-    NativeSharedLibrarySummary, PROTOCOL_VERSION, ProjectSummary, Request, ResolutionMap, Response,
-    RunSummary, ScalarValueSummary, SourceView, Stats, StepBudget,
+    NativeSharedLibrarySummary, PROTOCOL_VERSION, ProjectSummary, RecordedWorkers, Request,
+    ResolutionMap, Response, RunSummary, ScalarValueSummary, SourceView, Stats, StepBudget,
 };
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -198,6 +198,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             source_view: _,
             explain,
             no_kiln_extensions,
+            workers,
             static_link,
             pgo_generate,
             pgo_use,
@@ -215,6 +216,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
                         node,
                         explain,
                         no_kiln_extensions,
+                        workers,
                         static_link,
                         pgo_gen,
                         pgo_u,
@@ -228,6 +230,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
                             profile,
                             explain,
                             no_kiln_extensions,
+                            workers,
                             static_link,
                             pgo_gen,
                             pgo_u,
@@ -1684,10 +1687,20 @@ pub(crate) fn native_build_program(
     profile: NativeProfile,
     explain: bool,
     no_kiln_extensions: bool,
+    workers: Option<RecordedWorkers>,
     static_link: bool,
     pgo_generate: Option<PathBuf>,
     pgo_use: Option<PathBuf>,
 ) -> Response {
+    // The worker supervisor lives in the graph launcher; the single-program launcher runs one
+    // realm and has nowhere to record a count, so the flag is refused rather than dropped.
+    if workers.is_some() {
+        return Response::Error {
+            message: format!(
+                "--workers needs a module-graph build, and {path} did not resolve to a project source file"
+            ),
+        };
+    }
     let project_root = PathBuf::from(project_root);
     let builder = match discover_native_builder(&project_root) {
         Ok(builder) => builder,
@@ -1924,6 +1937,7 @@ pub(crate) fn native_build_graph(
     node: bool,
     explain: bool,
     no_kiln_extensions: bool,
+    workers: Option<RecordedWorkers>,
     static_link: bool,
     pgo_generate: Option<PathBuf>,
     pgo_use: Option<PathBuf>,
@@ -1958,7 +1972,8 @@ pub(crate) fn native_build_graph(
             output,
             profile: native_profile(profile),
             realm: kiln_native::NativeRealmPolicy::host_clock()
-                .without_kiln_extensions(no_kiln_extensions),
+                .without_kiln_extensions(no_kiln_extensions)
+                .with_workers(workers.map(native_workers)),
             march_native: false,
             static_link,
             pgo_generate,
@@ -2128,6 +2143,13 @@ fn native_profile(profile: NativeProfile) -> kiln_native::NativeProfile {
         NativeProfile::Release => kiln_native::NativeProfile::Release,
         NativeProfile::ReleaseSize => kiln_native::NativeProfile::ReleaseSize,
         NativeProfile::Profile => kiln_native::NativeProfile::Profile,
+    }
+}
+
+fn native_workers(workers: RecordedWorkers) -> kiln_native::NativeWorkers {
+    match workers {
+        RecordedWorkers::Auto => kiln_native::NativeWorkers::Auto,
+        RecordedWorkers::Count(count) => kiln_native::NativeWorkers::Count(count),
     }
 }
 
