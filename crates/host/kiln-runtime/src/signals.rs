@@ -35,10 +35,43 @@
 //! them with `sigwait` on one; it hands each to [`deliver`], and ends the process by the signal
 //! only when no realm took it. A realm's subscriptions end with its thread
 //! ([`release_thread`]), so a realm that has finished never swallows a signal.
+//!
+//! # A program that is not the process (realms issue 26)
+//!
+//! `kiln run` without `--one-shot` runs the program inside the resident compiler daemon, and a
+//! program must observe exactly what it would observe run alone -- in particular it must never
+//! be able to signal the daemon. So the launcher of an interpreted program wraps the run in
+//! [`host_program`], and while that guard lives the realm's signals are *the program's*:
+//!
+//! * **Signals it sends itself are delivered in the realm, never with `kill(2)`.** "Itself" is
+//!   its own `process.pid`; for a daemon-hosted program also the daemon's real pid, `0`, `-1`
+//!   and the daemon's process group, since a program alone would have been in all of those. A
+//!   listener gets the event exactly as issue 23 delivers it; with no listener the signal's
+//!   default action happens to the program: a terminating signal ends the realm on the spot
+//!   (the engine unwinds as `process.exit(128 + n)` would, and [`ProgramGuard::terminated_by`]
+//!   tells the launcher, which reports a death by that signal -- the client re-raises it, so its
+//!   own parent sees node's `WIFSIGNALED` status and 128 + n in a shell); an ignoring one
+//!   (`SIGCHLD`, `SIGURG`, `SIGWINCH`, `SIGCONT`, `SIGINFO`) does nothing; a stopping one
+//!   (`SIGSTOP`, `SIGTSTP`, `SIGTTIN`, `SIGTTOU`) does nothing in the daemon, which cannot be
+//!   stopped for one program, and really stops a `--one-shot` process.
+//! * **A daemon-hosted program has a virtual pid** ([`pid`]): one per run, above every real pid
+//!   the kernels kiln runs on hand out (Linux's `pid_max` is at most 2^22, macOS's 99,999), so it
+//!   can never name another process. A program that logs it, compares it with itself, or
+//!   signals it behaves as alone; one that looks it up outside itself (`/proc/<pid>`, `ps`, a
+//!   child's `process.ppid`) finds nothing or the daemon, and `kill(pid, 0)` from *another*
+//!   process answers `ESRCH`. Its listeners take nothing from the process: the daemon's own
+//!   dispositions are never touched, so a real `SIGTERM` to the daemon stops the daemon.
+//! * **Signals to any other pid stay real `kill(2)`.**
+//!
+//! A `--one-shot` run is the process, so it keeps the real pid and real dispositions (a server
+//! run that way still drains on an external `SIGTERM`); only its self-directed signals take the
+//! in-realm path, which is what lets the launcher print what the program wrote before the
+//! signal ended it. `node:worker_threads` workers inherit their program.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::ThreadId;
 
 use crate::workers::{self, Message, Token};
@@ -98,6 +131,213 @@ fn valid(signal: i32) -> bool {
     (1..platform::SIGNAL_LIMIT).contains(&signal)
 }
 
+/// Whether this process hosts programs that are not it (the resident daemon): see the module
+/// documentation. Set once, by the daemon, before it serves anything.
+static ISOLATED: AtomicBool = AtomicBool::new(false);
+
+/// The next virtual pid; see [`pid`].
+static NEXT_VIRTUAL_PID: AtomicI32 = AtomicI32::new(VIRTUAL_PID_BASE);
+
+/// Above every pid Linux (`PID_MAX_LIMIT`, 2^22) and macOS (99,999) hand out.
+pub const VIRTUAL_PID_BASE: i32 = 1 << 22;
+
+/// Make every program run under [`host_program`] from now on a virtual process: its own pid,
+/// its signals delivered in its realm and never to this process. The resident daemon calls this
+/// once at startup; a `--one-shot` run does not, and its program is the process.
+pub fn isolate_hosted_programs() {
+    ISOLATED.store(true, Ordering::Release);
+}
+
+/// One program's signal state, shared by its main realm and the workers it starts.
+pub struct Program {
+    pid: i32,
+    isolated: bool,
+    state: Mutex<ProgramState>,
+}
+
+#[derive(Default)]
+struct ProgramState {
+    /// This program's subscriptions, per signal.
+    listeners: HashMap<i32, Vec<u64>>,
+    /// The signal whose default action ended the program.
+    terminated_by: Option<i32>,
+}
+
+impl Program {
+    fn state(&self) -> MutexGuard<'_, ProgramState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Whether `kill(pid, _)` from this program names the program itself.
+    fn targets_self(&self, pid: i32) -> bool {
+        if pid == self.pid {
+            return true;
+        }
+        if !self.isolated {
+            return false;
+        }
+        #[cfg(unix)]
+        // SAFETY: `getpid` and `getpgrp` cannot fail.
+        let (real, group) = unsafe { (libc::getpid(), libc::getpgrp()) };
+        #[cfg(not(unix))]
+        let (real, group) = (std::process::id() as i32, 0);
+        pid == real || pid == 0 || pid == -1 || (group > 0 && pid == -group)
+    }
+
+    /// `signal` arrived for this program; answers what [`kill`] does.
+    fn signal_self(&self, signal: i32) -> i32 {
+        if signal == 0 {
+            return 0;
+        }
+        let mut state = self.state();
+        if let Some(listeners) = state.listeners.get(&signal).filter(|l| !l.is_empty()) {
+            for endpoint in listeners {
+                let message = Message::new(
+                    workers::kind::SIGNAL,
+                    vec![Token::Number(f64::from(signal))],
+                );
+                workers::enqueue(*endpoint, message);
+            }
+            return 0;
+        }
+        self.default_action(&mut state, signal)
+    }
+
+    /// What `signal` does to a program that does not listen for it.
+    fn default_action(&self, state: &mut ProgramState, signal: i32) -> i32 {
+        match platform::default_action(signal) {
+            Action::Ignore => 0,
+            Action::Stop if self.isolated => 0,
+            Action::Stop => {
+                #[cfg(unix)]
+                // SAFETY: `kill` on this process with a valid signal number.
+                unsafe {
+                    libc::kill(libc::getpid(), signal);
+                }
+                0
+            }
+            Action::Terminate => {
+                state.terminated_by.get_or_insert(signal);
+                0
+            }
+        }
+    }
+
+    fn release(&self) {
+        let listeners: Vec<u64> = std::mem::take(&mut self.state().listeners)
+            .into_values()
+            .flatten()
+            .collect();
+        if !self.isolated {
+            let mut registry = registry();
+            for endpoint in &listeners {
+                remove(&mut registry, *endpoint);
+            }
+        }
+        for endpoint in listeners {
+            workers::close(endpoint);
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Action {
+    Terminate,
+    Ignore,
+    Stop,
+}
+
+thread_local! {
+    static PROGRAM: RefCell<Option<Arc<Program>>> = const { RefCell::new(None) };
+}
+
+/// The program the realm on this thread belongs to, if its launcher said.
+pub fn current_program() -> Option<Arc<Program>> {
+    PROGRAM.with(|program| program.borrow().clone())
+}
+
+/// Make this thread's realm part of `program` (a worker, on its own thread); `None` clears it.
+pub fn adopt_program(program: Option<Arc<Program>>) {
+    PROGRAM.with(|slot| *slot.borrow_mut() = program);
+}
+
+/// Run the program on this thread as a program of its own until the guard drops: see the module
+/// documentation. A daemon that called [`isolate_hosted_programs`] gives it a virtual pid.
+pub fn host_program() -> ProgramGuard {
+    let isolated = ISOLATED.load(Ordering::Acquire);
+    let pid = if isolated {
+        NEXT_VIRTUAL_PID.fetch_add(1, Ordering::Relaxed)
+    } else {
+        real_pid()
+    };
+    let program = Arc::new(Program {
+        pid,
+        isolated,
+        state: Mutex::new(ProgramState::default()),
+    });
+    let previous = PROGRAM.with(|slot| slot.borrow_mut().replace(Arc::clone(&program)));
+    ProgramGuard { program, previous }
+}
+
+/// The program [`host_program`] started; it ends when this drops.
+pub struct ProgramGuard {
+    program: Arc<Program>,
+    previous: Option<Arc<Program>>,
+}
+
+impl ProgramGuard {
+    /// The program's `process.pid`.
+    pub fn pid(&self) -> i32 {
+        self.program.pid
+    }
+
+    /// The signal whose default action ended the program, if one did: the launcher reports a
+    /// death by that signal, not the `128 + n` the realm unwound with.
+    pub fn terminated_by(&self) -> Option<i32> {
+        self.program.state().terminated_by
+    }
+}
+
+impl Drop for ProgramGuard {
+    fn drop(&mut self) {
+        self.program.release();
+        let previous = self.previous.take();
+        PROGRAM.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+fn real_pid() -> i32 {
+    #[cfg(unix)]
+    // SAFETY: `getpid` cannot fail.
+    unsafe {
+        libc::getpid()
+    }
+    #[cfg(not(unix))]
+    {
+        std::process::id() as i32
+    }
+}
+
+/// `process.pid` for the realm on this thread: its program's, else this process's.
+pub fn pid() -> i32 {
+    PROGRAM
+        .with(|program| program.borrow().as_ref().map(|program| program.pid))
+        .unwrap_or_else(real_pid)
+}
+
+/// The signal that has ended this thread's program, if one has: an engine checks this after
+/// `kill` and after [`unhandled`] and unwinds its realm as `process.exit(128 + n)` would.
+pub fn termination() -> Option<i32> {
+    PROGRAM.with(|program| {
+        program
+            .borrow()
+            .as_ref()
+            .and_then(|program| program.state().terminated_by)
+    })
+}
+
 #[derive(Default)]
 struct Registry {
     /// Subscribed endpoints per signal, in subscription order.
@@ -123,6 +363,25 @@ pub fn listen(signal: i32) -> Result<u64, i32> {
     if !valid(signal) || platform::uncatchable(signal) {
         return Err(platform::EINVAL);
     }
+    let program = current_program();
+    let endpoint = match &program {
+        // A hosted program's listener takes nothing from the process (see the module docs).
+        Some(program) if program.isolated => workers::endpoint(),
+        _ => listen_process(signal)?,
+    };
+    if let Some(program) = program {
+        program
+            .state()
+            .listeners
+            .entry(signal)
+            .or_default()
+            .push(endpoint);
+    }
+    Ok(endpoint)
+}
+
+/// Subscribe to `signal` arriving at the process.
+fn listen_process(signal: i32) -> Result<u64, i32> {
     let mut registry = registry();
     let first = registry
         .subscribers
@@ -173,6 +432,27 @@ fn remove(registry: &mut Registry, endpoint: u64) -> Option<(i32, bool)> {
 /// realm in the process listens any more, restore the signal's disposition and send it to the
 /// process again, so that it does what it would have done without a listener.
 pub fn unhandled(endpoint: u64) {
+    if let Some(program) = current_program() {
+        let mut state = program.state();
+        let owned = state.listeners.iter_mut().find_map(|(signal, listeners)| {
+            let before = listeners.len();
+            listeners.retain(|listener| *listener != endpoint);
+            (listeners.len() != before).then_some(*signal)
+        });
+        if let Some(signal) = owned {
+            if !program.isolated {
+                // The process's disposition goes back when this was its last listener; the
+                // signal itself is the program's to act on, below, not re-sent.
+                remove(&mut registry(), endpoint);
+            }
+            workers::close(endpoint);
+            if state.listeners.get(&signal).is_none_or(Vec::is_empty) {
+                state.listeners.remove(&signal);
+                program.default_action(&mut state, signal);
+            }
+            return;
+        }
+    }
     let removed = remove(&mut registry(), endpoint);
     workers::close(endpoint);
     if let Some((signal, true)) = removed {
@@ -247,6 +527,11 @@ pub fn deliver(signal: i32) -> usize {
 pub fn kill(pid: i32, signal: i32) -> i32 {
     if signal != 0 && !valid(signal) {
         return platform::EINVAL;
+    }
+    if let Some(program) = current_program()
+        && program.targets_self(pid)
+    {
+        return program.signal_self(signal);
     }
     #[cfg(unix)]
     {
@@ -367,6 +652,18 @@ mod platform {
 
     pub fn uncatchable(signal: i32) -> bool {
         signal == libc::SIGKILL || signal == libc::SIGSTOP
+    }
+
+    /// What `signal` does by default (POSIX's table; a core dump counts as terminating).
+    pub fn default_action(signal: i32) -> super::Action {
+        use super::Action;
+        match signal {
+            libc::SIGCHLD | libc::SIGURG | libc::SIGWINCH | libc::SIGCONT => Action::Ignore,
+            #[cfg(target_vendor = "apple")]
+            libc::SIGINFO => Action::Ignore,
+            libc::SIGSTOP | libc::SIGTSTP | libc::SIGTTIN | libc::SIGTTOU => Action::Stop,
+            _ => Action::Terminate,
+        }
     }
 
     /// The self-pipe: read end, write end; -1 until the first handler is installed.
@@ -580,6 +877,10 @@ mod platform {
     pub fn uncatchable(signal: i32) -> bool {
         signal == 9
     }
+
+    pub fn default_action(_signal: i32) -> super::Action {
+        super::Action::Terminate
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -626,5 +927,49 @@ mod tests {
         assert_eq!(current, libc::SIG_DFL, "SIGURG's default (ignore) is back");
         assert_eq!(kill(me, 1234), libc::EINVAL);
         assert_eq!(kill(me, 0), 0);
+    }
+
+    /// A daemon-hosted program (realms issue 26): a virtual pid, and every signal it sends
+    /// itself -- by that pid or by the daemon's -- stays in it. None of this may reach the test
+    /// process: `SIGUSR2`'s default would end it, which is the property under test.
+    #[test]
+    fn a_hosted_program_signals_only_itself() {
+        isolate_hosted_programs();
+        let signal = libc::SIGUSR2;
+        // SAFETY: getpid cannot fail.
+        let me = unsafe { libc::getpid() };
+        let hosted = host_program();
+        assert!(hosted.pid() >= VIRTUAL_PID_BASE);
+        assert_eq!(pid(), hosted.pid());
+
+        let endpoint = listen(signal).expect("SIGUSR2 can be caught");
+        // SAFETY: reading the current disposition only.
+        let disposition = unsafe {
+            let mut current: libc::sigaction = std::mem::zeroed();
+            libc::sigaction(signal, std::ptr::null(), &mut current);
+            current.sa_sigaction
+        };
+        assert_eq!(
+            disposition,
+            libc::SIG_DFL,
+            "the process's disposition is untouched"
+        );
+
+        for target in [hosted.pid(), me, 0] {
+            assert_eq!(kill(target, signal), 0);
+            let message = workers::take(endpoint).expect("delivered in the realm");
+            assert_eq!(message.kind, workers::kind::SIGNAL);
+        }
+        assert_eq!(kill(hosted.pid(), 0), 0);
+        assert_eq!(kill(hosted.pid(), libc::SIGCHLD), 0, "ignored by default");
+        assert_eq!(termination(), None);
+
+        // The last listener gone, the signal's default action is the program's.
+        unhandled(endpoint);
+        assert_eq!(termination(), Some(signal));
+        assert_eq!(hosted.terminated_by(), Some(signal));
+        drop(hosted);
+        assert_eq!(pid(), me);
+        assert_eq!(termination(), None);
     }
 }

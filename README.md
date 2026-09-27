@@ -168,6 +168,20 @@ cargo run -p kiln-cli -- --one-shot build server.mjs --node --profile native-rel
 `kiln watch` re-runs an entry in the interpreter on every save. `kiln test <dir>` runs a
 conformance corpus; the corpora and the runner each one needs are listed in `AGENTS.md`.
 
+Without `--one-shot`, `kiln run` interprets the program inside the resident daemon, and the
+program is a process of its own there (realms issue 26; `kiln_runtime::signals`). Its
+`process.pid` is a virtual pid, one per run and above any pid Linux or macOS hands out: logging
+it, comparing it with itself and signalling it behave as alone, but nothing outside the program
+knows it (`/proc/<pid>`, `ps`, a child's `process.ppid` see the daemon or nothing). A signal it
+sends itself -- by that pid, the daemon's, `0`, `-1` or the daemon's group -- never reaches the
+daemon: its listeners get it, or its default action happens to the program (a terminating one
+ends it, and `kiln run` then exits by the same signal after writing its output, as node would; an
+ignoring one does nothing; a stopping one does nothing, since the daemon cannot stop for one
+program). Signals to any other pid are real `kill(2)`, and its listeners take nothing from the
+daemon, so a real `SIGTERM` to the daemon still stops the daemon. A `--one-shot` run is the
+process: its real pid and real signal handling, with only its self-directed signals taking the
+in-realm path, so it too prints what it wrote before a signal ended it.
+
 `native-release` keeps speed-focused optimizations while reducing shipped artifact size on Linux
 and macOS: it removes unreachable native sections and DWARF debug sections while retaining the
 normal symbol table and unwind information. `native-check` remains the debug/sanitizer profile and

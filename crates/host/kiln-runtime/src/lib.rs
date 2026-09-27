@@ -4369,7 +4369,7 @@ impl<M, T> Realm<M, T> {
     /// A process warning as node's default `warning` listener writes it to stderr: the
     /// `--trace-warnings` hint follows the first one only.
     pub fn process_warning(&mut self, name: &str, message: &str) -> String {
-        let mut text = format!("(node:{}) {name}: {message}\n", std::process::id());
+        let mut text = format!("(node:{}) {name}: {message}\n", crate::signals::pid());
         if !std::mem::replace(&mut self.warned, true) {
             text.push_str(
                 "(Use `node --trace-warnings ...` to show where the warning was created)\n",

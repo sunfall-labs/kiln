@@ -68,7 +68,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             other => other,
         };
         process.set("platform", Value::String(platform.to_owned().into()));
-        process.set("pid", Value::Number(f64::from(std::process::id())));
+        // The program's pid, which is not the process's when the daemon hosts it (realms issue 26).
+        process.set(
+            "pid",
+            Value::Number(f64::from(kiln_runtime::signals::pid())),
+        );
         process.set("version", Value::String("v22.0.0".to_owned().into()));
         process.set(
             "versions",

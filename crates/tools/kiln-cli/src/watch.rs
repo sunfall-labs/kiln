@@ -1294,6 +1294,7 @@ mod tests {
                         file: FileId(1),
                         succeeded: !failed,
                         exit_code: None,
+                        signal: None,
                         stdout: format!("program: {}\n", source.trim()),
                         stderr: String::new(),
                         value: Some("undefined".to_string()),

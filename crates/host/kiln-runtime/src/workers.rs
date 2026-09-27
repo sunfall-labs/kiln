@@ -621,7 +621,14 @@ where
     );
     let body = {
         let context = Arc::clone(&context);
-        move || run_worker(context, run)
+        // A worker belongs to its parent's program: the same `process.pid`, and a signal it
+        // sends that program stays in it (realms issue 26).
+        let program = crate::signals::current_program();
+        move || {
+            crate::signals::adopt_program(program);
+            run_worker(context, run);
+            crate::signals::adopt_program(None);
+        }
     };
     RUNNING.fetch_add(1, Ordering::AcqRel);
     match realm_host().spawn_pinned_with_stack(WORKER_STACK, body) {

@@ -501,7 +501,30 @@ fn report(output: Output) -> Result<i32> {
             eprintln!("kiln: {note}");
         }
     }
+    if let Some(signal) = output.signal {
+        end_by_signal(signal);
+    }
     Ok(output.exit_code)
+}
+
+/// The program was ended by `signal` (it sent itself one nothing listened for, realms issue 26):
+/// end this process the same way, as node's would have ended, so a parent sees `WIFSIGNALED`
+/// and a shell 128 + n. Returns only if the signal did not end it.
+fn end_by_signal(signal: i32) {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    #[cfg(unix)]
+    // SAFETY: restoring the default action of a signal number the runtime produced, then
+    // unblocking and raising it on this thread.
+    unsafe {
+        libc::signal(signal, libc::SIG_DFL);
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, signal);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+        libc::raise(signal);
+    }
 }
 
 fn emit_error(text: &str) -> Result<()> {

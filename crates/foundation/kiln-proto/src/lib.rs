@@ -33,7 +33,7 @@ pub enum StepBudget {
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 35;
+pub const PROTOCOL_VERSION: u32 = 36;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -854,6 +854,12 @@ pub struct RunSummary {
     pub succeeded: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    /// The signal that ended the program, when one did: it sent itself a signal nothing listened
+    /// for (realms issue 26). `exit_code` is then `128 + signal`, the shell's spelling, and the
+    /// client ends itself by the same signal after writing the program's output, so the status
+    /// its own parent sees is node's. Protocol 36.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<i32>,
     pub stdout: String,
     /// The program's own standard error, verbatim. Separate from `diagnostics`, which are the
     /// engine's words about the program: this is the program's words, and it goes to the caller's
@@ -999,7 +1005,7 @@ mod tests {
 
     #[test]
     fn current_protocol_run_step_budget_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 35);
+        assert_eq!(PROTOCOL_VERSION, 36);
 
         let requests = [
             (

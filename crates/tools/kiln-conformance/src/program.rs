@@ -172,6 +172,9 @@ fn run_node_module(path: &Path, expected: Expectation<'_>, mode: RunMode) -> Cas
         Err(error) => return failed(DiagnosticPhase::Compile, error.to_string(), started),
     };
 
+    // A test is a program of its own: a signal it sends itself stays in it, never reaching a
+    // daemon or a runner that hosts it (realms issue 26).
+    let _hosted = kiln_runtime::signals::host_program();
     let mut host = CaptureHost::new();
     let outcome = graph
         .execute_node(
@@ -271,6 +274,7 @@ fn run_with_executor(
             }
         };
 
+    let _hosted = kiln_runtime::signals::host_program();
     let mut host = CaptureHost::new();
     let program = std::rc::Rc::new(program);
     let strictness = std::rc::Rc::new(strictness);
@@ -809,8 +813,11 @@ server.listen(0, '127.0.0.1', () => {
         fs::create_dir_all(&root).expect("fixture directory is created");
         let rejects = root.join("rejects.js");
         let completes = root.join("completes.js");
-        fs::write(&rejects, "console.log(1);\nPromise.reject(new Error('boom'));\n")
-            .expect("fixture is written");
+        fs::write(
+            &rejects,
+            "console.log(1);\nPromise.reject(new Error('boom'));\n",
+        )
+        .expect("fixture is written");
         fs::write(&completes, "console.log(1);\n").expect("fixture is written");
         let expected = Expectation {
             stdout: "1\n",
@@ -829,7 +836,11 @@ server.listen(0, '127.0.0.1', () => {
         let unexpected = run_node_against_expected_stdout(&rejects, "1\n", RunMode::Node);
         let _ = fs::remove_dir_all(&root);
         assert_eq!(recorded.result.outcome, Outcome::Pass, "{recorded:?}");
-        assert_eq!(wrong_stdout.result.outcome, Outcome::Fail, "{wrong_stdout:?}");
+        assert_eq!(
+            wrong_stdout.result.outcome,
+            Outcome::Fail,
+            "{wrong_stdout:?}"
+        );
         assert_eq!(completed.result.outcome, Outcome::Fail, "{completed:?}");
         assert_eq!(unexpected.result.outcome, Outcome::Fail, "{unexpected:?}");
     }

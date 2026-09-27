@@ -163,13 +163,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             OP_SIGNAL_UNHANDLED => {
                 signals::unhandled(endpoint_of(first));
+                if let Some(signal) = signals::termination() {
+                    return Err(ExecutionError::ProcessExited(128 + signal));
+                }
                 Value::Undefined
             }
-            // `kill(pid, signal)`: 0, or the errno.
+            // `kill(pid, signal)`: 0, or the errno. A signal a hosted program sent itself with
+            // nobody listening ends it here, as the kernel would have before `kill` returned
+            // (realms issue 26); its launcher reports the signal.
             OP_KILL => {
                 let pid = first.map_or(0.0, Value::as_number);
                 let signal = arguments.get(2).map_or(0.0, Value::as_number);
-                Value::Number(f64::from(signals::kill(pid as i32, signal as i32)))
+                let errno = signals::kill(pid as i32, signal as i32);
+                if let Some(signal) = signals::termination() {
+                    return Err(ExecutionError::ProcessExited(128 + signal));
+                }
+                Value::Number(f64::from(errno))
             }
             _ => {
                 return Err(ExecutionError::Host {
@@ -253,10 +262,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 other => {
                     return Err(ExecutionError::TypeErrorMessage {
-                        message: format!(
-                            "kiln: a message token cannot be a {}",
-                            other.type_name()
-                        ),
+                        message: format!("kiln: a message token cannot be a {}", other.type_name()),
                     });
                 }
             });
