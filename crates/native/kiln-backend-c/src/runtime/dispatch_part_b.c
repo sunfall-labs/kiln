@@ -2468,6 +2468,7 @@
         return KILN_C99_OK;
     case KILN_C99_METHOD_JOIN: {
         kiln_text joined = {NULL, 0, 0};
+        size_t length;
         kiln_value separator = argc > 0 ? args[0] : kiln_c99_undefined();
         int has_separator = 0;
         if (separator.tag != KILN_VALUE_UNDEFINED) {
@@ -2478,8 +2479,12 @@
             separator = shown;
             has_separator = 1;
         }
-        for (index = 0; index < array->count; ++index) {
-            kiln_val element = array->elements[index];
+        /* The length is read once, as `LengthOfArrayLike` does: an element's `toString` can
+         * push or pop, and the walk goes on to the length it started with, reading a vanished
+         * index as undefined. */
+        length = array->count;
+        for (index = 0; index < length; ++index) {
+            kiln_val element = index < array->count ? array->elements[index] : KILN_VAL_UNDEFINED;
             if (index != 0 &&
                 (has_separator ? kiln_c99_text_append_string(&joined, separator)
                                : kiln_c99_text_append(&joined, ",", 1)) != KILN_C99_OK) {
@@ -2516,21 +2521,18 @@
             {
                 kiln_value boundary = kiln_val_to_boundary(element);
                 kiln_value shown;
-                /* A Buffer element reads as its text through `Buffer.prototype.toString`,
-                 * which is a call; every other element converts without one. */
-                if (boundary.tag == KILN_VALUE_TYPED_ARRAY &&
-                    kiln_c99_typed_array_of(boundary)->is_buffer) {
-                    kiln_value primitive;
-                    int prim_status = kiln_c99_to_primitive(host, boundary, 1, &primitive, depth, thrown);
-                    if (prim_status != KILN_C99_OK) {
-                        free(joined.bytes);
-                        return prim_status;
-                    }
-                    boundary = primitive;
+                /* Each element is `ToString`ed, which for an object is a call: its own
+                 * `toString`, `@@toPrimitive` or `valueOf` -- a Buffer's decoder among them.
+                 * Converting one without the call answered "[object Object]" for
+                 * `[{ toString() { return "y"; } }].join()` and for every `String(array)`,
+                 * `${array}` and `array + ""` that reaches this through `toString`. A symbol
+                 * element is the `TypeError` `ToString` gives it. */
+                int shown_status = kiln_c99_to_text_argument(host, boundary, &shown, depth, thrown);
+                if (shown_status != KILN_C99_OK) {
+                    free(joined.bytes);
+                    return shown_status;
                 }
-                shown = kiln_c99_text(boundary);
-                if (shown.tag != KILN_VALUE_STRING ||
-                    kiln_c99_text_append_string(&joined, shown) != KILN_C99_OK) {
+                if (kiln_c99_text_append_string(&joined, shown) != KILN_C99_OK) {
                     free(joined.bytes);
                     return KILN_C99_OUT_OF_MEMORY;
                 }

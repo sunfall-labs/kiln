@@ -2058,3 +2058,23 @@ responding
 server closed after the last connection
 client got done
 """
+
+[[test]]
+id = "regress/r39-array-element-tostring"
+group = "regress"
+source = "regress/r39-array-element-tostring.js"
+status = "runnable"
+features = ["array-methods", "type-coercion", "to-primitive"]
+catches = """
+An array's string conversion `ToString`s its elements, which for an object runs its own `toString`, `@@toPrimitive` or `valueOf` (parallel-builtins issue 23), recorded from node 26.8.1. `Array.prototype.toString` had a pure arm in the interpreter that joined a dense array without the call, so `[o] + ""`, a template and `String([o])` answered "[object Object]" while `[o].join()` was right; the native `join` made the call for no element at all. A throwing `toString`, a symbol element and an element that shortens the array mid-join are in it.\
+"""
+expected_stdout = """
+y y y y t,t,t,t
+1-P---z P t,t,t,t,string,string
+7 7,7,2
+caught RangeError nope
+caught RangeError nope
+caught TypeError
+1,m,
+y,2,y 8
+"""

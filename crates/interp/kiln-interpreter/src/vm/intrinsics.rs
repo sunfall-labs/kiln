@@ -87,14 +87,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // walk serves both receivers. The pure arm coerced neither, which made a typed
                 // array and an array disagree about `join({toString(){ return "-" }})`.
                 | Native::ArrayJoin
-        ) || matches!(
-            (native, receiver),
-            // `Array.prototype.toString` is a *call* to the receiver's own `join`, and a view
-            // reaching the pure arm below found no `Vec` to join and answered the empty string:
-            // `String(new Uint8Array([1, 2, 3]))` was `""` where node says `"1,2,3"`. The
-            // exclusion above is there so a view keeps its own element walk; `toString` does no
-            // walking of its own, so it does not want it.
-            (Native::ArrayJoinDefault, Value::TypedArray(_))
+                // `Array.prototype.toString` is a *call* to the receiver's own `join`, whatever
+                // the receiver. A view reaching the pure arm found no `Vec` to join and answered
+                // the empty string (`String(new Uint8Array([1, 2, 3]))` was `""`), and an array
+                // reaching it joined without `ToString`ing its elements, so every `String(arr)`,
+                // `${arr}` and `arr + ""` answered "[object Object]" for an element with its own
+                // `toString` (issue 23). It has no pure form.
+                | Native::ArrayJoinDefault
         ) {
             return self.generic_array_native(native, receiver, arguments, instruction);
         }
