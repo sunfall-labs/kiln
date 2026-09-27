@@ -70,8 +70,9 @@ kiln leads hello world and trails bun on the small service by four percent while
 per request than either (23.7 microseconds of CPU against bun's 26.7).
 
 A realm owns its thread, so the way kiln uses the other fifteen cores is `KILN_WORKERS`, which
-forks that many realms over one `SO_REUSEPORT` listener. Inside one realm, `Array.prototype.parallelMap` runs a callback the compiler can prove
-reads its numbers and returns a number on a private thread pool in the native binary (ADR 0058);
+forks that many realms over one `SO_REUSEPORT` listener. Inside one realm, kiln's
+[parallel collection methods](docs/parallel-builtins.md) run callbacks that the compiler proves
+safe to parallelize on a private thread pool in the native binary.
 `KILN_PARALLELISM=<n>` sizes that pool, defaulting to the machine's available parallelism divided
 among the `KILN_WORKERS` realms (so N workers share the cores rather than each taking all of them),
 and `KILN_PARALLELISM=1` runs every such map inline on the realm thread. A call whose measured work
