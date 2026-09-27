@@ -1071,6 +1071,7 @@ static inline const uint32_t *kiln_c99_recv_claim(const kiln_shape **shapes,
 typedef struct kiln_array {
 static inline int kiln_c99_array_elements_owned(const kiln_array *array) {
 typedef struct kiln_c99_par_env {
+#define KILN_C99_PAR_CALL_DEPTH 128u
 typedef struct kiln_c99_par_site {
 typedef struct kiln_c99_par_arena kiln_c99_par_arena;
 typedef struct kiln_c99_par_frame {
@@ -1093,6 +1094,43 @@ extern int kiln_c99_par_array(kiln_c99_par_arena *arena, const kiln_val *element
 extern int kiln_c99_par_to_string(kiln_c99_par_arena *arena, kiln_val value, kiln_val *out);
 extern int kiln_c99_par_concat(kiln_c99_par_arena *arena, kiln_val a, kiln_val b, kiln_val *out);
 extern int kiln_c99_par_flatten(kiln_val mapped, size_t count, kiln_val *out);
+extern int kiln_c99_par_plain_array(kiln_val value, const kiln_array **out);
+extern int kiln_c99_par_array_sized(kiln_c99_par_arena *arena, size_t count, kiln_val *out,
+extern void kiln_c99_par_array_seal(kiln_array *array);
+extern int kiln_c99_par_f_Number(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+extern int kiln_c99_par_f_Boolean(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+extern int kiln_c99_par_f_String(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+extern int kiln_c99_par_f_parseInt(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+extern int kiln_c99_par_f_parseFloat(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+extern int kiln_c99_par_f_Number_isInteger(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+extern int kiln_c99_par_f_Number_isSafeInteger(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+extern int kiln_c99_par_f_Number_isNaN(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+extern int kiln_c99_par_f_Number_isFinite(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+extern int kiln_c99_par_f_Number_parseInt(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+extern int kiln_c99_par_f_Number_parseFloat(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+extern int kiln_c99_par_f_JSON_stringify(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+extern int kiln_c99_par_m_trim(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+extern int kiln_c99_par_m_trimStart(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+extern int kiln_c99_par_m_trimEnd(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+extern int kiln_c99_par_m_toUpperCase(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+extern int kiln_c99_par_m_toLowerCase(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+extern int kiln_c99_par_m_at(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+extern int kiln_c99_par_m_charAt(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+extern int kiln_c99_par_m_codePointAt(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+extern int kiln_c99_par_m_substring(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+extern int kiln_c99_par_m_slice(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+extern int kiln_c99_par_m_indexOf(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+extern int kiln_c99_par_m_includes(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+extern int kiln_c99_par_m_lastIndexOf(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+extern int kiln_c99_par_m_startsWith(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+extern int kiln_c99_par_m_endsWith(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+extern int kiln_c99_par_m_padStart(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+extern int kiln_c99_par_m_padEnd(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+extern int kiln_c99_par_m_repeat(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+extern int kiln_c99_par_m_split(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+extern int kiln_c99_par_m_toString(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+extern int kiln_c99_par_m_toFixed(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+extern int kiln_c99_par_m_join(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
 #else
 static void kiln_c99_par_enter(const kiln_c99_par_env *env, kiln_c99_par_frame *frame);
 static void kiln_c99_par_leave(kiln_c99_par_frame *frame);
@@ -1112,6 +1150,43 @@ static int kiln_c99_par_array(kiln_c99_par_arena *arena, const kiln_val *element
 static int kiln_c99_par_to_string(kiln_c99_par_arena *arena, kiln_val value, kiln_val *out);
 static int kiln_c99_par_concat(kiln_c99_par_arena *arena, kiln_val a, kiln_val b, kiln_val *out);
 static int kiln_c99_par_flatten(kiln_val mapped, size_t count, kiln_val *out);
+static int kiln_c99_par_plain_array(kiln_val value, const kiln_array **out);
+static int kiln_c99_par_array_sized(kiln_c99_par_arena *arena, size_t count, kiln_val *out,
+static void kiln_c99_par_array_seal(kiln_array *array);
+static int kiln_c99_par_f_Number(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+static int kiln_c99_par_f_Boolean(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+static int kiln_c99_par_f_String(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+static int kiln_c99_par_f_parseInt(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+static int kiln_c99_par_f_parseFloat(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+static int kiln_c99_par_f_Number_isInteger(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+static int kiln_c99_par_f_Number_isSafeInteger(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+static int kiln_c99_par_f_Number_isNaN(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+static int kiln_c99_par_f_Number_isFinite(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+static int kiln_c99_par_f_Number_parseInt(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+static int kiln_c99_par_f_Number_parseFloat(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+static int kiln_c99_par_f_JSON_stringify(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+static int kiln_c99_par_m_trim(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+static int kiln_c99_par_m_trimStart(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+static int kiln_c99_par_m_trimEnd(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+static int kiln_c99_par_m_toUpperCase(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+static int kiln_c99_par_m_toLowerCase(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+static int kiln_c99_par_m_at(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+static int kiln_c99_par_m_charAt(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+static int kiln_c99_par_m_codePointAt(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+static int kiln_c99_par_m_substring(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+static int kiln_c99_par_m_slice(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+static int kiln_c99_par_m_indexOf(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+static int kiln_c99_par_m_includes(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+static int kiln_c99_par_m_lastIndexOf(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+static int kiln_c99_par_m_startsWith(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+static int kiln_c99_par_m_endsWith(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+static int kiln_c99_par_m_padStart(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+static int kiln_c99_par_m_padEnd(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+static int kiln_c99_par_m_repeat(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+static int kiln_c99_par_m_split(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+static int kiln_c99_par_m_toString(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+static int kiln_c99_par_m_toFixed(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+static int kiln_c99_par_m_join(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
 #endif
 static KILN_ALWAYS_INLINE inline int kiln_c99_par_number(kiln_val v, double *out) {
 static KILN_ALWAYS_INLINE inline int kiln_c99_par_get(const kiln_c99_par_env *env,
@@ -2310,6 +2385,8 @@ static uint32_t kiln_c99_ryu_pow5_factor(uint64_t value) {
 static uint64_t kiln_c99_ryu_shortest(uint64_t bits, int32_t *exponent) {
 static size_t kiln_c99_double_to_js(double value, char out[32]) {
 static size_t kiln_c99_exact_digits(double value, unsigned char *digits, size_t capacity,
+#define KILN_C99_FIXED_SPELLING_MAX 1204
+static size_t kiln_c99_fixed_spelling(double value, int places, char *out) {
 static int kiln_c99_to_fixed(kiln_value *out, double value, int places) {
 static void kiln_c99_significant_digits(double value, size_t count, char *mantissa,
 static int kiln_c99_shortest_digits(double value, char *mantissa, size_t capacity, int *exponent) {
@@ -2920,6 +2997,8 @@ static int kiln_c99_generator_close_with(kiln_host *host, kiln_generator *frame,
 static int kiln_c99_generator_delegate_return(kiln_host *host, kiln_generator *frame, kiln_value sent_val,
 static int kiln_c99_generator_delegate_throw(kiln_host *host, kiln_generator *frame, kiln_value thrown_val,
 int kiln_c99_default_require(void *context, kiln_host *host, kiln_value specifier,
+static double kiln_c99_parse_int_bytes(const char *bytes, size_t len, double radix) {
+static double kiln_c99_parse_float_bytes(const char *bytes, size_t len) {
 static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, uint64_t code,
 #if KILN_RETAIN_GROUP_NODE_EVENT
 #endif
@@ -3315,3 +3394,64 @@ static int kiln_c99_val_to_property_key(kiln_host *host, kiln_val target, kiln_v
 static int kiln_c99_val_check_tdz(kiln_val val, kiln_value *thrown) {
 static int kiln_c99_val_make_cell(kiln_val *slot) {
 static void kiln_c99_gc_unit_roots(void *opaque, void *context, int phase) {
+static void *kiln_c99_par_string_alloc(kiln_c99_par_arena *arena, size_t length, int utf16,
+static kiln_val kiln_c99_par_empty(void) {
+static int kiln_c99_par_unit_string(kiln_c99_par_arena *arena, uint16_t unit, kiln_val *out) {
+static int kiln_c99_par_substring(kiln_c99_par_arena *arena, kiln_val value, size_t start,
+static int kiln_c99_par_integer(kiln_val value, double *out) {
+static size_t kiln_c99_par_clamp(double position, size_t length, int relative) {
+static kiln_val kiln_c99_par_arg(size_t argc, const kiln_val *args, size_t index) {
+static int kiln_c99_par_arg_text(kiln_val value, char buffer[32], kiln_string *view,
+static double kiln_c99_par_find(const kiln_string *haystack, const kiln_string *needle, size_t from) {
+static int kiln_c99_par_units_equal(const kiln_string *a, size_t at, const kiln_string *b) {
+static int kiln_c99_par_plain_array(kiln_val value, const kiln_array **out) {
+static int kiln_c99_par_array_sized(kiln_c99_par_arena *arena, size_t count, kiln_val *out,
+static void kiln_c99_par_array_seal(kiln_array *array) {
+static int kiln_c99_par_is_bigint(kiln_val value) {
+static int kiln_c99_par_f_Number(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_f_Boolean(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_f_String(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_parse_subject(kiln_val value, char buffer[32], kiln_string *view,
+static int kiln_c99_par_f_parseInt(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_f_parseFloat(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_number_arg(size_t argc, const kiln_val *args, double *d) {
+static int kiln_c99_par_f_Number_isInteger(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_f_Number_isSafeInteger(const kiln_c99_par_env *env,
+static int kiln_c99_par_f_Number_isNaN(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_f_Number_isFinite(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_f_Number_parseInt(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_f_Number_parseFloat(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+#define KILN_C99_PAR_JSON_DEPTH 64
+static int kiln_c99_par_json_maybe_tojson(const kiln_object *object, const kiln_string *tojson) {
+static int kiln_c99_par_json_value(kiln_text *text, kiln_val value, int *wrote,
+static int kiln_c99_par_utf8_string(kiln_c99_par_arena *arena, const unsigned char *bytes,
+static int kiln_c99_par_f_JSON_stringify(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+#define KILN_C99_PAR_STRING_SELF(self)                                                            \
+static int kiln_c99_par_trim_mode(kiln_c99_par_arena *arena, kiln_val self, int mode, kiln_val *out) {
+static int kiln_c99_par_m_trim(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+static int kiln_c99_par_m_trimStart(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_m_trimEnd(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_case(kiln_c99_par_arena *arena, kiln_val self, int upper, kiln_val *out) {
+static int kiln_c99_par_m_toUpperCase(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_m_toLowerCase(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_m_at(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+static int kiln_c99_par_m_charAt(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_m_codePointAt(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_m_substring(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_m_slice(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_m_indexOf(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_m_includes(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_m_lastIndexOf(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_m_startsWith(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_m_endsWith(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+#define KILN_C99_PAR_BUILT_UNITS ((size_t)1 << 24)
+static int kiln_c99_par_pad(kiln_c99_par_arena *arena, kiln_val self, size_t argc,
+static int kiln_c99_par_m_padStart(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_m_padEnd(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_m_repeat(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static uint32_t kiln_c99_par_uint32(double d) {
+static int kiln_c99_par_m_split(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_m_toString(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_m_toFixed(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+static int kiln_c99_par_m_join(const kiln_c99_par_env *env, kiln_c99_par_arena *arena,
+#undef KILN_C99_PAR_STRING_SELF

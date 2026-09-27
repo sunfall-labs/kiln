@@ -1048,8 +1048,12 @@ fn runtime_prelude_size() {
     // ownership-transfer join in `heap.c`, the builders a pool thread uses (object and array
     // literals, spreads, strings, the flatten) in `spread.c`, the worker's shape step, and the
     // comments saying what each proves.
+    // Widened on 2026-09-27 for parallel issue 09 (+~1,300 lines): tier 4's worker paths of the
+    // built-ins marked pure (`boxed.c`: string, number and array methods, `Number`/`parseInt`/
+    // `parseFloat`, `JSON.stringify` of plain data, and their declarations in the header), and
+    // `toFixed`/`parseInt`/`parseFloat` split into pure helpers both paths share.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 56_900;
+    const CEILING_LINES: usize = 58_300;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

@@ -1996,7 +1996,15 @@ typedef struct kiln_c99_par_env {
     /* The interned keys the callback defines (object literal members, `{ ...r, k: v }`), in
      * `HeapShape::defines` order, interned on the realm thread before the pool starts. */
     const kiln_string *const *defines;
+    /* Tier 4 (parallel issue 09): the bodies of the functions the callback calls through a
+     * closure value, in `HeapShape::bodies` order, so a clone checks per call that the closure
+     * it found is the one the proof is about. */
+    const kiln_body_fn *bodies;
 } kiln_c99_par_env;
+
+/* How deep a pool thread's clones call each other (tier 4) before the call declines and runs
+ * sequentially -- where a recursion that deep is the sequential run's to finish, or overflow. */
+#define KILN_C99_PAR_CALL_DEPTH 128u
 
 /* A worker's own cache for one named read of the clone: the shape it last met there and the own
  * data slot the name has in it. It lives in the chunk worker's frame, so nothing shared is taught
@@ -2043,6 +2051,79 @@ extern int kiln_c99_par_array(kiln_c99_par_arena *arena, const kiln_val *element
 extern int kiln_c99_par_to_string(kiln_c99_par_arena *arena, kiln_val value, kiln_val *out);
 extern int kiln_c99_par_concat(kiln_c99_par_arena *arena, kiln_val a, kiln_val b, kiln_val *out);
 extern int kiln_c99_par_flatten(kiln_val mapped, size_t count, kiln_val *out);
+/* Tier 4 (parallel issue 09): the pure built-ins a pool thread runs (`boxed.c`). */
+extern int kiln_c99_par_plain_array(kiln_val value, const kiln_array **out);
+extern int kiln_c99_par_array_sized(kiln_c99_par_arena *arena, size_t count, kiln_val *out,
+                                    kiln_array **array);
+extern void kiln_c99_par_array_seal(kiln_array *array);
+extern int kiln_c99_par_f_Number(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+           const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_f_Boolean(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+           const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_f_String(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+           const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_f_parseInt(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+           const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_f_parseFloat(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+           const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_f_Number_isInteger(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+           const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_f_Number_isSafeInteger(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+           const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_f_Number_isNaN(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+           const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_f_Number_isFinite(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+           const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_f_Number_parseInt(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+           const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_f_Number_parseFloat(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+           const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_f_JSON_stringify(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+           const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_m_trim(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_m_trimStart(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_m_trimEnd(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_m_toUpperCase(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_m_toLowerCase(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_m_at(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_m_charAt(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_m_codePointAt(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_m_substring(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_m_slice(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_m_indexOf(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_m_includes(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_m_lastIndexOf(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_m_startsWith(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_m_endsWith(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_m_padStart(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_m_padEnd(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_m_repeat(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_m_split(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_m_toString(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_m_toFixed(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+extern int kiln_c99_par_m_join(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
 #else
 static void kiln_c99_par_enter(const kiln_c99_par_env *env, kiln_c99_par_frame *frame);
 static void kiln_c99_par_leave(kiln_c99_par_frame *frame);
@@ -2067,6 +2148,78 @@ static int kiln_c99_par_array(kiln_c99_par_arena *arena, const kiln_val *element
 static int kiln_c99_par_to_string(kiln_c99_par_arena *arena, kiln_val value, kiln_val *out);
 static int kiln_c99_par_concat(kiln_c99_par_arena *arena, kiln_val a, kiln_val b, kiln_val *out);
 static int kiln_c99_par_flatten(kiln_val mapped, size_t count, kiln_val *out);
+static int kiln_c99_par_plain_array(kiln_val value, const kiln_array **out);
+static int kiln_c99_par_array_sized(kiln_c99_par_arena *arena, size_t count, kiln_val *out,
+                                    kiln_array **array);
+static void kiln_c99_par_array_seal(kiln_array *array);
+static int kiln_c99_par_f_Number(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+           const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_f_Boolean(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+           const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_f_String(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+           const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_f_parseInt(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+           const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_f_parseFloat(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+           const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_f_Number_isInteger(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+           const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_f_Number_isSafeInteger(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+           const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_f_Number_isNaN(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+           const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_f_Number_isFinite(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+           const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_f_Number_parseInt(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+           const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_f_Number_parseFloat(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+           const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_f_JSON_stringify(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, size_t argc,
+           const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_m_trim(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_m_trimStart(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_m_trimEnd(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_m_toUpperCase(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_m_toLowerCase(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_m_at(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_m_charAt(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_m_codePointAt(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_m_substring(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_m_slice(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_m_indexOf(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_m_includes(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_m_lastIndexOf(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_m_startsWith(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_m_endsWith(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_m_padStart(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_m_padEnd(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_m_repeat(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_m_split(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_m_toString(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_m_toFixed(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
+static int kiln_c99_par_m_join(const kiln_c99_par_env *env, kiln_c99_par_arena *arena, kiln_val self,
+           size_t argc, const kiln_val *args, kiln_val *out);
 #endif
 
 

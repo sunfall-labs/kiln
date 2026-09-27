@@ -1011,7 +1011,12 @@ static int kiln_c99_par_array(kiln_c99_par_arena *arena, const kiln_val *element
     array = (kiln_array *)kiln_c99_par_alloc(arena, KILN_GC_ARRAY,
                                              sizeof *array + in_block * sizeof(kiln_val));
     if (array == NULL) return 0;
-    for (index = 0; index < count; ++index) numeric &= KILN_VAL_IS_NUMBER(elements[index]) ? 1 : 0;
+    /* No `elements` (tier 4's `map`/`filter`/`split`): holes, which the caller overwrites before
+     * the array is seen, and `kiln_c99_par_array_seal` sets `is_numeric` from what it wrote. */
+    for (index = 0; elements != NULL && index < count; ++index) {
+        numeric &= KILN_VAL_IS_NUMBER(elements[index]) ? 1 : 0;
+    }
+    if (elements == NULL) numeric = 0;
     array->elements = NULL;
     array->count = 0;
     array->capacity = 0;
@@ -1029,7 +1034,8 @@ static int kiln_c99_par_array(kiln_c99_par_arena *arena, const kiln_val *element
         array->elements = array->inline_elements;
         array->capacity = inline_capacity;
     }
-    if (count > 0) memcpy(array->elements, elements, count * sizeof(kiln_val));
+    if (count > 0 && elements != NULL) memcpy(array->elements, elements, count * sizeof(kiln_val));
+    for (index = 0; elements == NULL && index < count; ++index) array->elements[index] = KILN_VAL_HOLE;
     array->count = count;
     *out = KILN_VAL_TAG_PTR(KILN_TAG_BUFFER_PREFIX, array);
     return 1;

@@ -1321,6 +1321,118 @@ int kiln_c99_default_require(void *context, kiln_host *host, kiln_value specifie
     return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR, "Cannot find module");
 }
 
+/* `parseInt(s, radix)` over the Latin1 code units of `s` (`radix` already `ToNumber`ed; 0 when
+ * none was given), and `parseFloat(s)`. Both read as far as they can and stop, rather than
+ * rejecting a string with a tail: `parseInt('12px')` is 12. That tolerance is the whole difference
+ * between these and `Number(x)`, which rejects the same input. Pure: a pool thread parses with
+ * them too (parallel tier 4). */
+static double kiln_c99_parse_int_bytes(const char *bytes, size_t len, double radix) {
+    size_t at = 0;
+    double magnitude = 0.0;
+    int base;
+    int negative = 0;
+    size_t digits_at;
+    while (at < len && kiln_c99_is_trimmed((uint16_t)(unsigned char)bytes[at])) {
+        at += 1;
+    }
+    radix = isfinite(radix) ? trunc(radix) : 0.0;
+    if (!(radix == 0.0 || (radix >= 2.0 && radix <= 36.0))) {
+        return 0.0 / 0.0;
+    }
+    base = (int)radix;
+    if (at < len && (bytes[at] == '-' || bytes[at] == '+')) {
+        negative = bytes[at] == '-';
+        at += 1;
+    }
+    /* `0x` selects hexadecimal when no radix was given, and is allowed when 16 was. */
+    if ((base == 0 || base == 16) && at + 1 < len && bytes[at] == '0' &&
+        (bytes[at + 1] == 'x' || bytes[at + 1] == 'X')) {
+        base = 16;
+        at += 2;
+    } else if (base == 0) {
+        base = 10;
+    }
+    digits_at = at;
+    while (at < len) {
+        int digit;
+        char character = bytes[at];
+        if (character >= '0' && character <= '9') {
+            digit = character - '0';
+        } else if (character >= 'a' && character <= 'z') {
+            digit = character - 'a' + 10;
+        } else if (character >= 'A' && character <= 'Z') {
+            digit = character - 'A' + 10;
+        } else {
+            break;
+        }
+        if (digit >= base) {
+            break;
+        }
+        /* Folded as a double rather than accumulated as an integer: the result is a double
+         * either way, and a long run of digits has to saturate toward infinity rather than
+         * overflow. */
+        magnitude = magnitude * (double)base + (double)digit;
+        at += 1;
+    }
+    return at == digits_at ? 0.0 / 0.0 : (negative ? -magnitude : magnitude);
+}
+
+static double kiln_c99_parse_float_bytes(const char *bytes, size_t len) {
+    /* The longest prefix that is a decimal literal, scanned rather than handed to `strtod`
+     * outright: C's parser also accepts `0x1f`, `inf` and `nan`, none of which this grammar has
+     * -- `parseFloat('0x1f')` is 0. */
+    size_t at = 0;
+    size_t start;
+    size_t scan;
+    size_t end;
+    size_t before = 0;
+    size_t after = 0;
+    while (at < len && kiln_c99_is_trimmed((uint16_t)(unsigned char)bytes[at])) {
+        at += 1;
+    }
+    start = at;
+    if (at < len && (bytes[at] == '-' || bytes[at] == '+')) {
+        at += 1;
+    }
+    if (len - at >= 8 && memcmp(bytes + at, "Infinity", 8) == 0) {
+        return bytes[start] == '-' ? -1.0 / 0.0 : 1.0 / 0.0;
+    }
+    scan = at;
+    while (scan < len && bytes[scan] >= '0' && bytes[scan] <= '9') {
+        scan += 1;
+        before += 1;
+    }
+    if (scan < len && bytes[scan] == '.') {
+        scan += 1;
+        while (scan < len && bytes[scan] >= '0' && bytes[scan] <= '9') {
+            scan += 1;
+            after += 1;
+        }
+    }
+    if (before + after == 0) {
+        return 0.0 / 0.0;
+    }
+    end = scan;
+    if (scan < len && (bytes[scan] == 'e' || bytes[scan] == 'E')) {
+        size_t probe = scan + 1;
+        if (probe < len && (bytes[probe] == '+' || bytes[probe] == '-')) {
+            probe += 1;
+        }
+        if (probe < len && bytes[probe] >= '0' && bytes[probe] <= '9') {
+            while (probe < len && bytes[probe] >= '0' && bytes[probe] <= '9') {
+                probe += 1;
+            }
+            /* An exponent with no digits is not part of the literal: `1e` is 1. */
+            end = probe;
+        }
+    }
+    /* The scanned prefix is a `StringNumericLiteral` by construction, so the provider's parser
+     * is exactly the right reader for it -- and it is the same one `Number(x)` uses, which is what
+     * keeps the two agreeing. `strtod` would read the process locale's decimal point, and an
+     * embedded module runs in its host's. */
+    return kiln_string_to_number(bytes + start, end - start);
+}
+
 static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, uint64_t code,
                                            kiln_c99_method_metadata metadata,
                                            kiln_value receiver, const kiln_value *args,
@@ -2627,7 +2739,6 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             kiln_value text;
             const char *bytes;
             size_t len;
-            size_t at = 0;
             /* These two read a *string*, so the string hint: `toString` before `valueOf`, and
              * `parseInt({toString: () => "99"})` is 99. The same split `kiln_c99_to_number_checked`
              * makes for the number hint -- `kiln_c99_text` is pure, so it cannot run a `toString`
@@ -2644,117 +2755,13 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             }
             bytes = kiln_c99_string_ascii_bytes(text, &len);
             if (bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
-            /* Both read as far as they can and stop, rather than rejecting a string with a tail:
-             * `parseInt('12px')` is 12. That tolerance is the whole difference between these and
-             * `Number(x)`, which rejects the same input. */
-            while (at < len && kiln_c99_is_trimmed((uint16_t)(unsigned char)bytes[at])) {
-                at += 1;
-            }
             if (code == KILN_C99_METHOD_PARSE_INT) {
-                double radix = argc > 1 ? kiln_c99_as_number(args[1]) : 0.0;
-                double magnitude = 0.0;
-                int base;
-                int negative = 0;
-                size_t digits_at;
-                radix = isfinite(radix) ? trunc(radix) : 0.0;
-                if (!(radix == 0.0 || (radix >= 2.0 && radix <= 36.0))) {
-                    *result = kiln_c99_number(0.0 / 0.0);
-                    return KILN_C99_OK;
-                }
-                base = (int)radix;
-                if (at < len && (bytes[at] == '-' || bytes[at] == '+')) {
-                    negative = bytes[at] == '-';
-                    at += 1;
-                }
-                /* `0x` selects hexadecimal when no radix was given, and is allowed when 16 was. */
-                if ((base == 0 || base == 16) && at + 1 < len && bytes[at] == '0' &&
-                    (bytes[at + 1] == 'x' || bytes[at + 1] == 'X')) {
-                    base = 16;
-                    at += 2;
-                } else if (base == 0) {
-                    base = 10;
-                }
-                digits_at = at;
-                while (at < len) {
-                    int digit;
-                    char character = bytes[at];
-                    if (character >= '0' && character <= '9') {
-                        digit = character - '0';
-                    } else if (character >= 'a' && character <= 'z') {
-                        digit = character - 'a' + 10;
-                    } else if (character >= 'A' && character <= 'Z') {
-                        digit = character - 'A' + 10;
-                    } else {
-                        break;
-                    }
-                    if (digit >= base) {
-                        break;
-                    }
-                    /* Folded as a double rather than accumulated as an integer: the result is a
-                     * double either way, and a long run of digits has to saturate toward infinity
-                     * rather than overflow. */
-                    magnitude = magnitude * (double)base + (double)digit;
-                    at += 1;
-                }
-                *result = kiln_c99_number(at == digits_at ? 0.0 / 0.0
-                                                          : (negative ? -magnitude : magnitude));
-                return KILN_C99_OK;
+                *result = kiln_c99_number(
+                    kiln_c99_parse_int_bytes(bytes, len, argc > 1 ? kiln_c99_as_number(args[1]) : 0.0));
+            } else {
+                *result = kiln_c99_number(kiln_c99_parse_float_bytes(bytes, len));
             }
-            {
-                /* The longest prefix that is a decimal literal, scanned rather than handed to
-                 * `strtod` outright: C's parser also accepts `0x1f`, `inf` and `nan`, none of
-                 * which this grammar has -- `parseFloat('0x1f')` is 0. */
-                size_t start = at;
-                size_t scan;
-                size_t end;
-                size_t before = 0;
-                size_t after = 0;
-                double parsed;
-                if (at < len && (bytes[at] == '-' || bytes[at] == '+')) {
-                    at += 1;
-                }
-                if (len - at >= 8 && memcmp(bytes + at, "Infinity", 8) == 0) {
-                    *result = kiln_c99_number(bytes[start] == '-' ? -1.0 / 0.0 : 1.0 / 0.0);
-                    return KILN_C99_OK;
-                }
-                scan = at;
-                while (scan < len && bytes[scan] >= '0' && bytes[scan] <= '9') {
-                    scan += 1;
-                    before += 1;
-                }
-                if (scan < len && bytes[scan] == '.') {
-                    scan += 1;
-                    while (scan < len && bytes[scan] >= '0' && bytes[scan] <= '9') {
-                        scan += 1;
-                        after += 1;
-                    }
-                }
-                if (before + after == 0) {
-                    *result = kiln_c99_number(0.0 / 0.0);
-                    return KILN_C99_OK;
-                }
-                end = scan;
-                if (scan < len && (bytes[scan] == 'e' || bytes[scan] == 'E')) {
-                    size_t probe = scan + 1;
-                    if (probe < len && (bytes[probe] == '+' || bytes[probe] == '-')) {
-                        probe += 1;
-                    }
-                    if (probe < len && bytes[probe] >= '0' && bytes[probe] <= '9') {
-                        while (probe < len && bytes[probe] >= '0' && bytes[probe] <= '9') {
-                            probe += 1;
-                        }
-                        /* An exponent with no digits is not part of the literal: `1e` is 1. */
-                        end = probe;
-                    }
-                }
-                /* The scanned prefix is a `StringNumericLiteral` by construction, so the
-                 * provider's parser is exactly the right reader for it -- and it is the same one
-                 * `Number(x)` uses, which is what keeps the two agreeing. `strtod` would read the
-                 * process locale's decimal point, and an embedded module runs in its host's. */
-                parsed = kiln_string_to_number(bytes + start, end - start);
-                *result = kiln_c99_number(parsed);
-                return KILN_C99_OK;
-            }
+            return KILN_C99_OK;
         }
 #if KILN_RETAIN_GROUP_MATH_NUMBER
         case KILN_C99_METHOD_MATH_FLOOR: *result = kiln_c99_number(floor(first)); return KILN_C99_OK;

@@ -424,19 +424,22 @@ static size_t kiln_c99_exact_digits(double value, unsigned char *digits, size_t 
     return count;
 }
 
-static int kiln_c99_to_fixed(kiln_value *out, double value, int places) {
+/* The longest spelling `kiln_c99_fixed_spelling` writes: a sign, every digit `exact_digits`
+ * can hold, and a point. */
+#define KILN_C99_FIXED_SPELLING_MAX 1204
+
+/* `value.toFixed(places)`'s characters for a finite `value` below 1e21 in magnitude, into `out`
+ * (at least `KILN_C99_FIXED_SPELLING_MAX` bytes, not terminated); the length. Allocates nothing
+ * and writes nothing else, so a pool thread spells with it too (parallel tier 4). */
+static size_t kiln_c99_fixed_spelling(double value, int places, char *out) {
     /* Little-endian decimal digits: `digits[0]` is the least significant. */
     unsigned char digits[1200];
     size_t count;
     size_t fractional;
     size_t index;
-    kiln_text text = {NULL, 0, 0};
+    size_t length = 0;
     int negative = value < 0.0;
     int round_up;
-    if (!isfinite(value) || fabs(value) >= 1e21) {
-        *out = kiln_c99_text(kiln_c99_number(value));
-        return out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
-    }
     count = kiln_c99_exact_digits(value, digits, sizeof digits, &fractional);
     if (fractional <= (size_t)places) {
         round_up = 0;
@@ -480,20 +483,26 @@ static int kiln_c99_to_fixed(kiln_value *out, double value, int places) {
     /* The sign survives rounding: `(-0.0004).toFixed(2)` is `"-0.00"`, which says the value was
      * negative rather than that it was nonzero. Negative zero is not negative here, so
      * `(-0).toFixed(2)` is `"0.00"`. */
-    if (negative && kiln_c99_text_append_c(&text, "-") != KILN_C99_OK) {
+    if (negative) out[length++] = '-';
+    for (index = count; index > 0; --index) {
+        if (index == fractional) out[length++] = '.';
+        out[length++] = (char)('0' + digits[index - 1]);
+    }
+    return length;
+}
+
+static int kiln_c99_to_fixed(kiln_value *out, double value, int places) {
+    char spelled[KILN_C99_FIXED_SPELLING_MAX];
+    size_t length;
+    kiln_text text = {NULL, 0, 0};
+    if (!isfinite(value) || fabs(value) >= 1e21) {
+        *out = kiln_c99_text(kiln_c99_number(value));
+        return out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+    }
+    length = kiln_c99_fixed_spelling(value, places, spelled);
+    if (kiln_c99_text_append(&text, spelled, length) != KILN_C99_OK) {
         free(text.bytes);
         return KILN_C99_OUT_OF_MEMORY;
-    }
-    for (index = count; index > 0; --index) {
-        char character = (char)('0' + digits[index - 1]);
-        if (index == fractional && kiln_c99_text_append_c(&text, ".") != KILN_C99_OK) {
-            free(text.bytes);
-            return KILN_C99_OUT_OF_MEMORY;
-        }
-        if (kiln_c99_text_append(&text, &character, 1) != KILN_C99_OK) {
-            free(text.bytes);
-            return KILN_C99_OUT_OF_MEMORY;
-        }
     }
     *out = kiln_c99_text_value(&text);
     return KILN_C99_OK;
