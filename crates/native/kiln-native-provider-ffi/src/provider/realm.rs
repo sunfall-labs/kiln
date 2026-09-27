@@ -4220,6 +4220,41 @@ pub unsafe extern "C" fn kiln_realm_run_pinned(
     context: *mut c_void,
     statuses: *mut i32,
 ) -> i32 {
+    // SAFETY: the caller's contract, which is this function's.
+    unsafe { run_realms(count, run, context, statuses, false) }
+}
+
+/// `kiln_realm_run_pinned` for `KILN_WORKERS` thread mode: the same N realm threads, each of
+/// which first joins the process's listen group, so every realm listening on one address
+/// shares one socket and the process balances accepted connections across them
+/// (`kiln_runtime::listen_group`) instead of the kernel hashing them over N `SO_REUSEPORT`
+/// sockets. Realms those realms start (`node:worker_threads`) are on other threads and listen
+/// as they always have.
+///
+/// # Safety
+///
+/// As `kiln_realm_run_pinned`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_run_workers(
+    count: u64,
+    run: Option<PinnedRun>,
+    context: *mut c_void,
+    statuses: *mut i32,
+) -> i32 {
+    // SAFETY: the caller's contract, which is this function's.
+    unsafe { run_realms(count, run, context, statuses, true) }
+}
+
+/// # Safety
+///
+/// As `kiln_realm_run_pinned`.
+unsafe fn run_realms(
+    count: u64,
+    run: Option<PinnedRun>,
+    context: *mut c_void,
+    statuses: *mut i32,
+    listen_group: bool,
+) -> i32 {
     ffi(|| {
         let (Some(run), Ok(count)) = (run, usize::try_from(count)) else {
             return INVALID_ARGUMENT;
@@ -4233,6 +4268,9 @@ pub unsafe extern "C" fn kiln_realm_run_pinned(
             .map(|index| {
                 pool.spawn_pinned(move || {
                     let shared = shared;
+                    if listen_group {
+                        kiln_runtime::join_listen_group();
+                    }
                     // SAFETY: the caller's contract for `run` and `context`.
                     unsafe { run(shared.0, index) }
                 })
@@ -4348,6 +4386,9 @@ macro_rules! assert_provider_export {
         };
         (realm, kiln_realm_run_pinned, realm_run_pinned) => {
             const _: unsafe extern "C" fn(u64, Option<PinnedRun>, *mut c_void, *mut i32) -> i32 = kiln_realm_run_pinned;
+        };
+        (realm, kiln_realm_run_workers, realm_run_pinned) => {
+            const _: unsafe extern "C" fn(u64, Option<PinnedRun>, *mut c_void, *mut i32) -> i32 = kiln_realm_run_workers;
         };
         (realm, kiln_realm_gc_attach, realm_gc_attach) => {
             const _: unsafe extern "C" fn(*const GcHooks, *mut c_void, *mut *mut c_void) -> i32 = kiln_realm_gc_attach;

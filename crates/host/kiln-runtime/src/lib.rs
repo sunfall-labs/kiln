@@ -43,6 +43,8 @@ impl std::fmt::Debug for HostTransport {
         formatter.write_str("HostTransport")
     }
 }
+pub mod listen_group;
+pub use listen_group::join_listen_group;
 pub mod node_http;
 pub mod node_http_agent;
 pub mod node_net;
@@ -2320,6 +2322,9 @@ pub struct TokioHost {
     /// The io_uring every taken transport goes on when that backend is selected.
     #[cfg(target_os = "linux")]
     uring: uring::HostRing,
+    /// The shared-listener tickets of connections this realm accepted in `KILN_WORKERS` thread
+    /// mode, keyed by the connection's resource and given back when it goes.
+    listen_tickets: BTreeMap<ResourceId, listen_group::ListenTicket>,
     _not_send: PhantomData<Rc<()>>,
 }
 
@@ -2346,6 +2351,7 @@ enum HostCompletionValue {
         peer: std::net::SocketAddr,
         referenced: bool,
         accepted: bool,
+        ticket: Option<listen_group::ListenTicket>,
     },
     /// A connection the io_uring accepted: not registered with Tokio's reactor until a discrete
     /// read, write or shutdown needs it, and never if the HTTP engine takes it first.
@@ -2354,14 +2360,17 @@ enum HostCompletionValue {
         stream: std::net::TcpStream,
         peer: std::net::SocketAddr,
         referenced: bool,
+        ticket: Option<listen_group::ListenTicket>,
     },
 }
 
-/// A listening socket: Tokio's, or (with the io_uring backend) the ring's multishot accept.
+/// A listening socket: Tokio's, (with the io_uring backend) the ring's multishot accept, or in
+/// `KILN_WORKERS` thread mode a member of the process's one listener for the address.
 enum HostListener {
     Tokio(TcpListener),
     #[cfg(target_os = "linux")]
     Ring(uring::RingListener),
+    Shared(listen_group::GroupMember),
 }
 
 impl HostListener {
@@ -2370,6 +2379,7 @@ impl HostListener {
             HostListener::Tokio(listener) => listener.local_addr(),
             #[cfg(target_os = "linux")]
             HostListener::Ring(listener) => listener.local_addr(),
+            HostListener::Shared(listener) => listener.local_addr(),
         }
     }
 }
@@ -2457,6 +2467,7 @@ impl TokioHost {
             fs: None,
             #[cfg(target_os = "linux")]
             uring: uring::HostRing::new(),
+            listen_tickets: BTreeMap::new(),
             _not_send: PhantomData,
         }
     }
@@ -2534,7 +2545,12 @@ impl TokioHost {
                 // peer has closed. The notifier keeps a permit when nothing is waiting, so a
                 // message posted between the check and the wait is not lost.
                 let Some(notify) = workers::notifier(port) else {
-                    self.insert_immediate(request, sequence, referenced, Ok(AsyncHostValue::Undefined));
+                    self.insert_immediate(
+                        request,
+                        sequence,
+                        referenced,
+                        Ok(AsyncHostValue::Undefined),
+                    );
                     return request;
                 };
                 self.spawn_task(request, sequence, referenced, async move {
@@ -2717,20 +2733,27 @@ impl TokioHost {
                 // (multishot), and the socket is never registered with Tokio's reactor.
                 #[cfg(target_os = "linux")]
                 let ring = self.uring.ring();
+                // A worker realm in `KILN_WORKERS` thread mode shares one socket per address
+                // with the others, and the process balances accepts across them.
+                let shared = listen_group::joined();
                 self.spawn_task(request, sequence, referenced, async move {
-                    let result = bind_tcp_listener_std(host.as_str(), port)
-                        .and_then(|listener| {
-                            #[cfg(target_os = "linux")]
-                            if let Some(ring) = ring {
-                                return match ring.listen(std::os::fd::OwnedFd::from(listener)) {
-                                    Ok(listener) => Ok(HostListener::Ring(listener)),
-                                    Err(fd) => {
-                                        TcpListener::from_std(fd.into()).map(HostListener::Tokio)
-                                    }
-                                };
-                            }
-                            TcpListener::from_std(listener).map(HostListener::Tokio)
-                        })
+                    let listen = || -> std::io::Result<HostListener> {
+                        if shared && let Some(member) = listen_group::listen(host.as_str(), port)? {
+                            return Ok(HostListener::Shared(member));
+                        }
+                        let listener = bind_tcp_listener_std(host.as_str(), port)?;
+                        #[cfg(target_os = "linux")]
+                        if let Some(ring) = &ring {
+                            return match ring.listen(std::os::fd::OwnedFd::from(listener)) {
+                                Ok(listener) => Ok(HostListener::Ring(listener)),
+                                Err(fd) => {
+                                    TcpListener::from_std(fd.into()).map(HostListener::Tokio)
+                                }
+                            };
+                        }
+                        TcpListener::from_std(listener).map(HostListener::Tokio)
+                    };
+                    let result = listen()
                         .map(|listener| HostCompletionValue::TcpListener {
                             listener,
                             referenced,
@@ -2762,6 +2785,44 @@ impl TokioHost {
                 };
                 let listener = Rc::clone(listener);
                 let accepted_referenced = *resource_referenced;
+                if let HostListener::Shared(member) = &*listener {
+                    let accept = member.accept();
+                    #[cfg(target_os = "linux")]
+                    let raw = self.uring.ring().is_some();
+                    self.spawn_task(request, sequence, referenced, async move {
+                        let result = async {
+                            let (stream, ticket) = accept.await?;
+                            let peer = stream.peer_addr()?;
+                            // With the ring, the connection stays raw until the HTTP engine
+                            // takes it onto the ring, exactly as a ring-accepted one does.
+                            #[cfg(target_os = "linux")]
+                            if raw {
+                                return Ok(HostCompletionValue::TcpRawStream {
+                                    stream,
+                                    peer,
+                                    referenced: accepted_referenced,
+                                    ticket: Some(ticket),
+                                });
+                            }
+                            Ok(HostCompletionValue::TcpStream {
+                                stream: TcpStream::from_std(stream)?,
+                                peer,
+                                referenced: accepted_referenced,
+                                accepted: true,
+                                ticket: Some(ticket),
+                            })
+                        }
+                        .await
+                        .map_err(|error| socket_error("accept", error));
+                        HostCompletion {
+                            request,
+                            sequence,
+                            lifecycle: None,
+                            result,
+                        }
+                    });
+                    return request;
+                }
                 #[cfg(target_os = "linux")]
                 if let HostListener::Ring(ring_listener) = &*listener {
                     let accept = ring_listener.accept();
@@ -2774,6 +2835,7 @@ impl TokioHost {
                                 stream,
                                 peer,
                                 referenced: accepted_referenced,
+                                ticket: None,
                             })
                         }
                         .await
@@ -2792,6 +2854,9 @@ impl TokioHost {
                         HostListener::Tokio(listener) => listener,
                         #[cfg(target_os = "linux")]
                         HostListener::Ring(_) => unreachable!("ring listeners are handled above"),
+                        HostListener::Shared(_) => {
+                            unreachable!("shared listeners are handled above")
+                        }
                     };
                     let result = listener
                         .accept()
@@ -2808,6 +2873,7 @@ impl TokioHost {
                                 peer,
                                 referenced,
                                 accepted: true,
+                                ticket: None,
                             }
                         }),
                     }
@@ -2824,6 +2890,7 @@ impl TokioHost {
                             peer,
                             referenced,
                             accepted: false,
+                            ticket: None,
                         })
                     }
                     .await
@@ -3096,6 +3163,7 @@ impl TokioHost {
     }
 
     fn close_resource(&mut self, resource: ResourceId) -> Result<AsyncHostValue, AsyncHostError> {
+        self.listen_tickets.remove(&resource);
         self.resources
             .remove(&resource)
             .map(|_| AsyncHostValue::Undefined)
@@ -3201,6 +3269,7 @@ impl TokioHost {
         self.pending.clear();
         self.ready.clear();
         self.resources.clear();
+        self.listen_tickets.clear();
         self.failure.get_or_insert_with(|| RuntimeFailure {
             code: "ERR_KILN_RUNTIME_TASK_PANIC",
             message: error.to_string(),
@@ -3303,10 +3372,14 @@ impl TokioHost {
                 stream,
                 peer,
                 referenced,
+                ticket,
             } => {
                 let local = stream.local_addr().ok();
                 let id = ResourceId::new(self.next_resource);
                 self.next_resource = self.next_resource.wrapping_add(1).max(1);
+                if let Some(ticket) = ticket {
+                    self.listen_tickets.insert(id, ticket);
+                }
                 let resource = ResourceInfo {
                     id,
                     kind: ResourceKind::TcpStream,
@@ -3332,10 +3405,14 @@ impl TokioHost {
                 peer,
                 referenced,
                 accepted,
+                ticket,
             } => {
                 let local = stream.local_addr().ok();
                 let id = ResourceId::new(self.next_resource);
                 self.next_resource = self.next_resource.wrapping_add(1).max(1);
+                if let Some(ticket) = ticket {
+                    self.listen_tickets.insert(id, ticket);
+                }
                 let resource = ResourceInfo {
                     id,
                     kind: ResourceKind::TcpStream,
@@ -3458,6 +3535,7 @@ impl RealmHostProvider for TokioHost {
         self.pending.clear();
         self.ready.clear();
         self.resources.clear();
+        self.listen_tickets.clear();
         #[cfg(target_os = "linux")]
         self.uring.shutdown();
     }
@@ -3496,7 +3574,10 @@ impl RealmHostProvider for TokioHost {
 
     fn release_transport(&mut self, resource: ResourceId) -> bool {
         match self.resources.get(&resource) {
-            Some(HostResource::TcpTaken { .. }) => self.resources.remove(&resource).is_some(),
+            Some(HostResource::TcpTaken { .. }) => {
+                self.listen_tickets.remove(&resource);
+                self.resources.remove(&resource).is_some()
+            }
             _ => false,
         }
     }
@@ -3947,7 +4028,10 @@ fn stream_closed(syscall: &str, resource: ResourceId) -> AsyncHostError {
     )
 }
 
-fn bind_tcp_listener_std(host: &str, port: u16) -> std::io::Result<std::net::TcpListener> {
+pub(crate) fn bind_tcp_listener_std(
+    host: &str,
+    port: u16,
+) -> std::io::Result<std::net::TcpListener> {
     use std::net::ToSocketAddrs;
     use std::os::fd::FromRawFd;
 

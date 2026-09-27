@@ -115,6 +115,30 @@ worker sees `process.env.KILN_WORKER_INDEX` (`0`..`N-1`, kept across a restart) 
 `KILN_WORKER_COUNT`, in both engines; a single realm sets neither, so a program can run once-only
 startup work where the index is `0` or absent -- though a restarted worker 0 runs it again.
 
+`KILN_WORKERS_MODE=thread` runs the N workers as N realms in **one process**, each on its own
+thread of the runtime's realm host, instead of forking. The realms share one listening socket per
+address: the first realm to listen binds it, and the runtime hands each accepted connection to
+the realm with the fewest open connections (round-robin among ties) instead of the kernel hashing
+connections over N `SO_REUSEPORT` sockets -- which, measured with 16 connections over 16 workers,
+left six workers with none and two with three. Each realm's own `process.env` has
+`KILN_WORKER_INDEX` and `KILN_WORKER_COUNT` (a copy of the process environment plus those two, as a
+node worker thread gets a copy of its parent's; the process environment itself is not changed),
+and worker 0 writes the result file. `SIGTERM`, `SIGINT`, `SIGHUP` and `SIGQUIT` end the process by
+the same signal, every realm at once -- what forwarding it to N workers that each die of it
+amounts to -- and with `128+signal` as PID 1, so `docker stop` works the same in both modes. A
+realm finishing with 0 leaves the others serving; one finishing with any other status, or calling
+`process.exit(n)`, ends the process with that status. **A realm that crashes takes every realm
+with it**, and nothing restarts it: crash isolation is what process mode is for.
+
+Process mode is the default (`KILN_WORKERS_MODE=process`, or unset). Measured on 16 hardware
+threads with `bench/server/serve.mjs` under `KILN_WORKERS=auto` and `oha` on the same machine
+(three rounds each, `.scratch/realms-and-concurrency/issues/07-kiln-workers-thread-mode.md`), the
+two serve the same at 32 connections and above (about 300k rps at 64, 370k at 256), thread mode is
+8% slower at 16 connections -- it spreads them over all sixteen cores, where the client runs too --
+and its p99 at 64 connections is 1.2-1.6 ms against 1.1-1.2 ms. It uses 40 MB of PSS idle against
+50 MB, and 181 MB against 193 MB under load: 0.7 MB per worker, which does not pay for losing the
+supervisor's restarts. That changes when the realms share their built-ins (realms issue 08).
+
 On Linux 6.1 and newer, listeners and HTTP connections run on an io_uring owned by the realm's
 own Tokio runtime (multishot accept and receive, batched sends; no second executor). Older
 kernels, and any kernel or seccomp profile that refuses a ring, use epoll. `KILN_IO=epoll` forces

@@ -1208,17 +1208,26 @@ int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
      * sees the difference -- so `console.error` and `console.warn` reach the same place here that
      * they reach in node. */
     sink = kiln_cli_sink(state, operation == KILN_HOST_OP_WRITE_STDERR ? stderr : stdout);
-    for (index = 0; index < argc; ++index) {
-        if (index != 0 && fputc(' ', sink) == EOF) {
-            *result = kiln_cli_refused(state, "terminal I/O", 12);
-            return KILN_C99_HOST_ERROR;
-        }
-        if (kiln_cli_write_value_to(sink, arguments[index]) != KILN_C99_OK) {
-            *result = kiln_cli_refused(state, "terminal I/O", 12);
-            return KILN_C99_HOST_ERROR;
-        }
+    /* One line is one unit on a stream several realms share (`KILN_WORKERS` thread mode): the
+     * stream stays locked from its first byte to its flush, so another realm's line never lands
+     * inside it. */
+#ifndef _WIN32
+    extern void flockfile(FILE *file);
+    extern void funlockfile(FILE *file);
+    flockfile(sink);
+#endif
+    int status = KILN_C99_OK;
+    for (index = 0; index < argc && status == KILN_C99_OK; ++index) {
+        if (index != 0 && fputc(' ', sink) == EOF) status = KILN_C99_HOST_ERROR;
+        else if (kiln_cli_write_value_to(sink, arguments[index]) != KILN_C99_OK)
+            status = KILN_C99_HOST_ERROR;
     }
-    if (fputc('\n', sink) == EOF || fflush(sink) != 0) {
+    if (status == KILN_C99_OK && (fputc('\n', sink) == EOF || fflush(sink) != 0))
+        status = KILN_C99_HOST_ERROR;
+#ifndef _WIN32
+    funlockfile(sink);
+#endif
+    if (status != KILN_C99_OK) {
         *result = kiln_cli_refused(state, "terminal I/O", 12);
         return KILN_C99_HOST_ERROR;
     }

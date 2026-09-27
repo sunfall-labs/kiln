@@ -2598,10 +2598,10 @@ pub(super) fn graph_launcher_source_with_imports(
 #include <time.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <strings.h>
 #if defined(__linux__)
 #include <sys/prctl.h>
-#else
-#include <pthread.h>
 #endif
 #endif
 
@@ -2721,6 +2721,13 @@ extern int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
 extern int kiln_realm_destroy(uint64_t realm);
 extern int kiln_realm_run_pinned(uint64_t count, int (*run)(void *context, uint64_t index),
                                  void *context, int *statuses);
+extern int kiln_realm_run_workers(uint64_t count, int (*run)(void *context, uint64_t index),
+                                  void *context, int *statuses);
+/* `KILN_WORKERS` thread mode: the worker index of the realm this thread runs (-1 on any other
+ * thread, a `node:worker_threads` worker's included) and the count, which the realm's
+ * `process.env` gets as KILN_WORKER_INDEX and KILN_WORKER_COUNT. */
+static _Thread_local long kiln_cli_thread_worker = -1;
+static long kiln_cli_thread_workers = 0;
 extern void kiln_c99_realm_capture_output(int fd) __attribute__((visibility("hidden")));
 /* `node:worker_threads` (realms issue 06): the runtime starts a worker's thread and calls the
  * launcher back there to run one module of this program as the worker's realm. */
@@ -3348,6 +3355,24 @@ static int kiln_install_native_modules(kiln_host *host) {
     return status;
 }
 
+/* A thread-mode worker realm's own `process.env` view: the process environment every realm
+ * copies when it builds `process` (as a node worker thread gets a copy of its parent's), plus its
+ * index and the count, which differ per realm and so never go into the shared `environ`. */
+static int kiln_cli_put_worker_env(kiln_host *host) {
+    kiln_value process = kiln_c99_undefined();
+    kiln_value env = kiln_c99_undefined();
+    char text[32];
+    int length;
+    int status = kiln_c99_process_object(&process);
+    if (status == KILN_C99_OK) status = kiln_c99_get(host, process, "env", 3, &env, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    length = snprintf(text, sizeof text, "%ld", kiln_cli_thread_worker);
+    status = kiln_c99_put(host, env, "KILN_WORKER_INDEX", 17, kiln_c99_copy_text(text, (size_t)length), 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    length = snprintf(text, sizeof text, "%ld", kiln_cli_thread_workers);
+    return kiln_c99_put(host, env, "KILN_WORKER_COUNT", 17, kiln_c99_copy_text(text, (size_t)length), 0, NULL);
+}
+
 static int kiln_graph_enter(void *opaque) {
     kiln_graph_context *graph = (kiln_graph_context *)opaque;
     kiln_graph_entry_context context;
@@ -3377,6 +3402,10 @@ static int kiln_graph_enter(void *opaque) {
         if (graph->cli.output != NULL) kiln_c99_realm_capture_output(fileno(graph->cli.output));
         status = kiln_install_native_modules(host);
         if (status != 0) return status;
+        if (kiln_cli_thread_worker >= 0 && graph->worker_entry == 0) {
+            status = kiln_cli_put_worker_env(host);
+            if (status != 0) return status;
+        }
 "#,
     );
     if let Some(bootstrap) = bootstrap {
@@ -4094,8 +4123,9 @@ static int kiln_cli_run_realms(int argc, char **argv, long count) {
 
 /* How many realms to run, read from the environment at startup.
  *
- * A server binds with SO_REUSEPORT, so N of these share a port and the kernel spreads the accepts
- * across them. Reading the count at startup keeps one artifact correct on every machine it is
+ * In process mode a server binds with SO_REUSEPORT, so N of these share a port and the kernel
+ * spreads the accepts across them; in thread mode (KILN_WORKERS_MODE=thread, `kiln_threads_run`)
+ * the realms share one socket and the runtime balances the accepts. Reading the count at startup keeps one artifact correct on every machine it is
  * copied to, which is the point of shipping a binary. `kiln build --workers=<n|auto>` records a
  * default in KILN_CLI_RECORDED_WORKERS, which applies only when KILN_WORKERS is unset or empty;
  * `auto` is still resolved here, on the machine that runs the binary, and `kiln build` warns when a
@@ -4151,7 +4181,8 @@ static int kiln_cli_http3_enabled(int argc, char **argv) {
  * each other's values -- `undefined is not a function` at the first import, measured before this
  * used fork. Since realms issue 04 step 5 the namespaces, module globals and the rest of a realm's
  * state are the realm's own (`kiln_graph_context`, the units' realm blocks), and realms in threads
- * are issue 05's to build; until then this stays a process per realm.
+ * exist (issue 05): KILN_WORKERS_MODE=thread runs the workers that way (`kiln_threads_run`,
+ * below). Process mode is still the default, for the crash isolation and restarts below.
  *
  * A process per realm is also what `node`'s cluster does, for the same reason, and the text
  * segment is shared copy-on-write so the cost is the heaps, which were never shareable anyway.
@@ -4208,6 +4239,13 @@ static int kiln_cli_http3_enabled(int argc, char **argv) {
 #define KILN_SUP_BACKOFF_MS 100LL
 #define KILN_SUP_BACKOFF_CAP_MS 2000LL
 #define KILN_SUP_GRACE_MS 10000LL
+/* Which mechanism `KILN_WORKERS` > 1 uses when KILN_WORKERS_MODE is unset: 1 threads, 0 processes.
+ * Processes, as measured in realms issue 07 (2026-09-27, 16 threads, bench/server/serve.mjs):
+ * thread mode matched process mode's throughput at 32 connections and above, was 8% slower at 16
+ * and had a higher p99 at 64, and saved 11 MB of PSS over 16 workers (0.7 MB each) -- not enough
+ * to give up a supervisor that restarts a crashed worker. Revisit once the realms share their
+ * built-ins (issue 08), which is where thread mode's memory argument is. */
+#define KILN_CLI_DEFAULT_WORKERS_THREADS 0
 
 static int kiln_sup_pipe[2] = { -1, -1 };
 static volatile sig_atomic_t kiln_sup_stop_signal = 0;
@@ -4538,6 +4576,120 @@ static int kiln_sup_run(int argc, char **argv, long workers) {
     }
     return exit_status;
 }
+
+/* `KILN_WORKERS` thread mode (realms issue 07): the N workers are N realms of the program in
+ * this one process, each pinned to its own thread of the runtime's worker pool
+ * (`kiln_realm_run_workers`), instead of N forked processes under a supervisor. What each part
+ * of the supervisor becomes:
+ *
+ *  - Accepts. The realm threads join the runtime's listen group, so the first realm to listen
+ *    on an address binds the one socket and every realm listening there is a member of it; the
+ *    runtime hands each accepted connection to the member with the fewest open connections
+ *    (round-robin among ties) rather than the kernel hashing it over N SO_REUSEPORT sockets.
+ *  - Signals. SIGTERM, SIGINT, SIGHUP and SIGQUIT are blocked in every realm thread and taken by
+ *    one thread here, which ends the process by the same signal -- every realm at once, which is
+ *    what forwarding the signal to N workers that each die of it amounts to -- or with
+ *    128+signal as PID 1, where a default action never fires. SIGUSR1 is left alone.
+ *  - Exit statuses, by the supervisor's rule: a realm that finishes with 0 is done and the
+ *    others keep serving; one that finishes with anything else (an uncaught error's 1, an
+ *    unsettled top-level await's 13) ends the process with that status at once, and
+ *    `process.exit(n)` in any realm ends the process with n, as it did one worker there.
+ *  - Crashes. There is nothing to restart: a realm that crashes (a segfault, an abort, the OOM
+ *    killer) takes every realm with it, because they are one process. That is what
+ *    KILN_WORKERS_MODE=process is for.
+ *  - Index. Each realm's own `process.env` has KILN_WORKER_INDEX and KILN_WORKER_COUNT, set
+ *    before any module runs; the process environment is not changed. Worker 0 writes the
+ *    result file. */
+static sigset_t kiln_threads_stop_signals;
+
+static void *kiln_threads_wait_for_stop(void *argument) {
+    int sig = 0;
+    (void)argument;
+    while (sigwait(&kiln_threads_stop_signals, &sig) != 0) {
+    }
+    if (getpid() == 1) _exit(128 + sig);
+    {
+        struct sigaction action;
+        sigset_t only;
+        memset(&action, 0, sizeof action);
+        action.sa_handler = SIG_DFL;
+        sigemptyset(&action.sa_mask);
+        sigaction(sig, &action, NULL);
+        sigemptyset(&only);
+        sigaddset(&only, sig);
+        pthread_sigmask(SIG_UNBLOCK, &only, NULL);
+        raise(sig);
+    }
+    _exit(128 + sig);
+    return NULL;
+}
+
+typedef struct kiln_threads {
+    int argc;
+    char **argv;
+} kiln_threads;
+
+static int kiln_threads_run_worker(void *context, uint64_t index) {
+    const kiln_threads *threads = (const kiln_threads *)context;
+    int status;
+    kiln_cli_thread_worker = (long)index;
+    status = kiln_cli_run_realm(threads->argc, threads->argv, index == 0, NULL);
+    if (status != 0) {
+        fprintf(stderr, "kiln: worker %llu exited with status %d; stopping the other workers\n",
+                (unsigned long long)index, status);
+        fflush(stdout);
+        fflush(stderr);
+        _exit(status);
+    }
+    return 0;
+}
+
+static int kiln_threads_run(int argc, char **argv, long workers) {
+    kiln_threads threads;
+    pthread_t waiter;
+    pthread_attr_t attributes;
+    int *statuses;
+    int status;
+    long index;
+    threads.argc = argc;
+    threads.argv = argv;
+    kiln_cli_thread_workers = workers;
+    sigemptyset(&kiln_threads_stop_signals);
+    sigaddset(&kiln_threads_stop_signals, SIGTERM);
+    sigaddset(&kiln_threads_stop_signals, SIGINT);
+    sigaddset(&kiln_threads_stop_signals, SIGHUP);
+    sigaddset(&kiln_threads_stop_signals, SIGQUIT);
+    /* Blocked before any realm thread exists, so every one of them inherits the mask and the
+     * waiter below is the only thread a stop signal can be delivered to. */
+    pthread_sigmask(SIG_BLOCK, &kiln_threads_stop_signals, NULL);
+    if (pthread_attr_init(&attributes) != 0) return 1;
+    pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&waiter, &attributes, kiln_threads_wait_for_stop, NULL) != 0) {
+        pthread_attr_destroy(&attributes);
+        fputs("kiln: cannot start the signal thread for KILN_WORKERS thread mode\n", stderr);
+        return 1;
+    }
+    pthread_attr_destroy(&attributes);
+    statuses = (int *)calloc((size_t)workers, sizeof *statuses);
+    if (statuses == NULL) return 1;
+    status = kiln_realm_run_workers((uint64_t)workers, kiln_threads_run_worker, &threads, statuses);
+    for (index = 0; index < workers; ++index)
+        if (statuses[index] != 0) status = statuses[index];
+    free(statuses);
+    return status == 0 ? 0 : 1;
+}
+
+/* Which mechanism N workers use: KILN_WORKERS_MODE=thread or process (case-insensitive). Unset
+ * or empty is the default; anything else is reported once and the default used. */
+static int kiln_cli_workers_use_threads(void) {
+    const char *setting = getenv("KILN_WORKERS_MODE");
+    if (setting == NULL || *setting == '\0') return KILN_CLI_DEFAULT_WORKERS_THREADS;
+    if (strcasecmp(setting, "thread") == 0 || strcasecmp(setting, "threads") == 0) return 1;
+    if (strcasecmp(setting, "process") == 0 || strcasecmp(setting, "processes") == 0) return 0;
+    fprintf(stderr, "kiln: ignoring KILN_WORKERS_MODE=%s (expected thread or process); using %s\n",
+            setting, KILN_CLI_DEFAULT_WORKERS_THREADS ? "thread" : "process");
+    return KILN_CLI_DEFAULT_WORKERS_THREADS;
+}
 #endif
 
 int main(int argc, char **argv) {
@@ -4559,6 +4711,7 @@ int main(int argc, char **argv) {
     return kiln_cli_run_realm(argc, argv, 1, NULL);
 #else
     if (workers <= 1) return kiln_cli_run_realm(argc, argv, 1, NULL);
+    if (kiln_cli_workers_use_threads()) return kiln_threads_run(argc, argv, workers);
     return kiln_sup_run(argc, argv, workers);
 #endif
 }
