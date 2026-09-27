@@ -247,7 +247,12 @@ static const size_t kiln_c99_hot_key_len[KILN_C99_HOT_KEY_COUNT] = {
  *
  * `alloc_count`/`alloc_bytes` are the blocks this chunk holds (the current chunk's are in the
  * nursery until it is sealed); `marked_count`/`marked_bytes` are what the marking found in it.
- * Their difference is what a collection frees, without the sizes being read back. */
+ * Their difference is what a collection frees, without the sizes being read back.
+ *
+ * Marks are cleared lazily, by a chunk's first mark in a collection (`mark_epoch`), and a chunk
+ * whose every block is marked settles without a pass over its words. Clearing and scanning every
+ * chunk at every collection is a pass over all of them each time -- quadratic under
+ * `KILN_GC_STRESS`, which collects at every allocation and promotes a chunk each time. */
 typedef struct kiln_nursery_chunk {
     char *base;
     char *limit;
@@ -260,6 +265,10 @@ typedef struct kiln_nursery_chunk {
     size_t alloc_bytes;
     size_t marked_count;
     size_t marked_bytes;
+    /* The collection (`heap->epoch`) whose marks `marks` and the marked counts hold. A chunk's
+     * first mark in a collection clears what an earlier one left; a chunk nothing marked has
+     * stale marks, and a stale epoch is read as none marked. */
+    uint32_t mark_epoch;
     struct kiln_nursery_chunk *next;
 } kiln_nursery_chunk;
 
@@ -590,6 +599,7 @@ static kiln_nursery_chunk *kiln_c99_nursery_new_region(kiln_gc_nursery *nursery)
     chunk->alloc_bytes = 0;
     chunk->marked_count = 0;
     chunk->marked_bytes = 0;
+    chunk->mark_epoch = 0;
     chunk->next = NULL;
     if (nursery->lo == NULL || region < nursery->lo) nursery->lo = region;
     if (nursery->hi == NULL || region + nursery->capacity > nursery->hi) {
@@ -1372,6 +1382,15 @@ static inline kiln_nursery_chunk *kiln_c99_nursery_chunk_of(const kiln_gc_heap *
 static inline void kiln_c99_nursery_note_mark(const kiln_gc_heap *heap, const kiln_gc_block *block) {
     kiln_nursery_chunk *chunk = kiln_c99_nursery_chunk_of(heap, block);
     size_t bit_idx = (size_t)((const char *)block - chunk->base) >> 4;
+    if (KILN_UNLIKELY(chunk->mark_epoch != heap->epoch)) {
+        const char *limit = (char *)chunk == heap->nursery.region ? heap->nursery.bump : chunk->limit;
+        size_t words = ((size_t)(limit - chunk->base) / 16 + 63) / 64;
+        if (words > chunk->bitmap_words) words = chunk->bitmap_words;
+        memset(chunk->marks, 0, words * sizeof(uint64_t));
+        chunk->marked_count = 0;
+        chunk->marked_bytes = 0;
+        chunk->mark_epoch = heap->epoch;
+    }
     chunk->marks[bit_idx >> 6] |= (uint64_t)1 << (bit_idx & 63);
     chunk->marked_count += 1;
     chunk->marked_bytes += block->size;
@@ -1533,8 +1552,12 @@ static int kiln_c99_string_is_ascii(kiln_value value) {
     }
     ascii = kiln_c99_ascii_scan((const char *)string->data, string->unit_len);
     if (block != NULL) {
-        block->kind = (block->kind & KILN_GC_KIND_MASK) | KILN_GC_FLAG_ASCII_KNOWN |
-                      (ascii ? KILN_GC_FLAG_ASCII : 0u);
+        /* Only the two ASCII bits change: the placement flags (`KILN_GC_FLAG_NURSERY`,
+         * `_LARGE`) are what the marker and the release paths find the block's chunk by, and
+         * dropping them here left a nursery string marked in its header but not in its chunk's
+         * mark bitmap -- freed live under `KILN_GC_STRESS`. */
+        block->kind = (block->kind & ~(KILN_GC_FLAG_ASCII_KNOWN | KILN_GC_FLAG_ASCII)) |
+                      KILN_GC_FLAG_ASCII_KNOWN | (ascii ? KILN_GC_FLAG_ASCII : 0u);
     }
     return ascii;
 }
@@ -3405,30 +3428,13 @@ static inline size_t kiln_c99_nursery_used_words(const kiln_nursery_chunk *chunk
     return words > chunk->bitmap_words ? chunk->bitmap_words : words;
 }
 
-static void kiln_c99_nursery_clear_marks(kiln_nursery_chunk *chunk, const char *limit) {
-    memset(chunk->marks, 0, kiln_c99_nursery_used_words(chunk, limit) * sizeof(uint64_t));
-    chunk->marked_count = 0;
-    chunk->marked_bytes = 0;
-}
-
 static void kiln_c99_gc_begin(kiln_gc_heap *heap) {
-    kiln_nursery_chunk *chunk;
     ++heap->epoch;
     if (heap->epoch == 0) ++heap->epoch;
     heap->stack_len = 0;
     heap->pending_head = 0;
     heap->pending_len = 0;
     heap->mark_failed = 0;
-    /* Every chunk that holds blocks starts the mark with an empty mark bitmap. */
-    if (heap->nursery.region != NULL && heap->nursery.bump != NULL) {
-        kiln_c99_nursery_clear_marks((kiln_nursery_chunk *)heap->nursery.region, heap->nursery.bump);
-    }
-    for (chunk = heap->nursery.full; chunk != NULL; chunk = chunk->next) {
-        kiln_c99_nursery_clear_marks(chunk, chunk->limit);
-    }
-    for (chunk = heap->nursery.promoted; chunk != NULL; chunk = chunk->next) {
-        kiln_c99_nursery_clear_marks(chunk, chunk->limit);
-    }
 }
 
 /* Free every unmarked block. Marked blocks either stay (an ordinary collection) or are orphaned
@@ -3565,12 +3571,18 @@ static size_t kiln_c99_nursery_settle(kiln_gc_heap *heap, kiln_nursery_chunk *ch
     size_t word_index;
     size_t dead_count;
     size_t dead_bytes;
+    int marked_now = !orphan && chunk->mark_epoch == heap->epoch;
+    size_t marked_count = marked_now ? chunk->marked_count : 0;
+    size_t marked_bytes = marked_now ? chunk->marked_bytes : 0;
+    /* Nothing died here: nothing to finalise and no bit to clear. A chunk settled twice in one
+     * collection always takes this branch the second time. */
+    if (!orphan && marked_count == chunk->alloc_count) return marked_count;
     for (word_index = 0; word_index < words; ++word_index) {
         uint64_t allocated = chunk->bitmap[word_index];
         uint64_t live;
         uint64_t finals;
         if (allocated == 0) continue;
-        live = orphan ? 0 : allocated & chunk->marks[word_index];
+        live = marked_now ? allocated & chunk->marks[word_index] : 0;
         finals = allocated & ~live & chunk->finals[word_index];
         while (finals != 0) {
             size_t bit_idx = word_index * 64 + (size_t)__builtin_ctzll(finals);
@@ -3585,8 +3597,8 @@ static size_t kiln_c99_nursery_settle(kiln_gc_heap *heap, kiln_nursery_chunk *ch
         chunk->finals[word_index] &= live;
     }
     if (orphan) return 0;
-    dead_count = chunk->alloc_count - chunk->marked_count;
-    dead_bytes = chunk->alloc_bytes - chunk->marked_bytes;
+    dead_count = chunk->alloc_count - marked_count;
+    dead_bytes = chunk->alloc_bytes - marked_bytes;
     heap->count -= dead_count;
     heap->bytes -= dead_bytes;
     heap->freed_blocks += dead_count;
@@ -3596,9 +3608,9 @@ static size_t kiln_c99_nursery_settle(kiln_gc_heap *heap, kiln_nursery_chunk *ch
     } else {
         heap->since_collection = 0;
     }
-    chunk->alloc_count = chunk->marked_count;
-    chunk->alloc_bytes = chunk->marked_bytes;
-    return chunk->marked_count;
+    chunk->alloc_count = marked_count;
+    chunk->alloc_bytes = marked_bytes;
+    return marked_count;
 }
 
 /* An emptied chunk goes back to the spares, up to a budget's worth plus as many chunks as the
@@ -3627,6 +3639,7 @@ static void kiln_c99_nursery_spare(kiln_gc_heap *heap, kiln_nursery_chunk *chunk
     chunk->alloc_bytes = 0;
     chunk->marked_count = 0;
     chunk->marked_bytes = 0;
+    chunk->mark_epoch = 0;
     chunk->next = nursery->spare;
     nursery->spare = chunk;
     nursery->spare_count += 1;

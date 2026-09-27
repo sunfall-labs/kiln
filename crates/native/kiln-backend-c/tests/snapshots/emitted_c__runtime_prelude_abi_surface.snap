@@ -1816,7 +1816,6 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
 static void kiln_c99_gc_finalize(kiln_gc_block *block) {
 static void kiln_c99_gc_drain(kiln_gc_heap *heap) {
 static inline size_t kiln_c99_nursery_used_words(const kiln_nursery_chunk *chunk, const char *limit) {
-static void kiln_c99_nursery_clear_marks(kiln_nursery_chunk *chunk, const char *limit) {
 static void kiln_c99_gc_begin(kiln_gc_heap *heap) {
 #define KILN_GC_SLAB_CLASSES \
 static void kiln_c99_gc_retain_survivor(kiln_gc_block *block);
