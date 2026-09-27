@@ -220,7 +220,7 @@ static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, s
     kiln_object *object;
     size_t index;
     if (target.tag == KILN_VALUE_FUNCTION) {
-        kiln_value store = kiln_c99_closure_of(target)->properties;
+        kiln_value store = kiln_c99_closure_store(kiln_c99_closure_of(target));
         if (store.tag != KILN_VALUE_OBJECT) {
             return NULL;
         }
@@ -247,7 +247,7 @@ static kiln_property *kiln_c99_own_private_key(kiln_value target, const kiln_str
     kiln_object *object;
     size_t index;
     if (target.tag == KILN_VALUE_FUNCTION) {
-        kiln_value store = kiln_c99_closure_of(target)->properties;
+        kiln_value store = kiln_c99_closure_store(kiln_c99_closure_of(target));
         if (store.tag != KILN_VALUE_OBJECT) {
             return NULL;
         }

@@ -836,7 +836,10 @@ pub(crate) fn execute_prepared_run(
     wait_for_run_gate(prepared.path());
 
     let limits = execution_limits(steps);
-    match prepared {
+    // The program is a process of its own for signals and `process.pid`, never this one
+    // (realms issue 26; `kiln_runtime::signals`). Its subscriptions end with it.
+    let hosted = kiln_runtime::signals::host_program();
+    let mut response = match prepared {
         PreparedRun::Graph {
             graph,
             path,
@@ -853,7 +856,14 @@ pub(crate) fn execute_prepared_run(
             revision,
             overlay,
         } => execute_program(program, path, args, file, revision, node, limits, overlay),
+    };
+    if let (Some(signal), Response::Ran(summary)) = (hosted.terminated_by(), &mut response) {
+        summary.signal = Some(signal);
+        summary.exit_code = Some(128 + signal);
+        summary.succeeded = false;
     }
+    drop(hosted);
+    response
 }
 
 /// The engine limits one run request asked for.
@@ -1078,6 +1088,7 @@ fn execute_graph(
                 file: FileId(file.0),
                 succeeded: true,
                 exit_code: Some(0),
+                signal: None,
                 stdout: host.stdout().to_owned(),
                 stderr: host.stderr().to_owned(),
                 value: Some(execution.value.to_display_string()),
@@ -1095,6 +1106,7 @@ fn execute_graph(
             file: FileId(file.0),
             succeeded: code == 0,
             exit_code: Some(code),
+            signal: None,
             stdout: host.stdout().to_owned(),
             stderr: host.stderr().to_owned(),
             value: None,
@@ -1108,6 +1120,7 @@ fn execute_graph(
             file: FileId(file.0),
             succeeded: false,
             exit_code: Some(1),
+            signal: None,
             stdout: host.stdout().to_owned(),
             stderr: host.stderr().to_owned(),
             value: None,
@@ -1474,6 +1487,7 @@ fn execute_program(
                 file: FileId(file.0),
                 succeeded: false,
                 exit_code: Some(1),
+                signal: None,
                 stdout: String::new(),
                 stderr: String::new(),
                 value: None,
@@ -1509,6 +1523,7 @@ fn execute_program(
                 file: FileId(file.0),
                 succeeded: true,
                 exit_code: Some(0),
+                signal: None,
                 stdout: host.stdout().to_owned(),
                 stderr: host.stderr().to_owned(),
                 value: Some(execution.value.to_display_string()),
@@ -1523,6 +1538,7 @@ fn execute_program(
             file: FileId(file.0),
             succeeded: code == 0,
             exit_code: Some(code),
+            signal: None,
             stdout: host.stdout().to_owned(),
             stderr: host.stderr().to_owned(),
             value: None,
@@ -1536,6 +1552,7 @@ fn execute_program(
             file: FileId(file.0),
             succeeded: false,
             exit_code: Some(1),
+            signal: None,
             stdout: host.stdout().to_owned(),
             stderr: host.stderr().to_owned(),
             value: None,

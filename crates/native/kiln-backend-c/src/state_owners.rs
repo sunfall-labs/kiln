@@ -49,6 +49,9 @@ pub const EMITTED_MUTABLE_STATE_OWNERS: &[(&str, EmittedStateOwner)] = &[
     ("{sym}_keys_shared", EmittedStateOwner::Process),
     // -- BigInt literal handles: provider handles made once from constant digits --------------
     ("{sym}_bigint_N", EmittedStateOwner::Constant),
+    // -- the shared immutable region (realms issue 08): each site's closure, written once by the
+    //    realm that builds the region before it is published sealed, read by every realm after -
+    ("{sym}_region_sites", EmittedStateOwner::Process),
     // -- inline caches (ADR 0071, step 3) -------------------------------------------------------
     ("site", EmittedStateOwner::Cache),
     ("{sym}_sites", EmittedStateOwner::Cache),
@@ -82,6 +85,13 @@ pub const EMITTED_MUTABLE_STATE_OWNERS: &[(&str, EmittedStateOwner)] = &[
     ("kiln_sup_stop_signal", EmittedStateOwner::Process),
     // The `KILN_WORKERS` supervisor's self-pipe: the supervising process's, before any realm.
     ("kiln_sup_pipe", EmittedStateOwner::Process),
+    // `KILN_WORKERS` thread mode (realms issue 07): the worker index of the realm a thread runs,
+    // set on that thread before its realm exists; the count and the stop signals the waiting
+    // thread takes, both written once before any realm thread starts.
+    ("kiln_cli_thread_worker", EmittedStateOwner::ThreadCache),
+    ("kiln_cli_thread_workers", EmittedStateOwner::Process),
+    ("kiln_threads_stop_signals", EmittedStateOwner::Process),
+    ("kiln_threads_grace_signal", EmittedStateOwner::Process),
     // Library paths a dynamic `@opentui/core` import tries: string literals, never written.
     ("opentui_candidates", EmittedStateOwner::Constant),
     // The shared-library wrapper: this thread's pointers into the realm context of the body

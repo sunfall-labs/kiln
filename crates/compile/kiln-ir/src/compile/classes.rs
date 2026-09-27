@@ -255,101 +255,64 @@ impl super::Compiler {
             self.code.push(Instruction::Pop);
         }
 
-        // Now the class binding exists, each computed field name is evaluated and converted --
-        // once, here, where the class is defined. A name whose `toString` has an effect has it
-        // once rather than once per instance, and one that refuses does so when the class is
-        // written rather than when it is first constructed. The class is pushed beneath the key
-        // because that is the pair `ToPropertyKey` reads; storing the name consumes it, and the
-        // receiver is dropped afterwards.
-        for (field, binding) in &field_bindings {
-            let (ObjectKey::Computed(key), Some(binding)) = (&field.key, binding) else {
-                continue;
-            };
-            let binding = binding.clone();
-            self.load_local_or_cell(local);
-            self.expression(key);
-            self.code.push(Instruction::ToPropertyKey);
-            self.store_home_binding(&binding);
-            self.code.push(Instruction::Pop);
-        }
-
         let prototype = self.constant_index(Constant::String("prototype".to_owned().into()));
 
-        // Link the two prototypes so instances inherit the parent's methods, and the two
-        // constructors so static methods are inherited too.
-        if class.superclass.is_some() {
-            self.load_local_or_cell(local);
-            self.code.push(Instruction::GetProperty(prototype));
-            self.load_super();
-            self.code.push(Instruction::GetProperty(prototype));
-            self.code.push(Instruction::SetPrototype);
-            self.code.push(Instruction::Pop);
-
-            self.load_local_or_cell(local);
-            self.load_super();
-            self.code.push(Instruction::SetPrototype);
-            self.code.push(Instruction::Pop);
-        }
-
-        // Filled after the prototype link, so that reading `C.prototype`'s own prototype from
-        // inside a method answers the parent's -- and before the static fields, because a static
-        // field initialiser runs *now* and may be the first thing to read one.
-        self.load_local_or_cell(local);
-        self.store_home_binding(&static_home);
-        self.load_local_or_cell(local);
-        self.code.push(Instruction::GetProperty(prototype));
-        self.store_home_binding(&instance_home);
-
-        // Static fields are ordinary properties of the constructor, assigned once here, and a
-        // `static { }` block is a body run once, here, with `this` bound to the constructor.
-        // One loop over one list because the two interleave and the order is observable.
-        self.home_bindings.push(static_home.clone());
-        for initialiser in &class.initialisers {
-            let field = match initialiser {
-                ClassInitialiser::Field(field) if field.is_static => field,
-                ClassInitialiser::Field(_) => continue,
-                // Compiled as the function it is and called immediately with the constructor as
-                // its receiver -- which is the whole of the block's semantics: `this` is the
-                // class, `var` stays inside, and `super.x` reads through the same home binding a
-                // static method does.
-                ClassInitialiser::StaticBlock(body) => {
-                    self.next_is_method = true;
-                    let Some(block) = self.compile_function(body, class.span) else {
-                        self.home_bindings.pop();
-                        return;
+        // A computed field name -- instance or static -- is evaluated and converted once, here,
+        // where the class is defined: one whose `toString` has an effect has it once rather than
+        // once per instance, and one that refuses does so when the class is written. Every
+        // element's key is evaluated in source order, a field's between the methods around it
+        // (issue 28): evaluating the static fields' keys with their values, before every method
+        // key, ran `static [b] = 1` ahead of an earlier `[a]() {}`. A static field's value still
+        // runs after every element, below. The class is pushed beneath the key because that is
+        // the pair `ToPropertyKey` reads; storing the name consumes it, and the receiver is
+        // dropped afterwards. A static field's name is refused as `prototype` where it is
+        // evaluated, before the next key, which is where node refuses it.
+        //
+        // Every key is evaluated before the heritage is checked (`link_heritage`, below the
+        // elements): node runs `k` in `class U extends 1 { [k()]() {} }` and then throws.
+        let mut static_field_keys: Vec<Option<String>> = Vec::new();
+        let mut field_keys: Vec<(u32, &Expression, bool, String)> = Vec::new();
+        {
+            let mut instance = field_bindings.iter();
+            for initialiser in &class.initialisers {
+                let ClassInitialiser::Field(field) = initialiser else {
+                    static_field_keys.push(None);
+                    continue;
+                };
+                if field.is_static {
+                    let binding = match &field.key {
+                        ObjectKey::Computed(key) => {
+                            let binding = self.declare_home_binding(class.span);
+                            field_keys.push((key.span.start, key, true, binding.clone()));
+                            Some(binding)
+                        }
+                        _ => None,
                     };
-                    self.load_local_or_cell(local);
-                    self.code.push(Instruction::MakeFunction(block));
-                    self.code.push(Instruction::NewArray { count: 0 });
-                    self.code.push(Instruction::Apply);
-                    self.code.push(Instruction::Pop);
+                    static_field_keys.push(binding);
                     continue;
                 }
-            };
-            self.load_local_or_cell(local);
-            match &field.key {
-                ObjectKey::Private(name) => {
-                    let name = self.constant_index(Constant::String(self.private_key(name).into()));
-                    self.emit_field_value(field, Some(&static_home));
-                    self.code.push(self.set_property_instruction(name));
-                }
-                ObjectKey::Static(key) => {
-                    let name = self.constant_index(Constant::String(key.clone().into()));
-                    self.emit_field_value(field, Some(&static_home));
-                    self.code.push(self.set_property_instruction(name));
-                }
-                ObjectKey::Computed(key) => {
-                    self.expression(key);
-                    self.guard_static_prototype_key();
-                    self.emit_field_value(field, Some(&static_home));
-                    self.code.push(self.set_computed_instruction());
+                static_field_keys.push(None);
+                if let Some((instance_field, binding)) = instance.next()
+                    && let (ObjectKey::Computed(key), Some(binding)) =
+                        (&instance_field.key, binding)
+                {
+                    field_keys.push((key.span.start, key, false, binding.clone()));
                 }
             }
-            self.code.push(Instruction::Pop);
         }
-        self.home_bindings.pop();
+        let mut field_keys = field_keys.into_iter().peekable();
 
         for method in &class.methods {
+            // Every field key written before this method's key is evaluated first. Only a
+            // computed key has an order anyone can observe, so a method with a literal key is
+            // defined where it falls.
+            if let ObjectKey::Computed(key) = &method.key {
+                while let Some((_, key_expression, is_static, binding)) =
+                    field_keys.next_if(|(start, _, _, _)| *start < key.span.start)
+                {
+                    self.emit_class_field_key(local, key_expression, is_static, &binding);
+                }
+            }
             self.home_bindings.push(if method.is_static {
                 static_home.clone()
             } else {
@@ -401,8 +364,12 @@ impl super::Compiler {
                         enumerable: false,
                     });
                 }
+                // The key converts where it is written, before the next element's key is
+                // evaluated; the define that follows converted it too late, and natively not at
+                // all (issue 24). The constructor or prototype is beneath it.
                 ObjectKey::Computed(key) => {
                     self.expression(key);
+                    self.code.push(Instruction::ToPropertyKey);
                     self.code.push(Instruction::MakeFunction(body));
                     if accessor {
                         self.code.push(Instruction::DefineAccessor {
@@ -417,6 +384,82 @@ impl super::Compiler {
             // Each definition leaves something; nothing consumes it.
             self.code.push(Instruction::Pop);
         }
+        for (_, key_expression, is_static, binding) in field_keys {
+            self.emit_class_field_key(local, key_expression, is_static, &binding);
+        }
+
+        // Link the two prototypes so instances inherit the parent's methods, and the two
+        // constructors so static methods are inherited too -- after every element key, which is
+        // node's order, and before any static field initialiser runs.
+        if class.superclass.is_some() {
+            self.link_heritage(local, prototype);
+        }
+
+        // Filled after the prototype link, so that reading `C.prototype`'s own prototype from
+        // inside a method answers the parent's -- and before the static fields, because a static
+        // field initialiser runs now and may be the first thing to read one.
+        self.load_local_or_cell(local);
+        self.store_home_binding(&static_home);
+        self.load_local_or_cell(local);
+        self.code.push(Instruction::GetProperty(prototype));
+        self.store_home_binding(&instance_home);
+
+        // Static fields are ordinary properties of the constructor, assigned once here -- after
+        // every element has been defined, so `static x = C.m()` finds a static method written
+        // below it -- and a `static { }` block is a body run once, here, with `this` bound to
+        // the constructor. One loop over one list because the two interleave and the order is
+        // observable.
+        self.home_bindings.push(static_home.clone());
+        for (initialiser, key_binding) in class.initialisers.iter().zip(&static_field_keys) {
+            let field = match initialiser {
+                ClassInitialiser::Field(field) if field.is_static => field,
+                ClassInitialiser::Field(_) => continue,
+                // Compiled as the function it is and called immediately with the constructor as
+                // its receiver -- which is the whole of the block's semantics: `this` is the
+                // class, `var` stays inside, and `super.x` reads through the same home binding a
+                // static method does.
+                ClassInitialiser::StaticBlock(body) => {
+                    self.next_is_method = true;
+                    let Some(block) = self.compile_function(body, class.span) else {
+                        self.home_bindings.pop();
+                        return;
+                    };
+                    self.load_local_or_cell(local);
+                    self.code.push(Instruction::MakeFunction(block));
+                    self.code.push(Instruction::NewArray { count: 0 });
+                    self.code.push(Instruction::Apply);
+                    self.code.push(Instruction::Pop);
+                    continue;
+                }
+            };
+            self.load_local_or_cell(local);
+            match (&field.key, key_binding) {
+                (ObjectKey::Private(name), _) => {
+                    let name = self.constant_index(Constant::String(self.private_key(name).into()));
+                    self.emit_field_value(field, Some(&static_home));
+                    self.code.push(self.set_property_instruction(name));
+                }
+                (ObjectKey::Static(key), _) => {
+                    let name = self.constant_index(Constant::String(key.clone().into()));
+                    self.emit_field_value(field, Some(&static_home));
+                    self.code.push(self.set_property_instruction(name));
+                }
+                // The name was evaluated, converted and checked with the other element keys.
+                (ObjectKey::Computed(_), Some(binding)) => {
+                    self.load_captured_binding(binding);
+                    self.emit_field_value(field, Some(&static_home));
+                    self.code.push(self.set_computed_instruction());
+                }
+                (ObjectKey::Computed(key), None) => {
+                    self.expression(key);
+                    self.guard_static_prototype_key();
+                    self.emit_field_value(field, Some(&static_home));
+                    self.code.push(self.set_computed_instruction());
+                }
+            }
+            self.code.push(Instruction::Pop);
+        }
+        self.home_bindings.pop();
 
         if class.superclass.is_some() {
             self.super_bindings.pop();
@@ -430,6 +473,84 @@ impl super::Compiler {
         self.private_declarations
             .pop()
             .expect("this class pushed its own private names");
+    }
+
+    /// Evaluate a class field's computed name and convert it with `ToPropertyKey`, into the
+    /// hidden binding the field's definition reads; a static field's is refused as `prototype`
+    /// there too. The class sits beneath the key because that is the pair `ToPropertyKey` reads;
+    /// it is dropped once the name is stored.
+    fn emit_class_field_key(
+        &mut self,
+        local: Local,
+        key: &Expression,
+        is_static: bool,
+        binding: &str,
+    ) {
+        self.load_local_or_cell(local);
+        self.expression(key);
+        if is_static {
+            self.guard_static_prototype_key();
+        } else {
+            self.code.push(Instruction::ToPropertyKey);
+        }
+        self.store_home_binding(binding);
+        self.code.push(Instruction::Pop);
+    }
+
+    /// ClassDefinitionEvaluation's heritage steps, in their order, for the class in `local`.
+    ///
+    /// `null` links the prototype object to `null` and leaves the constructor's own link at
+    /// `Function.prototype`. Anything else must be a constructor -- `SetPrototype` with a
+    /// function target is where both engines check that, first, before `prototype` is read --
+    /// and its `prototype` must be an object or `null`. Reading `prototype` first and linking
+    /// whatever came back let `class U extends 1 {}` define a class natively, and made
+    /// `extends null` a `TypeError` in both engines (issue 25).
+    fn link_heritage(&mut self, local: Local, prototype: u32) {
+        self.load_super();
+        self.push_constant(Constant::Null);
+        self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
+        let not_null = self.emit_jump(Instruction::JumpIfFalse(0));
+        self.load_local_or_cell(local);
+        self.code.push(Instruction::GetProperty(prototype));
+        self.push_constant(Constant::Null);
+        self.code.push(Instruction::SetPrototype);
+        self.code.push(Instruction::Pop);
+        let done = self.emit_jump(Instruction::Jump(0));
+
+        self.patch_jump(not_null);
+        self.load_local_or_cell(local);
+        self.load_super();
+        self.code.push(Instruction::SetPrototype);
+        self.code.push(Instruction::Pop);
+
+        self.load_local_or_cell(local);
+        self.code.push(Instruction::GetProperty(prototype));
+        self.load_super();
+        self.code.push(Instruction::GetProperty(prototype));
+        // `typeof` is "object" for an object and for `null`, and "function" for a callable
+        // object; every other answer is a primitive, which cannot be a prototype.
+        let mut valid = Vec::new();
+        for kind in ["object", "function"] {
+            self.code.push(Instruction::Dup);
+            self.code.push(Instruction::Unary(UnaryOp::TypeOf));
+            self.push_constant(Constant::String(kind.to_owned().into()));
+            self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
+            valid.push(self.emit_jump(Instruction::JumpIfTruthy(0)));
+        }
+        self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+        self.push_constant(Constant::String(
+            "class heritage does not have a valid prototype property"
+                .to_owned()
+                .into(),
+        ));
+        self.code.push(Instruction::New { argc: 1 });
+        self.code.push(Instruction::Throw);
+        for jump in valid {
+            self.patch_jump(jump);
+        }
+        self.code.push(Instruction::SetPrototype);
+        self.code.push(Instruction::Pop);
+        self.patch_jump(done);
     }
 
     /// Push the `[[Prototype]]` of the home object of the method currently being compiled.

@@ -1783,6 +1783,183 @@ beside custom
 """
 
 [[test]]
+id = "regress/r27-worker-round-trip"
+requires_host = "node"
+group = "regress"
+source = "regress/r27-worker-round-trip.js"
+status = "runnable"
+features = ["node-worker-threads", "workers", "message-port", "structured-clone"]
+catches = """
+`new Worker` threw in both engines until 2026-09-27 (realms issue 06). A worker running this same file is a realm of its own on a thread of its own; messages between the two are structured-clone copies that arrive in order, `online` comes before the worker's first message and `exit` after its last, and `threadId` is 1 in the worker and -1 once it has exited.\
+"""
+expected_stdout = """
+main thread 0 worker thread 1
+online
+message {"n":1,"from":1}
+message {"n":2,"echoed":[1],"from":1}
+message {"n":3,"echoed":[2],"from":1}
+exit 0
+threadId after exit -1
+"""
+
+[[test]]
+id = "regress/r28-worker-data"
+requires_host = "node"
+group = "regress"
+source = "regress/r28-worker-data.js"
+status = "runnable"
+features = ["node-worker-threads", "workers", "structured-clone", "process-env"]
+catches = """
+What a worker starts from (realms issue 06): `workerData` is a structured clone made when the worker is -- a Map, a Date, a shared reference and a cycle arrive as such, and a later change in the parent is not seen -- `argv` is appended to its `process.argv`, `env` replaces its `process.env`, `name` is its `threadName`, `resourceLimits` are reported with node's defaults for the ones not given (and -1 for them on the parent's side), and environment data set before the worker starts is a copy it can read.\
+"""
+expected_stdout = """
+parent limits {"maxYoungGenerationSizeMb":-1,"maxOldGenerationSizeMb":64,"codeRangeSizeMb":-1,"stackSizeMb":4}
+main true 0 "" {} symbol
+isMainThread false
+threadId 1
+threadName reporter
+map true 1
+date true 0
+list [1,"two",null]
+shared true shared
+cycle true
+argv ["first","2"]
+env {"ONLY":"this"}
+limits {"maxYoungGenerationSizeMb":96,"maxOldGenerationSizeMb":64,"codeRangeSizeMb":0,"stackSizeMb":4}
+environmentData {"mode":"test"}
+exit 0
+"""
+
+[[test]]
+id = "regress/r29-worker-transfer-list"
+requires_host = "node"
+group = "regress"
+source = "regress/r29-worker-transfer-list.js"
+status = "runnable"
+features = ["node-worker-threads", "workers", "transfer-list", "array-buffer", "message-channel", "receive-message-on-port"]
+catches = """
+Transfer lists between realms (realms issue 06; ADR 0070 primitive C): a transferred `ArrayBuffer` is detached in the sender and its bytes arrive intact, a view over it arrives as a view, one given in `workerData` with `transferList` moves the same way, a transferred `MessagePort` lets the two realms talk over it, `receiveMessageOnPort` takes from it synchronously across realms, and an uncloneable message throws before anything is detached.\
+"""
+expected_stdout = """
+workerData buffer detached true 0
+uncloneable DataCloneError 8
+sender 0 true 0 3
+initial 9,8,7,6
+over the transferred port {"from":"worker","lines":["view Uint16Array 2 513,1027 of 8","copied 1,2,3"]}
+worker says second then {"message":"third"} then undefined
+exit 0
+"""
+
+[[test]]
+id = "regress/r30-worker-terminate"
+requires_host = "node"
+group = "regress"
+source = "regress/r30-worker-terminate.js"
+status = "runnable"
+features = ["node-worker-threads", "workers", "worker-terminate"]
+catches = """
+`worker.terminate()` (realms issue 06) stops a worker in the middle of a loop that never yields, or idle with a listener that would keep it alive for ever; its promise settles with 1 after the `exit` event reports the same, terminating a worker that has already stopped answers `undefined`, and its `threadId` is -1 from then on.\
+"""
+expected_stdout = """
+busy exit event 1
+busy terminated 1
+again undefined -1
+idle terminated 1
+finished then terminated undefined
+"""
+
+[[test]]
+id = "regress/r31-worker-error"
+requires_host = "node"
+group = "regress"
+source = "regress/r31-worker-error.js"
+status = "runnable"
+features = ["node-worker-threads", "workers", "worker-error", "unhandled-rejections"]
+catches = """
+An exception nothing in a worker catches ends the worker (realms issue 06): the parent's `error` event gets a copy of it -- the same kind of error, its message, or the thrown value itself -- and then `exit` reports 1, while the parent carries on. That holds for a throw from the module body, from a timer the worker's loop runs later, and for a rejection nothing handled.\
+"""
+expected_stdout = """
+body message before the throw
+body error TypeError TypeError "thrown from the body" true
+body exit 1
+timer error RangeError RangeError "thrown from a timer" false
+timer exit 1
+rejection error SyntaxError SyntaxError "rejected and never handled" false
+rejection exit 1
+value error value number 42
+value exit 1
+parent still running
+"""
+
+[[test]]
+id = "regress/r32-worker-process-exit"
+requires_host = "node"
+group = "regress"
+source = "regress/r32-worker-process-exit.js"
+status = "runnable"
+features = ["node-worker-threads", "workers", "process-exit"]
+catches = """
+`process.exit()` in a worker ends that worker and not the process (realms issue 06): the parent's `exit` event reports the code and the parent keeps running; nothing after the call runs in the worker, while what it posted before the call is still delivered, ahead of the exit.\
+"""
+expected_stdout = """
+body message posted before exit
+body exit 3
+handler message got please exit
+handler exit 7
+parent still running
+"""
+
+[[test]]
+id = "regress/r33-worker-atomics"
+requires_host = "node"
+group = "regress"
+source = "regress/r33-worker-atomics.js"
+status = "runnable"
+features = ["node-worker-threads", "workers", "shared-array-buffer", "atomics"]
+catches = """
+A `SharedArrayBuffer` is the same memory in every realm it is sent to (realms issue 06): four workers adding to one counter with `Atomics.add` leave exactly their total -- the interpreter's read and write of an element were two locks until 2026-09-27, and lost updates -- and `Atomics.wait` in a worker sleeps until the parent's `Atomics.notify` on the same cell, where it had answered "timed-out" at once.\
+"""
+expected_stdout = """
+counter 8000 expected 8000
+woken 1
+first wait ok, second wait not-equal
+shared bytes seen by the parent 1,2,3,4
+"""
+
+[[test]]
+id = "regress/r34-worker-eval"
+requires_host = "node"
+group = "regress"
+source = "regress/r34-worker-eval.js"
+status = "runnable"
+features = ["node-worker-threads", "workers", "worker-eval"]
+catches = """
+`new Worker(code, { eval: true })` runs source text as the worker's program (realms issue 06): CommonJS with `require`, `workerData` and messages as for a file worker, and an error in the text reported to the parent's `error` event. The interpreter compiles the text when the worker starts; a natively built program has no compiler to do that, and says so through the same event.\
+"""
+expected_stdout = """
+eval worker says {"square":49,"base":10,"isMainThread":false}
+eval worker exit 0
+error ReferenceError undefinedFunction is not defined
+failing exit 1
+"""
+
+[[test]]
+id = "regress/r35-worker-broadcast-channel"
+requires_host = "node"
+group = "regress"
+source = "regress/r35-worker-broadcast-channel.js"
+status = "runnable"
+features = ["node-worker-threads", "workers", "broadcast-channel"]
+catches = """
+A `BroadcastChannel` reaches every other channel of its name in the process, in this realm and in every worker's (realms issue 06): each receiver gets its own copy and the sender none. Until 2026-09-27 a channel reached only channels in its own realm.\
+"""
+expected_stdout = """
+local heard {"headline":"hello","items":[1,2]}
+worker 1 heard {"headline":"hello","items":[1,2]}
+worker 2 heard {"headline":"hello","items":[1,2]}
+"""
+
+[[test]]
 id = "server/s08-binary-http-chunks"
 requires_host = "node"
 group = "server"
@@ -1811,4 +1988,228 @@ true true true
 true
 true
 012 true
+"""
+
+[[test]]
+id = "regress/r36-dead-closure-captures-import"
+requires_host = "node"
+group = "regress"
+source = "regress/r36-dead-closure-captures-import.mjs"
+status = "runnable"
+features = ["modules", "closures", "builtin-modules"]
+catches = """
+A function nothing calls still captures the imports it names (realms issue 22). The linker drops an import nothing live reads, but the body hoists the dead declaration and captures the import's slot anyway; the interpreter failed the whole module with "local slot 0 does not hold a captured cell" before its first line (`bench/concurrency/js/common.mjs`'s `rssKiB`). The native backend's locals start `undefined` and never failed.\
+"""
+expected_stdout = """
+live-7
+done
+"""
+
+[[test]]
+id = "regress/r37-signal-events"
+requires_host = "node"
+group = "regress"
+source = "regress/r37-signal-events.js"
+status = "runnable"
+features = ["process-signals", "process-kill", "event-loop-order", "next-tick", "promise-jobs"]
+catches = """
+`process.on(signal)` and `process.kill` as node has them (realms issue 23), recorded from node 26.8.1. A listener turns the signal into an event emitted from the poll phase -- after the script's ticks and promise jobs, before its immediates -- with `(name, number)` and `process` as `this`, one event per arrival, a `once` listener removed before the next. `SIGKILL` and `SIGSTOP` throw node's `uv_signal_start EINVAL` from `on` and add nothing; `process.kill` throws `ERR_UNKNOWN_SIGNAL`, `ERR_INVALID_ARG_TYPE` and the `kill` errno errors node does, and signal 0 probes. Until 2026-09-27 neither engine had signal events and `process.kill` answered `true` without sending anything (the native one emitted the event synchronously instead).\
+"""
+expected_stdout = """
+SIGKILL: Error EINVAL -22 uv_signal_start uv_signal_start EINVAL
+SIGKILL listeners 0
+SIGSTOP: uv_signal_start EINVAL
+unknown: TypeError ERR_UNKNOWN_SIGNAL Unknown signal: SIGNOPE
+pid: TypeError ERR_INVALID_ARG_TYPE The "pid" argument must be of type number. Received type string ('abc')
+bad number: Error EINVAL -22 kill kill EINVAL
+no such process: ESRCH -3 kill kill ESRCH
+kill 0 answers true
+kill answers true
+script end
+tick
+promise job
+SIGUSR2 #1: SIGUSR2 number true this=true
+tick inside SIGUSR2 #1
+promise job inside SIGUSR2 #1
+once SIGHUP, listeners left 1
+on SIGHUP
+immediate
+SIGUSR2 #2: SIGUSR2 number true this=true
+tick inside SIGUSR2 #2
+promise job inside SIGUSR2 #2
+on SIGHUP
+second immediate
+"""
+
+[[test]]
+id = "regress/r38-signal-drain"
+requires_host = "node"
+group = "regress"
+source = "regress/r38-signal-drain.js"
+status = "runnable"
+features = ["process-signals", "node-http", "server-close", "graceful-shutdown"]
+catches = """
+Graceful shutdown (realms issue 23), recorded from node 26.8.1: a `SIGTERM` listener closes the server while a request is in flight; the response still goes out, `server.close`'s callback runs only once the last connection has ended, and the program ends by itself instead of dying of the signal. The interpreter called the close callback as soon as the listener closed, before the in-flight response -- so `server.close(() => process.exit(0))` cut it off -- and a natively built program with a signal listener never ended in a virtual-clock realm (an unreferenced wait kept the drive parked after the last connection closed).\
+"""
+expected_stdout = """
+request /work
+SIGTERM: closing the server
+responding
+server closed after the last connection
+client got done
+"""
+
+[[test]]
+id = "regress/r39-array-element-tostring"
+group = "regress"
+source = "regress/r39-array-element-tostring.js"
+status = "runnable"
+features = ["array-methods", "type-coercion", "to-primitive"]
+catches = """
+An array's string conversion `ToString`s its elements, which for an object runs its own `toString`, `@@toPrimitive` or `valueOf` (parallel-builtins issue 23), recorded from node 26.8.1. `Array.prototype.toString` had a pure arm in the interpreter that joined a dense array without the call, so `[o] + ""`, a template and `String([o])` answered "[object Object]" while `[o].join()` was right; the native `join` made the call for no element at all. A throwing `toString`, a symbol element and an element that shortens the array mid-join are in it.\
+"""
+expected_stdout = """
+y y y y t,t,t,t
+1-P---z P t,t,t,t,string,string
+7 7,7,2
+caught RangeError nope
+caught RangeError nope
+caught TypeError
+1,m,
+y,2,y 8
+"""
+
+[[test]]
+id = "regress/r40-computed-key-to-property-key"
+group = "regress"
+source = "regress/r40-computed-key-to-property-key.js"
+status = "runnable"
+features = ["object-literals", "classes", "computed-keys", "to-primitive", "evaluation-order"]
+catches = """
+A computed key converts with `ToPropertyKey` where it is written, between its key and its value (parallel-builtins issue 24), recorded from node 26.8.1. The native backend keyed the property "[object Object]" and ran no user code; the interpreter converted it when the object was built, after every value. Object literal pairs before and after a spread, methods and accessors, class methods, accessors and static fields, a throwing key, a symbol from `@@toPrimitive`, and function naming after the converted key.\
+"""
+expected_stdout = """
+kk k
+constructor,kk,kkg number 1 k,k,k,k
+a,tp 5 k,k,k,k,string,string,string
+1
+caught RangeError key
+caught RangeError key
+caught RangeError key
+key a,value 1,value 2,key c,value 3,key d,value 4,key e {"a":1,"b":2,"c":3,"d":4,"e":5}
+key m,key s,key g
+9 1
+kk [sym]
+"""
+
+[[test]]
+id = "regress/r41-class-heritage-checks"
+group = "regress"
+source = "regress/r41-class-heritage-checks.js"
+status = "runnable"
+features = ["classes", "class-heritage", "type-errors"]
+catches = """
+ClassDefinitionEvaluation's heritage checks (parallel-builtins issue 25), recorded from node 26.8.1: a heritage that is neither `null` nor a constructor, and a constructor whose `prototype` is neither an object nor `null`, are a `TypeError` before the class exists. The native backend defined every one of them; the interpreter accepted a primitive `prototype` and made `extends null` a `TypeError` by reading `null.prototype`, where the class exists with a prototype object inheriting from nothing.\
+"""
+expected_stdout = """
+number TypeError
+string TypeError
+undefined TypeError
+symbol TypeError
+plain object TypeError
+arrow TypeError
+arrow with a prototype TypeError
+async TypeError
+generator TypeError
+async generator TypeError
+method TypeError
+prototype 3 TypeError
+prototype string TypeError
+class expression TypeError
+function no throw
+class no throw
+builtin no throw
+prototype null no throw
+prototype function no throw
+true null
+true null
+2 true true
+"""
+
+[[test]]
+id = "regress/r42-class-element-key-order"
+group = "regress"
+source = "regress/r42-class-element-key-order.js"
+status = "runnable"
+features = ["classes", "computed-keys", "class-fields", "static-blocks", "evaluation-order"]
+catches = """
+Class element key order (parallel-builtins issue 28, item 1), recorded from node 26.8.1: every element's computed key -- method, instance field and static field -- is evaluated and converted in source order, and only then do the static field initialisers and static blocks run. Both engines evaluated a static field's key together with its value, before every method key, and ran static fields before the methods were defined. Node also evaluates every key before the heritage check, and refuses a computed static field named `prototype` where its key is evaluated.\
+"""
+expected_stdout = """
+key m1, key s1, key i1, key m2, key s2, key g1, value s1, block, value s2
+value i1
+late
+stop key a, key b
+toString x, toString y, toString z [ 'x' ] [ 'z' ]
+TypeError 1
+TypeError 
+"""
+
+[[test]]
+id = "regress/r43-spread-pair-keeps-function-name"
+group = "regress"
+source = "regress/r43-spread-pair-keeps-function-name.js"
+status = "runnable"
+features = ["object-literals", "spread", "function-names"]
+catches = """
+A pair after a spread keeps its value's name (parallel-builtins issue 28, item 2), recorded from node 26.8.1: `{ ...{}, f: foo }` defined `f` through `DefineNamedProperty`, which named `foo` \"f\" in both engines. Only an anonymous function definition takes the key as its name.\
+"""
+expected_stdout = """
+foo foo true
+bar bar foo a,bc,d
+K K
+g h i j m
+1 x,__proto__ true
+bound foo
+"""
+
+[[test]]
+id = "regress/r44-prototype-assigned-undefined"
+group = "regress"
+source = "regress/r44-prototype-assigned-undefined.js"
+status = "runnable"
+features = ["functions", "prototype", "classes", "class-heritage"]
+catches = """
+`F.prototype = undefined` sticks (parallel-builtins issue 28, item 3), recorded from node 26.8.1: the native backend's undefined `prototype` slot meant \"not created yet\", so the read after the assignment made a fresh object and `class U extends F {}` defined a class where node throws. `new F()` with a primitive `prototype` inherits `Object.prototype` (the interpreter linked the primitive; native linked `null` for `null`).\
+"""
+expected_stdout = """
+undefined true true
+TypeError
+true
+true
+true true
+again again
+again
+object true
+"""
+
+[[test]]
+id = "regress/r45-extends-bound-function"
+group = "regress"
+source = "regress/r45-extends-bound-function.js"
+status = "runnable"
+features = ["bound-functions", "prototype", "classes", "class-heritage"]
+catches = """
+A bound function's `prototype` (parallel-builtins issue 28, item 4), recorded from node 26.8.1: it owns none and inherits the name from its target's [[Prototype]], so `class U extends f.bind() {}` is a `TypeError` for an ordinary function and a bound derived class answers with its parent's `prototype`. The native backend refused the read; the interpreter answered undefined for a bound derived class.\
+"""
+expected_stdout = """
+undefined false false
+TypeError
+undefined
+undefined
+TypeError
+true
+defines
+own true
+undefined
 """

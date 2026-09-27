@@ -147,6 +147,11 @@ mod ffi;
 #[path = "provider/realm.rs"]
 mod realm;
 
+/// Cross-realm ports, `node:worker_threads` and shared memory for native realms (realms issue 06).
+#[cfg(feature = "realm")]
+#[path = "provider/workers.rs"]
+mod workers;
+
 /// The allocator the regexp engine runs on.
 ///
 /// `malloc` and `free`, because the generated artifact this is linked into already has them and a
@@ -386,6 +391,13 @@ pub unsafe extern "C" fn kiln_parallel_map(
     _context: *mut core::ffi::c_void,
 ) -> i32 {
     INVALID_ARGUMENT
+}
+
+#[cfg(not(feature = "parallel"))]
+/// Without the pool every call runs on the calling thread.
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_parallel_threads() -> usize {
+    1
 }
 
 #[cfg(not(feature = "parallel"))]

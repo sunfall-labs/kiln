@@ -1494,12 +1494,11 @@ pub(crate) fn call_native(
             }
             _ => Value::Undefined,
         },
-        Native::ArrayJoinDefault => match receiver {
-            Value::Array(items) => {
-                Value::String(join_units(&items.borrow(), &StringUnits::from(","))?)
-            }
-            _ => Value::String(String::new().into()),
-        },
+        // `toString` calls the receiver's own `join`, which is program code: it is dispatched by
+        // the interpreter, and reaching this arm means the route to it was lost.
+        Native::ArrayJoinDefault => {
+            unreachable!("`Array.prototype.toString` is dispatched by the interpreter")
+        }
         Native::ArraySplice => match receiver {
             Value::Array(items) => {
                 let length = items.borrow().len();
@@ -2852,6 +2851,8 @@ pub(crate) fn call_native(
         | Native::UrlAdoptRaw
         | Native::JobsPendingRaw
         | Native::QueueIoRaw
+        | Native::WorkerOpRaw
+        | Native::PortWaitRaw
         | Native::PromiseRejectionsRaw
         | Native::ProcessStdinSetRawMode
         | Native::UrlConstructor

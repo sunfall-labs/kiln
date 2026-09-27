@@ -217,6 +217,30 @@ pub(super) fn receiver_prologue(
     )
 }
 
+/// The typed entry's receiver-row lookup, as a function of its own: the row for `recv_obj`'s
+/// shape in the entry's table, claimed when the shape has none yet and can take one, NULL when it
+/// cannot (a receiver whose `this` fields are not the representation the entry reads -- the same
+/// class holding a string where the entry reads a double). Issue 21: a method call site asks this
+/// *before* entering the entry, where the boxed call is still available and nothing has run; a
+/// NULL takes the boxed call instead of entering an entry that could only refuse at its door.
+pub(super) fn typed_row_claimer(
+    symbol: &str,
+    index: usize,
+    columns: &[u32],
+    double_mask: u32,
+    linkage: &str,
+) -> String {
+    let keys: Vec<String> = columns
+        .iter()
+        .map(|name| format!("{symbol}_key_{name}"))
+        .collect();
+    let count = columns.len();
+    format!(
+        "{linkage}const uint32_t *{symbol}_fn_{index}_t_row(const kiln_object *recv_obj) {{ const uint32_t *recv_row = kiln_c99_recv_row({symbol}_fn_{index}_typed_recv_shape, &{symbol}_fn_{index}_typed_recv_slot[0][0], {count}, recv_obj->shape); if (recv_row == NULL && !kiln_c99_recv_refused({symbol}_fn_{index}_typed_recv_refused, recv_obj->shape) && kiln_c99_gc_kind_of_ptr(recv_obj) == KILN_GC_OBJECT) {{ const kiln_string *const recv_keys[{count}] = {{ {} }}; recv_row = kiln_c99_recv_claim({symbol}_fn_{index}_typed_recv_shape, {symbol}_fn_{index}_typed_recv_refused, &{symbol}_fn_{index}_typed_recv_slot[0][0], {count}, recv_keys, recv_obj, {double_mask}u); }} return recv_row; }}\n",
+        keys.join(", ")
+    )
+}
+
 pub(crate) fn collect_typed_call_sites(
     graph: &FunctionGraph,
     program: &Program,

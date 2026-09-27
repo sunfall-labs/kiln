@@ -1425,6 +1425,7 @@ dependencies = [
  "num-bigint 0.4.8",
  "oxc_allocator",
  "oxc_ast",
+ "oxc_ast_visit",
  "oxc_diagnostics",
  "oxc_ecmascript",
  "oxc_minifier",
@@ -1551,6 +1552,7 @@ version = "0.1.0"
 dependencies = [
  "kiln-builtins",
  "kiln-frontend-oxc",
+ "kiln-hir",
  "kiln-host-abi",
  "kiln-interpreter",
  "kiln-ir",
@@ -1694,6 +1696,7 @@ dependencies = [
  "kiln-artifact-cache",
  "kiln-host-abi",
  "kiln-number-core",
+ "kiln-string",
  "libc",
  "tokio",
  "tokio-metrics",

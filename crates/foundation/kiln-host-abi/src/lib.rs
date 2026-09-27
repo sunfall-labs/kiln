@@ -200,6 +200,9 @@ pub enum AsyncHostOp {
         args: Vec<String>,
         stdin: Option<Vec<u8>>,
     },
+    /// Wait until a cross-realm message port (`kiln_runtime::workers`) has a message queued, or
+    /// its peer has closed. Completes with no payload: the realm then takes what is queued.
+    PortWait { port: u64 },
 }
 
 /// Stable resource category that does not expose executor or operating-system types.

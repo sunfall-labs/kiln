@@ -50,6 +50,7 @@ crates/host/kiln-runtime/src/node_net.rs
 crates/host/kiln-runtime/src/node_stream.rs
 crates/host/kiln-runtime/src/scripted_transport.rs
 crates/host/kiln-runtime/src/worker_pool.rs
+crates/host/kiln-runtime/src/workers.rs
 crates/host/kiln-runtime/src/uring.rs
 crates/semantics/kiln-native-provider-contract/src/lib.rs
 crates/semantics/kiln-native-provider-contract/src/main.rs
@@ -72,3 +73,4 @@ crates/native/kiln-native-provider-ffi/src/provider/regexp.rs
 crates/native/kiln-native-provider-ffi/src/provider/regexp_stubs.rs
 crates/native/kiln-native-provider-ffi/src/provider/temporal.rs
 crates/native/kiln-native-provider-ffi/src/provider/temporal_stubs.rs
+crates/native/kiln-native-provider-ffi/src/provider/workers.rs

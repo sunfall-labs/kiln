@@ -192,6 +192,88 @@ thread_local! {
     static PARALLEL_CLONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// The ids of the blocks of `graph` that lie on a cycle, following both control edges and the
+/// edge to a block's exception handler (Tarjan's strongly connected components).
+pub(crate) fn blocks_on_a_cycle(graph: &FunctionGraph) -> HashSet<u32> {
+    use std::collections::HashMap;
+    let index_of: HashMap<u32, usize> = graph
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(position, block)| (block.id.0, position))
+        .collect();
+    let edges: Vec<Vec<usize>> = graph
+        .blocks
+        .iter()
+        .map(|block| {
+            block
+                .successors
+                .iter()
+                .chain(block.exception_handler.iter())
+                .filter_map(|id| index_of.get(&id.0).copied())
+                .collect()
+        })
+        .collect();
+    let count = graph.blocks.len();
+    let mut order = vec![usize::MAX; count];
+    let mut low = vec![0usize; count];
+    let mut on_stack = vec![false; count];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut next_order = 0usize;
+    let mut on_cycle = HashSet::new();
+    for root in 0..count {
+        if order[root] != usize::MAX {
+            continue;
+        }
+        // Iterative Tarjan: (node, next edge to look at).
+        let mut work: Vec<(usize, usize)> = vec![(root, 0)];
+        order[root] = next_order;
+        low[root] = next_order;
+        next_order += 1;
+        stack.push(root);
+        on_stack[root] = true;
+        while let Some(&mut (node, ref mut edge)) = work.last_mut() {
+            if *edge < edges[node].len() {
+                let target = edges[node][*edge];
+                *edge += 1;
+                if order[target] == usize::MAX {
+                    order[target] = next_order;
+                    low[target] = next_order;
+                    next_order += 1;
+                    stack.push(target);
+                    on_stack[target] = true;
+                    work.push((target, 0));
+                } else if on_stack[target] {
+                    low[node] = low[node].min(order[target]);
+                }
+                continue;
+            }
+            work.pop();
+            if let Some(&(parent, _)) = work.last() {
+                low[parent] = low[parent].min(low[node]);
+            }
+            if low[node] == order[node] {
+                let mut component = Vec::new();
+                loop {
+                    let member = stack.pop().expect("tarjan stack");
+                    on_stack[member] = false;
+                    component.push(member);
+                    if member == node {
+                        break;
+                    }
+                }
+                let self_loop = edges[node].contains(&node);
+                if component.len() > 1 || self_loop {
+                    for member in component {
+                        on_cycle.insert(graph.blocks[member].id.0);
+                    }
+                }
+            }
+        }
+    }
+    on_cycle
+}
+
 /// The upvalue indices, ascending, whose values the parallel clone of proto `index` takes as
 /// `double cap<k>` parameters after its own (tier 1, ADR 0069). Empty for a proto that
 /// captures nothing or does not qualify.

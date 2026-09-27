@@ -10,6 +10,7 @@ kiln-hir = { workspace = true }
 kiln-host-abi = { workspace = true }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
+oxc_ast_visit = { version = "0.147.0", default-features = false }
 # `regular_expression` turns on the pattern parser behind `ParseOptions::parse_regular_expression`.
 # It is a default feature upstream, but the workspace pins every `oxc_*` crate with
 # `default-features = false`, so it has to be asked for by name here.

@@ -803,6 +803,8 @@ static kiln_value kiln_c99_text(kiln_value value) {
         return kiln_c99_text_value(&joined);
     }
     case KILN_VALUE_ARRAY_BUFFER:
+        if (kiln_c99_typed_buffer_of(value)->shared != NULL)
+            return kiln_c99_copy_text("[object SharedArrayBuffer]", 26);
         return kiln_c99_copy_text("[object ArrayBuffer]", 20);
     /* A DataView holds no elements to join, so unlike a typed array it converts to the tagged
      * form its buffer does -- which is what node and the interpreter both answer. */

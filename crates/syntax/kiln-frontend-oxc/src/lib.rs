@@ -4,6 +4,8 @@
 //! accepts ordinary strings and returns [`kiln_hir`] values, so an Oxc upgrade cannot leak AST
 //! types or arena lifetimes into the query database, interpreter, or backends.
 
+mod dce_guard;
+
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     path::Path,
@@ -479,11 +481,201 @@ fn discover_node_runtime_requests_from_semantic(
             continue;
         }
     }
+    // A `node:worker_threads` worker runs another module of the program as its entry, so the
+    // module a `new Worker(...)` names is a lazy edge like a `createRequire` target: in the graph
+    // and live, evaluated only when the worker starts. The spellings that name a module
+    // independently of the working directory are recognised -- `new URL("./w.js",
+    // import.meta.url)`, `path.join(__dirname, "w.js")`, `fileURLToPath(...)` of either -- and a
+    // literal path, which node resolves against the working directory and the graph against
+    // the module's (the two agree when a program is run from its own directory).
+    for node in semantic.nodes() {
+        let AstKind::NewExpression(new) = node.kind() else {
+            continue;
+        };
+        let names_worker = match &new.callee {
+            Expression::Identifier(identifier) => identifier.name == "Worker",
+            Expression::StaticMemberExpression(member) => member.property.name == "Worker",
+            _ => false,
+        };
+        if !names_worker {
+            continue;
+        }
+        let evaluates_source = new
+            .arguments
+            .get(1)
+            .and_then(Argument::as_expression)
+            .is_some_and(|options| match options {
+                Expression::ObjectExpression(object) => object.properties.iter().any(|property| {
+                    matches!(property, ObjectPropertyKind::ObjectProperty(property)
+                        if property.key.static_name().is_some_and(|name| name == "eval")
+                            && !matches!(property.value, Expression::BooleanLiteral(ref flag) if !flag.value))
+                }),
+                _ => false,
+            });
+        if evaluates_source {
+            continue;
+        }
+        let Some(argument) = new.arguments.first().and_then(Argument::as_expression) else {
+            continue;
+        };
+        let mut specifiers = Vec::new();
+        worker_script_specifiers(argument, semantic, 0, &mut specifiers);
+        for specifier in specifiers {
+            requests.push(NodeRuntimeRequest {
+                specifier,
+                importer: path.to_owned(),
+            });
+        }
+    }
     requests.sort_by(|left, right| left.specifier.cmp(&right.specifier));
     requests.dedup_by(|left, right| {
         left.specifier == right.specifier && left.importer == right.importer
     });
     requests
+}
+
+/// Every module a `new Worker(argument)` can name: through a `const` binding (`const script =
+/// join(__dirname, "w.js"); new Worker(script)`) and through each side of a `||`, `??` or
+/// conditional (`override || join(__dirname, "lib", "worker.js")`, as thread-stream writes it).
+fn worker_script_specifiers(
+    argument: &Expression<'_>,
+    semantic: &oxc_semantic::Semantic<'_>,
+    depth: usize,
+    out: &mut Vec<String>,
+) {
+    if depth > 8 {
+        return;
+    }
+    match argument {
+        Expression::ParenthesizedExpression(inner) => {
+            worker_script_specifiers(&inner.expression, semantic, depth + 1, out)
+        }
+        Expression::LogicalExpression(logical) => {
+            worker_script_specifiers(&logical.left, semantic, depth + 1, out);
+            worker_script_specifiers(&logical.right, semantic, depth + 1, out);
+        }
+        Expression::ConditionalExpression(conditional) => {
+            worker_script_specifiers(&conditional.consequent, semantic, depth + 1, out);
+            worker_script_specifiers(&conditional.alternate, semantic, depth + 1, out);
+        }
+        Expression::Identifier(identifier) => {
+            let scoping = semantic.scoping();
+            let Some(symbol) = identifier
+                .reference_id
+                .get()
+                .and_then(|reference| scoping.get_reference(reference).symbol_id())
+            else {
+                return;
+            };
+            if scoping.symbol_is_mutated(symbol) {
+                return;
+            }
+            let declaration = semantic
+                .nodes()
+                .get_node(scoping.symbol_declaration(symbol));
+            if let AstKind::VariableDeclarator(declarator) = declaration.kind()
+                && let Some(init) = &declarator.init
+            {
+                worker_script_specifiers(init, semantic, depth + 1, out);
+            }
+        }
+        other => {
+            if let Some(specifier) = worker_script_specifier(other, semantic.scoping()) {
+                out.push(specifier);
+            }
+        }
+    }
+}
+
+/// The module a `new Worker(argument)` names, as a specifier relative to the module that says
+/// it, when the argument spells one without depending on run-time values.
+fn worker_script_specifier(
+    argument: &Expression<'_>,
+    scoping: &oxc_semantic::Scoping,
+) -> Option<String> {
+    fn text(expression: &Expression<'_>) -> Option<String> {
+        match expression {
+            Expression::StringLiteral(literal) => Some(literal.value.to_string()),
+            Expression::TemplateLiteral(template) if template.expressions.is_empty() => template
+                .quasis
+                .first()
+                .and_then(|quasi| quasi.value.cooked.as_ref())
+                .map(|cooked| cooked.to_string()),
+            _ => None,
+        }
+    }
+    fn is_import_meta_url(expression: &Expression<'_>) -> bool {
+        matches!(expression, Expression::StaticMemberExpression(member)
+            if member.property.name == "url" && matches!(member.object, Expression::ImportMeta(_)))
+    }
+    match argument {
+        Expression::StringLiteral(_) | Expression::TemplateLiteral(_) => {
+            let path = text(argument)?;
+            (path.starts_with("./") || path.starts_with("../") || path.starts_with('/'))
+                .then_some(path)
+        }
+        Expression::NewExpression(url) => {
+            let Expression::Identifier(callee) = &url.callee else {
+                return None;
+            };
+            if callee.name != "URL" {
+                return None;
+            }
+            let relative = text(url.arguments.first()?.as_expression()?)?;
+            if !is_import_meta_url(url.arguments.get(1)?.as_expression()?) {
+                return None;
+            }
+            Some(
+                if relative.starts_with("./") || relative.starts_with("../") {
+                    relative
+                } else {
+                    format!("./{relative}")
+                },
+            )
+        }
+        Expression::CallExpression(call) => {
+            // A compiler's `(0, path_1.resolve)(...)` calls the member without a receiver.
+            let mut callee = &call.callee;
+            loop {
+                callee = match callee {
+                    Expression::SequenceExpression(sequence) => sequence.expressions.last()?,
+                    Expression::ParenthesizedExpression(inner) => &inner.expression,
+                    _ => break,
+                };
+            }
+            let callee = match callee {
+                Expression::Identifier(identifier) => identifier.name.as_str(),
+                Expression::StaticMemberExpression(member) => member.property.name.as_str(),
+                _ => return None,
+            };
+            match callee {
+                "fileURLToPath" => {
+                    worker_script_specifier(call.arguments.first()?.as_expression()?, scoping)
+                }
+                "join" | "resolve" => {
+                    let mut arguments = call.arguments.iter();
+                    let Expression::Identifier(base) = arguments.next()?.as_expression()? else {
+                        return None;
+                    };
+                    if base.name != "__dirname" || !base.is_global_reference(scoping) {
+                        return None;
+                    }
+                    let mut parts = Vec::new();
+                    for argument in arguments {
+                        parts.push(text(argument.as_expression()?)?);
+                    }
+                    let joined = parts.join("/");
+                    Some(if joined.starts_with("./") || joined.starts_with("../") {
+                        joined
+                    } else {
+                        format!("./{joined}")
+                    })
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 fn strip_jsonc_comments(input: &str) -> String {
@@ -864,8 +1056,12 @@ fn parse_source_in_context(
         && !has_unexported_top_level_class_heritage(&parsed.program)
     {
         expose_only_demanded_declarations(&allocator, &mut parsed.program, demanded_exports);
+        // Oxc's side-effect model assumes coercions are pure and that some global functions
+        // never throw; guard what the language can observe before it runs (issue 19).
+        dce_guard::guard_observable_effects(&allocator, &mut parsed.program);
         Compressor::new(&allocator)
             .dead_code_elimination(&mut parsed.program, CompressOptions::dce());
+        dce_guard::release_observable_guards(&allocator, &mut parsed.program);
     }
     let node_runtime_requests = if parsed.panicked || !parsed.diagnostics.is_empty() {
         Vec::new()
@@ -3862,6 +4058,87 @@ mod tests {
 
         assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
         assert_eq!(module.body.len(), 3);
+    }
+
+    /// The HIR of a release (DCE) parse, as text: enough to ask whether a name survived.
+    fn dce_text(source: &str) -> String {
+        let module = parse_dce("module.js", source, &BTreeSet::new());
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let text = format!("{:?}", module.body);
+        assert!(
+            !text.contains(dce_guard::OBSERVABLE),
+            "a DCE guard survived into the HIR"
+        );
+        text
+    }
+
+    #[test]
+    fn dce_keeps_expressions_whose_coercion_can_run_user_code() {
+        // Each statement's only effect is a coercion of `o` (issue 19); Oxc assumes coercions
+        // are pure. `k` is a parameter, so it survives as a use only if the statement does.
+        for source in [
+            "function f(o, k) { o < k; } f({}, 1);",
+            "function f(o, k) { o == k; } f({}, 1);",
+            "function f(o, k) { `${o}${k}`; } f({}, 1);",
+            "function f(o, k) { [o] + k; } f({}, 1);",
+            "function f(o, k) { ({ [o]: k }); } f({}, 1);",
+            "function f(o, k) { class C { [o]() { return k; } } } f({}, 1);",
+            "function f(o, k) { const unused = o < k; } f({}, 1);",
+            "function f(o, k) { String(o, k); } f({}, 1);",
+            "function f(o, k) { Math.abs(o, k); } f({}, 1);",
+            "function f(o, k) { new Date(o, k); } f({}, 1);",
+        ] {
+            let text = dce_text(source);
+            assert!(text.matches("\"k\"").count() >= 2, "{source}: {text}");
+        }
+        for source in [
+            "function f(o) { +o; } f({});",
+            "function f(o) { -o; } f({});",
+            "function f(o) { ~o; } f({});",
+        ] {
+            assert!(dce_text(source).contains("Unary"), "{source}");
+        }
+    }
+
+    #[test]
+    fn dce_keeps_calls_and_classes_that_may_throw() {
+        for (source, marker) in [
+            (
+                "try { decodeURIComponent('%'); } catch {}",
+                "decodeURIComponent",
+            ),
+            ("try { decodeURI?.('%'); } catch {}", "decodeURI"),
+            ("try { parseInt('1'); } catch {}", "parseInt"),
+            (
+                "function f() { const n = 1; class KeptSubclass extends n {} } f();",
+                "KeptSubclass",
+            ),
+        ] {
+            assert!(dce_text(source).contains(marker), "{source}");
+        }
+    }
+
+    #[test]
+    fn dce_guard_keeps_what_the_pass_is_for() {
+        // Primitive comparisons still fold, `x == null` and `===` do not coerce, unused
+        // declarations still go, and module-scope allocations bundles never use still go.
+        let text = dce_text(
+            "const LIMIT = 3; if (LIMIT > 5) { deadBranch(); } \
+             function f(x) { x == null; x === 1; } f(1); \
+             function unusedFunction() {} \
+             const unusedMap = new Map(); const unusedSymbol = Symbol('s'); \
+             function g() { class UnusedBase {} class UnusedDerived extends UnusedBase {} } g(); \
+             console.log('live');",
+        );
+        for dropped in [
+            "deadBranch",
+            "unusedFunction",
+            "unusedMap",
+            "unusedSymbol",
+            "UnusedDerived",
+        ] {
+            assert!(!text.contains(dropped), "{dropped} survived: {text}");
+        }
     }
 
     #[test]

@@ -838,3 +838,363 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
     }
     return KILN_C99_OK;
 }
+
+/* ---- Tier 3 of the parallel built-ins: building values on a pool thread (parallel issue 08) --
+ *
+ * A tier-3 callback (`parallel::heap_verdict`, ADR 0069) returns what it builds: an object
+ * literal, `{ ...r, total: r.qty * r.price }`, an array literal, a string made with `+` or a
+ * template. Its clone (`parallel_heap.rs`) builds each through the functions below, in the
+ * worker's arena (`kiln_c99_par_alloc`, heap.c), and each builds exactly what the sequential
+ * lowering builds for the same values or declines with 0:
+ *
+ *   - an object starts as `kiln_c99_new_object` starts one (root shape, sixteen inline slots,
+ *     `Object.prototype`), and every member is defined in source order by the transition the
+ *     sequential definition takes (`kiln_c99_define_named_fast`, `kiln_c99_define_computed`):
+ *     the same key, the same double bit for the same value, so the same shape -- and so the same
+ *     property order, which `Object.keys` and `JSON.stringify` read. A member that would leave
+ *     shape mode, need slots past the inline ones, name a function, redefine a slot the
+ *     sequential path would take to a dictionary, or need a realm-local edge the realm has not
+ *     made yet (`kiln_c99_par_shape_step`) declines;
+ *   - `{ ...r }` is `kiln_c99_spread_object_fast`'s copy -- the source's slots and its shape --
+ *     under the same conditions, into a literal that has nothing yet; null and undefined spread
+ *     nothing, as the language says; anything else declines;
+ *   - an array literal is `kiln_c99_new_array_with_capacity`'s layout: its elements inline up to
+ *     eight, inside its own block up to sixty-four, and more declines (the sequential array
+ *     would `malloc` them);
+ *   - a string is flat, its units the units `ToString` and `+` give (`kiln_c99_double_to_js` for a
+ *     number), Latin1 unless a part is UTF-16.
+ *
+ * None of them reads anything but its arguments and the frozen heap, and none writes anything
+ * but the block it allocated and, for a new shared transition, the process's shape tree. */
+
+/* `ikey` as a name a pool thread may define: a canonical key that is not an index (which goes to
+ * elements), not a reserved `@@` spelling, not `__proto__` and not empty -- the cases the
+ * sequential fast path hands to its generic one. */
+static int kiln_c99_par_key_plain(const kiln_string *ikey) {
+    return ikey != NULL && ikey->unit_len != 0 && !kiln_c99_key_is_reserved(ikey) &&
+           kiln_c99_key_index_key(ikey) < 0.0 && !kiln_c99_same_name_key(ikey, "__proto__");
+}
+
+static int kiln_c99_par_object(kiln_c99_par_arena *arena, kiln_val *out) {
+    kiln_object *object = (kiln_object *)kiln_c99_par_alloc(arena, KILN_GC_OBJECT, sizeof *object);
+    size_t slot;
+    if (object == NULL) return 0;
+    object->properties = NULL;
+    object->count = 0;
+    object->capacity = 0;
+    object->prototype = kiln_c99_undefined();
+    object->frozen = 0;
+    object->not_extensible = 0;
+    object->module_namespace = 0;
+    object->arguments_brand = 0;
+    object->error_brand = 0;
+    object->layout_token = 0;
+    object->accessor_count = 0;
+    object->read_only_seen = 0;
+    object->shape = kiln_c99_shape_root();
+    object->slots = object->inline_slots;
+    object->slot_capacity = KILN_C99_INLINE_SLOTS;
+    for (slot = 0; slot < KILN_C99_INLINE_SLOTS; ++slot) object->inline_slots[slot] = KILN_VAL_UNDEFINED;
+    object->elements = NULL;
+    object->element_count = 0;
+    object->element_capacity = 0;
+    *out = KILN_VAL_TAG_PTR(KILN_TAG_OBJECT_PREFIX, object);
+    return 1;
+}
+
+/* Define `ikey` (canonical) on `target`, an object this worker built, as an object literal's
+ * member does. `site` is the worker's own cache for this definition: the shape it last left from
+ * and the one it went to, for a value of the same kind. */
+static int kiln_c99_par_define(kiln_c99_par_arena *arena, kiln_c99_par_site *site, kiln_val target,
+                               const kiln_string *ikey, kiln_val value) {
+    kiln_object *object;
+    kiln_shape *next;
+    uint32_t slot;
+    uint32_t number = KILN_VAL_IS_NUMBER(value) ? 1u : 0u;
+    (void)arena;
+    if (!KILN_VAL_IS_OBJECT(target) || KILN_VAL_IS_CLOSURE(value)) return 0;
+    object = (kiln_object *)KILN_VAL_PTR(target);
+    if (kiln_c99_gc_payload_kind(object) != KILN_GC_OBJECT || object->shape == NULL ||
+        object->properties != NULL || object->elements != NULL || object->frozen ||
+        object->not_extensible || object->accessor_count != 0) {
+        return 0;
+    }
+    if (site != NULL && site->shape == object->shape && site->to != NULL && site->number == number) {
+        if (site->slot >= object->slot_capacity) return 0;
+        object->slots[site->slot] = value;
+        object->shape = (kiln_shape *)site->to;
+        return 1;
+    }
+    if (!kiln_c99_par_key_plain(ikey)) return 0;
+    if (kiln_c99_shape_find_slot(object->shape, ikey, &slot)) {
+        /* The member is there already (`{ ...r, qty: 1 }` over an `r` with a `qty`): its value
+         * changes in place, unless the slot carries attributes, or holds doubles and the value is
+         * not one -- the sequential definition then leaves shape mode. */
+        if (slot >= object->slot_capacity || slot >= 32u ||
+            (object->shape->special_mask & (1u << slot)) != 0 ||
+            ((object->shape->double_slots_mask & (1u << slot)) != 0 && !number)) {
+            return 0;
+        }
+        next = object->shape;
+    } else {
+        if (!kiln_c99_par_shape_step(object->shape, ikey, (int)number, &next)) return 0;
+        slot = next->slot_index;
+        if (slot >= object->slot_capacity) return 0;
+    }
+    if (site != NULL) {
+        site->shape = object->shape;
+        site->to = next;
+        site->slot = slot;
+        site->number = number;
+    }
+    object->slots[slot] = value;
+    object->shape = next;
+    return 1;
+}
+
+/* A member whose key is computed (`{ [k]: v }`): a string key the realm has interned, defined as
+ * above. A key the realm never interned names no transition anywhere, and interning it is the
+ * realm thread's; a number, a symbol or an object key declines too. */
+static int kiln_c99_par_define_computed(kiln_c99_par_arena *arena, kiln_val target, kiln_val key,
+                                        kiln_val value) {
+    const kiln_string *ikey;
+    if (arena == NULL || !KILN_VAL_IS_STRING(key)) return 0;
+    ikey = kiln_c99_interned_key_in((kiln_gc_heap *)arena->heap,
+                                    (const kiln_string *)KILN_VAL_PTR(key));
+    if (ikey == NULL) return 0;
+    return kiln_c99_par_define(arena, NULL, target, ikey, value);
+}
+
+/* `{ ...source }` into `target`, a literal this worker built that has no member yet. */
+static int kiln_c99_par_spread(kiln_c99_par_arena *arena, kiln_val target, kiln_val source) {
+    kiln_object *object;
+    kiln_object *dest;
+    kiln_shape *sshape;
+    size_t scount;
+    (void)arena;
+    if (source == KILN_VAL_UNDEFINED || source == KILN_VAL_NULL) return KILN_VAL_IS_OBJECT(target);
+    if (!KILN_VAL_IS_OBJECT(source) || !KILN_VAL_IS_OBJECT(target)) return 0;
+    object = (kiln_object *)KILN_VAL_PTR(source);
+    dest = (kiln_object *)KILN_VAL_PTR(target);
+    if (object == NULL || dest == NULL || kiln_c99_gc_payload_kind(object) != KILN_GC_OBJECT ||
+        kiln_c99_gc_payload_kind(dest) != KILN_GC_OBJECT) {
+        return 0;
+    }
+    if (object->properties != NULL || object->shape == NULL || object->elements != NULL ||
+        object->accessor_count != 0 || object->arguments_brand || object->error_brand ||
+        object->module_namespace) {
+        return 0;
+    }
+    if (dest->properties != NULL || dest->shape == NULL || dest->shape->property_count != 0 ||
+        dest->elements != NULL || dest->frozen || dest->not_extensible || dest->accessor_count != 0) {
+        return 0;
+    }
+    sshape = object->shape;
+    scount = sshape->property_count;
+    if (sshape->special_mask != 0 || sshape->has_symbol_key || scount > dest->slot_capacity ||
+        scount > object->slot_capacity) {
+        return 0;
+    }
+    if (scount > 0) memcpy(dest->slots, object->slots, scount * sizeof(kiln_val));
+    dest->shape = sshape;
+    return 1;
+}
+
+static int kiln_c99_par_array(kiln_c99_par_arena *arena, const kiln_val *elements, size_t count,
+                              kiln_val *out) {
+    size_t inline_capacity = sizeof(((kiln_array *)0)->inline_elements) / sizeof(kiln_val);
+    size_t in_block = count > inline_capacity ? count : 0;
+    kiln_array *array;
+    size_t index;
+    int numeric = 1;
+    if (count > KILN_C99_ARRAY_INBLOCK_MAX) return 0;
+    array = (kiln_array *)kiln_c99_par_alloc(arena, KILN_GC_ARRAY,
+                                             sizeof *array + in_block * sizeof(kiln_val));
+    if (array == NULL) return 0;
+    /* No `elements` (tier 4's `map`/`filter`/`split`): holes, which the caller overwrites before
+     * the array is seen, and `kiln_c99_par_array_seal` sets `is_numeric` from what it wrote. */
+    for (index = 0; elements != NULL && index < count; ++index) {
+        numeric &= KILN_VAL_IS_NUMBER(elements[index]) ? 1 : 0;
+    }
+    if (elements == NULL) numeric = 0;
+    array->elements = NULL;
+    array->count = 0;
+    array->capacity = 0;
+    array->properties = kiln_c99_undefined();
+    array->frozen = 0;
+    array->not_extensible = 0;
+    array->match_index = -1;
+    array->match_input = kiln_c99_undefined();
+    array->match_groups = kiln_c99_undefined();
+    array->is_numeric = numeric;
+    if (in_block > 0) {
+        array->elements = (kiln_val *)(array + 1);
+        array->capacity = in_block;
+    } else if (count > 0) {
+        array->elements = array->inline_elements;
+        array->capacity = inline_capacity;
+    }
+    if (count > 0 && elements != NULL) memcpy(array->elements, elements, count * sizeof(kiln_val));
+    for (index = 0; elements == NULL && index < count; ++index) array->elements[index] = KILN_VAL_HOLE;
+    array->count = count;
+    *out = KILN_VAL_TAG_PTR(KILN_TAG_BUFFER_PREFIX, array);
+    return 1;
+}
+
+/* The units of `value` as `ToString` gives them, for a primitive whose conversion runs no code:
+ * a string is itself; a number, a boolean, undefined and null are spelled into `buffer`. 0 for
+ * anything else (an object's `toString`, a symbol, a BigInt). */
+static int kiln_c99_par_text(kiln_val value, char buffer[32], kiln_string *view,
+                             const kiln_string **out) {
+    const char *spelled;
+    size_t length;
+    if (KILN_VAL_IS_STRING(value)) {
+        *out = (const kiln_string *)KILN_VAL_PTR(value);
+        return *out != NULL;
+    }
+    if (KILN_VAL_IS_NUMBER(value)) {
+        double d;
+        memcpy(&d, &value, sizeof d);
+        length = kiln_c99_double_to_js(d, buffer);
+        spelled = buffer;
+    } else if (value == KILN_VAL_TRUE) {
+        spelled = "true";
+        length = 4;
+    } else if (value == KILN_VAL_FALSE) {
+        spelled = "false";
+        length = 5;
+    } else if (value == KILN_VAL_UNDEFINED) {
+        spelled = "undefined";
+        length = 9;
+    } else if (value == KILN_VAL_NULL) {
+        spelled = "null";
+        length = 4;
+    } else {
+        return 0;
+    }
+    view->unit_len = (uint32_t)length;
+    view->flags = KILN_STRING_LATIN1;
+    view->data = spelled;
+    *out = view;
+    return 1;
+}
+
+/* A flat string of `left` then `right`, in the arena. */
+static int kiln_c99_par_join(kiln_c99_par_arena *arena, const kiln_string *left,
+                             const kiln_string *right, kiln_val *out) {
+    size_t total = (size_t)left->unit_len + (size_t)right->unit_len;
+    uint32_t flags = kiln_string_is_utf16(left) || kiln_string_is_utf16(right) ? KILN_STRING_UTF16
+                                                                              : KILN_STRING_LATIN1;
+    size_t storage;
+    kiln_string *joined;
+    if (total > UINT32_MAX || !kiln_string_storage_size((uint32_t)total, flags, &storage)) return 0;
+    joined = (kiln_string *)kiln_c99_par_alloc(arena, KILN_GC_STRING, storage + 1);
+    if (joined == NULL) return 0;
+    joined->unit_len = (uint32_t)total;
+    joined->flags = flags;
+    joined->data = (const void *)(joined + 1);
+    if (flags == KILN_STRING_UTF16) {
+        uint16_t *units = (uint16_t *)(joined + 1);
+        size_t index;
+        for (index = 0; index < left->unit_len; ++index) units[index] = kiln_string_unit_at(left, index);
+        for (index = 0; index < right->unit_len; ++index) {
+            units[left->unit_len + index] = kiln_string_unit_at(right, index);
+        }
+        ((char *)(joined + 1))[storage - sizeof(kiln_string)] = '\0';
+    } else {
+        char *bytes = (char *)(joined + 1);
+        if (left->unit_len != 0) memcpy(bytes, left->data, left->unit_len);
+        if (right->unit_len != 0) memcpy(bytes + left->unit_len, right->data, right->unit_len);
+        bytes[total] = '\0';
+    }
+    *out = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, joined);
+    return 1;
+}
+
+/* `String(value)`, and a template literal's substitution. */
+static int kiln_c99_par_to_string(kiln_c99_par_arena *arena, kiln_val value, kiln_val *out) {
+    char buffer[32];
+    kiln_string view;
+    kiln_string empty;
+    const kiln_string *text;
+    if (KILN_VAL_IS_STRING(value)) {
+        *out = value;
+        return 1;
+    }
+    if (arena == NULL || !kiln_c99_par_text(value, buffer, &view, &text)) return 0;
+    empty.unit_len = 0;
+    empty.flags = KILN_STRING_LATIN1;
+    empty.data = "";
+    return kiln_c99_par_join(arena, text, &empty, out);
+}
+
+/* `a + b` where one side is a string (`kiln_c99_par_add`). */
+static int kiln_c99_par_concat(kiln_c99_par_arena *arena, kiln_val a, kiln_val b, kiln_val *out) {
+    char left_buffer[32];
+    char right_buffer[32];
+    kiln_string left_view;
+    kiln_string right_view;
+    const kiln_string *left;
+    const kiln_string *right;
+    if (arena == NULL || !kiln_c99_par_text(a, left_buffer, &left_view, &left) ||
+        !kiln_c99_par_text(b, right_buffer, &right_view, &right)) {
+        return 0;
+    }
+    return kiln_c99_par_join(arena, left, right, out);
+}
+
+/* `parallelFlatMap`'s answer from the callback's answers (`count` of them in `mapped`, a hole
+ * where `flatMap` skips an element), on the realm thread once the arenas have joined: each answer
+ * that is an array contributes its elements -- holes skipped, as `FlattenIntoArray` skips them --
+ * and every other answer itself. An answer `IsArray` would look through (a proxy) declines, and
+ * the call runs `flatMap`. `mapped` stays live across the allocation below, so the collector the
+ * allocation may run marks every answer through it. */
+static int kiln_c99_par_flatten(kiln_val mapped, size_t count, kiln_val *out) {
+    const kiln_array *answers;
+    kiln_value built;
+    kiln_array *flat;
+    size_t total = 0;
+    size_t index;
+    size_t at = 0;
+    if ((mapped & KILN_TAG_MASK) != KILN_TAG_BUFFER_PREFIX) return 0;
+    answers = (const kiln_array *)KILN_VAL_PTR(mapped);
+    if (count > answers->count) return 0;
+    for (index = 0; index < count; ++index) {
+        kiln_val answer = answers->elements[index];
+        if (answer == KILN_VAL_HOLE) continue;
+        if ((answer & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX &&
+            kiln_c99_gc_payload_kind(KILN_VAL_PTR(answer)) == KILN_GC_ARRAY) {
+            const kiln_array *inner = (const kiln_array *)KILN_VAL_PTR(answer);
+            size_t k;
+            for (k = 0; k < inner->count; ++k) total += inner->elements[k] != KILN_VAL_HOLE;
+        } else if (KILN_VAL_IS_OBJECT(answer) &&
+                   kiln_c99_gc_payload_kind(KILN_VAL_PTR(answer)) == KILN_GC_PROXY) {
+            return 0;
+        } else {
+            total += 1;
+        }
+    }
+    if (kiln_c99_new_array_with_capacity(&built, total, 0) != KILN_C99_OK) return 0;
+    flat = kiln_c99_array_of(built);
+    for (index = 0; index < count; ++index) {
+        kiln_val answer = answers->elements[index];
+        if (answer == KILN_VAL_HOLE) continue;
+        if ((answer & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX &&
+            kiln_c99_gc_payload_kind(KILN_VAL_PTR(answer)) == KILN_GC_ARRAY) {
+            const kiln_array *inner = (const kiln_array *)KILN_VAL_PTR(answer);
+            size_t k;
+            for (k = 0; k < inner->count; ++k) {
+                if (inner->elements[k] != KILN_VAL_HOLE) flat->elements[at++] = inner->elements[k];
+            }
+        } else {
+            flat->elements[at++] = answer;
+        }
+    }
+    flat->count = at;
+    flat->is_numeric = 1;
+    for (index = 0; index < at && flat->is_numeric; ++index) {
+        flat->is_numeric = KILN_VAL_IS_NUMBER(flat->elements[index]);
+    }
+    *out = kiln_val_from_boundary(built);
+    return 1;
+}

@@ -337,9 +337,9 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
          * reason as the promise above: `"call" in fn` was false about a member `fn.call`
          * produces. */
         kiln_closure *closure = kiln_c99_closure_of(target);
-        if (closure->properties.tag == KILN_VALUE_OBJECT) {
+        if (kiln_c99_closure_store(closure).tag == KILN_VALUE_OBJECT) {
             int carried = 0;
-            int status = kiln_c99_has_property_key(host, closure->properties, key, ikey, &carried,
+            int status = kiln_c99_has_property_key(host, kiln_c99_closure_store(closure), key, ikey, &carried,
                                                depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
@@ -716,6 +716,26 @@ static int kiln_c99_delete_key(kiln_host *host, kiln_value target, const kiln_st
         int enumerable;
         kiln_c99_typed_own_key(target, key, &found, &enumerable);
         *answer = !found;
+        return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_BUILTIN) {
+        /* A member the program wrote onto a built-in lives in the built-in's store, and deleting
+         * it puts the table's member back in view (`delete Float64Array.prototype.map` after a
+         * patch). The store changing is a store onto the built-in, so every remembered answer
+         * about its members is dropped (parallel issue 30). A table member itself is not
+         * deleted: the tables are shared and have no per-realm tombstone. */
+        kiln_value store = kiln_c99_undefined();
+        int status = kiln_c99_callable_store(target, &store, 0);
+        if (status != KILN_C99_OK) return status;
+        if (store.tag == KILN_VALUE_OBJECT) {
+            kiln_object *properties = kiln_c99_object_of(store);
+            if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
+            if (kiln_c99_own_index_key(properties, ikey, key) != properties->count) {
+                kiln_c99_realm_note_store();
+                kiln_c99_realm_note_builtin_store((uint32_t)target.bits);
+                return kiln_c99_delete_key(host, store, key, ikey, answer, depth, thrown);
+            }
+        }
         return KILN_C99_OK;
     }
     if (target.tag != KILN_VALUE_OBJECT) {

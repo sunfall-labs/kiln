@@ -1031,8 +1031,33 @@ fn runtime_prelude_size() {
     // protocol every shared cache is published and replaced by, site entry scans and promotion
     // through it, once-built indexes, and the comments saying what each shared word's
     // publication is and why (about half of it comments).
+    // Widened on 2026-09-27 for realms issue 06 (+~600 lines): message tokens to and from a
+    // realm's values, the worker operations and the port wait, `SharedArrayBuffer` stores and
+    // the `Atomics` element primitive with its wait and notify, and a shared buffer's members.
+    // Widened on 2026-09-27 for realms issue 17 (+~390 lines): symbol-keyed reads and writes
+    // through keyed site entries, private-field sites that learn realm-local shapes and forget
+    // them at teardown, shared keys for registered and well-known symbols, and the comments.
+    // Widened on 2026-09-27 for realms issue 08 (+~430 lines): the shared immutable region (its
+    // reservation, sealing and the closure accessors), the no-write read path, lazily initialised
+    // slabs, and the generated list of the prelude's literal keys (~75 lines, packed).
+    // Widened on 2026-09-27 for parallel issue 07 (+~480 lines): tier 2's guarded readers (the
+    // inline halves in the header, the walks and the absent-name check in `read.c`), the
+    // no-write frame a worker enters, the collection that refuses to run on a frozen heap, issue
+    // 06's `KILN_PARALLEL_PROTECT` write detector, and the comments saying what each proves.
+    // Widened on 2026-09-27 for parallel issue 08 (+~620 lines): tier 3's worker arenas and the
+    // ownership-transfer join in `heap.c`, the builders a pool thread uses (object and array
+    // literals, spreads, strings, the flatten) in `spread.c`, the worker's shape step, and the
+    // comments saying what each proves.
+    // Widened on 2026-09-27 for parallel issue 09 (+~1,300 lines): tier 4's worker paths of the
+    // built-ins marked pure (`boxed.c`: string, number and array methods, `Number`/`parseInt`/
+    // `parseFloat`, `JSON.stringify` of plain data, and their declarations in the header), and
+    // `toFixed`/`parseInt`/`parseFloat` split into pure helpers both paths share. Raised to
+    // 59,000 on 2026-09-27 (58,650 measured) for parallel issue 30: the per-realm answers to
+    // "has the program written this member onto a kind's prototype" (`stores.c`), the reads that
+    // let a written member shadow a method table (`read.c`), the stack floor (`foundation.c`),
+    // `split`'s limit and `parseInt` on UTF-16 text.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 53_500;
+    const CEILING_LINES: usize = 59_000;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

@@ -96,6 +96,12 @@ pub struct EmissionPolicy {
     /// generic-only for its size and compiles that unit at `-O2` while the module stays at
     /// `-O0`. A caller that sets it must compile and link the extra unit.
     pub parallel_workers_unit: bool,
+    /// With `compact`: split the module's functions into translation units ([`CModule::chunks`])
+    /// of about this many bytes of C each, in function order, whatever its function count.
+    /// `kiln-native` sets it for the specialized builtin bootstrap of a release build (issue
+    /// 17), whose one-time optimising compile is then parallel units rather than one long one.
+    /// `None` keeps the count rule (a module past 500 functions, 1,000 or 1,500 per unit).
+    pub unit_chunk_bytes: Option<usize>,
     /// Whether speculative versioning is enabled. Native orchestration resolves its process
     /// setting before emission; `None` preserves the direct emitter's default.
     pub speculate: Option<bool>,
@@ -111,6 +117,15 @@ pub struct EmissionPolicy {
     /// Build a binary that never installs kiln's own members (ADR 0068), whatever its
     /// `KILN_EXTENSIONS` says at run time: `kiln build --no-kiln-extensions`.
     pub no_kiln_extensions: bool,
+    /// Make each closure the module makes once per realm -- at its top level, or in a function
+    /// the top level calls once -- once per process in the shared immutable region, and hand
+    /// every realm that one (ADR 0070 primitive B; realms issue 08). Such a closure reads the
+    /// bindings it would have captured through the realm's unit block instead (`module_cells`).
+    /// `kiln-native` sets it for the runtime bootstrap, whose top level is the built-ins it
+    /// writes in TypeScript. The
+    /// closure's identity is shared -- no realm can hold another's to compare -- and its
+    /// prototype and property store are each realm's own.
+    pub shared_region: bool,
 }
 
 impl EmissionPolicy {
@@ -348,6 +363,49 @@ macro_rules! provider_c_declaration {
     ($group:ident, $name:ident, node_fs_rmdir_sync) => {
         concat!("int ", stringify!($name), "(const uint8_t *path, uint64_t path_len, int32_t *out_err);\n")
     };
+    // Cross-realm ports, workers and shared memory (realms issue 06).
+    ($group:ident, $name:ident, worker_post) => {
+        concat!("int ", stringify!($name), "(uint32_t op, uint64_t port, uint32_t kind, kiln_worker_token *tokens, uint64_t count);\n")
+    };
+    ($group:ident, $name:ident, worker_take) => {
+        concat!("int ", stringify!($name), "(uint64_t port, uint32_t *out_kind, kiln_worker_token **out_tokens, uint64_t *out_count, void **out_message);\n")
+    };
+    ($group:ident, $name:ident, worker_message_free) => {
+        concat!("void ", stringify!($name), "(void *message);\n")
+    };
+    ($group:ident, $name:ident, worker_op) => {
+        concat!("int ", stringify!($name), "(uint32_t op, uint64_t a, uint64_t *out);\n")
+    };
+    ($group:ident, $name:ident, worker_broadcast_join) => {
+        concat!("int ", stringify!($name), "(const kiln_string *name, uint64_t *out);\n")
+    };
+    ($group:ident, $name:ident, worker_spawn) => {
+        concat!("int ", stringify!($name), "(const kiln_string *entry, int32_t eval, const kiln_string *argv, uint64_t argc, uint64_t port, uint64_t control, const kiln_string *info, uint64_t *out_key, uint64_t *out_thread);\n")
+    };
+    ($group:ident, $name:ident, worker_self) => {
+        concat!("int ", stringify!($name), "(uint64_t *out_thread, uint64_t *out_port, uint64_t *out_control, const uint8_t **out_info, uint64_t *out_info_len);\n")
+    };
+    ($group:ident, $name:ident, worker_stdio) => {
+        concat!("int ", stringify!($name), "(uint32_t stream, const uint8_t *bytes, uint64_t len);\n")
+    };
+    ($group:ident, $name:ident, worker_exit) => {
+        concat!("int ", stringify!($name), "(int32_t code);\n")
+    };
+    ($group:ident, $name:ident, shared_create) => {
+        concat!("int ", stringify!($name), "(uint64_t length, uint64_t capacity, uint8_t **out_bytes, void **out_handle);\n")
+    };
+    ($group:ident, $name:ident, shared_release) => {
+        concat!("void ", stringify!($name), "(void *handle);\n")
+    };
+    ($group:ident, $name:ident, shared_grow) => {
+        concat!("int ", stringify!($name), "(void *handle, uint64_t length, uint64_t *out);\n")
+    };
+    ($group:ident, $name:ident, atomics_wait) => {
+        concat!("int ", stringify!($name), "(void *handle, uint64_t offset, uint32_t width, int64_t expected, double timeout);\n")
+    };
+    ($group:ident, $name:ident, atomics_notify) => {
+        concat!("uint64_t ", stringify!($name), "(void *handle, uint64_t offset, uint64_t count);\n")
+    };
     // A provider entry point the generated C never calls needs no declaration.
     ($group:ident, $name:ident, $signature:ident) => { "" };
 }
@@ -501,7 +559,26 @@ pub fn emit_module_with_logical_path_and_policy(
 ) -> Result<CModule, EmitError> {
     let (symbol, program_hash, _) =
         module_identity_with_logical_path_and_policy(module, logical_path, &policy)?;
-    let rendered = render_module(module, program_hash, &symbol, &policy, false, logical_path)?;
+    // The runtime bootstrap reads its captured bindings from the realm's unit block, so that its
+    // closures capture nothing and live in the shared immutable region (realms issue 08).
+    let region = policy
+        .shared_region
+        .then(|| module_cells::plan(&module.program))
+        .flatten();
+    let rewritten;
+    let (module, region) = match region {
+        Some((program, plan)) => {
+            rewritten = ModuleProgram {
+                program,
+                ..module.clone()
+            };
+            (&rewritten, Some(std::rc::Rc::new(plan)))
+        }
+        None => (module, None),
+    };
+    let rendered = module_cells::with_plan(region, || {
+        render_module(module, program_hash, &symbol, &policy, false, logical_path)
+    })?;
     Ok(CModule {
         symbol,
         source: rendered.source,
@@ -652,7 +729,9 @@ mod direct;
 pub mod emit_graph;
 pub mod facts;
 pub mod graph;
+mod module_cells;
 pub mod parallel;
+pub mod parallel_heap;
 pub mod regex;
 pub mod state_owners;
 pub mod summary;
@@ -1023,6 +1102,92 @@ pub(crate) fn builtin_load(builtin: kiln_ir::Builtin) -> BuiltinLoad {
     }
 }
 
+/// What a closure carries, as the C expressions `kiln_c99_make_closure` and
+/// `kiln_c99_region_closure` take, decided once for both.
+struct ClosureFields {
+    name: String,
+    source: String,
+    source_len: usize,
+    diagnostic_source: String,
+    arity: u32,
+    generator: i32,
+    asynchronous: i32,
+    async_generator: i32,
+    is_method: i32,
+    arrow: i32,
+    strict: i32,
+    frame_locals: u32,
+    frame_stack: usize,
+    frame_handlers: usize,
+    prologue_resume: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn closure_fields(
+    functions: &[FunctionProto],
+    source: &str,
+    frame_stacks: &[usize],
+    strict_functions: &[bool],
+    symbol: &str,
+    diagnostic_site: &str,
+    proto: u32,
+    publishes_frame: bool,
+) -> ClosureFields {
+    let target = &functions[proto as usize];
+    let name = target.effective_name_units().map_or_else(
+        || "NULL".to_owned(),
+        |_| format!("&{symbol}_function_name_{proto}"),
+    );
+    let span = target.span;
+    let (source, source_len) =
+        if source.is_empty() || span.end as usize > source.len() || span.start > span.end {
+            ("NULL".to_owned(), 0usize)
+        } else {
+            (
+                format!("{symbol}_source + {}", span.start),
+                (span.end - span.start) as usize,
+            )
+        };
+    // An arrow is `1` when it reads the enclosing frame (its own `arguments`/`new.target`, or a
+    // nested arrow's) and `2` when it provably never does: `kiln_c99_make_closure` then skips
+    // materialising the enclosing call's `arguments` object for it.
+    let arrow = match (target.arrow, publishes_frame) {
+        (false, _) => 0,
+        (true, true) => 1,
+        (true, false) => 2,
+    };
+    ClosureFields {
+        name,
+        source,
+        source_len,
+        diagnostic_source: diagnostic_source(diagnostic_site),
+        arity: target.declared_length,
+        generator: i32::from(target.generator || target.asynchronous),
+        asynchronous: i32::from(target.asynchronous),
+        async_generator: i32::from(target.async_generator),
+        is_method: i32::from(target.is_method),
+        arrow,
+        strict: i32::from(
+            strict_functions
+                .get(proto as usize)
+                .copied()
+                .unwrap_or(true),
+        ),
+        frame_locals: target.local_count.max(1),
+        frame_stack: frame_stacks
+            .get(proto as usize)
+            .copied()
+            .unwrap_or(1)
+            .max(1),
+        frame_handlers: target.code.len().max(1),
+        prologue_resume: if binds_at_call(target) {
+            target.code.len()
+        } else {
+            0
+        },
+    }
+}
+
 /// The one call that makes a closure, for both emitters.
 ///
 /// Everything a closure carries is decided here, once: its name and source slice for
@@ -1044,55 +1209,84 @@ pub(crate) fn closure_construction(
     capture_count: usize,
     publishes_frame: bool,
 ) -> String {
-    let target = &functions[proto as usize];
-    let name = target.effective_name_units().map_or_else(
-        || "NULL".to_owned(),
-        |_| format!("&{symbol}_function_name_{proto}"),
+    let ClosureFields {
+        name,
+        source,
+        source_len,
+        diagnostic_source,
+        arity,
+        generator,
+        asynchronous,
+        async_generator,
+        is_method,
+        arrow,
+        strict,
+        frame_locals,
+        frame_stack,
+        frame_handlers,
+        prologue_resume,
+    } = closure_fields(
+        functions,
+        source,
+        frame_stacks,
+        strict_functions,
+        symbol,
+        diagnostic_site,
+        proto,
+        publishes_frame,
     );
-    let span = target.span;
-    let (source, source_len) =
-        if source.is_empty() || span.end as usize > source.len() || span.start > span.end {
-            ("NULL".to_owned(), 0usize)
-        } else {
-            (
-                format!("{symbol}_source + {}", span.start),
-                (span.end - span.start) as usize,
-            )
-        };
-    let generator = i32::from(target.generator || target.asynchronous);
-    let asynchronous = i32::from(target.asynchronous);
-    // An arrow is `1` when it reads the enclosing frame (its own `arguments`/`new.target`, or a
-    // nested arrow's) and `2` when it provably never does: `kiln_c99_make_closure` then skips
-    // materialising the enclosing call's `arguments` object for it.
-    let arrow = match (target.arrow, publishes_frame) {
-        (false, _) => 0,
-        (true, true) => 1,
-        (true, false) => 2,
-    };
-    let async_generator = i32::from(target.async_generator);
-    let is_method = i32::from(target.is_method);
-    let strict = i32::from(
-        strict_functions
-            .get(proto as usize)
-            .copied()
-            .unwrap_or(true),
-    );
-    let arity = target.declared_length;
-    let frame_locals = target.local_count.max(1);
-    let frame_stack = frame_stacks
-        .get(proto as usize)
-        .copied()
-        .unwrap_or(1)
-        .max(1);
-    let frame_handlers = target.code.len().max(1);
-    let prologue_resume = if binds_at_call(target) {
-        target.code.len()
-    } else {
-        0
-    };
-    let diagnostic_source = diagnostic_source(diagnostic_site);
     format!(
         "kiln_c99_make_closure(&built, {symbol}_fn_{proto}, {name}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {is_method}, {arrow}, {strict}, {defining_receiver}, kiln_val_from_boundary(kiln_c99_new_target), UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), {captured}, UINT32_C({capture_count}))"
+    )
+}
+
+/// The call that makes a closure at a region site (realms issue 08;
+/// `module_cells`): the same fields as [`closure_construction`], and the
+/// site's process-wide slot `{symbol}_region_sites[site]`. The closure captures nothing, so there
+/// is no upvalue array; whether it publishes its frame is passed in, since a region closure is
+/// never written after it is made.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn region_closure_construction(
+    functions: &[FunctionProto],
+    source: &str,
+    frame_stacks: &[usize],
+    strict_functions: &[bool],
+    symbol: &str,
+    diagnostic_site: &str,
+    proto: u32,
+    defining_receiver: &str,
+    site: usize,
+    publishes_frame: bool,
+) -> String {
+    let ClosureFields {
+        name,
+        source,
+        source_len,
+        diagnostic_source,
+        arity,
+        generator,
+        asynchronous,
+        async_generator,
+        is_method,
+        arrow,
+        strict,
+        frame_locals,
+        frame_stack,
+        frame_handlers,
+        prologue_resume,
+    } = closure_fields(
+        functions,
+        source,
+        frame_stacks,
+        strict_functions,
+        symbol,
+        diagnostic_site,
+        proto,
+        publishes_frame,
+    );
+    let publishes = i32::from(publishes_frame);
+    format!(
+        "kiln_c99_region_closure(&built, &{symbol}_region_sites[{site}], {symbol}_fn_{proto}, {name}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {is_method}, {arrow}, {strict}, {defining_receiver}, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), {publishes})"
     )
 }
 
@@ -1482,6 +1676,57 @@ fn render_functions(
     }
     let admitted: Vec<bool> = parallel_clones.iter().map(Option::is_some).collect();
     direct.set_parallel(&admitted);
+    // Tier 2 (ADR 0069, parallel issue 07): a callback whose verdict reads the heap gets a heap
+    // clone (`_h`, and `_hk` for a key comparator's key), emitted from its graph by the lowering
+    // in `parallel_heap.rs`, which knows only what `parallel::heap_verdict` admits.
+    let heap_clones: Vec<Option<(String, crate::parallel::HeapShape)>> =
+        (0..program.functions.len())
+            .map(|index| {
+                let Some(Ok(shape)) = direct.entry.parallel.get(index) else {
+                    return None;
+                };
+                let heap = shape.heap.clone()?;
+                let proto = &program.functions[index];
+                let mut text = String::new();
+                let ctx = parallel_heap::CloneContext {
+                    symbol,
+                    root: index as u32,
+                    callee: None,
+                };
+                // Tier 4: the functions it calls, each cloned for it, ahead of it.
+                parallel_heap::emit_heap_callees(
+                    &mut text,
+                    &graphs,
+                    program,
+                    symbol,
+                    index as u32,
+                    &heap,
+                );
+                parallel_heap::emit_heap_clone(
+                    &mut text,
+                    &graphs[index],
+                    proto,
+                    program,
+                    &format!("{symbol}_fn_{index}_h"),
+                    &heap,
+                    None,
+                    &ctx,
+                );
+                if let Some((_, key)) = heap.key {
+                    parallel_heap::emit_heap_clone(
+                        &mut text,
+                        &graphs[index],
+                        proto,
+                        program,
+                        &format!("{symbol}_fn_{index}_hk"),
+                        &heap,
+                        Some(key),
+                        &ctx,
+                    );
+                }
+                Some((text, heap))
+            })
+            .collect();
     let fast: Vec<bool> = program
         .functions
         .iter()
@@ -1511,7 +1756,9 @@ fn render_functions(
     // before any body: the definitions follow with the boxed clone that owns them.
     for (index, &columns) in receiver_columns.iter().enumerate() {
         if columns > 0 {
-            let linkage = if should_chunk { "" } else { "static " };
+            // Chunked, the boxed clone that owns them defines them (in whichever chunk it lands);
+            // the unit's own text only declares them.
+            let linkage = if should_chunk { "extern " } else { "static " };
             writeln!(
                 output,
                 "{linkage}const kiln_shape *{symbol}_fn_{index}_recv_shape[4];\n{linkage}uint32_t {symbol}_fn_{index}_recv_slot[4][{columns}];\n{linkage}const kiln_shape *{symbol}_fn_{index}_typed_recv_shape[4];\n{linkage}uint32_t {symbol}_fn_{index}_typed_recv_slot[4][{columns}];"
@@ -1597,6 +1844,17 @@ fn render_functions(
                 )
                 .unwrap();
             }
+            // Issue 21: the entry's receiver-row lookup, asked by a method call site before it
+            // enters the entry (defined beside the entry, `emit_graph/body.rs`).
+            if direct.entry.typed_needs[index].row {
+                let declaration = format!(
+                    "const uint32_t *{symbol}_fn_{index}_t_row(const kiln_object *recv_obj);"
+                );
+                writeln!(output, "{static_kw}{declaration}").unwrap();
+                if should_chunk {
+                    writeln!(fn_declarations[index], "{declaration}").unwrap();
+                }
+            }
             if direct.parallel_chunk(index as u32) {
                 // Issue 14: with a worker unit, the chunk workers are defined there, under the
                 // module's link-visible symbol, and this unit only declares them. A compact
@@ -1630,6 +1888,40 @@ fn render_functions(
                         )
                         .unwrap();
                     }
+                }
+            }
+        }
+        // Tier 2's workers, declared like tier 1's (issue 14's worker unit included).
+        if let Some((_, heap)) = &heap_clones[index] {
+            let worker_symbol = workers.as_ref().map_or(symbol, |(link, _)| *link);
+            let pmap_link = if should_chunk || workers.is_some() {
+                ""
+            } else {
+                "static "
+            };
+            for kind in parallel_heap::heap_chunk_kinds(
+                program.functions[index].parameter_count,
+                heap.key.is_some(),
+                heap.allocates,
+            ) {
+                writeln!(
+                    output,
+                    "{pmap_link}void {worker_symbol}_pmap{kind}_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);"
+                )
+                .unwrap();
+                if worker_symbol != symbol {
+                    writeln!(
+                        output,
+                        "#define {symbol}_pmap{kind}_{index} {worker_symbol}_pmap{kind}_{index}"
+                    )
+                    .unwrap();
+                }
+                if should_chunk {
+                    writeln!(
+                        fn_declarations[index],
+                        "void {worker_symbol}_pmap{kind}_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);"
+                    )
+                    .unwrap();
                 }
             }
         }
@@ -1790,6 +2082,23 @@ fn render_functions(
              }}\n"
         )
         .unwrap();
+        // A closure-making site in the shared immutable region (realms issue 08): the same
+        // metadata, and the site's process-wide slot.
+        if module_cells::region_site_count() > 0 {
+            writeln!(
+                output,
+                "{closure_linkage}__attribute__((unused)) int {closure_fn_name}_region(kiln_val *dst, uint32_t proto, kiln_val receiver, kiln_closure **site) {{\n\
+                 const ku_proto_meta *m = &ku_protos[proto];\n\
+                 kiln_value b;\n\
+                 const char *src = m->span_len ? ({source_expr} + m->span_start) : NULL;\n\
+                 int status = kiln_c99_region_closure(&b, site, m->body, m->name, src, (size_t)m->span_len, ku_site, proto, (uint32_t)m->arity, (m->flags & 1) != 0, (m->flags & 2) != 0, (m->flags & 4) != 0, (m->flags & 8) != 0, (m->flags & 16) != 0 ? ((m->flags & 64) != 0 ? 1 : 2) : 0, (m->flags & 32) != 0, receiver, (uint32_t)m->locals, (uint32_t)m->stack, (uint32_t)m->handlers, (uint32_t)m->resume, (m->flags & 64) != 0);\n\
+                 if (KILN_UNLIKELY(status != KILN_C99_OK)) return status;\n\
+                 *dst = kiln_val_from_boundary(b);\n\
+                 return KILN_C99_OK;\n\
+                 }}\n"
+            )
+            .unwrap();
+        }
     }
     if should_chunk {
         output.push_str("/* KILN_CHUNK_0_FUNCTIONS_PLACEHOLDER */\n");
@@ -1891,6 +2200,41 @@ fn render_functions(
                         should_chunk,
                     );
                 }
+            }
+        }
+        // Tier 2: the heap clone and its chunk workers, where tier 1's go (issue 14's worker
+        // unit, compiled optimised, when there is one). The workers reach the heap only through
+        // the prelude's `kiln_c99_par_*` readers, which the worker unit's header declares.
+        if let Some((clone, heap)) = &heap_clones[index] {
+            let kinds = parallel_heap::heap_chunk_kinds(
+                proto.parameter_count,
+                heap.key.is_some(),
+                heap.allocates,
+            );
+            if let Some((link, unit)) = workers.as_mut() {
+                unit.push_str(clone);
+                parallel_heap::emit_heap_workers(
+                    unit,
+                    link,
+                    symbol,
+                    index,
+                    proto.parameter_count,
+                    &kinds,
+                    heap.sites,
+                    "",
+                );
+            } else {
+                target_buf.push_str(clone);
+                parallel_heap::emit_heap_workers(
+                    target_buf,
+                    symbol,
+                    symbol,
+                    index,
+                    proto.parameter_count,
+                    &kinds,
+                    heap.sites,
+                    if should_chunk { "" } else { "static " },
+                );
             }
         }
         // Emitted again now that every plan knows the fast set: a fast clone calls other fast
@@ -2871,7 +3215,7 @@ fn literal_key_constants(program: &Program, code: &[Instruction], keys: &mut Vec
                 }
                 // `{ ...rest, name: value }`: a member after a spread (or beside a computed key)
                 // is defined one at a time, its static key the constant beneath its value.
-                Instruction::DefineNamedProperty => {
+                Instruction::DefineNamedProperty { .. } => {
                     if let Some(Some(constant)) = labels.len().checked_sub(2).map(|at| labels[at])
                         && matches!(
                             program.constants.get(constant as usize),
@@ -3032,6 +3376,63 @@ fn render_key_table(
         }
     }
     writeln!(output, "    {symbol}_keys_shared = 1;\n}}").unwrap();
+}
+
+/// The runtime bootstrap's string constants that read as names, registered as shared keys before
+/// the first realm (realms issue 08) beside the property names `render_key_table` registers.
+///
+/// The bootstrap spells some of the names it defines as values -- `const added = ["count",
+/// "countReset", ...]` then `Object.defineProperty(console, added[i], ...)` -- and a name that
+/// reaches a property as a value is interned at run time, into the realm's own table, with a
+/// realm-local shape for every object built with it: every realm paid for its own copy of the
+/// same console and `DisposableStack` layouts. Registering the spelling first makes the run-time
+/// intern find the shared key. Only a unit emitted with `shared_region` does this: the bootstrap's
+/// strings are the built-ins' names; a program's are its data, which ADR 0071 keeps realm-local.
+fn render_name_registration(output: &mut String, program: &Program, symbol: &str, keys: &[u32]) {
+    let names: Vec<usize> = program
+        .constants
+        .iter()
+        .enumerate()
+        .filter(|(index, constant)| {
+            let Constant::String(value) = constant else {
+                return false;
+            };
+            if keys.contains(&(*index as u32)) {
+                return false;
+            }
+            let units: Vec<u16> = value.units().collect();
+            !units.is_empty()
+                && units.len() <= 48
+                && units.iter().enumerate().all(|(at, unit)| {
+                    let byte = *unit as u8;
+                    *unit < 0x80
+                        && (byte.is_ascii_alphabetic()
+                            || byte == b'_'
+                            || byte == b'$'
+                            || (at > 0 && byte.is_ascii_digit()))
+                })
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if names.is_empty() {
+        return;
+    }
+    writeln!(
+        output,
+        "static const kiln_string *const {symbol}_name_sources[{}] = {{",
+        names.len()
+    )
+    .unwrap();
+    for index in &names {
+        writeln!(output, "    &{symbol}_string_{index},").unwrap();
+    }
+    writeln!(output, "}};").unwrap();
+    writeln!(
+        output,
+        "__attribute__((constructor)) static void {symbol}_register_names(void) {{\n    (void)kiln_c99_register_static_keys({symbol}_name_sources, NULL, (size_t){});\n}}",
+        names.len()
+    )
+    .unwrap();
 }
 
 fn render_key_table_extern(output: &mut String, symbol: &str, keys: &[u32]) {
@@ -3630,7 +4031,7 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
             | Instruction::SetSuperPropertyStrict { .. }
             | Instruction::SetSuperElementStrict { .. }
             | Instruction::SetPrivate(_)
-            | Instruction::DefineNamedProperty
+            | Instruction::DefineNamedProperty { .. }
             | Instruction::Unary(_)
             | Instruction::DirectEval(_) => {
                 *has_status = true;
@@ -3875,6 +4276,9 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
     }
     if has_closure {
         output.push_str(&format!("#define KU_CLOSURE(DST, PROTO, RECV, CAP, CAP_CNT) do {{ int status = {closure_fn}(&(DST), (PROTO), (RECV), (CAP), (CAP_CNT)); if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; }} while (0)\n"));
+        if module_cells::region_site_count() > 0 {
+            output.push_str(&format!("#define KU_REGION_CLOSURE(DST, PROTO, RECV, SITE) do {{ int status = {closure_fn}_region(&(DST), (PROTO), (RECV), (SITE)); if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; }} while (0)\n"));
+        }
     }
     if has_new_object {
         output.push_str("static __attribute__((unused)) inline uint32_t ku_compute_literal_mask(const kiln_val *pairs, size_t count) {\n\
@@ -4174,7 +4578,8 @@ fn render_module_positioned(
     diagnostic_site: &str,
 ) -> Result<RenderedModule, EmitError> {
     let program = &module.program;
-    let should_chunk = policy.compact && program.functions.len() > 500;
+    let should_chunk =
+        policy.compact && (program.functions.len() > 500 || policy.unit_chunk_bytes.is_some());
     // Compact graph modules are each compiled as their own translation unit. Private identifiers
     // therefore do not need the link-visible content hash; retain it only on exported adapters.
     // Chunked modules must retain the module symbol prefix so their non-static chunk symbols
@@ -4257,6 +4662,9 @@ fn render_module_positioned(
     }
     let keys = property_key_constants(program);
     render_key_table(&mut output, program, unit_symbol, &keys, should_chunk);
+    if policy.shared_region {
+        render_name_registration(&mut output, program, unit_symbol, &keys);
+    }
     render_unit_state(
         &mut output,
         unit_symbol,
@@ -4267,6 +4675,18 @@ fn render_module_positioned(
     );
     render_template_sites(&mut output, program, unit_symbol, should_chunk);
     render_unit_roots(&mut output, unit_symbol, !keys.is_empty());
+    let region_sites = module_cells::region_site_count();
+    if region_sites > 0 {
+        // Each region site's closure (realms issue 08): written once, by the realm that builds
+        // the region, before it publishes the region sealed; read by every realm after
+        // (`kiln_c99_region_closure`).
+        let linkage = if should_chunk { "" } else { "static " };
+        writeln!(
+            output,
+            "{linkage}kiln_closure *{unit_symbol}_region_sites[{region_sites}];"
+        )
+        .unwrap();
+    }
     if policy.compact {
         output.push_str("/* KILN_C99_SITES_PLACEHOLDER */\n");
     }
@@ -4426,8 +4846,36 @@ fn render_module_positioned(
     if should_chunk {
         let function_texts = chunked_bodies.expect("chunked_bodies present when should_chunk");
         let total_funcs = function_texts.len();
-        let chunk_size = if total_funcs > 10_000 { 1500 } else { 1000 };
-        let chunk_0_funcs = chunk_size.min(total_funcs);
+        // Where each unit ends: by function count, or (issue 17) by bytes of C, greedily in
+        // function order. Chunk 0 also holds the module's own text -- its body, key table,
+        // constants and entry -- so it starts that much fuller.
+        let chunk_ends: Vec<usize> = match policy.unit_chunk_bytes {
+            Some(budget) => {
+                let budget = budget.max(1);
+                let mut ends = Vec::new();
+                let mut filled = output.len();
+                for (index, text) in function_texts.iter().enumerate() {
+                    if filled > 0
+                        && filled + text.len() > budget
+                        && index > ends.last().copied().unwrap_or(0)
+                    {
+                        ends.push(index);
+                        filled = 0;
+                    }
+                    filled += text.len();
+                }
+                ends.push(total_funcs);
+                ends
+            }
+            None => {
+                let chunk_size = if total_funcs > 10_000 { 1500 } else { 1000 };
+                (1..)
+                    .map(|k| (k * chunk_size).min(total_funcs))
+                    .take(total_funcs.div_ceil(chunk_size).max(1))
+                    .collect()
+            }
+        };
+        let chunk_0_funcs = chunk_ends[0];
 
         let source = output.replace(
             "/* KILN_CHUNK_0_FUNCTIONS_PLACEHOLDER */\n",
@@ -4485,6 +4933,13 @@ fn render_module_positioned(
         if total_sites > 0 {
             writeln!(chunk_header, "extern kiln_c99_site {unit_symbol}_sites[];").unwrap();
         }
+        if region_sites > 0 {
+            writeln!(
+                chunk_header,
+                "extern kiln_closure *{unit_symbol}_region_sites[];"
+            )
+            .unwrap();
+        }
         let has_closure = has_closure_instruction(emitted_program);
         if has_closure && !emitted_program.functions.is_empty() {
             writeln!(
@@ -4492,6 +4947,13 @@ fn render_module_positioned(
                 "extern int {closure_fn}(kiln_val *dst, uint32_t proto, kiln_val receiver, const kiln_val *captured, uint32_t count);"
             )
             .unwrap();
+            if region_sites > 0 {
+                writeln!(
+                    chunk_header,
+                    "extern int {closure_fn}_region(kiln_val *dst, uint32_t proto, kiln_val receiver, kiln_closure **site);"
+                )
+                .unwrap();
+            }
         }
         if !emitted_program.template_sites.is_empty() {
             writeln!(
@@ -4504,8 +4966,7 @@ fn render_module_positioned(
         let mut chunks = Vec::new();
         chunks.push(chunk_0);
         let mut start = chunk_0_funcs;
-        while start < total_funcs {
-            let end = (start + chunk_size).min(total_funcs);
+        for &end in &chunk_ends[1..] {
             let referenced =
                 scan_referenced_functions(&function_texts[start..end], unit_symbol, total_funcs);
             let decl_len: usize = (0..total_funcs)

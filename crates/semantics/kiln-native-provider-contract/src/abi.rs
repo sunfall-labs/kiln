@@ -107,6 +107,7 @@ macro_rules! provider_abi_registry {
             (realm, kiln_realm_retired_safe, realm_retired_safe);
             (realm, kiln_realm_retire, realm_retire);
             (realm, kiln_realm_run_pinned, realm_run_pinned);
+            (realm, kiln_realm_run_workers, realm_run_pinned);
             (realm, kiln_realm_gc_attach, realm_gc_attach);
             (realm, kiln_realm_gc_register_roots, realm_gc_register_roots);
             (realm, kiln_realm_gc_unregister_roots, realm_gc_unregister_roots);
@@ -156,6 +157,22 @@ macro_rules! provider_abi_registry {
             (realm, kiln_node_fs_realpath_sync, node_fs_realpath_sync);
             (realm, kiln_node_fs_unlink_sync, node_fs_unlink_sync);
             (realm, kiln_node_fs_rmdir_sync, node_fs_rmdir_sync);
+            (realm, kiln_worker_post, worker_post);
+            (realm, kiln_worker_take, worker_take);
+            (realm, kiln_worker_message_free, worker_message_free);
+            (realm, kiln_worker_op, worker_op);
+            (realm, kiln_worker_broadcast_join, worker_broadcast_join);
+            (realm, kiln_worker_set_runner, worker_set_runner);
+            (realm, kiln_worker_spawn, worker_spawn);
+            (realm, kiln_worker_self, worker_self);
+            (realm, kiln_worker_stdio, worker_stdio);
+            (realm, kiln_worker_exit, worker_exit);
+            (realm, kiln_worker_exit_code, worker_exit_code);
+            (realm, kiln_shared_create, shared_create);
+            (realm, kiln_shared_release, shared_release);
+            (realm, kiln_shared_grow, shared_grow);
+            (realm, kiln_atomics_wait, atomics_wait);
+            (realm, kiln_atomics_notify, atomics_notify);
             (root, kiln_number_to_js_string, number_to_js_string);
             (root, kiln_string_to_number, string_to_number);
             (root, kiln_typed_array_sort, typed_array_sort);
@@ -195,6 +212,7 @@ macro_rules! provider_abi_registry {
             (intl, kiln_intl_collate, intl_collate);
             (parallel, kiln_parallel_map, parallel_map);
             (parallel, kiln_parallel_sort, parallel_sort);
+            (parallel, kiln_parallel_threads, parallel_threads);
             (ffi, kiln_ffi_open, ffi_open);
             (ffi, kiln_ffi_close, ffi_close);
             (ffi, kiln_ffi_prepare, ffi_prepare);
@@ -213,7 +231,7 @@ macro_rules! provider_export_names {
 }
 
 /// Version of the private provider ABI represented by [`provider_abi_registry!`].
-pub const PROVIDER_ABI_VERSION: u32 = 46;
+pub const PROVIDER_ABI_VERSION: u32 = 49;
 
 /// Canonical ordered export names required in a packaged provider manifest.
 pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_names);
@@ -232,7 +250,18 @@ mod tests {
 
     #[test]
     fn registry_has_the_packaged_contract_shape() {
-        // 46 and 122 exports: `kiln_realm_retire_tag`, `kiln_realm_retired_safe` and
+        // 49 and 140 exports: `kiln_parallel_threads` joined so a parallel call site can ask
+        // the pool's size before it takes its pooled lowering -- a one-thread pool runs the
+        // sequential method's own loop (parallel issue 22) -- and a tier-3 site can size its
+        // worker-arena table (parallel issue 08). Before that, 48 and 139 exports:
+        // `kiln_realm_run_workers` joined for `KILN_WORKERS` thread mode
+        // (realms issue 07): `kiln_realm_run_pinned` whose realm threads share one listening
+        // socket per address, with accepts balanced in process. Before that, 47 and 138 exports:
+        // `node:worker_threads` on realms (realms issue 06) -- the sixteen
+        // `kiln_worker_*`, `kiln_shared_*` and `kiln_atomics_*` operations that carry message
+        // tokens between a native realm and the runtime's cross-realm ports, start a worker's realm
+        // through the launcher, and share a `SharedArrayBuffer`'s store and its `Atomics.wait`
+        // list between realms. Before that, 46 and 122 exports: `kiln_realm_retire_tag`, `kiln_realm_retired_safe` and
         // `kiln_realm_retire` joined when shared cache state became safe to write from realms on
         // several threads at once (ADR 0071, quiescent-state reclamation at turn boundaries), and
         // `kiln_realm_run_pinned` when a launcher could run several realms in one process, each
@@ -264,8 +293,8 @@ mod tests {
         // one realm the other's cache. A shipped archive built before any of these does not export
         // the newer symbol, and the version is how a resolver knows to rebuild rather than to fail
         // at link time.
-        assert_eq!(PROVIDER_ABI_VERSION, 46);
-        assert_eq!(PROVIDER_EXPORTS.len(), 122);
+        assert_eq!(PROVIDER_ABI_VERSION, 49);
+        assert_eq!(PROVIDER_EXPORTS.len(), 140);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_ffi_last_error"));
     }

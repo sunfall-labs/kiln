@@ -332,6 +332,11 @@ static int kiln_c99_array_buffer_detach_raw(kiln_value *out, const kiln_value *a
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                     "Cannot perform ArrayBuffer transfer on a detached ArrayBuffer");
     }
+    /* A shared buffer's bytes are every holder's: there is nothing one of them could move. */
+    if (kiln_c99_typed_buffer_of(args[0])->shared != NULL) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Cannot transfer a SharedArrayBuffer");
+    }
     length = kiln_c99_typed_buffer_of(args[0])->byte_length;
     if (argc > 1 && args[1].tag == KILN_VALUE_NUMBER) {
         status = kiln_c99_to_index(args[1], &length, thrown);
@@ -374,6 +379,239 @@ static int kiln_c99_array_buffer_detach_raw(kiln_value *out, const kiln_value *a
     source->detached = 1;
     *out = kiln_c99_value(KILN_VALUE_ARRAY_BUFFER, (uint64_t)(uintptr_t)moved, NULL, 0);
     return KILN_C99_OK;
+}
+
+/* ---- SharedArrayBuffer and Atomics over shared stores (realms issue 06) ------------------
+ *
+ * A `SharedArrayBuffer` here is an `ArrayBuffer` value whose bytes are a store of the provider's
+ * (`kiln_shared_create`), shared with every realm the buffer is sent to, rather than a block this
+ * realm owns. Two primitives, captured and deleted by the shared bootstrap (`arraybuffer.ts`,
+ * `atomics.ts`), which make every check a program can observe: `__kilnSharedBuffer(op, ...)`
+ * makes, measures and grows a store, and `__kilnAtomics(op, view, index, ...)` is the one
+ * indivisible operation on an element that `Atomics` needs, with `wait` and `notify` on the
+ * runtime's waiter list. */
+#define KILN_C99_REALM_SLOT_SHARED_ARRAY_BUFFER UINT32_C(12)
+#define KILN_C99_SHARED_CREATE 1
+#define KILN_C99_SHARED_GROW 2
+#define KILN_C99_SHARED_LENGTH 3
+#define KILN_C99_SHARED_REGISTER 6
+#define KILN_C99_SHARED_IS 7
+
+static int kiln_c99_is_shared_buffer(kiln_value value) {
+    return value.tag == KILN_VALUE_ARRAY_BUFFER && kiln_c99_typed_buffer_of(value)->shared != NULL;
+}
+
+/* The buffer's length as the store has it now: another realm may have grown it. */
+static size_t kiln_c99_shared_length(kiln_typed_buffer *buffer) {
+    uint64_t length = 0;
+    if (buffer->shared != NULL && buffer->shared_growable &&
+        kiln_shared_grow(buffer->shared, 0, &length) == 0 && length <= SIZE_MAX)
+        buffer->byte_length = (size_t)length;
+    return buffer->byte_length;
+}
+
+static int kiln_c99_shared_buffer_raw(kiln_value *out, const kiln_value *args, size_t argc,
+                                      kiln_value *thrown) {
+    double op = argc > 0 && args[0].tag == KILN_VALUE_NUMBER ? kiln_c99_as_number(args[0]) : 0;
+    if (op == KILN_C99_SHARED_CREATE) {
+        double length = argc > 1 && args[1].tag == KILN_VALUE_NUMBER ? kiln_c99_as_number(args[1]) : 0;
+        int growable = argc > 2 && args[2].tag == KILN_VALUE_NUMBER;
+        double capacity = growable ? kiln_c99_as_number(args[2]) : length;
+        kiln_typed_buffer *buffer;
+        uint8_t *bytes = NULL;
+        void *handle = NULL;
+        if (!(length >= 0) || !(capacity >= length) || capacity > 9007199254740991.0)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR, "Invalid array buffer length");
+        buffer = (kiln_typed_buffer *)kiln_c99_gc_alloc(KILN_GC_TYPED_BUFFER, sizeof *buffer);
+        if (buffer == NULL) return KILN_C99_OUT_OF_MEMORY;
+        if (kiln_shared_create((uint64_t)length, growable ? (uint64_t)capacity : UINT64_MAX, &bytes, &handle) != 0)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR, "Array buffer allocation failed");
+        buffer->bytes = bytes;
+        buffer->byte_length = (size_t)length;
+        buffer->owns_bytes = 0;
+        buffer->shared = handle;
+        buffer->shared_capacity = (size_t)capacity;
+        buffer->shared_growable = growable;
+        *out = kiln_c99_value(KILN_VALUE_ARRAY_BUFFER, (uint64_t)(uintptr_t)buffer, NULL, 0);
+        return KILN_C99_OK;
+    }
+    if (op == KILN_C99_SHARED_REGISTER) {
+        kiln_value *slot;
+        int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_SHARED_ARRAY_BUFFER, &slot);
+        if (status != KILN_C99_OK) return status;
+        *slot = argc > 1 ? args[1] : kiln_c99_undefined();
+        *out = kiln_c99_boolean(1);
+        return KILN_C99_OK;
+    }
+    if (op == KILN_C99_SHARED_IS) {
+        *out = kiln_c99_boolean(argc > 1 && kiln_c99_is_shared_buffer(args[1]));
+        return KILN_C99_OK;
+    }
+    if (argc < 2 || !kiln_c99_is_shared_buffer(args[1]))
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "not a SharedArrayBuffer");
+    {
+        kiln_typed_buffer *buffer = kiln_c99_typed_buffer_of(args[1]);
+        if (op == KILN_C99_SHARED_LENGTH) {
+            *out = kiln_c99_number((double)kiln_c99_shared_length(buffer));
+            return KILN_C99_OK;
+        }
+        if (op == KILN_C99_SHARED_GROW) {
+            double length = argc > 2 && args[2].tag == KILN_VALUE_NUMBER ? kiln_c99_as_number(args[2]) : -1;
+            uint64_t grown = 0;
+            if (!buffer->shared_growable || !(length >= 0) ||
+                kiln_shared_grow(buffer->shared, (uint64_t)length, &grown) != 0 || grown > SIZE_MAX) {
+                *out = kiln_c99_boolean(0);
+                return KILN_C99_OK;
+            }
+            buffer->byte_length = (size_t)grown;
+            *out = kiln_c99_boolean(1);
+            return KILN_C99_OK;
+        }
+    }
+    KILN_C99_REFUSE("a SharedArrayBuffer operation this runtime does not have");
+}
+
+#define KILN_C99_ATOMICS_LOAD 1
+#define KILN_C99_ATOMICS_STORE 2
+#define KILN_C99_ATOMICS_ADD 3
+#define KILN_C99_ATOMICS_SUB 4
+#define KILN_C99_ATOMICS_AND 5
+#define KILN_C99_ATOMICS_OR 6
+#define KILN_C99_ATOMICS_XOR 7
+#define KILN_C99_ATOMICS_EXCHANGE 8
+#define KILN_C99_ATOMICS_COMPARE_EXCHANGE 9
+#define KILN_C99_ATOMICS_WAIT 10
+#define KILN_C99_ATOMICS_NOTIFY 11
+
+/* The element bits a number operand stands for: `ToIntegerOrInfinity` was the caller's, and the
+ * store is modulo 2^64 before the element's width cuts it, as a typed array's own store is. */
+static uint64_t kiln_c99_atomics_number_bits(double number) {
+    double wrapped;
+    if (!isfinite(number)) return 0;
+    wrapped = fmod(trunc(number), 18446744073709551616.0);
+    if (wrapped < 0) wrapped += 18446744073709551616.0;
+    return wrapped >= 18446744073709551616.0 ? 0 : (uint64_t)wrapped;
+}
+
+static int kiln_c99_atomics_operand(kiln_typed_kind kind, kiln_value value, uint64_t *out,
+                                    kiln_value *thrown) {
+    if (kind == KILN_TYPED_BIG_INT64 || kind == KILN_TYPED_BIG_UINT64)
+        return kiln_c99_to_bigint64_bits(NULL, value, out, 0, thrown);
+    *out = kiln_c99_atomics_number_bits(value.tag == KILN_VALUE_NUMBER ? kiln_c99_as_number(value) : 0);
+    return KILN_C99_OK;
+}
+
+/* The element an old value's bits are, as the language reads it from `kind`. */
+static int kiln_c99_atomics_value(kiln_typed_kind kind, uint64_t bits, kiln_value *out) {
+    switch (kind) {
+    case KILN_TYPED_INT8: *out = kiln_c99_number((double)(int8_t)(uint8_t)bits); return KILN_C99_OK;
+    case KILN_TYPED_UINT8: *out = kiln_c99_number((double)(uint8_t)bits); return KILN_C99_OK;
+    case KILN_TYPED_INT16: *out = kiln_c99_number((double)(int16_t)(uint16_t)bits); return KILN_C99_OK;
+    case KILN_TYPED_UINT16: *out = kiln_c99_number((double)(uint16_t)bits); return KILN_C99_OK;
+    case KILN_TYPED_INT32: *out = kiln_c99_number((double)(int32_t)(uint32_t)bits); return KILN_C99_OK;
+    case KILN_TYPED_UINT32: *out = kiln_c99_number((double)(uint32_t)bits); return KILN_C99_OK;
+    case KILN_TYPED_BIG_INT64:
+        return kiln_c99_u64_bigint((int64_t)bits < 0 ? (uint64_t)0 - bits : bits, (int64_t)bits < 0, out);
+    case KILN_TYPED_BIG_UINT64: return kiln_c99_u64_bigint(bits, 0, out);
+    default: KILN_C99_REFUSE("an Atomics operation on a floating-point element");
+    }
+}
+
+#define KILN_C99_ATOMIC_RMW(type, cell, op, operand, replacement, old)                               \
+    do {                                                                                           \
+        type *at_ = (type *)(void *)(cell);                                                        \
+        type value_ = (type)(operand);                                                             \
+        switch (op) {                                                                              \
+        case KILN_C99_ATOMICS_LOAD: (old) = (uint64_t)__atomic_load_n(at_, __ATOMIC_SEQ_CST); break; \
+        case KILN_C99_ATOMICS_STORE: __atomic_store_n(at_, value_, __ATOMIC_SEQ_CST); (old) = (uint64_t)value_; break; \
+        case KILN_C99_ATOMICS_ADD: (old) = (uint64_t)__atomic_fetch_add(at_, value_, __ATOMIC_SEQ_CST); break; \
+        case KILN_C99_ATOMICS_SUB: (old) = (uint64_t)__atomic_fetch_sub(at_, value_, __ATOMIC_SEQ_CST); break; \
+        case KILN_C99_ATOMICS_AND: (old) = (uint64_t)__atomic_fetch_and(at_, value_, __ATOMIC_SEQ_CST); break; \
+        case KILN_C99_ATOMICS_OR: (old) = (uint64_t)__atomic_fetch_or(at_, value_, __ATOMIC_SEQ_CST); break; \
+        case KILN_C99_ATOMICS_XOR: (old) = (uint64_t)__atomic_fetch_xor(at_, value_, __ATOMIC_SEQ_CST); break; \
+        case KILN_C99_ATOMICS_EXCHANGE: (old) = (uint64_t)__atomic_exchange_n(at_, value_, __ATOMIC_SEQ_CST); break; \
+        default: {                                                                                 \
+            type expected_ = value_;                                                               \
+            (void)__atomic_compare_exchange_n(at_, &expected_, (type)(replacement), 0,             \
+                                              __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);                  \
+            (old) = (uint64_t)expected_;                                                           \
+        }                                                                                          \
+        }                                                                                          \
+    } while (0)
+
+/* `__kilnAtomics(op, view, index, value, replacement)`: the view is an integer typed array, the
+ * index in bounds and its buffer attached -- `atomics.ts` checked all three and converted the
+ * operands -- so what is left is the indivisible access itself, and for `wait` and `notify` the
+ * runtime's waiter list. */
+static int kiln_c99_atomics_raw(kiln_value *out, const kiln_value *args, size_t argc,
+                                kiln_value *thrown) {
+    double op = argc > 0 && args[0].tag == KILN_VALUE_NUMBER ? kiln_c99_as_number(args[0]) : 0;
+    kiln_typed_array *view;
+    kiln_typed_buffer *buffer;
+    size_t index, width, offset;
+    uint64_t operand = 0, replacement = 0, old = 0;
+    uint8_t *cell;
+    int status;
+    if (argc < 3 || args[1].tag != KILN_VALUE_TYPED_ARRAY || args[2].tag != KILN_VALUE_NUMBER)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "Atomics: not an integer typed array");
+    view = kiln_c99_typed_array_of(args[1]);
+    buffer = view->buffer;
+    width = kiln_c99_typed_width(view->kind);
+    index = (size_t)kiln_c99_as_number(args[2]);
+    if (view->kind == KILN_TYPED_FLOAT32 || view->kind == KILN_TYPED_FLOAT64 ||
+        view->kind == KILN_TYPED_UINT8_CLAMPED)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "Atomics: not an integer typed array");
+    if (index >= view->length || buffer->detached)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR, "Invalid atomic access index");
+    offset = view->byte_offset + index * width;
+    cell = buffer->bytes + offset;
+    if (op == KILN_C99_ATOMICS_WAIT) {
+        double timeout = argc > 4 && args[4].tag == KILN_VALUE_NUMBER ? kiln_c99_as_number(args[4]) : INFINITY;
+        uint64_t expected = 0;
+        int answer;
+        static const char ok[] = "ok", not_equal[] = "not-equal", timed_out[] = "timed-out";
+        if (buffer->shared == NULL)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "Atomics.wait requires a SharedArrayBuffer");
+        status = kiln_c99_atomics_operand(view->kind, argc > 3 ? args[3] : kiln_c99_undefined(), &expected, thrown);
+        if (status != KILN_C99_OK) return status;
+        answer = kiln_atomics_wait(buffer->shared, (uint64_t)offset, (uint32_t)width,
+                                   width == 8 ? (int64_t)expected : (int64_t)(int32_t)(uint32_t)expected,
+                                   timeout);
+        if (answer == 3) {
+            /* The worker waiting was terminated: its realm unwinds to the launcher. */
+            (void)kiln_worker_exit(1);
+            return KILN_C99_HOST_ERROR;
+        }
+        if (answer < 0 || answer > 2) KILN_C99_REFUSE("an Atomics.wait the runtime's waiter list would not take");
+        *out = answer == 0 ? kiln_c99_copy_text(ok, sizeof ok - 1)
+             : answer == 1 ? kiln_c99_copy_text(not_equal, sizeof not_equal - 1)
+                           : kiln_c99_copy_text(timed_out, sizeof timed_out - 1);
+        return KILN_C99_OK;
+    }
+    if (op == KILN_C99_ATOMICS_NOTIFY) {
+        double count = argc > 3 && args[3].tag == KILN_VALUE_NUMBER ? kiln_c99_as_number(args[3]) : INFINITY;
+        uint64_t wanted = !(count >= 0) ? 0 : count >= 18446744073709551615.0 ? UINT64_MAX : (uint64_t)count;
+        *out = kiln_c99_number(buffer->shared == NULL ? 0.0
+                               : (double)kiln_atomics_notify(buffer->shared, (uint64_t)offset, wanted));
+        return KILN_C99_OK;
+    }
+    if (op < KILN_C99_ATOMICS_LOAD || op > KILN_C99_ATOMICS_COMPARE_EXCHANGE)
+        KILN_C99_REFUSE("an Atomics operation this runtime does not have");
+    if (op != KILN_C99_ATOMICS_LOAD) {
+        status = kiln_c99_atomics_operand(view->kind, argc > 3 ? args[3] : kiln_c99_undefined(), &operand, thrown);
+        if (status != KILN_C99_OK) return status;
+    }
+    if (op == KILN_C99_ATOMICS_COMPARE_EXCHANGE) {
+        status = kiln_c99_atomics_operand(view->kind, argc > 4 ? args[4] : kiln_c99_undefined(), &replacement, thrown);
+        if (status != KILN_C99_OK) return status;
+    }
+    switch (width) {
+    case 1: KILN_C99_ATOMIC_RMW(uint8_t, cell, (int)op, operand, replacement, old); break;
+    case 2: KILN_C99_ATOMIC_RMW(uint16_t, cell, (int)op, operand, replacement, old); break;
+    case 4: KILN_C99_ATOMIC_RMW(uint32_t, cell, (int)op, operand, replacement, old); break;
+    default: KILN_C99_ATOMIC_RMW(uint64_t, cell, (int)op, operand, replacement, old); break;
+    }
+    return kiln_c99_atomics_value(view->kind, old, out);
 }
 
 /* An element index or count the shared TypeScript already computed: a non-negative integral

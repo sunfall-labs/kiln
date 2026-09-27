@@ -2072,3 +2072,62 @@ Object.defineProperty(Promise.prototype, "constructor", {
         "{error}"
     );
 }
+
+#[test]
+fn release_source_dce_keeps_a_discarded_coercion_and_a_throwing_global_call() {
+    // Issue 19: Oxc's dead-code pass assumes coercions are pure and `decodeURIComponent` never
+    // throws; the release build deleted both statements and folded `calls` to 0.
+    let Some(output) = run_native_release_fixture(
+        "release-source-dce-observable-effects",
+        r#"
+let calls = 0;
+const o = { valueOf() { calls += 1; return 2; }, toString() { calls += 10; return "o"; } };
+o < 10;
+o == 2;
+`${o}`;
+let thrown = "no";
+try { decodeURIComponent("%"); } catch (error) { thrown = error.name; }
+let hint = "none";
+const d = new Date({ [Symbol.toPrimitive](h) { hint = h; return 0; } });
+console.log(calls, thrown, hint, d.getTime());
+"#,
+    ) else {
+        return;
+    };
+    assert_eq!(output, "12 URIError default 0\n");
+}
+
+#[test]
+fn release_integer_remainder_of_a_negative_dividend_is_negative_zero() {
+    // Issue 20: `(value | 0) % 2` was proven an int, and its `int64_t` twin lost the sign.
+    let Some(output) = run_native_release_fixture(
+        "release-integer-remainder-negative-zero",
+        r#"
+function constantRemainder(value) { return (value | 0) % 2; }
+console.log([-4, -6, 4].map(constantRemainder).map((x) => Object.is(x, -0)).join());
+function viaArgument(value) { return 1 / ((value | 0) % 5); }
+console.log(viaArgument(-10), viaArgument(10));
+"#,
+    ) else {
+        return;
+    };
+    assert_eq!(output, "true,true,false\n-Infinity Infinity\n");
+}
+
+#[test]
+fn release_typed_method_call_takes_the_boxed_call_for_a_receiver_without_a_row() {
+    // Issue 21: a receiver of the right class whose `v` is a string has no double row, so the
+    // typed entry could only refuse; the call site now asks first and takes the boxed call.
+    let Some(output) = run_native_release_fixture(
+        "release-typed-method-receiver-without-row",
+        r#"
+class V { constructor(v) { this.v = v; } val() { return this.v; } }
+const objs = [new V(1), new V("x"), new V(3)];
+function sumVals() { let s = 0; for (let i = 0; i < objs.length; i++) s += objs[i].val(); return s; }
+console.log(sumVals());
+"#,
+    ) else {
+        return;
+    };
+    assert_eq!(output, "1x3\n");
+}

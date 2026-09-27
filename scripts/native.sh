@@ -148,9 +148,10 @@ run_probe() {
 		parallelism="${BASH_REMATCH[1]//,/ }"
 		# Under collector stress every allocation collects, and these probes map large arrays at
 		# several thread counts: tens of minutes each, which made `native-stress` impractical.
-		# Their pooled workers never allocate, and the part of the path that does (the result
-		# array) is the ordinary `map` path the other probes stress, so they are skipped here and
-		# counted as skipped, never as matched.
+		# They are skipped here and counted as skipped, never as matched. Tier 3's workers do
+		# allocate (in arenas the heap adopts after the call), so `parallel-alloc-stress.js` --
+		# small, no thread directive, checks that allocate nothing -- is the tier-3 probe this
+		# mode runs, at the machine's core count.
 		if [[ -n $STRESS ]]; then
 			touch "$WORK_DIR/$name.stress-skipped"
 			return 0

@@ -21,7 +21,7 @@
 import os from "node:os";
 import { Worker } from "node:worker_threads";
 import { bench } from "../../harness.mjs";
-import { floats, ints, qtys, ratings, sortChecksum, sumChecksum, valueChecksum } from "./common.mjs";
+import { floats, ints, qtys, ratings, recordsChecksum, sortChecksum, sumChecksum, valueChecksum } from "./common.mjs";
 
 const workload = process.argv[2];
 const n = Number(process.argv[3] ?? 1000000);
@@ -40,6 +40,11 @@ else if (workload === "pipeline-records") {
   input.price = shared(floats(n));
   input.qty = shared(qtys(n));
   input.rating = shared(ratings(n));
+} else if (workload === "sort-records") {
+  // Objects cannot be shared: the pool sorts their keys, as a program wanting the cores would --
+  // the price column and an index permutation in shared memory -- and the main thread applies
+  // the permutation to its records.
+  input.price = shared(floats(n));
 } else if (workload !== "pipeline-objects") input.xs = shared(floats(n));
 
 // Contiguous ranges, one per worker.
@@ -105,6 +110,37 @@ if (workload === "map-light" || workload === "map-heavy") {
     return out;
   };
   checksum = sumChecksum;
+} else if (workload === "sort-records") {
+  const price = floats(n);
+  const records = [];
+  for (let i = 0; i < n; i += 1) records.push({ id: i, price: price[i] });
+  run = async () => {
+    let a = new Uint32Array(new SharedArrayBuffer(n * 4));
+    let b = new Uint32Array(new SharedArrayBuffer(n * 4));
+    await each(procs, (worker) => worker.postMessage({ op: "sortIndex", a }));
+    let runs = bounds.slice();
+    while (runs.length > 2) {
+      const next = [0];
+      const jobs = [];
+      for (let r = 0; r + 1 < runs.length; r += 2) {
+        const lo = runs[r];
+        const mid = runs[r + 1];
+        const hi = r + 2 < runs.length ? runs[r + 2] : mid;
+        jobs.push({ lo, mid, hi });
+        next.push(hi);
+      }
+      const from = a;
+      const to = b;
+      await each(jobs.length, (worker, w) => worker.postMessage({ op: "mergeIndex", from, to, ...jobs[w] }));
+      a = to;
+      b = from;
+      runs = next;
+    }
+    const out = new Array(n);
+    for (let i = 0; i < n; i += 1) out[i] = records[a[i]];
+    return out;
+  };
+  checksum = recordsChecksum;
 } else if (workload === "sort-typed" || workload === "sort-array") {
   run = async () => {
     let a = new Float64Array(new SharedArrayBuffer(n * 8));

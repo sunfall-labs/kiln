@@ -474,6 +474,84 @@ pub fn own_data_property(value: &Value, name: &str) -> Option<Value> {
     object.borrow().get_own(name).cloned()
 }
 
+/// What `node:worker_threads` reads about the exception that ended a worker (realms issue 06):
+/// the tokens its parent's `error` event decodes, in the message layout of
+/// `kiln-builtins/src/web_events_streams.ts` -- no transferred ports, then the value. An error is
+/// its name, message and stack; any other value is itself when it is a primitive, and an empty
+/// object otherwise.
+pub fn worker_error_tokens(
+    thrown: &Value,
+    error_constructor: Option<&str>,
+) -> Vec<kiln_runtime::workers::Token> {
+    use kiln_runtime::workers::Token;
+    const T_UNDEFINED: f64 = 0.0;
+    const T_NULL: f64 = 1.0;
+    const T_FALSE: f64 = 2.0;
+    const T_TRUE: f64 = 3.0;
+    const T_NUMBER: f64 = 4.0;
+    const T_STRING: f64 = 5.0;
+    const T_BIGINT: f64 = 6.0;
+    const T_OBJECT: f64 = 8.0;
+    const T_ERROR: f64 = 19.0;
+    let mut out = vec![Token::Number(0.0)];
+    match thrown {
+        Value::Undefined => out.push(Token::Number(T_UNDEFINED)),
+        Value::Null => out.push(Token::Number(T_NULL)),
+        Value::Boolean(value) => out.push(Token::Number(if *value { T_TRUE } else { T_FALSE })),
+        Value::Number(value) => out.extend([Token::Number(T_NUMBER), Token::Number(*value)]),
+        Value::String(text) => out.extend([Token::Number(T_STRING), Token::String(text.clone())]),
+        Value::BigInt(value) => out.extend([
+            Token::Number(T_BIGINT),
+            Token::String(Value::BigInt(value.clone()).to_display_string().into()),
+        ]),
+        Value::Object(object) => {
+            let text = |name: &str| -> Option<StringUnits> {
+                let mut current = Some(Rc::clone(object));
+                for _ in 0..64 {
+                    let here = current?;
+                    let borrowed = here.borrow();
+                    if let Some(Value::String(text)) = borrowed.get_own(name) {
+                        return Some(text.clone());
+                    }
+                    current = match &borrowed.prototype {
+                        Some(Value::Object(next)) => Some(Rc::clone(next)),
+                        _ => None,
+                    };
+                }
+                None
+            };
+            let message = object.borrow().get_own("message").cloned();
+            let is_error = error_constructor.is_some_and(|name| name.ends_with("Error"))
+                || matches!(message, Some(Value::String(_)));
+            if !is_error {
+                out.extend([Token::Number(T_OBJECT), Token::Number(0.0)]);
+                return out;
+            }
+            let name = text("name")
+                .or_else(|| error_constructor.map(StringUnits::from))
+                .unwrap_or_else(|| StringUnits::from("Error"));
+            let message = match message {
+                Some(Value::String(text)) => text,
+                _ => StringUnits::from(""),
+            };
+            out.extend([
+                Token::Number(T_ERROR),
+                Token::String(name),
+                Token::String(message),
+            ]);
+            match object.borrow().get_own("stack") {
+                Some(Value::String(stack)) => {
+                    out.extend([Token::Number(T_STRING), Token::String(stack.clone())])
+                }
+                _ => out.push(Token::Number(T_UNDEFINED)),
+            }
+            out.push(Token::Number(0.0));
+        }
+        _ => out.extend([Token::Number(T_OBJECT), Token::Number(0.0)]),
+    }
+    out
+}
+
 /// Parse a JSON module into the same JavaScript value graph used by `JSON.parse`.
 ///
 /// Module loaders use this instead of translating through a second JSON representation, keeping
@@ -723,6 +801,16 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
             other => Value::Cell(Rc::new(RefCell::new(other.clone()))),
         };
     }
+    // A slot the body reads as a cell (a capture, `LoadCell`, `StoreCell`) that no `NewCell`
+    // creates is an import's -- and the linker drops an import nothing live reads. A function
+    // that only a dead declaration reaches still captures the slot when the body hoists it, so
+    // the slot needs a cell even though no value will ever arrive in it. The native backend's
+    // locals start `undefined` and read a dropped import the same way (realms issue 22).
+    for slot in module_cell_slots_without_new_cell(&module.program) {
+        if let Some(local @ Value::Undefined) = locals.get_mut(slot as usize) {
+            *local = Value::Cell(Rc::new(RefCell::new(Value::Undefined)));
+        }
+    }
 
     // An import this module makes from itself names a binding that does not exist yet, so
     // there was no value for the loop above to place. Both kinds are set up here instead: a
@@ -876,17 +964,30 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
     // Exports are read before the event loop runs: they are the module's interface, and a timer
     // that mutates a binding afterwards has not changed what the module exported.
     if enter_runtime {
+        // An exception that ends the loop is the program's last word; the loader keeps the value
+        // as it does for a module body's (a worker reports it to its parent).
+        let mut record = |vm: &mut Vm<'_, H>, error: ExecutionError| {
+            if let Some(value) = vm.uncaught_value.take()
+                && let Some(loader) = commonjs_loader.as_deref_mut()
+            {
+                loader.record_thrown_value(value);
+            }
+            error
+        };
         if suspended_module {
-            vm.run_node_event_loop_until_module(runtime)?;
+            vm.run_node_event_loop_until_module(runtime)
+                .map_err(|error| record(&mut vm, error))?;
             // The entry is the module the loop is for: once its await has settled, whatever the
             // continuation armed -- a timer, a server -- still has to run. Stopping here left
             // `await x; setTimeout(f)` with `f` never called (fixed 2026-09-19); a dependency
             // returns to its importer instead, which is what `until_module` is for.
             if drain {
-                vm.run_node_event_loop(runtime)?;
+                vm.run_node_event_loop(runtime)
+                    .map_err(|error| record(&mut vm, error))?;
             }
         } else if drain {
-            vm.run_node_event_loop(runtime)?;
+            vm.run_node_event_loop(runtime)
+                .map_err(|error| record(&mut vm, error))?;
         } else if vm.async_host.is_none() && session.is_none() {
             // A module with no shared realm drains its own loop; one in a shared realm leaves
             // its timers for the entry's loop, as node does.
@@ -967,4 +1068,38 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
         exports,
         commonjs_exports,
     })
+}
+
+/// Slots a module body reads as cells -- captured by a function it makes, or loaded and stored
+/// as a cell -- that no `NewCell` in the body creates: the ones whose cell must already be there
+/// when the body starts. The native backend's `slots_read_as_cells` is the same walk.
+fn module_cell_slots_without_new_cell(program: &Program) -> Vec<u32> {
+    let mut needed = HashSet::new();
+    let mut created = HashSet::new();
+    for instruction in &program.code {
+        match instruction {
+            Instruction::LoadCell(slot) | Instruction::StoreCell(slot) => {
+                needed.insert(*slot);
+            }
+            Instruction::NewCell(slot) => {
+                created.insert(*slot);
+            }
+            Instruction::MakeFunction(proto) => {
+                if let Some(target) = program.functions.get(*proto as usize) {
+                    for upvalue in &target.upvalues {
+                        if let Upvalue::ParentLocal(slot) | Upvalue::NamedParentLocal { slot, .. } =
+                            upvalue
+                        {
+                            needed.insert(*slot);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    needed.retain(|slot| !created.contains(slot));
+    let mut slots: Vec<u32> = needed.into_iter().collect();
+    slots.sort_unstable();
+    slots
 }

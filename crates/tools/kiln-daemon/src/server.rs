@@ -229,6 +229,15 @@ impl<E: QueryEngine + Send + 'static> Daemon<E> {
         })
     }
 
+    /// Run every program this daemon hosts as a process of its own: a virtual `process.pid`,
+    /// and the signals it sends itself delivered in its realm, never to the daemon (realms
+    /// issue 26; `kiln_runtime::signals`). The resident daemon calls this; a `--one-shot`
+    /// engine does not, because its program is the process.
+    pub fn isolate_hosted_programs(self) -> Self {
+        kiln_runtime::signals::isolate_hosted_programs();
+        self
+    }
+
     pub fn socket_path(&self) -> &Path {
         &self.shared.socket
     }

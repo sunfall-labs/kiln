@@ -20,6 +20,15 @@ const __kilnResizeBuffer: ((buffer: any, length: number) => void) | undefined =
   (globalThis as any).__kilnArrayBufferResize;
 delete (globalThis as any).__kilnArrayBufferResize;
 
+// The native backend's `SharedArrayBuffer` store (ADR 0065, representation; realms issue 06):
+// `(1, length, maxByteLength?)` makes a buffer over a new store every realm it is sent to shares,
+// `(2, buffer, length)` grows a growable one (false when it cannot), `(6, constructor)` names
+// the function `new SharedArrayBuffer(...)` runs. The interpreter builds its shared buffers
+// itself and publishes none.
+const __kilnSharedBuffer: ((op: number, a?: any, b?: any) => any) | undefined =
+  (globalThis as any).__kilnSharedBuffer;
+delete (globalThis as any).__kilnSharedBuffer;
+
 (function installArrayBufferExtensions() {
   if (typeof ArrayBuffer === "undefined" || !ArrayBuffer.prototype) {
     return;
@@ -120,6 +129,25 @@ delete (globalThis as any).__kilnArrayBufferResize;
   defineMethod(Proto, "transfer", transfer);
   defineMethod(Proto, "transferToFixedLength", transferToFixedLength);
 
+  // `new SharedArrayBuffer(length, options)`, where the engine asks the bootstrap for it: every
+  // check, then a store of `length` zeroed bytes that can grow to `options.maxByteLength`.
+  if (typeof __kilnSharedBuffer === "function") {
+    const makeShared = __kilnSharedBuffer;
+    const construct = function SharedArrayBuffer(length: any, options: any): any {
+      const byteLength = toIndex(length);
+      let maxByteLength: number | undefined;
+      if (options !== null && typeof options === "object") {
+        const requested = options.maxByteLength;
+        if (requested !== undefined) {
+          maxByteLength = toIndex(requested);
+          if (byteLength > maxByteLength) throw new RangeError("Invalid array buffer max length");
+        }
+      }
+      return makeShared(1, byteLength, maxByteLength);
+    };
+    makeShared(6, construct);
+  }
+
   // --- SharedArrayBuffer.prototype extensions ---
 
   if (typeof SharedArrayBuffer !== "undefined" && SharedArrayBuffer.prototype) {
@@ -160,7 +188,11 @@ delete (globalThis as any).__kilnArrayBufferResize;
       if (newByteLength < this.byteLength || newByteLength > this.maxByteLength) {
         throw new RangeError("SharedArrayBuffer.prototype.grow: Invalid length parameter");
       }
-      (__kilnResizeBuffer as (buffer: any, length: number) => void)(this, newByteLength);
+      if (typeof __kilnResizeBuffer === "function") {
+        __kilnResizeBuffer(this, newByteLength);
+      } else if (typeof __kilnSharedBuffer !== "function" || !__kilnSharedBuffer(2, this, newByteLength)) {
+        throw new RangeError("SharedArrayBuffer.prototype.grow: Invalid length parameter");
+      }
     } }.grow;
 
     const slice = { slice(this: any, begin?: number, end?: number): any {

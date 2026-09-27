@@ -249,6 +249,7 @@ impl NativeRealmPolicy {
             generic_only: false,
             parallel_in_generic: false,
             parallel_workers_unit: false,
+            unit_chunk_bytes: None,
             speculate: Some(std::env::var("KILN_SPECULATE").as_deref() != Ok("0")),
             type_profile_record: false,
             type_profile: None,
@@ -256,6 +257,8 @@ impl NativeRealmPolicy {
             compile_regex: None,
             omit_source: false,
             no_kiln_extensions: self.no_kiln_extensions,
+            // Set for the runtime bootstrap alone (`bootstrap_emitter`).
+            shared_region: false,
         }
     }
 

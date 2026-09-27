@@ -31,6 +31,9 @@ pub(crate) struct NodeServerState {
     /// A fetch-style (`serve`) server: its connections take requests whole and its handler is
     /// called with strings and bytes instead of an IncomingMessage and a ServerResponse.
     pub(crate) fetch: bool,
+    /// The listener has closed while connections were still open: node's `close` event (and the
+    /// `server.close(callback)` callback) waits for the last of them to end.
+    pub(crate) close_deferred: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

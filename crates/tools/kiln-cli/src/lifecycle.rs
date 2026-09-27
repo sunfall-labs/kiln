@@ -92,7 +92,9 @@ pub fn status(socket: &Path) -> Result<(Output, i32)> {
 /// Run the accept loop in the foreground. This is what `start` and autostart spawn, and what
 /// a developer runs by hand when they want to watch the daemon's own output.
 pub fn serve(socket: &Path) -> Result<()> {
-    let daemon = Daemon::bind(socket).map_err(|source| Error::Daemon(source.to_string()))?;
+    let daemon = Daemon::bind(socket)
+        .map_err(|source| Error::Daemon(source.to_string()))?
+        .isolate_hosted_programs();
     // The spawned copy has this redirected into the log beside the socket, which is where
     // `wait_for_daemon` looks when a daemon dies before it can listen.
     eprintln!(

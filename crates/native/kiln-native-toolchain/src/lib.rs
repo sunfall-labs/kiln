@@ -461,6 +461,22 @@ fn release_section_flags(
     }
 }
 
+/// The main thread's stack for an executable, where the platform fixes it at link time. A
+/// compiled program recurses on the C stack, as deeply as the interpreter's 10,000 calls (parallel
+/// issue 30), so its main thread gets what a `node:worker_threads` realm's thread gets (64 MiB,
+/// `kiln_runtime::workers`) rather than the default 8 MiB. macOS sizes the main thread from the
+/// executable's header; Linux grows it on demand up to `RLIMIT_STACK`, which the launcher raises
+/// itself (`kiln_cli_grow_main_stack`), so it needs no flag.
+fn main_stack_flags(platform: TargetPlatform) -> &'static [&'static str] {
+    match platform {
+        TargetPlatform::Macos => &["-Wl,-stack_size,0x4000000"],
+        TargetPlatform::Linux
+        | TargetPlatform::Windows
+        | TargetPlatform::Other
+        | TargetPlatform::Unknown => &[],
+    }
+}
+
 fn release_dead_strip_flag(
     profile: BuildProfile,
     platform: TargetPlatform,
@@ -1266,7 +1282,12 @@ impl Toolchain {
         executable: impl AsRef<Path>,
         options: &LinkOptions,
     ) -> Result<ArtifactReport, ToolchainError> {
-        self.link_artifact(objects, executable.as_ref(), options, &[])
+        self.link_artifact(
+            objects,
+            executable.as_ref(),
+            options,
+            main_stack_flags(self.identity.target_platform()),
+        )
     }
 
     /// Link object files and optional runtime libraries into a shared library.

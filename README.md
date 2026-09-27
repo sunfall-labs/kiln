@@ -98,7 +98,11 @@ either, and a binary built without the flag runs one realm.
 With more than one worker the first process is a supervisor that runs no JavaScript itself (on
 POSIX; Windows always runs one realm). It forwards `SIGTERM`, `SIGINT`, `SIGHUP` and `SIGQUIT` to
 every worker, waits for all of them, and then exits by the same signal (`128+signal` as PID 1), so
-`docker stop` drains every worker; `SIGUSR1` is forwarded without stopping anything. A worker still
+`docker stop` drains every worker; `SIGUSR1` is forwarded without stopping anything. A worker with
+a listener for the signal -- `process.on('SIGTERM', () => server.close(() => process.exit(0)))`,
+node's graceful shutdown, which works the same in a single realm -- takes it as an event and
+drains; when every worker has exited by itself the supervisor exits as they did (0 for a clean
+drain) instead of by the signal. A worker still
 running `KILN_WORKERS_GRACE_MS` after the stop began (default 10000; 0 kills at once) gets
 `SIGKILL`, sent to its process group. Each worker runs in a process group of its own, so Ctrl-C at
 a terminal reaches it once, through the supervisor, rather than once from the terminal and again
@@ -114,6 +118,33 @@ when the supervisor dies (Linux: `PR_SET_PDEATHSIG`; elsewhere a pipe each worke
 worker sees `process.env.KILN_WORKER_INDEX` (`0`..`N-1`, kept across a restart) and
 `KILN_WORKER_COUNT`, in both engines; a single realm sets neither, so a program can run once-only
 startup work where the index is `0` or absent -- though a restarted worker 0 runs it again.
+
+`KILN_WORKERS_MODE=thread` runs the N workers as N realms in **one process**, each on its own
+thread of the runtime's realm host, instead of forking. The realms share one listening socket per
+address: the first realm to listen binds it, and the runtime hands each accepted connection to
+the realm with the fewest open connections (round-robin among ties) instead of the kernel hashing
+connections over N `SO_REUSEPORT` sockets -- which, measured with 16 connections over 16 workers,
+left six workers with none and two with three. Each realm's own `process.env` has
+`KILN_WORKER_INDEX` and `KILN_WORKER_COUNT` (a copy of the process environment plus those two, as a
+node worker thread gets a copy of its parent's; the process environment itself is not changed),
+and worker 0 writes the result file. `SIGTERM`, `SIGINT`, `SIGHUP` and `SIGQUIT` go to every realm
+that listens for them (`process.on('SIGTERM')`), which drains; the process then ends when every
+realm has finished, or by the signal `KILN_WORKERS_GRACE_MS` after it arrived. With no listener
+they end the process by the same signal, every realm at once -- what forwarding it to N workers
+that each die of it amounts to -- and with `128+signal` as PID 1, so `docker stop` works the same
+in both modes. A realm finishing with 0, or calling `process.exit(0)`, leaves the others serving;
+one finishing with any other status, or calling `process.exit(n)`, ends the process with that
+status. **A realm that crashes takes every realm
+with it**, and nothing restarts it: crash isolation is what process mode is for.
+
+Process mode is the default (`KILN_WORKERS_MODE=process`, or unset). Measured on 16 hardware
+threads with `bench/server/serve.mjs` under `KILN_WORKERS=auto` and `oha` on the same machine
+(three rounds each, `.scratch/realms-and-concurrency/issues/07-kiln-workers-thread-mode.md`), the
+two serve the same at 32 connections and above (about 300k rps at 64, 370k at 256), thread mode is
+8% slower at 16 connections -- it spreads them over all sixteen cores, where the client runs too --
+and its p99 at 64 connections is 1.2-1.6 ms against 1.1-1.2 ms. It uses 40 MB of PSS idle against
+50 MB, and 181 MB against 193 MB under load: 0.7 MB per worker, which does not pay for losing the
+supervisor's restarts. That changes when the realms share their built-ins (realms issue 08).
 
 On Linux 6.1 and newer, listeners and HTTP connections run on an io_uring owned by the realm's
 own Tokio runtime (multishot accept and receive, batched sends; no second executor). Older
@@ -136,6 +167,20 @@ cargo run -p kiln-cli -- --one-shot build server.mjs --node --profile native-rel
 `--node` selects Node's module resolution and installs the Tokio-owned adapter for `node:*`.
 `kiln watch` re-runs an entry in the interpreter on every save. `kiln test <dir>` runs a
 conformance corpus; the corpora and the runner each one needs are listed in `AGENTS.md`.
+
+Without `--one-shot`, `kiln run` interprets the program inside the resident daemon, and the
+program is a process of its own there (realms issue 26; `kiln_runtime::signals`). Its
+`process.pid` is a virtual pid, one per run and above any pid Linux or macOS hands out: logging
+it, comparing it with itself and signalling it behave as alone, but nothing outside the program
+knows it (`/proc/<pid>`, `ps`, a child's `process.ppid` see the daemon or nothing). A signal it
+sends itself -- by that pid, the daemon's, `0`, `-1` or the daemon's group -- never reaches the
+daemon: its listeners get it, or its default action happens to the program (a terminating one
+ends it, and `kiln run` then exits by the same signal after writing its output, as node would; an
+ignoring one does nothing; a stopping one does nothing, since the daemon cannot stop for one
+program). Signals to any other pid are real `kill(2)`, and its listeners take nothing from the
+daemon, so a real `SIGTERM` to the daemon still stops the daemon. A `--one-shot` run is the
+process: its real pid and real signal handling, with only its self-directed signals taking the
+in-realm path, so it too prints what it wrote before a signal ended it.
 
 `native-release` keeps speed-focused optimizations while reducing shipped artifact size on Linux
 and macOS: it removes unreachable native sections and DWARF debug sections while retaining the

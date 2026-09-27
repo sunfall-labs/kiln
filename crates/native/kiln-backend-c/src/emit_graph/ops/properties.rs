@@ -689,7 +689,7 @@ pub(super) fn emit_get_computed(
     if ctx.plan.generic_only {
         writeln!(
             output,
-            "    {{ int status = kiln_c99_val_read_element(host, v{o}, v{k}, depth, thrown, &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(v{o}), kiln_val_to_boundary(v{k})); {check} }}{typed_sync}",
+            "    {{ static kiln_c99_symbol_cell kiln_sym_site; int status; if (KILN_VAL_IS_SYMBOL(v{k})) {{ status = kiln_c99_val_read_symbol(host, v{o}, v{k}, depth, thrown, &kiln_sym_site, &v{v}); }} else {{ status = kiln_c99_val_read_element(host, v{o}, v{k}, depth, thrown, &v{v}); }} if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(v{o}), kiln_val_to_boundary(v{k})); {check} }}{typed_sync}",
             o = object.0,
             k = key.0,
             typed_sync = if typed {
@@ -861,6 +861,22 @@ pub(super) fn emit_get_computed(
     } else {
         format!(" && KILN_VAL_IS_NUMBER({vk})")
     };
+    // Realms issue 17: a symbol key reads through the shape and slot caches a named read uses,
+    // from a site of its own allocated the first time it learns (`kiln_c99_val_read_symbol`).
+    let symbol_body = if key_is_int {
+        String::new()
+    } else {
+        format!(
+            "if (!handled && KILN_VAL_IS_SYMBOL({vk})) {{ \
+                static kiln_c99_symbol_cell kiln_sym_site; \
+                int status = kiln_c99_val_read_symbol(host, v{o}, {vk}, depth, thrown, &kiln_sym_site, &v{v}); \
+                if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(v{o}), kiln_val_to_boundary({vk})); \
+                {check} \
+                handled = 1; \
+            }} ",
+            o = object.0,
+        )
+    };
     writeln!(
                 output,
                 "    {{ int handled = 0; {array_tier}{vk_decl}\
@@ -875,6 +891,7 @@ pub(super) fn emit_get_computed(
                 }} else if (!handled && KILN_VAL_IS_STRING(v{o}){number_guard}) {{ \
                     {string_body} \
                 }} \
+                {symbol_body}\
                 if (!handled) {{ \
                     int status = kiln_c99_val_read_element(host, v{o}, {vk}, depth, thrown, &v{v}); \
                     if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(v{o}), kiln_val_to_boundary({vk})); \
@@ -886,6 +903,7 @@ pub(super) fn emit_get_computed(
                 array_body = array_body,
                 typed_body = typed_body,
                 string_body = string_body,
+                symbol_body = symbol_body,
                 vk = vk,
                 typed_sync = if typed { format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));") } else { String::new() }
             )
@@ -980,7 +998,7 @@ pub(super) fn emit_set_computed(
     if ctx.plan.generic_only {
         writeln!(
             output,
-            "    {{ int status = kiln_c99_val_write_element(host, v{o}, v{k}, v{val}, {strict}, depth, thrown); {check} {assign_v}}}{typed_sync}",
+            "    {{ static kiln_c99_symbol_cell kiln_sym_site; int status; if (KILN_VAL_IS_SYMBOL(v{k})) {{ status = kiln_c99_val_write_symbol(host, v{o}, v{k}, v{val}, {strict}, depth, thrown, &kiln_sym_site); }} else {{ status = kiln_c99_val_write_element(host, v{o}, v{k}, v{val}, {strict}, depth, thrown); }} {check} {assign_v}}}{typed_sync}",
             o = object.0,
             k = key.0,
             val = value.0,
@@ -1010,16 +1028,7 @@ pub(super) fn emit_set_computed(
                 k = key.0
             )
         };
-        let val_d_init = if ctx.live_numbers.contains(value) {
-            format!("double val_d = d{val};", val = value.0)
-        } else if ctx.live_ints.contains(value) {
-            format!("double val_d = (double)i{val};", val = value.0)
-        } else {
-            format!(
-                "double val_d; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{val}))) memcpy(&val_d, &v{val}, sizeof(val_d)); else val_d = kiln_c99_as_number(kiln_val_to_boundary(v{val}));",
-                val = value.0
-            )
-        };
+        let (val_d_init, val_guard) = typed_store_value(ctx, value);
         (
             format!(
                 "kiln_array *arr = (kiln_array *)ptr; if (KILN_LIKELY({arr_bound} && !arr->frozen)) {{ if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v{val})) arr->is_numeric = 0; arr->elements[i{k}] = v{val}; {assign_v}handled = 1; }}",
@@ -1028,23 +1037,14 @@ pub(super) fn emit_set_computed(
                 assign_v = assign_v,
             ),
             format!(
-                "kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY({typed_bound})) {{ {val_d_init} kiln_c99_typed_set(view, (size_t)i{k}, val_d); {assign_v}handled = 1; }}",
+                "kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY({typed_bound}{val_guard})) {{ {val_d_init} kiln_c99_typed_set(view, (size_t)i{k}, val_d); {assign_v}handled = 1; }}",
                 k = key.0,
                 val_d_init = val_d_init,
                 assign_v = assign_v,
             ),
         )
     } else {
-        let val_d_init = if ctx.live_numbers.contains(value) {
-            format!("double val_d = d{val};", val = value.0)
-        } else if ctx.live_ints.contains(value) {
-            format!("double val_d = (double)i{val};", val = value.0)
-        } else {
-            format!(
-                "double val_d; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{val}))) memcpy(&val_d, &v{val}, sizeof(val_d)); else val_d = kiln_c99_as_number(kiln_val_to_boundary(v{val}));",
-                val = value.0
-            )
-        };
+        let (val_d_init, val_guard) = typed_store_value(ctx, value);
         (
             format!(
                 "double idx; memcpy(&idx, &v{k}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_array *arr = (kiln_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && !arr->frozen)) {{ if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v{val})) arr->is_numeric = 0; arr->elements[slot] = v{val}; {assign_v}handled = 1; }}",
@@ -1053,7 +1053,7 @@ pub(super) fn emit_set_computed(
                 assign_v = assign_v,
             ),
             format!(
-                "double idx; memcpy(&idx, &v{k}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < view->length && !view->buffer->detached)) {{ {val_d_init} kiln_c99_typed_set(view, slot, val_d); {assign_v}handled = 1; }}",
+                "double idx; memcpy(&idx, &v{k}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < view->length && !view->buffer->detached && view->kind <= KILN_TYPED_FLOAT64{val_guard})) {{ {val_d_init} kiln_c99_typed_set(view, slot, val_d); {assign_v}handled = 1; }}",
                 k = key.0,
                 val_d_init = val_d_init,
                 assign_v = assign_v,
@@ -1076,6 +1076,23 @@ pub(super) fn emit_set_computed(
     } else {
         format!(" && KILN_VAL_IS_NUMBER(v{k})", k = key.0)
     };
+    // Realms issue 17: a symbol key writes through the shape and slot caches a named write uses.
+    let symbol_body = if key_is_int {
+        String::new()
+    } else {
+        format!(
+            "if (!handled && KILN_VAL_IS_SYMBOL(v{k})) {{ \
+                static kiln_c99_symbol_cell kiln_sym_site; \
+                int status = kiln_c99_val_write_symbol(host, v{o}, v{k}, v{val}, {strict}, depth, thrown, &kiln_sym_site); \
+                {check} \
+                {assign_v}\
+                handled = 1; \
+            }} ",
+            k = key.0,
+            o = object.0,
+            val = value.0,
+        )
+    };
     writeln!(
                 output,
                 "    {{ int handled = 0; {vk_decl}\
@@ -1088,6 +1105,7 @@ pub(super) fn emit_set_computed(
                         {typed_body} \
                     }} \
                 }} \
+                {symbol_body}\
                 if (!handled) {{ \
                     int status = kiln_c99_val_write_element(host, v{o}, {vk}, v{val}, {strict}, depth, thrown); \
                     {check} \
@@ -1101,9 +1119,31 @@ pub(super) fn emit_set_computed(
                 number_guard = number_guard,
                 array_body = array_body,
                 typed_body = typed_body,
+                symbol_body = symbol_body,
                 check = check,
                 assign_v = assign_v,
                 typed_sync = typed_sync,
             )
             .unwrap();
+}
+
+/// The value a typed-array element store's fast path writes, and the condition it adds to that
+/// path. A number -- a twin, or a box that is one -- is stored as it stands. Anything else is not
+/// the fast path's to convert: `ToNumber` of an object runs its `valueOf`, which can throw or
+/// have effects, and a BigInt view takes `ToBigInt`, not a double. Converting either here stored
+/// NaN for `{ valueOf() { return 7 } }` without calling it, and `0n` for a BigInt
+/// (`BigInt64Array.prototype.set`, parallel-builtins issue 18); the generic element write does
+/// both as the language says.
+fn typed_store_value(ctx: &OpContext, value: &ValueId) -> (String, String) {
+    let val = value.0;
+    if ctx.live_numbers.contains(value) {
+        (format!("double val_d = d{val};"), String::new())
+    } else if ctx.live_ints.contains(value) {
+        (format!("double val_d = (double)i{val};"), String::new())
+    } else {
+        (
+            format!("double val_d; memcpy(&val_d, &v{val}, sizeof(val_d));"),
+            format!(" && KILN_VAL_IS_NUMBER(v{val})"),
+        )
+    }
 }

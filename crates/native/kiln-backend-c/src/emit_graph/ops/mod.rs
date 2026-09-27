@@ -562,7 +562,7 @@ pub(super) fn emit_graph_op(
             pushes: 1,
         } if matches!(
             instruction,
-            Instruction::SpreadObject | Instruction::DefineNamedProperty
+            Instruction::SpreadObject | Instruction::DefineNamedProperty { .. }
         ) && graph
             .scalar_alias_map
             .get(&operands[0])
@@ -660,8 +660,52 @@ pub(super) fn emit_graph_op(
                 "    {{ int status = kiln_c99_val_make_cell(&locals[{slot}]); if (status != KILN_C99_OK) return status; }}"
             )
             .unwrap();
+            // A function the runtime bootstrap's top level calls once publishes the cell to the
+            // realm's unit block, where the functions it makes read it (`module_cells`).
+            if let Some(global) = crate::module_cells::published_slot(self_index, *slot) {
+                writeln!(output, "    {symbol}_globals[{global}] = locals[{slot}];").unwrap();
+            }
             if is_used {
                 writeln!(output, "    v{v} = locals[{slot}];").unwrap();
+            }
+        }
+        // A block slot holding a cell (the runtime bootstrap's captured bindings, `module_cells`)
+        // is read and written through it, exactly as the upvalue it replaced was.
+        GraphOp::LoadGlobal(slot)
+            if crate::module_cells::is_cell_global(*slot) && plan.unchecked.contains(&vid) =>
+        {
+            writeln!(
+                output,
+                "    v{v} = *(const kiln_val *)KILN_VAL_PTR({symbol}_globals[{slot}]);"
+            )
+            .unwrap();
+        }
+        GraphOp::LoadGlobal(slot) if crate::module_cells::is_cell_global(*slot) => {
+            let thrown = if scalar_proto { "NULL" } else { "thrown" };
+            if crate::compact_diagnostic_site(diagnostic_site) {
+                writeln!(
+                    output,
+                    "    KU_LOAD_CELL(v{v}, {symbol}_globals[{slot}], {thrown}, {pc}, \"{label}\", {unwind});"
+                )
+                .unwrap();
+            } else {
+                let check = status_check(diagnostic_site, pc, label, unwind);
+                writeln!(
+                    output,
+                    "    {{ const kiln_val *cell = (const kiln_val *)KILN_VAL_PTR({symbol}_globals[{slot}]); int status = kiln_c99_val_check_tdz(*cell, {thrown}); {check} v{v} = *cell; }}"
+                )
+                .unwrap();
+            }
+        }
+        GraphOp::StoreGlobal { slot, value } if crate::module_cells::is_cell_global(*slot) => {
+            writeln!(
+                output,
+                "    *(kiln_val *)KILN_VAL_PTR({symbol}_globals[{slot}]) = v{};",
+                value.0
+            )
+            .unwrap();
+            if is_used {
+                writeln!(output, "    v{v} = v{};", value.0).unwrap();
             }
         }
         GraphOp::LoadGlobal(slot) => {
@@ -1330,6 +1374,40 @@ pub(super) fn emit_graph_op(
             } else {
                 "KILN_VAL_UNDEFINED"
             };
+            // A site whose closure every realm shares (realms issue 08): it lives in the shared
+            // immutable region, and is never written after it is made, so nothing follows it.
+            // (An arrow that copies its frame's `arguments` when it is made is not one: its
+            // closure holds that realm's object.)
+            if let Some(site) = crate::module_cells::region_site(*index)
+                .filter(|_| !(target.arrow && plan.publishes_frame[*index as usize]))
+            {
+                if plan.compact {
+                    writeln!(
+                        output,
+                        "    KU_REGION_CLOSURE(v{v}, {index}, {defining_receiver}, &{symbol}_region_sites[{site}]);"
+                    )
+                    .unwrap();
+                    return;
+                }
+                let construction = crate::region_closure_construction(
+                    &program.functions,
+                    &program.source,
+                    frame_stacks,
+                    strict_functions,
+                    symbol,
+                    diagnostic_site,
+                    *index,
+                    defining_receiver,
+                    site,
+                    plan.publishes_frame[*index as usize],
+                );
+                writeln!(
+                    output,
+                    "    {{ kiln_value built; int status = {construction}; if (status != KILN_C99_OK) return status; v{v} = kiln_val_from_boundary(built); }}"
+                )
+                .unwrap();
+                return;
+            }
             if plan.compact {
                 let (captured_expr, setup_block) = if captures.is_empty() {
                     ("NULL".to_string(), String::new())
@@ -1606,7 +1684,7 @@ fn emit_sunk_bridge(
     let scalar_obj = &graph.scalar_objects[&root];
     let alloc = root.0;
     match instruction {
-        Instruction::DefineNamedProperty => {
+        Instruction::DefineNamedProperty { .. } => {
             let key = resolve_const_string(operands[1], ctx.defs, ctx.program)
                 .expect("a sunk define's key is a constant string: the escape analysis checked");
             if let Some(&field_idx) = scalar_obj.fields.get(&key) {

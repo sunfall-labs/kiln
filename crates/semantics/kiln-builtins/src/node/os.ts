@@ -1,3 +1,5 @@
+import { signals } from "node:constants";
+
 export const EOL: string = "\n";
 export const devNull: string = "/dev/null";
 
@@ -117,10 +119,14 @@ export function userInfo(): any {
   };
 }
 
+// node's `os.constants`, as far as kiln has it: `signals`, platform-correct (realms issue 26).
+export const constants: any = Object.freeze({ signals });
+
 const os: any = {
   EOL,
   arch,
   availableParallelism,
+  constants,
   cpus,
   default: null,
   devNull,

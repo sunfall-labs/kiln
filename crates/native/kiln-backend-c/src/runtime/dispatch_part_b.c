@@ -807,7 +807,9 @@
             case KILN_VALUE_GENERATOR: tag = "Generator"; break;
             case KILN_VALUE_SYMBOL: tag = "Symbol"; break;
             case KILN_VALUE_BIGINT: tag = "BigInt"; break;
-            case KILN_VALUE_ARRAY_BUFFER: tag = "ArrayBuffer"; break;
+            case KILN_VALUE_ARRAY_BUFFER:
+                tag = kiln_c99_typed_buffer_of(receiver)->shared != NULL ? "SharedArrayBuffer" : "ArrayBuffer";
+                break;
             case KILN_VALUE_DATA_VIEW: tag = "DataView"; break;
             case KILN_VALUE_TYPED_ARRAY:
                 tag = kiln_c99_typed_name(kiln_c99_typed_array_of(receiver)->kind);
@@ -1353,7 +1355,9 @@
                 return KILN_C99_OK;
             }
             if (subject.tag == KILN_VALUE_ARRAY_BUFFER) {
-                *result = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE);
+                *result = kiln_c99_builtin(kiln_c99_typed_buffer_of(subject)->shared != NULL
+                                               ? KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER_PROTOTYPE
+                                               : KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE);
                 return KILN_C99_OK;
             }
             if (subject.tag == KILN_VALUE_FUNCTION || subject.tag == KILN_VALUE_METHOD ||
@@ -1364,8 +1368,8 @@
                  * about a chain they are both walking. */
                 kiln_value linked =
                     subject.tag == KILN_VALUE_FUNCTION &&
-                            kiln_c99_closure_of(subject)->properties.tag == KILN_VALUE_OBJECT
-                        ? kiln_c99_object_of(kiln_c99_closure_of(subject)->properties)->prototype
+                            kiln_c99_closure_store(kiln_c99_closure_of(subject)).tag == KILN_VALUE_OBJECT
+                        ? kiln_c99_object_of(kiln_c99_closure_store(kiln_c99_closure_of(subject)))->prototype
                         : kiln_c99_undefined();
                 *result = linked.tag == KILN_VALUE_UNDEFINED
                               ? kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION_PROTOTYPE)
@@ -2086,15 +2090,13 @@
                 flag = &kiln_c99_array_of(subject)->not_extensible;
                 frozen = kiln_c99_array_of(subject)->frozen;
             } else if (subject.tag == KILN_VALUE_FUNCTION) {
-                kiln_closure *closure = kiln_c99_closure_of(subject);
-                if (closure->properties.tag != KILN_VALUE_OBJECT) {
-                    status = kiln_c99_new_object(&closure->properties);
-                    if (status != KILN_C99_OK) {
-                        return status;
-                    }
+                kiln_value store;
+                status = kiln_c99_function_store(subject, &store);
+                if (status != KILN_C99_OK) {
+                    return status;
                 }
-                flag = &kiln_c99_object_of(closure->properties)->not_extensible;
-                frozen = kiln_c99_object_of(closure->properties)->frozen;
+                flag = &kiln_c99_object_of(store)->not_extensible;
+                frozen = kiln_c99_object_of(store)->frozen;
             }
             if (flag == NULL) {
                 /* A primitive keeps the specification's answer: it is not extensible, and
@@ -2173,14 +2175,12 @@
             } else if (subject.tag == KILN_VALUE_FUNCTION) {
                 /* A function's own properties live in an object it makes on first use. Freezing
                  * the function is freezing that store, so it has to exist first. */
-                kiln_closure *closure = kiln_c99_closure_of(subject);
-                if (closure->properties.tag != KILN_VALUE_OBJECT) {
-                    int status = kiln_c99_new_object(&closure->properties);
-                    if (status != KILN_C99_OK) {
-                        return status;
-                    }
+                kiln_value store;
+                int status = kiln_c99_function_store(subject, &store);
+                if (status != KILN_C99_OK) {
+                    return status;
                 }
-                flag = &kiln_c99_object_of(closure->properties)->frozen;
+                flag = &kiln_c99_object_of(store)->frozen;
             }
             if (subject.tag == KILN_VALUE_PROXY) {
                 kiln_value inner = kiln_c99_proxy_inner(subject);
@@ -2223,8 +2223,8 @@
                     }
                 } else if (subject.tag == KILN_VALUE_FUNCTION) {
                     kiln_closure *closure = kiln_c99_closure_of(subject);
-                    if (closure->properties.tag == KILN_VALUE_OBJECT) {
-                        kiln_object *obj = kiln_c99_object_of(closure->properties);
+                    if (kiln_c99_closure_store(closure).tag == KILN_VALUE_OBJECT) {
+                        kiln_object *obj = kiln_c99_object_of(kiln_c99_closure_store(closure));
                         size_t i;
                         if (obj->shape != NULL) {
                             kiln_c99_ensure_dictionary(obj);
@@ -2468,6 +2468,7 @@
         return KILN_C99_OK;
     case KILN_C99_METHOD_JOIN: {
         kiln_text joined = {NULL, 0, 0};
+        size_t length;
         kiln_value separator = argc > 0 ? args[0] : kiln_c99_undefined();
         int has_separator = 0;
         if (separator.tag != KILN_VALUE_UNDEFINED) {
@@ -2478,8 +2479,12 @@
             separator = shown;
             has_separator = 1;
         }
-        for (index = 0; index < array->count; ++index) {
-            kiln_val element = array->elements[index];
+        /* The length is read once, as `LengthOfArrayLike` does: an element's `toString` can
+         * push or pop, and the walk goes on to the length it started with, reading a vanished
+         * index as undefined. */
+        length = array->count;
+        for (index = 0; index < length; ++index) {
+            kiln_val element = index < array->count ? array->elements[index] : KILN_VAL_UNDEFINED;
             if (index != 0 &&
                 (has_separator ? kiln_c99_text_append_string(&joined, separator)
                                : kiln_c99_text_append(&joined, ",", 1)) != KILN_C99_OK) {
@@ -2516,21 +2521,18 @@
             {
                 kiln_value boundary = kiln_val_to_boundary(element);
                 kiln_value shown;
-                /* A Buffer element reads as its text through `Buffer.prototype.toString`,
-                 * which is a call; every other element converts without one. */
-                if (boundary.tag == KILN_VALUE_TYPED_ARRAY &&
-                    kiln_c99_typed_array_of(boundary)->is_buffer) {
-                    kiln_value primitive;
-                    int prim_status = kiln_c99_to_primitive(host, boundary, 1, &primitive, depth, thrown);
-                    if (prim_status != KILN_C99_OK) {
-                        free(joined.bytes);
-                        return prim_status;
-                    }
-                    boundary = primitive;
+                /* Each element is `ToString`ed, which for an object is a call: its own
+                 * `toString`, `@@toPrimitive` or `valueOf` -- a Buffer's decoder among them.
+                 * Converting one without the call answered "[object Object]" for
+                 * `[{ toString() { return "y"; } }].join()` and for every `String(array)`,
+                 * `${array}` and `array + ""` that reaches this through `toString`. A symbol
+                 * element is the `TypeError` `ToString` gives it. */
+                int shown_status = kiln_c99_to_text_argument(host, boundary, &shown, depth, thrown);
+                if (shown_status != KILN_C99_OK) {
+                    free(joined.bytes);
+                    return shown_status;
                 }
-                shown = kiln_c99_text(boundary);
-                if (shown.tag != KILN_VALUE_STRING ||
-                    kiln_c99_text_append_string(&joined, shown) != KILN_C99_OK) {
+                if (kiln_c99_text_append_string(&joined, shown) != KILN_C99_OK) {
                     free(joined.bytes);
                     return KILN_C99_OUT_OF_MEMORY;
                 }

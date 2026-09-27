@@ -1644,6 +1644,191 @@ fn executable_native_alu_and_bitwise_operations_execute_correctly() {
     );
 }
 
+/// A versioned body's generic clone reads a speculated value boxed, and the fast clone keeps
+/// that box (parallel-builtins issue 18).
+///
+/// ```js
+/// function f(list, needle) {
+///   let kept = "";
+///   kept += list.slice(0, 1);                              // a string: the fast clone exits
+///   return list.indexOf("x", 1 + needle.length) + kept.length;
+/// }
+/// f("axbxcx", "ab") // 3 + 1
+/// ```
+///
+/// `1 + needle.length` is a number only by speculation. The fast clone exits at the `slice`
+/// (its result feeds `+=`, so it was speculated a number), and the generic clone computes the
+/// sum boxed -- `needle.length` could be anything there. The `indexOf` argument read the sum's
+/// double twin, which the generic clone never writes, and searched from 0: this answered 2, and
+/// `headerListRemove`'s loop in `web.ts` never ended.
+#[test]
+fn executable_generic_clone_reads_a_speculated_sum_boxed_after_an_exit() {
+    let mut callee = function(vec![
+        Instruction::Const(0), // ""
+        Instruction::StoreLocal(2),
+        Instruction::LoadLocal(2),
+        Instruction::LoadLocal(0),
+        Instruction::Const(1),                        // 0
+        Instruction::Const(2),                        // 1
+        Instruction::CallMethod { name: 3, argc: 2 }, // list.slice(0, 1)
+        Instruction::Binary(BinaryOp::Add),
+        Instruction::StoreLocal(2),
+        Instruction::LoadLocal(0),
+        Instruction::Const(5), // "x"
+        Instruction::Const(2), // 1
+        Instruction::LoadLocal(1),
+        Instruction::GetProperty(6), // needle.length
+        Instruction::Binary(BinaryOp::Add),
+        Instruction::CallMethod { name: 4, argc: 2 }, // list.indexOf("x", 1 + needle.length)
+        Instruction::LoadLocal(2),
+        Instruction::GetProperty(6), // kept.length
+        Instruction::Binary(BinaryOp::Add),
+        Instruction::Return,
+    ]);
+    callee.name = Some("f".into());
+    callee.parameter_count = 2;
+    callee.declared_length = 2;
+    callee.local_count = 3;
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: vec![
+            Constant::String("".into()),        // 0
+            Constant::Number(0.0f64.to_bits()), // 1
+            Constant::Number(1.0f64.to_bits()), // 2
+            Constant::String("slice".into()),   // 3
+            Constant::String("indexOf".into()), // 4
+            Constant::String("x".into()),       // 5
+            Constant::String("length".into()),  // 6
+            Constant::String("axbxcx".into()),  // 7
+            Constant::String("ab".into()),      // 8
+        ],
+        code: vec![
+            Instruction::MakeFunction(0),
+            Instruction::Const(7),
+            Instruction::Const(8),
+            Instruction::Call { argc: 2 },
+            Instruction::Return,
+        ],
+        local_count: 0,
+        functions: vec![callee],
+        template_sites: Vec::new(),
+    };
+    let generated = emit(&program).expect("program emits");
+    assert!(
+        generated
+            .source
+            .contains("/* Clone A: guarded fast path */"),
+        "the callee must be versioned for this test to mean anything"
+    );
+    let wrapper = format!(
+        "int main(void) {{ kiln_value result; int status = {}(NULL, &result); if (status != 0) return 2; if (result.tag != KILN_VALUE_NUMBER) return 3; double d; memcpy(&d, &result.bits, sizeof d); return d == 4.0 ? 0 : (int)(10.0 + d); }}\n",
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "speculated-sum-after-exit");
+    assert!(
+        run.status.success(),
+        "the generic clone read a twin it never wrote ({:?}; 12 is indexOf from 0):\nstdout: {}\nstderr: {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+/// The other half of the same contract: a speculated value the fast clone computed *before* the
+/// exit, and never boxed because nothing in the fast clone read it boxed, reaches the generic
+/// clone boxed -- the exit writes it from its twin on the way out.
+///
+/// ```js
+/// function g(o, s) {
+///   const n = o.a * 4;           // speculated; the fast clone reads it only as a twin
+///   let k = "";
+///   k += s.slice(0, 1);          // exits
+///   return n * 2 + k.length;     // the generic clone reads `n` boxed
+/// }
+/// g({ a: 1 }, "axbx") // 8 + 1
+/// ```
+#[test]
+fn executable_fast_clone_exit_boxes_a_speculated_value_it_never_boxed() {
+    let mut callee = function(vec![
+        Instruction::LoadLocal(0),
+        Instruction::GetProperty(6), // o.a
+        Instruction::Const(9),       // 4
+        Instruction::Binary(BinaryOp::Multiply),
+        Instruction::StoreLocal(2), // n
+        Instruction::Const(0),      // ""
+        Instruction::StoreLocal(3),
+        Instruction::LoadLocal(3),
+        Instruction::LoadLocal(1),
+        Instruction::Const(1),                        // 0
+        Instruction::Const(2),                        // 1
+        Instruction::CallMethod { name: 3, argc: 2 }, // s.slice(0, 1)
+        Instruction::Binary(BinaryOp::Add),
+        Instruction::StoreLocal(3),
+        Instruction::LoadLocal(2),
+        Instruction::Const(10), // 2
+        Instruction::Binary(BinaryOp::Multiply),
+        Instruction::LoadLocal(3),
+        Instruction::GetProperty(7), // k.length
+        Instruction::Binary(BinaryOp::Add),
+        Instruction::Return,
+    ]);
+    callee.name = Some("g".into());
+    callee.parameter_count = 2;
+    callee.declared_length = 2;
+    callee.local_count = 4;
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: vec![
+            Constant::String("".into()),        // 0
+            Constant::Number(0.0f64.to_bits()), // 1
+            Constant::Number(1.0f64.to_bits()), // 2
+            Constant::String("slice".into()),   // 3
+            Constant::String("indexOf".into()), // 4
+            Constant::String("x".into()),       // 5
+            Constant::String("a".into()),       // 6
+            Constant::String("length".into()),  // 7
+            Constant::String("axbx".into()),    // 8
+            Constant::Number(4.0f64.to_bits()), // 9
+            Constant::Number(2.0f64.to_bits()), // 10
+        ],
+        code: vec![
+            Instruction::NewObject { count: 0 },
+            Instruction::StoreLocal(0),
+            Instruction::LoadLocal(0),
+            Instruction::Const(2), // 1
+            Instruction::SetProperty(6),
+            Instruction::Pop,
+            Instruction::MakeFunction(0),
+            Instruction::LoadLocal(0),
+            Instruction::Const(8),
+            Instruction::Call { argc: 2 },
+            Instruction::Return,
+        ],
+        local_count: 1,
+        functions: vec![callee],
+        template_sites: Vec::new(),
+    };
+    let generated = emit(&program).expect("program emits");
+    assert!(
+        generated.source.contains("kiln_fast_exit_"),
+        "the fast clone's exits must box `n` on the way out"
+    );
+    let wrapper = format!(
+        "int main(void) {{ kiln_value result; int status = {}(NULL, &result); if (status != 0) return 2; if (result.tag != KILN_VALUE_NUMBER) return 3; double d; memcpy(&d, &result.bits, sizeof d); return d == 9.0 ? 0 : 4; }}\n",
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "speculated-value-before-exit");
+    assert!(
+        run.status.success(),
+        "the generic clone read a box the fast clone never wrote ({:?}):\nstdout: {}\nstderr: {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
 #[test]
 fn executable_length_specialization() {
     let constants = vec![

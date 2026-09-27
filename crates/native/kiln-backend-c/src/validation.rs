@@ -438,7 +438,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::StoreGlobal(_)
         | Instruction::DefineAccessor { .. }
         | Instruction::DefineMethod
-        | Instruction::DefineNamedProperty
+        | Instruction::DefineNamedProperty { .. }
         | Instruction::DefinePrivate { .. }
         | Instruction::SpreadObject
         | Instruction::SpreadInto

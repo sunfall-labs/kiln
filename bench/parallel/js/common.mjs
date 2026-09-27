@@ -62,6 +62,13 @@ export function sortChecksum(values) {
   return values.length + ":" + values[0] + ":" + values[values.length - 1] + ":" + sum;
 }
 
+/// Records sorted by `price`: `sortChecksum` of their prices, in the result's order.
+export function recordsChecksum(records) {
+  const prices = new Float64Array(records.length);
+  for (let i = 0; i < records.length; i += 1) prices[i] = records[i].price;
+  return sortChecksum(prices);
+}
+
 /// A number that is already the answer (a fold, a pipeline's total).
 export function valueChecksum(value) {
   return "1:" + value;

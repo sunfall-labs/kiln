@@ -183,11 +183,13 @@ fn bootstrap_emission_cache_reopens_and_separates_surface_and_policy() {
     };
     let cache = ArtifactCache::new(&cache_path);
     let (first, program, capabilities, hit) =
-        native_builtin_bootstrap_module(&cache, "test-target", &policy, false, false).unwrap();
+        native_builtin_bootstrap_module(&cache, "test-target", &policy, false, false, None)
+            .unwrap();
     assert!(!hit);
     let reopened = ArtifactCache::new(&cache_path);
     let (again, again_program, again_capabilities, hit) =
-        native_builtin_bootstrap_module(&reopened, "test-target", &policy, false, false).unwrap();
+        native_builtin_bootstrap_module(&reopened, "test-target", &policy, false, false, None)
+            .unwrap();
     assert!(hit);
     assert_eq!(first, again);
     assert_eq!(program, again_program);
@@ -199,15 +201,195 @@ fn bootstrap_emission_cache_reopens_and_separates_surface_and_policy() {
         (
             EmissionPolicy {
                 no_kiln_extensions: true,
-                ..policy
+                ..policy.clone()
             },
             false,
         ),
     ] {
         let (_, _, _, hit) =
-            native_builtin_bootstrap_module(&reopened, "test-target", &policy, false, url).unwrap();
+            native_builtin_bootstrap_module(&reopened, "test-target", &policy, false, url, None)
+                .unwrap();
         assert!(!hit);
     }
+    // Issue 17: a release build's specialized bootstrap is its own entry, split into units.
+    let (specialized, _, _, hit) = native_builtin_bootstrap_module(
+        &reopened,
+        "test-target",
+        &policy,
+        false,
+        false,
+        Some(1 << 20),
+    )
+    .unwrap();
+    assert!(!hit);
+    assert!(first.generic_only && first.chunks.is_empty());
+    assert!(!specialized.generic_only);
+    assert!(
+        specialized.chunks.len() > 1,
+        "split into units: {}",
+        specialized.chunks.len()
+    );
+}
+
+/// Realms issue 08: in a unit emitted with `shared_region` (the runtime bootstrap), a function
+/// reads the bindings of the top level, and of a function the top level calls once, through the
+/// realm's unit block instead of capturing their cells -- so the closures made there capture
+/// nothing and are made in the shared immutable region. A binding made afresh per loop iteration
+/// keeps its capture, and its closures stay the realm's own.
+#[test]
+fn a_shared_region_unit_reads_once_made_cells_from_the_realm_block() {
+    let source = r#"
+const shared = { n: 1 };
+let counter = 0;
+globalThis.top = function top() { counter += 1; return shared.n + counter; };
+(function install() {
+    const local = 2;
+    globalThis.inner = function inner() { return local + shared.n; };
+    for (let i = 0; i < 2; i++) {
+        globalThis["loop" + i] = function perIteration() { return i + local; };
+    }
+})();
+"#;
+    let program =
+        kiln_ir::compile_module(&kiln_frontend_oxc::parse("region.js", source)).expect("compiles");
+    let policy = EmissionPolicy {
+        decoupled_prelude: true,
+        compact: true,
+        shared_region: true,
+        ..Default::default()
+    };
+    let emitted =
+        kiln_backend_c::emit_module_with_logical_path_and_policy(&program, "region.js", policy)
+            .expect("emits");
+    let c = &emitted.source;
+    // A body can be emitted more than once (its generic and typed entries); count the functions.
+    let protos = |text: &str, call: &str| {
+        text.lines()
+            .filter_map(|line| {
+                let at = line.find(call).filter(|_| !line.starts_with("#define"))?;
+                let args = &line[at + call.len()..];
+                Some(args.split(", ").nth(1)?.to_owned())
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    // `top`, `install` and `inner` capture nothing now; `perIteration` still captures `i`.
+    assert_eq!(protos(c, "KU_REGION_CLOSURE(").len(), 3, "{c}");
+    assert!(c.contains("ku_region_sites[3];"), "{c}");
+    assert_eq!(protos(c, "KU_CLOSURE(").len(), 1, "{c}");
+    // `install` publishes the cell of `local` to the block; `inner` reads through it.
+    assert!(c.contains("kiln_mg["), "{c}");
+    assert!(c.contains("] = locals["), "{c}");
+    // Without the policy nothing changes: every closure captures its cells.
+    let plain = kiln_backend_c::emit_module_with_logical_path_and_policy(
+        &program,
+        "region.js",
+        EmissionPolicy {
+            decoupled_prelude: true,
+            compact: true,
+            ..Default::default()
+        },
+    )
+    .expect("emits");
+    assert!(!plain.source.contains("KU_REGION_CLOSURE("));
+    assert_eq!(protos(&plain.source, "KU_CLOSURE(").len(), 4);
+}
+
+/// Realms issue 08: nearly every closure the core bootstrap makes is a region closure.
+#[test]
+fn the_core_bootstraps_closures_are_region_closures() {
+    let root = TestDirectory::new("kiln-bootstrap-region");
+    let policy = EmissionPolicy {
+        decoupled_prelude: true,
+        compact: true,
+        ..Default::default()
+    };
+    let (bootstrap, _, _, _) =
+        native_builtin_bootstrap_module(&root.cache(), "test-target", &policy, false, false, None)
+            .expect("builtin bootstrap emits");
+    let region = bootstrap.source.matches("KU_REGION_CLOSURE(").count();
+    let captured = bootstrap.source.matches("KU_CLOSURE(").count();
+    assert!(
+        region >= 300 && captured <= 40,
+        "region closure sites {region}, capturing sites {captured}"
+    );
+}
+
+/// Issue 17: a specialized unit split by `unit_chunk_bytes` -- here one function per unit --
+/// compiles unit by unit and links without a duplicate or missing definition, including the
+/// receiver caches a method's `this` reads share with callers in other units.
+#[test]
+fn a_specialized_unit_split_by_bytes_compiles_and_links_as_units() {
+    let source = r#"
+class Point {
+  constructor(x, y) { this.x = x; this.y = y; }
+  norm() { return Math.sqrt(this.x * this.x + this.y * this.y); }
+  scaled(k) { return new Point(this.x * k, this.y * k); }
+}
+function total(points) { let s = 0; for (const p of points) s += p.norm(); return s; }
+function build(n) { const out = []; for (let i = 0; i < n; i++) out.push(new Point(i, i + 1).scaled(2)); return out; }
+export const answer = total(build(10));
+"#;
+    let hir = kiln_frontend_oxc::parse("split.js", source);
+    let program = kiln_ir::compile_module(&hir).expect("compiles");
+    let policy = EmissionPolicy {
+        decoupled_prelude: true,
+        compact: true,
+        unit_chunk_bytes: Some(1),
+        ..Default::default()
+    };
+    let module =
+        kiln_backend_c::emit_module_with_logical_path_and_policy(&program, "split.js", policy)
+            .expect("emits");
+    assert!(!module.generic_only);
+    assert!(
+        module.chunks.len() > 2,
+        "one unit per function: {}",
+        module.chunks.len()
+    );
+    let root = TestDirectory::new("kiln-native-split-units");
+    fs::write(
+        root.path.join(kiln_backend_c::RUNTIME_PRELUDE_HEADER_NAME),
+        kiln_backend_c::runtime_prelude_header(),
+    )
+    .unwrap();
+    let mut objects = Vec::new();
+    for (index, chunk) in module.chunks.iter().enumerate() {
+        let name = format!("unit_{index}.c");
+        fs::write(root.path.join(&name), chunk).unwrap();
+        let object = format!("unit_{index}.o");
+        let compile = std::process::Command::new("cc")
+            .current_dir(&root.path)
+            .args([
+                "-std=c11",
+                "-O0",
+                "-fno-common",
+                "-Werror=implicit-function-declaration",
+                "-c",
+                &name,
+                "-o",
+                &object,
+            ])
+            .output()
+            .expect("a C compiler is available for native tests");
+        assert!(
+            compile.status.success(),
+            "unit {index} did not compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        objects.push(object);
+    }
+    // A relocatable link of every unit: a symbol defined twice fails here.
+    let link = std::process::Command::new("cc")
+        .current_dir(&root.path)
+        .args(["-r", "-nostdlib", "-o", "all.o"])
+        .args(&objects)
+        .output()
+        .expect("a linker is available for native tests");
+    assert!(
+        link.status.success(),
+        "units did not link:\n{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
 }
 
 #[test]
@@ -483,6 +665,7 @@ fn native_graph_wiring_uses_resolved_star_export_origins() {
         &NativeRealmPolicy::default().emission(),
         false,
         true,
+        None,
     )
     .expect("builtin bootstrap emits");
     let bootstrapped = graph_launcher_source_with_imports(

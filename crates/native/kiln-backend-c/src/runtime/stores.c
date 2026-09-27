@@ -38,23 +38,35 @@ static double kiln_c99_array_index(kiln_value key) {
  *
  * It carries `constructor` back to the function, which is what makes `x.constructor === C` true
  * and what a console reads to print `C {}` rather than `{}`. The two point at each other, so a
- * constructor that is never collected keeps its prototype alive -- and nothing here collects. */
+ * constructor that is never collected keeps its prototype alive -- and nothing here collects.
+ *
+ * An undefined slot means "not created yet"; a program's own `f.prototype = undefined` is stored
+ * as a hole instead (properties.c), because it has to stick: materialising a fresh object for it
+ * let `class U extends f {}` define a class where the language throws (issue 28). */
 static int kiln_c99_prototype_object(kiln_value function, kiln_value *out) {
     kiln_closure *closure = kiln_c99_closure_of(function);
-    if (closure->prototype.tag == KILN_VALUE_UNDEFINED) {
-        int status = kiln_c99_new_object(&closure->prototype);
+    kiln_value prototype = kiln_c99_closure_prototype(closure);
+    if (prototype.tag == KILN_VALUE_HOLE) {
+        prototype = kiln_c99_undefined();
+    } else if (prototype.tag == KILN_VALUE_UNDEFINED) {
+        /* A region closure's is the realm's (realms issue 08): its slot is in the realm context. */
+        kiln_value *slot = kiln_c99_closure_prototype_slot(closure);
+        int status;
+        if (slot == NULL) return KILN_C99_OUT_OF_MEMORY;
+        status = kiln_c99_new_object(slot);
         if (status != KILN_C99_OK) {
             return status;
         }
         /* Defined rather than assigned: `constructor` is a real property and is never
          * enumerated, so `for (const k in new C())` visits what the constructor assigned and not
          * the link back to the class. */
-        status = kiln_c99_define_method(closure->prototype, "constructor", 11, function);
+        status = kiln_c99_define_method(*slot, "constructor", 11, function);
         if (status != KILN_C99_OK) {
             return status;
         }
+        prototype = *slot;
     }
-    *out = closure->prototype;
+    *out = prototype;
     return KILN_C99_OK;
 }
 
@@ -176,13 +188,18 @@ int kiln_c99_get_array_unscopables(kiln_value *out) {
  * function and an instance method belongs to what it constructs. */
 static int kiln_c99_function_store(kiln_value function, kiln_value *out) {
     kiln_closure *closure = kiln_c99_closure_of(function);
-    if (closure->properties.tag == KILN_VALUE_UNDEFINED) {
-        int status = kiln_c99_new_object(&closure->properties);
+    kiln_value store = kiln_c99_closure_store(closure);
+    if (store.tag == KILN_VALUE_UNDEFINED) {
+        kiln_value *slot = kiln_c99_closure_store_slot(closure);
+        int status;
+        if (slot == NULL) return KILN_C99_OUT_OF_MEMORY;
+        status = kiln_c99_new_object(slot);
         if (status != KILN_C99_OK) {
             return status;
         }
+        store = *slot;
     }
-    *out = closure->properties;
+    *out = store;
     return KILN_C99_OK;
 }
 
@@ -239,6 +256,9 @@ static void kiln_c99_realm_note_store(void) {
 static void kiln_c99_builtin_bootstrap_done(void) {
     kiln_gc_heap *heap = kiln_c99_gc_heap();
     if (heap == NULL) return;
+    /* The realm that built the shared region has made every closure it will hold (realms issue
+     * 08): protect it and let every other realm read it. */
+    kiln_c99_region_seal(heap);
     __atomic_sub_fetch(&kiln_c99_builtin_store_epoch, heap->builtin_stores, __ATOMIC_RELAXED);
     heap->builtin_stores = 0;
     memset(heap->program_builtins, 0, sizeof heap->program_builtins);
@@ -296,7 +316,7 @@ static int kiln_c99_callable_store_lookup(kiln_value callable, kiln_value *out, 
     kiln_method_store *entry;
     if (callable.tag == KILN_VALUE_FUNCTION) {
         kiln_closure *closure = kiln_c99_closure_of(callable);
-        if (closure->properties.tag != KILN_VALUE_OBJECT && !create) {
+        if (kiln_c99_closure_store(closure).tag != KILN_VALUE_OBJECT && !create) {
             KILN_C99_ABSENT("a callable with no property store, so it has no own member to "
                             "answer",
                             out);
@@ -438,6 +458,19 @@ kiln_c99_realm_builtins_untouched(uint64_t mask0, uint64_t mask1, int beyond) {
     return kiln_c99_realm_builtins_untouched_in(heap, mask0, mask1, beyond);
 }
 
+/* Issue 30: whether this realm's program has written an own property onto `builtin` -- exactly
+ * that built-in, nothing folded in. A read off a receiver whose members come from a method table
+ * (a string's `trim`, an array's `join`, a number's `toFixed`) asks it before the table, since a
+ * written member shadows the table's. No heap answers yes: the store is consulted, which costs a
+ * lookup and is never wrong. The cold half of `kiln_c99_program_wrote_builtin`. */
+static __attribute__((noinline)) int kiln_c99_realm_program_wrote(uint32_t builtin) {
+    const kiln_gc_heap *heap = kiln_c99_gc_heap();
+    if (heap == NULL) return 1;
+    if (heap->builtin_stores == 0) return 0;
+    if (builtin >= 64u * KILN_C99_MODIFIED_BUILTIN_WORDS) return heap->program_builtin_beyond;
+    return (int)((heap->program_builtins[builtin >> 6] >> (builtin & 63u)) & 1u);
+}
+
 /* Whether `builtin`'s own-property store holds `member` (spelt `len` bytes). A built-in's own
  * members are its table's until the program writes one: every read consults the store first
  * (`read.c`, the top of the built-in case), and a delete of a table member changes nothing. So a
@@ -458,7 +491,7 @@ static int kiln_c99_builtin_store_has_own(uint32_t builtin, const char *member, 
 
 /* Where `member_answers` keeps the answer about (`builtin`, `member`). */
 static inline size_t kiln_c99_member_answer_at(uint32_t builtin, const char *member) {
-    return (((uintptr_t)member >> 3) ^ builtin) & 7u;
+    return (((uintptr_t)member >> 3) ^ (builtin * 0x9e3779b1u)) & 63u;
 }
 
 /* The member-granular answer's common path, or -1 when it has to read the store: yes while the
@@ -514,6 +547,171 @@ kiln_c99_realm_builtin_member_untouched(uint32_t builtin, const char *member, si
     return kiln_c99_realm_member_answer(builtin, member, len);
 }
 
+/* Issue 30: the prototypes whose members a receiver *kind* answers from a method table (a string's
+ * `trim`, an array's `join`, a map's `get`, a regexp's `test`), and so the ones an emitted method
+ * fast path -- which answers by name for whichever of these kinds the receiver turns out to be --
+ * relies on. Object.prototype is not here: every name the fast paths answer is an own member of
+ * one of these, which shadows it. */
+static const uint32_t kiln_c99_kind_prototypes[] = {
+    KILN_C99_BUILTIN_ARRAY_PROTOTYPE,       KILN_C99_BUILTIN_STRING_PROTOTYPE,
+    KILN_C99_BUILTIN_NUMBER_PROTOTYPE,      KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE,
+    KILN_C99_BUILTIN_REGEXP_PROTOTYPE,      KILN_C99_BUILTIN_MAP_PROTOTYPE,
+    KILN_C99_BUILTIN_SET_PROTOTYPE,         KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE,
+    KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE,    KILN_C99_BUILTIN_PROMISE_PROTOTYPE,
+    KILN_C99_BUILTIN_DATE_PROTOTYPE,        KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE,
+    KILN_C99_BUILTIN_INT8_ARRAY_PROTOTYPE,  KILN_C99_BUILTIN_UINT8_ARRAY_PROTOTYPE,
+    KILN_C99_BUILTIN_UINT8_CLAMPED_ARRAY_PROTOTYPE, KILN_C99_BUILTIN_INT16_ARRAY_PROTOTYPE,
+    KILN_C99_BUILTIN_UINT16_ARRAY_PROTOTYPE, KILN_C99_BUILTIN_INT32_ARRAY_PROTOTYPE,
+    KILN_C99_BUILTIN_UINT32_ARRAY_PROTOTYPE, KILN_C99_BUILTIN_FLOAT32_ARRAY_PROTOTYPE,
+    KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE, KILN_C99_BUILTIN_BIG_INT64_ARRAY_PROTOTYPE,
+    KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE,
+};
+/* Stands for "every kind prototype" in `member_answers`; no built-in has this number. */
+#define KILN_C99_ANY_KIND_PROTOTYPE UINT32_C(0xfffffffe)
+
+static int kiln_c99_realm_kind_member_compute(const kiln_gc_heap *heap, const char *member,
+                                              size_t len) {
+    size_t index;
+    for (index = 0; index < sizeof kiln_c99_kind_prototypes / sizeof kiln_c99_kind_prototypes[0];
+         ++index) {
+        uint32_t builtin = kiln_c99_kind_prototypes[index];
+        if (((heap->program_builtins[builtin >> 6] >> (builtin & 63u)) & 1u) != 0 &&
+            kiln_c99_builtin_store_has_own(builtin, member, len)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static __attribute__((noinline)) KILN_C99_RARE_CALL int kiln_c99_realm_kind_member_answer(const char *member,
+                                                                                         size_t len) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    size_t at;
+    int untouched;
+    if (heap == NULL) return 0;
+    if (heap->builtin_stores == 0) return 1;
+    at = kiln_c99_member_answer_at(KILN_C99_ANY_KIND_PROTOTYPE, member);
+    if (heap->member_answers[at].member == member &&
+        heap->member_answers[at].builtin == KILN_C99_ANY_KIND_PROTOTYPE &&
+        heap->member_answers[at].serial == heap->builtin_store_serial) {
+        return heap->member_answers[at].untouched;
+    }
+    untouched = kiln_c99_realm_kind_member_compute(heap, member, len);
+    heap->member_answers[at].member = member;
+    heap->member_answers[at].builtin = KILN_C99_ANY_KIND_PROTOTYPE;
+    heap->member_answers[at].serial = heap->builtin_store_serial;
+    heap->member_answers[at].untouched = (uint8_t)untouched;
+    return untouched;
+}
+
+/* The cold half of `kiln_c99_kind_member_unmodified`: no kind prototype's store holds `member` in
+ * a realm whose program has written onto that prototype. Remembered per member until the realm's
+ * next store onto a built-in, like the member answer above. */
+static __attribute__((noinline, pure)) KILN_C99_RARE_CALL int
+kiln_c99_realm_kind_member_untouched(const char *member, size_t len) {
+    const kiln_gc_heap *heap = kiln_c99_gc_heap_if_cached();
+    size_t at;
+    if (KILN_UNLIKELY(heap == NULL)) return kiln_c99_realm_kind_member_answer(member, len);
+    if (heap->builtin_stores == 0) return 1;
+    at = kiln_c99_member_answer_at(KILN_C99_ANY_KIND_PROTOTYPE, member);
+    if (KILN_LIKELY(heap->member_answers[at].member == member &&
+                    heap->member_answers[at].builtin == KILN_C99_ANY_KIND_PROTOTYPE &&
+                    heap->member_answers[at].serial == heap->builtin_store_serial)) {
+        return heap->member_answers[at].untouched;
+    }
+    return kiln_c99_realm_kind_member_answer(member, len);
+}
+
+/* Whether the program has written onto any prototype a receiver of kind `tag` finds members on
+ * before the table answers: the kind's own prototype, and Object.prototype for the members a
+ * table hands out on its behalf (`hasOwnProperty`). */
+static int kiln_c99_realm_tag_prototypes_pristine(const kiln_gc_heap *heap, uint8_t tag) {
+    uint64_t mask0 = UINT64_C(1) << KILN_C99_BUILTIN_OBJECT_PROTOTYPE, mask1 = 0;
+    if (heap == NULL) return 0;
+    if (heap->builtin_stores == 0) return 1;
+#define KILN_C99_TAG_PROTO(id)                                                                      \
+    do {                                                                                           \
+        if ((id) < 64) mask0 |= UINT64_C(1) << (id);                                               \
+        else mask1 |= UINT64_C(1) << ((id) - 64);                                                  \
+    } while (0)
+    switch (tag) {
+    case KILN_VALUE_STRING: KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_STRING_PROTOTYPE); break;
+    case KILN_VALUE_NUMBER: KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_NUMBER_PROTOTYPE); break;
+    case KILN_VALUE_BOOLEAN: KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE); break;
+    case KILN_VALUE_ARRAY: KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_ARRAY_PROTOTYPE); break;
+    case KILN_VALUE_REGEXP: KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_REGEXP_PROTOTYPE); break;
+    case KILN_VALUE_COLLECTION:
+        KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_MAP_PROTOTYPE);
+        KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_SET_PROTOTYPE);
+        KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE);
+        KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE);
+        break;
+    case KILN_VALUE_TYPED_ARRAY:
+        KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE);
+        KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_INT8_ARRAY_PROTOTYPE);
+        KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_UINT8_ARRAY_PROTOTYPE);
+        KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_UINT8_CLAMPED_ARRAY_PROTOTYPE);
+        KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_INT16_ARRAY_PROTOTYPE);
+        KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_UINT16_ARRAY_PROTOTYPE);
+        KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_INT32_ARRAY_PROTOTYPE);
+        KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_UINT32_ARRAY_PROTOTYPE);
+        KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_FLOAT32_ARRAY_PROTOTYPE);
+        KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE);
+        KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_BIG_INT64_ARRAY_PROTOTYPE);
+        KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE);
+        break;
+    default: return 0;
+    }
+#undef KILN_C99_TAG_PROTO
+    return (heap->program_builtins[0] & mask0) == 0 && (heap->program_builtins[1] & mask1) == 0;
+}
+typedef char kiln_c99_tag_prototypes_fit_the_bitmap[KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE < 128 &&
+                                                            KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE < 128
+                                                        ? 1
+                                                        : -1];
+
+
+
+/* The cold half of `kiln_c99_tag_method_pristine`: a site's method remembered for a receiver
+ * *kind* (every string answers `trim` with the same method code) is the table's, and it is still
+ * the answer while no prototype the kind's lookup walks before the table holds a member of that
+ * name the program wrote. Object-granular first -- a realm that wrote onto none of them answers
+ * at once -- then by the method's name, remembered per name like the member answers above, so a
+ * realm that polyfilled `Array.prototype.last` keeps `join` cached. A written member means the
+ * site asks by name, which consults the stores first (`read.c`). */
+static int kiln_c99_realm_tag_method_compute(const kiln_gc_heap *heap, uint64_t code) {
+    const char *name = kiln_c99_method_name(code);
+    size_t len;
+    if (name == NULL) return 0;
+    len = strlen(name);
+    if (!kiln_c99_realm_kind_member_compute(heap, name, len)) return 0;
+    return ((heap->program_builtins[0] >> KILN_C99_BUILTIN_OBJECT_PROTOTYPE) & 1u) == 0 ||
+           !kiln_c99_builtin_store_has_own(KILN_C99_BUILTIN_OBJECT_PROTOTYPE, name, len);
+}
+static int kiln_c99_realm_tag_method_pristine_in(kiln_gc_heap *heap, uint8_t tag, uint64_t code) {
+    size_t at;
+    int pristine;
+    if (heap == NULL) return 0;
+    if (kiln_c99_realm_tag_prototypes_pristine(heap, tag)) return 1;
+    at = (size_t)((code * 0x9e3779b97f4a7c15u) >> 58);
+    if (heap->method_answers[at].code == code && heap->method_answers[at].tag == tag &&
+        heap->method_answers[at].serial == heap->builtin_store_serial) {
+        return heap->method_answers[at].pristine;
+    }
+    pristine = kiln_c99_realm_tag_method_compute(heap, code);
+    heap->method_answers[at].code = code;
+    heap->method_answers[at].tag = tag;
+    heap->method_answers[at].serial = heap->builtin_store_serial;
+    heap->method_answers[at].pristine = (uint8_t)pristine;
+    return pristine;
+}
+static __attribute__((noinline, pure)) KILN_C99_RARE_CALL int kiln_c99_realm_tag_method_pristine(uint8_t tag,
+                                                                                               uint64_t code) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_if_cached();
+    if (KILN_UNLIKELY(heap == NULL)) heap = kiln_c99_gc_heap();
+    return kiln_c99_realm_tag_method_pristine_in(heap, tag, code);
+}
+
 /* Canonical headed store walk shared by arrays, collections and promises. The raw helper in
  * keys.c remains a Latin1 adapter for fixed C names; arbitrary property keys enter here so the
  * receiver's store and its prototype chain compare UTF-16 units exactly once. */
@@ -531,7 +729,7 @@ static int kiln_c99_store_get_key(kiln_host *host, kiln_value target,
         kiln_object *object;
         size_t index;
         if (current.tag == KILN_VALUE_FUNCTION) {
-            current = kiln_c99_closure_of(current)->properties;
+            current = kiln_c99_closure_store(kiln_c99_closure_of(current));
         }
         if (current.tag != KILN_VALUE_OBJECT) return KILN_C99_OK;
         object = kiln_c99_object_of(current);

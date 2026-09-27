@@ -1661,6 +1661,8 @@ expected_stdout = "bundle\n"
             .map(|test| selector_metadata(test, TestMode::Node))
             .collect::<Vec<_>>();
         let expected = [
+            // Imports `node:http` to drain a request on SIGTERM (realms issue 23).
+            "regress/r38-signal-drain",
             "server/s01-http-hello",
             "server/s02-routing-json",
             "server/s03-request-body-streams",

@@ -759,6 +759,12 @@ pub enum Native {
     /// `__kilnQueueIo(callback, argument)`: `callback(argument)` as an I/O callback, node's poll
     /// phase (`kiln_runtime::Realm::queue_io`), which is where a message port delivers.
     QueueIoRaw,
+    /// `__kilnWorkerOp(op, ...)`: the runtime's cross-realm ports and workers
+    /// (`kiln_runtime::workers`), for `kiln-builtins/src/web_events_streams.ts`.
+    WorkerOpRaw,
+    /// `__kilnPortWait(endpoint, referenced)`: a host operation done once a cross-realm port has
+    /// something for this realm.
+    PortWaitRaw,
     /// `__kilnPromiseRejections(process)`: registers the shared unhandled-rejection tracking
     /// (`kiln-builtins/src/rejections.ts`), which the end of every microtask checkpoint calls.
     PromiseRejectionsRaw,

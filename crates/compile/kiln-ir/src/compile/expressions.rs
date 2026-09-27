@@ -591,6 +591,9 @@ impl super::Compiler {
                 )
             })
             .then(|| self.declare_home_binding(span));
+        // The hidden local a pending pair's computed key converts through, in a scope of its own
+        // that is opened by the first key needing it and closed with the literal.
+        let mut key_slot: Option<String> = None;
 
         for member in members {
             match member {
@@ -634,7 +637,12 @@ impl super::Compiler {
                             ObjectKey::Static(key) => {
                                 self.push_constant(Constant::String(key.clone().into()));
                             }
-                            ObjectKey::Computed(key) => self.expression(key),
+                            // The object is beneath the key, which is the pair `ToPropertyKey`
+                            // reads.
+                            ObjectKey::Computed(key) => {
+                                self.expression(key);
+                                self.code.push(Instruction::ToPropertyKey);
+                            }
                         }
                         if method && let Some(home) = &home {
                             self.home_bindings.push(home.clone());
@@ -644,7 +652,12 @@ impl super::Compiler {
                         if method && home.is_some() {
                             self.home_bindings.pop();
                         }
-                        self.code.push(Instruction::DefineNamedProperty);
+                        // Only an anonymous function definition takes the key as its name: a
+                        // pair here only because it follows a spread defines without renaming
+                        // what its value already is (`{ ...o, f: foo }` keeps `foo.name`).
+                        self.code.push(Instruction::DefineNamedProperty {
+                            name_function: method || anonymous_function_value(&property.value),
+                        });
                         continue;
                     }
                     match &property.key {
@@ -658,7 +671,10 @@ impl super::Compiler {
                         }
                         // Evaluated in source order, between the members around it, because a
                         // computed key is an arbitrary expression and may have side effects.
-                        ObjectKey::Computed(key) => self.expression(key),
+                        ObjectKey::Computed(key) => {
+                            self.expression(key);
+                            self.pending_literal_key(key, &mut key_slot, span);
+                        }
                     }
                     // A method's body is the only part of a member the literal's own home
                     // covers. A value's is not: `{ v: super.m() }` inside a class method reads
@@ -699,7 +715,10 @@ impl super::Compiler {
                         ObjectKey::Static(name) => {
                             self.push_constant(Constant::String(name.clone().into()));
                         }
-                        ObjectKey::Computed(key) => self.expression(key),
+                        ObjectKey::Computed(key) => {
+                            self.expression(key);
+                            self.code.push(Instruction::ToPropertyKey);
+                        }
                     }
                     if let Some(home) = &home {
                         self.home_bindings.push(home.clone());
@@ -721,6 +740,9 @@ impl super::Compiler {
             }
         }
         self.emit_object_segment(&mut pending, accumulating);
+        if key_slot.is_some() {
+            self.scopes.pop().expect("the literal's key scope was pushed");
+        }
         // The literal is the home object its methods were defined on, so it is what the binding
         // they captured has to hold -- duplicated rather than reloaded, because the literal is
         // also this expression's value.
@@ -729,6 +751,44 @@ impl super::Compiler {
             let home = home.clone();
             self.store_home_binding(&home);
         }
+    }
+
+    /// `ToPropertyKey` of a computed key in a pending run of pairs, where it happens: after the
+    /// key and before the value, so `{ [k]: v() }` runs `k`'s `toString` before `v` and a throw
+    /// from it stops the literal there. Converting when the object is built ran it after every
+    /// value, and the native backend did not run it at all (issue 24).
+    ///
+    /// `ToPropertyKey` reads the object beneath its key, and a pending pair has none -- only the
+    /// previous pair's value, which may be nullish. The key itself stands in for it (a nullish
+    /// key is a primitive and needs no conversion), and a hidden local carries the converted key
+    /// past the original. A key that is syntactically a primitive is left alone.
+    fn pending_literal_key(
+        &mut self,
+        key: &Expression,
+        slot: &mut Option<String>,
+        span: Span,
+    ) {
+        if matches!(
+            key.kind,
+            kiln_hir::ExpressionKind::Literal(_) | kiln_hir::ExpressionKind::Template { .. }
+        ) {
+            return;
+        }
+        let name = match slot {
+            Some(name) => name.clone(),
+            None => {
+                let name = format!("%okey{}", self.hidden_bindings);
+                self.hidden_bindings += 1;
+                self.scopes.push(HashMap::new());
+                *slot = Some(name.clone());
+                name
+            }
+        };
+        self.code.push(Instruction::Dup);
+        self.code.push(Instruction::ToPropertyKey);
+        self.declare_hidden(&name, span);
+        self.code.push(Instruction::Pop);
+        self.load_hidden(&name);
     }
 
     /// Emit the pending run of key/value pairs as an object, merging it into the accumulator

@@ -989,6 +989,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let trace = captured_trace(reason);
         let instruction = self.instruction;
         let described = self.describe_uncaught(reason, instruction);
+        // The value, for whoever reports it (a worker's parent gets a copy of the reason).
+        self.uncaught_value = Some(reason.clone());
         ExecutionError::Uncaught {
             instruction,
             message: format!("(in promise) {described}"),

@@ -270,6 +270,16 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_OBJECT) {
         return kiln_c99_object_constructor(result, args, argc);
     }
+    /* `new SharedArrayBuffer(length, options)`: the shared bootstrap's constructor
+     * (`arraybuffer.ts`), which makes every check and asks `__kilnSharedBuffer` for the store. */
+    if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER) {
+        kiln_value *slot;
+        status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_SHARED_ARRAY_BUFFER, &slot);
+        if (status != KILN_C99_OK) return status;
+        if (!kiln_c99_is_callable(*slot))
+            KILN_C99_REFUSE("SharedArrayBuffer before the runtime bootstrap defined it");
+        return kiln_c99_call(host, result, *slot, kiln_c99_undefined(), args, argc, depth, thrown);
+    }
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_ARRAY_BUFFER) {
         size_t length;
         status = kiln_c99_to_index(argc > 0 ? args[0] : kiln_c99_undefined(), &length, thrown);
@@ -524,6 +534,14 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     status = kiln_c99_new_object(&instance);
     if (status != KILN_C99_OK) {
         return status;
+    }
+    /* GetPrototypeFromConstructor substitutes `Object.prototype` for a `prototype` that is not an
+     * object -- an assigned undefined or null among them -- and an unrecorded link is that. A null
+     * link would mean `Object.create(null)`, which is not what `new` builds. */
+    if (prototype.tag == KILN_VALUE_NULL || prototype.tag == KILN_VALUE_BOOLEAN ||
+        prototype.tag == KILN_VALUE_NUMBER || prototype.tag == KILN_VALUE_STRING ||
+        prototype.tag == KILN_VALUE_SYMBOL || prototype.tag == KILN_VALUE_BIGINT) {
+        prototype = kiln_c99_undefined();
     }
     kiln_c99_object_of(instance)->prototype = prototype;
     /* Inside the body being constructed, `new.target` is the constructor the `new` named -- and
@@ -794,6 +812,39 @@ static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype) {
     KILN_C99_REFUSE("setting the prototype of a value with no prototype slot");
 }
 
+/* IsConstructor, as far as `class ... extends` needs it. A generated function knows what it was
+ * written as; a bound function and a proxy are constructors exactly when their targets are. Every
+ * other callable here is a built-in, and the built-ins that are not constructors have no
+ * `prototype` either, which the class's own check on `prototype` refuses. */
+static int kiln_c99_heritage_constructs(kiln_value value) {
+    if (value.tag == KILN_VALUE_PROXY) {
+        return kiln_c99_heritage_constructs(kiln_c99_proxy_of(value)->target);
+    }
+    if (value.tag == KILN_VALUE_BOUND) {
+        return kiln_c99_heritage_constructs(((kiln_bound *)(uintptr_t)value.bits)->target);
+    }
+    if (value.tag == KILN_VALUE_FUNCTION) {
+        kiln_closure *closure = kiln_c99_closure_of(value);
+        return !(closure->arrow || closure->generator || closure->asynchronous ||
+                 closure->is_method);
+    }
+    return kiln_c99_is_callable(value);
+}
+
+/* `SetPrototype` as emitted: a function target is `class D extends X` linking the two
+ * constructors, and ClassDefinitionEvaluation refuses a heritage that is neither `null` nor a
+ * constructor before anything is linked. Without the check `class U extends 1 {}` built a class
+ * natively, where the interpreter and node throw (issue 25). */
+static int kiln_c99_set_prototype_checked(kiln_value target, kiln_value prototype,
+                                          kiln_value *thrown) {
+    if (target.tag == KILN_VALUE_FUNCTION && prototype.tag != KILN_VALUE_NULL &&
+        !kiln_c99_heritage_constructs(prototype)) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "class heritage is not a constructor or null");
+    }
+    return kiln_c99_set_prototype(target, prototype);
+}
+
 /* `x instanceof C` walks the same chain a property read walks, looking for `C.prototype` rather
  * than for a name -- which is why the two must agree about the shape of the chain. */
 static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *answer) {
@@ -815,7 +866,12 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
         case KILN_C99_BUILTIN_REGEXP: *answer = value.tag == KILN_VALUE_REGEXP; return KILN_C99_OK;
         case KILN_C99_BUILTIN_ARRAY: *answer = value.tag == KILN_VALUE_ARRAY; return KILN_C99_OK;
         case KILN_C99_BUILTIN_ARRAY_BUFFER:
-            *answer = value.tag == KILN_VALUE_ARRAY_BUFFER;
+            *answer = value.tag == KILN_VALUE_ARRAY_BUFFER &&
+                      kiln_c99_typed_buffer_of(value)->shared == NULL;
+            return KILN_C99_OK;
+        case KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER:
+            *answer = value.tag == KILN_VALUE_ARRAY_BUFFER &&
+                      kiln_c99_typed_buffer_of(value)->shared != NULL;
             return KILN_C99_OK;
         case KILN_C99_BUILTIN_DATA_VIEW:
             *answer = value.tag == KILN_VALUE_DATA_VIEW;
@@ -946,6 +1002,16 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
         return status;
     }
     *answer = 0;
+    /* A `prototype` that is not an object -- `F.prototype = undefined` now reads back as the
+     * undefined it is (issue 28) -- matches nothing. Walking on would compare it with the
+     * undefined an ordinary object's unrecorded link holds and answer true. OrdinaryHasInstance
+     * throws a TypeError here; that is not modelled, and false is what it answered before. */
+    if (prototype.tag == KILN_VALUE_UNDEFINED || prototype.tag == KILN_VALUE_NULL ||
+        prototype.tag == KILN_VALUE_BOOLEAN || prototype.tag == KILN_VALUE_NUMBER ||
+        prototype.tag == KILN_VALUE_STRING || prototype.tag == KILN_VALUE_SYMBOL ||
+        prototype.tag == KILN_VALUE_BIGINT) {
+        return KILN_C99_OK;
+    }
     current = value;
     {
         /* An array or a collection built by `super()` in a derived constructor carries its

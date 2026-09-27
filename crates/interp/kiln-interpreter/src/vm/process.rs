@@ -6,6 +6,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if let Some(existing) = &self.process_object {
             return existing.clone();
         }
+        // A realm shared by several machines (a module graph's) has one `process`: the one its
+        // global object was given when the first machine built it. A second machine reaching
+        // `process` must find that one, or a change made through one -- a worker's `env`,
+        // set by the bootstrap before the program runs -- is invisible through the other.
+        if let Some(Some(Value::Object(global))) =
+            self.global_objects.get(self.current_realm.0 as usize)
+            && let Some(existing @ Value::Object(_)) = global.borrow().get_own("process").cloned()
+        {
+            self.process_object = Some(existing.clone());
+            return existing;
+        }
         let mut process = ObjectData::default();
         process.set_prototype(Value::Native(
             Native::PrototypeOf(PrototypeTable::EventEmitter),
@@ -57,7 +68,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             other => other,
         };
         process.set("platform", Value::String(platform.to_owned().into()));
-        process.set("pid", Value::Number(f64::from(std::process::id())));
+        // The program's pid, which is not the process's when the daemon hosts it (realms issue 26).
+        process.set(
+            "pid",
+            Value::Number(f64::from(kiln_runtime::signals::pid())),
+        );
         process.set("version", Value::String("v22.0.0".to_owned().into()));
         process.set(
             "versions",

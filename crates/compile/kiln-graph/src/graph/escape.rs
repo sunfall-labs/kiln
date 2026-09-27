@@ -48,7 +48,7 @@ fn spread_bridge<'a>(
             pushes: 1,
         } if operands.len() == 2 => Some((&operands[0], None, Some(&operands[1]))),
         GraphOp::Bridge {
-            instruction: Instruction::DefineNamedProperty,
+            instruction: Instruction::DefineNamedProperty { .. },
             operands,
             pushes: 1,
         } if operands.len() == 3 => {

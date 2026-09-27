@@ -53,6 +53,14 @@ pub(super) fn hash_program_with_policy_and_seed(
         hash ^= 0x7e;
         hash = hash.wrapping_mul(0x100000001b3);
     }
+    if let Some(bytes) = policy.unit_chunk_bytes {
+        hash ^= 0x7d;
+        hash = hash.wrapping_mul(0x100000001b3);
+        for value in (bytes as u64).to_le_bytes() {
+            hash ^= u64::from(value);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
     if let Some(seed) = entropy_seed {
         for value in seed.to_le_bytes() {
             hash ^= u64::from(value);
@@ -267,7 +275,10 @@ pub(super) fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 byte(&mut hash, u8::from(*enumerable));
             }
             Instruction::DefineMethod => byte(&mut hash, 43),
-            Instruction::DefineNamedProperty => byte(&mut hash, 194),
+            Instruction::DefineNamedProperty { name_function } => {
+                byte(&mut hash, 194);
+                byte(&mut hash, u8::from(*name_function));
+            }
             Instruction::LoadTemplateObject(site) => {
                 byte(&mut hash, 195);
                 word(&mut hash, u64::from(*site));
@@ -597,6 +608,14 @@ pub(super) fn hash_module_with_policy_and_seed(
     if policy.no_kiln_extensions {
         hash ^= 0x7e;
         hash = hash.wrapping_mul(0x100000001b3);
+    }
+    if let Some(bytes) = policy.unit_chunk_bytes {
+        hash ^= 0x7d;
+        hash = hash.wrapping_mul(0x100000001b3);
+        for value in (bytes as u64).to_le_bytes() {
+            hash ^= u64::from(value);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
     }
     if let Some(seed) = entropy_seed {
         for value in seed.to_le_bytes() {

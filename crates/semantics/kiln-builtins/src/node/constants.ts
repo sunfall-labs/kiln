@@ -122,37 +122,59 @@ export const ETXTBSY = 26;
 export const EWOULDBLOCK = 35;
 export const EXDEV = 18;
 
-export const SIGHUP = 1;
-export const SIGINT = 2;
-export const SIGQUIT = 3;
-export const SIGILL = 4;
-export const SIGTRAP = 5;
-export const SIGABRT = 6;
-export const SIGIOT = 6;
-export const SIGBUS = 10;
-export const SIGFPE = 8;
-export const SIGKILL = 9;
-export const SIGUSR1 = 30;
-export const SIGSEGV = 11;
-export const SIGUSR2 = 31;
-export const SIGPIPE = 13;
-export const SIGALRM = 14;
-export const SIGTERM = 15;
-export const SIGCHLD = 20;
-export const SIGCONT = 19;
-export const SIGSTOP = 17;
-export const SIGTSTP = 18;
-export const SIGTTIN = 21;
-export const SIGTTOU = 22;
-export const SIGURG = 16;
-export const SIGXCPU = 24;
-export const SIGXFSZ = 25;
-export const SIGVTALRM = 26;
-export const SIGPROF = 27;
-export const SIGWINCH = 28;
-export const SIGIO = 23;
-export const SIGINFO = 29;
-export const SIGSYS = 12;
+// Signal numbers are the platform's, as node's are (realms issue 26): a third of them differ
+// between Linux and macOS (`SIGUSR2` is 12 on one and 31 on the other). `signals` is node's
+// `os.constants.signals`, in node's key order (src/node_constants.cc), holding only the names the
+// platform defines; the named exports below read it, so a name the platform lacks is `undefined`.
+const DARWIN = typeof process !== "undefined" && process.platform === "darwin";
+export const signals: { [name: string]: number } = DARWIN
+  ? {
+      SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGILL: 4, SIGTRAP: 5, SIGABRT: 6, SIGIOT: 6, SIGBUS: 10,
+      SIGFPE: 8, SIGKILL: 9, SIGUSR1: 30, SIGSEGV: 11, SIGUSR2: 31, SIGPIPE: 13, SIGALRM: 14,
+      SIGTERM: 15, SIGCHLD: 20, SIGCONT: 19, SIGSTOP: 17, SIGTSTP: 18, SIGTTIN: 21, SIGTTOU: 22,
+      SIGURG: 16, SIGXCPU: 24, SIGXFSZ: 25, SIGVTALRM: 26, SIGPROF: 27, SIGWINCH: 28, SIGIO: 23,
+      SIGINFO: 29, SIGSYS: 12,
+    }
+  : {
+      SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGILL: 4, SIGTRAP: 5, SIGABRT: 6, SIGIOT: 6, SIGBUS: 7,
+      SIGFPE: 8, SIGKILL: 9, SIGUSR1: 10, SIGSEGV: 11, SIGUSR2: 12, SIGPIPE: 13, SIGALRM: 14,
+      SIGTERM: 15, SIGCHLD: 17, SIGSTKFLT: 16, SIGCONT: 18, SIGSTOP: 19, SIGTSTP: 20, SIGTTIN: 21,
+      SIGTTOU: 22, SIGURG: 23, SIGXCPU: 24, SIGXFSZ: 25, SIGVTALRM: 26, SIGPROF: 27, SIGWINCH: 28,
+      SIGIO: 29, SIGPOLL: 29, SIGPWR: 30, SIGSYS: 31,
+    };
+Object.freeze(signals);
+
+export const SIGHUP = signals.SIGHUP;
+export const SIGINT = signals.SIGINT;
+export const SIGQUIT = signals.SIGQUIT;
+export const SIGILL = signals.SIGILL;
+export const SIGTRAP = signals.SIGTRAP;
+export const SIGABRT = signals.SIGABRT;
+export const SIGIOT = signals.SIGIOT;
+export const SIGBUS = signals.SIGBUS;
+export const SIGFPE = signals.SIGFPE;
+export const SIGKILL = signals.SIGKILL;
+export const SIGUSR1 = signals.SIGUSR1;
+export const SIGSEGV = signals.SIGSEGV;
+export const SIGUSR2 = signals.SIGUSR2;
+export const SIGPIPE = signals.SIGPIPE;
+export const SIGALRM = signals.SIGALRM;
+export const SIGTERM = signals.SIGTERM;
+export const SIGCHLD = signals.SIGCHLD;
+export const SIGCONT = signals.SIGCONT;
+export const SIGSTOP = signals.SIGSTOP;
+export const SIGTSTP = signals.SIGTSTP;
+export const SIGTTIN = signals.SIGTTIN;
+export const SIGTTOU = signals.SIGTTOU;
+export const SIGURG = signals.SIGURG;
+export const SIGXCPU = signals.SIGXCPU;
+export const SIGXFSZ = signals.SIGXFSZ;
+export const SIGVTALRM = signals.SIGVTALRM;
+export const SIGPROF = signals.SIGPROF;
+export const SIGWINCH = signals.SIGWINCH;
+export const SIGIO = signals.SIGIO;
+export const SIGINFO = signals.SIGINFO;
+export const SIGSYS = signals.SIGSYS;
 
 const constants = {
   COPYFILE_EXCL,
@@ -253,37 +275,6 @@ const constants = {
   O_TRUNC,
   O_WRONLY,
   R_OK,
-  SIGABRT,
-  SIGALRM,
-  SIGBUS,
-  SIGCHLD,
-  SIGCONT,
-  SIGFPE,
-  SIGHUP,
-  SIGILL,
-  SIGINFO,
-  SIGINT,
-  SIGIO,
-  SIGIOT,
-  SIGKILL,
-  SIGPIPE,
-  SIGPROF,
-  SIGQUIT,
-  SIGSEGV,
-  SIGSTOP,
-  SIGSYS,
-  SIGTERM,
-  SIGTRAP,
-  SIGTSTP,
-  SIGTTIN,
-  SIGTTOU,
-  SIGURG,
-  SIGUSR1,
-  SIGUSR2,
-  SIGVTALRM,
-  SIGWINCH,
-  SIGXCPU,
-  SIGXFSZ,
   S_IFBLK,
   S_IFCHR,
   S_IFDIR,
@@ -308,6 +299,8 @@ const constants = {
   X_OK,
   default: undefined as any,
 };
+// The platform's signals, and only those (node's `constants` has no `SIGINFO` on Linux).
+for (const name of Object.keys(signals)) (constants as any)[name] = signals[name];
 constants.default = constants;
 
 export default constants;

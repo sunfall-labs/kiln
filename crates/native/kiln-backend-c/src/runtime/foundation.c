@@ -977,7 +977,21 @@ typedef struct kiln_c99_realm_state {
     /* Where the realm's standard streams go when its host gave it a descriptor of its own -- a
      * realm hosted beside others in one process (realms issue 05) -- or 0 for the process's. */
     int output_fd;
+    /* The realm's own half of each region closure it has given a prototype or a property to
+     * (realms issue 08; `kiln_c99_region_own_slot`): a chained table keyed by the closure, whose
+     * entries never move, so a slot pointer stays valid while the table grows. */
+    struct kiln_c99_region_own **region_own;
+    size_t region_own_buckets;
+    size_t region_own_count;
 } kiln_c99_realm_state;
+
+/* A region closure's prototype and property store in one realm. */
+typedef struct kiln_c99_region_own {
+    const struct kiln_closure *closure;
+    kiln_value prototype;
+    kiln_value store;
+    struct kiln_c99_region_own *next;
+} kiln_c99_region_own;
 
 /* This thread's realm's context: its heap's, or the fallback heap's outside a realm. */
 static kiln_c99_realm_state *kiln_c99_realm(void);
@@ -1843,4 +1857,64 @@ static kiln_data_view *kiln_c99_data_view_of(kiln_value value) {
         view->byte_offset = 0;
     }
     return view;
+}
+
+/* Parallel issue 30: the C stack a call may still use. `KILN_C99_MAX_CALL_DEPTH` counts calls,
+ * which is the interpreter's limit and what a program can rely on; but a frame here is as big as
+ * the C the call went through, and a call that goes through the runtime -- `f.call(..)`, a
+ * callback from `map`, a method by name -- passes through the dispatcher, whose frame is kilobytes
+ * in an unoptimised build. So the runtime's call entries also ask how much of the thread's stack
+ * is left, and a call that would go below the floor is the same catchable `RangeError` the count
+ * raises, rather than a segfault. The floor keeps an eighth of the stack (at least 256 KiB) for
+ * the direct calls that follow a check without making one. Found once per thread. */
+#include <pthread.h>
+static _Thread_local uintptr_t kiln_c99_stack_floor;
+static __attribute__((noinline, cold)) uintptr_t kiln_c99_stack_floor_find(void) {
+    uintptr_t low = 0;
+    size_t size = 0;
+    size_t margin;
+#if defined(__APPLE__)
+    {
+        uintptr_t high = (uintptr_t)pthread_get_stackaddr_np(pthread_self());
+        size = pthread_get_stacksize_np(pthread_self());
+        low = high > size ? high - size : 0;
+    }
+#else
+    {
+        extern int pthread_getattr_np(pthread_t, pthread_attr_t *);
+        pthread_attr_t attr;
+        void *addr = NULL;
+        if (pthread_getattr_np(pthread_self(), &attr) == 0) {
+            if (pthread_attr_getstack(&attr, &addr, &size) != 0) size = 0;
+            low = (uintptr_t)addr;
+            pthread_attr_destroy(&attr);
+        }
+    }
+#endif
+    if (low == 0 || size == 0) {
+        /* Unknown: the count alone decides, as it did before. */
+        kiln_c99_stack_floor = 1;
+        return 1;
+    }
+    margin = size / 8;
+    if (margin < (size_t)256 * 1024) margin = (size_t)256 * 1024;
+    if (margin > size / 2) margin = size / 2;
+    kiln_c99_stack_floor = low + margin;
+    return kiln_c99_stack_floor;
+}
+/* Whether a call made from here would start below the floor. The stack pointer is read directly
+ * where the target allows: `__builtin_frame_address` would make every function this is inlined
+ * into set up a frame pointer. */
+static KILN_ALWAYS_INLINE inline int kiln_c99_stack_exhausted(void) {
+    uintptr_t floor = kiln_c99_stack_floor;
+    uintptr_t here;
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__)
+    __asm__("movq %%rsp, %0" : "=r"(here));
+#elif (defined(__GNUC__) || defined(__clang__)) && defined(__aarch64__)
+    __asm__("mov %0, sp" : "=r"(here));
+#else
+    here = (uintptr_t)__builtin_frame_address(0);
+#endif
+    if (KILN_UNLIKELY(floor == 0)) floor = kiln_c99_stack_floor_find();
+    return KILN_UNLIKELY(here < floor);
 }

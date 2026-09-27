@@ -930,6 +930,31 @@ fn executable_array_named_property_is_visible_to_in() {
     );
 }
 
+/// A receiver with no shape has no receiver row. An unclaimed row's key is NULL too, and its
+/// columns are the absent sentinel, so a `Date` -- whose payload reads as no shape -- used to find
+/// the first empty row and index `slots[UINT32_MAX]` (parallel-builtins issue 18).
+#[test]
+fn executable_a_receiver_without_a_shape_matches_no_empty_row() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0)).expect("emits");
+    let wrapper = format!(
+        r#"
+int main(void) {{
+    const kiln_shape *shapes[4] = {{ NULL, NULL, NULL, NULL }};
+    uint32_t slots[4][2] = {{ {{ UINT32_MAX, UINT32_MAX }}, {{ UINT32_MAX, UINT32_MAX }},
+                              {{ UINT32_MAX, UINT32_MAX }}, {{ UINT32_MAX, UINT32_MAX }} }};
+    if (kiln_c99_recv_row(shapes, &slots[0][0], 2, NULL) != NULL) return 1;
+    return 0;
+}}
+"#
+    );
+    let run = run_with_main(&generated, &wrapper, "recv-row-null-shape");
+    assert!(
+        run.status.success(),
+        "a NULL shape found a receiver row (exit {:?})",
+        run.status.code()
+    );
+}
+
 #[test]
 fn executable_typed_array_views_cover_all_element_kinds_and_aliasing() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0)).expect("emits");

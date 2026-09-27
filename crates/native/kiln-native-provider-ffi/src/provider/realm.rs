@@ -186,6 +186,13 @@ const OP_TCP_SHUTDOWN: u32 = 12;
 const OP_STDIN_READ: u32 = 13;
 const OP_MKDIR: u32 = 14;
 const OP_PROCESS_RUN: u32 = 15;
+/// Wait until a cross-realm port has something for this realm (`kiln_runtime::workers`).
+const OP_PORT_WAIT: u32 = 16;
+
+/// What a drive answers when the worker it runs has been asked to end (`process.exit`,
+/// `terminate`): the C runtime's host-error status, which no `catch` takes, so the realm unwinds
+/// to the launcher, which reads the exit code the worker asked for.
+const WORKER_EXIT: i32 = -3;
 
 const VALUE_UNDEFINED: u32 = 0;
 const VALUE_BYTES: u32 = 1;
@@ -1231,6 +1238,17 @@ fn active_realm() -> Option<Rc<NativeRealm>> {
     ACTIVE_REALM_RC.with(|slot| slot.borrow().clone())
 }
 
+/// Wake the active realm's drive if it is parked: a callback run inside a connection task has
+/// asked the realm to end (`process.exit` in a worker or a thread-mode realm), and the drive
+/// must see that now rather than at its next timeout (realms issue 23).
+pub(crate) fn wake_active_drive() {
+    if let Some(realm) = active_realm()
+        && let Ok(runtime) = realm.runtime.state.try_borrow()
+    {
+        runtime.wake_drive();
+    }
+}
+
 /// The active realm's `node:ffi` state, for `ffi.rs`; `None` outside a realm.
 #[cfg(feature = "ffi")]
 pub(crate) fn with_active_ffi_state<R>(
@@ -1327,6 +1345,9 @@ unsafe fn host_operation(view: &HostOpView) -> Option<AsyncHostOp> {
             path: text,
             recursive: view.argument != 0,
         },
+        OP_PORT_WAIT => AsyncHostOp::PortWait {
+            port: view.resource,
+        },
         _ => return None,
     })
 }
@@ -1393,6 +1414,18 @@ async fn drive_async(realm: &NativeRealm) -> i32 {
     loop {
         // A turn boundary: no generated frame is on this thread's stack.
         reclaim::quiescent();
+        // A worker whose parent called `terminate()` ends here (realms issue 06); the launcher
+        // reads the exit it asked for.
+        if kiln_runtime::workers::terminate_requested() {
+            kiln_runtime::workers::request_exit(1);
+            return WORKER_EXIT;
+        }
+        // So does one whose `process.exit` a callback's caller did not unwind with (a close
+        // callback's status is not every dispatcher's to return): the realm is over the moment
+        // it asked, not when its loop next runs dry (realms issue 23).
+        if kiln_runtime::workers::exit_requested() {
+            return WORKER_EXIT;
+        }
         tick_clock(realm);
         collect_if_due(realm);
         introspect_if_requested(realm);
@@ -3472,9 +3505,12 @@ impl kiln_runtime::HttpDispatch for NativeHttpDispatch {
                 | HttpEventKind::Closed
                 | HttpEventKind::Error
         ) {
-            // The drive may be waiting for exactly this request to finish.
+            // The drive may be waiting for exactly this request to finish. A referenced host
+            // request will wake it by completing; an unreferenced one -- a signal listener's or
+            // an unref'd port's wait (realms issue 23) -- never may, and must not leave a
+            // virtual-clock drive parked once nothing keeps the realm alive.
             let runtime = realm.runtime.state.borrow();
-            if !runtime.has_pending_host_work() {
+            if !runtime.has_referenced_host_work() {
                 runtime.wake_drive();
             }
         }
@@ -4204,6 +4240,41 @@ pub unsafe extern "C" fn kiln_realm_run_pinned(
     context: *mut c_void,
     statuses: *mut i32,
 ) -> i32 {
+    // SAFETY: the caller's contract, which is this function's.
+    unsafe { run_realms(count, run, context, statuses, false) }
+}
+
+/// `kiln_realm_run_pinned` for `KILN_WORKERS` thread mode: the same N realm threads, each of
+/// which first joins the process's listen group, so every realm listening on one address
+/// shares one socket and the process balances accepted connections across them
+/// (`kiln_runtime::listen_group`) instead of the kernel hashing them over N `SO_REUSEPORT`
+/// sockets. Realms those realms start (`node:worker_threads`) are on other threads and listen
+/// as they always have.
+///
+/// # Safety
+///
+/// As `kiln_realm_run_pinned`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_run_workers(
+    count: u64,
+    run: Option<PinnedRun>,
+    context: *mut c_void,
+    statuses: *mut i32,
+) -> i32 {
+    // SAFETY: the caller's contract, which is this function's.
+    unsafe { run_realms(count, run, context, statuses, true) }
+}
+
+/// # Safety
+///
+/// As `kiln_realm_run_pinned`.
+unsafe fn run_realms(
+    count: u64,
+    run: Option<PinnedRun>,
+    context: *mut c_void,
+    statuses: *mut i32,
+    listen_group: bool,
+) -> i32 {
     ffi(|| {
         let (Some(run), Ok(count)) = (run, usize::try_from(count)) else {
             return INVALID_ARGUMENT;
@@ -4215,10 +4286,22 @@ pub unsafe extern "C" fn kiln_realm_run_pinned(
         let shared = SharedContext(context);
         let realms: Vec<_> = (0..count as u64)
             .map(|index| {
-                pool.spawn_pinned(move || {
+                // As deep a C stack as a main thread or a worker realm's (parallel issue 30):
+                // compiled code recurses on it, up to the interpreter's 10,000 calls.
+                pool.spawn_pinned_with_stack(kiln_runtime::workers::WORKER_STACK, move || {
                     let shared = shared;
+                    if listen_group {
+                        kiln_runtime::join_listen_group();
+                        // Thread mode (realms issue 23): `process.exit` ends this realm and the
+                        // launcher decides for the rest, rather than a C `exit` under the others.
+                        kiln_runtime::workers::own_exits();
+                    }
                     // SAFETY: the caller's contract for `run` and `context`.
-                    unsafe { run(shared.0, index) }
+                    let status = unsafe { run(shared.0, index) };
+                    // A finished realm takes no more signals: one it listened for must not be
+                    // swallowed on its behalf.
+                    kiln_runtime::signals::release_thread();
+                    status
                 })
             })
             .collect();
@@ -4332,6 +4415,9 @@ macro_rules! assert_provider_export {
         };
         (realm, kiln_realm_run_pinned, realm_run_pinned) => {
             const _: unsafe extern "C" fn(u64, Option<PinnedRun>, *mut c_void, *mut i32) -> i32 = kiln_realm_run_pinned;
+        };
+        (realm, kiln_realm_run_workers, realm_run_pinned) => {
+            const _: unsafe extern "C" fn(u64, Option<PinnedRun>, *mut c_void, *mut i32) -> i32 = kiln_realm_run_workers;
         };
         (realm, kiln_realm_gc_attach, realm_gc_attach) => {
             const _: unsafe extern "C" fn(*const GcHooks, *mut c_void, *mut *mut c_void) -> i32 = kiln_realm_gc_attach;

@@ -193,7 +193,8 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
                     !kiln_c99_same_name_key(name_key, "@@unscopables")) {
                     KILN_C99_ABSENT("a reserved slot nobody set on this object", out);
                 }
-                return kiln_c99_get_key(host, target, name_key, NULL, out, depth, thrown);
+                return kiln_c99_get_key(host, target, name_key, kiln_c99_property_ikey(key), out,
+                                        depth, thrown);
             }
             /* Reserved protocol slots are reached through Symbols. An ordinary string that only
              * happens to have the same spelling remains an ordinary named property. */
@@ -289,8 +290,8 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
             KILN_C99_REFUSE("a computed property key that is neither a string nor a named symbol "
                             "slot");
         }
-        return kiln_c99_get_key(host, target, (const kiln_string *)text.ptr, NULL, out, depth,
-                                thrown);
+        return kiln_c99_get_key(host, target, (const kiln_string *)text.ptr,
+                                kiln_c99_property_ikey(key), out, depth, thrown);
     }
 }
 
@@ -352,10 +353,14 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
     }
     if (target.tag == KILN_VALUE_TYPED_ARRAY && index >= 0.0) {
         kiln_typed_array *view = kiln_c99_typed_array_of(target);
-        if (kiln_c99_typed_kind_is_bigint(view->kind))
-            return kiln_c99_typed_store(host, view, (size_t)index, value, depth, thrown);
-        kiln_c99_typed_set(view, (size_t)index, kiln_c99_as_number(value));
-        return KILN_C99_OK;
+        if (value.tag == KILN_VALUE_NUMBER && !kiln_c99_typed_kind_is_bigint(view->kind)) {
+            kiln_c99_typed_set(view, (size_t)index, kiln_c99_as_number(value));
+            return KILN_C99_OK;
+        }
+        /* Anything else takes the conversion that can call back into the program: the pure
+         * `kiln_c99_as_number` stored NaN for `{ valueOf() { return 7; } }` without calling it,
+         * and swallowed what a throwing `valueOf` threw. */
+        return kiln_c99_typed_store(host, view, (size_t)index, value, depth, thrown);
     }
     if (target.tag == KILN_VALUE_OBJECT && index >= 0.0 && index < 100000.0) {
         kiln_object *object = kiln_c99_object_of(target);
@@ -399,8 +404,8 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
             KILN_C99_REFUSE("a computed property key that is neither a string nor a named symbol "
                             "slot");
         }
-        return kiln_c99_put_mode_key(host, target, (const kiln_string *)text.ptr, NULL, value,
-                                     strict, depth, thrown);
+        return kiln_c99_put_mode_key(host, target, (const kiln_string *)text.ptr,
+                                     kiln_c99_property_ikey(key), value, strict, depth, thrown);
     }
 }
 
@@ -421,10 +426,10 @@ static int kiln_c99_write_would_accept_key(kiln_value target, const kiln_string 
     if (target.tag == KILN_VALUE_FUNCTION) {
         kiln_closure *closure = kiln_c99_closure_of(target);
         if (kiln_c99_same_name_key(key, "prototype")) {
-            return closure->properties.tag != KILN_VALUE_OBJECT ||
-                   !kiln_c99_object_of(closure->properties)->frozen;
+            return kiln_c99_closure_store(closure).tag != KILN_VALUE_OBJECT ||
+                   !kiln_c99_object_of(kiln_c99_closure_store(closure))->frozen;
         }
-        current = closure->properties;
+        current = kiln_c99_closure_store(closure);
     } else if (target.tag == KILN_VALUE_ARRAY) {
         kiln_array *array = kiln_c99_array_of(target);
         if (array->frozen) {
@@ -628,7 +633,9 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
             }
             return KILN_C99_OK;
         } else {
-            const kiln_string *ikey = kiln_c99_intern_key((const kiln_string *)text.ptr);
+            const kiln_string *ikey = key.tag == KILN_VALUE_SYMBOL
+                                          ? kiln_c99_property_ikey(key)
+                                          : kiln_c99_intern_key((const kiln_string *)text.ptr);
             uint32_t slot_idx;
             kiln_shape *next_shape;
             if (ikey == NULL) return KILN_C99_OUT_OF_MEMORY;

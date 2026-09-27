@@ -403,14 +403,35 @@ impl DirectPlan {
                 if !parallel_callbacks.contains(&(i as u32)) {
                     return Err(Refusal::new(Reason::CallbackUnknown));
                 }
-                let shape = crate::parallel::parallel_verdict(
+                // A callback tier 1 refuses may still read the heap in parallel (tier 2).
+                let tier_2 = |refusal| {
+                    let lookup = |f: u32, v: ValueId| known.parallel_callee(graphs, f, v);
+                    let calls = crate::parallel::CallGraph {
+                        graphs,
+                        captures: &known.captures,
+                        known: &lookup,
+                        root: i as u32,
+                    };
+                    crate::parallel::tier_2(
+                        g,
+                        &program.functions[i],
+                        program,
+                        &known.captures[i],
+                        refusal,
+                        Some(&calls),
+                    )
+                };
+                let shape = match crate::parallel::parallel_verdict(
                     g,
                     &program.functions[i],
                     program,
                     &known.captures[i],
-                )?;
+                ) {
+                    Ok(shape) => shape,
+                    Err(refusal) => return tier_2(refusal),
+                };
                 if !typed_eligible[i] {
-                    return Err(Refusal::new(Reason::NotTyped));
+                    return tier_2(Refusal::new(Reason::NotTyped));
                 }
                 let mut seeds: HashMap<ValueId, Proven> = g
                     .initial_locals
@@ -439,7 +460,11 @@ impl DirectPlan {
                 })
             })
             .collect();
-        let parallel_safe: Vec<bool> = parallel_verdicts.iter().map(Result::is_ok).collect();
+        // A tier-2 verdict has no typed clone: `parallel_safe` is tier 1's.
+        let parallel_safe: Vec<bool> = parallel_verdicts
+            .iter()
+            .map(|v| matches!(v, Ok(shape) if shape.heap.is_none()))
+            .collect();
         let parallel_verdicts = std::sync::Arc::new(parallel_verdicts);
         let plan_for = |graph: &FunctionGraph,
                         known: &KnownValues,
@@ -963,14 +988,35 @@ impl DirectPlan {
         for &t in &targets {
             let i = t as usize;
             verdicts[i] = (|| {
-                let shape = crate::parallel::parallel_verdict(
+                // A callback tier 1 refuses may still read the heap in parallel (tier 2).
+                let tier_2 = |refusal| {
+                    let lookup = |f: u32, v: ValueId| known.parallel_callee(graphs, f, v);
+                    let calls = crate::parallel::CallGraph {
+                        graphs,
+                        captures: &known.captures,
+                        known: &lookup,
+                        root: i as u32,
+                    };
+                    crate::parallel::tier_2(
+                        &graphs[i],
+                        &program.functions[i],
+                        program,
+                        &known.captures[i],
+                        refusal,
+                        Some(&calls),
+                    )
+                };
+                let shape = match crate::parallel::parallel_verdict(
                     &graphs[i],
                     &program.functions[i],
                     program,
                     &known.captures[i],
-                )?;
+                ) {
+                    Ok(shape) => shape,
+                    Err(refusal) => return tier_2(refusal),
+                };
                 let Some(cb) = callbacks.get(&t) else {
-                    return Err(Refusal::new(Reason::NotTyped));
+                    return tier_2(Refusal::new(Reason::NotTyped));
                 };
                 let mut seeds: HashMap<ValueId, Proven> = graphs[i]
                     .initial_locals
@@ -1000,7 +1046,11 @@ impl DirectPlan {
                 })
             })();
         }
-        let parallel_safe: Vec<bool> = verdicts.iter().map(Result::is_ok).collect();
+        // A tier-2 verdict has no typed clone: `parallel_safe` is tier 1's.
+        let parallel_safe: Vec<bool> = verdicts
+            .iter()
+            .map(|v| matches!(v, Ok(shape) if shape.heap.is_none()))
+            .collect();
         let verdicts = std::sync::Arc::new(verdicts);
 
         // The callback's own plans: its typed entry (which the site's typed-callback check and
@@ -1411,6 +1461,40 @@ struct Known {
     entry: KnownValues,
     /// Per proto, per upvalue index: what the unit knows about the binding it captures.
     captures: Vec<Vec<crate::parallel::Capture>>,
+    /// Per proto: the upvalues whose binding's one real store is a closure of a proto made at
+    /// one site (tier 4's calls through a captured `const f = x => ...`, body-checked per call).
+    captured_closures: Vec<HashMap<u32, u32>>,
+}
+
+impl Known {
+    /// Tier 4's answer to "which proto would a call through value `v` of proto `f`'s body run":
+    /// a known closure, or a captured binding holding one closure (checked again at run time).
+    fn parallel_callee(&self, graphs: &[FunctionGraph], f: u32, v: ValueId) -> Option<u32> {
+        if let Some(&t) = self.functions.get(f as usize)?.known.get(&v) {
+            return Some(t);
+        }
+        let graph = graphs.get(f as usize)?;
+        let def = |v: ValueId| {
+            graph
+                .blocks
+                .iter()
+                .flat_map(|b| b.operations.iter())
+                .find(|(id, _)| *id == v)
+                .map(|(_, op)| op)
+        };
+        let upvalue = match def(v)? {
+            GraphOp::LoadUpvalue(k) => *k,
+            GraphOp::CheckTdz { value, .. } => match def(*value)? {
+                GraphOp::LoadUpvalue(k) => *k,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        self.captured_closures
+            .get(f as usize)?
+            .get(&upvalue)
+            .copied()
+    }
 }
 
 /// What a stored value is, for the binding rule.
@@ -1491,6 +1575,19 @@ fn known_callees(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGr
             .collect()
     };
     let cells: HashMap<Owner, HashSet<u32>> = owners.iter().map(|&o| (o, cell_slots(o))).collect();
+    // A block slot is the top level's binding, unless a function the runtime bootstrap calls once
+    // published its own cell there (`module_cells`): then it is that function's binding, as the
+    // upvalue it replaced resolved to.
+    let global_binding = |slot: u32| match crate::module_cells::published_origin(slot) {
+        Some((function, local)) => Binding {
+            owner: Owner::Function(function),
+            slot: local,
+        },
+        None => Binding {
+            owner: Owner::Entry,
+            slot,
+        },
+    };
     let defines = |owner: Owner, value: ValueId| -> Stored {
         for block in &graph_of(owner).blocks {
             for (vid, op) in &block.operations {
@@ -1524,25 +1621,15 @@ fn known_callees(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGr
                     GraphOp::StoreLocal { slot, value } if !cells[&owner].contains(slot) => {
                         (Some(Binding { owner, slot: *slot }), Some(*value))
                     }
-                    GraphOp::StoreGlobal { slot, value } => (
-                        Some(Binding {
-                            owner: Owner::Entry,
-                            slot: *slot,
-                        }),
-                        Some(*value),
-                    ),
+                    GraphOp::StoreGlobal { slot, value } => {
+                        (Some(global_binding(*slot)), Some(*value))
+                    }
                     GraphOp::StoreUpvalue { index, value } => match owner {
                         Owner::Function(f) => (resolve(program, &parent, f, *index), Some(*value)),
                         Owner::Entry => (None, Some(*value)),
                     },
                     GraphOp::LoadCell(slot) => (Some(Binding { owner, slot: *slot }), None),
-                    GraphOp::LoadGlobal(slot) => (
-                        Some(Binding {
-                            owner: Owner::Entry,
-                            slot: *slot,
-                        }),
-                        None,
-                    ),
+                    GraphOp::LoadGlobal(slot) => (Some(global_binding(*slot)), None),
                     GraphOp::LoadUpvalue(index) => match owner {
                         Owner::Function(f) => (resolve(program, &parent, f, *index), None),
                         Owner::Entry => (None, None),
@@ -1578,15 +1665,17 @@ fn known_callees(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGr
     for (binding, binding_stores) in &stores {
         // A global slot read as a cell is a box, not a value; leave it alone.
         if binding.owner == Owner::Entry && cells[&Owner::Entry].contains(&binding.slot) {
-            let read_raw = reads.get(binding).is_some_and(|rs| {
-                rs.iter().any(|(owner, vid)| {
-                    graph_of(*owner)
-                        .blocks
-                        .iter()
-                        .flat_map(|b| b.operations.iter())
-                        .any(|(v, op)| v == vid && matches!(op, GraphOp::LoadGlobal(_)))
-                })
-            });
+            // (The runtime bootstrap's cell globals are read through the cell: `module_cells`.)
+            let read_raw = !crate::module_cells::is_cell_global(binding.slot)
+                && reads.get(binding).is_some_and(|rs| {
+                    rs.iter().any(|(owner, vid)| {
+                        graph_of(*owner)
+                            .blocks
+                            .iter()
+                            .flat_map(|b| b.operations.iter())
+                            .any(|(v, op)| v == vid && matches!(op, GraphOp::LoadGlobal(_)))
+                    })
+                });
             if read_raw {
                 continue;
             }
@@ -1721,7 +1810,7 @@ fn known_callees(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGr
                 instruction,
                 Instruction::DefineMethod
                     | Instruction::DefineAccessor { .. }
-                    | Instruction::DefineNamedProperty
+                    | Instruction::DefineNamedProperty { .. }
                     | Instruction::DefinePrivate { .. }
                     | Instruction::SetPrototype
                     | Instruction::PushHole
@@ -1776,10 +1865,44 @@ fn known_callees(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGr
                 .collect()
         })
         .collect();
+    // Tier 4 of the parallel built-ins: a captured binding whose one real store is a closure of a
+    // proto made at one site -- the function a call through it would run, if it runs any. Weaker
+    // than a known binding (a read may still be in the dead zone, or before the store), which is
+    // why a parallel clone never calls through one without comparing the closure's body with the
+    // proto's first (`parallel_heap`'s body check).
+    let captured_closures: Vec<HashMap<u32, u32>> = (0..graphs.len() as u32)
+        .map(|f| {
+            let mut out = HashMap::new();
+            if poisoned {
+                return out;
+            }
+            for k in 0..program.functions[f as usize].upvalues.len() as u32 {
+                let Some(binding) = resolve(program, &parent, f, k) else {
+                    continue;
+                };
+                let real: Vec<&Store> = stores
+                    .get(&binding)
+                    .map(|all| {
+                        all.iter()
+                            .filter(|s| s.stored != Stored::Undefined)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if let [one] = real[..]
+                    && let Stored::Closure(index) = one.stored
+                    && unique(index)
+                {
+                    out.insert(k, index);
+                }
+            }
+            out
+        })
+        .collect();
     let mut known = Known {
         functions: vec![KnownValues::default(); graphs.len()],
         entry: KnownValues::default(),
         captures,
+        captured_closures,
     };
     fn values_of(known: &mut Known, owner: Owner) -> &mut KnownValues {
         match owner {

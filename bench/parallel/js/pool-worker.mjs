@@ -68,6 +68,25 @@ function merge(from, to, a, mid, b) {
   while (j < b) to[k++] = from[j++];
 }
 
+// sort-records: the index permutation of [lo, hi) by `price`, stable; and a merge of two runs.
+function sortIndex(a) {
+  const { price } = input;
+  const run = [];
+  for (let i = lo; i < hi; i += 1) run.push(i);
+  run.sort((x, y) => price[x] - price[y]);
+  a.set(run, lo);
+}
+
+function mergeIndex(from, to, a, mid, b) {
+  const { price } = input;
+  let i = a;
+  let j = mid;
+  let k = a;
+  while (i < mid && j < b) to[k++] = price[from[j]] < price[from[i]] ? from[j++] : from[i++];
+  while (i < mid) to[k++] = from[i++];
+  while (j < b) to[k++] = from[j++];
+}
+
 parentPort.on("message", (msg) => {
   switch (msg.op) {
     case "ready":
@@ -85,6 +104,12 @@ parentPort.on("message", (msg) => {
       return parentPort.postMessage(0);
     case "merge":
       merge(msg.from, msg.to, msg.lo, msg.mid, msg.hi);
+      return parentPort.postMessage(0);
+    case "sortIndex":
+      sortIndex(msg.a);
+      return parentPort.postMessage(0);
+    case "mergeIndex":
+      mergeIndex(msg.from, msg.to, msg.lo, msg.mid, msg.hi);
       return parentPort.postMessage(0);
     default:
       return parentPort.postMessage(fold());

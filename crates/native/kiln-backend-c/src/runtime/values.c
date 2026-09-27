@@ -228,8 +228,9 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const kiln_
             return captured;
         }
     }
-    closure->prototype = kiln_c99_undefined();
-    closure->properties = kiln_c99_undefined();
+    closure->region = 0;
+    closure->own_prototype = kiln_c99_undefined();
+    closure->own_store = kiln_c99_undefined();
     closure->name = name;
     closure->source = source;
     closure->source_len = source_len;
@@ -242,6 +243,75 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const kiln_
     closure->upvalues = upvalues;
     *out = kiln_c99_function(closure);
     return KILN_C99_OK;
+}
+
+/* A closure-making site the emitter proved runs once per realm, at the runtime bootstrap's top
+ * level, capturing nothing (`EmissionPolicy::shared_region`; realms issue 08): the closure lives
+ * in the shared immutable region, made by the realm that builds it and handed to every realm
+ * after. `*site` is the site's process-wide slot. A realm that does not use the region, a site
+ * the builder never reached, a full reservation, or an arrow whose receiver is not the module's
+ * `undefined` all make an ordinary closure exactly as `kiln_c99_make_closure` would -- the
+ * region is an economy, never a requirement. */
+static int kiln_c99_region_closure(kiln_value *out, kiln_closure **site, kiln_body_fn body,
+                                   const kiln_string *name, const char *source, size_t source_len,
+                                   const char *diagnostic_source, uint32_t proto, uint32_t arity,
+                                   int generator, int asynchronous, int async_generator,
+                                   int is_method, int arrow, int strict, kiln_val receiver,
+                                   uint32_t local_count, uint32_t stack_size,
+                                   uint32_t handler_depth, uint32_t prologue_resume,
+                                   int publishes_frame) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    int mode = kiln_c99_region_mode(heap);
+    int status;
+    if (mode == KILN_C99_REGION_MODE_USER) {
+        kiln_closure *shared = __atomic_load_n(site, __ATOMIC_ACQUIRE);
+        if (shared != NULL) {
+            *out = kiln_c99_function(shared);
+            return KILN_C99_OK;
+        }
+    } else if (mode == KILN_C99_REGION_MODE_BUILDER && arrow != 1 &&
+               receiver == KILN_VAL_UNDEFINED && __atomic_load_n(site, __ATOMIC_ACQUIRE) == NULL) {
+        kiln_closure *closure = (kiln_closure *)kiln_c99_region_alloc(KILN_GC_CLOSURE, sizeof *closure);
+        if (closure != NULL) {
+            closure->body = body;
+            closure->generator = generator;
+            closure->asynchronous = asynchronous;
+            closure->local_count = local_count;
+            closure->stack_size = stack_size;
+            closure->handler_depth = handler_depth;
+            closure->arrow = arrow != 0;
+            closure->strict = strict;
+            closure->publishes_frame = publishes_frame;
+            closure->region = 1;
+            closure->captured_this = KILN_VAL_UNDEFINED;
+            closure->async_generator = async_generator;
+            closure->is_method = is_method;
+            closure->captured_new_target = KILN_VAL_UNDEFINED;
+            closure->captured_arguments = kiln_c99_undefined();
+            closure->own_prototype = kiln_c99_undefined();
+            closure->own_store = kiln_c99_undefined();
+            closure->name = name;
+            closure->source = source;
+            closure->source_len = source_len;
+            closure->source_value = kiln_c99_undefined();
+            closure->diagnostic_source = diagnostic_source;
+            closure->arity = arity;
+            closure->prologue_resume = prologue_resume;
+            closure->proto = proto;
+            closure->upvalue_count = 0;
+            closure->upvalues = NULL;
+            __atomic_store_n(site, closure, __ATOMIC_RELEASE);
+            *out = kiln_c99_function(closure);
+            return KILN_C99_OK;
+        }
+    }
+    status = kiln_c99_make_closure(out, body, name, source, source_len, diagnostic_source, proto,
+                                   arity, generator, asynchronous, async_generator, is_method,
+                                   arrow, strict, receiver,
+                                   kiln_val_from_boundary(kiln_c99_new_target), local_count,
+                                   stack_size, handler_depth, prologue_resume, NULL, 0);
+    if (status == KILN_C99_OK && !publishes_frame) kiln_c99_closure_of(*out)->publishes_frame = 0;
+    return status;
 }
 
 /* Stack-tail operations are outlined as operations, not as wrappers around operations. Compact
@@ -438,6 +508,10 @@ static inline int kiln_c99_invoke_closure(kiln_host *host, kiln_val *result,
                                           const kiln_val *args, size_t argc, int depth,
                                           kiln_value *thrown, kiln_generator *frame,
                                           int inherit_new_target) {
+    if (KILN_UNLIKELY(kiln_c99_stack_exhausted())) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                    "Maximum call stack size exceeded");
+    }
     if (!closure->publishes_frame && !inherit_new_target) {
         int saved_depth = kiln_c99_diagnostic_active_depth;
         int quick;
@@ -507,7 +581,7 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
     if (!kiln_c99_is_callable(callee)) {
         return kiln_c99_throw_not_a(thrown, callee, "function");
     }
-    if (depth >= KILN_C99_MAX_CALL_DEPTH) {
+    if (depth >= KILN_C99_MAX_CALL_DEPTH || kiln_c99_stack_exhausted()) {
         /* A `RangeError` the program can catch, which is what a real engine raises when the
          * stack runs out -- and what a recursive descent parser catches to report a nesting
          * limit rather than dying. */
@@ -672,6 +746,10 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         case KILN_C99_BUILTIN_ARRAY_BUFFER: {
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                         "ArrayBuffer constructor requires 'new'");
+        }
+        case KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER: {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Constructor SharedArrayBuffer requires 'new'");
         }
         case KILN_C99_BUILTIN_DATA_VIEW: {
             /* The interpreter's wording, word for word, which is not the wording of the

@@ -1443,20 +1443,26 @@ fn native_build_launcher_supports_workers_auto() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("workers-ok"));
 
-    // Every supervised worker learns its index and the count before its realm starts; worker 0
-    // is one of them (the supervisor runs no realm), and a worker that exits 0 is not restarted.
-    let out = Command::new(&report.output)
-        .env("KILN_WORKERS", "3")
-        .output_when_launchable()
-        .expect("run native executable with KILN_WORKERS=3");
-    assert!(out.status.success(), "{out:?}");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let mut lines: Vec<&str> = stdout.lines().collect();
-    lines.sort_unstable();
-    assert_eq!(
-        lines,
-        ["workers-ok 0/3", "workers-ok 1/3", "workers-ok 2/3"]
-    );
+    // Every worker learns its index and the count before its realm starts, in both modes: a
+    // thread-mode realm through its own `process.env`, a supervised process through its
+    // environment (worker 0 is one of them: the supervisor runs no realm). A worker that
+    // finishes with 0 is done and is not restarted.
+    for mode in ["thread", "process", ""] {
+        let out = Command::new(&report.output)
+            .env("KILN_WORKERS", "3")
+            .env("KILN_WORKERS_MODE", mode)
+            .output_when_launchable()
+            .expect("run native executable with KILN_WORKERS=3");
+        assert!(out.status.success(), "{mode}: {out:?}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let mut lines: Vec<&str> = stdout.lines().collect();
+        lines.sort_unstable();
+        assert_eq!(
+            lines,
+            ["workers-ok 0/3", "workers-ok 1/3", "workers-ok 2/3"],
+            "{mode}"
+        );
+    }
 
     // A single realm sets neither variable, so the program sees the environment node would.
     let out = Command::new(&report.output)
@@ -1509,6 +1515,7 @@ fn native_build_records_a_worker_count_and_surfaces_a_worker_exit_status() {
     // and 2 may be stopped before they print, which is that same rule, so only worker 1 is read.
     let out = Command::new(&report.output)
         .env_remove("KILN_WORKERS")
+        .env("KILN_WORKERS_MODE", "process")
         .output_when_launchable()
         .expect("run native executable with its recorded worker count");
     assert_eq!(out.status.code(), Some(7), "{out:?}");
@@ -1524,6 +1531,20 @@ fn native_build_records_a_worker_count_and_surfaces_a_worker_exit_status() {
         "{stderr}"
     );
     assert!(!stderr.contains("restarting"), "{stderr}");
+
+    // Thread mode: `process.exit(7)` in realm 1 ends the process with 7.
+    let out = Command::new(&report.output)
+        .env_remove("KILN_WORKERS")
+        .env("KILN_WORKERS_MODE", "thread")
+        .output_when_launchable()
+        .expect("run native executable in thread mode");
+    assert_eq!(out.status.code(), Some(7), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .any(|line| line == "worker 1/3"),
+        "{out:?}"
+    );
 
     // KILN_WORKERS overrides the recorded count: one realm, neither variable set.
     let out = Command::new(&report.output)

@@ -5,7 +5,8 @@
 // two empty objects for ports, `moveMessagePortToContext` handed back its argument, and
 // `markAsUncloneable` accepted a mark that nothing honoured. Every one was a silent wrong answer.
 // Each now refuses by name, and this probe is the record, so that nobody "fixes" one back into an
-// answer. Cross-realm workers (ADR 0070, issue 06) are what turns these into real answers.
+// answer. `Worker`, `BroadcastChannel` and ports across realms are real since issue 06
+// (`worker-threads-*.cjs` beside this); what is left here still needs `vm` contexts or clone marks.
 //
 // The channel stand-ins apply only where the realm has no web messaging globals; in Node mode the
 // real in-realm channels are exported, so the probe says which case it is in.
@@ -30,4 +31,3 @@ if (!webMessaging) {
 attempt("markAsUncloneable", () => wt.markAsUncloneable({}));
 attempt("moveMessagePortToContext", () => wt.moveMessagePortToContext({}, {}));
 attempt("markAsUntransferable", () => wt.markAsUntransferable({}));
-attempt("Worker", () => new wt.Worker("worker.js"));

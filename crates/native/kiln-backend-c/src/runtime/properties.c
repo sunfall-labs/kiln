@@ -262,13 +262,15 @@ static int kiln_c99_inherited_write_blocked(kiln_value proto, const kiln_string 
  * carry the canonical pointer -- is `proto_slot`, and `*holder` is that level. ABSENT: no level up
  * to `depth` has the key and the last one's prototype link is not an object; `absent` is set.
  * NONE for anything else: an accessor or a refused record, a level that is not an ordinary
- * object, a key deeper than two steps, a level that cannot be named, a reserved key. `object`'s
- * own properties are the caller's to have checked. */
-static int kiln_c99_pic_learn_path(kiln_c99_pic_entry *entry, const kiln_object *object,
-                                   const kiln_string *key, const kiln_object **holder) {
+ * object, a key deeper than two steps, a level that cannot be named, a reserved key unless
+ * `symbol` vouches for it. `object`'s own properties are the caller's to have checked. */
+static int kiln_c99_pic_learn_path_as(kiln_c99_pic_entry *entry, const kiln_object *object,
+                                      const kiln_string *key, const kiln_object **holder,
+                                      int symbol) {
     const kiln_object *level = object;
     uint32_t d;
-    if (key == NULL || kiln_c99_key_is_reserved(key) || kiln_c99_same_name_key(key, "__proto__")) {
+    if (key == NULL || (!symbol && kiln_c99_key_is_reserved(key)) ||
+        kiln_c99_same_name_key(key, "__proto__")) {
         return KILN_C99_PATH_NONE;
     }
     entry->key = key;
@@ -322,6 +324,15 @@ static int kiln_c99_pic_learn_path(kiln_c99_pic_entry *entry, const kiln_object 
     return KILN_C99_PATH_ABSENT;
 }
 
+/* A named site's path. A reserved (`@@`) key is refused: a named site never carries a symbol's,
+ * and the runtime's own slots have hiding rules the slow path keeps. `symbol` in the form above
+ * is a symbol-keyed site's (`kiln_c99_val_read_symbol`), whose key is a symbol's by
+ * construction. */
+static int kiln_c99_pic_learn_path(kiln_c99_pic_entry *entry, const kiln_object *object,
+                                   const kiln_string *key, const kiln_object **holder) {
+    return kiln_c99_pic_learn_path_as(entry, object, key, holder, 0);
+}
+
 /* Whether a transitioning store an inline-cache entry remembers may run on `object`: nothing on
  * its prototype chain intercepts the entry's key. The coarse walk answers for most objects. For
  * one whose chain holds accessors, the exact answer is remembered in the entry as a path (ADR
@@ -366,10 +377,12 @@ static __attribute__((noinline)) int kiln_c99_transition_store_clear_slow(
      * transition, restated with the path, replaces the entry (a published entry never changes). */
     memset(&path, 0, sizeof path);
     if (ikey != NULL &&
-        kiln_c99_pic_learn_path(&path, object, ikey, &holder) == KILN_C99_PATH_ABSENT) {
+        kiln_c99_pic_learn_path_as(&path, object, ikey, &holder, entry->keyed) ==
+            KILN_C99_PATH_ABSENT) {
         path.shape = object->shape;
         path.transition_to = entry->transition_to;
         path.slot = entry->slot;
+        path.keyed = entry->keyed;
         kiln_c99_site_remember(site, &path);
     }
     return 1;
@@ -428,21 +441,29 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
          * slot on the closure rather than an ordinary property -- a write that landed in the
          * store would be read back by `f.prototype` and ignored by `new`. */
         if (kiln_c99_same_name_key(key, "prototype")) {
-            if (closure->properties.tag == KILN_VALUE_OBJECT &&
-                kiln_c99_object_of(closure->properties)->frozen) {
+            kiln_value store = kiln_c99_closure_store(closure);
+            kiln_value *slot;
+            if (store.tag == KILN_VALUE_OBJECT && kiln_c99_object_of(store)->frozen) {
                 return strict ? kiln_c99_throw_read_only_key(thrown, key) : KILN_C99_OK;
             }
-            closure->prototype = value;
+            slot = kiln_c99_closure_prototype_slot(closure);
+            if (slot == NULL) return KILN_C99_OUT_OF_MEMORY;
+            /* The slot's undefined means "not created yet" (`kiln_c99_prototype_object`), so an
+             * assigned undefined is kept as a hole, which that function reads back as the
+             * undefined the program wrote rather than as a request to make one. */
+            *slot = value.tag == KILN_VALUE_UNDEFINED
+                        ? kiln_c99_value(KILN_VALUE_HOLE, 0, NULL, 0)
+                        : value;
             return KILN_C99_OK;
         }
-        if (closure->properties.tag != KILN_VALUE_OBJECT) {
-            status = kiln_c99_new_object(&closure->properties);
+        {
+            kiln_value store;
+            status = kiln_c99_function_store(target, &store);
             if (status != KILN_C99_OK) {
                 return status;
             }
+            return kiln_c99_put_mode_key(host, store, key, ikey, value, strict, depth, thrown);
         }
-        return kiln_c99_put_mode_key(host, closure->properties, key, ikey, value, strict, depth,
-                                     thrown);
     }
     if (target.tag == KILN_VALUE_METHOD || target.tag == KILN_VALUE_BUILTIN ||
         target.tag == KILN_VALUE_BOUND) {

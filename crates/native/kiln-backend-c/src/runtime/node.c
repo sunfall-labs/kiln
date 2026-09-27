@@ -2241,6 +2241,497 @@ int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code
     *result = pair; return KILN_C99_OK;
 }
 
+/* ---- Cross-realm ports and `node:worker_threads` (`kiln_runtime::workers`; realms issue 06) ---
+ *
+ * Two primitives, captured and deleted by the realm bootstrap (`kiln-builtins/src/
+ * web_events_streams.ts`), which owns every rule about what a message is: `__kilnWorkerOp(op,
+ * ...)`, the runtime's synchronous operations, and `__kilnPortWait(endpoint, referenced)`, a host
+ * operation done when an endpoint has something for this realm. What is this engine's own is the
+ * translation between its values and message tokens -- and a transferred `ArrayBuffer`, whose
+ * block moves with the message rather than being copied (ADR 0070 primitive C). */
+#define KILN_C99_WORKER_OP_CHANNEL 1
+#define KILN_C99_WORKER_OP_POST 2
+#define KILN_C99_WORKER_OP_TAKE 3
+#define KILN_C99_WORKER_OP_CLOSE 4
+#define KILN_C99_WORKER_OP_STATE 5
+#define KILN_C99_WORKER_OP_ENQUEUE 6
+#define KILN_C99_WORKER_OP_BROADCAST_JOIN 7
+#define KILN_C99_WORKER_OP_BROADCAST_POST 8
+#define KILN_C99_WORKER_OP_SPAWN 9
+#define KILN_C99_WORKER_OP_TERMINATE 10
+#define KILN_C99_WORKER_OP_SELF 11
+#define KILN_C99_WORKER_OP_CANCEL_WAIT 12
+#define KILN_C99_WORKER_OP_REAP 13
+#define KILN_C99_WORKER_OP_STDIO 14
+#define KILN_C99_WORKER_OP_REPORT_ERROR 15
+/* Process signals (`kiln_runtime::signals`, realms issue 23), for `kiln-builtins/src/signals.ts`. */
+#define KILN_C99_WORKER_OP_SIGNAL_NUMBER 16
+#define KILN_C99_WORKER_OP_SIGNAL_LISTEN 17
+#define KILN_C99_WORKER_OP_SIGNAL_UNHANDLED 18
+#define KILN_C99_WORKER_OP_KILL 19
+
+static uint64_t kiln_c99_worker_word(const kiln_value *args, size_t argc, size_t at) {
+    double number;
+    if (at >= argc || args[at].tag != KILN_VALUE_NUMBER) return 0;
+    number = kiln_c99_as_number(args[at]);
+    return number >= 0 && number <= 9007199254740991.0 ? (uint64_t)number : 0;
+}
+
+/* The tokens of a message the bootstrap flattened. A buffer in it is one the structured clone
+ * just made, which nothing else in this realm references: its block moves into the message and
+ * the buffer is left detached -- or, for a broadcast's several receivers (`copy`), its bytes are
+ * copied. The list stays rooted by the caller, and nothing here allocates on the collected heap,
+ * so the string units the tokens point at stay where they are until the provider has copied
+ * them. */
+static int kiln_c99_worker_tokens(kiln_value list, int copy, kiln_worker_token **out,
+                                  size_t *out_count, kiln_value *thrown) {
+    kiln_array *items;
+    kiln_worker_token *tokens;
+    size_t index, count;
+    *out = NULL;
+    *out_count = 0;
+    if (list.tag != KILN_VALUE_ARRAY) return kiln_c99_throw_not_a(thrown, list, "message token list");
+    items = kiln_c99_array_of(list);
+    count = items->count;
+    tokens = (kiln_worker_token *)calloc(count == 0 ? 1 : count, sizeof *tokens);
+    if (tokens == NULL) return KILN_C99_OUT_OF_MEMORY;
+    for (index = 0; index < count; ++index) {
+        kiln_value item = kiln_val_to_boundary(items->elements[index]);
+        kiln_worker_token *token = &tokens[index];
+        switch (item.tag) {
+        case KILN_VALUE_UNDEFINED:
+        case KILN_VALUE_HOLE:
+            token->kind = KILN_WORKER_TOKEN_UNDEFINED;
+            break;
+        case KILN_VALUE_NULL:
+            token->kind = KILN_WORKER_TOKEN_NULL;
+            break;
+        case KILN_VALUE_BOOLEAN:
+            token->kind = KILN_WORKER_TOKEN_BOOL;
+            token->flag = item.bits != 0 ? 1u : 0u;
+            break;
+        case KILN_VALUE_NUMBER:
+            token->kind = KILN_WORKER_TOKEN_NUMBER;
+            token->number = kiln_c99_as_number(item);
+            break;
+        case KILN_VALUE_STRING: {
+            const kiln_string *text = (const kiln_string *)item.ptr;
+            token->kind = KILN_WORKER_TOKEN_STRING;
+            if (text != NULL) {
+                token->flag = kiln_string_is_utf16(text) ? 1u : 0u;
+                token->data = text->data;
+                token->len = text->unit_len;
+            }
+            break;
+        }
+        case KILN_VALUE_ARRAY_BUFFER: {
+            kiln_typed_buffer *buffer = kiln_c99_typed_buffer_of(item);
+            if (buffer->shared != NULL) {
+                token->kind = KILN_WORKER_TOKEN_SHARED;
+                token->handle = buffer->shared;
+                token->len = buffer->byte_length;
+                break;
+            }
+            if (buffer->detached) {
+                free(tokens);
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "An ArrayBuffer is detached and could not be cloned.");
+            }
+            if (copy) {
+                token->kind = KILN_WORKER_TOKEN_BYTES;
+                token->data = buffer->bytes;
+                token->len = buffer->byte_length;
+                break;
+            }
+            token->kind = KILN_WORKER_TOKEN_MOVED;
+            token->len = buffer->byte_length;
+            if (buffer->owns_bytes) {
+                token->handle = buffer->bytes;
+            } else {
+                /* Bytes this runtime does not own (a borrowed `node:ffi` view) move as a copy. */
+                uint8_t *block = (uint8_t *)malloc(buffer->byte_length == 0 ? 1 : buffer->byte_length);
+                if (block == NULL) {
+                    free(tokens);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                if (buffer->byte_length != 0) memcpy(block, buffer->bytes, buffer->byte_length);
+                token->handle = block;
+            }
+            buffer->bytes = (uint8_t *)kiln_c99_detached_bytes;
+            buffer->byte_length = 0;
+            buffer->owns_bytes = 0;
+            buffer->detached = 1;
+            break;
+        }
+        default:
+            free(tokens);
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "kiln: a message token must be a primitive or a buffer");
+        }
+    }
+    *out = tokens;
+    *out_count = count;
+    return KILN_C99_OK;
+}
+
+/* This engine's value for one token of a message it received. A moved block or a shared store
+ * is adopted, and cleared from the token so the message does not free it too. */
+static int kiln_c99_worker_value(kiln_worker_token *token, kiln_value *out) {
+    switch (token->kind) {
+    case KILN_WORKER_TOKEN_NULL:
+        *out = kiln_c99_null();
+        return KILN_C99_OK;
+    case KILN_WORKER_TOKEN_BOOL:
+        *out = kiln_c99_boolean(token->flag != 0);
+        return KILN_C99_OK;
+    case KILN_WORKER_TOKEN_NUMBER:
+        *out = kiln_c99_number(token->number);
+        return KILN_C99_OK;
+    case KILN_WORKER_TOKEN_STRING: {
+        kiln_string *text;
+        size_t width = token->flag != 0 ? 2u : 1u;
+        if (token->len == 0) {
+            *out = kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)&kiln_c99_empty_string, 0);
+            return KILN_C99_OK;
+        }
+        if (token->len > UINT32_MAX || token->data == NULL) return KILN_C99_INVALID_ARGUMENT;
+        text = kiln_c99_gc_alloc_units((size_t)token->len,
+                                       token->flag != 0 ? KILN_STRING_UTF16 : KILN_STRING_LATIN1);
+        if (text == NULL) return KILN_C99_OUT_OF_MEMORY;
+        memcpy((void *)(uintptr_t)text->data, token->data, (size_t)token->len * width);
+        *out = kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)text, text->unit_len);
+        return KILN_C99_OK;
+    }
+    case KILN_WORKER_TOKEN_MOVED:
+    case KILN_WORKER_TOKEN_SHARED: {
+        kiln_typed_buffer *buffer;
+        if (token->len > SIZE_MAX) return KILN_C99_INVALID_ARGUMENT;
+        buffer = (kiln_typed_buffer *)kiln_c99_gc_alloc(KILN_GC_TYPED_BUFFER, sizeof *buffer);
+        if (buffer == NULL) return KILN_C99_OUT_OF_MEMORY;
+        buffer->byte_length = (size_t)token->len;
+        if (token->kind == KILN_WORKER_TOKEN_MOVED) {
+            buffer->bytes = token->handle != NULL ? (uint8_t *)token->handle
+                                                  : (uint8_t *)kiln_c99_detached_bytes;
+            buffer->owns_bytes = token->handle != NULL;
+            if (token->handle != NULL) kiln_c99_gc_note_external(buffer->byte_length);
+        } else {
+            buffer->bytes = (uint8_t *)(uintptr_t)token->data;
+            buffer->owns_bytes = 0;
+            buffer->shared = token->handle;
+            buffer->shared_capacity = token->number > 0 ? (size_t)token->number : buffer->byte_length;
+            buffer->shared_growable = token->flag != 0;
+        }
+        token->handle = NULL;
+        *out = kiln_c99_value(KILN_VALUE_ARRAY_BUFFER, (uint64_t)(uintptr_t)buffer, NULL, 0);
+        return KILN_C99_OK;
+    }
+    case KILN_WORKER_TOKEN_BYTES: {
+        int status;
+        if (token->len > SIZE_MAX) return KILN_C99_INVALID_ARGUMENT;
+        status = kiln_c99_new_typed_buffer_ex(out, (size_t)token->len, 0);
+        if (status == KILN_C99_OK && token->len != 0)
+            memcpy(kiln_c99_typed_buffer_of(*out)->bytes, token->data, (size_t)token->len);
+        return status;
+    }
+    default:
+        /* The token that stands for `undefined` in a message: a value, not a missing member. */
+        *out = kiln_c99_undefined();
+        break;
+    }
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_worker_post(uint32_t op, uint64_t port, uint32_t kind, kiln_value list,
+                                kiln_value *result, kiln_value *thrown) {
+    kiln_worker_token *tokens;
+    size_t count;
+    int posted;
+    int status = kiln_c99_worker_tokens(list, op == KILN_C99_WORKER_OP_BROADCAST_POST, &tokens,
+                                        &count, thrown);
+    if (status != KILN_C99_OK) return status;
+    posted = kiln_worker_post(op, port, kind, tokens, (uint64_t)count);
+    /* A moved block the provider refused is still this call's to free. */
+    if (posted < 0) {
+        size_t index;
+        for (index = 0; index < count; ++index)
+            if (tokens[index].kind == KILN_WORKER_TOKEN_MOVED && tokens[index].handle != NULL)
+                free(tokens[index].handle);
+    }
+    free(tokens);
+    if (posted < 0) KILN_C99_REFUSE("a message the runtime's ports would not carry");
+    *result = kiln_c99_boolean(posted > 0);
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_worker_take(uint64_t port, kiln_value *result) {
+    uint32_t kind = 0;
+    kiln_worker_token *tokens = NULL;
+    uint64_t count = 0, index;
+    void *message = NULL;
+    kiln_value list, pair, item;
+    int status = kiln_worker_take(port, &kind, &tokens, &count, &message);
+    if (status == 0) {
+        *result = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    if (status < 0) KILN_C99_REFUSE("a message the runtime's ports would not hand over");
+    status = kiln_c99_new_array(&list);
+    for (index = 0; status == KILN_C99_OK && index < count; ++index) {
+        status = kiln_c99_worker_value(&tokens[index], &item);
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(list, item);
+    }
+    kiln_worker_message_free(message);
+    if (status == KILN_C99_OK) status = kiln_c99_new_array(&pair);
+    if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, kiln_c99_number((double)kind));
+    if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, list);
+    if (status == KILN_C99_OK) *result = pair;
+    return status;
+}
+
+/* `OP_SPAWN(entry, isEval, argv, port, control, info)`: `[key, threadId]` once the worker's
+ * thread has started. */
+static int kiln_c99_worker_spawn(const kiln_value *args, size_t argc, kiln_value *result,
+                                 kiln_value *thrown) {
+    kiln_value entry = argc > 1 ? args[1] : kiln_c99_undefined();
+    kiln_value argv = argc > 3 ? args[3] : kiln_c99_undefined();
+    kiln_value info = argc > 6 ? args[6] : kiln_c99_undefined();
+    kiln_string *arguments = NULL;
+    kiln_array *items;
+    uint64_t key = 0, thread = 0;
+    size_t index, count = 0;
+    kiln_value pair;
+    int status;
+    if (entry.tag != KILN_VALUE_STRING || info.tag != KILN_VALUE_STRING || argv.tag != KILN_VALUE_ARRAY)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "kiln: a worker needs its entry, argv and description");
+    items = kiln_c99_array_of(argv);
+    count = items->count;
+    arguments = (kiln_string *)calloc(count == 0 ? 1 : count, sizeof *arguments);
+    if (arguments == NULL) return KILN_C99_OUT_OF_MEMORY;
+    for (index = 0; index < count; ++index) {
+        kiln_value item = kiln_val_to_boundary(items->elements[index]);
+        if (item.tag == KILN_VALUE_STRING && item.ptr != NULL) arguments[index] = *(const kiln_string *)item.ptr;
+        else arguments[index] = kiln_c99_empty_string;
+    }
+    status = kiln_worker_spawn((const kiln_string *)entry.ptr, argc > 2 && kiln_c99_truthy(args[2]) ? 1 : 0,
+                               arguments, (uint64_t)count, kiln_c99_worker_word(args, argc, 4),
+                               kiln_c99_worker_word(args, argc, 5), (const kiln_string *)info.ptr,
+                               &key, &thread);
+    free(arguments);
+    if (status == -2)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
+                                    "kiln: this program cannot start workers (it was built without a launcher that runs them)");
+    if (status != 0)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR, "kiln: could not start a worker");
+    status = kiln_c99_new_array(&pair);
+    if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, kiln_c99_number((double)key));
+    if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, kiln_c99_number((double)thread));
+    if (status == KILN_C99_OK) *result = pair;
+    return status;
+}
+
+static int kiln_c99_worker_op_raw(kiln_value *result, const kiln_value *args, size_t argc,
+                                  kiln_value *thrown) {
+    uint64_t op = kiln_c99_worker_word(args, argc, 0);
+    uint64_t first = kiln_c99_worker_word(args, argc, 1);
+    uint64_t words[2] = {0, 0};
+    kiln_value built;
+    int status;
+    switch (op) {
+    case KILN_C99_WORKER_OP_CHANNEL:
+        if (kiln_worker_op((uint32_t)op, 0, words) != 0) KILN_C99_REFUSE("a channel the runtime would not make");
+        status = kiln_c99_new_array(&built);
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(built, kiln_c99_number((double)words[0]));
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(built, kiln_c99_number((double)words[1]));
+        if (status == KILN_C99_OK) *result = built;
+        return status;
+    case KILN_C99_WORKER_OP_POST:
+    case KILN_C99_WORKER_OP_ENQUEUE:
+        return kiln_c99_worker_post((uint32_t)op, first, (uint32_t)kiln_c99_worker_word(args, argc, 2),
+                                    argc > 3 ? args[3] : kiln_c99_undefined(), result, thrown);
+    case KILN_C99_WORKER_OP_BROADCAST_POST:
+        return kiln_c99_worker_post((uint32_t)op, first, 0, argc > 2 ? args[2] : kiln_c99_undefined(),
+                                    result, thrown);
+    case KILN_C99_WORKER_OP_TAKE:
+        return kiln_c99_worker_take(first, result);
+    case KILN_C99_WORKER_OP_CLOSE:
+    case KILN_C99_WORKER_OP_REAP:
+        (void)kiln_worker_op((uint32_t)op, first, NULL);
+        *result = kiln_c99_undefined();
+        return KILN_C99_OK;
+    case KILN_C99_WORKER_OP_STATE:
+    case KILN_C99_WORKER_OP_TERMINATE:
+        (void)kiln_worker_op((uint32_t)op, first, words);
+        *result = op == KILN_C99_WORKER_OP_STATE ? kiln_c99_number((double)words[0])
+                                                 : kiln_c99_boolean(words[0] != 0);
+        return KILN_C99_OK;
+    case KILN_C99_WORKER_OP_BROADCAST_JOIN: {
+        kiln_value name = argc > 1 ? kiln_c99_text(args[1]) : kiln_c99_static_text("", 0);
+        if (name.tag != KILN_VALUE_STRING || kiln_worker_broadcast_join((const kiln_string *)name.ptr, words) != 0)
+            KILN_C99_REFUSE("a broadcast group the runtime would not join");
+        *result = kiln_c99_number((double)words[0]);
+        return KILN_C99_OK;
+    }
+    case KILN_C99_WORKER_OP_SPAWN:
+        return kiln_c99_worker_spawn(args, argc, result, thrown);
+    case KILN_C99_WORKER_OP_SELF: {
+        uint64_t thread = 0, port = 0, control = 0, info_len = 0;
+        const uint8_t *info = NULL;
+        if (kiln_worker_self(&thread, &port, &control, &info, &info_len) != 1) {
+            *result = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
+        status = kiln_c99_new_array(&built);
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(built, kiln_c99_number((double)thread));
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(built, kiln_c99_number((double)port));
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(built, kiln_c99_number((double)control));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text((const char *)info, (size_t)info_len));
+        if (status == KILN_C99_OK) *result = built;
+        return status;
+    }
+    case KILN_C99_WORKER_OP_CANCEL_WAIT:
+        *result = kiln_c99_boolean(kiln_realm_cancel_active_request(first) == KILN_C99_OK);
+        return KILN_C99_OK;
+    case KILN_C99_WORKER_OP_STDIO: {
+        uint8_t *bytes = NULL;
+        size_t length = 0;
+        kiln_value text = argc > 2 ? kiln_c99_text(args[2]) : kiln_c99_static_text("", 0);
+        if (text.tag == KILN_VALUE_STRING &&
+            kiln_c99_string_to_utf8_lossy(text, &bytes, &length) == KILN_C99_OK) {
+            (void)kiln_worker_stdio((uint32_t)first, bytes, (uint64_t)length);
+            free(bytes);
+        }
+        *result = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    case KILN_C99_WORKER_OP_REPORT_ERROR:
+        return kiln_c99_worker_post((uint32_t)op, 0, 3, argc > 1 ? args[1] : kiln_c99_undefined(),
+                                    result, thrown);
+    case KILN_C99_WORKER_OP_SIGNAL_NUMBER:
+        (void)kiln_worker_op((uint32_t)op, first, words);
+        *result = kiln_c99_number((double)words[0]);
+        return KILN_C99_OK;
+    case KILN_C99_WORKER_OP_SIGNAL_LISTEN:
+        /* The endpoint, or the errno negated. */
+        (void)kiln_worker_op((uint32_t)op, first, words);
+        *result = words[0] != 0 ? kiln_c99_number((double)words[0])
+                                : kiln_c99_number(-(double)(words[1] != 0 ? words[1] : 22));
+        return KILN_C99_OK;
+    case KILN_C99_WORKER_OP_SIGNAL_UNHANDLED:
+        (void)kiln_worker_op((uint32_t)op, first, NULL);
+        *result = kiln_c99_undefined();
+        return KILN_C99_OK;
+    case KILN_C99_WORKER_OP_KILL: {
+        /* `kill(pid, signal)`: 0, or the errno. The pid may be negative (a process group). */
+        double pid = argc > 1 && args[1].tag == KILN_VALUE_NUMBER ? kiln_c99_as_number(args[1]) : 0;
+        uint64_t packed = (uint64_t)(uint32_t)(int32_t)pid |
+                          ((uint64_t)(uint32_t)kiln_c99_worker_word(args, argc, 2) << 32);
+        if (kiln_worker_op((uint32_t)op, packed, words) != 0) words[0] = 22;
+        *result = kiln_c99_number((double)words[0]);
+        return KILN_C99_OK;
+    }
+    default:
+        KILN_C99_REFUSE("an operation the runtime's ports and workers do not have");
+    }
+}
+
+/* The exception ending a worker's realm, for its parent's `error` event: the tokens the shared
+ * TypeScript reads (`web_events_streams.ts`: no ports, then the value) -- an error's name, message
+ * and stack; a primitive as itself; any other object as an empty one. The graph launcher calls
+ * this inside the worker's realm once its program has failed. */
+static int kiln_c99_worker_report_error(kiln_value error) {
+    kiln_value tokens, name, message, stack, ignored;
+    int status = kiln_c99_new_array(&tokens);
+    if (status == KILN_C99_OK) status = kiln_c99_array_push(tokens, kiln_c99_number(0));
+    if (status != KILN_C99_OK) return status;
+    switch (error.tag) {
+    case KILN_VALUE_UNDEFINED:
+        status = kiln_c99_array_push(tokens, kiln_c99_number(0));
+        break;
+    case KILN_VALUE_NULL:
+        status = kiln_c99_array_push(tokens, kiln_c99_number(1));
+        break;
+    case KILN_VALUE_BOOLEAN:
+        status = kiln_c99_array_push(tokens, kiln_c99_number(error.bits != 0 ? 3 : 2));
+        break;
+    case KILN_VALUE_NUMBER:
+        status = kiln_c99_array_push(tokens, kiln_c99_number(4));
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(tokens, error);
+        break;
+    case KILN_VALUE_STRING:
+        status = kiln_c99_array_push(tokens, kiln_c99_number(5));
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(tokens, error);
+        break;
+    default:
+        if (kiln_c99_get(NULL, error, "message", 7, &message, 0, NULL) != KILN_C99_OK ||
+            message.tag != KILN_VALUE_STRING) {
+            status = kiln_c99_array_push(tokens, kiln_c99_number(8));
+            if (status == KILN_C99_OK) status = kiln_c99_array_push(tokens, kiln_c99_number(0));
+            break;
+        }
+        if (kiln_c99_get(NULL, error, "name", 4, &name, 0, NULL) != KILN_C99_OK ||
+            name.tag != KILN_VALUE_STRING)
+            name = kiln_c99_static_text("Error", 5);
+        status = kiln_c99_array_push(tokens, kiln_c99_number(19));
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(tokens, name);
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(tokens, message);
+        if (status == KILN_C99_OK &&
+            kiln_c99_get(NULL, error, "stack", 5, &stack, 0, NULL) == KILN_C99_OK &&
+            stack.tag == KILN_VALUE_STRING) {
+            status = kiln_c99_array_push(tokens, kiln_c99_number(5));
+            if (status == KILN_C99_OK) status = kiln_c99_array_push(tokens, stack);
+        } else if (status == KILN_C99_OK) {
+            status = kiln_c99_array_push(tokens, kiln_c99_number(0));
+        }
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(tokens, kiln_c99_number(0));
+        break;
+    }
+    if (status != KILN_C99_OK) return status;
+    return kiln_c99_worker_post(KILN_C99_WORKER_OP_REPORT_ERROR, 0, 3, tokens, &ignored, NULL);
+}
+
+static int kiln_c99_node_port_wait_complete(void *opaque, const kiln_async_completion *completion,
+                                            void *host, void *thrown) {
+    kiln_node_process_completion *work = (kiln_node_process_completion *)opaque;
+    (void)completion; (void)host; (void)thrown;
+    if (work == NULL) return KILN_C99_INVALID_ARGUMENT;
+    return kiln_c99_settle(work->promise, kiln_c99_undefined(), 0);
+}
+
+/* `__kilnPortWait(endpoint, referenced)`: `{ requestId, promise }`, the promise fulfilled once
+ * the endpoint has a message or its peer has closed. */
+static int kiln_c99_port_wait_raw(kiln_value *result, const kiln_value *args, size_t argc) {
+    kiln_value promise, pair;
+    kiln_node_process_completion *work;
+    kiln_async_host_op operation = {0};
+    uint64_t request = 0;
+    int status;
+    if (kiln_c99_new_promise(&promise) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
+    work = (kiln_node_process_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_PROCESS_COMPLETION, sizeof *work);
+    if (work == NULL) return KILN_C99_OUT_OF_MEMORY;
+    work->promise = promise;
+    operation.operation = KILN_REALM_OP_PORT_WAIT;
+    operation.flags = argc > 1 && kiln_c99_truthy(args[1]) ? 1u : 0u;
+    operation.resource = kiln_c99_worker_word(args, argc, 0);
+    status = kiln_realm_start_active_host_op(&operation, kiln_c99_node_port_wait_complete,
+                                             kiln_c99_node_drop_process, work, &request);
+    if (status != KILN_C99_OK) return status;
+    if (kiln_c99_new_object(&pair) != KILN_C99_OK) {
+        (void)kiln_realm_cancel_active_request(request);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    work->result = pair;
+    status = kiln_c99_put(NULL, pair, "requestId", 9, kiln_c99_number((double)request), 0, NULL);
+    if (status == KILN_C99_OK) status = kiln_c99_put(NULL, pair, "promise", 7, promise, 0, NULL);
+    if (status != KILN_C99_OK) {
+        (void)kiln_realm_cancel_active_request(request);
+        return status;
+    }
+    *result = pair;
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_node_fs_encoding(kiln_host *host, kiln_value option, int *utf8,
                                      int depth, kiln_value *thrown) {
     kiln_value encoding;

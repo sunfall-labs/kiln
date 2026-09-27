@@ -110,6 +110,181 @@ impl ModuleGraphExecution for ModuleGraph {
 
 struct GraphExecutor<'graph>(&'graph ModuleGraph);
 
+thread_local! {
+    /// The value of the last exception a module or the event loop left uncaught on this thread:
+    /// what a worker whose realm ended with one reports to its parent's `error` event.
+    static LAST_THROWN: std::cell::RefCell<Option<Value>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Workers for a graph's program (`node:worker_threads`, realms issue 06): each runs one of the
+/// graph's modules as its entry, in a realm of its own on the worker's thread, with the same
+/// limits and capabilities as the program that started it.
+struct GraphWorkers {
+    graph: ModuleGraph,
+    limits: ExecutionLimits,
+    capabilities: ExecutionCapabilities,
+}
+
+impl kiln_interpreter::WorkerHost for GraphWorkers {
+    fn has_module(&self, path: &str) -> bool {
+        self.graph.module(path).is_some()
+    }
+
+    fn run(&self, worker: Arc<kiln_runtime::workers::WorkerContext>) -> i32 {
+        use kiln_runtime::workers::WorkerEntry;
+        let graph = match &worker.spec.entry {
+            WorkerEntry::File(path) => self
+                .graph
+                .with_entry(path)
+                .ok_or_else(|| format!("Cannot find module '{path}'")),
+            WorkerEntry::Eval(source) => eval_graph(source),
+        };
+        let graph = match graph {
+            Ok(graph) => graph,
+            Err(message) => {
+                worker.report_error(worker_failure(message));
+                return 1;
+            }
+        };
+        let mut host = WorkerStdio {
+            worker: Arc::clone(&worker),
+            inner: kiln_runtime::CaptureHost::new()
+                .with_fs(Box::new(kiln_host_abi::OsFileSystem)),
+        };
+        let capabilities = self.capabilities.clone().with_argv(worker.spec.argv.clone());
+        LAST_THROWN.with(|last| last.borrow_mut().take());
+        let outcome = graph.execute_node(&mut host, self.limits, capabilities);
+        let thrown = LAST_THROWN.with(|last| last.borrow_mut().take());
+        match outcome {
+            Ok(_) => 0,
+            Err(ModuleEvaluationError::Execution {
+                error: ExecutionError::ProcessExited(code),
+                ..
+            }) => code,
+            Err(ModuleEvaluationError::Execution {
+                error:
+                    ExecutionError::Uncaught {
+                        error_constructor,
+                        message,
+                        ..
+                    },
+                ..
+            }) => {
+                let tokens = match thrown {
+                    Some(value) => {
+                        kiln_interpreter::worker_error_tokens(&value, error_constructor.as_deref())
+                    }
+                    None => kiln_interpreter::worker_error_tokens(
+                        &Value::String(message.into()),
+                        None,
+                    ),
+                };
+                worker.report_error(tokens);
+                1
+            }
+            Err(error) => {
+                worker.report_error(kiln_interpreter::worker_error_tokens(
+                    &Value::String(error.to_string().into()),
+                    None,
+                ));
+                1
+            }
+        }
+    }
+}
+
+/// A failure to start a worker's program, as the `Error` its parent's `error` event gets.
+fn worker_failure(message: String) -> Vec<kiln_runtime::workers::Token> {
+    let mut error = kiln_interpreter::ObjectData::default();
+    error.set("message", Value::String(message.into()));
+    kiln_interpreter::worker_error_tokens(
+        &Value::Object(std::rc::Rc::new(std::cell::RefCell::new(error))),
+        Some("Error"),
+    )
+}
+
+/// The graph a worker made from source text runs (`new Worker(code, { eval: true })`): the
+/// text is a module of its own at `[worker eval]` in the working directory, whose requests
+/// resolve from there, as node's do. CommonJS, as node runs it, unless it has module syntax.
+fn eval_graph(source: &str) -> Result<ModuleGraph, String> {
+    struct NodeFrontend;
+    impl kiln_module_graph::Frontend for NodeFrontend {
+        fn parse(&mut self, path: &str, source: &str) -> kiln_hir::Module {
+            kiln_frontend_oxc::parse_with_goal(path, source, kiln_hir::SourceGoal::Module)
+        }
+
+        fn parse_commonjs(&mut self, path: &str, source: &str) -> kiln_module_graph::CommonJsParse {
+            let (module, static_requires) =
+                kiln_frontend_oxc::parse_commonjs_with_requires(path, source);
+            kiln_module_graph::CommonJsParse {
+                module,
+                static_requires,
+            }
+        }
+    }
+    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let build = |name: &str| {
+        let resolver = kiln_module_resolver::NodeRuntimeResolver::new(&cwd)
+            .map_err(|error| ModuleGraphError::Source {
+                path: cwd.clone(),
+                message: error.to_string(),
+            })?;
+        ModuleGraph::build_node_virtual(
+            cwd.join(name),
+            source.to_owned(),
+            resolver,
+            |path: &Path| std::fs::read_to_string(path),
+            NodeFrontend,
+        )
+    };
+    match build("[worker eval].cjs") {
+        Err(ModuleGraphError::CjsStaticModuleSyntax { .. }) => build("[worker eval].mjs"),
+        other => other,
+    }
+    .map_err(|error| error.to_string())
+}
+
+/// A worker's host: its standard streams go to its parent as messages, where node's worker
+/// pipes them into the parent's own; everything else is the ordinary capture host's.
+struct WorkerStdio {
+    worker: Arc<kiln_runtime::workers::WorkerContext>,
+    inner: kiln_runtime::CaptureHost,
+}
+
+impl HostOps for WorkerStdio {
+    fn call(
+        &mut self,
+        operation: kiln_host_abi::HostOp,
+        arguments: &[kiln_host_abi::HostValue],
+    ) -> Result<kiln_host_abi::HostValue, kiln_host_abi::HostError> {
+        use kiln_host_abi::HostOp;
+        match operation {
+            HostOp::WriteStdout | HostOp::WriteStderr => {
+                let mut line = String::new();
+                for (index, argument) in arguments.iter().enumerate() {
+                    if index > 0 {
+                        line.push(' ');
+                    }
+                    line.push_str(&argument.to_console_string());
+                }
+                line.push('\n');
+                self.worker
+                    .write_stdio(operation == HostOp::WriteStderr, line.as_str().into());
+                Ok(kiln_host_abi::HostValue::Undefined)
+            }
+            _ => self.inner.call(operation, arguments),
+        }
+    }
+
+    fn fs(&mut self) -> Option<&mut (dyn kiln_host_abi::FileSystemOps + '_)> {
+        self.inner.fs()
+    }
+
+    fn clone_fs(&self) -> Option<Box<dyn kiln_host_abi::FileSystemOps>> {
+        self.inner.clone_fs()
+    }
+}
+
 impl std::ops::Deref for GraphExecutor<'_> {
     type Target = ModuleGraph;
     fn deref(&self) -> &Self::Target {
@@ -706,6 +881,36 @@ impl GraphExecutor<'_> {
         // Every realm this graph runs in -- the one the modules share and any a module makes --
         // runs the shared built-ins first, in the set this mode has (see `realm_bootstrap`).
         let capabilities = capabilities.with_realm_bootstrap(realm_bootstrap(node));
+        // A Node program can start workers, each a realm running another of this graph's
+        // modules on a thread of its own (realms issue 06).
+        let capabilities = if node {
+            let workers = GraphWorkers {
+                graph: (*self.0).clone(),
+                limits,
+                capabilities: capabilities.clone(),
+            };
+            capabilities.with_worker_host(Arc::new(workers))
+        } else {
+            capabilities
+        };
+        // A program run on a main thread numbers its workers from 1, as a node process does.
+        kiln_runtime::workers::begin_program();
+        let outcome = self.execute_mode_in(host, limits, capabilities, node);
+        // The realm is over, and so are the workers it started and did not wait for.
+        kiln_runtime::workers::finish_children();
+        // And so are its signal subscriptions (realms issue 23): a daemon or a test runner goes
+        // on to other programs, and a signal must not be taken on behalf of one that has ended.
+        kiln_runtime::signals::release_thread();
+        outcome
+    }
+
+    fn execute_mode_in<H: HostOps + ?Sized>(
+        &self,
+        host: &mut H,
+        limits: ExecutionLimits,
+        capabilities: ExecutionCapabilities,
+        node: bool,
+    ) -> Result<ExecutionResult, ModuleEvaluationError> {
         let mut values: HashMap<PathBuf, HashMap<String, Value>> = HashMap::new();
         // One cell per binding that a cycle forces somebody to hold before the module that owns
         // it has run. The cell starts in the dead zone, so reading the binding too early is the
@@ -1620,10 +1825,12 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
 
 impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
     fn record_thrown_value(&mut self, value: Value) {
+        LAST_THROWN.with(|last| *last.borrow_mut() = Some(value.clone()));
         self.pending_thrown = Some(value);
     }
 
     fn take_thrown_value(&mut self) -> Option<Value> {
+        LAST_THROWN.with(|last| last.borrow_mut().take());
         self.pending_thrown.take()
     }
 

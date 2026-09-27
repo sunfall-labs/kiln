@@ -201,6 +201,20 @@ static double kiln_c99_units_find(const uint16_t *haystack, size_t haystack_len,
     return -1.0;
 }
 
+/* `split`'s limit (parallel issue 30), for the two paths that find every piece first -- a regexp
+ * separator, and a string separator on a UTF-16 receiver: the answer is the first `ToUint32(limit)`
+ * of those pieces, which is exactly the array the specification's walk stops at, because it pushes
+ * the pieces (captures included) in this order and stops when the count reaches the limit. The
+ * Latin1 walk above reads the limit itself. */
+static void kiln_c99_split_limit(kiln_value pieces, const kiln_value *args, size_t argc) {
+    uint32_t lim;
+    kiln_array *array;
+    if (argc < 2 || args[1].tag == KILN_VALUE_UNDEFINED || pieces.tag != KILN_VALUE_ARRAY) return;
+    lim = kiln_c99_to_uint32(kiln_c99_as_number(args[1]));
+    array = kiln_c99_array_of(pieces);
+    if (array->count > (size_t)lim) array->count = (size_t)lim;
+}
+
 /* A code unit that `trim` removes: the specification's WhiteSpace plus LineTerminator. */
 static int kiln_c99_is_trimmed(uint16_t unit) {
     switch (unit) {
@@ -1223,6 +1237,7 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
                                                  kiln_c99_from_units(units + from, count - from));
                 }
             }
+            kiln_c99_split_limit(built, args, argc);
             *result = built;
         }
         break;
@@ -1465,6 +1480,18 @@ static int kiln_c99_match_result(kiln_host *host, kiln_value *out, const uint16_
  *
  * An empty match advances the cursor by one, or a pattern that can match nothing would never
  * finish. */
+static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t code,
+                                   kiln_value receiver, const kiln_value *args, size_t argc,
+                                   int depth, kiln_value *thrown);
+static int kiln_c99_string_pattern_split(kiln_host *host, kiln_value *result, kiln_value receiver,
+                                         const kiln_value *args, size_t argc, int depth,
+                                         kiln_value *thrown) {
+    int status = kiln_c99_string_pattern(host, result, KILN_C99_METHOD_SPLIT, receiver, args,
+                                         argc > 1 ? 1 : argc, depth, thrown);
+    if (status == KILN_C99_OK) kiln_c99_split_limit(*result, args, argc);
+    return status;
+}
+
 static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t code,
                                    kiln_value receiver, const kiln_value *args, size_t argc,
                                    int depth, kiln_value *thrown) {

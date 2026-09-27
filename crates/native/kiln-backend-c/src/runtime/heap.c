@@ -137,8 +137,14 @@ typedef struct kiln_gc_slab {
     uint32_t class_index;
     uint32_t slot_size;             /* bytes per slot: header + this class's payload, rounded */
     uint32_t slot_count;
-    uint32_t free_count;
+    uint32_t free_count;            /* slots on the free list plus slots never handed out */
     uint32_t first_slot_offset;     /* bytes from the slab base to slot 0 */
+    /* Slots `[0, fresh)` have been handed out at least once and carry a header; the rest have
+     * never been touched (ADR 0070: a realm must cost what it uses). A slab used to write every
+     * slot's header when it was made, so the first key copy of a size class cost the realm the
+     * whole 64 KiB slab in resident memory; now it costs the pages its slots reach. Every walk
+     * and every lookup stops at `fresh`, and nothing reads a slot past it. */
+    uint32_t fresh;
 } kiln_gc_slab;
 
 /* A tiny open-addressed set of pointer values, shared by the large-block table (keys are block
@@ -402,6 +408,11 @@ typedef struct kiln_gc_heap {
      * one collection and costs nothing else. */
     void *stack_base;
     int mid_turn;
+    /* ADR 0069's paused state: nonzero while a parallel call's worker arenas are open (between
+     * `kiln_c99_par_arenas_open` and `kiln_c99_par_arenas_join`). The arenas' chunks are no part
+     * of the heap yet and objects in them already point into it, so a collection then would sweep
+     * what they reach unmarked; `kiln_c99_gc_collect` stops at the cause instead. */
+    int parallel_paused;
     size_t stress_every;
     size_t stress_countdown;
     /* Call-site caches with an entry that names one of this heap's realm-local shapes (ADR
@@ -412,6 +423,11 @@ typedef struct kiln_gc_heap {
     kiln_c99_site **sites;
     size_t site_len;
     size_t site_cap;
+    /* The same for private-field sites (`kiln_c99_private_site`), whose one entry may name a
+     * realm-local shape: an object with a `Symbol()` key and private fields. */
+    kiln_c99_private_site **private_sites;
+    size_t private_site_len;
+    size_t private_site_cap;
     /* ADR 0071: the built-ins this realm has written an own property onto, one bit per built-in
      * number (`kiln_c99_realm_builtin_modified`), and one flag for any number past the bitmap. */
     uint64_t modified_builtins[KILN_C99_MODIFIED_BUILTIN_WORDS];
@@ -435,13 +451,23 @@ typedef struct kiln_gc_heap {
     uint64_t builtin_store_serial;
     /* `kiln_c99_realm_builtin_member_untouched`'s answers, each valid while `serial` is the
      * heap's `builtin_store_serial`: a speculation on `Math.sqrt` in a realm that wrote
-     * `Math.foo` asks the store once per store, not once per call. */
+     * `Math.foo` asks the store once per store, not once per call. Sixty-four of them: a realm
+     * that wrote onto Array.prototype asks one per method name its call sites use (issue 30). */
     struct {
         uint64_t serial;
         const char *member;
         uint32_t builtin;
         uint8_t untouched;
-    } member_answers[8];
+    } member_answers[64];
+    /* `kiln_c99_realm_tag_method_pristine`'s answers, by method code and receiver kind, valid
+     * while `serial` is the heap's `builtin_store_serial` (parallel issue 30): a cached method
+     * asks its name's stores once per store onto a built-in, not once per call. */
+    struct {
+        uint64_t serial;
+        uint64_t code;
+        uint8_t tag;
+        uint8_t pristine;
+    } method_answers[64];
     /* The promise job lane (Phase 6.3). A promise reaction and an await resumption used to be a
      * GC cell and a call across the private ABI each; they are values in this array now, which
      * the realm drains by calling back into the prelude. It lives in the heap because the heap
@@ -464,6 +490,9 @@ typedef struct kiln_gc_heap {
      * what the promise lane hands node's tracking once the queues are empty (promises.c). The
      * lists themselves are realm slots, which the runtime already roots. */
     size_t rejections_waiting;
+    /* How this realm uses the shared immutable region (`KILN_C99_REGION_MODE_*`), decided at its
+     * first region site (`kiln_c99_region_mode`) and fixed from then on. */
+    uint8_t region_mode;
     /* The realm context (ADR 0070, realms issue 04 step 5; `foundation.c`): the runtime's realm
      * state and every unit's module block, owned, marked and freed by this heap. */
     kiln_c99_realm_state realm;
@@ -524,6 +553,15 @@ typedef struct kiln_shared_state {
     uint32_t shared_shapes;
     /* The root of the shape tree. */
     kiln_shape root;
+    /* The shared immutable region (ADR 0070 primitive B; see "The shared immutable region"
+     * below). `region_state` is one of `KILN_C99_REGION_*`; the rest is written by the one realm
+     * that builds the region, before the release store that seals it. */
+    uint32_t region_state;
+    uint64_t region_builder;
+    char *region_base;
+    size_t region_reserve;
+    size_t region_used;
+    size_t region_blocks;
 } kiln_shared_state;
 
 /* This unit's pointer to the process block, set once it is initialised. */
@@ -616,17 +654,32 @@ static int kiln_c99_gc_stress_checks;
 /* One new region: aligned to its own size, entered in the set of region bases, its header and
  * bitmap laid out at its start and the payload beginning after them. NULL when memory is
  * refused, with nothing entered. */
+static kiln_nursery_chunk *kiln_c99_chunk_lay_out(char *region, size_t bitmap_words);
+
 static kiln_nursery_chunk *kiln_c99_nursery_new_region(kiln_gc_nursery *nursery) {
     char *region = (char *)kiln_c99_gc_aligned_alloc(nursery->capacity, nursery->capacity);
     kiln_nursery_chunk *chunk;
-    size_t bitmap_bytes;
     if (region == NULL) return NULL;
     if (kiln_c99_gc_ptrset_insert(&nursery->regions, region) != KILN_C99_OK) {
         kiln_c99_gc_aligned_free(region);
         return NULL;
     }
+    chunk = kiln_c99_chunk_lay_out(region, nursery->bitmap_words);
+    if (nursery->lo == NULL || region < nursery->lo) nursery->lo = region;
+    if (nursery->hi == NULL || region + nursery->capacity > nursery->hi) {
+        nursery->hi = region + nursery->capacity;
+    }
+    return chunk;
+}
+
+/* A region's header and its three bitmaps, laid out at its start, the payload after them, and
+ * nothing allocated: what every chunk of the nursery's kind looks like when it is made, whichever
+ * thread makes it (a worker arena's are made on pool threads, `kiln_c99_arena_chunk`). */
+static kiln_nursery_chunk *kiln_c99_chunk_lay_out(char *region, size_t bitmap_words) {
+    kiln_nursery_chunk *chunk;
+    size_t bitmap_bytes;
     chunk = (kiln_nursery_chunk *)region;
-    chunk->bitmap_words = nursery->bitmap_words;
+    chunk->bitmap_words = bitmap_words;
     bitmap_bytes = (chunk->bitmap_words * sizeof(uint64_t) + 15) & ~(size_t)15;
     chunk->bitmap = (uint64_t *)(region + KILN_NURSERY_HEADER);
     chunk->marks = (uint64_t *)(region + KILN_NURSERY_HEADER + bitmap_bytes);
@@ -641,10 +694,6 @@ static kiln_nursery_chunk *kiln_c99_nursery_new_region(kiln_gc_nursery *nursery)
     chunk->marked_bytes = 0;
     chunk->mark_epoch = 0;
     chunk->next = NULL;
-    if (nursery->lo == NULL || region < nursery->lo) nursery->lo = region;
-    if (nursery->hi == NULL || region + nursery->capacity > nursery->hi) {
-        nursery->hi = region + nursery->capacity;
-    }
     return chunk;
 }
 
@@ -922,6 +971,16 @@ static void kiln_c99_introspect_dump(kiln_gc_heap *heap) {
     kiln_c99_introspect_field(&line, "freed_bytes", heap->freed_bytes);
     kiln_c99_introspect_field(&line, "nursery_promotions", heap->nursery.promotions);
     kiln_c99_introspect_field(&line, "nursery_resets", heap->nursery.resets);
+    /* What a realm holds of its own outside the collector (ADR 0070: a realm's cost): its
+     * realm-local shapes and interned keys. A realm whose startup objects are built from shared
+     * keys has none of either before its program makes one (realms issue 08). */
+    kiln_c99_introspect_field(&line, "local_shapes", (uint64_t)heap->local_shape_count);
+    kiln_c99_introspect_field(&line, "local_keys", (uint64_t)heap->keys.count);
+    /* The shared immutable region (realms issue 08): how this realm uses it (0 undecided, 1 not,
+     * 2 built it, 3 reads it) and what the process holds there. */
+    kiln_c99_introspect_field(&line, "region_mode", (uint64_t)heap->region_mode);
+    kiln_c99_introspect_field(&line, "region_blocks", (uint64_t)kiln_c99_process()->region_blocks);
+    kiln_c99_introspect_field(&line, "region_bytes", (uint64_t)kiln_c99_process()->region_used);
     kiln_c99_introspect_field(&line, "enabled", (uint64_t)(heap->enabled != 0));
     kiln_c99_introspect_field(&line, "collecting", (uint64_t)(heap->collecting != 0));
     kiln_c99_introspect_flush(&line);
@@ -1035,6 +1094,424 @@ static inline KILN_ALWAYS_INLINE kiln_gc_heap *kiln_c99_gc_heap_if_cached(void) 
 static kiln_c99_realm_state *kiln_c99_realm(void) {
     kiln_gc_heap *heap = kiln_c99_gc_heap();
     return KILN_LIKELY(heap != NULL) ? &heap->realm : &kiln_c99_gc_fallback.realm;
+}
+
+/* ---- The shared immutable region (ADR 0070 primitive B; realms issue 08) --------------------
+ *
+ * Memory for objects that never change once published, read by every realm and every thread
+ * without copying. The first thing it holds is the closures the runtime bootstrap makes at its
+ * top level: every built-in method the bootstrap writes in TypeScript (`Uint8Array.prototype
+ * .toHex`, the iterator helpers, `Intl.Segmenter`'s methods, ...). Each realm runs the bootstrap
+ * as before -- its objects, prototypes and stores are its own -- but a closure-making site the
+ * emitter proved runs once per realm and captures nothing (`EmissionPolicy::shared_region`)
+ * hands every realm the one closure the region holds instead of allocating one per realm.
+ *
+ * Why closures and not the objects. Realms never exchange object references -- a message is a
+ * structured clone, a transfer moves an object -- so which realm an identity "belongs to" is not
+ * observable; what must be per realm is every *mutable* part (ADR 0059 invariant 4, ADR 0071
+ * "modified built-ins are the realm's own"). A closure's mutable parts are two fields that
+ * every path already reaches through a handful of accessors, so a region closure keeps them in the
+ * realm's context instead (`kiln_c99_closure_prototype`, `kiln_c99_closure_store`, below) --
+ * the same arrangement the C built-ins have always had, whose identity is a number and whose
+ * store is the realm's. An object's properties, by contrast, are read inline by every cache hit
+ * the emitter writes; giving a shared object a per-realm half would put a test on that path for
+ * every object. So objects stay the realm's, and the region takes the part of the bootstrap that
+ * is behaviour -- about seven tenths of its live heap.
+ *
+ * Lifecycle. `region_state` goes EMPTY -> BUILDING -> SEALED, or -> ABANDONED. The first realm to
+ * reach a region site claims BUILDING and becomes the builder: its sites allocate here, bumping
+ * through a reservation made once per process. When its bootstrap finishes
+ * (`kiln_c99_builtin_bootstrap_done`) the builder makes the used pages read-only and publishes
+ * SEALED with a release store; a realm that finds SEALED reads each site's closure with acquire,
+ * so it sees the closure whole. A realm that arrives while another builds waits for it (the
+ * builder's bootstrap is one synchronous module body on another thread, so the wait is its
+ * remaining run), and gives up after `KILN_C99_REGION_WAIT_NS` and makes its own closures. A
+ * builder torn down before sealing abandons the region: nobody uses it, and nothing in it is
+ * freed, because the builder's heap may still name what it made. `KILN_REGION=0` keeps a realm out.
+ *
+ * The collector's contract. Region memory is not any heap's: no heap's tables contain it, so the
+ * marker's lookup never finds a region block, never marks one, never traces one and never frees
+ * one -- the same way a unit's static string headers are ignored. A realm object may point into
+ * the region. A region object never points into a realm heap: its closures capture nothing, their
+ * names and source are static text or copied here, and their prototype and store are the realm's.
+ * Sealing makes the pages read-only, so a write any path forgot to route is a fault at the write
+ * rather than one realm's change appearing in another.
+ *
+ * The no-write read path (ADR 0069, parallel-builtins issue 06) reads the region from any thread:
+ * see "The no-write read path" below. */
+#define KILN_C99_REGION_EMPTY 0u
+#define KILN_C99_REGION_BUILDING 1u
+#define KILN_C99_REGION_SEALED 2u
+#define KILN_C99_REGION_ABANDONED 3u
+#define KILN_C99_REGION_MODE_UNDECIDED 0
+#define KILN_C99_REGION_MODE_NONE 1
+#define KILN_C99_REGION_MODE_BUILDER 2
+#define KILN_C99_REGION_MODE_USER 3
+/* Address space, not memory: pages the builder never reaches are never touched. */
+#define KILN_C99_REGION_RESERVE ((size_t)4 << 20)
+#define KILN_C99_REGION_WAIT_NS ((uint64_t)250 * 1000 * 1000)
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/mman.h>
+#include <time.h>
+#endif
+
+static size_t kiln_c99_region_page(void) {
+#if defined(__unix__) || defined(__APPLE__)
+    long page = sysconf(_SC_PAGESIZE);
+    if (page > 0 && ((size_t)page & ((size_t)page - 1)) == 0) return (size_t)page;
+#endif
+    return 4096;
+}
+
+/* Whether `pointer` lies in the region. A range test on the process block, for the paths that
+ * must treat a region block differently (never on a cache hit). */
+static int kiln_c99_in_region(const void *pointer) {
+    const kiln_shared_state *process = kiln_c99_process();
+    const char *base = __atomic_load_n(&process->region_base, __ATOMIC_ACQUIRE);
+    return base != NULL && (const char *)pointer >= base &&
+           (const char *)pointer < base + process->region_reserve;
+}
+
+/* A block in the region, headed like a heap block so `kiln_c99_gc_payload_kind` reads its kind,
+ * zeroed. Only the builder allocates, and only while it builds; NULL when the reservation is used
+ * up, and the caller then makes the object in its own heap as before. */
+static void *kiln_c99_region_alloc(uint32_t kind, size_t size) {
+    kiln_shared_state *process = kiln_c99_process();
+    size_t payload = size == 0 ? 1 : size;
+    size_t total = (sizeof(kiln_gc_block) + payload + 15) & ~(size_t)15;
+    kiln_gc_block *block;
+    if (__atomic_load_n(&process->region_state, __ATOMIC_ACQUIRE) != KILN_C99_REGION_BUILDING ||
+        process->region_base == NULL || total > process->region_reserve - process->region_used) {
+        return NULL;
+    }
+    block = (kiln_gc_block *)(process->region_base + process->region_used);
+    process->region_used += total;
+    process->region_blocks += 1;
+    block->prev = NULL;
+    block->next = NULL;
+    block->size = size;
+    block->kind = kind & KILN_GC_KIND_MASK;
+    block->mark = 0;
+    memset(block + 1, 0, payload);
+    return block + 1;
+}
+
+/* A copy of `string` in the region, for a region closure's name: the builder's own string would
+ * die with the builder's heap, which does not know the region closure names it. */
+static const kiln_string *kiln_c99_region_string(const kiln_string *string) {
+    size_t storage;
+    kiln_string *copy;
+    uint32_t enc;
+    if (string == NULL || kiln_c99_in_region(string)) return string;
+    enc = string->flags & (KILN_STRING_LATIN1 | KILN_STRING_UTF16);
+    if (!kiln_string_storage_size(string->unit_len, enc, &storage) || storage > SIZE_MAX - 1)
+        return NULL;
+    copy = (kiln_string *)kiln_c99_region_alloc(KILN_GC_STRING, storage + 1);
+    if (copy == NULL) return NULL;
+    copy->unit_len = string->unit_len;
+    copy->flags = enc;
+    copy->data = (const void *)(copy + 1);
+    if (storage > sizeof *copy) memcpy((void *)copy->data, string->data, storage - sizeof *copy);
+    return copy;
+}
+
+/* The reservation: aligned to the page so sealing can protect exactly the used pages. Never
+ * freed -- a sealed region lives as long as the process, like the shared keys and shapes. */
+static char *kiln_c99_region_reserve(size_t *reserve) {
+    size_t page = kiln_c99_region_page();
+    size_t size = (KILN_C99_REGION_RESERVE + page - 1) & ~(page - 1);
+    char *base = NULL;
+#if defined(__unix__) || defined(__APPLE__)
+    void *memory = NULL;
+    if (posix_memalign(&memory, page, size) == 0) base = (char *)memory;
+#else
+    base = (char *)kiln_c99_gc_aligned_alloc(page, size);
+#endif
+    *reserve = base != NULL ? size : 0;
+    return base;
+}
+
+/* How the current realm uses the region: decided at its first region site and fixed after. */
+static int kiln_c99_region_decide(kiln_gc_heap *heap) {
+    kiln_shared_state *process = kiln_c99_process();
+    const char *setting;
+    uint64_t waited = 0;
+    if (heap->fallback || heap->serial == 0) return KILN_C99_REGION_MODE_NONE;
+    setting = getenv("KILN_REGION");
+    if (setting != NULL && setting[0] == '0' && setting[1] == '\0') return KILN_C99_REGION_MODE_NONE;
+    for (;;) {
+        uint32_t state = __atomic_load_n(&process->region_state, __ATOMIC_ACQUIRE);
+        if (state == KILN_C99_REGION_SEALED) return KILN_C99_REGION_MODE_USER;
+        if (state == KILN_C99_REGION_ABANDONED) return KILN_C99_REGION_MODE_NONE;
+        if (state == KILN_C99_REGION_EMPTY) {
+            uint32_t expected = KILN_C99_REGION_EMPTY;
+            if (__atomic_compare_exchange_n(&process->region_state, &expected,
+                                            KILN_C99_REGION_BUILDING, 0, __ATOMIC_ACQ_REL,
+                                            __ATOMIC_ACQUIRE)) {
+                size_t reserve = 0;
+                char *base = kiln_c99_region_reserve(&reserve);
+                if (base == NULL) {
+                    __atomic_store_n(&process->region_state, KILN_C99_REGION_ABANDONED,
+                                     __ATOMIC_RELEASE);
+                    return KILN_C99_REGION_MODE_NONE;
+                }
+                process->region_reserve = reserve;
+                process->region_used = 0;
+                process->region_builder = heap->serial;
+                __atomic_store_n(&process->region_base, base, __ATOMIC_RELEASE);
+                return KILN_C99_REGION_MODE_BUILDER;
+            }
+            continue;
+        }
+        /* Another realm is building it, on another thread: a realm runs its bootstrap in one
+         * synchronous module body, so no builder waits on this thread. */
+        if (waited >= KILN_C99_REGION_WAIT_NS) return KILN_C99_REGION_MODE_NONE;
+#if defined(__unix__) || defined(__APPLE__)
+        {
+            struct timespec pause = {0, 20 * 1000};
+            nanosleep(&pause, NULL);
+        }
+#endif
+        waited += 20 * 1000;
+    }
+}
+
+static int kiln_c99_region_mode(kiln_gc_heap *heap) {
+    if (heap == NULL) return KILN_C99_REGION_MODE_NONE;
+    if (KILN_UNLIKELY(heap->region_mode == KILN_C99_REGION_MODE_UNDECIDED))
+        heap->region_mode = (uint8_t)kiln_c99_region_decide(heap);
+    return heap->region_mode;
+}
+
+/* The builder's bootstrap has finished: protect what it made and publish it. */
+static void kiln_c99_region_seal(kiln_gc_heap *heap) {
+    kiln_shared_state *process;
+    if (heap == NULL || heap->region_mode != KILN_C99_REGION_MODE_BUILDER) return;
+    process = kiln_c99_process();
+    heap->region_mode = KILN_C99_REGION_MODE_USER;
+    if (__atomic_load_n(&process->region_state, __ATOMIC_ACQUIRE) != KILN_C99_REGION_BUILDING ||
+        process->region_builder != heap->serial)
+        return;
+#if defined(__unix__) || defined(__APPLE__)
+    if (process->region_used != 0) {
+        size_t page = kiln_c99_region_page();
+        size_t length = (process->region_used + page - 1) & ~(page - 1);
+        (void)mprotect(process->region_base, length, PROT_READ);
+    }
+#endif
+    /* Nothing more is allocated: the rest of the reservation stays untouched address space. */
+    __atomic_store_n(&process->region_state, KILN_C99_REGION_SEALED, __ATOMIC_RELEASE);
+}
+
+/* A builder torn down before it sealed: nobody else will use what it started. */
+static void kiln_c99_region_abandon(kiln_gc_heap *heap) {
+    kiln_shared_state *process;
+    uint32_t expected = KILN_C99_REGION_BUILDING;
+    if (heap == NULL || heap->region_mode != KILN_C99_REGION_MODE_BUILDER) return;
+    process = kiln_c99_process();
+    if (process->region_builder != heap->serial) return;
+    (void)__atomic_compare_exchange_n(&process->region_state, &expected,
+                                      KILN_C99_REGION_ABANDONED, 0, __ATOMIC_ACQ_REL,
+                                      __ATOMIC_ACQUIRE);
+}
+
+/* The realm's own prototype (`which` 0) or store (`which` 1) of a region closure: a slot that
+ * stays where it is. With `create` clear an absent entry answers NULL and nothing is written --
+ * the read of a function that was never given a property allocates nothing. NULL too when there
+ * is no realm (a parallel worker's thread): a region closure there has no own properties. */
+static kiln_value *kiln_c99_region_own_slot(const struct kiln_closure *closure, int which, int create) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    kiln_c99_realm_state *realm;
+    kiln_c99_region_own *entry;
+    size_t bucket;
+    if (heap == NULL) return NULL;
+    realm = &heap->realm;
+    if (realm->region_own_buckets != 0) {
+        bucket = (((uintptr_t)closure >> 4) * UINT64_C(0x9e3779b97f4a7c15)) >> 40;
+        for (entry = realm->region_own[bucket & (realm->region_own_buckets - 1)]; entry != NULL;
+             entry = entry->next) {
+            if (entry->closure == closure) return which == 0 ? &entry->prototype : &entry->store;
+        }
+    }
+    if (!create) return NULL;
+    if ((realm->region_own_count + 1) * 2 > realm->region_own_buckets) {
+        size_t buckets = realm->region_own_buckets == 0 ? 16 : realm->region_own_buckets * 2;
+        kiln_c99_region_own **grown = (kiln_c99_region_own **)calloc(buckets, sizeof *grown);
+        size_t index;
+        if (grown == NULL) return NULL;
+        for (index = 0; index < realm->region_own_buckets; ++index) {
+            entry = realm->region_own[index];
+            while (entry != NULL) {
+                kiln_c99_region_own *next = entry->next;
+                bucket = (((uintptr_t)entry->closure >> 4) * UINT64_C(0x9e3779b97f4a7c15)) >> 40;
+                entry->next = grown[bucket & (buckets - 1)];
+                grown[bucket & (buckets - 1)] = entry;
+                entry = next;
+            }
+        }
+        free(realm->region_own);
+        realm->region_own = grown;
+        realm->region_own_buckets = buckets;
+    }
+    entry = (kiln_c99_region_own *)malloc(sizeof *entry);
+    if (entry == NULL) return NULL;
+    entry->closure = closure;
+    entry->prototype = kiln_c99_undefined();
+    entry->store = kiln_c99_undefined();
+    bucket = (((uintptr_t)closure >> 4) * UINT64_C(0x9e3779b97f4a7c15)) >> 40;
+    entry->next = realm->region_own[bucket & (realm->region_own_buckets - 1)];
+    realm->region_own[bucket & (realm->region_own_buckets - 1)] = entry;
+    realm->region_own_count += 1;
+    return which == 0 ? &entry->prototype : &entry->store;
+}
+
+/* A closure's prototype and property store: the closure's own fields, or for a region closure
+ * the realm's (above). The reads write nothing; the `_slot` forms make the realm's entry and
+ * answer NULL only when memory runs out. */
+static inline kiln_value kiln_c99_closure_prototype(const struct kiln_closure *closure) {
+    const kiln_value *slot;
+    if (KILN_LIKELY(!closure->region)) return closure->own_prototype;
+    slot = kiln_c99_region_own_slot(closure, 0, 0);
+    return slot != NULL ? *slot : kiln_c99_undefined();
+}
+
+static inline kiln_value kiln_c99_closure_store(const struct kiln_closure *closure) {
+    const kiln_value *slot;
+    if (KILN_LIKELY(!closure->region)) return closure->own_store;
+    slot = kiln_c99_region_own_slot(closure, 1, 0);
+    return slot != NULL ? *slot : kiln_c99_undefined();
+}
+
+static inline kiln_value *kiln_c99_closure_prototype_slot(struct kiln_closure *closure) {
+    if (KILN_LIKELY(!closure->region)) return &closure->own_prototype;
+    return kiln_c99_region_own_slot(closure, 0, 1);
+}
+
+static inline kiln_value *kiln_c99_closure_store_slot(struct kiln_closure *closure) {
+    if (KILN_LIKELY(!closure->region)) return &closure->own_store;
+    return kiln_c99_region_own_slot(closure, 1, 1);
+}
+
+/* ---- The no-write read path (ADR 0069; parallel-builtins issue 06; realms issue 08) --------
+ *
+ * Reads that write nothing, for a thread that is not the running realm's: a parallel built-in's
+ * worker reading a heap frozen for the call (ADR 0069 tier 2), or any thread reading the shared
+ * region. It is the ordinary read path -- the same functions, so the two cannot disagree about an
+ * answer -- run with this thread in no-write mode, in which each read that would otherwise write
+ * does the no-write half of its work instead:
+ *
+ *   - an inline cache is consulted but never taught (`kiln_c99_site_remember` learns nothing,
+ *     so nothing is registered with the heap either);
+ *   - a list-mode prototype level with no layout token yet is not issued one
+ *     (`kiln_c99_pic_name_level`), so the answer is found but not cached;
+ *   - a string's "all ASCII" answer is computed and not stored in its block header
+ *     (`kiln_c99_string_is_ascii`); a key's hash is never stored anywhere to begin with;
+ *   - a key is looked up and never interned: every interning entry point answers what the shared
+ *     and realm tables already hold and NULL otherwise, which its caller treats as it treats
+ *     running out of memory -- the parallel section's signal to finish sequentially;
+ *   - a region closure's own prototype and store are read from the realm's table without making
+ *     an entry (`kiln_c99_region_own_slot` with `create` clear).
+ *
+ * What the read path cannot do without writing -- allocate, or materialise lazy state such as a
+ * function's first `prototype` -- is outside what a tier-2 callback's proof admits, and the realm
+ * thread materialises what the proof says it can reach before the pool starts (ADR 0069).
+ *
+ * Entry points:
+ *
+ *   kiln_c99_no_write_enter(heap, &frame)   this thread reads `heap` (the frozen realm's, or NULL
+ *                                           for the region alone) and writes nothing until
+ *   kiln_c99_no_write_leave(&frame)         restores the thread's own realm cache.
+ *   kiln_c99_no_write()                     whether this thread is in no-write mode.
+ *   kiln_c99_interned_key_in(heap, string)  the lookup that never interns (a key the tables do
+ *                                           not hold names no property of any object).
+ *   kiln_c99_in_region(pointer)             whether a block is the region's.
+ *
+ * A thread that reads shared cache state must also be online for the quiescent-state
+ * reclamation of issue 04 step 4 (`reclaim::online` in the provider) for the whole section.
+ * Region memory is sealed read-only, so a write any of these paths forgot faults at the write. */
+static _Thread_local int kiln_c99_no_write_depth;
+
+typedef struct kiln_c99_no_write_frame {
+    kiln_realm_cache saved;
+} kiln_c99_no_write_frame;
+
+static inline int kiln_c99_no_write(void) {
+    return KILN_UNLIKELY(kiln_c99_no_write_depth != 0);
+}
+
+static void kiln_c99_no_write_enter(kiln_gc_heap *heap, kiln_c99_no_write_frame *frame) {
+    kiln_realm_cache *cache = &kiln_c99_realm_cached;
+    frame->saved = *cache;
+    if (heap != NULL) {
+        if (cache->generation_slot == NULL) cache->generation_slot = kiln_realm_generation_slot();
+        cache->heap = heap;
+        cache->generation = *cache->generation_slot;
+    }
+    kiln_c99_no_write_depth += 1;
+}
+
+static void kiln_c99_no_write_leave(kiln_c99_no_write_frame *frame) {
+    kiln_c99_no_write_depth -= 1;
+    kiln_c99_realm_cached = frame->saved;
+}
+
+/* A tier-2 chunk worker's section (parallel issue 07): the no-write frame above, kept in the
+ * opaque `kiln_c99_par_frame` a module unit can declare, since this struct is the prelude's. */
+_Static_assert(sizeof(kiln_c99_no_write_frame) <= sizeof(kiln_c99_par_frame),
+               "kiln_c99_par_frame holds a no-write frame");
+_Static_assert(_Alignof(kiln_c99_no_write_frame) <= _Alignof(kiln_c99_par_frame),
+               "kiln_c99_par_frame is aligned for a no-write frame");
+
+static void kiln_c99_par_enter(const kiln_c99_par_env *env, kiln_c99_par_frame *frame) {
+    kiln_c99_no_write_enter((kiln_gc_heap *)env->heap, (kiln_c99_no_write_frame *)(void *)frame);
+}
+
+static void kiln_c99_par_leave(kiln_c99_par_frame *frame) {
+    kiln_c99_no_write_leave((kiln_c99_no_write_frame *)(void *)frame);
+}
+
+/* The write detector of parallel issue 06: with `KILN_PARALLEL_PROTECT=1` in the environment, a
+ * tier-2 call site maps its realm's heap read-only for the length of the pool's run -- every slab
+ * and every nursery region, the pages that hold the headers of objects, arrays, strings and
+ * views -- so a write any read path forgot (a cache taught, an ASCII answer stored in a string's
+ * header, a layout token issued) faults at the write instead of racing. Large blocks are the
+ * allocator's and share pages with other memory, so they are not covered. Off, it costs the site
+ * one load. Read once per process: 0 not yet read, 1 off, 2 on. */
+static int kiln_c99_par_protect_state;
+
+static void kiln_c99_par_protect_regions(kiln_gc_heap *heap, int prot) {
+#if defined(__unix__) || defined(__APPLE__)
+    kiln_gc_slab *slab;
+    size_t index;
+    for (slab = heap->all_slabs; slab != NULL; slab = slab->all_next) {
+        (void)mprotect(slab, KILN_GC_SLAB_SIZE, prot);
+    }
+    for (index = 0; index < heap->nursery.regions.capacity; ++index) {
+        void *region = heap->nursery.regions.table[index];
+        if (region != NULL) (void)mprotect(region, heap->nursery.capacity, prot);
+    }
+#else
+    (void)heap;
+    (void)prot;
+#endif
+}
+
+/* `frozen` nonzero just before a tier-2 pool run, zero just after it. */
+static void kiln_c99_par_section(int frozen) {
+    int state = __atomic_load_n(&kiln_c99_par_protect_state, __ATOMIC_RELAXED);
+    kiln_gc_heap *heap;
+    if (KILN_UNLIKELY(state == 0)) {
+        const char *setting = getenv("KILN_PARALLEL_PROTECT");
+        state = setting != NULL && setting[0] == '1' ? 2 : 1;
+        __atomic_store_n(&kiln_c99_par_protect_state, state, __ATOMIC_RELAXED);
+    }
+    if (KILN_LIKELY(state != 2)) return;
+    heap = kiln_c99_gc_heap();
+    if (heap == NULL) return;
+#if defined(__unix__) || defined(__APPLE__)
+    kiln_c99_par_protect_regions(heap, frozen ? PROT_READ : PROT_READ | PROT_WRITE);
+#endif
 }
 
 /* A compiled unit's block in this thread's realm, made on the realm's first entry into the unit
@@ -1388,7 +1865,6 @@ static kiln_gc_slab *kiln_c99_gc_slab_new(kiln_gc_heap *heap, int class_index) {
     size_t first_slot_offset = sizeof(kiln_gc_slab);
     size_t usable;
     size_t slot_count;
-    uint32_t index;
     if (first_slot_offset % sizeof(void *) != 0)
         first_slot_offset += sizeof(void *) - (first_slot_offset % sizeof(void *));
     if (first_slot_offset >= KILN_GC_SLAB_SIZE) return NULL;
@@ -1403,15 +1879,7 @@ static kiln_gc_slab *kiln_c99_gc_slab_new(kiln_gc_heap *heap, int class_index) {
     slab->free_count = (uint32_t)slot_count;
     slab->first_slot_offset = (uint32_t)first_slot_offset;
     slab->free_head = NULL;
-    for (index = 0; index < (uint32_t)slot_count; ++index) {
-        kiln_gc_block *slot = kiln_c99_gc_slab_slot(slab, index);
-        slot->size = KILN_GC_SLOT_FREE;
-        slot->kind = KILN_GC_NONE;
-        slot->mark = 0;
-        slot->prev = NULL;
-        slot->next = slab->free_head;
-        slab->free_head = slot;
-    }
+    slab->fresh = 0;
     if (kiln_c99_gc_ptrset_insert(&heap->slab_table, slab) != KILN_C99_OK) {
         kiln_c99_gc_aligned_free(slab);
         return NULL;
@@ -1428,6 +1896,23 @@ static kiln_gc_slab *kiln_c99_gc_slab_new(kiln_gc_heap *heap, int class_index) {
         heap->class_free_head[class_index]->free_prev = slab;
     heap->class_free_head[class_index] = slab;
     return slab;
+}
+
+/* One slot of `slab`, which has one: a freed slot first, so the pages already touched are
+ * reused, and otherwise the next slot never handed out. The caller writes the header's kind,
+ * mark and size before anything can look the slot up. */
+static inline kiln_gc_block *kiln_c99_gc_slab_take(kiln_gc_heap *heap, kiln_gc_slab *slab) {
+    kiln_gc_block *block = slab->free_head;
+    if (block != NULL) {
+        slab->free_head = block->next;
+    } else {
+        block = kiln_c99_gc_slab_slot(slab, slab->fresh);
+        slab->fresh += 1;
+        block->prev = NULL;
+    }
+    block->next = NULL;
+    if (--slab->free_count == 0) kiln_c99_gc_slab_unlink_free(heap, slab);
+    return block;
 }
 
 /* The one membership check every candidate edge pays for (ADR 0041: marking never trusts a
@@ -1458,7 +1943,7 @@ static kiln_gc_block *kiln_c99_gc_lookup_slab(const kiln_gc_heap *heap, const vo
         relative = offset - slab->first_slot_offset;
         if (relative % slab->slot_size != sizeof(kiln_gc_block)) return NULL;
         slot_index = relative / slab->slot_size;
-        if (slot_index >= slab->slot_count) return NULL;
+        if (slot_index >= slab->fresh) return NULL;
         block = kiln_c99_gc_slab_slot(slab, (uint32_t)slot_index);
         if (block->size == KILN_GC_SLOT_FREE) return NULL;
         if (out_slab != NULL) *out_slab = (kiln_gc_slab *)slab;
@@ -1654,6 +2139,11 @@ typedef char kiln_c99_block_kind_fits_a_byte[KILN_GC_KIND_COUNT <= 256 ? 1 : -1]
 static __attribute__((noinline)) void kiln_c99_gc_kind_check(const void *ptr, uint32_t kind) {
     kiln_gc_heap *heap = kiln_c99_gc_heap();
     kiln_gc_block *block = heap == NULL ? NULL : kiln_c99_gc_lookup(heap, ptr);
+    /* A block in the shared region is no heap's, and headed like one (realms issue 08). */
+    if (block == NULL && kiln_c99_in_region(ptr)) {
+        if ((((const kiln_gc_block *)ptr - 1)->kind & KILN_GC_KIND_MASK) != kind) __builtin_trap();
+        return;
+    }
     if (block == NULL || (block->kind & KILN_GC_KIND_MASK) != kind) __builtin_trap();
 }
 
@@ -1709,7 +2199,7 @@ static int kiln_c99_string_is_ascii(kiln_value value) {
         return (block->kind & KILN_GC_FLAG_ASCII) != 0;
     }
     ascii = kiln_c99_ascii_scan((const char *)string->data, string->unit_len);
-    if (block != NULL) {
+    if (block != NULL && !kiln_c99_no_write()) {
         /* Only the two ASCII bits change: the placement flags (`KILN_GC_FLAG_NURSERY`,
          * `_LARGE`) are what the marker and the release paths find the block's chunk by, and
          * dropping them here left a nursery string marked in its header but not in its chunk's
@@ -1792,7 +2282,7 @@ static kiln_gc_block *kiln_c99_gc_lookup_interior(const kiln_gc_heap *heap, uint
         kiln_gc_block *block;
         if (offset < slab->first_slot_offset) return NULL;
         slot_index = (offset - slab->first_slot_offset) / slab->slot_size;
-        if (slot_index >= slab->slot_count) return NULL;
+        if (slot_index >= slab->fresh) return NULL;
         block = kiln_c99_gc_slab_slot(slab, (uint32_t)slot_index);
         if (block->size == KILN_GC_SLOT_FREE) return NULL;
         return block;
@@ -1947,6 +2437,38 @@ static void kiln_c99_site_learned(kiln_c99_site *site) {
     }
 }
 
+/* Register a private-field site that is about to learn a realm-local shape with the current heap
+ * (see `kiln_c99_gc_register_site`). `registered` is left zero when the heap cannot take it, and
+ * the caller then does not learn. */
+static void kiln_c99_gc_register_private_site(kiln_c99_private_site *site) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    if (heap == NULL || site == NULL || heap->serial == 0) return;
+    if (__atomic_load_n(&site->registered, __ATOMIC_RELAXED) == heap->serial) return;
+    if (heap->private_site_len == heap->private_site_cap && heap->private_site_len != 0) {
+        size_t kept = 1, index;
+        qsort(heap->private_sites, heap->private_site_len, sizeof *heap->private_sites,
+              kiln_c99_site_pointer_order);
+        for (index = 1; index < heap->private_site_len; ++index) {
+            if (heap->private_sites[index] != heap->private_sites[kept - 1])
+                heap->private_sites[kept++] = heap->private_sites[index];
+        }
+        heap->private_site_len = kept;
+    }
+    if (heap->private_site_len == heap->private_site_cap) {
+        size_t wanted = heap->private_site_cap == 0 ? 64 : heap->private_site_cap * 2;
+        kiln_c99_private_site **grown = (kiln_c99_private_site **)realloc(
+            heap->private_sites, wanted * sizeof *grown);
+        if (grown == NULL) {
+            __atomic_store_n(&site->registered, 0, __ATOMIC_RELAXED);
+            return;
+        }
+        heap->private_sites = grown;
+        heap->private_site_cap = wanted;
+    }
+    heap->private_sites[heap->private_site_len++] = site;
+    __atomic_store_n(&site->registered, heap->serial, __ATOMIC_RELAXED);
+}
+
 /* Teardown, before the heap frees anything: every registered site forgets the entries that name
  * a realm-local shape or key. */
 static void kiln_c99_gc_forget_realm_local(kiln_gc_heap *heap) {
@@ -1961,6 +2483,17 @@ static void kiln_c99_gc_forget_realm_local(kiln_gc_heap *heap) {
     heap->sites = NULL;
     heap->site_len = 0;
     heap->site_cap = 0;
+    for (index = 0; index < heap->private_site_len; ++index) {
+        kiln_c99_private_site *site = heap->private_sites[index];
+        const kiln_shape *key = kiln_c99_slot_key(&site->shape);
+        if (KILN_C99_SLOT_IS_ANSWER(key) && !key->shared) kiln_c99_slot_retire(&site->shape, key);
+        (void)__atomic_compare_exchange_n(&site->registered, &(uint64_t){heap->serial}, 0, 0,
+                                          __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+    }
+    free(heap->private_sites);
+    heap->private_sites = NULL;
+    heap->private_site_len = 0;
+    heap->private_site_cap = 0;
 }
 
 /* Claim an entry of `site` no answer has used yet, raising the count over it; -1 when all are. */
@@ -1988,18 +2521,29 @@ static int kiln_c99_site_claim_fresh(kiln_c99_site *site) {
  * goes in a free place or waits for the next miss. Then register the site if it now names a
  * realm-local shape (`kiln_c99_site_learned`). */
 static void kiln_c99_site_remember(kiln_c99_site *site, const kiln_c99_pic_entry *given) {
-    uint32_t p, count = kiln_c99_site_count(site);
+    uint32_t p, count;
     int at = -1;
     kiln_c99_pic_entry entry = *given;
+    /* The no-write read path consults a site and never teaches it. */
+    if (kiln_c99_no_write()) return;
+    count = kiln_c99_site_count(site);
     /* An entry is compared against a receiver's shape but its `transition_to` is *given* to the
      * receiver. From a shared shape by a realm-local key the child is the learning realm's own:
      * another realm running now would move its object into that realm's shape (and key). Such a
-     * store stays uncached; from a realm-local shape only its own realm can arrive. */
-    if (entry.transition_to != NULL && !entry.transition_to->shared && entry.shape->shared) return;
+     * store stays uncached; from a realm-local shape only its own realm can arrive.
+     *
+     * A keyed entry whose key is realm-local is the exception, because every hit compares the key:
+     * that key is the learning realm's own pointer, which no other realm holds while it is alive
+     * (another realm's `Symbol()` is another key), and the entry is forgotten before the realm's
+     * teardown frees it (`kiln_c99_pic_entry_is_local`). So only the learning realm can arrive. */
+    if (entry.transition_to != NULL && !entry.transition_to->shared && entry.shape->shared &&
+        !(entry.keyed && entry.key != NULL && !kiln_c99_key_is_shared(entry.key)))
+        return;
     entry.one_step = entry.depth == 1 && !entry.absent && entry.transition_to == NULL &&
                      entry.slot == UINT32_MAX && entry.level_shape[0] != NULL;
     for (p = 0; p < count; ++p) {
-        if (kiln_c99_slot_key(&site->entries[p].shape) == entry.shape) {
+        if (kiln_c99_slot_key(&site->entries[p].shape) == entry.shape &&
+            (!entry.keyed || site->entries[p].key == entry.key)) {
             if (kiln_c99_slot_claim(&site->entries[p].shape, 1)) at = (int)p;
             break;
         }
@@ -2091,7 +2635,10 @@ static int kiln_c99_pic_name_level(const kiln_object *level, const kiln_shape **
         return 1;
     }
     if (level->layout_token == 0) {
-        uint64_t issued =
+        uint64_t issued;
+        /* No-write mode names only a level that already has a token. */
+        if (kiln_c99_no_write()) return 0;
+        issued =
             __atomic_add_fetch(&kiln_c99_process()->next_layout_token, 1, __ATOMIC_RELAXED);
         if (issued > UINT32_MAX) return 0;
         ((kiln_object *)level)->layout_token = (uint32_t)issued;
@@ -2105,6 +2652,18 @@ static void kiln_c99_gc_collect(void *opaque, int force);
 
 /* A collection from inside a turn, at an allocation. */
 static void kiln_c99_gc_collect_mid_turn(kiln_gc_heap *heap) {
+    /* A thread in no-write mode -- a parallel section's chunk (ADR 0069, parallel issue 07) --
+     * reads a heap that other threads read at the same time, so it must never allocate, and an
+     * allocation that reached a collection is a proof the backend admitted by mistake: sweeping
+     * now would free memory the other workers are reading. Stop at the cause instead. On the
+     * collection path only, so an allocation costs nothing more; `KILN_GC_STRESS`, which
+     * collects at every allocation, makes any such allocation arrive here. */
+    if (KILN_UNLIKELY(kiln_c99_no_write())) {
+        fputs("kiln: a collection was due on a thread reading a frozen heap (a parallel section "
+              "allocated)\n",
+              stderr);
+        abort();
+    }
     heap->mid_turn = 1;
     kiln_c99_gc_collect(heap, 1);
     heap->mid_turn = 0;
@@ -2239,10 +2798,7 @@ static void *kiln_c99_gc_alloc_ex(uint32_t kind, size_t size, int zero_payload) 
             slab = kiln_c99_gc_slab_new(heap, class_index);
             if (slab == NULL) return NULL;
         }
-        block = slab->free_head;
-        slab->free_head = block->next;
-        block->next = NULL;
-        if (--slab->free_count == 0) kiln_c99_gc_slab_unlink_free(heap, slab);
+        block = kiln_c99_gc_slab_take(heap, slab);
         block->kind = kind;
         block->mark = 0;
         block->size = size;
@@ -2374,10 +2930,7 @@ static void *kiln_c99_gc_alloc_tenured(uint32_t kind, size_t size) {
             slab = kiln_c99_gc_slab_new(heap, class_index);
             if (slab == NULL) return NULL;
         }
-        block = slab->free_head;
-        slab->free_head = block->next;
-        block->next = NULL;
-        if (--slab->free_count == 0) kiln_c99_gc_slab_unlink_free(heap, slab);
+        block = kiln_c99_gc_slab_take(heap, slab);
         block->kind = kind;
         block->mark = 0;
         block->size = size;
@@ -2412,6 +2965,315 @@ static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
     return payload;
 }
 
+/* ---- Ownership transfer: chunks built off the heap, adopted in one step ---------------------
+ *
+ * ADR 0070's primitive C moves a group of blocks into a heap by relinking them, never by copying.
+ * Its second user, and the first built (realms issue 10 step 2), is ADR 0069's worker arenas: a
+ * parallel call's workers allocate into private chunks of the nursery's own kind, and when the
+ * call returns the realm thread makes every one of them the heap's at once.
+ *
+ * The unit moved is a *chunk*, not a block. A chunk of the nursery's kind already carries
+ * everything the collector needs to know about its blocks -- the allocation bitmap, the
+ * finaliser bitmap, the fill and the counts -- in its own header, and the heap finds it by
+ * masking an address to the chunk size and asking its set of region bases. So adopting a chunk
+ * is: enter its base in that set, widen the heap's address bounds over it, queue it on the
+ * nursery's filled list (where the next collection resets it when nothing in it lives and
+ * promotes it whole when something does, like any chunk the realm filled itself), and add its
+ * counts to the heap's. Nothing is read or written per block: a million objects adopt in the time
+ * of the handful of chunks that hold them.
+ *
+ *   kiln_c99_arena_chunk(capacity, words)   a chunk of the heap's kind for no heap yet, on any
+ *                                           thread (it is `malloc`'s)
+ *   kiln_c99_heap_adopt_chunks(heap, list)  on the heap's own realm thread, with no collection
+ *                                           running: every sealed chunk of `list` is the heap's
+ *                                           (1), or none is and the list is the caller's (0,
+ *                                           the region set could not grow)
+ *   kiln_c99_arena_chunks_free(list)        a list nothing will ever reference, returned
+ *
+ * What makes it sound is who can see a chunk before the step. Its builder alone: the chunk is in
+ * no heap's set, so a collection of the heap -- which the builder's protocol must rule out anyway
+ * while objects in the chunk point into the heap unmarked -- would neither find nor free it. The
+ * parallel section's protocol is the paused state (`parallel_paused`): a collection due while an
+ * arena is open aborts rather than run. A sealed chunk's `limit` is its fill and `alloc_count`/
+ * `alloc_bytes` its blocks, exactly what `kiln_c99_nursery_seal` leaves for a chunk of the realm's
+ * own, and every block in it has its header, its bitmap bit and, for a kind finalised from birth,
+ * its finaliser bit (`kiln_c99_par_alloc`). */
+static kiln_nursery_chunk *kiln_c99_arena_chunk(size_t capacity, size_t bitmap_words) {
+    char *region = (char *)kiln_c99_gc_aligned_alloc(capacity, capacity);
+    if (region == NULL) return NULL;
+    return kiln_c99_chunk_lay_out(region, bitmap_words);
+}
+
+static void kiln_c99_arena_chunks_free(kiln_nursery_chunk *chunks) {
+    while (chunks != NULL) {
+        kiln_nursery_chunk *next = chunks->next;
+        kiln_c99_gc_aligned_free(chunks);
+        chunks = next;
+    }
+}
+
+static int kiln_c99_heap_adopt_chunks(kiln_gc_heap *heap, kiln_nursery_chunk *chunks) {
+    kiln_gc_nursery *nursery = &heap->nursery;
+    kiln_nursery_chunk *chunk;
+    size_t count = 0;
+    for (chunk = chunks; chunk != NULL; chunk = chunk->next) count += 1;
+    if (count == 0) return 1;
+    /* Room for every base first, so no insert below can fail half way through the list. */
+    if ((nursery->regions.count + count) * 2 > nursery->regions.capacity &&
+        kiln_c99_gc_ptrset_grow(&nursery->regions, nursery->regions.count + count) != KILN_C99_OK) {
+        return 0;
+    }
+    while (chunks != NULL) {
+        char *region = (char *)chunks;
+        chunk = chunks;
+        chunks = chunk->next;
+        (void)kiln_c99_gc_ptrset_insert(&nursery->regions, region);
+        if (nursery->lo == NULL || region < nursery->lo) nursery->lo = region;
+        if (nursery->hi == NULL || region + nursery->capacity > nursery->hi) {
+            nursery->hi = region + nursery->capacity;
+        }
+        kiln_c99_gc_bound(heap, region, nursery->capacity);
+        chunk->next = nursery->full;
+        nursery->full = chunk;
+        nursery->full_bytes += (size_t)(chunk->limit - chunk->base);
+        heap->count += chunk->alloc_count;
+        heap->bytes += chunk->alloc_bytes;
+        heap->since_collection += chunk->alloc_bytes;
+    }
+    return 1;
+}
+
+/* ---- Worker arenas (ADR 0069; parallel issue 08) --------------------------------------------
+ *
+ * A tier-3 callback allocates: an object literal, `{ ...r, total }`, an array literal, a string
+ * built with `+` or a template. Its clone runs on the pool's threads while the realm thread is
+ * blocked in the call, and the realm's allocator is the realm's -- its nursery pointers, its
+ * counters, its collector -- so a worker never touches it. Each thread that runs a chunk of the
+ * call claims an *arena* instead (`kiln_c99_par_arena_claim`, one per thread per call, found again
+ * for the thread's next chunk), and bumps through chunks of the nursery's kind that it makes for
+ * itself (`kiln_c99_par_alloc`). Every block it writes is laid out exactly as the nursery lays
+ * one out; nothing in the realm's heap changes while the call runs.
+ *
+ * The collector is paused from `kiln_c99_par_arenas_open` to `kiln_c99_par_arenas_join` (the
+ * call's own thread does not allocate in between, and a pool thread cannot reach the realm's
+ * allocator at all; `kiln_c99_gc_collect` aborts if either were ever wrong). The join, on the
+ * realm thread, seals each arena's last chunk and adopts every chunk into the heap in one step
+ * (above). When the call is answered sequentially instead -- a worker declined, or an arena ran
+ * out of its budget -- nothing the arenas hold is reachable from anything, and they are freed
+ * without being adopted.
+ *
+ * An arena's budget (`KILN_PARALLEL_ARENA_KIB`, 256 MiB by default) bounds the chunks one thread
+ * may take in one call. A worker that would pass it declines like any other worker, and the call
+ * then runs the sequential method from its first element: memory pressure is never a failure,
+ * and the answer is `map`'s by the same argument as every other decline (nothing the pool did is
+ * observable). */
+struct kiln_c99_par_arena {
+    /* The claiming thread's anchor (the address of its `kiln_c99_no_write_depth`), NULL until
+     * the slot is claimed. */
+    const void *owner;
+    /* The frozen heap: only its chunk size and bitmap width are read. */
+    const kiln_gc_heap *heap;
+    /* Sealed chunks, newest first, and the one being filled. */
+    kiln_nursery_chunk *filled;
+    kiln_nursery_chunk *current;
+    char *bump;
+    char *limit;
+    size_t count;
+    size_t bytes;
+    /* Region bytes taken, against `budget`. */
+    size_t taken;
+    size_t budget;
+};
+
+/* Read once per process: `KILN_PARALLEL_ARENA_KIB`, else 256 MiB. 0 not yet read. */
+static size_t kiln_c99_par_arena_budget_bytes;
+
+static size_t kiln_c99_par_arena_budget(void) {
+    size_t budget = __atomic_load_n(&kiln_c99_par_arena_budget_bytes, __ATOMIC_RELAXED);
+    if (KILN_UNLIKELY(budget == 0)) {
+        const char *setting = getenv("KILN_PARALLEL_ARENA_KIB");
+        budget = (size_t)256 * 1024 * 1024;
+        if (setting != NULL && setting[0] >= '0' && setting[0] <= '9') {
+            size_t kib = (size_t)strtoul(setting, NULL, 10);
+            if (kib > 0 && kib <= (size_t)64 * 1024 * 1024) budget = kib * 1024;
+        }
+        __atomic_store_n(&kiln_c99_par_arena_budget_bytes, budget, __ATOMIC_RELAXED);
+    }
+    return budget;
+}
+
+/* Seal the chunk being filled onto `filled` (an empty one is simply freed). */
+static void kiln_c99_par_arena_seal(kiln_c99_par_arena *arena) {
+    kiln_nursery_chunk *chunk = arena->current;
+    if (chunk == NULL) return;
+    arena->current = NULL;
+    if (arena->bump == chunk->base) {
+        kiln_c99_gc_aligned_free(chunk);
+        return;
+    }
+    chunk->limit = arena->bump;
+    chunk->live_count = 0;
+    chunk->alloc_count = arena->count;
+    chunk->alloc_bytes = arena->bytes;
+    chunk->next = arena->filled;
+    arena->filled = chunk;
+}
+
+/* A new chunk to bump through, or 0 when the budget or memory says no. */
+static int kiln_c99_par_arena_refill(kiln_c99_par_arena *arena) {
+    size_t capacity = arena->heap->nursery.capacity;
+    kiln_nursery_chunk *chunk;
+    kiln_c99_par_arena_seal(arena);
+    if (arena->taken + capacity > arena->budget) return 0;
+    chunk = kiln_c99_arena_chunk(capacity, arena->heap->nursery.bitmap_words);
+    if (chunk == NULL) return 0;
+    arena->taken += capacity;
+    arena->current = chunk;
+    arena->bump = chunk->base;
+    arena->limit = (char *)chunk + capacity;
+    arena->count = 0;
+    arena->bytes = 0;
+    return 1;
+}
+
+/* A block of `kind` with room for `size` payload bytes, laid out as the nursery's bump lays one
+ * out -- header, allocation bit, the finaliser bit a kind finalised from birth gets -- or NULL:
+ * a block the nursery would not take (a quarter of a chunk or more), or the budget spent. The
+ * payload is not zeroed; no collection can run before the builder has filled it. */
+static void *kiln_c99_par_alloc(kiln_c99_par_arena *arena, uint32_t kind, size_t size) {
+    size_t payload = size == 0 ? 1 : size;
+    size_t total = (sizeof(kiln_gc_block) + payload + 15) & ~((size_t)15);
+    kiln_nursery_chunk *chunk;
+    kiln_gc_block *block;
+    size_t bit_idx;
+    if (arena == NULL || sizeof(kiln_gc_block) + payload > (arena->heap->nursery.capacity >> 2)) {
+        return NULL;
+    }
+    if (KILN_UNLIKELY(arena->current == NULL || arena->bump + total > arena->limit)) {
+        if (!kiln_c99_par_arena_refill(arena)) return NULL;
+    }
+    chunk = arena->current;
+    block = (kiln_gc_block *)arena->bump;
+    bit_idx = (size_t)(arena->bump - chunk->base) >> 4;
+    chunk->bitmap[bit_idx >> 6] |= ((uint64_t)1 << (bit_idx & 63));
+    if (kiln_c99_gc_kind_finalized_at_alloc(kind)) {
+        chunk->finals[bit_idx >> 6] |= ((uint64_t)1 << (bit_idx & 63));
+    }
+    arena->bump += total;
+    block->kind = kind | KILN_GC_FLAG_NURSERY;
+    block->mark = 0;
+    block->size = size;
+    block->prev = NULL;
+    block->next = NULL;
+    arena->count += 1;
+    arena->bytes += size;
+    return block + 1;
+}
+
+/* On the realm thread, just before the pool: a slot per thread that can run a chunk (the pool's
+ * and the calling thread, which runs the cost model's probe), and the heap paused. 0 when the heap
+ * has no nursery to take chunks of its kind, or no memory: the site then runs sequentially. */
+static int kiln_c99_par_arenas_open(kiln_c99_par_env *env, size_t threads) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)env->heap;
+    size_t capacity = threads + 1;
+    if (heap == NULL || heap->nursery.capacity == 0 ||
+        heap->nursery.bitmap_words == 0) {
+        return 0;
+    }
+    if (capacity < 2) capacity = 2;
+    if (capacity > 4096) capacity = 4096;
+    env->arenas = (struct kiln_c99_par_arena *)calloc(capacity, sizeof(struct kiln_c99_par_arena));
+    if (env->arenas == NULL) return 0;
+    env->arena_capacity = (uint32_t)capacity;
+    env->arena_count = 0;
+    heap->parallel_paused += 1;
+    return 1;
+}
+
+/* On a pool thread, at the start of each chunk: this thread's arena for the call -- the one it
+ * claimed at an earlier chunk, else a fresh slot. NULL when the site gave its workers no arenas,
+ * or every slot is taken (a thread the table was not sized for); the worker then declines at its
+ * first allocation. */
+static kiln_c99_par_arena *kiln_c99_par_arena_claim(kiln_c99_par_env *env) {
+    const void *me = (const void *)&kiln_c99_no_write_depth;
+    uint32_t seen;
+    uint32_t index;
+    kiln_c99_par_arena *arena;
+    if (env->arenas == NULL) return NULL;
+    seen = __atomic_load_n(&env->arena_count, __ATOMIC_ACQUIRE);
+    if (seen > env->arena_capacity) seen = env->arena_capacity;
+    for (index = 0; index < seen; ++index) {
+        if (__atomic_load_n(&env->arenas[index].owner, __ATOMIC_ACQUIRE) == me) {
+            return &env->arenas[index];
+        }
+    }
+    index = __atomic_fetch_add(&env->arena_count, 1, __ATOMIC_ACQ_REL);
+    if (index >= env->arena_capacity) return NULL;
+    arena = &env->arenas[index];
+    arena->heap = (const kiln_gc_heap *)env->heap;
+    arena->budget = kiln_c99_par_arena_budget();
+    __atomic_store_n(&arena->owner, me, __ATOMIC_RELEASE);
+    return arena;
+}
+
+/* `KILN_PARALLEL_TRACE=1`: one line on stderr per join -- how many arenas the call claimed, how
+ * many chunks and bytes they held, whether the heap adopted them -- so a probe or a benchmark can
+ * see which calls really ran in arenas. Read once: 0 not yet read, 1 off, 2 on. */
+static int kiln_c99_par_trace_state;
+
+static void kiln_c99_par_trace(uint32_t arenas, size_t chunks, size_t bytes, int kept, int adopted) {
+    int state = __atomic_load_n(&kiln_c99_par_trace_state, __ATOMIC_RELAXED);
+    if (KILN_UNLIKELY(state == 0)) {
+        const char *setting = getenv("KILN_PARALLEL_TRACE");
+        state = setting != NULL && setting[0] == '1' ? 2 : 1;
+        __atomic_store_n(&kiln_c99_par_trace_state, state, __ATOMIC_RELAXED);
+    }
+    if (KILN_LIKELY(state != 2)) return;
+    kiln_c99_gc_trace_text("kiln parallel: arenas ");
+    kiln_c99_gc_trace_count(arenas);
+    kiln_c99_gc_trace_text(" chunks ");
+    kiln_c99_gc_trace_count(chunks);
+    kiln_c99_gc_trace_text(" bytes ");
+    kiln_c99_gc_trace_count(bytes);
+    kiln_c99_gc_trace_text(adopted ? " adopted\n" : kept ? " adoption refused\n" : " freed (sequential)\n");
+}
+
+/* On the realm thread, once the pool has returned: every arena sealed, the heap unpaused, and
+ * with `keep` every chunk adopted (1) -- the answer the workers built is the heap's. Without
+ * `keep`, or when adoption cannot get memory, the chunks are freed and 0 says the site must not
+ * publish what the workers wrote. */
+static int kiln_c99_par_arenas_join(kiln_c99_par_env *env, int keep) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)env->heap;
+    kiln_nursery_chunk *chunks = NULL;
+    uint32_t count;
+    uint32_t index;
+    size_t chunk_count = 0;
+    size_t bytes = 0;
+    int adopted;
+    if (env->arenas == NULL) return keep;
+    count = env->arena_count < env->arena_capacity ? env->arena_count : env->arena_capacity;
+    for (index = 0; index < count; ++index) {
+        kiln_c99_par_arena *arena = &env->arenas[index];
+        kiln_c99_par_arena_seal(arena);
+        while (arena->filled != NULL) {
+            kiln_nursery_chunk *chunk = arena->filled;
+            arena->filled = chunk->next;
+            chunk->next = chunks;
+            chunks = chunk;
+            chunk_count += 1;
+            bytes += chunk->alloc_bytes;
+        }
+    }
+    free(env->arenas);
+    env->arenas = NULL;
+    heap->parallel_paused -= 1;
+    adopted = keep && kiln_c99_heap_adopt_chunks(heap, chunks);
+    kiln_c99_par_trace(count, chunk_count, bytes, keep, adopted);
+    if (adopted) return 1;
+    kiln_c99_arena_chunks_free(chunks);
+    return 0;
+}
+
 /* ---- Interned keys ------------------------------------------------------------------------
  *
  * Three entry points, and the difference between them is the whole design:
@@ -2438,6 +3300,7 @@ static kiln_string *kiln_c99_gc_alloc_key_copy(const kiln_string *view);
 static const kiln_string *kiln_c99_intern_key(const kiln_string *string);
 static const kiln_string *kiln_c99_intern_static_key(const kiln_string *string);
 static const kiln_string *kiln_c99_intern_pinned_key(const kiln_string *string);
+static const kiln_string *kiln_c99_intern_shared_key(const kiln_string *string);
 static int kiln_c99_register_static_keys(const kiln_string *const *keys, const kiln_string **out,
                                          size_t count);
 
@@ -2719,6 +3582,7 @@ const kiln_string *kiln_c99_intern_key(const kiln_string *string) {
     kiln_string *copy;
     const kiln_string *shared;
     if (string == NULL || string->unit_len == 0) return kiln_c99_key_empty;
+    if (kiln_c99_no_write()) return kiln_c99_interned_key_in(kiln_c99_gc_heap(), string);
     hash = kiln_c99_key_hash(string);
     shared = kiln_c99_shared_key_probe(string, hash);
     if (shared != NULL) return shared;
@@ -2742,6 +3606,7 @@ const kiln_string *kiln_c99_intern_pinned_key(const kiln_string *string) {
     kiln_string *copy;
     const kiln_string *shared;
     if (string == NULL || string->unit_len == 0) return kiln_c99_key_empty;
+    if (kiln_c99_no_write()) return kiln_c99_interned_key_in(kiln_c99_gc_heap(), string);
     hash = kiln_c99_key_hash(string);
     shared = kiln_c99_shared_key_probe(string, hash);
     if (shared != NULL) return shared;
@@ -2755,6 +3620,36 @@ const kiln_string *kiln_c99_intern_pinned_key(const kiln_string *string) {
     copy = kiln_c99_gc_alloc_key_copy(string);
     if (copy == NULL) return NULL;
     return kiln_c99_key_insert(&heap->keys, copy, hash, 1);
+}
+
+/* A key that means the same in every realm although no unit names it: a registered symbol's
+ * (`Symbol.for`, spelt `@@symbol-for:` and the registry key). It joins the shared table whatever
+ * other realms are alive, which is sound where `kiln_c99_intern_static_key` below is not because
+ * no realm makes this spelling any other way: only `Symbol.for` spells a `@@symbol-for:` key, and
+ * it spells it here. The calling realm's own table is still consulted first, so a realm that holds
+ * the spelling already (a program string that happened to spell one) keeps its own pointer. The
+ * table only grows, like the registries it mirrors, which live as long as their realms. */
+const kiln_string *kiln_c99_intern_shared_key(const kiln_string *string) {
+    kiln_gc_heap *heap;
+    uint64_t hash;
+    const kiln_string *shared;
+    kiln_shared_state *process;
+    if (string == NULL || string->unit_len == 0) return kiln_c99_key_empty;
+    if (kiln_c99_no_write()) return kiln_c99_interned_key_in(kiln_c99_gc_heap(), string);
+    hash = kiln_c99_key_hash(string);
+    shared = kiln_c99_shared_key_probe(string, hash);
+    if (shared != NULL) return shared;
+    heap = kiln_c99_gc_heap();
+    if (heap == NULL) return NULL;
+    if (kiln_c99_key_probe(&heap->keys, string, hash) == NULL) {
+        process = kiln_c99_process();
+        kiln_c99_process_lock(process);
+        shared = kiln_c99_shared_key_probe(string, hash);
+        if (shared == NULL) shared = kiln_c99_shared_key_insert(process, string, hash);
+        kiln_c99_process_unlock(process);
+        if (shared != NULL) return shared;
+    }
+    return kiln_c99_intern_pinned_key(string);
 }
 
 /* A constant of the program: a unit's constant-table key, a prelude literal. These are what the
@@ -2781,6 +3676,7 @@ const kiln_string *kiln_c99_intern_static_key(const kiln_string *string) {
     const kiln_string *shared;
     kiln_shared_state *process;
     if (string == NULL || string->unit_len == 0) return kiln_c99_key_empty;
+    if (kiln_c99_no_write()) return kiln_c99_interned_key_in(kiln_c99_gc_heap(), string);
     hash = kiln_c99_key_hash(string);
     shared = kiln_c99_shared_key_probe(string, hash);
     if (shared != NULL) return shared;
@@ -3360,8 +4256,10 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         kiln_c99_gc_mark_val(heap, closure->captured_this);
         kiln_c99_gc_mark_val(heap, closure->captured_new_target);
         kiln_c99_gc_mark_value(heap, &closure->captured_arguments);
-        kiln_c99_gc_mark_value(heap, &closure->prototype);
-        kiln_c99_gc_mark_value(heap, &closure->properties);
+        /* A region closure is never reached here (no heap holds its block); an ordinary one
+         * keeps its prototype and store in these fields. */
+        kiln_c99_gc_mark_value(heap, &closure->own_prototype);
+        kiln_c99_gc_mark_value(heap, &closure->own_store);
         /* Generated names may point at static headers; runtime-created/inferred names point at
          * GC strings.  The marker's lookup treats static headers as non-heap and marks the latter
          * without a second representation or an unsafe header-kind probe. */
@@ -3611,6 +4509,10 @@ static void kiln_c99_gc_finalize(kiln_gc_block *block) {
             kiln_c99_bytes_retire(((kiln_typed_buffer *)payload)->bytes,
                                   ((kiln_typed_buffer *)payload)->byte_length);
         }
+        /* A `SharedArrayBuffer`'s store outlives this realm's buffer while another realm holds
+         * it; this buffer's reference is handed back. */
+        if (((kiln_typed_buffer *)payload)->shared != NULL)
+            kiln_shared_release(((kiln_typed_buffer *)payload)->shared);
         break;
     case KILN_GC_REGEXP:
         /* The compiled pattern is the provider's, and this is the only place it is handed back. */
@@ -3740,7 +4642,7 @@ static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
         kiln_gc_slab *next_slab = slab->all_next;
         uint32_t index;
         int had_survivor = 0;
-        for (index = 0; index < slab->slot_count; ++index) {
+        for (index = 0; index < slab->fresh; ++index) {
             kiln_gc_block *slot = kiln_c99_gc_slab_slot(slab, index);
             if (slot->size == KILN_GC_SLOT_FREE) continue;
             if (slot->mark != heap->epoch) {
@@ -3917,6 +4819,13 @@ static void kiln_c99_gc_mark_realm(kiln_gc_heap *heap) {
         const kiln_c99_unit_block *block = realm->units[index];
         if (block != NULL) kiln_c99_gc_mark_vals(heap, block->vals, block->val_count);
     }
+    for (index = 0; index < realm->region_own_buckets; ++index) {
+        const kiln_c99_region_own *entry;
+        for (entry = realm->region_own[index]; entry != NULL; entry = entry->next) {
+            kiln_c99_gc_mark_value(heap, &entry->prototype);
+            kiln_c99_gc_mark_value(heap, &entry->store);
+        }
+    }
 }
 
 /* Free what the realm context owns outside the collector, with the heap (teardown). */
@@ -3941,6 +4850,18 @@ static void kiln_c99_realm_free(kiln_c99_realm_state *realm) {
     free(realm->units);
     realm->units = NULL;
     realm->unit_capacity = 0;
+    for (index = 0; index < realm->region_own_buckets; ++index) {
+        kiln_c99_region_own *entry = realm->region_own[index];
+        while (entry != NULL) {
+            kiln_c99_region_own *next = entry->next;
+            free(entry);
+            entry = next;
+        }
+    }
+    free(realm->region_own);
+    realm->region_own = NULL;
+    realm->region_own_buckets = 0;
+    realm->region_own_count = 0;
 }
 
 static void kiln_c99_gc_collect(void *opaque, int force) {
@@ -3953,6 +4874,11 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
     int tenured_due;
     if (heap == NULL || heap->collecting || heap->fallback) return;
     if (!heap->enabled && !heap->stress) return;
+    if (KILN_UNLIKELY(heap->parallel_paused != 0)) {
+        fputs("kiln: a collection was due while a parallel call's worker arenas were open\n",
+              stderr);
+        abort();
+    }
 
     nursery_has_allocs = heap->nursery.full != NULL ||
                          (heap->nursery.active && heap->nursery.bump > heap->nursery.base);
@@ -4131,6 +5057,8 @@ static void kiln_c99_gc_teardown_end(void *opaque) {
     if (heap == NULL || heap->fallback) return;
     /* First, while this realm's keys and shapes are all still allocated: no site may name one. */
     kiln_c99_gc_forget_realm_local(heap);
+    /* A realm that was building the shared region and never sealed it: nobody will use it. */
+    kiln_c99_region_abandon(heap);
     /* The realm's modifications of built-ins end with it (`kiln_c99_builtin_store_epoch`). */
     __atomic_sub_fetch(&kiln_c99_builtin_store_epoch, heap->builtin_stores, __ATOMIC_RELAXED);
     heap->builtin_stores = 0;
@@ -4143,7 +5071,7 @@ static void kiln_c99_gc_teardown_end(void *opaque) {
             block->mark = heap->epoch;
         for (kiln_gc_slab *slab = heap->all_slabs; slab != NULL; slab = slab->all_next) {
             uint32_t index;
-            for (index = 0; index < slab->slot_count; ++index) {
+            for (index = 0; index < slab->fresh; ++index) {
                 kiln_gc_block *slot = kiln_c99_gc_slab_slot(slab, index);
                 if (slot->size != KILN_GC_SLOT_FREE) slot->mark = heap->epoch;
             }

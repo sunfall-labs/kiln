@@ -1,6 +1,6 @@
 use super::clones::{RESTART, bail_out, route_typed_failures, typed_fail};
 use super::ops::emit_graph_op;
-use super::sites::{self, receiver_prologue, share_sites, this_columns};
+use super::sites::{self, receiver_prologue, share_sites, this_columns, typed_row_claimer};
 use super::{EntryKind, Site, Speculation, this_site_count, typed_signature};
 use crate::direct::{CallPlan, direct_callable};
 use crate::graph::{
@@ -414,6 +414,24 @@ pub fn emit_function_from_graph_with_profile(
                 "static inline "
             };
             let suffix = if super::parallel_clone() { "_p" } else { "_t" };
+            // Issue 21: the entry's row lookup, callable by a method call site before it
+            // enters the entry. Emitted wherever the entry has a receiver prologue; declared
+            // (in `lib.rs`) and called only where the entry reads the row.
+            if !super::parallel_clone() && !plan.generic_only && this_site_count(graph) > 0 {
+                let (this_col_map, this_col_names) = this_columns(graph);
+                let linkage = if plan.should_chunk {
+                    ""
+                } else {
+                    "static inline __attribute__((unused)) "
+                };
+                output.push_str(&typed_row_claimer(
+                    symbol,
+                    index,
+                    &this_col_names,
+                    typed_double_mask(&this_col_map, plan),
+                    linkage,
+                ));
+            }
             writeln!(
                 output,
                 "{inline}{result} {symbol}_fn_{index}{suffix}({params}) {{"
@@ -428,13 +446,7 @@ pub fn emit_function_from_graph_with_profile(
     let receiver_cache = if !plan.generic_only && this_site_count(graph) > 0 {
         let (this_col_map, this_col_names) = this_columns(graph);
         let double_mask = if matches!(kind, EntryKind::Typed { .. }) {
-            let mut mask = 0u32;
-            for (vid, col_idx) in &this_col_map {
-                if plan.numbers.contains(vid) && *col_idx < 32 {
-                    mask |= 1u32 << col_idx;
-                }
-            }
-            mask
+            typed_double_mask(&this_col_map, plan)
         } else {
             0u32
         };
@@ -538,7 +550,8 @@ pub fn emit_function_from_graph_with_profile(
                     if let Some((_, _, exit_pc)) = delegate {
                         writeln!(
                             output,
-                            "        case {exit_pc}: goto kiln_resume_{exit_pc};"
+                            "        case {}: goto kiln_resume_exit_{exit_pc};",
+                            delegate_exit_id(*exit_pc)
                         )
                         .unwrap();
                     }
@@ -625,9 +638,12 @@ pub fn emit_function_from_graph_with_profile(
         }
         if this_sites > 0 {
             let row = vec!["UINT32_MAX"; this_sites].join(", ");
+            // A chunked unit's callers in other chunks name the shape and slot rows (`lib.rs`
+            // declares them extern there), so here they are the one external definition.
+            let shared = if plan.should_chunk { "" } else { "static " };
             writeln!(
                 declarations,
-                "static const kiln_shape *{symbol}_fn_{index}_recv_shape[4];\nstatic const kiln_shape *{symbol}_fn_{index}_recv_refused[4];\nstatic uint32_t {symbol}_fn_{index}_recv_slot[4][{this_sites}] = {{ {{{row}}}, {{{row}}}, {{{row}}}, {{{row}}} }};\nstatic const kiln_shape *{symbol}_fn_{index}_typed_recv_shape[4];\nstatic const kiln_shape *{symbol}_fn_{index}_typed_recv_refused[4];\nstatic uint32_t {symbol}_fn_{index}_typed_recv_slot[4][{this_sites}] = {{ {{{row}}}, {{{row}}}, {{{row}}}, {{{row}}} }};"
+                "{shared}const kiln_shape *{symbol}_fn_{index}_recv_shape[4];\nstatic const kiln_shape *{symbol}_fn_{index}_recv_refused[4];\n{shared}uint32_t {symbol}_fn_{index}_recv_slot[4][{this_sites}] = {{ {{{row}}}, {{{row}}}, {{{row}}}, {{{row}}} }};\n{shared}const kiln_shape *{symbol}_fn_{index}_typed_recv_shape[4];\nstatic const kiln_shape *{symbol}_fn_{index}_typed_recv_refused[4];\n{shared}uint32_t {symbol}_fn_{index}_typed_recv_slot[4][{this_sites}] = {{ {{{row}}}, {{{row}}}, {{{row}}}, {{{row}}} }};"
             )
             .unwrap();
         }
@@ -784,7 +800,8 @@ pub fn emit_async_entry_body(
             if let Some((_, _, exit_pc)) = delegate {
                 writeln!(
                     output,
-                    "        case {exit_pc}: goto kiln_resume_{exit_pc};"
+                    "        case {}: goto kiln_resume_exit_{exit_pc};",
+                    delegate_exit_id(*exit_pc)
                 )
                 .unwrap();
             }
@@ -1053,15 +1070,17 @@ fn emit_block_sequence(
     ivs: &std::collections::HashMap<ValueId, InductionVariable>,
     block_prefix: &str,
     is_fast_clone: bool,
+    keep_boxed: &HashSet<ValueId>,
     type_profile_record: bool,
     this_sites: &std::collections::HashMap<ValueId, usize>,
     spec: &Speculation,
 ) {
     // A proven number nothing reads boxed is never boxed: its box statement is dropped from
-    // the operation's text, and its twin is all that lives. Only in a body with one clone --
-    // a versioned body's clones share every value, and the generic one reads them boxed. (A
-    // fast clone that boxed only at its exits was tried on 2026-09-06: it measured nothing,
-    // and a bundled `marked` answered wrongly under it.)
+    // the operation's text, and its twin is all that lives. In a versioned body the generic
+    // clone always boxes, and a box the generic clone reads that the fast clone dropped
+    // (`keep_boxed`, see `split_clone_twins`) is written on each exit's way out: an exit hands
+    // the generic clone the fast clone's variables as they stand. (A fast clone that boxed only at its exits was tried on
+    // 2026-09-06: it measured nothing, and a bundled `marked` answered wrongly under it.)
     let boxed =
         if block_prefix == "kiln_generic_block_" || (plan.generic_only && numbers.is_empty()) {
             None
@@ -1077,6 +1096,18 @@ fn emit_block_sequence(
                 spec,
             ))
         };
+    // The boxes the generic clone reads that this (fast) clone did not write: each exit into
+    // the generic clone writes them from their twins on its way out (see `split_clone_twins`).
+    let exit_boxes: Vec<ValueId> = {
+        let mut exit_boxes: Vec<ValueId> = keep_boxed
+            .iter()
+            .filter(|v| boxed.as_ref().is_some_and(|boxed| !boxed.contains(v)))
+            .copied()
+            .collect();
+        exit_boxes.sort();
+        exit_boxes
+    };
+    let sequence_start = output.len();
     // A second read of the same `this` slot in a block, with nothing between the two that could
     // run code or write a property, reads what the first read. Only the row path copies -- an
     // accessor puts its object in dictionary mode, and a dictionary object has no row -- so the
@@ -1279,7 +1310,7 @@ fn emit_block_sequence(
                     .filter(|(_, op)| matches!(op, GraphOp::Phi { .. }))
                     .map(|(v, _)| v.0)
                     .collect();
-                writeln!(output, "kiln_resume_{exit_pc}:;").unwrap();
+                writeln!(output, "kiln_resume_exit_{exit_pc}:;").unwrap();
                 writeln!(
                     output,
                     "    frame->delegate = kiln_c99_undefined(); frame->delegate_exit = 0;"
@@ -1472,6 +1503,223 @@ fn emit_block_sequence(
             boxed.as_ref(),
         );
     }
+    if is_fast_clone && !exit_boxes.is_empty() {
+        route_exits_through_boxing(
+            output,
+            sequence_start,
+            graph,
+            &exit_boxes,
+            live_numbers,
+            live_ints,
+        );
+    }
+}
+
+/// The resume id of a `yield*`'s completion: its target pc, in a space of its own. A suspension
+/// resumes by its own pc and a delegate's completion by the pc of the instruction after the
+/// `yield*`, so `yield yield* inner()` -- whose `yield` *is* that instruction -- gave both the
+/// same id: a duplicate `case` and a redefined label, and the module did not compile (the
+/// release source DCE writes exactly that from `const r = yield* inner(); yield r;`;
+/// parallel-builtins issue 18). `frame->resume` is a `size_t`, and bytecode stays far below it.
+fn delegate_exit_id(exit_pc: u32) -> u64 {
+    (1u64 << 31) | u64::from(exit_pc)
+}
+
+/// Send each exit of a fast clone's text into the generic clone through a stub that first
+/// writes, from their twins, the `boxes` the generic clone will read after that exit:
+/// `goto kiln_generic_resume_N;` (a speculation that failed mid-body) becomes
+/// `goto kiln_fast_exit_N;`, and `goto kiln_generic_block_N;` (a loop header's exit) becomes
+/// `goto kiln_fast_exit_block_N;`. An exit boxes only a value that is defined before it and
+/// used after it: boxing every kept value at every exit kept every twin alive to every exit,
+/// and that cost the hot path about 7% on `bench/non-io/class-poly.mjs`.
+fn route_exits_through_boxing(
+    output: &mut String,
+    start: usize,
+    graph: &FunctionGraph,
+    boxes: &[ValueId],
+    live_numbers: &HashSet<ValueId>,
+    live_ints: &HashSet<ValueId>,
+) {
+    let boxes: HashSet<ValueId> = boxes.iter().copied().collect();
+    let dominators = crate::graph::compute_dominators(graph);
+    let block_of = |id: BlockId| graph.blocks.iter().find(|b| b.id == id);
+    // Where an exit leaves: the block, and how many of its operations ran before it.
+    let exit_point = |block: bool, id: u32| -> Option<(BlockId, usize)> {
+        if block {
+            return Some((BlockId(id), 0));
+        }
+        graph.blocks.iter().find_map(|b| {
+            b.operations
+                .iter()
+                .position(|(v, _)| v.0 == id)
+                .map(|p| (b.id, p))
+        })
+    };
+    let terminator_uses = |terminator: &Terminator| -> Vec<ValueId> {
+        match terminator {
+            Terminator::Return(Some(v)) | Terminator::Throw(v) => vec![*v],
+            Terminator::Branch { condition, .. }
+            | Terminator::BranchNotNullish { condition, .. } => vec![*condition],
+            Terminator::Suspend {
+                value,
+                spilled,
+                delegate,
+                ..
+            } => {
+                let mut uses = vec![*value];
+                uses.extend(spilled.iter().copied());
+                if let Some((iter, _, _)) = delegate {
+                    uses.push(*iter);
+                }
+                uses
+            }
+            _ => Vec::new(),
+        }
+    };
+    // Backward liveness over the fast graph. A phi's inputs are live out of the predecessor they
+    // come from, not live into the phi's block.
+    let mut live_out: HashMap<BlockId, HashSet<ValueId>> = HashMap::new();
+    let mut live_in: HashMap<BlockId, HashSet<ValueId>> = HashMap::new();
+    let transfer = |b: &BasicBlock, out: &HashSet<ValueId>, from: usize| -> HashSet<ValueId> {
+        let mut live = out.clone();
+        live.extend(terminator_uses(&b.terminator));
+        for (v, op) in b.operations[from.min(b.operations.len())..].iter().rev() {
+            live.remove(v);
+            if !matches!(op, GraphOp::Phi { .. }) {
+                live.extend(op.operands());
+            }
+        }
+        live
+    };
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for b in graph.blocks.iter().rev() {
+            let mut out: HashSet<ValueId> = HashSet::new();
+            for succ in b.successors.iter().chain(b.exception_handler.iter()) {
+                if let Some(live) = live_in.get(succ) {
+                    out.extend(live.iter().copied());
+                }
+                if let Some(sb) = block_of(*succ) {
+                    for (_, op) in &sb.operations {
+                        if let GraphOp::Phi { inputs } = op {
+                            out.extend(
+                                inputs
+                                    .iter()
+                                    .filter(|(from, _)| *from == b.id)
+                                    .map(|(_, v)| *v),
+                            );
+                        }
+                    }
+                }
+            }
+            let inn = transfer(b, &out, 0);
+            if live_out.get(&b.id) != Some(&out) {
+                live_out.insert(b.id, out);
+                changed = true;
+            }
+            if live_in.get(&b.id) != Some(&inn) {
+                live_in.insert(b.id, inn);
+                changed = true;
+            }
+        }
+    }
+    let boxes_at = |block: BlockId, position: usize| -> Vec<ValueId> {
+        let Some(here) = block_of(block) else {
+            return boxes.iter().copied().collect();
+        };
+        // Defined before the exit: in a block that strictly dominates this one, or earlier in it.
+        let mut defined: HashSet<ValueId> = here.operations[..position.min(here.operations.len())]
+            .iter()
+            .map(|(v, _)| *v)
+            .collect();
+        if let Some(doms) = dominators.get(&block) {
+            for dom in doms.iter().filter(|d| **d != block) {
+                if let Some(b) = block_of(*dom) {
+                    defined.extend(b.operations.iter().map(|(v, _)| *v));
+                }
+            }
+        }
+        defined.extend(graph.initial_locals.iter().copied());
+        // Used after it: live at the exit's position, which the generic clone resumes from.
+        let used = transfer(
+            here,
+            live_out.get(&block).unwrap_or(&HashSet::new()),
+            position,
+        );
+        let mut at: Vec<ValueId> = boxes
+            .iter()
+            .filter(|v| defined.contains(v) && used.contains(v))
+            .copied()
+            .collect();
+        at.sort();
+        at
+    };
+    let text = output.split_off(start);
+    let mut rewritten = String::with_capacity(text.len());
+    let mut stubs: std::collections::BTreeMap<(bool, u32), String> =
+        std::collections::BTreeMap::new();
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find("goto kiln_generic_") {
+        rewritten.push_str(&rest[..at]);
+        let tail = &rest[at + "goto kiln_generic_".len()..];
+        let (block, digits_at) = if let Some(t) = tail.strip_prefix("resume_") {
+            (false, t)
+        } else if let Some(t) = tail.strip_prefix("block_") {
+            (true, t)
+        } else {
+            rewritten.push_str("goto kiln_generic_");
+            rest = tail;
+            continue;
+        };
+        let digits = digits_at
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(digits_at.len());
+        let Ok(id) = digits_at[..digits].parse::<u32>() else {
+            rewritten.push_str("goto kiln_generic_");
+            rest = tail;
+            continue;
+        };
+        let materialize = stubs.entry((block, id)).or_insert_with(|| {
+            let values = match exit_point(block, id) {
+                Some((b, p)) => boxes_at(b, p),
+                None => boxes.iter().copied().collect(),
+            };
+            let mut text = String::new();
+            for value in values {
+                let v = value.0;
+                if live_numbers.contains(&value) {
+                    text.push_str(&format!(" v{v} = kiln_c99_val_from_double(d{v});"));
+                } else if live_ints.contains(&value) {
+                    text.push_str(&format!(" v{v} = kiln_c99_val_from_double((double)i{v});"));
+                }
+            }
+            text
+        });
+        let kind = if block { "block_" } else { "resume_" };
+        if materialize.is_empty() {
+            rewritten.push_str(&format!("goto kiln_generic_{kind}{id}"));
+        } else {
+            let label = if block { "block_" } else { "" };
+            rewritten.push_str(&format!("goto kiln_fast_exit_{label}{id}"));
+        }
+        rest = &digits_at[digits..];
+    }
+    rewritten.push_str(rest);
+    output.push_str(&rewritten);
+    for ((block, id), materialize) in stubs {
+        if materialize.is_empty() {
+            continue;
+        }
+        let (label, kind) = if block {
+            ("block_", "block_")
+        } else {
+            ("", "resume_")
+        };
+        output.push_str(&format!(
+            "kiln_fast_exit_{label}{id}:;{materialize} goto kiln_generic_{kind}{id};\n"
+        ));
+    }
 }
 
 /// The values proven booleans under `assumptions`: comparisons, `!`, `in`, `instanceof`, the
@@ -1570,6 +1818,66 @@ fn compute_live_booleans(
     }
 
     live
+}
+
+/// Which unboxed twins each clone of a versioned body reads and writes, and which boxes the
+/// fast clone must keep because the generic clone reads them.
+struct CloneTwins {
+    fast_numbers: HashSet<ValueId>,
+    fast_ints: HashSet<ValueId>,
+    generic_numbers: HashSet<ValueId>,
+    generic_ints: HashSet<ValueId>,
+    keep_boxed: HashSet<ValueId>,
+}
+
+/// The two clones of a versioned body share every SSA variable: an exit from the fast clone
+/// resumes the generic one mid-body with the variables as they stand. The live twins are
+/// computed against the fast clone's proof, which includes the speculation. A twin is only a
+/// value's representation where the value is *proven* a number, and in the generic clone a
+/// speculated value is not: `at + needle.length` there is emitted boxed (`needle.length` may
+/// be anything), so its twin is never written, and a call argument that read the twin because
+/// it was live passed a stale `0.0` -- `indexOf("\n", 0)` in `headerListRemove`, a loop that
+/// never ended (parallel-builtins issue 18).
+///
+/// So the generic clone reads a twin only for a value its own (baseline) proof covers, and
+/// reads everything else boxed. The fast clone may be the one that defined such a value and may
+/// have dropped its box (nothing in the fast clone reads it boxed), so every exit into the
+/// generic clone writes those boxes from their twins on its way out (`keep_boxed`,
+/// `route_exits_through_boxing`) -- on the cold path, not on every definition. A baseline number the fast
+/// clone carries as an integer only is given a double twin in both, since the generic clone
+/// treats it as a number.
+fn split_clone_twins(
+    live_numbers: &HashSet<ValueId>,
+    live_ints: &HashSet<ValueId>,
+    baseline_numbers: &HashSet<ValueId>,
+    baseline_ints: &HashSet<ValueId>,
+) -> CloneTwins {
+    let generic_ints: HashSet<ValueId> = live_ints.intersection(baseline_ints).copied().collect();
+    let generic_numbers: HashSet<ValueId> = live_numbers
+        .iter()
+        .filter(|v| baseline_numbers.contains(v))
+        .chain(
+            live_ints
+                .iter()
+                .filter(|v| baseline_numbers.contains(v) && !baseline_ints.contains(v)),
+        )
+        .copied()
+        .collect();
+    let mut fast_numbers = live_numbers.clone();
+    fast_numbers.extend(generic_numbers.iter().copied());
+    let keep_boxed = live_numbers
+        .iter()
+        .chain(live_ints.iter())
+        .filter(|v| !generic_numbers.contains(v) && !generic_ints.contains(v))
+        .copied()
+        .collect();
+    CloneTwins {
+        fast_numbers,
+        fast_ints: live_ints.clone(),
+        generic_numbers,
+        generic_ints,
+        keep_boxed,
+    }
 }
 
 /// Values whose double twin `d{v}` or integer twin `i{v}` is actually read downstream.
@@ -2513,11 +2821,17 @@ fn emit_blocks(
             &use_counts,
             &ivs,
         );
+        let clone_twins = split_clone_twins(
+            &all_live_numbers,
+            &all_live_ints,
+            baseline_numbers,
+            baseline_ints,
+        );
         emit_ssa_declarations(
             output,
             fast_graph,
-            &all_live_numbers,
-            &all_live_ints,
+            &clone_twins.fast_numbers,
+            &clone_twins.fast_ints,
             &all_live_booleans,
             true,
             false,
@@ -2628,14 +2942,15 @@ fn emit_blocks(
             kind,
             &all_numbers,
             &all_ints,
-            &all_live_numbers,
-            &all_live_ints,
+            &clone_twins.fast_numbers,
+            &clone_twins.fast_ints,
             &all_live_booleans,
             &defs,
             &use_counts,
             &ivs,
             "kiln_fast_block_",
             true,
+            &clone_twins.keep_boxed,
             type_profile_record,
             &this_sites,
             &Speculation {
@@ -2664,14 +2979,15 @@ fn emit_blocks(
             kind,
             baseline_numbers,
             baseline_ints,
-            &all_live_numbers,
-            &all_live_ints,
+            &clone_twins.generic_numbers,
+            &clone_twins.generic_ints,
             &all_live_booleans,
             &defs,
             &use_counts,
             &ivs,
             "kiln_generic_block_",
             false,
+            &HashSet::new(),
             type_profile_record,
             &this_sites,
             &Speculation {
@@ -2744,6 +3060,7 @@ fn emit_blocks(
             &ivs,
             "kiln_block_",
             false,
+            &HashSet::new(),
             type_profile_record,
             &this_sites,
             &Speculation::default(),
@@ -3314,7 +3631,8 @@ fn emit_terminator(
                 Some((iter, _, exit_pc)) => {
                     format!(
                         " frame->delegate = kiln_val_to_boundary(v{}); frame->delegate_exit = {};",
-                        iter.0, exit_pc
+                        iter.0,
+                        delegate_exit_id(*exit_pc)
                     )
                 }
                 None => {
@@ -3487,6 +3805,18 @@ fn emit_phi_assignments(
         }
     }
     output.push_str(" }\n");
+}
+
+/// The `this` columns a typed entry reads as doubles: the representation a receiver's row must
+/// have for the entry to claim it.
+fn typed_double_mask(this_col_map: &HashMap<ValueId, usize>, plan: &CallPlan) -> u32 {
+    let mut mask = 0u32;
+    for (vid, col_idx) in this_col_map {
+        if plan.numbers.contains(vid) && *col_idx < 32 {
+            mask |= 1u32 << col_idx;
+        }
+    }
+    mask
 }
 
 #[cfg(test)]

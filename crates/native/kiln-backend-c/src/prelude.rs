@@ -1103,6 +1103,14 @@ method_ids! {
     // copy, and the default-order sort through the provider's `kiln_typed_array_sort`.
     (KILN_C99_METHOD_TYPED_ARRAY_COPY_RAW, 537, Direct; 0, 0),
     (KILN_C99_METHOD_TYPED_ARRAY_SORT_RAW, 538, Direct; 0, 0),
+    // The runtime's cross-realm ports and workers (realms issue 06), captured and deleted by
+    // `kiln-builtins/src/web_events_streams.ts`: every synchronous operation, and the wait.
+    (KILN_C99_METHOD_WORKER_OP_RAW, 539, Direct; 0, 0),
+    (KILN_C99_METHOD_PORT_WAIT_RAW, 540, Direct; 0, 0),
+    // `SharedArrayBuffer` stores and `Atomics` on their elements (realms issue 06), captured and
+    // deleted by `kiln-builtins/src/arraybuffer.ts` and `atomics.ts`.
+    (KILN_C99_METHOD_SHARED_BUFFER_RAW, 541, Direct; 0, 0),
+    (KILN_C99_METHOD_ATOMICS_RAW, 542, Direct; 0, 0),
     (KILN_C99_METHOD_PROCESS_EXIT, 513, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC, 514, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC, 515, Direct; 0, 0),
@@ -2166,7 +2174,7 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     },
     AbsentAnswer {
         function: "kiln_c99_get_own_kind",
-        sites: 25,
+        sites: 26,
         proved_by: "one membership predicate per receiver kind -- kiln_c99_is_array_member, \
                     kiln_c99_is_string_member, kiln_c99_is_date_member, \
                     kiln_c99_is_collection_member and the kiln_c99_collection_kind_member \
@@ -2174,7 +2182,10 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
                     (a name belonging to a sibling kind -- `Map.prototype.add` -- is absent \
                     rather than unbuilt), kiln_c99_is_array_buffer_member, \
                     kiln_c99_is_typed_array_member, RegExp.prototype without name, and BUILTIN_SURFACE plus \
-                    BUILTIN_SURFACE_BACKLOG for the table-driven built-ins. These are the lists \
+                    BUILTIN_SURFACE_BACKLOG for the table-driven built-ins. A bound function's \
+                    `prototype` is decided by BoundFunctionCreate, which defines none, so it is \
+                    absent when its [[Prototype]] is null or a `Function.prototype` whose store \
+                    lacks it. These are the lists \
                     the two engines can disagree about, and \
                     scripts/native-surface-inventory.py --gate is what measures them",
     },
@@ -2607,7 +2618,9 @@ const _: () = assert_refusals_name_themselves(
 /// now `memchr`) and the request-method table (lengths now stored beside the names).
 /// One added the same day by `kiln_c99_register_builtin_keys` (surface.c), which measures a
 /// surface row's `name`: a C string literal out of the generated table, as its other readers do.
-pub const C_STRING_LENGTH_SITES: usize = 73;
+/// One added 2026-09-27 by `kiln_c99_realm_tag_method_pristine` (stores.c, parallel issue 30),
+/// which measures `kiln_c99_method_name`'s answer: a C string literal out of the method table.
+pub const C_STRING_LENGTH_SITES: usize = 74;
 
 /// How far the `strlen(` scan may skip after reading the last byte of its seven-byte window:
 /// the Horspool shift, as `refusal_scan_shift` is for the refusal scan, so the const evaluator
@@ -3030,10 +3043,14 @@ macro_rules! header_rest {
     } while (0)
 
 /* Recursion runs on the C stack, where exhausting it aborts the process instead of reporting
- * anything.  The interpreter's own limit is 10000 frames, but its frames are heap-allocated and
- * these are not: a generated body holds its stack and locals as automatic arrays, so the safe
- * bound is far lower and has to be enforced rather than hoped for. */
-#define KILN_C99_MAX_CALL_DEPTH 2048
+ * anything. The limit is the interpreter's own, 10,000 calls (parallel issue 30: 2,048 threw at
+ * a recursion node and the interpreter finish), which every thread a realm runs on has the stack
+ * for: 64 MiB, the launcher's main thread (`kiln_cli_grow_main_stack`, `main_stack_flags`), a
+ * worker's and a pinned realm's. A call that goes through the runtime also asks how much of the
+ * stack is left (`kiln_c99_stack_exhausted`), since its frames are as big as the C it passes
+ * through, so a thread with less stack than that answers the same `RangeError` rather than a
+ * segfault. */
+#define KILN_C99_MAX_CALL_DEPTH 10000
 
 
 enum kiln_value_tag {
@@ -3722,6 +3739,10 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_PROMISE_REJECTIONS_RAW),
     emit_method_define!(KILN_C99_METHOD_TYPED_ARRAY_COPY_RAW),
     emit_method_define!(KILN_C99_METHOD_TYPED_ARRAY_SORT_RAW),
+    emit_method_define!(KILN_C99_METHOD_WORKER_OP_RAW),
+    emit_method_define!(KILN_C99_METHOD_PORT_WAIT_RAW),
+    emit_method_define!(KILN_C99_METHOD_SHARED_BUFFER_RAW),
+    emit_method_define!(KILN_C99_METHOD_ATOMICS_RAW),
     emit_method_define!(KILN_C99_METHOD_PROCESS_EXIT),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC),
@@ -4523,6 +4544,7 @@ typedef struct {
 static const kiln_builtin_gap kiln_c99_builtin_backlog[] = {
 "#,
     emit_builtin_backlog_rows!(),
+    include_str!(concat!(env!("OUT_DIR"), "/prelude_literal_keys.h")),
     core_parts!(),
 );
 
@@ -4726,9 +4748,17 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_builtin_store_epoch", C99StateOwner::Process),
     // Recycled byte blocks: plain memory that names no realm's value.
     ("kiln_c99_bytes_cache", C99StateOwner::ThreadCache),
+    // Parallel issue 30: the lowest address this thread's calls may start at, found once.
+    ("kiln_c99_stack_floor", C99StateOwner::ThreadCache),
     // Per thread, and trusted only for the heap serial it was built under: the `node:http` layouts.
     ("kiln_c99_node_http_layouts", C99StateOwner::ThreadCache),
     ("kiln_c99_gc_stress_checks", C99StateOwner::Process),
+    // Parallel issue 06's write detector (`KILN_PARALLEL_PROTECT`), read from the environment once.
+    ("kiln_c99_par_protect_state", C99StateOwner::Process),
+    // Parallel issue 08's worker arena budget (`KILN_PARALLEL_ARENA_KIB`), read once.
+    ("kiln_c99_par_arena_budget_bytes", C99StateOwner::Process),
+    // `KILN_PARALLEL_TRACE`: whether each arena join says what it adopted, read once.
+    ("kiln_c99_par_trace_state", C99StateOwner::Process),
     ("kiln_c99_introspect_pending", C99StateOwner::Process),
     ("kiln_c99_introspect_armed", C99StateOwner::Process),
     // The process-shared block (ADR 0071): shared keys and the shape root, one per process.
@@ -4750,10 +4780,15 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_static_texts", C99StateOwner::Constant),
     // `Symbol()` serials: process-wide so no realm mints one twice.
     ("kiln_c99_symbol_serial", C99StateOwner::Process),
+    // Each well-known symbol's shared canonical key, published once (`kiln_c99_symbol_ikey`).
+    ("kiln_c99_well_known_ikeys", C99StateOwner::Constant),
     // The `KILN_SPECULATE=exit` test mode's draw, per thread.
     ("kiln_c99_speculate_rng", C99StateOwner::ThreadCache),
     // Which later entry of which site answered this thread last (`kiln_c99_site_answered`).
     ("kiln_c99_streaks", C99StateOwner::ThreadCache),
+    // The no-write read path (realms issue 08, parallel-builtins issue 06): whether this thread
+    // is reading without writing, around a section that leaves it as it found it.
+    ("kiln_c99_no_write_depth", C99StateOwner::Frame),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

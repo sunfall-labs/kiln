@@ -179,7 +179,8 @@ def http_ok(port):
 def build_all(kiln, go_cmd, work):
     """Build every binary once. Returns {name: path or None} and {name: failure text}."""
     binaries, failures = {}, {}
-    kiln_programs = ["kiln-start", "inrealm", "tasks", "pmap", "pmap-parallel", "pmap-parallel-light", "serve"]
+    kiln_programs = ["kiln-start", "inrealm", "tasks", "pmap", "pmap-parallel", "pmap-parallel-light", "serve",
+                     "start", "messages"]
     for name in kiln_programs:
         out = os.path.join(work, f"kiln-{name}")
         argv = [kiln, "--one-shot", "--node", "build", os.path.join(JS, name + ".mjs"),
@@ -367,6 +368,10 @@ def jobs_for(cfg, bins):
     add("start", "go", lambda: simple("go", [go, "start", str(cfg["start_warm"])]), go)
     for n in cfg["mem_ns"]:
         add("start", "go", lambda n=n: simple("go", [go, "mem", str(n)]), go)
+    # `node:worker_threads` in kiln (realms issue 06): the same program node and bun run, built.
+    add("start", "kiln", lambda: simple("kiln", [k["start"], "start", str(cfg["start_warm"])]), k["start"])
+    for n in cfg["mem_ns"]:
+        add("start", "kiln", lambda n=n: simple("kiln", [k["start"], "mem", str(n)]), k["start"])
     for n in cfg["kiln_ns"]:
         add("start", "kiln", lambda n=n: kiln_process_start(k["kiln-start"], n, cfg["kiln_reps"]), k["kiln-start"])
     for n in cfg["kiln_ns"]:
@@ -379,6 +384,9 @@ def jobs_for(cfg, bins):
         add("messages", rt, lambda rt=rt: [dict(r, scope="realm") for r in
                                            simple(rt, js(rt, "inrealm.mjs", cfg["msg_budget"], cfg["inrealm_oneway"]))])
     add("messages", "go", lambda: [dict(r, scope="thread") for r in simple("go", [go, "messages", str(cfg["msg_budget"])])], go)
+    add("messages", "kiln", lambda: [dict(r, scope="thread") for r in
+                                     simple("kiln", [k["messages"], str(cfg["msg_budget"]), str(cfg["oneway"])], timeout=300)],
+        k["messages"])
     add("messages", "kiln", lambda: [dict(r, scope="realm") for r in
                                      simple("kiln", [k["inrealm"], str(cfg["msg_budget"]), str(cfg["inrealm_oneway"])], timeout=300)],
         k["inrealm"])
@@ -551,7 +559,7 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
     rep = Report(table, diverged, cfg["rounds"])
     L = []
     w = L.append
-    na_kiln_worker = "not available (no `worker_threads`)"
+    na_kiln_worker = "not measured"
     w(f"# Concurrency benchmarks, {started[:10]}")
     w("")
     w(f"Produced by `bench/concurrency/run.sh{' --quick' if quick else ''}`; see `bench/concurrency/README.md` for what each row "
@@ -571,19 +579,22 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
     # 1. start
     w("## 1. Worker start")
     w("")
-    w("| | node `worker_threads` | bun `Worker` | Go goroutine + channel | kiln |")
+    w("| | node `worker_threads` | bun `Worker` | Go goroutine + channel | kiln `worker_threads` |")
     w("| --- | --- | --- | --- | --- |")
     w(rep.row("start one worker, first message back: warm median", [
         rep.cell("start", "node", "median_ms", " ms"), rep.cell("start", "bun", "median_ms", " ms"),
-        rep.cell("start", "go", "median_ms", " µs", scale=lambda v: v * 1000), na_kiln_worker]))
+        rep.cell("start", "go", "median_ms", " µs", scale=lambda v: v * 1000),
+        rep.cell("start", "kiln", "median_ms", " ms") or na_kiln_worker]))
     w(rep.row("the same, first (cold) start", [
         rep.cell("start", "node", "cold_ms", " ms"), rep.cell("start", "bun", "cold_ms", " ms"),
-        rep.cell("start", "go", "cold_ms", " µs", scale=lambda v: v * 1000), na_kiln_worker]))
+        rep.cell("start", "go", "cold_ms", " µs", scale=lambda v: v * 1000),
+        rep.cell("start", "kiln", "cold_ms", " ms") or na_kiln_worker]))
     for n in cfg["mem_ns"]:
         w(rep.row(f"memory per added worker, {n} alive (RSS delta / N)", [
             rep.cell(f"mem-{n}", "node", "per_worker_kib", " MB", scale=mb),
             rep.cell(f"mem-{n}", "bun", "per_worker_kib", " MB", scale=mb),
-            rep.cell(f"mem-{n}", "go", "per_worker_kib", " KB"), na_kiln_worker]))
+            rep.cell(f"mem-{n}", "go", "per_worker_kib", " KB"),
+            rep.cell(f"mem-{n}", "kiln", "per_worker_kib", " MB", scale=mb) or na_kiln_worker]))
     w("")
     w("Nearest kiln equivalent today: one `KILN_WORKERS` process per worker (process mode, forked by the "
       "supervisor from a process that never built a realm). Timed from spawn to exit of the whole tree, each "
@@ -612,8 +623,8 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
     # 2. messages
     w("## 2. Messages")
     w("")
-    w("Across threads (a `worker_threads` Worker; Go: a goroutine). kiln has no cross-thread or cross-realm "
-      "port yet: not available.")
+    w("Across threads (a `worker_threads` Worker; Go: a goroutine; kiln: a `worker_threads` Worker, a realm on "
+      "a thread of the realm host, realms issue 06).")
     w("")
     w("| | node | bun | Go | kiln |")
     w("| --- | --- | --- | --- | --- |")
@@ -625,8 +636,7 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
         ("16 MB ArrayBuffer, round trip, transferred", "ab16-transfer", "ms_per_op", " ms"),
     ]
     for label, case, metric, unit in msg_rows:
-        w(rep.row(label, [rep.cell(case, rt, metric, unit, scope="thread") for rt in ("node", "bun", "go")]
-                  + ["not available"]))
+        w(rep.row(label, [rep.cell(case, rt, metric, unit, scope="thread") for rt in ("node", "bun", "go", "kiln")]))
     w(rep.row("1 MB object graph by reference (Go only)", ["--", "--",
                                                            rep.cell("graph-1mb-ref", "go", "ms_per_op", " ms", scope="thread"), "--"]))
     w("")

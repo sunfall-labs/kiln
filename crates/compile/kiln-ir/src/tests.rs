@@ -1895,7 +1895,7 @@ fn a_spread_splits_the_literal_into_merged_segments() {
     let defines = program
         .code
         .iter()
-        .filter(|instruction| matches!(instruction, Instruction::DefineNamedProperty))
+        .filter(|instruction| matches!(instruction, Instruction::DefineNamedProperty { .. }))
         .count();
     assert_eq!((objects, merges, defines), (1, 1, 1));
 }

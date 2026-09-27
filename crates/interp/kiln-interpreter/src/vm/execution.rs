@@ -13,6 +13,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 limit: self.limits.max_steps,
             });
         }
+        // A worker whose parent called `terminate()` stops here, wherever it was: node stops a
+        // worker in the middle of a loop, not only once it is idle.
+        if self.in_worker && kiln_runtime::workers::terminate_requested() {
+            return Err(ExecutionError::ProcessExited(1));
+        }
         // A quantum, then. Hand the baton on and take it back before the next instruction runs:
         // this agent's Rust stack, frames and operand stack all stay exactly where they are,
         // which is the whole reason an agent is a thread rather than a continuation.
@@ -37,6 +42,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Some(group) if group.scheduled() => self
                 .steps
                 .saturating_add(agent::QUANTUM_STEPS)
+                .min(self.limits.max_steps),
+            _ if self.in_worker => self
+                .steps
+                .saturating_add(crate::vm::WORKER_QUANTUM)
                 .min(self.limits.max_steps),
             _ => self.limits.max_steps,
         }
@@ -1508,7 +1517,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // they are not enumerated -- see `Instruction::DefineMethod`.
                 // Like `DefineMethod`, but the property is enumerated: an object literal's
                 // members are, and a class's methods are not.
-                Instruction::DefineNamedProperty => {
+                Instruction::DefineNamedProperty { name_function } => {
                     let function = self.pop(current)?;
                     let key = self.pop(current)?;
                     let coerced = self.computed_key(&key, current);
@@ -1519,9 +1528,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     else {
                         continue;
                     };
-                    if self
-                        .catchable(define_function_name(&function, &key, None), current)?
-                        .is_none()
+                    if *name_function
+                        && self
+                            .catchable(define_function_name(&function, &key, None), current)?
+                            .is_none()
                     {
                         continue;
                     }

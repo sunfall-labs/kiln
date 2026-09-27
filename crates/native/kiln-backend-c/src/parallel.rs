@@ -99,7 +99,10 @@ pub enum Reason {
     /// Some reachable `return` is not proven to be a number.
     ReturnsNonNumber,
     // The plan and the emitter.
-    /// The callback has no typed entry: not directly callable, or too large.
+    /// The callback has no typed entry: not directly callable, or too large. Since tier 2 a
+    /// callback the plan finds untyped runs as its heap clone instead (every callback tier 1's
+    /// source rules admit, tier 2's admit too), so this is only the call site's answer when a
+    /// verdict it holds has no typed entry behind it.
     NotTyped,
     /// The emitted parallel clone reaches realm state (host, heap, upvalue table), so the
     /// machine check in `lib.rs` rejected it.
@@ -125,6 +128,29 @@ pub enum Reason {
     /// decision -- the edit-run loop stays proportional to the program, and the answer is
     /// identical either way. `--profile native-release` gives the site its parallel lowering.
     DevProfile,
+    /// Tier 2: the callback reads a property this module defines as an accessor (a `get` in an
+    /// object literal or a class), or `__proto__`: reading it calls a function, which may be user
+    /// code, so the read cannot run on a pool thread. A getter the compiler cannot see (defined
+    /// in another module, or with `Object.defineProperty`) is found at run time instead: the
+    /// read declines and the call runs sequentially.
+    ReadsAccessor,
+    /// Tier 3: the callback builds values (an object or array literal, a spread, a string), which
+    /// only `parallelMap`, `parallelFilter` and `parallelFlatMap` keep: `parallelReduce` folds
+    /// numbers and `parallelSort` compares keys.
+    AllocatesForMethod,
+    /// Tier 4: the callback calls a built-in not marked pure (`kiln_builtin_surface::PURE_MEMBERS`)
+    /// -- `console.log`, `Math.random`, `Date.now`, `arr.push` -- or one marked pure in a form the
+    /// mark does not cover (a `thisArg`, a `JSON.stringify` replacer).
+    CallsImpure,
+    /// Tier 4: the callback calls a function of the program the proof does not admit: the
+    /// function's own body breaks a rule (named in the detail), directly or in a function it calls.
+    CallsUnproven,
+    /// Tier 4: the callback calls a value the compiler cannot identify as one function (a
+    /// parameter, a binding assigned more than once, a property).
+    CallsUnknown,
+    /// Tier 4: the functions the callback calls nest deeper than the proof follows
+    /// ([`PARALLEL_CALL_DEPTH`]), or are more than it emits ([`PARALLEL_CALLEES`]).
+    CallsTooDeep,
 }
 
 impl Reason {
@@ -156,6 +182,12 @@ impl Reason {
         Reason::DevProfile,
         Reason::ArgumentShape,
         Reason::ComparatorUnproven,
+        Reason::ReadsAccessor,
+        Reason::AllocatesForMethod,
+        Reason::CallsImpure,
+        Reason::CallsUnproven,
+        Reason::CallsUnknown,
+        Reason::CallsTooDeep,
     ];
 
     /// The stable code printed by `--explain-parallel`.
@@ -187,6 +219,12 @@ impl Reason {
             Reason::DevProfile => "dev-profile",
             Reason::ArgumentShape => "argument-shape",
             Reason::ComparatorUnproven => "comparator-unproven",
+            Reason::ReadsAccessor => "reads-accessor",
+            Reason::AllocatesForMethod => "allocates-for-method",
+            Reason::CallsImpure => "calls-impure",
+            Reason::CallsUnproven => "calls-unproven",
+            Reason::CallsUnknown => "calls-unknown",
+            Reason::CallsTooDeep => "calls-too-deep",
         }
     }
 
@@ -221,7 +259,10 @@ impl Reason {
             Reason::ReadsThis => "the callback reads `this`, `new.target` or `arguments`",
             Reason::ReadsProperty => "the callback reads a property or element",
             Reason::WritesProperty => "the callback writes a property or element",
-            Reason::Allocates => "the callback allocates",
+            Reason::Allocates => {
+                "the callback allocates what a pool thread does not build (tier 3 builds object \
+                 and array literals, spreads and strings)"
+            }
             Reason::Calls => "the callback calls something other than a listed Math function",
             Reason::ReturnsUndefined => "the callback can return undefined",
             Reason::ReturnsNonNumber => "the callback is not proven to return a number",
@@ -243,7 +284,27 @@ impl Reason {
             }
             Reason::ComparatorUnproven => {
                 "the comparator is not proven consistent (tier 1 knows `(a, b) => a - b` and \
-                 `(a, b) => b - a`)"
+                 `(a, b) => b - a`; tier 2 a difference of one key read from each, \
+                 `(a, b) => a.k - b.k`)"
+            }
+            Reason::ReadsAccessor => {
+                "the callback reads a property the program defines with a getter, which is a call"
+            }
+            Reason::AllocatesForMethod => {
+                "the callback builds values, which only parallelMap, parallelFilter and \
+                 parallelFlatMap keep (tier 3)"
+            }
+            Reason::CallsImpure => {
+                "the callback calls a built-in that is not marked pure (tier 4 calls Math, string \
+                 and number formatting methods, parseInt/parseFloat/Number, JSON.stringify and \
+                 array slice/map/filter/join on plain data)"
+            }
+            Reason::CallsUnproven => "the callback calls a function that is not proven pure",
+            Reason::CallsUnknown => {
+                "the callback calls a value the compiler cannot identify as one function"
+            }
+            Reason::CallsTooDeep => {
+                "the functions the callback calls nest deeper than the proof follows"
             }
         }
     }
@@ -303,6 +364,1096 @@ pub struct ParallelShape {
     /// boxed value rather than a double, and only `parallelFilter` -- which reads the answer
     /// through `ToBoolean` -- runs it on the pool ([`parallel_result`]).
     pub boolean_result: bool,
+    /// Tier 2 (ADR 0069, parallel issue 07): the callback reads the heap, and runs as its heap
+    /// clone (`parallel_heap.rs`) rather than as a typed `_p` clone. `captures` and
+    /// `captured_values` above are then empty: the heap clone reads its captures, of any kind,
+    /// from [`HeapShape::captures`].
+    pub heap: Option<HeapShape>,
+}
+
+/// What a tier-2 callback (one that reads the heap, [`heap_verdict`]) needs at its call site and
+/// in its clone: the values the realm thread hands every chunk, and how many named reads each
+/// worker keeps a cache for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HeapShape {
+    /// Captured bindings (upvalue indices, ascending), each written once in the unit, which the
+    /// realm thread reads once before the pool starts -- a value of any kind, since the clone
+    /// reads it through the same guarded readers as an element.
+    pub captures: Vec<u32>,
+    /// The constant indices of the property names the body reads by name, in first-use order:
+    /// the call site hands the clone the unit's interned keys in this order.
+    pub keys: Vec<u32>,
+    /// The constant indices of the string literals the body uses, in first-use order.
+    pub strings: Vec<u32>,
+    /// How many named reads the body makes: the size of each chunk worker's site cache.
+    pub sites: usize,
+    /// As a `parallelSort` comparator: `(a, b) => K(a) - K(b)` (ascending) or `K(b) - K(a)`
+    /// (descending), where `K` reads one element and nothing else varies between the two sides
+    /// ([`key_comparator`]); the value is `K` applied to the first parameter.
+    pub key: Option<(SortOrder, crate::graph::ValueId)>,
+    /// Tier 3 (parallel issue 08): the callback builds values -- an object or array literal, a
+    /// spread, `String(x)` or a template -- in its worker's arena.
+    pub allocates: bool,
+    /// Some `+` is not proven to add two numbers: on a string it joins, which allocates (in an
+    /// arena where the site gives its workers one, and declines where it does not).
+    pub concat: bool,
+    /// Some reachable `return` is proven a string, an object or a function: an answer only
+    /// `map`, `filter` and `flatMap` keep.
+    pub answers_value: bool,
+    /// The constant indices of the member names the body defines (object literal keys, the keys
+    /// of `{ ...r, k: v }`), in first-use order: the call site interns them before the pool starts.
+    pub defines: Vec<u32>,
+    /// Tier 4 (parallel issue 09): the callback calls something beyond tier 2's `Math`,
+    /// `charCodeAt` and `String(x)` -- a pure built-in or a function of the program.
+    pub calls: bool,
+    /// Tier 4: the program's functions the callback calls, directly or through each other (the
+    /// callback itself too, when it is recursive), each with the first of its worker cache
+    /// entries: every one gets a clone of its own for this callback
+    /// (`{symbol}_fn_{callback}_hc{proto}`, [`crate::parallel_heap::emit_heap_callees`]), whose
+    /// named reads use `sites[base..]`.
+    pub callees: Vec<(u32, usize)>,
+    /// Tier 4: the functions called through a closure value (a captured declaration), whose
+    /// bodies the call site hands the workers (`env->bodies`) so a clone can check, per call,
+    /// that the closure is the one the proof is about.
+    pub bodies: Vec<u32>,
+    /// Tier 4: what each call site in the callback and its callees calls, by the body it is in
+    /// (`u32::MAX` for the callback) and the call's callee value: a function of the program.
+    pub targets: std::collections::BTreeMap<(u32, u32), u32>,
+}
+
+impl HeapShape {
+    /// The position of proto `index` among the bodies the call site hands over.
+    pub fn body_slot(&self, index: u32) -> Option<usize> {
+        self.bodies.iter().position(|&k| k == index)
+    }
+
+    /// The first worker cache entry of callee `index`'s clone.
+    pub fn callee_base(&self, index: u32) -> Option<usize> {
+        self.callees
+            .iter()
+            .find(|(k, _)| *k == index)
+            .map(|(_, base)| *base)
+    }
+
+    /// The position of upvalue `index` among the captures the call site hands over.
+    pub fn capture_slot(&self, index: u32) -> Option<usize> {
+        self.captures.iter().position(|&k| k == index)
+    }
+
+    /// The position of the property name at constant `name` among the keys.
+    pub fn key_slot(&self, name: u32) -> Option<usize> {
+        self.keys.iter().position(|&k| k == name)
+    }
+
+    /// The position of the string literal at constant `index` among the strings.
+    pub fn string_slot(&self, index: u32) -> Option<usize> {
+        self.strings.iter().position(|&k| k == index)
+    }
+
+    /// The position of the member name at constant `index` among the defined names.
+    pub fn define_slot(&self, index: u32) -> Option<usize> {
+        self.defines.iter().position(|&k| k == index)
+    }
+
+    /// Tier 3's label: the callback builds values (so its site keeps them in worker arenas).
+    pub fn builds(&self) -> bool {
+        self.allocates || self.concat
+    }
+}
+
+/// The most members an object literal a pool thread builds may have: the inline slots every
+/// object starts with (`KILN_C99_INLINE_SLOTS`). More would `malloc` slots, which the sequential
+/// literal does.
+pub const PARALLEL_OBJECT_MEMBERS: usize = 16;
+
+/// The most elements an array literal a pool thread builds may have: the elements an array keeps
+/// inside its own block (`KILN_C99_ARRAY_INBLOCK_MAX`).
+pub const PARALLEL_ARRAY_ELEMENTS: usize = 64;
+
+/// Whether a literal member name is one a pool thread defines as the sequential fast path does:
+/// not an index (which goes to elements), not `@`-prefixed (a symbol's spelling), not
+/// `__proto__`, not empty.
+pub fn plain_member_name(name: &str) -> bool {
+    let index = !name.is_empty()
+        && name.bytes().all(|b| b.is_ascii_digit())
+        && (name.len() == 1 || !name.starts_with('0'))
+        && name.parse::<u64>().is_ok_and(|n| n < u64::from(u32::MAX));
+    !name.is_empty() && !index && !name.starts_with('@') && name != "__proto__"
+}
+
+/// `Math`'s value properties: each is non-writable and non-configurable, so a read of one is the
+/// constant whatever the program has done, and a tier-2 clone reads it as the constant.
+pub const MATH_CONSTANTS: &[(&str, f64)] = &[
+    ("E", std::f64::consts::E),
+    ("LN10", std::f64::consts::LN_10),
+    ("LN2", std::f64::consts::LN_2),
+    ("LOG10E", std::f64::consts::LOG10_E),
+    ("LOG2E", std::f64::consts::LOG2_E),
+    ("PI", std::f64::consts::PI),
+    ("SQRT1_2", std::f64::consts::FRAC_1_SQRT_2),
+    ("SQRT2", std::f64::consts::SQRT_2),
+];
+
+/// Every property name the program defines as an accessor with the syntax that says so -- a `get`
+/// or `set` in an object literal or a class body (`DefineAccessor`, its key the constant pushed
+/// two instructions before, ahead of the function). A tier-2 read of such a name would very
+/// likely call it, so the verdict says so at compile time ([`Reason::ReadsAccessor`]); an
+/// accessor defined any other way is met at run time, where the read declines.
+pub fn accessor_names(program: &Program) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    for code in std::iter::once(&program.code).chain(program.functions.iter().map(|f| &f.code)) {
+        for (pc, instruction) in code.iter().enumerate() {
+            if !matches!(instruction, kiln_ir::Instruction::DefineAccessor { .. }) || pc < 2 {
+                continue;
+            }
+            if let (kiln_ir::Instruction::MakeFunction(_), kiln_ir::Instruction::Const(k)) =
+                (&code[pc - 1], &code[pc - 2])
+                && let Some(name) = constant_name(program, *k)
+            {
+                names.insert(name);
+            }
+        }
+    }
+    names
+}
+
+/// Tier 2 of the proof (ADR 0069, parallel issue 07): whether `graph` (the body of `proto`) may
+/// run on a pool thread while reading the heap, and what its call site hands it.
+///
+/// Rules 1 and 2 are tier 1's (a plain function, no handler, no throw). The rest, each with the
+/// reason it refuses with:
+///
+/// 3. Values come from constants (numbers, booleans, `undefined`, `null`, and string literals,
+///    which the clone reads as the unit's own static strings), the parameters and locals, the
+///    captures of rule 4, `Phi`, and the operators -- every unary and binary operator but
+///    `typeof`, `in` and `instanceof`. Their operands are not proven anything: the clone
+///    converts only what converts without running code (`kiln_c99_par_number`), compares strings
+///    by code units, and declines the rest at run time (a string `+` allocates; an object's
+///    `valueOf` is user code).
+/// 4. Captured bindings written exactly once, read once by the realm thread, of any kind; no
+///    write to a capture, no global, no `this`, no `arguments`.
+/// 5. Reads: `o.name` and `o[key]`, through the guarded readers in `prelude_types.h`; a name the
+///    module defines as an accessor, or `__proto__`, refuses here ([`Reason::ReadsAccessor`]).
+///    `Math.<constant>` is the constant. No write.
+/// 6. Every reachable `return` has a value. One proven a string, an object or a function is
+///    recorded ([`HeapShape::answers_value`]): `map`, `filter` and `flatMap` keep it, and the
+///    site of `parallelReduce` or `parallelSort` refuses.
+/// 7. Tier 3 (parallel issue 08): allocation of what a worker builds in its arena -- object
+///    literals of at most [`PARALLEL_OBJECT_MEMBERS`] members whose constant names are plain
+///    ([`plain_member_name`]; computed ones are checked per element), `{ ...r }` and the members
+///    defined after it, array literals of at most [`PARALLEL_ARRAY_ELEMENTS`] elements,
+///    `String(x)` (a template's substitutions) and `+` on strings. A closure or a cell refuses
+///    ([`Reason::Allocates`]), except a closure that is only ever called (rule 8).
+/// 8. Tier 4 (parallel issue 09): calls. A built-in marked pure in the member description
+///    (`kiln_builtin_surface::PURE_MEMBERS`: `Math`, string methods, number formatting,
+///    `parseInt`/`parseFloat`/`Number`, `JSON.stringify`, array `slice`/`map`/`filter`/`join`...)
+///    -- a method by name, whatever the receiver, since the clone dispatches on the receiver's kind
+///    and declines one the mark does not cover -- and a function of the program ([`CallGraph`])
+///    whose own body satisfies these same rules (a `return` without a value allowed), followed to
+///    [`PARALLEL_CALL_DEPTH`] levels and [`PARALLEL_CALLEES`] functions; a call back into a
+///    function already being proven (recursion) is admitted, since every function of the cycle
+///    is then proven by the same walk. A callee's captures are bindings written once, read on the
+///    worker from the closure the call finds (whose body the clone checks), or handed down to a
+///    closure written inside the callback that is only ever called. Anything else refuses:
+///    [`Reason::CallsImpure`] naming the built-in, [`Reason::CallsUnproven`] naming the function
+///    and why, [`Reason::CallsUnknown`], [`Reason::CallsTooDeep`].
+pub fn heap_verdict(
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+    program: &Program,
+    captures: &[Capture],
+) -> Result<HeapShape, Refusal> {
+    heap_verdict_in(graph, proto, program, captures, None)
+}
+
+/// How many functions deep tier 4 follows calls below the callback.
+pub const PARALLEL_CALL_DEPTH: usize = 8;
+
+/// The most functions one callback's proof admits: each gets a clone of its own.
+pub const PARALLEL_CALLEES: usize = 32;
+
+/// The most parameters a function the callback calls may declare.
+pub const PARALLEL_CALLEE_PARAMETERS: u32 = 8;
+
+/// What tier 4 needs to follow a call into the program's other functions: every proto's graph,
+/// what the unit knows about each one's captures, which values are known closures, and which
+/// proto the verdict is for (so a recursive call to it resolves).
+pub struct CallGraph<'a> {
+    pub graphs: &'a [FunctionGraph],
+    pub captures: &'a [Vec<Capture>],
+    /// The proto a value of proto `f`'s body is known to be the closure of.
+    pub known: &'a dyn Fn(u32, crate::graph::ValueId) -> Option<u32>,
+    pub root: u32,
+}
+
+/// [`heap_verdict`], with the program's call graph for tier 4's calls to its functions (without
+/// one, every such call is [`Reason::CallsUnknown`]).
+pub fn heap_verdict_in(
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+    program: &Program,
+    captures: &[Capture],
+    calls: Option<&CallGraph>,
+) -> Result<HeapShape, Refusal> {
+    if proto.generator || proto.asynchronous || proto.async_generator {
+        return Err(Refusal::new(Reason::NotPlainFunction));
+    }
+    if proto
+        .code
+        .iter()
+        .any(|i| matches!(i, kiln_ir::Instruction::RestArguments(_)))
+    {
+        return Err(Refusal::new(Reason::RestParameter));
+    }
+    if !(1..=3).contains(&proto.parameter_count) {
+        return Err(Refusal::with(
+            Reason::Arity,
+            format!("{} parameters", proto.parameter_count),
+        ));
+    }
+    let mut proof = Proof {
+        program,
+        calls,
+        shape: HeapShape::default(),
+        accessors: None,
+        admitted: std::collections::HashSet::new(),
+    };
+    proof.body(None, graph, proto, captures, &[])?;
+    let mut shape = proof.shape;
+    // Rule 6: an answer the graph proves a string, an object or a function is one only `map`,
+    // `filter` and `flatMap` keep; the site decides (`parallelReduce` and `parallelSort` refuse).
+    let proven = crate::graph::proven_types(graph);
+    for block in graph
+        .blocks
+        .iter()
+        .filter(|b| b.is_reachable_from_entry(graph.entry_block))
+    {
+        if let Terminator::Return(Some(v)) = &block.terminator
+            && matches!(
+                proven.get(v),
+                Some(Proven::String | Proven::Object | Proven::Callable)
+            )
+        {
+            shape.answers_value = true;
+        }
+    }
+    shape.captures.sort_unstable();
+    shape.key = key_comparator(graph, proto);
+    Ok(shape)
+}
+
+/// The display name of a built-in global in a reason.
+fn builtin_name(builtin: Builtin) -> String {
+    match builtin {
+        Builtin::Json => "JSON".to_owned(),
+        Builtin::ParseInt => "parseInt".to_owned(),
+        Builtin::ParseFloat => "parseFloat".to_owned(),
+        Builtin::GlobalThis => "globalThis".to_owned(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// The callable globals a pure call may name (`Number(x)`, `parseInt(s, r)`), with their
+/// [`kiln_builtin_surface::PURE_MEMBERS`] key.
+pub fn pure_global(builtin: Builtin) -> Option<&'static str> {
+    let key = match builtin {
+        Builtin::Number => "Number",
+        Builtin::String => "String",
+        Builtin::Boolean => "Boolean",
+        Builtin::ParseInt => "parseInt",
+        Builtin::ParseFloat => "parseFloat",
+        _ => return None,
+    };
+    kiln_builtin_surface::pure_member("globalThis", key).map(|m| m.key)
+}
+
+/// The name a person knows proto `index` by.
+fn function_name(program: &Program, index: u32) -> String {
+    program
+        .functions
+        .get(index as usize)
+        .map(|f| f.display_name_units())
+        .and_then(|units| units.to_scalar_string().ok())
+        .filter(|name| !name.is_empty())
+        .map_or_else(
+            || "an anonymous function".to_owned(),
+            |name| format!("`{name}`"),
+        )
+}
+
+/// Tier 2-4's walk over one callback and every function it calls.
+struct Proof<'a> {
+    program: &'a Program,
+    calls: Option<&'a CallGraph<'a>>,
+    shape: HeapShape,
+    accessors: Option<std::collections::HashSet<String>>,
+    /// The protos admitted, or being admitted (a call back into one is recursion, admitted
+    /// once the whole cycle is).
+    admitted: std::collections::HashSet<u32>,
+}
+
+impl Proof<'_> {
+    /// The rules over one body: the callback's (`owner` `None`) or a callee's, reached through
+    /// `chain` (the callees above it). Its named reads take the next worker cache entries in
+    /// emission order; its callees are walked after it, so each body's entries are contiguous.
+    fn body(
+        &mut self,
+        owner: Option<u32>,
+        graph: &FunctionGraph,
+        proto: &FunctionProto,
+        captures: &[Capture],
+        chain: &[u32],
+    ) -> Result<(), Refusal> {
+        use crate::graph::ValueId;
+        let program = self.program;
+        let owner_code = owner.unwrap_or(u32::MAX);
+        let math: std::collections::HashSet<ValueId> = graph
+            .blocks
+            .iter()
+            .flat_map(|b| b.operations.iter())
+            .filter_map(|(v, op)| matches!(op, GraphOp::LoadBuiltin(Builtin::Math)).then_some(*v))
+            .collect();
+        let label = |vid: &ValueId| {
+            graph
+                .origins
+                .get(vid)
+                .map(|o| o.label.clone())
+                .unwrap_or_else(|| "operation".to_owned())
+        };
+        let defs: std::collections::HashMap<ValueId, &GraphOp> = graph
+            .blocks
+            .iter()
+            .flat_map(|b| b.operations.iter())
+            .map(|(v, op)| (*v, op))
+            .collect();
+        // Values the clone never materialises: a built-in other than `Math` (its placeholder is
+        // only ever called or used as a static's receiver) and a closure written here (only ever
+        // called). Their uses are checked after the walk.
+        let placeholders: std::collections::HashMap<ValueId, Option<Builtin>> = defs
+            .iter()
+            .filter_map(|(v, op)| match op {
+                GraphOp::LoadBuiltin(Builtin::Math | Builtin::NotANumber | Builtin::Infinity) => {
+                    None
+                }
+                GraphOp::LoadBuiltin(b) => Some((*v, Some(*b))),
+                GraphOp::MakeFunction { .. } => Some((*v, None)),
+                _ => None,
+            })
+            .collect();
+        let builtin_of = |v: &ValueId| -> Option<Builtin> {
+            match defs.get(v) {
+                Some(GraphOp::LoadBuiltin(b)) => Some(*b),
+                _ => None,
+            }
+        };
+        // What a value called here is: a callable global, or a function of the program -- written
+        // here, or a closure the unit knows.
+        let proto_of = |v: &ValueId| -> Option<u32> {
+            if let Some(GraphOp::MakeFunction { index, .. }) = defs.get(v) {
+                return Some(*index);
+            }
+            let calls = self.calls?;
+            (calls.known)(owner.unwrap_or(calls.root), *v)
+        };
+        let mut callees: Vec<u32> = Vec::new();
+        // A member a literal defines: a constant name the sequential fast path defines by a
+        // transition (listed, for the call site to intern, with a worker cache entry), or a computed
+        // one (checked per element: an interned string that is a plain name, or the worker declines).
+        let member = |key: &ValueId, shape: &mut HeapShape| -> Option<Refusal> {
+            let Some(GraphOp::Const {
+                index,
+                constant: Constant::String(_),
+            }) = defs.get(key)
+            else {
+                return None;
+            };
+            let name = constant_name(program, *index).unwrap_or_default();
+            if !plain_member_name(&name) {
+                return Some(Refusal::with(
+                    Reason::Allocates,
+                    format!("the member `{name}`"),
+                ));
+            }
+            if !shape.defines.contains(index) {
+                shape.defines.push(*index);
+            }
+            shape.sites += 1;
+            None
+        };
+        for block in &graph.blocks {
+            if block.exception_handler.is_some() {
+                return Err(Refusal::new(Reason::ExceptionHandler));
+            }
+            let reachable = block.is_reachable_from_entry(graph.entry_block);
+            match &block.terminator {
+                Terminator::Throw(_) => return Err(Refusal::new(Reason::Throws)),
+                Terminator::Return(None) if reachable && owner.is_none() => {
+                    return Err(Refusal::new(Reason::ReturnsUndefined));
+                }
+                Terminator::Suspend { .. } => return Err(Refusal::new(Reason::NotPlainFunction)),
+                _ => {}
+            }
+            for (vid, op) in &block.operations {
+                let refusal = match op {
+                    GraphOp::Const { index, constant } => match constant {
+                        Constant::Number(_)
+                        | Constant::Boolean(_)
+                        | Constant::Undefined
+                        | Constant::Null => None,
+                        Constant::String(_) => {
+                            if !self.shape.strings.contains(index) {
+                                self.shape.strings.push(*index);
+                            }
+                            None
+                        }
+                        _ => Some(Refusal::new(Reason::NonNumericConstant)),
+                    },
+                    GraphOp::LoadLocal(_)
+                    | GraphOp::StoreLocal { .. }
+                    | GraphOp::Phi { .. }
+                    | GraphOp::MarkUninitialized(_)
+                    | GraphOp::CheckTdz { .. } => None,
+                    // `Math` is a value; every other built-in is a placeholder, held to its uses.
+                    GraphOp::LoadBuiltin(_) => None,
+                    GraphOp::Unary { op, .. } => matches!(op, UnaryOp::TypeOf)
+                        .then(|| Refusal::with(Reason::UnsupportedOperation, format!("{op:?}"))),
+                    GraphOp::Binary { op, .. } => {
+                        matches!(op, kiln_ir::BinaryOp::In | kiln_ir::BinaryOp::InstanceOf)
+                            .then(|| Refusal::with(Reason::UnsupportedOperation, format!("{op:?}")))
+                    }
+                    GraphOp::LoadUpvalue(index) => {
+                        let name = upvalue_name(proto, program, *index)
+                            .unwrap_or_else(|| format!("upvalue {index}"));
+                        match captures.get(*index as usize) {
+                            Some(Capture::Writes(1)) => {
+                                if owner.is_none() && !self.shape.captures.contains(index) {
+                                    self.shape.captures.push(*index);
+                                }
+                                None
+                            }
+                            Some(Capture::Writes(n)) => Some(Refusal {
+                                writes: Some(*n),
+                                ..Refusal::with(Reason::CapturesReassigned, name)
+                            }),
+                            _ => Some(Refusal::with(Reason::CapturesUnresolved, name)),
+                        }
+                    }
+                    GraphOp::StoreUpvalue { index, .. } => Some(Refusal::with(
+                        Reason::WritesCapture,
+                        upvalue_name(proto, program, *index)
+                            .unwrap_or_else(|| format!("upvalue {index}")),
+                    )),
+                    GraphOp::LoadGlobal(_) | GraphOp::StoreGlobal { .. } => {
+                        Some(Refusal::new(Reason::ReadsGlobal))
+                    }
+                    GraphOp::LoadThis | GraphOp::LoadNewTarget => {
+                        Some(Refusal::new(Reason::ReadsThis))
+                    }
+                    GraphOp::GetProperty { object, name, .. } => {
+                        let key = constant_name(program, *name);
+                        if math.contains(object)
+                            && key
+                                .as_deref()
+                                .is_some_and(|k| MATH_CONSTANTS.iter().any(|(c, _)| *c == k))
+                        {
+                            None
+                        } else if placeholders.contains_key(object) {
+                            Some(Refusal::with(Reason::UnsupportedOperation, label(vid)))
+                        } else {
+                            match key {
+                                None => Some(Refusal::new(Reason::ReadsProperty)),
+                                Some(key) => {
+                                    let accessors = self
+                                        .accessors
+                                        .get_or_insert_with(|| accessor_names(program));
+                                    if key == "__proto__" || accessors.contains(&key) {
+                                        Some(Refusal::with(Reason::ReadsAccessor, key))
+                                    } else {
+                                        if !self.shape.keys.contains(name) {
+                                            self.shape.keys.push(*name);
+                                        }
+                                        self.shape.sites += 1;
+                                        None
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    GraphOp::GetComputed { .. } => None,
+                    GraphOp::SetProperty { name, .. } | GraphOp::SetPropertyStrict { name, .. } => {
+                        Some(match constant_name(program, *name) {
+                            Some(n) => Refusal::with(Reason::WritesProperty, n),
+                            None => Refusal::new(Reason::WritesProperty),
+                        })
+                    }
+                    GraphOp::SetComputed { .. } | GraphOp::SetComputedStrict { .. } => {
+                        Some(Refusal::new(Reason::WritesProperty))
+                    }
+                    // Tier 3: literals the worker builds in its arena, as the sequential literal
+                    // builds them (`kiln_c99_par_object`, `kiln_c99_par_array`).
+                    GraphOp::NewArray { elements, .. } => {
+                        self.shape.allocates = true;
+                        (elements.len() > PARALLEL_ARRAY_ELEMENTS).then(|| {
+                            Refusal::with(
+                                Reason::Allocates,
+                                format!("an array literal of {} elements", elements.len()),
+                            )
+                        })
+                    }
+                    GraphOp::NewObject { pairs, .. } => {
+                        self.shape.allocates = true;
+                        if pairs.len() > PARALLEL_OBJECT_MEMBERS {
+                            Some(Refusal::with(
+                                Reason::Allocates,
+                                format!("an object literal of {} members", pairs.len()),
+                            ))
+                        } else {
+                            pairs
+                                .iter()
+                                .find_map(|(key, _)| member(key, &mut self.shape))
+                        }
+                    }
+                    GraphOp::Bridge {
+                        instruction: kiln_ir::Instruction::SpreadObject,
+                        ..
+                    } => {
+                        self.shape.allocates = true;
+                        None
+                    }
+                    GraphOp::Bridge {
+                        instruction: kiln_ir::Instruction::DefineNamedProperty { .. },
+                        operands,
+                        ..
+                    } if operands.len() == 3 => {
+                        self.shape.allocates = true;
+                        member(&operands[1], &mut self.shape)
+                    }
+                    // A closure written here that is only ever called (the uses check below):
+                    // nothing is allocated; each call runs its clone, handed the captures it
+                    // reads from this body's own.
+                    GraphOp::MakeFunction { index, .. } => {
+                        match program.functions.get(*index as usize) {
+                            Some(inner) if self.calls.is_some() => inner
+                                .upvalues
+                                .iter()
+                                .find_map(|up| match up {
+                                    kiln_ir::Upvalue::ParentUpvalue(j)
+                                    | kiln_ir::Upvalue::NamedParentUpvalue { index: j, .. } => {
+                                        match captures.get(*j as usize) {
+                                            Some(Capture::Writes(1)) => {
+                                                if owner.is_none()
+                                                    && !self.shape.captures.contains(j)
+                                                {
+                                                    self.shape.captures.push(*j);
+                                                }
+                                                None
+                                            }
+                                            _ => Some(Refusal::with(
+                                                Reason::Allocates,
+                                                "a closure capturing a binding written more than once",
+                                            )),
+                                        }
+                                    }
+                                    _ => Some(Refusal::with(
+                                        Reason::Allocates,
+                                        "a closure capturing a local of the callback",
+                                    )),
+                                }),
+                            _ => Some(Refusal::with(Reason::Allocates, label(vid))),
+                        }
+                    }
+                    GraphOp::MakeCell(_) => Some(Refusal::with(Reason::Allocates, label(vid))),
+                    GraphOp::LoadCell(_) | GraphOp::StoreCell { .. } => {
+                        Some(Refusal::with(Reason::Allocates, "a cell"))
+                    }
+                    GraphOp::CallMethod {
+                        object, name, args, ..
+                    } => {
+                        let key = constant_name(program, *name).unwrap_or_default();
+                        if math.contains(object) {
+                            let listed = PARALLEL_MATH
+                                .iter()
+                                .any(|(k, n)| key == *k && *n == args.len());
+                            (!listed)
+                                .then(|| Refusal::with(Reason::CallsImpure, format!("Math.{key}")))
+                        } else if let Some(builtin) = builtin_of(object) {
+                            let owner_name = builtin_name(builtin);
+                            let pure = match builtin {
+                                Builtin::Json => key == "stringify" && args.len() == 1,
+                                Builtin::Number => {
+                                    kiln_builtin_surface::pure_member("Number", &key).is_some()
+                                        && args.len() <= 2
+                                }
+                                _ => false,
+                            };
+                            if pure {
+                                self.shape.calls = true;
+                                if builtin == Builtin::Json {
+                                    self.shape.allocates = true;
+                                }
+                                None
+                            } else {
+                                Some(Refusal::with(
+                                    Reason::CallsImpure,
+                                    format!("{owner_name}.{key}"),
+                                ))
+                            }
+                        } else if placeholders.contains_key(object) {
+                            Some(Refusal::with(Reason::CallsImpure, format!(".{key}()")))
+                        } else {
+                            let rows: Vec<_> = kiln_builtin_surface::pure_methods(&key).collect();
+                            if rows.is_empty() {
+                                Some(Refusal::with(Reason::CallsImpure, format!(".{key}()")))
+                            } else if rows.iter().any(|r| r.callback.is_some()) {
+                                // `map`/`filter`/`some`/`every`: the callback is proven too.
+                                if args.len() != 1 {
+                                    Some(Refusal::with(
+                                        Reason::CallsImpure,
+                                        format!(".{key}() with other than one argument"),
+                                    ))
+                                } else if builtin_of(&args[0]).and_then(pure_global).is_some() {
+                                    self.shape.calls = true;
+                                    self.shape.allocates |= key == "map" || key == "filter";
+                                    None
+                                } else if let Some(target) = proto_of(&args[0]) {
+                                    self.shape.calls = true;
+                                    self.shape.allocates |= key == "map" || key == "filter";
+                                    self.shape.targets.insert((owner_code, args[0].0), target);
+                                    if !matches!(
+                                        defs.get(&args[0]),
+                                        Some(GraphOp::MakeFunction { .. })
+                                    ) && !self.shape.bodies.contains(&target)
+                                    {
+                                        self.shape.bodies.push(target);
+                                    }
+                                    if !callees.contains(&target) {
+                                        callees.push(target);
+                                    }
+                                    None
+                                } else {
+                                    Some(Refusal::with(
+                                        Reason::CallsUnknown,
+                                        format!("the callback of .{key}()"),
+                                    ))
+                                }
+                            } else {
+                                // `charCodeAt` is tier 2's; every other marked method is tier 4.
+                                if key != "charCodeAt" {
+                                    self.shape.calls = true;
+                                }
+                                if rows.iter().any(|r| {
+                                    matches!(
+                                        r.answers,
+                                        kiln_builtin_surface::PureAnswer::String
+                                            | kiln_builtin_surface::PureAnswer::Array
+                                            | kiln_builtin_surface::PureAnswer::Value
+                                    )
+                                }) {
+                                    self.shape.allocates = true;
+                                }
+                                None
+                            }
+                        }
+                    }
+                    GraphOp::Call { callee, args, .. } => {
+                        if let Some(builtin) = builtin_of(callee) {
+                            match builtin {
+                                // `String(x)`: `ToString` of a primitive, into the arena.
+                                Builtin::String if args.len() == 1 => {
+                                    self.shape.allocates = true;
+                                    None
+                                }
+                                b if pure_global(b).is_some() && b != Builtin::String => {
+                                    self.shape.calls = true;
+                                    None
+                                }
+                                b => Some(Refusal::with(
+                                    Reason::CallsImpure,
+                                    format!("{}()", builtin_name(b)),
+                                )),
+                            }
+                        } else if let Some(target) = proto_of(callee) {
+                            self.shape.calls = true;
+                            self.shape.targets.insert((owner_code, callee.0), target);
+                            if !matches!(defs.get(callee), Some(GraphOp::MakeFunction { .. }))
+                                && !self.shape.bodies.contains(&target)
+                            {
+                                self.shape.bodies.push(target);
+                            }
+                            if !callees.contains(&target) {
+                                callees.push(target);
+                            }
+                            None
+                        } else {
+                            // Name what was called: a captured binding by its name.
+                            let upvalue = match defs.get(callee) {
+                                Some(GraphOp::LoadUpvalue(k)) => Some(*k),
+                                Some(GraphOp::CheckTdz { value, .. }) => match defs.get(value) {
+                                    Some(GraphOp::LoadUpvalue(k)) => Some(*k),
+                                    _ => None,
+                                },
+                                _ => None,
+                            };
+                            let named = upvalue
+                                .and_then(|k| upvalue_name(proto, program, k))
+                                .map_or_else(|| label(vid), |name| format!("`{name}`"));
+                            Some(Refusal::with(Reason::CallsUnknown, named))
+                        }
+                    }
+                    GraphOp::New { .. } => Some(Refusal::with(
+                        Reason::CallsImpure,
+                        format!("`new` ({})", label(vid)),
+                    )),
+                    GraphOp::Bridge { instruction, .. }
+                        if matches!(instruction, kiln_ir::Instruction::LoadArguments) =>
+                    {
+                        Some(Refusal::with(Reason::ReadsThis, "arguments"))
+                    }
+                    _ => Some(Refusal::with(Reason::UnsupportedOperation, label(vid))),
+                };
+                if let Some(refusal) = refusal {
+                    return Err(refusal);
+                }
+            }
+        }
+        // A placeholder is only ever called, or a static's receiver, or the callback of a pure
+        // array method: any other use would read a value the clone never made. (A placeholder
+        // called or used as a receiver the rules do not admit was refused above.)
+        let array_slots = crate::graph::array_slots(graph, program);
+        for (vid, op) in graph.blocks.iter().flat_map(|b| b.operations.iter()) {
+            let misused = |v: &ValueId| placeholders.contains_key(v);
+            let bad = match op {
+                GraphOp::Call { args, .. } => args.iter().any(misused),
+                // `const f = x => ...`: a local the graph forwards (every read of it is the
+                // closure itself), unless the slot lives in the frame's array and is read back.
+                GraphOp::StoreLocal { slot, .. } => {
+                    array_slots.contains(slot) && op.operands().iter().any(misused)
+                }
+                GraphOp::CallMethod { name, args, .. } => {
+                    let key = constant_name(program, *name).unwrap_or_default();
+                    let callback = args.len() == 1
+                        && kiln_builtin_surface::pure_methods(&key).any(|r| r.callback.is_some());
+                    args.iter()
+                        .enumerate()
+                        .any(|(k, a)| misused(a) && !(k == 0 && callback))
+                }
+                other => other.operands().iter().any(misused),
+            };
+            if bad {
+                let closure = op
+                    .operands()
+                    .iter()
+                    .any(|v| matches!(placeholders.get(v), Some(None)));
+                return Err(if closure {
+                    Refusal::with(Reason::Allocates, "a closure that is not only called")
+                } else {
+                    Refusal::with(Reason::UnsupportedOperation, label(vid))
+                });
+            }
+        }
+        for block in graph.blocks.iter() {
+            match &block.terminator {
+                Terminator::Return(Some(v))
+                | Terminator::Branch { condition: v, .. }
+                | Terminator::BranchNotNullish { condition: v, .. }
+                    if placeholders.contains_key(v) =>
+                {
+                    return Err(match placeholders.get(v) {
+                        Some(Some(b)) => {
+                            Refusal::with(Reason::UnsupportedOperation, builtin_name(*b))
+                        }
+                        _ => Refusal::with(Reason::Allocates, "a closure"),
+                    });
+                }
+                _ => {}
+            }
+        }
+        // A `+` of two operands not both proven numbers may join strings.
+        let proven = crate::graph::proven_types(graph);
+        self.shape.concat |=
+            graph
+                .blocks
+                .iter()
+                .flat_map(|b| b.operations.iter())
+                .any(|(_, op)| match op {
+                    GraphOp::Binary {
+                        op: kiln_ir::BinaryOp::Add,
+                        left,
+                        right,
+                    } => {
+                        !(proven.get(left).is_some_and(Proven::is_number)
+                            && proven.get(right).is_some_and(Proven::is_number))
+                    }
+                    _ => false,
+                });
+        // Tier 4: each function called here, after this body (so its worker cache entries follow
+        // this body's), unless it is already admitted or being admitted (recursion).
+        for target in callees {
+            if !self.admitted.insert(target) {
+                continue;
+            }
+            let mut path: Vec<u32> = chain.to_vec();
+            path.push(target);
+            let named = || {
+                path.iter()
+                    .map(|&t| function_name(program, t))
+                    .collect::<Vec<_>>()
+                    .join(" -> ")
+            };
+            if path.len() > PARALLEL_CALL_DEPTH || self.admitted.len() > PARALLEL_CALLEES {
+                return Err(Refusal::with(Reason::CallsTooDeep, named()));
+            }
+            let calls = self
+                .calls
+                .expect("a callee is resolved only through the call graph");
+            let callee = &program.functions[target as usize];
+            let unproven = |inner: Refusal| {
+                let why = match &inner.detail {
+                    Some(detail) => format!("{}: {detail}", inner.reason.code()),
+                    None => inner.reason.code().to_owned(),
+                };
+                Refusal::with(Reason::CallsUnproven, format!("{} ({why})", named()))
+            };
+            if callee.generator || callee.asynchronous || callee.async_generator {
+                return Err(unproven(Refusal::new(Reason::NotPlainFunction)));
+            }
+            if callee
+                .code
+                .iter()
+                .any(|i| matches!(i, kiln_ir::Instruction::RestArguments(_)))
+            {
+                return Err(unproven(Refusal::new(Reason::RestParameter)));
+            }
+            if callee.parameter_count > PARALLEL_CALLEE_PARAMETERS {
+                return Err(unproven(Refusal::with(
+                    Reason::Arity,
+                    format!("{} parameters", callee.parameter_count),
+                )));
+            }
+            let Some(callee_graph) = calls.graphs.get(target as usize) else {
+                return Err(Refusal::with(Reason::CallsUnknown, named()));
+            };
+            let callee_captures = calls
+                .captures
+                .get(target as usize)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let start = self.shape.sites;
+            self.shape.callees.push((target, start));
+            match self.body(Some(target), callee_graph, callee, callee_captures, &path) {
+                Ok(()) => {}
+                // Already about a call below: it names its own chain, which starts with this one.
+                Err(inner)
+                    if matches!(inner.reason, Reason::CallsUnproven | Reason::CallsTooDeep) =>
+                {
+                    return Err(inner);
+                }
+                Err(inner) => return Err(unproven(inner)),
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The verdict of a callback tier 1 refused with `refusal`: tier 2's, when [`heap_verdict`]
+/// admits it, as a [`ParallelShape`] carrying the [`HeapShape`]; otherwise tier 2's refusal,
+/// since it is the more permissive tier and so names what really keeps the callback sequential.
+pub fn tier_2(
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+    program: &Program,
+    captures: &[Capture],
+    refusal: Refusal,
+    calls: Option<&CallGraph>,
+) -> Result<ParallelShape, Refusal> {
+    // What tier 2 cannot change: the function itself, and a callback that is fine by the source
+    // rules but not numeric where tier 1 needs it (that is the site's or the plan's reason).
+    if matches!(
+        refusal.reason,
+        Reason::NotPlainFunction | Reason::RestParameter | Reason::Arity
+    ) {
+        return Err(refusal);
+    }
+    heap_verdict_in(graph, proto, program, captures, calls).map(|heap| ParallelShape {
+        heap: Some(heap),
+        ..ParallelShape::default()
+    })
+}
+
+/// The order a two-parameter comparator is when it returns the difference of one key read from
+/// each element -- `(a, b) => a.k - b.k` (ascending) or `(a, b) => b.k - a.k` (descending) --
+/// and the value of that key applied to the first parameter.
+///
+/// The body must be one straight-line block whose `return` is `L - R`, where `L` is computed
+/// from one parameter and `R` from the other by the same operations (captures, constants and the
+/// reads of rule 5 shared or equal), and neither side is the parameter itself (that is tier 1's
+/// [`comparator_order`]). Then `compare(a, b)` is `K(a) - K(b)` for one pure `K`, and over keys
+/// that are numbers and not `NaN` such a comparator is consistent exactly as `a - b` is over
+/// numbers, so a stable sort by `K` is `sort`'s answer. The pool computes every key, declines
+/// the call when one is not a number or is `NaN` (and when an element is `undefined` or a hole,
+/// which `sort` never passes to a comparator), and sorts by key.
+pub fn key_comparator(
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+) -> Option<(SortOrder, crate::graph::ValueId)> {
+    use crate::graph::ValueId;
+    if proto.parameter_count != 2 {
+        return None;
+    }
+    let mut reachable = graph
+        .blocks
+        .iter()
+        .filter(|b| b.is_reachable_from_entry(graph.entry_block));
+    let block = reachable.next()?;
+    if reachable.next().is_some() {
+        return None;
+    }
+    let Terminator::Return(Some(ret)) = &block.terminator else {
+        return None;
+    };
+    let defs: std::collections::HashMap<ValueId, &GraphOp> =
+        block.operations.iter().map(|(v, op)| (*v, op)).collect();
+    if block
+        .operations
+        .iter()
+        .any(|(_, op)| matches!(op, GraphOp::StoreLocal { slot, .. } if *slot < 2))
+    {
+        return None;
+    }
+    let parameter = |v: ValueId| -> Option<usize> {
+        if let Some(k) = graph.initial_locals.iter().take(2).position(|p| *p == v) {
+            return Some(k);
+        }
+        match defs.get(&v) {
+            Some(GraphOp::LoadLocal(slot)) if *slot < 2 => Some(*slot as usize),
+            _ => None,
+        }
+    };
+    // Which parameters a value's computation reads: bit 0 the first, bit 1 the second, bit 2 a
+    // value this rule does not follow (which disqualifies it).
+    fn reads(
+        v: ValueId,
+        defs: &std::collections::HashMap<ValueId, &GraphOp>,
+        parameter: &dyn Fn(ValueId) -> Option<usize>,
+        depth: usize,
+    ) -> u8 {
+        if let Some(k) = parameter(v) {
+            return 1 << k;
+        }
+        if depth > 64 {
+            return 4;
+        }
+        match defs.get(&v) {
+            Some(
+                GraphOp::Const { .. }
+                | GraphOp::LoadUpvalue(_)
+                | GraphOp::LoadBuiltin(_)
+                | GraphOp::LoadLocal(_),
+            ) => 0,
+            Some(
+                op @ (GraphOp::GetProperty { .. }
+                | GraphOp::GetComputed { .. }
+                | GraphOp::Binary { .. }
+                | GraphOp::Unary { .. }
+                | GraphOp::CheckTdz { .. }
+                | GraphOp::CallMethod { .. }),
+            ) => op
+                .operands()
+                .into_iter()
+                .fold(0, |acc, o| acc | reads(o, defs, parameter, depth + 1)),
+            // Tier 4: a pure callable global (`parseInt(a) - parseInt(b)`), whose clone is a
+            // function of its arguments alone.
+            Some(op @ GraphOp::Call { callee, .. }) if matches!(defs.get(callee), Some(GraphOp::LoadBuiltin(b)) if pure_global(*b).is_some()) => {
+                op.operands()
+                    .into_iter()
+                    .fold(0, |acc, o| acc | reads(o, defs, parameter, depth + 1))
+            }
+            _ => 4,
+        }
+    }
+    fn same(
+        l: ValueId,
+        r: ValueId,
+        defs: &std::collections::HashMap<ValueId, &GraphOp>,
+        parameter: &dyn Fn(ValueId) -> Option<usize>,
+        depth: usize,
+    ) -> bool {
+        if depth > 64 {
+            return false;
+        }
+        match (parameter(l), parameter(r)) {
+            (Some(0), Some(1)) => return true,
+            (Some(_), _) | (_, Some(_)) => return false,
+            _ => {}
+        }
+        let same_all = |a: &[ValueId], b: &[ValueId]| {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b)
+                    .all(|(x, y)| same(*x, *y, defs, parameter, depth + 1))
+        };
+        match (defs.get(&l), defs.get(&r)) {
+            // A shared operand that reads no parameter (a capture, `Math`) is the same on both.
+            _ if l == r => reads(l, defs, parameter, depth) == 0,
+            (
+                Some(GraphOp::Const { constant: a, .. }),
+                Some(GraphOp::Const { constant: b, .. }),
+            ) => a == b,
+            (Some(GraphOp::LoadUpvalue(a)), Some(GraphOp::LoadUpvalue(b))) => a == b,
+            (Some(GraphOp::LoadBuiltin(a)), Some(GraphOp::LoadBuiltin(b))) => a == b,
+            (
+                Some(GraphOp::GetProperty {
+                    object: o1,
+                    name: n1,
+                    ..
+                }),
+                Some(GraphOp::GetProperty {
+                    object: o2,
+                    name: n2,
+                    ..
+                }),
+            ) => n1 == n2 && same(*o1, *o2, defs, parameter, depth + 1),
+            (Some(a @ GraphOp::GetComputed { .. }), Some(b @ GraphOp::GetComputed { .. }))
+            | (Some(a @ GraphOp::CheckTdz { .. }), Some(b @ GraphOp::CheckTdz { .. })) => {
+                same_all(&a.operands(), &b.operands())
+            }
+            (Some(a @ GraphOp::Binary { op: x, .. }), Some(b @ GraphOp::Binary { op: y, .. })) => {
+                x == y && same_all(&a.operands(), &b.operands())
+            }
+            (Some(a @ GraphOp::Unary { op: x, .. }), Some(b @ GraphOp::Unary { op: y, .. })) => {
+                x == y && same_all(&a.operands(), &b.operands())
+            }
+            (
+                Some(a @ GraphOp::CallMethod { name: x, .. }),
+                Some(b @ GraphOp::CallMethod { name: y, .. }),
+            ) => x == y && same_all(&a.operands(), &b.operands()),
+            (Some(a @ GraphOp::Call { .. }), Some(b @ GraphOp::Call { .. })) => {
+                same_all(&a.operands(), &b.operands())
+            }
+            _ => false,
+        }
+    }
+    let Some(GraphOp::Binary {
+        op: kiln_ir::BinaryOp::Subtract,
+        left,
+        right,
+    }) = defs.get(ret)
+    else {
+        return None;
+    };
+    if parameter(*left).is_some() || parameter(*right).is_some() {
+        return None;
+    }
+    match (
+        reads(*left, &defs, &parameter, 0),
+        reads(*right, &defs, &parameter, 0),
+    ) {
+        (1, 2) if same(*left, *right, &defs, &parameter, 0) => Some((SortOrder::Ascending, *left)),
+        (2, 1) if same(*right, *left, &defs, &parameter, 0) => {
+            Some((SortOrder::Descending, *right))
+        }
+        _ => None,
+    }
 }
 
 /// What every reachable `return` of a callback is proven to be, with its parameters and captures
@@ -733,11 +1884,10 @@ pub fn parallel_verdict(
                 GraphOp::Call { .. } | GraphOp::New { .. } => {
                     Some(Refusal::with(Reason::Calls, label(vid)))
                 }
-                GraphOp::Bridge { instruction, .. }
-                    if matches!(instruction, kiln_ir::Instruction::LoadArguments) =>
-                {
-                    Some(Refusal::with(Reason::ReadsThis, "arguments"))
-                }
+                GraphOp::Bridge {
+                    instruction: kiln_ir::Instruction::LoadArguments,
+                    ..
+                } => Some(Refusal::with(Reason::ReadsThis, "arguments")),
                 _ => Some(Refusal::with(Reason::UnsupportedOperation, label(vid))),
             };
             if let Some(refusal) = refusal {
@@ -783,6 +1933,12 @@ pub struct SiteRecord {
     pub at: Option<(u32, u32)>,
     /// `parallelSort` with no comparator: parallel on typed arrays only.
     pub default_order: bool,
+    /// Tier 2: a callback of the site reads the heap (its reads are guarded per element).
+    pub heap: bool,
+    /// Tier 3: the callback builds values, which its workers keep in arenas.
+    pub alloc: bool,
+    /// Tier 4: the callback calls pure built-ins or functions of the program.
+    pub calls: bool,
 }
 
 thread_local! {
@@ -975,6 +2131,16 @@ impl SiteRecord {
         if self.default_order {
             out.push_str(" order=default");
         }
+        if self.calls {
+            out.push_str(" tier=4");
+            if self.alloc {
+                out.push_str(" builds=1");
+            }
+        } else if self.alloc {
+            out.push_str(" tier=3");
+        } else if self.heap {
+            out.push_str(" tier=2");
+        }
         out.push_str(" */");
         out
     }
@@ -1006,6 +2172,9 @@ impl SiteRecord {
             captures: 0,
             at: None,
             default_order: false,
+            heap: false,
+            alloc: false,
+            calls: false,
         };
         let mut parallel = None;
         let mut reason = None;
@@ -1023,6 +2192,12 @@ impl SiteRecord {
                 "detail" => detail = Some(unescape(value)),
                 "writes" => writes = value.parse().ok(),
                 "order" => record.default_order = value == "default",
+                "tier" => {
+                    record.heap = value == "2" || value == "3" || value == "4";
+                    record.alloc = value == "3";
+                    record.calls = value == "4";
+                }
+                "builds" => record.alloc = value == "1",
                 "at" => {
                     let (l, c) = value.split_once(':')?;
                     record.at = Some((l.parse().ok()?, c.parse().ok()?));
@@ -1054,6 +2229,11 @@ impl SiteRecord {
             self.method.name()
         );
         match &self.refusal {
+            None if self.calls => format!("{head}parallel (tier 4: pure calls)\n"),
+            None if self.alloc => {
+                format!("{head}parallel (tier 3: builds values in worker arenas)\n")
+            }
+            None if self.heap => format!("{head}parallel (tier 2: reads the heap)\n"),
             None if self.captures > 0 => {
                 format!("{head}parallel (tier 1: reads captured values)\n")
             }
@@ -1078,8 +2258,28 @@ impl SiteRecord {
                     }
                     (Reason::WritesCapture, Some(name)) => format!("assigns captured `{name}`{at}"),
                     (Reason::ReadsProperty, Some(name)) => format!("reads property `{name}`"),
+                    (Reason::ReadsAccessor, Some(name)) if name == "__proto__" => {
+                        "reads `__proto__`, which is an accessor".to_owned()
+                    }
+                    (Reason::ReadsAccessor, Some(name)) => {
+                        format!("reads `{name}`, which this module defines with a getter or setter")
+                    }
                     (Reason::WritesProperty, Some(name)) => format!("writes property `{name}`"),
                     (Reason::Calls, Some(callee)) => format!("calls {callee}"),
+                    (Reason::CallsImpure, Some(callee)) => {
+                        format!("calls {callee}, which is not marked pure")
+                    }
+                    (Reason::CallsUnproven, Some(chain)) => {
+                        format!("calls {chain}, which is not proven pure")
+                    }
+                    (Reason::CallsUnknown, Some(callee)) => {
+                        format!(
+                            "calls {callee}, which the compiler cannot identify as one function"
+                        )
+                    }
+                    (Reason::CallsTooDeep, Some(chain)) => format!(
+                        "calls {chain}: deeper than {PARALLEL_CALL_DEPTH} functions, or more than {PARALLEL_CALLEES}"
+                    ),
                     (_, Some(detail)) => format!("{} ({detail})", r.reason.describe()),
                     (_, None) => r.reason.describe().to_owned(),
                 };
@@ -1582,6 +2782,9 @@ mod tests {
                 captures: 1,
                 at: None,
                 default_order: false,
+                heap: false,
+                alloc: false,
+                calls: false,
             },
             SiteRecord {
                 method: ParallelMethod::Map,
@@ -1594,6 +2797,9 @@ mod tests {
                 captures: 0,
                 at: Some((7, 54)),
                 default_order: false,
+                heap: false,
+                alloc: false,
+                calls: false,
             },
             SiteRecord {
                 method: ParallelMethod::Sort,
@@ -1603,6 +2809,9 @@ mod tests {
                 captures: 0,
                 at: None,
                 default_order: true,
+                heap: false,
+                alloc: false,
+                calls: false,
             },
             SiteRecord {
                 method: ParallelMethod::Reduce,
@@ -1612,6 +2821,21 @@ mod tests {
                 captures: 0,
                 at: None,
                 default_order: false,
+                heap: false,
+                alloc: false,
+                calls: false,
+            },
+            SiteRecord {
+                method: ParallelMethod::Filter,
+                line: 10,
+                column: 5,
+                refusal: None,
+                captures: 2,
+                at: None,
+                default_order: false,
+                heap: true,
+                alloc: false,
+                calls: false,
             },
         ];
         let c: String = records
@@ -1630,7 +2854,725 @@ mod tests {
              src/a.ts:8:3  parallelSort  parallel (typed arrays: the default numeric order)\n\
              src/a.ts:9:3  parallelReduce  sequential\n  \
              argument-shape: the call does not pass the arguments the parallel lowering takes \
-             (parallelReduce: callback, combine, initial)\n"
+             (parallelReduce: callback, combine, initial)\n\
+             src/a.ts:10:5  parallelFilter  parallel (tier 2: reads the heap)\n"
         );
+    }
+
+    /// Tier 2's verdict for `proto` in `program` (built from [`program`] when `None`).
+    fn heap(proto: FunctionProto, program: Option<Program>) -> Result<HeapShape, Reason> {
+        let program = program.unwrap_or_else(|| self::program(&proto));
+        let graph = build_function_graph(&proto, &program).unwrap();
+        heap_verdict(&graph, &proto, &program, &[]).map_err(|r| r.reason)
+    }
+
+    #[test]
+    fn tier_2_reads_by_name_by_index_and_compares_strings() {
+        // `x => (x.x === "s") + x.x * x[1] + x.length`
+        let code = vec![
+            Instruction::LoadLocal(0),
+            Instruction::GetProperty(4),
+            Instruction::Const(6),
+            Instruction::Binary(BinaryOp::StrictEqual),
+            Instruction::LoadLocal(0),
+            Instruction::GetProperty(4),
+            Instruction::LoadLocal(0),
+            Instruction::Const(0),
+            Instruction::GetComputed,
+            Instruction::Binary(BinaryOp::Multiply),
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::LoadLocal(0),
+            Instruction::GetProperty(3),
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::Return,
+        ];
+        // Tier 1 refuses the read; tier 2 admits it, and hands the site what the clone reads.
+        assert_eq!(why(proto(code.clone(), 1)), Some(Reason::ReadsProperty));
+        let shape = heap(proto(code.clone(), 1), None).expect("tier 2 admits reads");
+        assert_eq!(shape.keys, vec![4, 3]);
+        assert_eq!(shape.strings, vec![6]);
+        assert_eq!(shape.sites, 3);
+        assert_eq!(shape.key, None);
+        let callback = proto(code, 1);
+        let program = program(&callback);
+        let graph = build_function_graph(&callback, &program).unwrap();
+        let refusal = parallel_verdict(&graph, &callback, &program, &[]).unwrap_err();
+        let verdict = tier_2(&graph, &callback, &program, &[], refusal, None).unwrap();
+        assert_eq!(verdict.heap, Some(shape));
+        assert!(verdict.captures.is_empty());
+    }
+
+    #[test]
+    fn tier_2_captures_of_any_kind_written_once() {
+        let mut callback = proto(
+            vec![
+                Instruction::LoadUpvalue(0),
+                Instruction::LoadLocal(0),
+                Instruction::GetComputed,
+                Instruction::Return,
+            ],
+            1,
+        );
+        callback.upvalues = vec![kiln_ir::Upvalue::ParentLocal(0)];
+        let program = program(&callback);
+        let graph = build_function_graph(&callback, &program).unwrap();
+        let shape = heap_verdict(&graph, &callback, &program, &[Capture::Writes(1)]).unwrap();
+        assert_eq!(shape.captures, vec![0]);
+        assert_eq!(
+            heap_verdict(&graph, &callback, &program, &[Capture::Writes(2)])
+                .unwrap_err()
+                .reason,
+            Reason::CapturesReassigned
+        );
+    }
+
+    #[test]
+    fn tier_2_still_refuses_writes_allocation_calls_and_this() {
+        let refused = |code: Vec<Instruction>| heap(proto(code, 1), None).err();
+        assert_eq!(
+            refused(vec![
+                Instruction::LoadLocal(0),
+                Instruction::Const(0),
+                Instruction::SetProperty(4),
+                Instruction::Return,
+            ]),
+            Some(Reason::WritesProperty)
+        );
+        // A closure is an allocation tier 3 does not build.
+        assert_eq!(
+            refused(vec![Instruction::MakeFunction(0), Instruction::Return]),
+            Some(Reason::Allocates)
+        );
+        // `x.random()`: no prototype marks `random` pure (tier 4 names it).
+        assert_eq!(
+            refused(vec![
+                Instruction::LoadLocal(0),
+                Instruction::CallMethod { name: 5, argc: 0 },
+                Instruction::Return,
+            ]),
+            Some(Reason::CallsImpure)
+        );
+        assert_eq!(
+            refused(vec![Instruction::LoadThis, Instruction::Return]),
+            Some(Reason::ReadsThis)
+        );
+        assert_eq!(
+            refused(vec![
+                Instruction::LoadLocal(0),
+                Instruction::Unary(UnaryOp::TypeOf),
+                Instruction::Return,
+            ]),
+            Some(Reason::UnsupportedOperation)
+        );
+        // An answer proven a string is one only `map`, `filter` and `flatMap` keep: the verdict
+        // says so, and the site decides.
+        let string = heap(
+            proto(vec![Instruction::Const(6), Instruction::Return], 1),
+            None,
+        )
+        .expect("the site decides what a string answer means");
+        assert!(string.answers_value && !string.allocates);
+    }
+
+    #[test]
+    fn tier_3_builds_literals_spreads_and_strings() {
+        // `r => ({ ...r, x: r.x + "s" })`
+        let code = vec![
+            Instruction::NewObject { count: 0 },
+            Instruction::LoadLocal(0),
+            Instruction::SpreadObject,
+            Instruction::Const(4),
+            Instruction::LoadLocal(0),
+            Instruction::GetProperty(4),
+            Instruction::Const(6),
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::DefineNamedProperty {
+                name_function: true,
+            },
+            Instruction::Return,
+        ];
+        assert_eq!(why(proto(code.clone(), 1)), Some(Reason::Allocates));
+        let shape = heap(proto(code, 1), None).expect("tier 3 admits the literal");
+        assert!(shape.allocates && shape.concat && shape.builds());
+        assert_eq!(shape.defines, vec![4], "the member the site interns");
+        assert_eq!(shape.sites, 2, "one read, one definition");
+        // `r => [r.x, String(r.x)]`
+        let listed = heap(
+            proto(
+                vec![
+                    Instruction::LoadLocal(0),
+                    Instruction::GetProperty(4),
+                    Instruction::LoadBuiltin(Builtin::String),
+                    Instruction::LoadLocal(0),
+                    Instruction::GetProperty(4),
+                    Instruction::Call { argc: 1 },
+                    Instruction::NewArray { count: 2 },
+                    Instruction::Return,
+                ],
+                1,
+            ),
+            None,
+        )
+        .expect("an array literal and String()");
+        assert!(listed.allocates && listed.defines.is_empty());
+        // `String` used as anything but the callee of `String(x)` is a built-in the rules do
+        // not list.
+        assert_eq!(
+            heap(
+                proto(
+                    vec![
+                        Instruction::LoadBuiltin(Builtin::String),
+                        Instruction::Return
+                    ],
+                    1
+                ),
+                None
+            )
+            .err(),
+            Some(Reason::UnsupportedOperation)
+        );
+        // More members than an object's inline slots, and a member named like an index.
+        let mut wide = Vec::new();
+        for _ in 0..17 {
+            wide.extend([Instruction::Const(4), Instruction::Const(0)]);
+        }
+        wide.extend([Instruction::NewObject { count: 17 }, Instruction::Return]);
+        assert_eq!(heap(proto(wide, 1), None).err(), Some(Reason::Allocates));
+        let mut index_named = program(&proto(Vec::new(), 1));
+        index_named.constants.push(Constant::String("0".into()));
+        let key = index_named.constants.len() as u32 - 1;
+        let callback = proto(
+            vec![
+                Instruction::Const(key),
+                Instruction::LoadLocal(0),
+                Instruction::NewObject { count: 1 },
+                Instruction::Return,
+            ],
+            1,
+        );
+        index_named.functions = vec![callback.clone()];
+        assert_eq!(
+            heap(callback, Some(index_named)).err(),
+            Some(Reason::Allocates)
+        );
+        assert!(plain_member_name("total") && !plain_member_name("12") && !plain_member_name(""));
+        assert!(plain_member_name("012") && !plain_member_name("__proto__"));
+    }
+
+    #[test]
+    fn reason_allocates_for_method() {
+        assert_eq!(
+            Reason::from_code("allocates-for-method"),
+            Some(Reason::AllocatesForMethod)
+        );
+        let record = SiteRecord {
+            method: ParallelMethod::Map,
+            line: 3,
+            column: 9,
+            refusal: None,
+            captures: 0,
+            at: None,
+            default_order: false,
+            heap: true,
+            alloc: true,
+            calls: false,
+        };
+        let parsed = SiteRecord::parse_all(&record.marker());
+        assert_eq!(
+            parsed,
+            vec![record.clone()],
+            "tier 3 round-trips through the marker"
+        );
+        assert!(
+            record
+                .render("m.js")
+                .contains("parallel (tier 3: builds values in worker arenas)")
+        );
+    }
+
+    #[test]
+    fn reason_reads_accessor() {
+        // The module defines `get x() {}` somewhere: a read of `x` would call it.
+        let callback = proto(
+            vec![
+                Instruction::LoadLocal(0),
+                Instruction::GetProperty(4),
+                Instruction::Return,
+            ],
+            1,
+        );
+        let mut with_getter = program(&callback);
+        with_getter.code = vec![
+            Instruction::NewObject { count: 0 },
+            Instruction::Const(4),
+            Instruction::MakeFunction(0),
+            Instruction::DefineAccessor {
+                setter: false,
+                enumerable: true,
+            },
+            Instruction::Return,
+        ];
+        assert_eq!(
+            heap(callback.clone(), Some(with_getter)).err(),
+            Some(Reason::ReadsAccessor)
+        );
+        assert!(heap(callback, None).is_ok(), "no accessor named `x`");
+        // `__proto__` is an accessor of `Object.prototype` whatever the module defines.
+        let mut constants = program(&proto(Vec::new(), 1)).constants;
+        constants.push(Constant::String("__proto__".into()));
+        let proto_read = proto(
+            vec![
+                Instruction::LoadLocal(0),
+                Instruction::GetProperty(constants.len() as u32 - 1),
+                Instruction::Return,
+            ],
+            1,
+        );
+        let mut reads_proto = program(&proto_read);
+        reads_proto.constants = constants;
+        assert_eq!(
+            heap(proto_read, Some(reads_proto)).err(),
+            Some(Reason::ReadsAccessor)
+        );
+    }
+
+    #[test]
+    fn a_key_comparator_is_a_difference_of_one_key_read_from_each_side() {
+        let key = |code: Vec<Instruction>| {
+            let callback = proto(code, 2);
+            let program = program(&callback);
+            let graph = build_function_graph(&callback, &program).unwrap();
+            key_comparator(&graph, &callback).map(|(order, _)| order)
+        };
+        let difference = |left: Vec<Instruction>, right: Vec<Instruction>| {
+            let mut code = left;
+            code.extend(right);
+            code.push(Instruction::Binary(BinaryOp::Subtract));
+            code.push(Instruction::Return);
+            code
+        };
+        let read = |parameter: u32, name: u32| {
+            vec![
+                Instruction::LoadLocal(parameter),
+                Instruction::GetProperty(name),
+            ]
+        };
+        // `(a, b) => a.x - b.x` and `(a, b) => b.x - a.x`.
+        assert_eq!(
+            key(difference(read(0, 4), read(1, 4))),
+            Some(SortOrder::Ascending)
+        );
+        assert_eq!(
+            key(difference(read(1, 4), read(0, 4))),
+            Some(SortOrder::Descending)
+        );
+        // Different keys on the two sides, one side's key twice, and tier 1's plain difference.
+        assert_eq!(key(difference(read(0, 4), read(1, 3))), None);
+        assert_eq!(key(difference(read(0, 4), read(0, 4))), None);
+        assert_eq!(
+            key(difference(
+                vec![Instruction::LoadLocal(0)],
+                vec![Instruction::LoadLocal(1)]
+            )),
+            None
+        );
+        // `(a, b) => a.x * 2 - b.x * 2`: the same computation on each side.
+        let scaled = |parameter| {
+            let mut code = read(parameter, 4);
+            code.extend([
+                Instruction::Const(0),
+                Instruction::Binary(BinaryOp::Multiply),
+            ]);
+            code
+        };
+        assert_eq!(
+            key(difference(scaled(0), scaled(1))),
+            Some(SortOrder::Ascending)
+        );
+        // The verdict carries it for `parallelSort`.
+        let callback = proto(difference(read(0, 4), read(1, 4)), 2);
+        let program = program(&callback);
+        let graph = build_function_graph(&callback, &program).unwrap();
+        let shape = heap_verdict(&graph, &callback, &program, &[]).unwrap();
+        assert!(matches!(shape.key, Some((SortOrder::Ascending, _))));
+    }
+
+    /// A program of `functions` over `constants`, for tier 4's tests.
+    fn unit(functions: Vec<FunctionProto>, constants: &[&str]) -> Program {
+        Program {
+            source: "".into(),
+            version: BYTECODE_VERSION,
+            constants: constants
+                .iter()
+                .map(|c| Constant::String((*c).into()))
+                .collect(),
+            code: vec![Instruction::Return],
+            local_count: 0,
+            functions,
+            template_sites: Vec::new(),
+        }
+    }
+
+    /// Tier 4's verdict for function 0 of `program`, where every captured read of a function's
+    /// body is the closure `closures[f][k]` (and every capture is written once).
+    fn tier_4(program: &Program, closures: &[Vec<u32>]) -> Result<HeapShape, Refusal> {
+        let graphs: Vec<FunctionGraph> = program
+            .functions
+            .iter()
+            .map(|f| build_function_graph(f, program).unwrap())
+            .collect();
+        let captures: Vec<Vec<Capture>> = program
+            .functions
+            .iter()
+            .map(|f| vec![Capture::Writes(1); f.upvalues.len()])
+            .collect();
+        let known = |f: u32, v: crate::graph::ValueId| -> Option<u32> {
+            graphs[f as usize]
+                .blocks
+                .iter()
+                .flat_map(|b| b.operations.iter())
+                .find_map(|(id, op)| match op {
+                    GraphOp::LoadUpvalue(k) if *id == v => {
+                        closures.get(f as usize)?.get(*k as usize).copied()
+                    }
+                    _ => None,
+                })
+        };
+        let calls = CallGraph {
+            graphs: &graphs,
+            captures: &captures,
+            known: &known,
+            root: 0,
+        };
+        heap_verdict_in(
+            &graphs[0],
+            &program.functions[0],
+            program,
+            &captures[0],
+            Some(&calls),
+        )
+    }
+
+    fn function(code: Vec<Instruction>, parameters: u32, upvalues: u32) -> FunctionProto {
+        let mut f = proto(code, parameters);
+        f.upvalues = (0..upvalues).map(kiln_ir::Upvalue::ParentLocal).collect();
+        f
+    }
+
+    #[test]
+    fn tier_4_calls_built_ins_marked_pure() {
+        // `l => l.trim().split(",").map(Number)`: the acceptance shape.
+        let program = unit(
+            vec![function(
+                vec![
+                    Instruction::LoadLocal(0),
+                    Instruction::CallMethod { name: 0, argc: 0 },
+                    Instruction::Const(2),
+                    Instruction::CallMethod { name: 1, argc: 1 },
+                    Instruction::LoadBuiltin(Builtin::Number),
+                    Instruction::CallMethod { name: 3, argc: 1 },
+                    Instruction::Return,
+                ],
+                1,
+                0,
+            )],
+            &["trim", "split", ",", "map"],
+        );
+        let shape = tier_4(&program, &[]).expect("pure built-ins qualify");
+        assert!(shape.calls && shape.allocates, "{shape:?}");
+        assert!(shape.callees.is_empty() && shape.bodies.is_empty());
+        // Without a call graph, the same holds: no function of the program is called.
+        let graph = build_function_graph(&program.functions[0], &program).unwrap();
+        assert!(heap_verdict(&graph, &program.functions[0], &program, &[]).is_ok());
+    }
+
+    #[test]
+    fn tier_4_names_a_built_in_that_is_not_marked_pure() {
+        let refused = |code: Vec<Instruction>| {
+            let program = unit(
+                vec![function(code, 1, 0)],
+                &["push", "random", "now", "trim"],
+            );
+            tier_4(&program, &[]).unwrap_err()
+        };
+        let push = refused(vec![
+            Instruction::LoadLocal(0),
+            Instruction::Const(0),
+            Instruction::CallMethod { name: 0, argc: 1 },
+            Instruction::Return,
+        ]);
+        assert_eq!(
+            (push.reason, push.detail.as_deref()),
+            (Reason::CallsImpure, Some(".push()"))
+        );
+        let random = refused(vec![
+            Instruction::LoadBuiltin(Builtin::Math),
+            Instruction::CallMethod { name: 1, argc: 0 },
+            Instruction::Return,
+        ]);
+        assert_eq!(random.detail.as_deref(), Some("Math.random"));
+        let now = refused(vec![
+            Instruction::LoadBuiltin(Builtin::Date),
+            Instruction::CallMethod { name: 2, argc: 0 },
+            Instruction::Return,
+        ]);
+        assert_eq!(
+            (now.reason, now.detail.as_deref()),
+            (Reason::CallsImpure, Some("Date.now"))
+        );
+        // A pure global passed anywhere but as a callback is a value the clone never makes.
+        let passed = refused(vec![
+            Instruction::LoadBuiltin(Builtin::Number),
+            Instruction::Return,
+        ]);
+        assert_eq!(passed.reason, Reason::UnsupportedOperation);
+    }
+
+    #[test]
+    fn tier_4_follows_calls_into_the_program() {
+        let constants = &["trim", "n"];
+        // 0: `x => f(x)`, capturing `f`; 1: `f = y => y.trim()`.
+        let caller = || {
+            function(
+                vec![
+                    Instruction::LoadUpvalue(0),
+                    Instruction::LoadLocal(0),
+                    Instruction::Call { argc: 1 },
+                    Instruction::Return,
+                ],
+                1,
+                1,
+            )
+        };
+        let trims = function(
+            vec![
+                Instruction::LoadLocal(0),
+                Instruction::CallMethod { name: 0, argc: 0 },
+                Instruction::Return,
+            ],
+            1,
+            0,
+        );
+        let program = unit(vec![caller(), trims], constants);
+        let shape = tier_4(&program, &[vec![1]]).expect("a pure helper qualifies");
+        assert_eq!(shape.callees, vec![(1, 0)]);
+        assert_eq!(shape.bodies, vec![1]);
+        assert!(shape.calls);
+
+        // A helper that writes refuses, naming it and why.
+        let writes = function(
+            vec![
+                Instruction::LoadLocal(0),
+                Instruction::Const(0),
+                Instruction::SetProperty(1),
+                Instruction::LoadLocal(0),
+                Instruction::Return,
+            ],
+            1,
+            0,
+        );
+        let program = unit(vec![caller(), writes], constants);
+        let refusal = tier_4(&program, &[vec![1]]).unwrap_err();
+        assert_eq!(refusal.reason, Reason::CallsUnproven);
+        assert!(
+            refusal
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("writes-property: n")),
+            "{refusal:?}"
+        );
+
+        // A call the compiler cannot place: no closure known for the capture.
+        let program = unit(
+            vec![
+                caller(),
+                function(vec![Instruction::LoadLocal(0), Instruction::Return], 1, 0),
+            ],
+            constants,
+        );
+        assert_eq!(
+            tier_4(&program, &[]).unwrap_err().reason,
+            Reason::CallsUnknown
+        );
+    }
+
+    #[test]
+    fn tier_4_admits_recursion_when_the_cycle_is_proven_and_bounds_depth() {
+        // 0: `x => f(x)`; 1: `f = k => f(k)` (capturing itself).
+        let recursive = function(
+            vec![
+                Instruction::LoadUpvalue(0),
+                Instruction::LoadLocal(0),
+                Instruction::Call { argc: 1 },
+                Instruction::Return,
+            ],
+            1,
+            1,
+        );
+        let program = unit(vec![recursive.clone(), recursive.clone()], &[]);
+        let shape = tier_4(&program, &[vec![1], vec![1]]).expect("recursion is proven");
+        assert_eq!(shape.callees, vec![(1, 0)]);
+        // A chain of distinct functions past the bound: 0 calls 1 calls 2 ... calls 11.
+        let chain: Vec<FunctionProto> = (0..12).map(|_| recursive.clone()).collect();
+        let closures: Vec<Vec<u32>> = (0..12u32).map(|f| vec![(f + 1).min(11)]).collect();
+        let program = unit(chain, &[]);
+        let refusal = tier_4(&program, &closures).unwrap_err();
+        assert_eq!(refusal.reason, Reason::CallsTooDeep, "{refusal:?}");
+    }
+
+    #[test]
+    fn tier_4_calls_a_closure_written_in_the_callback() {
+        // `l => [l].map(x => x.trim())`
+        let program = unit(
+            vec![
+                function(
+                    vec![
+                        Instruction::LoadLocal(0),
+                        Instruction::NewArray { count: 1 },
+                        Instruction::MakeFunction(1),
+                        Instruction::CallMethod { name: 1, argc: 1 },
+                        Instruction::Return,
+                    ],
+                    1,
+                    0,
+                ),
+                function(
+                    vec![
+                        Instruction::LoadLocal(0),
+                        Instruction::CallMethod { name: 0, argc: 0 },
+                        Instruction::Return,
+                    ],
+                    1,
+                    0,
+                ),
+            ],
+            &["trim", "map"],
+        );
+        let shape = tier_4(&program, &[]).expect("a closure only called qualifies");
+        assert_eq!(shape.callees, vec![(1, 0)]);
+        assert!(
+            shape.bodies.is_empty(),
+            "no closure is made, so none is checked"
+        );
+        // Returned rather than called, it is an allocation the pool does not make.
+        let program = unit(
+            vec![
+                function(
+                    vec![Instruction::MakeFunction(1), Instruction::Return],
+                    1,
+                    0,
+                ),
+                function(vec![Instruction::LoadLocal(0), Instruction::Return], 1, 0),
+            ],
+            &[],
+        );
+        assert_eq!(tier_4(&program, &[]).unwrap_err().reason, Reason::Allocates);
+    }
+
+    #[test]
+    fn every_pure_member_has_a_worker_path_and_every_path_is_marked() {
+        let runtime = include_str!("runtime/boxed.c");
+        for member in kiln_builtin_surface::PURE_MEMBERS {
+            let path =
+                crate::parallel_heap::pure_path(member.owner, member.key).unwrap_or_else(|| {
+                    panic!(
+                        "{}.{} is marked pure with no worker path",
+                        member.owner, member.key
+                    )
+                });
+            let defined = match path {
+                crate::parallel_heap::PurePath::Function(name) => {
+                    format!("static int kiln_c99_par_f_{name}(")
+                }
+                crate::parallel_heap::PurePath::Method(name) => {
+                    format!("static int kiln_c99_par_m_{name}(")
+                }
+                _ => continue,
+            };
+            assert!(runtime.contains(&defined), "{defined} is not in boxed.c");
+        }
+        for key in crate::parallel_heap::PURE_METHODS {
+            assert!(
+                kiln_builtin_surface::pure_methods(key).next().is_some(),
+                "kiln_c99_par_m_{key} serves no member marked pure"
+            );
+        }
+        for (name, _) in PARALLEL_MATH {
+            assert!(
+                kiln_builtin_surface::pure_member("Math", name).is_some(),
+                "Math.{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn tier_4_sites_say_so() {
+        let record = SiteRecord {
+            method: ParallelMethod::Map,
+            line: 3,
+            column: 7,
+            refusal: None,
+            captures: 0,
+            at: None,
+            default_order: false,
+            heap: true,
+            alloc: true,
+            calls: true,
+        };
+        let parsed = SiteRecord::parse_all(&record.marker());
+        assert_eq!(parsed, vec![record.clone()]);
+        assert_eq!(
+            record.render("a.js"),
+            "a.js:3:7  parallelMap  parallel (tier 4: pure calls)\n"
+        );
+        let refused = SiteRecord {
+            refusal: Some(Refusal::with(Reason::CallsImpure, "Math.random")),
+            calls: false,
+            heap: false,
+            alloc: false,
+            ..record
+        };
+        assert_eq!(
+            refused.render("a.js"),
+            "a.js:3:7  parallelMap  sequential\n  calls-impure: calls Math.random, which is not marked pure\n"
+        );
+    }
+
+    #[test]
+    fn tier_4_a_key_comparator_may_call_a_pure_global() {
+        // `(a, b) => parseInt(a) - parseInt(b)`: a key, read from each side the same way.
+        let code = vec![
+            Instruction::LoadBuiltin(Builtin::ParseInt),
+            Instruction::LoadLocal(0),
+            Instruction::Call { argc: 1 },
+            Instruction::LoadBuiltin(Builtin::ParseInt),
+            Instruction::LoadLocal(1),
+            Instruction::Call { argc: 1 },
+            Instruction::Binary(BinaryOp::Subtract),
+            Instruction::Return,
+        ];
+        let comparator = proto(code, 2);
+        let program = program(&comparator);
+        let graph = build_function_graph(&comparator, &program).unwrap();
+        assert!(matches!(
+            key_comparator(&graph, &comparator),
+            Some((SortOrder::Ascending, _))
+        ));
+        // A call to anything else is not a key.
+        let other = proto(
+            vec![
+                Instruction::LoadBuiltin(Builtin::Date),
+                Instruction::LoadLocal(0),
+                Instruction::Call { argc: 1 },
+                Instruction::LoadBuiltin(Builtin::Date),
+                Instruction::LoadLocal(1),
+                Instruction::Call { argc: 1 },
+                Instruction::Binary(BinaryOp::Subtract),
+                Instruction::Return,
+            ],
+            2,
+        );
+        let graph = build_function_graph(&other, &program).unwrap();
+        assert_eq!(key_comparator(&graph, &other), None);
     }
 }
