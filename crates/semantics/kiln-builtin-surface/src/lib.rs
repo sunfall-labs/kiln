@@ -2114,6 +2114,200 @@ pub const KILN_EXTENSIONS: &[KilnExtension] = &[
 /// here, and a test holds the TypeScript constant to it. Changing it changes the method's answer.
 pub const PARALLEL_REDUCE_LEAF: usize = 256;
 
+/// What a [`PureMember`] answers, which is what a parallel callback that calls it may need a
+/// worker arena for: a string or an array is built, a number or a boolean is not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PureAnswer {
+    Number,
+    Boolean,
+    String,
+    Array,
+    /// Any value (`Array.prototype.at`'s element, `toString` of a string): built only by what
+    /// the argument itself was.
+    Value,
+}
+
+/// A built-in member marked **pure** (ADR 0069 tier 4, parallel-builtins issue 09): given plain
+/// data -- primitives, and arrays and ordinary objects made of them -- it has no side effect, reads
+/// no clock, entropy or host state, and runs no user code, so a parallel callback may call it and
+/// still run on the pool. `callback` names the one argument that *is* user code (`map`'s): the
+/// proof covers that function as it covers the callback itself.
+///
+/// The mark is a claim about the language, not about either engine: both engines' sequential
+/// definitions are the answer. The native backend holds every row to a worker-safe
+/// implementation that reads through the no-write readers and allocates only into worker arenas
+/// (`kiln-backend-c`'s `parallel_heap::pure_path`, both directions checked by a test there), and
+/// declines -- the call then runs sequentially -- for anything outside "plain data": an object
+/// receiver where the name could be its own method, a `RegExp` separator, a replaced built-in
+/// (the per-realm modified-built-ins record stands every parallel site down), a value whose
+/// conversion would call `valueOf` or `toString`.
+///
+/// `owner` is spelled as the surface inventory spells it; a callable global is owned by
+/// `"globalThis"` (`parseInt(s)`, `Number(x)`). `Math.random` is not here and never will be: it
+/// reads entropy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PureMember {
+    pub owner: &'static str,
+    pub key: &'static str,
+    pub answers: PureAnswer,
+    /// The argument that is a function the parallel proof must also cover.
+    pub callback: Option<usize>,
+}
+
+const fn pure(owner: &'static str, key: &'static str, answers: PureAnswer) -> PureMember {
+    PureMember {
+        owner,
+        key,
+        answers,
+        callback: None,
+    }
+}
+
+const fn pure_with_callback(
+    owner: &'static str,
+    key: &'static str,
+    answers: PureAnswer,
+) -> PureMember {
+    PureMember {
+        owner,
+        key,
+        answers,
+        callback: Some(0),
+    }
+}
+
+/// Every built-in member marked pure. See [`PureMember`].
+pub const PURE_MEMBERS: &[PureMember] = &[
+    // Math: the functions a pool thread computes as one libm call (the native `PARALLEL_MATH`).
+    pure("Math", "abs", PureAnswer::Number),
+    pure("Math", "floor", PureAnswer::Number),
+    pure("Math", "ceil", PureAnswer::Number),
+    pure("Math", "round", PureAnswer::Number),
+    pure("Math", "trunc", PureAnswer::Number),
+    pure("Math", "sign", PureAnswer::Number),
+    pure("Math", "sqrt", PureAnswer::Number),
+    pure("Math", "cbrt", PureAnswer::Number),
+    pure("Math", "sinh", PureAnswer::Number),
+    pure("Math", "cosh", PureAnswer::Number),
+    pure("Math", "tanh", PureAnswer::Number),
+    pure("Math", "asinh", PureAnswer::Number),
+    pure("Math", "acosh", PureAnswer::Number),
+    pure("Math", "atanh", PureAnswer::Number),
+    pure("Math", "log1p", PureAnswer::Number),
+    pure("Math", "expm1", PureAnswer::Number),
+    pure("Math", "hypot", PureAnswer::Number),
+    pure("Math", "atan2", PureAnswer::Number),
+    pure("Math", "sin", PureAnswer::Number),
+    pure("Math", "cos", PureAnswer::Number),
+    pure("Math", "tan", PureAnswer::Number),
+    pure("Math", "asin", PureAnswer::Number),
+    pure("Math", "acos", PureAnswer::Number),
+    pure("Math", "atan", PureAnswer::Number),
+    pure("Math", "pow", PureAnswer::Number),
+    pure("Math", "min", PureAnswer::Number),
+    pure("Math", "max", PureAnswer::Number),
+    pure("Math", "log", PureAnswer::Number),
+    pure("Math", "log2", PureAnswer::Number),
+    pure("Math", "log10", PureAnswer::Number),
+    pure("Math", "exp", PureAnswer::Number),
+    // Callable globals, called as functions.
+    pure("globalThis", "Number", PureAnswer::Number),
+    pure("globalThis", "String", PureAnswer::String),
+    pure("globalThis", "Boolean", PureAnswer::Boolean),
+    pure("globalThis", "parseInt", PureAnswer::Number),
+    pure("globalThis", "parseFloat", PureAnswer::Number),
+    // Number's statics: none of them converts its argument.
+    pure("Number", "isInteger", PureAnswer::Boolean),
+    pure("Number", "isSafeInteger", PureAnswer::Boolean),
+    pure("Number", "isNaN", PureAnswer::Boolean),
+    pure("Number", "isFinite", PureAnswer::Boolean),
+    pure("Number", "parseInt", PureAnswer::Number),
+    pure("Number", "parseFloat", PureAnswer::Number),
+    // JSON: of plain data only (no `toJSON` anywhere on the path, no replacer, no indent).
+    pure("JSON", "stringify", PureAnswer::String),
+    // String.prototype, on a string receiver.
+    pure("String.prototype", "at", PureAnswer::Value),
+    pure("String.prototype", "charAt", PureAnswer::String),
+    pure("String.prototype", "charCodeAt", PureAnswer::Number),
+    pure("String.prototype", "codePointAt", PureAnswer::Value),
+    pure("String.prototype", "endsWith", PureAnswer::Boolean),
+    pure("String.prototype", "includes", PureAnswer::Boolean),
+    pure("String.prototype", "indexOf", PureAnswer::Number),
+    pure("String.prototype", "lastIndexOf", PureAnswer::Number),
+    pure("String.prototype", "padEnd", PureAnswer::String),
+    pure("String.prototype", "padStart", PureAnswer::String),
+    pure("String.prototype", "repeat", PureAnswer::String),
+    pure("String.prototype", "slice", PureAnswer::String),
+    pure("String.prototype", "split", PureAnswer::Array),
+    pure("String.prototype", "startsWith", PureAnswer::Boolean),
+    pure("String.prototype", "substring", PureAnswer::String),
+    pure("String.prototype", "toLowerCase", PureAnswer::String),
+    pure("String.prototype", "toString", PureAnswer::String),
+    pure("String.prototype", "toUpperCase", PureAnswer::String),
+    pure("String.prototype", "trim", PureAnswer::String),
+    pure("String.prototype", "trimEnd", PureAnswer::String),
+    pure("String.prototype", "trimStart", PureAnswer::String),
+    // Number.prototype, on a number receiver: formatting.
+    pure("Number.prototype", "toFixed", PureAnswer::String),
+    pure("Number.prototype", "toString", PureAnswer::String),
+    // Array.prototype, on an ordinary array with no named properties.
+    pure_with_callback("Array.prototype", "every", PureAnswer::Boolean),
+    pure_with_callback("Array.prototype", "filter", PureAnswer::Array),
+    pure("Array.prototype", "includes", PureAnswer::Boolean),
+    pure("Array.prototype", "indexOf", PureAnswer::Number),
+    pure("Array.prototype", "join", PureAnswer::String),
+    pure_with_callback("Array.prototype", "map", PureAnswer::Array),
+    pure("Array.prototype", "slice", PureAnswer::Array),
+    pure_with_callback("Array.prototype", "some", PureAnswer::Boolean),
+];
+
+/// The prototypes whose pure members a program calls as methods of a value (`s.trim()`): which
+/// one answers is the receiver's kind, known only at run time.
+pub const PURE_METHOD_OWNERS: [&str; 3] =
+    ["String.prototype", "Number.prototype", "Array.prototype"];
+
+/// The row marking `owner.key` pure, if one does.
+pub const fn pure_member(owner: &str, key: &str) -> Option<&'static PureMember> {
+    let mut index = 0;
+    while index < PURE_MEMBERS.len() {
+        if same(PURE_MEMBERS[index].owner, owner) && same(PURE_MEMBERS[index].key, key) {
+            return Some(&PURE_MEMBERS[index]);
+        }
+        index += 1;
+    }
+    None
+}
+
+/// The rows marking `key` pure on any of [`PURE_METHOD_OWNERS`]: what `value.key(...)` may be
+/// when `value` is a primitive or an array.
+pub fn pure_methods(key: &str) -> impl Iterator<Item = &'static PureMember> + '_ {
+    PURE_MEMBERS
+        .iter()
+        .filter(move |m| m.key == key && PURE_METHOD_OWNERS.contains(&m.owner))
+}
+
+const fn validate_pure_members(members: &[PureMember]) {
+    let mut index = 0;
+    while index < members.len() {
+        let member = &members[index];
+        assert!(
+            !(same(member.owner, "Math") && same(member.key, "random")),
+            "Math.random reads entropy and is never pure"
+        );
+        let mut other = index + 1;
+        while other < members.len() {
+            assert!(
+                !(same(member.owner, members[other].owner) && same(member.key, members[other].key)),
+                "a pure member is declared twice"
+            );
+            other += 1;
+        }
+        index += 1;
+    }
+}
+
+const _: () = validate_pure_members(PURE_MEMBERS);
+
 /// The environment variable that removes every kiln extension at run time when it is `0`, in
 /// either engine (ADR 0068 rule 4). Any other value, or none, leaves them installed.
 pub const KILN_EXTENSIONS_ENV: &str = "KILN_EXTENSIONS";
@@ -2249,6 +2443,29 @@ pub const fn prototype_has(prototype: PrototypeId, key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pure mark on a static names a member the surface declares: a mark cannot invent one.
+    #[test]
+    fn every_pure_static_is_a_surface_member() {
+        for member in PURE_MEMBERS {
+            if member.owner == "globalThis" || PURE_METHOD_OWNERS.contains(&member.owner) {
+                continue;
+            }
+            assert!(
+                find(member.owner).is_some_and(|members| members.contains(&member.key)),
+                "{}.{} is marked pure but not declared in SURFACE",
+                member.owner,
+                member.key
+            );
+        }
+        assert!(pure_member("Math", "random").is_none());
+        assert!(pure_member("String.prototype", "trim").is_some());
+        assert_eq!(pure_methods("slice").count(), 2);
+        assert_eq!(
+            pure_member("Array.prototype", "map").and_then(|m| m.callback),
+            Some(0)
+        );
+    }
 
     /// A bootstrap-owned static is still a declared member: it has to be in [`SURFACE`] for its
     /// slot, and for the name and order reflection reports.
