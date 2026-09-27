@@ -2167,6 +2167,50 @@ fn to_property_key_coerces_regexp_and_other_objects_without_recursion() {
 }
 
 #[test]
+fn regexp_constructions_share_compiled_code_but_keep_fresh_objects_and_cursors() {
+    let pattern = StringUnits::from(r"\S+");
+    let Value::RegExp(first) = build_regexp(&pattern, "g").expect("valid pattern") else {
+        panic!("regexp constructor returned a non-regexp");
+    };
+    let Value::RegExp(second) = build_regexp(&pattern, "g").expect("valid pattern") else {
+        panic!("regexp constructor returned a non-regexp");
+    };
+    assert!(
+        !Rc::ptr_eq(&first, &second),
+        "each construction has its own identity"
+    );
+    assert!(
+        Arc::ptr_eq(&first.compiled, &second.compiled),
+        "immutable compiled code is reused"
+    );
+    assert!(!std::ptr::eq(&first.properties, &second.properties));
+
+    first
+        .properties
+        .borrow_mut()
+        .set("lastIndex", Value::Number(9.0));
+    assert_eq!(
+        first.properties.borrow().get_own("lastIndex"),
+        Some(&Value::Number(9.0))
+    );
+    assert_eq!(
+        second.properties.borrow().get_own("lastIndex"),
+        Some(&Value::Number(0.0)),
+        "the cached code carries no regexp cursor"
+    );
+
+    let Value::RegExp(different_flags) =
+        build_regexp(&pattern, "gi").expect("valid flags and pattern")
+    else {
+        panic!("regexp constructor returned a non-regexp");
+    };
+    assert!(
+        !Arc::ptr_eq(&first.compiled, &different_flags.compiled),
+        "flags participate in the compiled-code cache key"
+    );
+}
+
+#[test]
 fn numeric_array_write_guard_is_shared_and_monotonic() {
     let intrinsics = Rc::new(Intrinsics::default());
     let child = Rc::clone(&intrinsics);

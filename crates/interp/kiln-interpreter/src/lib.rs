@@ -1360,7 +1360,9 @@ pub struct RegExpData {
     /// The pattern as written, which `source` hands back to the program.
     source: StringUnits,
     flags: String,
-    compiled: regress::Regex,
+    /// Immutable compiled code can be shared across realms. The regexp object,
+    /// its properties and its cursor remain fresh for every construction.
+    compiled: Arc<regress::Regex>,
     global: bool,
     sticky: bool,
     /// The `d` flag. Read once here rather than off `flags` at every match, and kept beside the

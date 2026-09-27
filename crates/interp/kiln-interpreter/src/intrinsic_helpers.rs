@@ -1,4 +1,159 @@
 use super::*;
+use std::collections::VecDeque;
+use std::sync::{Mutex, OnceLock};
+
+// A short, fixed admission limit keeps the process-wide cache small even when
+// an application constructs a million unique patterns. Unicode property sets
+// and Unicode-set expressions can expand well beyond their source spelling,
+// and counted repetitions can compile a short pattern into disproportionately
+// large code, so neither is admitted. This bounds retained source/key volume;
+// regress does not expose compiled allocation size. `RegExpData` still owns
+// all observable state; this stores compiled code only.
+const REGEXP_CACHE_MAX_ENTRIES: usize = 64;
+const REGEXP_CACHE_MAX_KEY_BYTES: usize = 8 * 1024;
+const REGEXP_CACHE_MAX_PATTERN_UNITS: usize = 128;
+
+#[derive(Debug, PartialEq, Eq)]
+struct RegExpCacheKey {
+    pattern: Box<[u16]>,
+    flags: Box<str>,
+}
+
+impl RegExpCacheKey {
+    fn retained_bytes(&self) -> usize {
+        self.pattern.len() * std::mem::size_of::<u16>() + self.flags.len()
+    }
+}
+
+struct CompiledRegExpEntry {
+    key: RegExpCacheKey,
+    compiled: Arc<regress::Regex>,
+}
+
+#[derive(Default)]
+struct CompiledRegExpCache {
+    entries: VecDeque<CompiledRegExpEntry>,
+    retained_key_bytes: usize,
+}
+
+impl CompiledRegExpCache {
+    fn get(&mut self, pattern: &[u16], flags: &str) -> Option<Arc<regress::Regex>> {
+        let index = self.entries.iter().position(|entry| {
+            entry.key.pattern.as_ref() == pattern && entry.key.flags.as_ref() == flags
+        })?;
+        let entry = self.entries.remove(index)?;
+        let compiled = Arc::clone(&entry.compiled);
+        self.entries.push_back(entry);
+        Some(compiled)
+    }
+
+    fn insert(
+        &mut self,
+        pattern: &[u16],
+        flags: &str,
+        compiled: Arc<regress::Regex>,
+    ) -> Arc<regress::Regex> {
+        if let Some(existing) = self.get(pattern, flags) {
+            return existing;
+        }
+        let key = RegExpCacheKey {
+            pattern: pattern.into(),
+            flags: flags.into(),
+        };
+        let key_bytes = key.retained_bytes();
+        if key_bytes > REGEXP_CACHE_MAX_KEY_BYTES {
+            return compiled;
+        }
+        while self.entries.len() >= REGEXP_CACHE_MAX_ENTRIES
+            || self.retained_key_bytes + key_bytes > REGEXP_CACHE_MAX_KEY_BYTES
+        {
+            let Some(oldest) = self.entries.pop_front() else {
+                break;
+            };
+            self.retained_key_bytes -= oldest.key.retained_bytes();
+            drop(oldest);
+        }
+        self.retained_key_bytes += key_bytes;
+        self.entries.push_back(CompiledRegExpEntry {
+            key,
+            compiled: Arc::clone(&compiled),
+        });
+        compiled
+    }
+}
+
+fn compiled_regexp_cache() -> &'static Mutex<CompiledRegExpCache> {
+    static CACHE: OnceLock<Mutex<CompiledRegExpCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(CompiledRegExpCache::default()))
+}
+
+fn regexp_cache_admits(units: &[u16], flags: &str) -> bool {
+    units.len() <= REGEXP_CACHE_MAX_PATTERN_UNITS
+        && flags.len() <= 7
+        && !flags.contains('u')
+        && !flags.contains('v')
+        // Conservatively exclude braces even when escaped or literal. This
+        // avoids retaining code expanded from counted repetition syntax.
+        && !units.contains(&(b'{' as u16))
+}
+
+#[cfg(test)]
+mod regexp_cache_tests {
+    use super::*;
+
+    #[test]
+    fn admission_is_limited_to_short_non_unicode_patterns() {
+        assert!(regexp_cache_admits(
+            &[b'\\' as u16, b'S' as u16, b'+' as u16],
+            "g"
+        ));
+        assert!(!regexp_cache_admits(
+            &[b'x' as u16; REGEXP_CACHE_MAX_PATTERN_UNITS + 1],
+            ""
+        ));
+        assert!(!regexp_cache_admits(&[b'x' as u16], "u"));
+        assert!(!regexp_cache_admits(&[b'x' as u16], "v"));
+        assert!(!regexp_cache_admits(
+            &[
+                b'x' as u16,
+                b'{' as u16,
+                b'1' as u16,
+                b'0' as u16,
+                b'0' as u16,
+                b'}' as u16
+            ],
+            ""
+        ));
+    }
+
+    #[test]
+    fn cache_bounds_entry_count_and_retained_key_bytes() {
+        let compiled = Arc::new(regress::Regex::new("x").expect("valid pattern"));
+        let mut count_bounded = CompiledRegExpCache::default();
+        for index in 0..REGEXP_CACHE_MAX_ENTRIES + 1 {
+            count_bounded.insert(&[index as u16], "", Arc::clone(&compiled));
+        }
+        assert_eq!(count_bounded.entries.len(), REGEXP_CACHE_MAX_ENTRIES);
+        assert!(count_bounded.retained_key_bytes <= REGEXP_CACHE_MAX_KEY_BYTES);
+        assert!(count_bounded.get(&[0], "").is_none());
+        assert!(
+            count_bounded
+                .get(&[REGEXP_CACHE_MAX_ENTRIES as u16], "")
+                .is_some()
+        );
+
+        let pattern = vec![b'x' as u16; REGEXP_CACHE_MAX_PATTERN_UNITS];
+        let mut byte_bounded = CompiledRegExpCache::default();
+        let max_keys = REGEXP_CACHE_MAX_KEY_BYTES / (pattern.len() * 2);
+        for index in 0..=max_keys {
+            let mut unique = pattern.clone();
+            unique[0] = index as u16;
+            byte_bounded.insert(&unique, "", Arc::clone(&compiled));
+        }
+        assert!(byte_bounded.retained_key_bytes <= REGEXP_CACHE_MAX_KEY_BYTES);
+        assert!(byte_bounded.entries.len() <= REGEXP_CACHE_MAX_ENTRIES);
+    }
+}
 
 /// The methods a string exposes.
 ///
@@ -2218,30 +2373,52 @@ pub(super) fn constructor_label(object: &ObjectData) -> Option<String> {
 /// Compile a regular expression, or `None` when the engine rejects the pattern.
 pub(super) fn build_regexp(pattern: &StringUnits, flags: &str) -> Option<Value> {
     let units = pattern.to_units();
-    let mut codepoints = Vec::with_capacity(units.len());
-    let mut index = 0;
-    // Without `u` the pattern is code units like the subject: an astral literal is a pair of
-    // surrogates that match a pair in the input one unit at a time. Only under `u` does a
-    // surrogate pair in the pattern mean the one code point.
-    let unicode = flags.contains('u') || flags.contains('v');
-    while index < units.len() {
-        let unit = units[index];
-        if unicode
-            && (0xd800..=0xdbff).contains(&unit)
-            && units
-                .get(index + 1)
-                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
-        {
-            let low = units[index + 1];
-            codepoints
-                .push(0x1_0000 + ((u32::from(unit) - 0xd800) << 10) + u32::from(low) - 0xdc00);
-            index += 2;
-        } else {
-            codepoints.push(u32::from(unit));
-            index += 1;
+    let cacheable = regexp_cache_admits(&units, flags);
+    let compiled = if cacheable {
+        compiled_regexp_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&units, flags)
+    } else {
+        None
+    };
+    let compiled = if let Some(compiled) = compiled {
+        compiled
+    } else {
+        let mut codepoints = Vec::with_capacity(units.len());
+        let mut index = 0;
+        // Without `u` the pattern is code units like the subject: an astral literal is a pair of
+        // surrogates that match a pair in the input one unit at a time. Only under `u` does a
+        // surrogate pair in the pattern mean the one code point.
+        let unicode = flags.contains('u') || flags.contains('v');
+        while index < units.len() {
+            let unit = units[index];
+            if unicode
+                && (0xd800..=0xdbff).contains(&unit)
+                && units
+                    .get(index + 1)
+                    .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+            {
+                let low = units[index + 1];
+                codepoints
+                    .push(0x1_0000 + ((u32::from(unit) - 0xd800) << 10) + u32::from(low) - 0xdc00);
+                index += 2;
+            } else {
+                codepoints.push(u32::from(unit));
+                index += 1;
+            }
         }
-    }
-    let compiled = regress::Regex::from_unicode(codepoints.iter().copied(), flags).ok()?;
+        let compiled =
+            Arc::new(regress::Regex::from_unicode(codepoints.iter().copied(), flags).ok()?);
+        if cacheable {
+            compiled_regexp_cache()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(&units, flags, compiled)
+        } else {
+            compiled
+        }
+    };
     Some(Value::RegExp(Rc::new(RegExpData {
         source: pattern.clone(),
         flags: flags.to_owned(),
