@@ -59,9 +59,7 @@ export function smallMessage(i) {
 /// 1 MB once structured-cloned.
 export function buildGraph() {
   const cats = [];
-  // `(i * 3) | 0` rather than `i * 3`: at 1e46b859 the native emitter writes an undeclared
-  // double temporary for `{ code: i * 3 }` in a loop and the C does not compile (README, caveats).
-  for (let i = 0; i < 13; i += 1) cats.push({ code: (i * 3) | 0, label: "category-" + i });
+  for (let i = 0; i < 13; i += 1) cats.push({ code: i * 3, label: "category-" + i });
   const items = [];
   for (let i = 0; i < 6000; i += 1) {
     items.push({ id: i, name: "item-" + i, tags: ["t" + (i % 13), "group-" + (i % 97)], price: (i % 1000) / 4, cat: cats[i % 13] });

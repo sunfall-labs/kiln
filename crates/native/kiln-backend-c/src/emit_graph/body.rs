@@ -306,7 +306,11 @@ pub fn emit_function_from_graph_with_profile(
                     )
                     .unwrap();
                 }
-                writeln!(output, "static kiln_c99_method_path {pfx}_path = KILN_C99_UNLEARNED_METHOD_PATH;").unwrap();
+                writeln!(
+                    output,
+                    "static kiln_c99_method_path {pfx}_path = KILN_C99_UNLEARNED_METHOD_PATH;"
+                )
+                .unwrap();
             }
         }
     }
@@ -703,7 +707,11 @@ pub fn emit_entry_from_graph_with_profile(
                 )
                 .unwrap();
             }
-            writeln!(output, "    static kiln_c99_method_path {pfx}_path = KILN_C99_UNLEARNED_METHOD_PATH;").unwrap();
+            writeln!(
+                output,
+                "    static kiln_c99_method_path {pfx}_path = KILN_C99_UNLEARNED_METHOD_PATH;"
+            )
+            .unwrap();
         }
     }
     let entry_start = output.len();
@@ -778,7 +786,11 @@ pub fn emit_async_entry_body(
                 )
                 .unwrap();
             }
-            writeln!(output, "    static kiln_c99_method_path {pfx}_path = KILN_C99_UNLEARNED_METHOD_PATH;").unwrap();
+            writeln!(
+                output,
+                "    static kiln_c99_method_path {pfx}_path = KILN_C99_UNLEARNED_METHOD_PATH;"
+            )
+            .unwrap();
         }
     }
     writeln!(output, "    kiln_val *locals = {symbol}_globals;").unwrap();
@@ -1725,7 +1737,17 @@ fn compute_live_twins(
                         && ints.contains(right)
                         && !matches!(op, BinaryOp::In | BinaryOp::InstanceOf)
                     {
-                        if matches!(op, BinaryOp::Divide | BinaryOp::Exponentiate) {
+                        // `emit_binary_ints` writes a quotient, a power, and a sum, difference
+                        // or product not proven to stay an integer into the double twin; only
+                        // the rest have an integer result. `{ code: i * 3 }` in a loop was the
+                        // product without a declared twin (issue 16).
+                        let double_result = matches!(op, BinaryOp::Divide | BinaryOp::Exponentiate)
+                            || (!ints.contains(vid)
+                                && matches!(
+                                    op,
+                                    BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply
+                                ));
+                        if double_result {
                             live_numbers.insert(*vid);
                             if ints.contains(vid) {
                                 live_ints.insert(*vid);
