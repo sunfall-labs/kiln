@@ -804,6 +804,39 @@ static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype) {
     KILN_C99_REFUSE("setting the prototype of a value with no prototype slot");
 }
 
+/* IsConstructor, as far as `class ... extends` needs it. A generated function knows what it was
+ * written as; a bound function and a proxy are constructors exactly when their targets are. Every
+ * other callable here is a built-in, and the built-ins that are not constructors have no
+ * `prototype` either, which the class's own check on `prototype` refuses. */
+static int kiln_c99_heritage_constructs(kiln_value value) {
+    if (value.tag == KILN_VALUE_PROXY) {
+        return kiln_c99_heritage_constructs(kiln_c99_proxy_of(value)->target);
+    }
+    if (value.tag == KILN_VALUE_BOUND) {
+        return kiln_c99_heritage_constructs(((kiln_bound *)(uintptr_t)value.bits)->target);
+    }
+    if (value.tag == KILN_VALUE_FUNCTION) {
+        kiln_closure *closure = kiln_c99_closure_of(value);
+        return !(closure->arrow || closure->generator || closure->asynchronous ||
+                 closure->is_method);
+    }
+    return kiln_c99_is_callable(value);
+}
+
+/* `SetPrototype` as emitted: a function target is `class D extends X` linking the two
+ * constructors, and ClassDefinitionEvaluation refuses a heritage that is neither `null` nor a
+ * constructor before anything is linked. Without the check `class U extends 1 {}` built a class
+ * natively, where the interpreter and node throw (issue 25). */
+static int kiln_c99_set_prototype_checked(kiln_value target, kiln_value prototype,
+                                          kiln_value *thrown) {
+    if (target.tag == KILN_VALUE_FUNCTION && prototype.tag != KILN_VALUE_NULL &&
+        !kiln_c99_heritage_constructs(prototype)) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "class heritage is not a constructor or null");
+    }
+    return kiln_c99_set_prototype(target, prototype);
+}
+
 /* `x instanceof C` walks the same chain a property read walks, looking for `C.prototype` rather
  * than for a name -- which is why the two must agree about the shape of the chain. */
 static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *answer) {

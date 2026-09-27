@@ -536,9 +536,11 @@ pub(crate) fn emit_tail_instruction(
         // `class D extends C` links the two prototype objects, which is what makes an instance
         // of `D` find a method of `C`.
         Instruction::SetPrototype => {
-            output.push_str(
-                "    { kiln_value prototype = kiln_val_to_boundary(stack[--sp]); int status = kiln_c99_set_prototype(kiln_val_to_boundary(stack[sp - 1]), prototype); if (status != KILN_C99_OK) return status; }\n",
-            );
+            writeln!(
+                output,
+                "    {{ kiln_value prototype = kiln_val_to_boundary(stack[--sp]); int status = kiln_c99_set_prototype_checked(kiln_val_to_boundary(stack[sp - 1]), prototype, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+            )
+            .unwrap();
         }
         // `super.x` reads the link the method's home object carries *now*, which is the same
         // question `Object.getPrototypeOf` answers -- so it is asked through the same

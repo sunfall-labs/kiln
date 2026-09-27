@@ -3224,6 +3224,8 @@ static int kiln_c99_super_call_val(kiln_host *host, kiln_val *produced, kiln_val
 static int kiln_c99_adopt_super_val(kiln_val *receiver, kiln_val produced) {
 static int kiln_c99_can_be_prototype(kiln_value value) {
 static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype) {
+static int kiln_c99_heritage_constructs(kiln_value value) {
+static int kiln_c99_set_prototype_checked(kiln_value target, kiln_value prototype,
 static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *answer) {
 static kiln_value kiln_c99_typeof(kiln_value value) {
 static int kiln_c99_string_compare(kiln_value left, kiln_value right) {

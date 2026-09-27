@@ -278,17 +278,7 @@ impl super::Compiler {
         // Link the two prototypes so instances inherit the parent's methods, and the two
         // constructors so static methods are inherited too.
         if class.superclass.is_some() {
-            self.load_local_or_cell(local);
-            self.code.push(Instruction::GetProperty(prototype));
-            self.load_super();
-            self.code.push(Instruction::GetProperty(prototype));
-            self.code.push(Instruction::SetPrototype);
-            self.code.push(Instruction::Pop);
-
-            self.load_local_or_cell(local);
-            self.load_super();
-            self.code.push(Instruction::SetPrototype);
-            self.code.push(Instruction::Pop);
+            self.link_heritage(local, prototype);
         }
 
         // Filled after the prototype link, so that reading `C.prototype`'s own prototype from
@@ -434,6 +424,62 @@ impl super::Compiler {
         self.private_declarations
             .pop()
             .expect("this class pushed its own private names");
+    }
+
+    /// ClassDefinitionEvaluation's heritage steps, in their order, for the class in `local`.
+    ///
+    /// `null` links the prototype object to `null` and leaves the constructor's own link at
+    /// `Function.prototype`. Anything else must be a constructor -- `SetPrototype` with a
+    /// function target is where both engines check that, first, before `prototype` is read --
+    /// and its `prototype` must be an object or `null`. Reading `prototype` first and linking
+    /// whatever came back let `class U extends 1 {}` define a class natively, and made
+    /// `extends null` a `TypeError` in both engines (issue 25).
+    fn link_heritage(&mut self, local: Local, prototype: u32) {
+        self.load_super();
+        self.push_constant(Constant::Null);
+        self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
+        let not_null = self.emit_jump(Instruction::JumpIfFalse(0));
+        self.load_local_or_cell(local);
+        self.code.push(Instruction::GetProperty(prototype));
+        self.push_constant(Constant::Null);
+        self.code.push(Instruction::SetPrototype);
+        self.code.push(Instruction::Pop);
+        let done = self.emit_jump(Instruction::Jump(0));
+
+        self.patch_jump(not_null);
+        self.load_local_or_cell(local);
+        self.load_super();
+        self.code.push(Instruction::SetPrototype);
+        self.code.push(Instruction::Pop);
+
+        self.load_local_or_cell(local);
+        self.code.push(Instruction::GetProperty(prototype));
+        self.load_super();
+        self.code.push(Instruction::GetProperty(prototype));
+        // `typeof` is "object" for an object and for `null`, and "function" for a callable
+        // object; every other answer is a primitive, which cannot be a prototype.
+        let mut valid = Vec::new();
+        for kind in ["object", "function"] {
+            self.code.push(Instruction::Dup);
+            self.code.push(Instruction::Unary(UnaryOp::TypeOf));
+            self.push_constant(Constant::String(kind.to_owned().into()));
+            self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
+            valid.push(self.emit_jump(Instruction::JumpIfTruthy(0)));
+        }
+        self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+        self.push_constant(Constant::String(
+            "class heritage does not have a valid prototype property"
+                .to_owned()
+                .into(),
+        ));
+        self.code.push(Instruction::New { argc: 1 });
+        self.code.push(Instruction::Throw);
+        for jump in valid {
+            self.patch_jump(jump);
+        }
+        self.code.push(Instruction::SetPrototype);
+        self.code.push(Instruction::Pop);
+        self.patch_jump(done);
     }
 
     /// Push the `[[Prototype]]` of the home object of the method currently being compiled.

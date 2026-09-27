@@ -2101,3 +2101,37 @@ key m,key s,key g
 9 1
 kk [sym]
 """
+
+[[test]]
+id = "regress/r41-class-heritage-checks"
+group = "regress"
+source = "regress/r41-class-heritage-checks.js"
+status = "runnable"
+features = ["classes", "class-heritage", "type-errors"]
+catches = """
+ClassDefinitionEvaluation's heritage checks (parallel-builtins issue 25), recorded from node 26.8.1: a heritage that is neither `null` nor a constructor, and a constructor whose `prototype` is neither an object nor `null`, are a `TypeError` before the class exists. The native backend defined every one of them; the interpreter accepted a primitive `prototype` and made `extends null` a `TypeError` by reading `null.prototype`, where the class exists with a prototype object inheriting from nothing.\
+"""
+expected_stdout = """
+number TypeError
+string TypeError
+undefined TypeError
+symbol TypeError
+plain object TypeError
+arrow TypeError
+arrow with a prototype TypeError
+async TypeError
+generator TypeError
+async generator TypeError
+method TypeError
+prototype 3 TypeError
+prototype string TypeError
+class expression TypeError
+function no throw
+class no throw
+builtin no throw
+prototype null no throw
+prototype function no throw
+true null
+true null
+2 true true
+"""
