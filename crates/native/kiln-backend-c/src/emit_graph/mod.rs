@@ -192,6 +192,180 @@ thread_local! {
     static PARALLEL_CLONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+thread_local! {
+    /// The closure-making operations of the entry body being emitted that make their closure in
+    /// the shared immutable region (ADR 0070 primitive B; realms issue 08), each with its site's
+    /// index in `{symbol}_region_sites`. Set only while a unit emitted with
+    /// `EmissionPolicy::shared_region` emits its entry, by [`with_region_sites`]; a thread-local
+    /// for the same reason `PARALLEL_CLONE` is.
+    #[allow(clippy::type_complexity)]
+    static REGION_SITES: std::cell::RefCell<Option<(usize, std::collections::HashMap<ValueId, usize>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The region site `vid` of `graph` makes its closure at, while an entry with region sites is
+/// emitted. The graph is part of the question: a value id means something only in its own graph,
+/// and another body's operations may be emitted while the entry's are.
+pub(crate) fn region_site(graph: &FunctionGraph, vid: ValueId) -> Option<usize> {
+    REGION_SITES.with(|sites| {
+        sites.borrow().as_ref().and_then(|(owner, map)| {
+            (*owner == graph as *const FunctionGraph as usize)
+                .then(|| map.get(&vid).copied())
+                .flatten()
+        })
+    })
+}
+
+/// Run `f` with `sites` as the region sites of `graph`, the entry it emits, restoring the
+/// previous set.
+pub(crate) fn with_region_sites<R>(
+    graph: &FunctionGraph,
+    sites: std::collections::HashMap<ValueId, usize>,
+    f: impl FnOnce() -> R,
+) -> R {
+    let owner = graph as *const FunctionGraph as usize;
+    let before = REGION_SITES.with(|cell| cell.replace(Some((owner, sites))));
+    let out = f();
+    REGION_SITES.with(|cell| *cell.borrow_mut() = before);
+    out
+}
+
+/// The closure-making operations of a module's top-level `graph` whose closure every realm can
+/// share (realms issue 08), in a stable order, numbered from zero.
+///
+/// A closure may live in the region only if one closure per realm is what the program makes
+/// there and nothing in it belongs to a realm:
+///
+/// - the operation runs at most once per realm: it is in the module's top-level body (the
+///   caller's to know) and on no cycle of that body's blocks -- a loop body, or a handler that
+///   can re-enter one, makes a fresh closure each time round, and `f !== g` for two of them;
+/// - the function captures nothing: an upvalue is a cell or a value of the realm that ran the
+///   body. What the module's top level binds is a module global, which the function reads through
+///   its realm's unit block (`kiln_mg`), not a capture, so a top-level helper referring to
+///   another top-level binding still qualifies;
+/// - it is not an arrow that reads the enclosing frame (`publishes_frame`): such an arrow copies
+///   the frame's `arguments` when it is made. A frame-free arrow's receiver is checked at run
+///   time: the region closure is taken only when it is the module's `undefined`.
+pub(crate) fn region_closure_sites(
+    graph: &FunctionGraph,
+    functions: &[FunctionProto],
+    publishes_frame: &[bool],
+) -> std::collections::HashMap<ValueId, usize> {
+    let on_cycle = blocks_on_a_cycle(graph);
+    let mut sites = std::collections::HashMap::new();
+    let mut blocks: Vec<&crate::graph::BasicBlock> = graph.blocks.iter().collect();
+    blocks.sort_by_key(|block| block.id.0);
+    for block in blocks {
+        if on_cycle.contains(&block.id.0) || !block.is_reachable_from_entry(graph.entry_block) {
+            continue;
+        }
+        for (vid, op) in &block.operations {
+            let GraphOp::MakeFunction { index, .. } = op else {
+                continue;
+            };
+            let Some(target) = functions.get(*index as usize) else {
+                continue;
+            };
+            if !target.upvalues.is_empty() {
+                continue;
+            }
+            if target.arrow
+                && publishes_frame
+                    .get(*index as usize)
+                    .copied()
+                    .unwrap_or(true)
+            {
+                continue;
+            }
+            let next = sites.len();
+            sites.entry(*vid).or_insert(next);
+        }
+    }
+    sites
+}
+
+/// The ids of the blocks of `graph` that lie on a cycle, following both control edges and the
+/// edge to a block's exception handler (Tarjan's strongly connected components).
+fn blocks_on_a_cycle(graph: &FunctionGraph) -> HashSet<u32> {
+    use std::collections::HashMap;
+    let index_of: HashMap<u32, usize> = graph
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(position, block)| (block.id.0, position))
+        .collect();
+    let edges: Vec<Vec<usize>> = graph
+        .blocks
+        .iter()
+        .map(|block| {
+            block
+                .successors
+                .iter()
+                .chain(block.exception_handler.iter())
+                .filter_map(|id| index_of.get(&id.0).copied())
+                .collect()
+        })
+        .collect();
+    let count = graph.blocks.len();
+    let mut order = vec![usize::MAX; count];
+    let mut low = vec![0usize; count];
+    let mut on_stack = vec![false; count];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut next_order = 0usize;
+    let mut on_cycle = HashSet::new();
+    for root in 0..count {
+        if order[root] != usize::MAX {
+            continue;
+        }
+        // Iterative Tarjan: (node, next edge to look at).
+        let mut work: Vec<(usize, usize)> = vec![(root, 0)];
+        order[root] = next_order;
+        low[root] = next_order;
+        next_order += 1;
+        stack.push(root);
+        on_stack[root] = true;
+        while let Some(&mut (node, ref mut edge)) = work.last_mut() {
+            if *edge < edges[node].len() {
+                let target = edges[node][*edge];
+                *edge += 1;
+                if order[target] == usize::MAX {
+                    order[target] = next_order;
+                    low[target] = next_order;
+                    next_order += 1;
+                    stack.push(target);
+                    on_stack[target] = true;
+                    work.push((target, 0));
+                } else if on_stack[target] {
+                    low[node] = low[node].min(order[target]);
+                }
+                continue;
+            }
+            work.pop();
+            if let Some(&(parent, _)) = work.last() {
+                low[parent] = low[parent].min(low[node]);
+            }
+            if low[node] == order[node] {
+                let mut component = Vec::new();
+                loop {
+                    let member = stack.pop().expect("tarjan stack");
+                    on_stack[member] = false;
+                    component.push(member);
+                    if member == node {
+                        break;
+                    }
+                }
+                let self_loop = edges[node].contains(&node);
+                if component.len() > 1 || self_loop {
+                    for member in component {
+                        on_cycle.insert(graph.blocks[member].id.0);
+                    }
+                }
+            }
+        }
+    }
+    on_cycle
+}
+
 /// The upvalue indices, ascending, whose values the parallel clone of proto `index` takes as
 /// `double cap<k>` parameters after its own (tier 1, ADR 0069). Empty for a proto that
 /// captures nothing or does not qualify.

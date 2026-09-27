@@ -49,6 +49,9 @@ pub const EMITTED_MUTABLE_STATE_OWNERS: &[(&str, EmittedStateOwner)] = &[
     ("{sym}_keys_shared", EmittedStateOwner::Process),
     // -- BigInt literal handles: provider handles made once from constant digits --------------
     ("{sym}_bigint_N", EmittedStateOwner::Constant),
+    // -- the shared immutable region (realms issue 08): each site's closure, written once by the
+    //    realm that builds the region before it is published sealed, read by every realm after -
+    ("{sym}_region_sites", EmittedStateOwner::Process),
     // -- inline caches (ADR 0071, step 3) -------------------------------------------------------
     ("site", EmittedStateOwner::Cache),
     ("{sym}_sites", EmittedStateOwner::Cache),

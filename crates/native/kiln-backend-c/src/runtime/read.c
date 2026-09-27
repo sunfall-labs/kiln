@@ -109,7 +109,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             /* A constructor's statics live in its own store, so a chain that reaches one
              * continues *into* that store rather than stopping at the function. */
             if (current.tag == KILN_VALUE_FUNCTION) {
-                current = kiln_c99_closure_of(current)->properties;
+                current = kiln_c99_closure_store(kiln_c99_closure_of(current));
             }
             if (current.tag != KILN_VALUE_OBJECT) {
                 if (current.tag != KILN_VALUE_UNDEFINED && current.tag != KILN_VALUE_NULL) {
@@ -288,8 +288,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             *out = kiln_c99_number((double)closure->arity);
             return KILN_C99_OK;
         }
-        if (closure->properties.tag == KILN_VALUE_OBJECT) {
-            kiln_object *store = kiln_c99_object_of(closure->properties);
+        if (kiln_c99_closure_store(closure).tag == KILN_VALUE_OBJECT) {
+            kiln_object *store = kiln_c99_object_of(kiln_c99_closure_store(closure));
             size_t index;
             if (store->shape != NULL) {
                 kiln_c99_ensure_dictionary(store);
@@ -298,7 +298,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 if (kiln_c99_same_key_view(&store->properties[index], key)) {
                     /* An assigned property wins, exactly as an own property shadows an
                      * inherited one -- which is what `Function.prototype.call` is. */
-                    return kiln_c99_get_key(host, closure->properties, key, ikey, out, depth,
+                    return kiln_c99_get_key(host, kiln_c99_closure_store(closure), key, ikey, out, depth,
                                         thrown);
                 }
             }
@@ -353,12 +353,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                                                        key, ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
         }
-        if (closure->properties.tag != KILN_VALUE_OBJECT) {
+        if (kiln_c99_closure_store(closure).tag != KILN_VALUE_OBJECT) {
             KILN_C99_ABSENT("a callable with no property store, so it has no own member to "
                             "answer",
                             out);
         }
-        return kiln_c99_get_key(host, closure->properties, key, ikey, out, depth, thrown);
+        return kiln_c99_get_key(host, kiln_c99_closure_store(closure), key, ikey, out, depth, thrown);
     }
 #if KILN_RETAIN_GROUP_TEMPORAL
     case KILN_VALUE_TEMPORAL: {

@@ -1649,6 +1649,7 @@ struct kiln_ffi_function_meta;
 struct kiln_ffi_callback_meta;
 typedef struct kiln_c99_unit_block {
 typedef struct kiln_c99_realm_state {
+typedef struct kiln_c99_region_own {
 static kiln_c99_realm_state *kiln_c99_realm(void);
 static void kiln_c99_realm_capture_output(int fd) {
 static int kiln_c99_realm_output(int fd) {
@@ -1802,6 +1803,48 @@ static int kiln_c99_promise_jobs_pending(void *context);
 static kiln_gc_heap *kiln_c99_gc_heap(void) {
 static inline KILN_ALWAYS_INLINE kiln_gc_heap *kiln_c99_gc_heap_if_cached(void) {
 static kiln_c99_realm_state *kiln_c99_realm(void) {
+#define KILN_C99_REGION_EMPTY 0u
+#define KILN_C99_REGION_BUILDING 1u
+#define KILN_C99_REGION_SEALED 2u
+#define KILN_C99_REGION_ABANDONED 3u
+#define KILN_C99_REGION_MODE_UNDECIDED 0
+#define KILN_C99_REGION_MODE_NONE 1
+#define KILN_C99_REGION_MODE_BUILDER 2
+#define KILN_C99_REGION_MODE_USER 3
+#define KILN_C99_REGION_RESERVE ((size_t)4 << 20)
+#define KILN_C99_REGION_WAIT_NS ((uint64_t)250 * 1000 * 1000)
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/mman.h>
+#include <time.h>
+#endif
+static size_t kiln_c99_region_page(void) {
+#if defined(__unix__) || defined(__APPLE__)
+#endif
+static int kiln_c99_in_region(const void *pointer) {
+static void *kiln_c99_region_alloc(uint32_t kind, size_t size) {
+static const kiln_string *kiln_c99_region_string(const kiln_string *string) {
+static char *kiln_c99_region_reserve(size_t *reserve) {
+#if defined(__unix__) || defined(__APPLE__)
+#else
+#endif
+static int kiln_c99_region_decide(kiln_gc_heap *heap) {
+#if defined(__unix__) || defined(__APPLE__)
+#endif
+static int kiln_c99_region_mode(kiln_gc_heap *heap) {
+static void kiln_c99_region_seal(kiln_gc_heap *heap) {
+#if defined(__unix__) || defined(__APPLE__)
+#endif
+static void kiln_c99_region_abandon(kiln_gc_heap *heap) {
+static kiln_value *kiln_c99_region_own_slot(const struct kiln_closure *closure, int which, int create) {
+static inline kiln_value kiln_c99_closure_prototype(const struct kiln_closure *closure) {
+static inline kiln_value kiln_c99_closure_store(const struct kiln_closure *closure) {
+static inline kiln_value *kiln_c99_closure_prototype_slot(struct kiln_closure *closure) {
+static inline kiln_value *kiln_c99_closure_store_slot(struct kiln_closure *closure) {
+static _Thread_local int kiln_c99_no_write_depth;
+typedef struct kiln_c99_no_write_frame {
+static inline int kiln_c99_no_write(void) {
+static void kiln_c99_no_write_enter(kiln_gc_heap *heap, kiln_c99_no_write_frame *frame) {
+static void kiln_c99_no_write_leave(kiln_c99_no_write_frame *frame) {
 static kiln_val *kiln_c99_unit_vals_slow(kiln_c99_unit *unit, kiln_c99_unit_cache *cache) {
 static int kiln_c99_unit_keys_claim(uint64_t *owner) {
 static void kiln_c99_unit_keys_release(uint64_t *owner, void *opaque) {
@@ -1829,6 +1872,7 @@ static void kiln_c99_gc_slab_link_free(kiln_gc_heap *heap, kiln_gc_slab *slab) {
 static void kiln_c99_gc_slab_unlink_all(kiln_gc_heap *heap, kiln_gc_slab *slab) {
 static void kiln_c99_gc_slab_maybe_destroy(kiln_gc_heap *heap, kiln_gc_slab *slab) {
 static kiln_gc_slab *kiln_c99_gc_slab_new(kiln_gc_heap *heap, int class_index) {
+static inline kiln_gc_block *kiln_c99_gc_slab_take(kiln_gc_heap *heap, kiln_gc_slab *slab) {
 static kiln_gc_block *kiln_c99_gc_lookup_slab(const kiln_gc_heap *heap, const void *payload,
 static int kiln_c99_nursery_locate(const kiln_gc_heap *heap, const char *ptr, char **base,
 static kiln_gc_block *kiln_c99_nursery_block_at(const char *base, const char *limit,
@@ -2359,6 +2403,7 @@ static const unsigned char kiln_c99_builtin_member_is_extension[] = {
 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
 typedef struct {
 static const kiln_builtin_gap kiln_c99_builtin_backlog[] = {
+#define KILN_C99_PRELUDE_LITERAL_KEYS(X) \
 static void *kiln_c99_node_hidden_pointer(kiln_value object, const char *key, size_t key_len);
 static int kiln_c99_val_call(kiln_host *host, kiln_val callee, const kiln_val *args, size_t argc,
 int kiln_c99_get_array_unscopables(kiln_value *out);
@@ -2409,6 +2454,7 @@ static int kiln_c99_val_make_cell(kiln_val *slot);
 static int kiln_c99_make_cell(kiln_value *slot) {
 static void kiln_c99_mark_uninitialized(kiln_value *slot) {
 static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const kiln_string *name,
+static int kiln_c99_region_closure(kiln_value *out, kiln_closure **site, kiln_body_fn body,
 static int kiln_c99_tail_define_accessor(kiln_val *stack, size_t *sp, int setter_half,
 static int kiln_c99_tail_define_method(kiln_val *stack, size_t *sp, const char *site,
 static int kiln_c99_tail_apply(kiln_host *host, kiln_val *stack, size_t *sp, int depth,

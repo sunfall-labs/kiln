@@ -422,10 +422,10 @@ static int kiln_c99_write_would_accept_key(kiln_value target, const kiln_string 
     if (target.tag == KILN_VALUE_FUNCTION) {
         kiln_closure *closure = kiln_c99_closure_of(target);
         if (kiln_c99_same_name_key(key, "prototype")) {
-            return closure->properties.tag != KILN_VALUE_OBJECT ||
-                   !kiln_c99_object_of(closure->properties)->frozen;
+            return kiln_c99_closure_store(closure).tag != KILN_VALUE_OBJECT ||
+                   !kiln_c99_object_of(kiln_c99_closure_store(closure))->frozen;
         }
-        current = closure->properties;
+        current = kiln_c99_closure_store(closure);
     } else if (target.tag == KILN_VALUE_ARRAY) {
         kiln_array *array = kiln_c99_array_of(target);
         if (array->frozen) {

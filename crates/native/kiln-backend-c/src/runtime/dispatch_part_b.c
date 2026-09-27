@@ -1368,8 +1368,8 @@
                  * about a chain they are both walking. */
                 kiln_value linked =
                     subject.tag == KILN_VALUE_FUNCTION &&
-                            kiln_c99_closure_of(subject)->properties.tag == KILN_VALUE_OBJECT
-                        ? kiln_c99_object_of(kiln_c99_closure_of(subject)->properties)->prototype
+                            kiln_c99_closure_store(kiln_c99_closure_of(subject)).tag == KILN_VALUE_OBJECT
+                        ? kiln_c99_object_of(kiln_c99_closure_store(kiln_c99_closure_of(subject)))->prototype
                         : kiln_c99_undefined();
                 *result = linked.tag == KILN_VALUE_UNDEFINED
                               ? kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION_PROTOTYPE)
@@ -2090,15 +2090,13 @@
                 flag = &kiln_c99_array_of(subject)->not_extensible;
                 frozen = kiln_c99_array_of(subject)->frozen;
             } else if (subject.tag == KILN_VALUE_FUNCTION) {
-                kiln_closure *closure = kiln_c99_closure_of(subject);
-                if (closure->properties.tag != KILN_VALUE_OBJECT) {
-                    status = kiln_c99_new_object(&closure->properties);
-                    if (status != KILN_C99_OK) {
-                        return status;
-                    }
+                kiln_value store;
+                status = kiln_c99_function_store(subject, &store);
+                if (status != KILN_C99_OK) {
+                    return status;
                 }
-                flag = &kiln_c99_object_of(closure->properties)->not_extensible;
-                frozen = kiln_c99_object_of(closure->properties)->frozen;
+                flag = &kiln_c99_object_of(store)->not_extensible;
+                frozen = kiln_c99_object_of(store)->frozen;
             }
             if (flag == NULL) {
                 /* A primitive keeps the specification's answer: it is not extensible, and
@@ -2177,14 +2175,12 @@
             } else if (subject.tag == KILN_VALUE_FUNCTION) {
                 /* A function's own properties live in an object it makes on first use. Freezing
                  * the function is freezing that store, so it has to exist first. */
-                kiln_closure *closure = kiln_c99_closure_of(subject);
-                if (closure->properties.tag != KILN_VALUE_OBJECT) {
-                    int status = kiln_c99_new_object(&closure->properties);
-                    if (status != KILN_C99_OK) {
-                        return status;
-                    }
+                kiln_value store;
+                int status = kiln_c99_function_store(subject, &store);
+                if (status != KILN_C99_OK) {
+                    return status;
                 }
-                flag = &kiln_c99_object_of(closure->properties)->frozen;
+                flag = &kiln_c99_object_of(store)->frozen;
             }
             if (subject.tag == KILN_VALUE_PROXY) {
                 kiln_value inner = kiln_c99_proxy_inner(subject);
@@ -2227,8 +2223,8 @@
                     }
                 } else if (subject.tag == KILN_VALUE_FUNCTION) {
                     kiln_closure *closure = kiln_c99_closure_of(subject);
-                    if (closure->properties.tag == KILN_VALUE_OBJECT) {
-                        kiln_object *obj = kiln_c99_object_of(closure->properties);
+                    if (kiln_c99_closure_store(closure).tag == KILN_VALUE_OBJECT) {
+                        kiln_object *obj = kiln_c99_object_of(kiln_c99_closure_store(closure));
                         size_t i;
                         if (obj->shape != NULL) {
                             kiln_c99_ensure_dictionary(obj);

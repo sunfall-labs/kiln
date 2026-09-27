@@ -1037,8 +1037,11 @@ fn runtime_prelude_size() {
     // Widened on 2026-09-27 for realms issue 17 (+~390 lines): symbol-keyed reads and writes
     // through keyed site entries, private-field sites that learn realm-local shapes and forget
     // them at teardown, shared keys for registered and well-known symbols, and the comments.
+    // Widened on 2026-09-27 for realms issue 08 (+~430 lines): the shared immutable region (its
+    // reservation, sealing and the closure accessors), the no-write read path, lazily initialised
+    // slabs, and the generated list of the prelude's literal keys (~75 lines, packed).
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 55_100;
+    const CEILING_LINES: usize = 55_600;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

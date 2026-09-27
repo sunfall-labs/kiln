@@ -441,21 +441,24 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
          * slot on the closure rather than an ordinary property -- a write that landed in the
          * store would be read back by `f.prototype` and ignored by `new`. */
         if (kiln_c99_same_name_key(key, "prototype")) {
-            if (closure->properties.tag == KILN_VALUE_OBJECT &&
-                kiln_c99_object_of(closure->properties)->frozen) {
+            kiln_value store = kiln_c99_closure_store(closure);
+            kiln_value *slot;
+            if (store.tag == KILN_VALUE_OBJECT && kiln_c99_object_of(store)->frozen) {
                 return strict ? kiln_c99_throw_read_only_key(thrown, key) : KILN_C99_OK;
             }
-            closure->prototype = value;
+            slot = kiln_c99_closure_prototype_slot(closure);
+            if (slot == NULL) return KILN_C99_OUT_OF_MEMORY;
+            *slot = value;
             return KILN_C99_OK;
         }
-        if (closure->properties.tag != KILN_VALUE_OBJECT) {
-            status = kiln_c99_new_object(&closure->properties);
+        {
+            kiln_value store;
+            status = kiln_c99_function_store(target, &store);
             if (status != KILN_C99_OK) {
                 return status;
             }
+            return kiln_c99_put_mode_key(host, store, key, ikey, value, strict, depth, thrown);
         }
-        return kiln_c99_put_mode_key(host, closure->properties, key, ikey, value, strict, depth,
-                                     thrown);
     }
     if (target.tag == KILN_VALUE_METHOD || target.tag == KILN_VALUE_BUILTIN ||
         target.tag == KILN_VALUE_BOUND) {

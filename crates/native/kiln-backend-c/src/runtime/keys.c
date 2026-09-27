@@ -238,7 +238,7 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
         return kiln_c99_proxy_all_keys(host, target, out, depth, thrown);
     }
     if (target.tag == KILN_VALUE_FUNCTION) {
-        target = kiln_c99_closure_of(target)->properties;
+        target = kiln_c99_closure_store(kiln_c99_closure_of(target));
     } else if (target.tag == KILN_VALUE_COLLECTION) {
         target = kiln_c99_collection_of(target)->properties;
     } else if (target.tag == KILN_VALUE_PROMISE) {

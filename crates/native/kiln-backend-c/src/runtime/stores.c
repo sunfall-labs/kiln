@@ -41,20 +41,26 @@ static double kiln_c99_array_index(kiln_value key) {
  * constructor that is never collected keeps its prototype alive -- and nothing here collects. */
 static int kiln_c99_prototype_object(kiln_value function, kiln_value *out) {
     kiln_closure *closure = kiln_c99_closure_of(function);
-    if (closure->prototype.tag == KILN_VALUE_UNDEFINED) {
-        int status = kiln_c99_new_object(&closure->prototype);
+    kiln_value prototype = kiln_c99_closure_prototype(closure);
+    if (prototype.tag == KILN_VALUE_UNDEFINED) {
+        /* A region closure's is the realm's (realms issue 08): its slot is in the realm context. */
+        kiln_value *slot = kiln_c99_closure_prototype_slot(closure);
+        int status;
+        if (slot == NULL) return KILN_C99_OUT_OF_MEMORY;
+        status = kiln_c99_new_object(slot);
         if (status != KILN_C99_OK) {
             return status;
         }
         /* Defined rather than assigned: `constructor` is a real property and is never
          * enumerated, so `for (const k in new C())` visits what the constructor assigned and not
          * the link back to the class. */
-        status = kiln_c99_define_method(closure->prototype, "constructor", 11, function);
+        status = kiln_c99_define_method(*slot, "constructor", 11, function);
         if (status != KILN_C99_OK) {
             return status;
         }
+        prototype = *slot;
     }
-    *out = closure->prototype;
+    *out = prototype;
     return KILN_C99_OK;
 }
 
@@ -176,13 +182,18 @@ int kiln_c99_get_array_unscopables(kiln_value *out) {
  * function and an instance method belongs to what it constructs. */
 static int kiln_c99_function_store(kiln_value function, kiln_value *out) {
     kiln_closure *closure = kiln_c99_closure_of(function);
-    if (closure->properties.tag == KILN_VALUE_UNDEFINED) {
-        int status = kiln_c99_new_object(&closure->properties);
+    kiln_value store = kiln_c99_closure_store(closure);
+    if (store.tag == KILN_VALUE_UNDEFINED) {
+        kiln_value *slot = kiln_c99_closure_store_slot(closure);
+        int status;
+        if (slot == NULL) return KILN_C99_OUT_OF_MEMORY;
+        status = kiln_c99_new_object(slot);
         if (status != KILN_C99_OK) {
             return status;
         }
+        store = *slot;
     }
-    *out = closure->properties;
+    *out = store;
     return KILN_C99_OK;
 }
 
@@ -239,6 +250,9 @@ static void kiln_c99_realm_note_store(void) {
 static void kiln_c99_builtin_bootstrap_done(void) {
     kiln_gc_heap *heap = kiln_c99_gc_heap();
     if (heap == NULL) return;
+    /* The realm that built the shared region has made every closure it will hold (realms issue
+     * 08): protect it and let every other realm read it. */
+    kiln_c99_region_seal(heap);
     __atomic_sub_fetch(&kiln_c99_builtin_store_epoch, heap->builtin_stores, __ATOMIC_RELAXED);
     heap->builtin_stores = 0;
     memset(heap->program_builtins, 0, sizeof heap->program_builtins);
@@ -296,7 +310,7 @@ static int kiln_c99_callable_store_lookup(kiln_value callable, kiln_value *out, 
     kiln_method_store *entry;
     if (callable.tag == KILN_VALUE_FUNCTION) {
         kiln_closure *closure = kiln_c99_closure_of(callable);
-        if (closure->properties.tag != KILN_VALUE_OBJECT && !create) {
+        if (kiln_c99_closure_store(closure).tag != KILN_VALUE_OBJECT && !create) {
             KILN_C99_ABSENT("a callable with no property store, so it has no own member to "
                             "answer",
                             out);
@@ -531,7 +545,7 @@ static int kiln_c99_store_get_key(kiln_host *host, kiln_value target,
         kiln_object *object;
         size_t index;
         if (current.tag == KILN_VALUE_FUNCTION) {
-            current = kiln_c99_closure_of(current)->properties;
+            current = kiln_c99_closure_store(kiln_c99_closure_of(current));
         }
         if (current.tag != KILN_VALUE_OBJECT) return KILN_C99_OK;
         object = kiln_c99_object_of(current);

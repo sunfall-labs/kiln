@@ -646,6 +646,12 @@ typedef struct kiln_closure {
      * global` finds the realm; a strict one runs with the `undefined` it was passed. */
     int strict;
     int publishes_frame;
+    /* Set on a closure that lives in the shared immutable region (ADR 0070 primitive B, realms
+     * issue 08): made once per process by the realm that built the region, read by every realm,
+     * and never written after the region is sealed. Its two mutable parts -- `own_prototype` and
+     * `own_store` below -- are the realm's own and live in the realm's context instead
+     * (`kiln_c99_closure_prototype`, `kiln_c99_closure_store`); read them only through those. */
+    int region;
     kiln_val captured_this;
     kiln_val captured_new_target;
     /* ...and its `arguments`, which is the enclosing function's list rather than its own. */
@@ -667,9 +673,12 @@ typedef struct kiln_closure {
     uint32_t handler_depth;
     /* The object `new f()` links instances to, and the store `f.x = 1` writes into. Both are
      * created on first use: an ordinary function that is never used as a constructor and never
-     * carries a property allocates neither. */
-    kiln_value prototype;
-    kiln_value properties;
+     * carries a property allocates neither. A region closure's are the realm's, not these: every
+     * read and write goes through `kiln_c99_closure_prototype{,_slot}` and
+     * `kiln_c99_closure_store{,_slot}`, and the names differ from `prototype`/`properties` so that
+     * a direct access elsewhere does not compile. */
+    kiln_value own_prototype;
+    kiln_value own_store;
     /* For the console, which prints `[Function: name]`.  NULL for an anonymous function, which
      * prints `[Function (anonymous)]` -- a distinct answer, not a missing one.  A name is a
      * canonical headed string so inferred names retain exact UTF-16 units and survive a closure

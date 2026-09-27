@@ -256,6 +256,8 @@ impl NativeRealmPolicy {
             compile_regex: None,
             omit_source: false,
             no_kiln_extensions: self.no_kiln_extensions,
+            // Set for the runtime bootstrap alone (`bootstrap_emitter`).
+            shared_region: false,
         }
     }
 

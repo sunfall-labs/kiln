@@ -228,8 +228,9 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const kiln_
             return captured;
         }
     }
-    closure->prototype = kiln_c99_undefined();
-    closure->properties = kiln_c99_undefined();
+    closure->region = 0;
+    closure->own_prototype = kiln_c99_undefined();
+    closure->own_store = kiln_c99_undefined();
     closure->name = name;
     closure->source = source;
     closure->source_len = source_len;
@@ -242,6 +243,75 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const kiln_
     closure->upvalues = upvalues;
     *out = kiln_c99_function(closure);
     return KILN_C99_OK;
+}
+
+/* A closure-making site the emitter proved runs once per realm, at the runtime bootstrap's top
+ * level, capturing nothing (`EmissionPolicy::shared_region`; realms issue 08): the closure lives
+ * in the shared immutable region, made by the realm that builds it and handed to every realm
+ * after. `*site` is the site's process-wide slot. A realm that does not use the region, a site
+ * the builder never reached, a full reservation, or an arrow whose receiver is not the module's
+ * `undefined` all make an ordinary closure exactly as `kiln_c99_make_closure` would -- the
+ * region is an economy, never a requirement. */
+static int kiln_c99_region_closure(kiln_value *out, kiln_closure **site, kiln_body_fn body,
+                                   const kiln_string *name, const char *source, size_t source_len,
+                                   const char *diagnostic_source, uint32_t proto, uint32_t arity,
+                                   int generator, int asynchronous, int async_generator,
+                                   int is_method, int arrow, int strict, kiln_val receiver,
+                                   uint32_t local_count, uint32_t stack_size,
+                                   uint32_t handler_depth, uint32_t prologue_resume,
+                                   int publishes_frame) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    int mode = kiln_c99_region_mode(heap);
+    int status;
+    if (mode == KILN_C99_REGION_MODE_USER) {
+        kiln_closure *shared = __atomic_load_n(site, __ATOMIC_ACQUIRE);
+        if (shared != NULL) {
+            *out = kiln_c99_function(shared);
+            return KILN_C99_OK;
+        }
+    } else if (mode == KILN_C99_REGION_MODE_BUILDER && arrow != 1 &&
+               receiver == KILN_VAL_UNDEFINED && __atomic_load_n(site, __ATOMIC_ACQUIRE) == NULL) {
+        kiln_closure *closure = (kiln_closure *)kiln_c99_region_alloc(KILN_GC_CLOSURE, sizeof *closure);
+        if (closure != NULL) {
+            closure->body = body;
+            closure->generator = generator;
+            closure->asynchronous = asynchronous;
+            closure->local_count = local_count;
+            closure->stack_size = stack_size;
+            closure->handler_depth = handler_depth;
+            closure->arrow = arrow != 0;
+            closure->strict = strict;
+            closure->publishes_frame = publishes_frame;
+            closure->region = 1;
+            closure->captured_this = KILN_VAL_UNDEFINED;
+            closure->async_generator = async_generator;
+            closure->is_method = is_method;
+            closure->captured_new_target = KILN_VAL_UNDEFINED;
+            closure->captured_arguments = kiln_c99_undefined();
+            closure->own_prototype = kiln_c99_undefined();
+            closure->own_store = kiln_c99_undefined();
+            closure->name = name;
+            closure->source = source;
+            closure->source_len = source_len;
+            closure->source_value = kiln_c99_undefined();
+            closure->diagnostic_source = diagnostic_source;
+            closure->arity = arity;
+            closure->prologue_resume = prologue_resume;
+            closure->proto = proto;
+            closure->upvalue_count = 0;
+            closure->upvalues = NULL;
+            __atomic_store_n(site, closure, __ATOMIC_RELEASE);
+            *out = kiln_c99_function(closure);
+            return KILN_C99_OK;
+        }
+    }
+    status = kiln_c99_make_closure(out, body, name, source, source_len, diagnostic_source, proto,
+                                   arity, generator, asynchronous, async_generator, is_method,
+                                   arrow, strict, receiver,
+                                   kiln_val_from_boundary(kiln_c99_new_target), local_count,
+                                   stack_size, handler_depth, prologue_resume, NULL, 0);
+    if (status == KILN_C99_OK && !publishes_frame) kiln_c99_closure_of(*out)->publishes_frame = 0;
+    return status;
 }
 
 /* Stack-tail operations are outlined as operations, not as wrappers around operations. Compact

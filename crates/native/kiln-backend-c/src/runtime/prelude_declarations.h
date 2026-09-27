@@ -187,6 +187,7 @@ extern int kiln_c99_global_object_val(kiln_val *out);
 extern int kiln_c99_make_cell(kiln_value *slot);
 extern void kiln_c99_mark_uninitialized(kiln_value *slot);
 extern int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const kiln_string *name, const char *source, size_t source_len, const char *diagnostic_source, uint32_t proto, uint32_t arity, int generator, int asynchronous, int async_generator, int is_method, int arrow, int strict, kiln_val receiver, kiln_val new_target, uint32_t local_count, uint32_t stack_size, uint32_t handler_depth, uint32_t prologue_resume, const kiln_val *captured, uint32_t count);
+extern int kiln_c99_region_closure(kiln_value *out, kiln_closure **site, kiln_body_fn body, const kiln_string *name, const char *source, size_t source_len, const char *diagnostic_source, uint32_t proto, uint32_t arity, int generator, int asynchronous, int async_generator, int is_method, int arrow, int strict, kiln_val receiver, uint32_t local_count, uint32_t stack_size, uint32_t handler_depth, uint32_t prologue_resume, int publishes_frame);
 extern int kiln_c99_module_completion(kiln_host *host, kiln_value input_promise, uint32_t module_index, kiln_value *out_promise, int depth, kiln_value *thrown);
 extern int kiln_c99_finish_module_checkpoint(kiln_host *host, kiln_value *thrown);
 extern int kiln_c99_buffer_prototype(kiln_host *host, kiln_value *out, int depth, kiln_value *thrown);

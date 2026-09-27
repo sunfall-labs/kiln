@@ -774,6 +774,233 @@ int main(void) {
     );
 }
 
+/// Realms issue 08, the shared immutable region: the first realm to reach a region site builds
+/// the region and makes the closure there; once its bootstrap is done the region is sealed
+/// read-only and every other realm gets that same closure. What a program can change about the
+/// closure -- its `prototype`, a property written onto it -- is each realm's own, kept in the
+/// realm's context rather than the closure. The collector never marks into the region, and the
+/// no-write read path consults caches without teaching them, computes a string's ASCII answer
+/// without storing it and looks keys up without interning them.
+#[test]
+fn the_shared_region_holds_one_closure_and_each_realm_keeps_its_own_parts() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static kiln_gc_heap *kiln_test_new_heap(void) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)malloc(sizeof *heap);
+    if (heap == NULL) return NULL;
+    kiln_c99_gc_heap_init(heap);
+    heap->enabled = 0;
+    kiln_c99_gc_heap_register(heap);
+    return heap;
+}
+static void kiln_test_enter(kiln_gc_heap *heap) {
+    kiln_test_heap = heap;
+    kiln_test_generation += 1;
+}
+static int kiln_test_body(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
+                          const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {
+    (void)ctx; (void)upvalues; (void)receiver_ptr; (void)args; (void)argc;
+    *result = KILN_VAL_UNDEFINED;
+    return KILN_C99_OK;
+}
+static const kiln_string kiln_test_fn_name = { 4, KILN_STRING_LATIN1, "func" };
+static kiln_closure *kiln_test_site;
+static int kiln_test_make(kiln_value *out) {
+    return kiln_c99_region_closure(out, &kiln_test_site, (kiln_body_fn)kiln_test_body,
+                                   &kiln_test_fn_name, NULL, 0, "<test>", 0, 2, 0, 0, 0, 0, 0, 1,
+                                   KILN_VAL_UNDEFINED, 1, 1, 1, 0, 1);
+}
+#if defined(__linux__)
+/* The protection of the page holding `pointer`, from the process's own map. */
+static int kiln_test_page_writable(const void *pointer) {
+    FILE *maps = fopen("/proc/self/maps", "r");
+    char line[512];
+    int writable = -1;
+    if (maps == NULL) return -1;
+    while (fgets(line, sizeof line, maps) != NULL) {
+        unsigned long lo, hi;
+        char perms[8];
+        if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) == 3 && (uintptr_t)pointer >= lo &&
+            (uintptr_t)pointer < hi) {
+            writable = perms[1] == 'w';
+            break;
+        }
+    }
+    fclose(maps);
+    return writable;
+}
+#endif
+int main(void) {
+    kiln_gc_heap *first;
+    kiln_gc_heap *second;
+    kiln_value fa, fb, proto_a, proto_b, again, holder, renamed_key, other_key;
+    kiln_closure *closure;
+    size_t blocks;
+    first = kiln_test_new_heap();
+    if (first == NULL) return 1;
+    kiln_test_enter(first);
+    if (kiln_c99_process()->region_state != KILN_C99_REGION_EMPTY) return 2;
+    /* The first realm at a region site builds the region. */
+    if (kiln_test_make(&fa) != KILN_C99_OK) return 3;
+    closure = kiln_c99_closure_of(fa);
+    if (!closure->region || !kiln_c99_in_region(closure) || kiln_test_site != closure) return 4;
+    if (first->region_mode != KILN_C99_REGION_MODE_BUILDER) return 5;
+    if (kiln_c99_process()->region_state != KILN_C99_REGION_BUILDING) return 6;
+    if (kiln_c99_gc_payload_kind(closure) != KILN_GC_CLOSURE) return 7;
+    /* Named while it builds: the name is copied into the region. */
+    renamed_key = kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)kiln_c99_intern("renamed", 7), 7);
+    if (kiln_c99_set_function_name(fa, renamed_key, NULL) != KILN_C99_OK) return 8;
+    if (closure->name == NULL || !kiln_c99_in_region(closure->name) || closure->name->unit_len != 7)
+        return 9;
+    /* Its prototype and a property are the first realm's, not the closure's. */
+    if (kiln_c99_prototype_object(fa, &proto_a) != KILN_C99_OK || proto_a.tag != KILN_VALUE_OBJECT)
+        return 10;
+    if (closure->own_prototype.tag != KILN_VALUE_UNDEFINED) return 11;
+    if (kiln_c99_put(NULL, fa, "marker", 6, kiln_c99_number(1.0), 0, NULL) != KILN_C99_OK) return 12;
+    if (closure->own_store.tag != KILN_VALUE_UNDEFINED ||
+        kiln_c99_closure_store(closure).tag != KILN_VALUE_OBJECT) return 13;
+    /* A collection with the closure held by a realm object: nothing in the region is marked or
+     * freed, and the realm's own parts survive through the realm context. */
+    if (kiln_c99_new_object(&holder) != KILN_C99_OK ||
+        kiln_c99_put(NULL, holder, "f", 1, fa, 0, NULL) != KILN_C99_OK) return 14;
+    blocks = kiln_c99_process()->region_blocks;
+    first->enabled = 1;
+    kiln_c99_gc_collect(first, 1);
+    first->enabled = 0;
+    if (kiln_c99_process()->region_blocks != blocks || closure->body != (kiln_body_fn)kiln_test_body)
+        return 15;
+    if (kiln_c99_prototype_object(fa, &again) != KILN_C99_OK || again.bits != proto_a.bits) return 16;
+    /* The bootstrap is done: the region is sealed, read-only, and every realm reads it. */
+    kiln_c99_builtin_bootstrap_done();
+    if (kiln_c99_process()->region_state != KILN_C99_REGION_SEALED) return 17;
+    if (first->region_mode != KILN_C99_REGION_MODE_USER) return 18;
+#if defined(__linux__)
+    if (kiln_test_page_writable(closure) != 0) return 19;
+#endif
+    second = kiln_test_new_heap();
+    if (second == NULL) return 20;
+    kiln_test_enter(second);
+    if (kiln_test_make(&fb) != KILN_C99_OK || kiln_c99_closure_of(fb) != closure) return 21;
+    if (second->region_mode != KILN_C99_REGION_MODE_USER) return 22;
+    /* None of the first realm's changes is visible here. */
+    if (kiln_c99_closure_store(closure).tag != KILN_VALUE_UNDEFINED) return 23;
+    if (kiln_c99_prototype_object(fb, &proto_b) != KILN_C99_OK || proto_b.bits == proto_a.bits)
+        return 24;
+    /* A sealed closure is not renamed: the builder named it, as every realm's definition would. */
+    other_key = kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)kiln_c99_intern("other", 5), 5);
+    if (kiln_c99_set_function_name(fb, other_key, NULL) != KILN_C99_OK ||
+        closure->name->unit_len != 7) return 25;
+    /* And the first realm still sees its own. */
+    kiln_test_enter(first);
+    if (kiln_c99_closure_store(closure).tag != KILN_VALUE_OBJECT) return 26;
+    if (kiln_c99_prototype_object(fa, &again) != KILN_C99_OK || again.bits != proto_a.bits) return 27;
+
+    /* The no-write read path, reading the first realm's heap. */
+    {
+        kiln_value text = kiln_c99_copy_text("plain", 5);
+        kiln_gc_block *block;
+        kiln_c99_no_write_frame frame;
+        kiln_c99_site site;
+        uint32_t before;
+        if (text.tag != KILN_VALUE_STRING) return 28;
+        block = kiln_c99_gc_lookup(first, text.ptr);
+        if (block == NULL) return 29;
+        before = block->kind;
+        memset(&site, 0, sizeof site);
+        kiln_test_enter(second);
+        kiln_c99_no_write_enter(first, &frame);
+        if (!kiln_c99_no_write() || kiln_c99_gc_heap() != first) return 30;
+        if (!kiln_c99_string_is_ascii(text) || block->kind != before) return 31;
+        if (kiln_c99_intern("never interned", 14) != NULL) return 32;
+        if (kiln_c99_intern("marker", 6) == NULL) return 33;
+        kiln_c99_site_remember_own(&site, kiln_c99_shape_root(), 0);
+        if (kiln_c99_site_count(&site) != 0) return 34;
+        if (kiln_c99_closure_store(closure).tag != KILN_VALUE_OBJECT) return 35;
+        kiln_c99_no_write_leave(&frame);
+        if (kiln_c99_no_write() || kiln_c99_gc_heap() != second) return 36;
+        kiln_test_enter(first);
+        if (!kiln_c99_string_is_ascii(text) || (block->kind & KILN_GC_FLAG_ASCII_KNOWN) == 0) return 37;
+        kiln_c99_site_remember_own(&site, kiln_c99_shape_root(), 0);
+        if (kiln_c99_site_count(&site) == 0) return 38;
+    }
+    kiln_c99_gc_teardown_begin(second);
+    kiln_c99_gc_teardown_end(second);
+    kiln_c99_gc_teardown_begin(first);
+    kiln_c99_gc_teardown_end(first);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "shared-region");
+    assert!(
+        run.status.success(),
+        "the shared region failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+/// A realm that began building the region and was torn down before sealing it abandons it: no
+/// later realm waits for it or reads it, and each makes its own closures as before.
+#[test]
+fn a_region_whose_builder_is_torn_down_unsealed_is_abandoned() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static kiln_gc_heap *kiln_test_new_heap(void) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)malloc(sizeof *heap);
+    if (heap == NULL) return NULL;
+    kiln_c99_gc_heap_init(heap);
+    heap->enabled = 0;
+    kiln_c99_gc_heap_register(heap);
+    return heap;
+}
+static void kiln_test_enter(kiln_gc_heap *heap) {
+    kiln_test_heap = heap;
+    kiln_test_generation += 1;
+}
+static int kiln_test_body(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
+                          const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {
+    (void)ctx; (void)upvalues; (void)receiver_ptr; (void)args; (void)argc;
+    *result = KILN_VAL_UNDEFINED;
+    return KILN_C99_OK;
+}
+static kiln_closure *kiln_test_site;
+static int kiln_test_make(kiln_value *out) {
+    return kiln_c99_region_closure(out, &kiln_test_site, (kiln_body_fn)kiln_test_body, NULL, NULL,
+                                   0, "<test>", 0, 0, 0, 0, 0, 0, 0, 1, KILN_VAL_UNDEFINED, 1, 1,
+                                   1, 0, 1);
+}
+int main(void) {
+    kiln_gc_heap *builder = kiln_test_new_heap();
+    kiln_gc_heap *later;
+    kiln_value made;
+    if (builder == NULL) return 1;
+    kiln_test_enter(builder);
+    if (kiln_test_make(&made) != KILN_C99_OK || !kiln_c99_closure_of(made)->region) return 2;
+    kiln_c99_gc_teardown_begin(builder);
+    kiln_c99_gc_teardown_end(builder);
+    if (kiln_c99_process()->region_state != KILN_C99_REGION_ABANDONED) return 3;
+    later = kiln_test_new_heap();
+    if (later == NULL) return 4;
+    kiln_test_enter(later);
+    if (kiln_test_make(&made) != KILN_C99_OK) return 5;
+    if (kiln_c99_closure_of(made)->region || kiln_c99_in_region(kiln_c99_closure_of(made))) return 6;
+    if (later->region_mode != KILN_C99_REGION_MODE_NONE) return 7;
+    kiln_c99_gc_teardown_begin(later);
+    kiln_c99_gc_teardown_end(later);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "abandoned-region");
+    assert!(
+        run.status.success(),
+        "an abandoned region was used ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
 #[test]
 fn executable_runtime_readable_has_a_checked_native_prototype_graph() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))

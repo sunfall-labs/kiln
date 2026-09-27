@@ -1330,6 +1330,28 @@ pub(super) fn emit_graph_op(
             } else {
                 "KILN_VAL_UNDEFINED"
             };
+            // A site whose closure every realm shares (realms issue 08): it lives in the shared
+            // immutable region, and is never written after it is made, so nothing follows it.
+            if let Some(site) = crate::emit_graph::region_site(graph, vid) {
+                let construction = crate::region_closure_construction(
+                    &program.functions,
+                    &program.source,
+                    frame_stacks,
+                    strict_functions,
+                    symbol,
+                    diagnostic_site,
+                    *index,
+                    defining_receiver,
+                    site,
+                    plan.publishes_frame[*index as usize],
+                );
+                writeln!(
+                    output,
+                    "    {{ kiln_value built; int status = {construction}; if (status != KILN_C99_OK) return status; v{v} = kiln_val_from_boundary(built); }}"
+                )
+                .unwrap();
+                return;
+            }
             if plan.compact {
                 let (captured_expr, setup_block) = if captures.is_empty() {
                     ("NULL".to_string(), String::new())

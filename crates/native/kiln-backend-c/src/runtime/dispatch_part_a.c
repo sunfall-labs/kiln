@@ -3291,7 +3291,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                  * and it is kept on the closure's store rather than in a slot list of its own.
                  * `name`, `length` and `prototype` are read from the closure and are not in that
                  * store, which is right -- none of the three is enumerated. */
-                kiln_value store = kiln_c99_closure_of(args[0])->properties;
+                kiln_value store = kiln_c99_closure_store(kiln_c99_closure_of(args[0]));
                 if (store.tag != KILN_VALUE_OBJECT) {
                     /* Nothing was ever assigned to it, so there is nothing to list. */
                     status = kiln_c99_new_array(&built);

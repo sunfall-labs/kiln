@@ -337,9 +337,9 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
          * reason as the promise above: `"call" in fn` was false about a member `fn.call`
          * produces. */
         kiln_closure *closure = kiln_c99_closure_of(target);
-        if (closure->properties.tag == KILN_VALUE_OBJECT) {
+        if (kiln_c99_closure_store(closure).tag == KILN_VALUE_OBJECT) {
             int carried = 0;
-            int status = kiln_c99_has_property_key(host, closure->properties, key, ikey, &carried,
+            int status = kiln_c99_has_property_key(host, kiln_c99_closure_store(closure), key, ikey, &carried,
                                                depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;

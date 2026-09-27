@@ -111,6 +111,13 @@ pub struct EmissionPolicy {
     /// Build a binary that never installs kiln's own members (ADR 0068), whatever its
     /// `KILN_EXTENSIONS` says at run time: `kiln build --no-kiln-extensions`.
     pub no_kiln_extensions: bool,
+    /// Make each closure the module's top level makes once per realm, capturing nothing, once
+    /// per process in the shared immutable region, and hand every realm that one (ADR 0070
+    /// primitive B; realms issue 08; `emit_graph::region_closure_sites`). `kiln-native` sets it
+    /// for the runtime bootstrap, whose top level is the built-ins it writes in TypeScript. The
+    /// closure's identity is shared -- no realm can hold another's to compare -- and its
+    /// prototype and property store are each realm's own.
+    pub shared_region: bool,
 }
 
 impl EmissionPolicy {
@@ -1066,6 +1073,92 @@ pub(crate) fn builtin_load(builtin: kiln_ir::Builtin) -> BuiltinLoad {
     }
 }
 
+/// What a closure carries, as the C expressions `kiln_c99_make_closure` and
+/// `kiln_c99_region_closure` take, decided once for both.
+struct ClosureFields {
+    name: String,
+    source: String,
+    source_len: usize,
+    diagnostic_source: String,
+    arity: u32,
+    generator: i32,
+    asynchronous: i32,
+    async_generator: i32,
+    is_method: i32,
+    arrow: i32,
+    strict: i32,
+    frame_locals: u32,
+    frame_stack: usize,
+    frame_handlers: usize,
+    prologue_resume: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn closure_fields(
+    functions: &[FunctionProto],
+    source: &str,
+    frame_stacks: &[usize],
+    strict_functions: &[bool],
+    symbol: &str,
+    diagnostic_site: &str,
+    proto: u32,
+    publishes_frame: bool,
+) -> ClosureFields {
+    let target = &functions[proto as usize];
+    let name = target.effective_name_units().map_or_else(
+        || "NULL".to_owned(),
+        |_| format!("&{symbol}_function_name_{proto}"),
+    );
+    let span = target.span;
+    let (source, source_len) =
+        if source.is_empty() || span.end as usize > source.len() || span.start > span.end {
+            ("NULL".to_owned(), 0usize)
+        } else {
+            (
+                format!("{symbol}_source + {}", span.start),
+                (span.end - span.start) as usize,
+            )
+        };
+    // An arrow is `1` when it reads the enclosing frame (its own `arguments`/`new.target`, or a
+    // nested arrow's) and `2` when it provably never does: `kiln_c99_make_closure` then skips
+    // materialising the enclosing call's `arguments` object for it.
+    let arrow = match (target.arrow, publishes_frame) {
+        (false, _) => 0,
+        (true, true) => 1,
+        (true, false) => 2,
+    };
+    ClosureFields {
+        name,
+        source,
+        source_len,
+        diagnostic_source: diagnostic_source(diagnostic_site),
+        arity: target.declared_length,
+        generator: i32::from(target.generator || target.asynchronous),
+        asynchronous: i32::from(target.asynchronous),
+        async_generator: i32::from(target.async_generator),
+        is_method: i32::from(target.is_method),
+        arrow,
+        strict: i32::from(
+            strict_functions
+                .get(proto as usize)
+                .copied()
+                .unwrap_or(true),
+        ),
+        frame_locals: target.local_count.max(1),
+        frame_stack: frame_stacks
+            .get(proto as usize)
+            .copied()
+            .unwrap_or(1)
+            .max(1),
+        frame_handlers: target.code.len().max(1),
+        prologue_resume: if binds_at_call(target) {
+            target.code.len()
+        } else {
+            0
+        },
+    }
+}
+
 /// The one call that makes a closure, for both emitters.
 ///
 /// Everything a closure carries is decided here, once: its name and source slice for
@@ -1087,55 +1180,84 @@ pub(crate) fn closure_construction(
     capture_count: usize,
     publishes_frame: bool,
 ) -> String {
-    let target = &functions[proto as usize];
-    let name = target.effective_name_units().map_or_else(
-        || "NULL".to_owned(),
-        |_| format!("&{symbol}_function_name_{proto}"),
+    let ClosureFields {
+        name,
+        source,
+        source_len,
+        diagnostic_source,
+        arity,
+        generator,
+        asynchronous,
+        async_generator,
+        is_method,
+        arrow,
+        strict,
+        frame_locals,
+        frame_stack,
+        frame_handlers,
+        prologue_resume,
+    } = closure_fields(
+        functions,
+        source,
+        frame_stacks,
+        strict_functions,
+        symbol,
+        diagnostic_site,
+        proto,
+        publishes_frame,
     );
-    let span = target.span;
-    let (source, source_len) =
-        if source.is_empty() || span.end as usize > source.len() || span.start > span.end {
-            ("NULL".to_owned(), 0usize)
-        } else {
-            (
-                format!("{symbol}_source + {}", span.start),
-                (span.end - span.start) as usize,
-            )
-        };
-    let generator = i32::from(target.generator || target.asynchronous);
-    let asynchronous = i32::from(target.asynchronous);
-    // An arrow is `1` when it reads the enclosing frame (its own `arguments`/`new.target`, or a
-    // nested arrow's) and `2` when it provably never does: `kiln_c99_make_closure` then skips
-    // materialising the enclosing call's `arguments` object for it.
-    let arrow = match (target.arrow, publishes_frame) {
-        (false, _) => 0,
-        (true, true) => 1,
-        (true, false) => 2,
-    };
-    let async_generator = i32::from(target.async_generator);
-    let is_method = i32::from(target.is_method);
-    let strict = i32::from(
-        strict_functions
-            .get(proto as usize)
-            .copied()
-            .unwrap_or(true),
-    );
-    let arity = target.declared_length;
-    let frame_locals = target.local_count.max(1);
-    let frame_stack = frame_stacks
-        .get(proto as usize)
-        .copied()
-        .unwrap_or(1)
-        .max(1);
-    let frame_handlers = target.code.len().max(1);
-    let prologue_resume = if binds_at_call(target) {
-        target.code.len()
-    } else {
-        0
-    };
-    let diagnostic_source = diagnostic_source(diagnostic_site);
     format!(
         "kiln_c99_make_closure(&built, {symbol}_fn_{proto}, {name}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {is_method}, {arrow}, {strict}, {defining_receiver}, kiln_val_from_boundary(kiln_c99_new_target), UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), {captured}, UINT32_C({capture_count}))"
+    )
+}
+
+/// The call that makes a closure at a region site (realms issue 08;
+/// [`emit_graph::region_closure_sites`]): the same fields as [`closure_construction`], and the
+/// site's process-wide slot `{symbol}_region_sites[site]`. The closure captures nothing, so there
+/// is no upvalue array; whether it publishes its frame is passed in, since a region closure is
+/// never written after it is made.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn region_closure_construction(
+    functions: &[FunctionProto],
+    source: &str,
+    frame_stacks: &[usize],
+    strict_functions: &[bool],
+    symbol: &str,
+    diagnostic_site: &str,
+    proto: u32,
+    defining_receiver: &str,
+    site: usize,
+    publishes_frame: bool,
+) -> String {
+    let ClosureFields {
+        name,
+        source,
+        source_len,
+        diagnostic_source,
+        arity,
+        generator,
+        asynchronous,
+        async_generator,
+        is_method,
+        arrow,
+        strict,
+        frame_locals,
+        frame_stack,
+        frame_handlers,
+        prologue_resume,
+    } = closure_fields(
+        functions,
+        source,
+        frame_stacks,
+        strict_functions,
+        symbol,
+        diagnostic_site,
+        proto,
+        publishes_frame,
+    );
+    let publishes = i32::from(publishes_frame);
+    format!(
+        "kiln_c99_region_closure(&built, &{symbol}_region_sites[{site}], {symbol}_fn_{proto}, {name}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {is_method}, {arrow}, {strict}, {defining_receiver}, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), {publishes})"
     )
 }
 
@@ -2516,25 +2638,43 @@ fn render_entry(
             }
         }
     }
-    let shared_sites = emit_graph::emit_entry_from_graph_with_profile(
-        output,
-        graph,
-        body,
-        program,
-        unit_symbol,
-        !callables,
-        diagnostic_site,
-        &plan.functions,
-        strict_functions,
-        &array_slots,
-        exports,
-        commonjs,
-        calls,
-        policy.type_profile_record,
-        site_offset,
-    );
+    // The runtime bootstrap's top-level closures live in the shared immutable region (ADR 0070
+    // primitive B; realms issue 08): one per process instead of one per realm.
+    let region_sites = if policy.shared_region {
+        emit_graph::region_closure_sites(graph, &program.functions, &calls.publishes_frame)
+    } else {
+        std::collections::HashMap::new()
+    };
+    let region_site_count = region_sites.len();
+    let shared_sites = emit_graph::with_region_sites(graph, region_sites, || {
+        emit_graph::emit_entry_from_graph_with_profile(
+            output,
+            graph,
+            body,
+            program,
+            unit_symbol,
+            !callables,
+            diagnostic_site,
+            &plan.functions,
+            strict_functions,
+            &array_slots,
+            exports,
+            commonjs,
+            calls,
+            policy.type_profile_record,
+            site_offset,
+        )
+    });
     output.push_str("}\n");
     emit_graph::retain_used_entry_context(output, context_start..context_end);
+    if region_site_count > 0 {
+        // Written once, by the realm that builds the region, before it publishes the region
+        // sealed; read by every realm after (`kiln_c99_region_closure`).
+        output.insert_str(
+            entry_start,
+            &format!("static kiln_closure *{unit_symbol}_region_sites[{region_site_count}];\n"),
+        );
+    }
     if policy.compact && shared_sites > 0 {
         output.insert_str(
             entry_start,
@@ -3075,6 +3215,63 @@ fn render_key_table(
         }
     }
     writeln!(output, "    {symbol}_keys_shared = 1;\n}}").unwrap();
+}
+
+/// The runtime bootstrap's string constants that read as names, registered as shared keys before
+/// the first realm (realms issue 08) beside the property names `render_key_table` registers.
+///
+/// The bootstrap spells some of the names it defines as values -- `const added = ["count",
+/// "countReset", ...]` then `Object.defineProperty(console, added[i], ...)` -- and a name that
+/// reaches a property as a value is interned at run time, into the realm's own table, with a
+/// realm-local shape for every object built with it: every realm paid for its own copy of the
+/// same console and `DisposableStack` layouts. Registering the spelling first makes the run-time
+/// intern find the shared key. Only a unit emitted with `shared_region` does this: the bootstrap's
+/// strings are the built-ins' names; a program's are its data, which ADR 0071 keeps realm-local.
+fn render_name_registration(output: &mut String, program: &Program, symbol: &str, keys: &[u32]) {
+    let names: Vec<usize> = program
+        .constants
+        .iter()
+        .enumerate()
+        .filter(|(index, constant)| {
+            let Constant::String(value) = constant else {
+                return false;
+            };
+            if keys.contains(&(*index as u32)) {
+                return false;
+            }
+            let units: Vec<u16> = value.units().collect();
+            !units.is_empty()
+                && units.len() <= 48
+                && units.iter().enumerate().all(|(at, unit)| {
+                    let byte = *unit as u8;
+                    *unit < 0x80
+                        && (byte.is_ascii_alphabetic()
+                            || byte == b'_'
+                            || byte == b'$'
+                            || (at > 0 && byte.is_ascii_digit()))
+                })
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if names.is_empty() {
+        return;
+    }
+    writeln!(
+        output,
+        "static const kiln_string *const {symbol}_name_sources[{}] = {{",
+        names.len()
+    )
+    .unwrap();
+    for index in &names {
+        writeln!(output, "    &{symbol}_string_{index},").unwrap();
+    }
+    writeln!(output, "}};").unwrap();
+    writeln!(
+        output,
+        "__attribute__((constructor)) static void {symbol}_register_names(void) {{\n    (void)kiln_c99_register_static_keys({symbol}_name_sources, NULL, (size_t){});\n}}",
+        names.len()
+    )
+    .unwrap();
 }
 
 fn render_key_table_extern(output: &mut String, symbol: &str, keys: &[u32]) {
@@ -4300,6 +4497,9 @@ fn render_module_positioned(
     }
     let keys = property_key_constants(program);
     render_key_table(&mut output, program, unit_symbol, &keys, should_chunk);
+    if policy.shared_region {
+        render_name_registration(&mut output, program, unit_symbol, &keys);
+    }
     render_unit_state(
         &mut output,
         unit_symbol,

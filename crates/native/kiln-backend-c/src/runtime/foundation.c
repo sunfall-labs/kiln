@@ -977,7 +977,21 @@ typedef struct kiln_c99_realm_state {
     /* Where the realm's standard streams go when its host gave it a descriptor of its own -- a
      * realm hosted beside others in one process (realms issue 05) -- or 0 for the process's. */
     int output_fd;
+    /* The realm's own half of each region closure it has given a prototype or a property to
+     * (realms issue 08; `kiln_c99_region_own_slot`): a chained table keyed by the closure, whose
+     * entries never move, so a slot pointer stays valid while the table grows. */
+    struct kiln_c99_region_own **region_own;
+    size_t region_own_buckets;
+    size_t region_own_count;
 } kiln_c99_realm_state;
+
+/* A region closure's prototype and property store in one realm. */
+typedef struct kiln_c99_region_own {
+    const struct kiln_closure *closure;
+    kiln_value prototype;
+    kiln_value store;
+    struct kiln_c99_region_own *next;
+} kiln_c99_region_own;
 
 /* This thread's realm's context: its heap's, or the fallback heap's outside a realm. */
 static kiln_c99_realm_state *kiln_c99_realm(void);

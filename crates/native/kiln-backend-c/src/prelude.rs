@@ -4535,6 +4535,7 @@ typedef struct {
 static const kiln_builtin_gap kiln_c99_builtin_backlog[] = {
 "#,
     emit_builtin_backlog_rows!(),
+    include_str!(concat!(env!("OUT_DIR"), "/prelude_literal_keys.h")),
     core_parts!(),
 );
 
@@ -4768,6 +4769,9 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_speculate_rng", C99StateOwner::ThreadCache),
     // Which later entry of which site answered this thread last (`kiln_c99_site_answered`).
     ("kiln_c99_streaks", C99StateOwner::ThreadCache),
+    // The no-write read path (realms issue 08, parallel-builtins issue 06): whether this thread
+    // is reading without writing, around a section that leaves it as it found it.
+    ("kiln_c99_no_write_depth", C99StateOwner::Frame),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

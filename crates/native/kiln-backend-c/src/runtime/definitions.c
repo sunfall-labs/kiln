@@ -762,11 +762,11 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
             KILN_C99_REFUSE("the prototype property of a callable has no descriptor to answer "
                             "with");
         }
-        if (closure->properties.tag != KILN_VALUE_OBJECT) {
+        if (kiln_c99_closure_store(closure).tag != KILN_VALUE_OBJECT) {
             return KILN_C99_OK;
         }
-        store = closure->properties;
-        target = closure->properties;
+        store = kiln_c99_closure_store(closure);
+        target = store;
     }
     if (target.tag == KILN_VALUE_BUILTIN) {
         if (!kiln_c99_is_namespace(target.bits) &&
@@ -1038,8 +1038,8 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
                 *found = 1;
                 return KILN_C99_OK;
             }
-            if (closure->properties.tag == KILN_VALUE_OBJECT) {
-                kiln_object *store = kiln_c99_object_of(closure->properties);
+            if (kiln_c99_closure_store(closure).tag == KILN_VALUE_OBJECT) {
+                kiln_object *store = kiln_c99_object_of(kiln_c99_closure_store(closure));
                 size_t index;
                 if (store->shape != NULL) {
                     kiln_c99_ensure_dictionary(store);
@@ -1221,9 +1221,22 @@ static int kiln_c99_set_function_name(kiln_value function, kiln_value key, const
     /* A no-description symbol with no prefix remains the anonymous/null spelling; an empty
      * computed string key still gets the canonical empty header, preserving its inferred-name
      * identity for consumers that distinguish anonymous from explicitly empty names. */
-    closure->name = named.len == 0 && prefix == NULL && no_description_symbol
-                        ? NULL
-                        : (const kiln_string *)named.ptr;
+    {
+        const kiln_string *given = named.len == 0 && prefix == NULL && no_description_symbol
+                                       ? NULL
+                                       : (const kiln_string *)named.ptr;
+        if (KILN_UNLIKELY(closure->region)) {
+            /* A region closure (realms issue 08) is named once, by the realm that built the
+             * region, with the same definition every realm runs; the name is copied into the
+             * region so it outlives the builder's heap. Once sealed it is not written again. */
+            if (__atomic_load_n(&kiln_c99_process()->region_state, __ATOMIC_ACQUIRE) !=
+                KILN_C99_REGION_BUILDING)
+                return KILN_C99_OK;
+            given = kiln_c99_region_string(given);
+            if (given == NULL && named.len != 0) return KILN_C99_OUT_OF_MEMORY;
+        }
+        closure->name = given;
+    }
     return KILN_C99_OK;
 }
 
@@ -1265,7 +1278,7 @@ static int kiln_c99_define_private(kiln_value target, const char *key, size_t ke
      * `kiln_c99_object_of(target)` it landed in the closure itself. */
     {
         kiln_value holder =
-            target.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(target)->properties : target;
+            target.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_store(kiln_c99_closure_of(target)) : target;
         if (holder.tag == KILN_VALUE_OBJECT) kiln_c99_object_of(holder)->read_only_seen = 1;
     }
     return KILN_C99_OK;
@@ -1300,7 +1313,7 @@ static int kiln_c99_define_private_key(kiln_value target, const kiln_string *key
      * `kiln_c99_object_of(target)` it landed in the closure itself. */
     {
         kiln_value holder =
-            target.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(target)->properties : target;
+            target.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_store(kiln_c99_closure_of(target)) : target;
         if (holder.tag == KILN_VALUE_OBJECT) kiln_c99_object_of(holder)->read_only_seen = 1;
     }
     return KILN_C99_OK;
