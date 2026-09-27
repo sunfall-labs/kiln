@@ -1365,6 +1365,9 @@ pub(super) struct Intrinsics {
     /// rare enough that re-scanning to clear the flag would cost more than the walk it saves,
     /// and a stale `true` is only ever slower, never wrong.
     accessors: std::cell::Cell<bool>,
+    /// Monotonic across all realms: a numeric property on either default array prototype
+    /// invalidates the strict indexed-write shortcut, even after that property is deleted.
+    pub(super) indexed_array_prototype: std::cell::Cell<bool>,
     /// Each realm's nine error prototypes, indexed by realm and then by kind.
     ///
     /// Here rather than on the machine because `Error.prototype` is an own property of `Error`
@@ -1387,6 +1390,18 @@ impl Default for Intrinsics {
         Self {
             entries: RefCell::default(),
             accessors: std::cell::Cell::new(false),
+            indexed_array_prototype: std::cell::Cell::new(
+                kiln_builtin_surface::PROTOTYPE_SURFACE
+                    .iter()
+                    .any(|member| {
+                        matches!(
+                            member.prototype,
+                            kiln_builtin_surface::PrototypeId::Array
+                                | kiln_builtin_surface::PrototypeId::Object
+                        ) && array_index_key(PropertyKeyRef::Utf8(member.key.property_key()))
+                            .is_some()
+                    }),
+            ),
             error_prototypes: RefCell::new(vec![[const { None }; ErrorKind::ALL.len()]]),
             unscopables: RefCell::new(vec![None]),
         }
@@ -1615,6 +1630,16 @@ impl Intrinsics {
         };
         if matches!(property, Property::Accessor { .. }) {
             self.accessors.set(true);
+        }
+        if matches!(
+            target,
+            Value::Native(
+                Native::PrototypeOf(PrototypeTable::Array | PrototypeTable::Object),
+                _
+            )
+        ) && array_index_key(key).is_some()
+        {
+            self.indexed_array_prototype.set(true);
         }
         if matches!(target, Value::Native(Native::NodeBufferGlobal, _))
             && key.matches_ascii("prototype")

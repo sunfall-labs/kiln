@@ -194,6 +194,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 None => self.set_or_throw(&inner, key, value, instruction),
             };
         }
+        // Ordinary numeric writes need no key spelling or prototype scan when the array
+        // has default descriptors and no built-in prototype can supply an indexed property.
+        // Keep the shared indexed-write path (and its conservative sparse flag) authoritative.
+        if let (Value::Array(items), Value::Number(index)) = (target, key)
+            && *index >= 0.0
+            && *index < f64::from(u32::MAX)
+            && index.fract() == 0.0
+            && items.length_writable.get()
+            && items.elements.borrow().is_empty()
+            && items.properties.borrow().is_extensible()
+            && !items.properties.borrow().is_frozen()
+            && items.properties.borrow().prototype().is_none()
+            && !self.intrinsics.indexed_array_prototype.get()
+        {
+            return self.set_array_index(target, items, *index as usize, value, instruction);
+        }
         let units = key.property_key_units_checked()?;
         if !self.write_accepted_key(target, PropertyKeyRef::Units(&units)) {
             return Err(Self::write_refused(key));

@@ -1833,7 +1833,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     /// The indexed array write shared by numeric and string keys. Descriptor/refusal handling
     /// stays here so avoiding a numeric key's string allocation cannot bypass an exotic element.
-    fn set_array_index(
+    pub(crate) fn set_array_index(
         &mut self,
         target: &Value,
         items: &Rc<ArrayData>,

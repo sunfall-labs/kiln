@@ -2165,3 +2165,111 @@ fn to_property_key_coerces_regexp_and_other_objects_without_recursion() {
         .expect("Object.getOwnPropertyDescriptor with RegExp key succeeds");
     assert_eq!(desc, Value::Undefined);
 }
+
+#[test]
+fn numeric_array_write_guard_is_shared_and_monotonic() {
+    let intrinsics = Rc::new(Intrinsics::default());
+    let child = Rc::clone(&intrinsics);
+    assert!(!intrinsics.indexed_array_prototype.get());
+    for table in [PrototypeTable::Array, PrototypeTable::Object] {
+        let target = Value::Native(Native::PrototypeOf(table), RealmId(1));
+        child.materialize(&target);
+        assert!(!intrinsics.indexed_array_prototype.get());
+    }
+    let target = Value::Native(Native::PrototypeOf(PrototypeTable::Array), RealmId(1));
+    child.install_key(
+        &target,
+        PropertyKeyRef::Utf8("7"),
+        Property::Value(Value::Number(11.0)),
+        Attributes::NONE,
+    );
+    assert!(intrinsics.indexed_array_prototype.get());
+    child.remove_key(&target, PropertyKeyRef::Utf8("7"));
+    assert!(intrinsics.indexed_array_prototype.get());
+
+    let object_intrinsics = Intrinsics::default();
+    object_intrinsics.install_key(
+        &Value::Native(
+            Native::PrototypeOf(PrototypeTable::Object),
+            RealmId::PRIMARY,
+        ),
+        PropertyKeyRef::Utf8("0"),
+        Property::Accessor {
+            get: None,
+            set: None,
+        },
+        Attributes::NONE,
+    );
+    assert!(object_intrinsics.indexed_array_prototype.get());
+}
+
+#[test]
+fn strict_numeric_array_appends_retain_conservative_sparse_policy() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: Default::default(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let items = ArrayData::new(Vec::new());
+    let array = Value::Array(Rc::clone(&items));
+    vm.assign_with_strict(&array, &Value::Number(0.0), Value::Number(12.0), 0, true)
+        .unwrap();
+    assert!(
+        items.sparse.get(),
+        "appending must not enable unrelated dense-method shortcuts"
+    );
+    vm.assign_with_strict(&array, &Value::Number(3.0), Value::Number(15.0), 0, true)
+        .unwrap();
+    assert_eq!(items.length(), 4);
+    assert_eq!(items.borrow()[0], Value::Number(12.0));
+    assert!(matches!(items.borrow()[1], Value::Native(Native::Hole, _)));
+    assert!(matches!(items.borrow()[2], Value::Native(Native::Hole, _)));
+    assert_eq!(items.borrow()[3], Value::Number(15.0));
+}
+
+#[test]
+fn child_vm_property_definition_invalidates_callers_numeric_write_guard() {
+    for table in [PrototypeTable::Array, PrototypeTable::Object] {
+        let program = no_program();
+        let mut caller_host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+            entropy: Default::default(),
+            timezone: None,
+            locale: None,
+        };
+        let mut child_host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+            entropy: Default::default(),
+            timezone: None,
+            locale: None,
+        };
+        let caller = test_vm(&program, &mut caller_host);
+        let mut child = test_vm(&program, &mut child_host);
+        child.intrinsics = Rc::clone(&caller.intrinsics);
+        let prototype = Value::Native(Native::PrototypeOf(table), RealmId::PRIMARY);
+        let key = Value::String("0".into());
+        let descriptor = object(&[
+            ("value", Value::Number(17.0)),
+            ("writable", Value::Boolean(false)),
+            ("configurable", Value::Boolean(true)),
+        ]);
+        assert!(!caller.intrinsics.indexed_array_prototype.get());
+        child
+            .dispatch_native(
+                Native::ObjectDefineProperty,
+                &Value::Undefined,
+                &[prototype.clone(), key.clone(), descriptor],
+                0,
+            )
+            .unwrap();
+        assert!(caller.intrinsics.indexed_array_prototype.get());
+        assert!(child.delete(&prototype, &key, 0).unwrap());
+        assert!(caller.intrinsics.indexed_array_prototype.get());
+    }
+}
