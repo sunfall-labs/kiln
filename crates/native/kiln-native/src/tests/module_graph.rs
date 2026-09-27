@@ -153,15 +153,17 @@ fn bootstrap_emission_cache_reopens_and_separates_surface_and_policy() {
         ..Default::default()
     };
     let cache = ArtifactCache::new(&cache_path);
-    let (first, program, hit) =
+    let (first, program, capabilities, hit) =
         native_builtin_bootstrap_module(&cache, "test-target", &policy, false, false).unwrap();
     assert!(!hit);
     let reopened = ArtifactCache::new(&cache_path);
-    let (again, again_program, hit) =
+    let (again, again_program, again_capabilities, hit) =
         native_builtin_bootstrap_module(&reopened, "test-target", &policy, false, false).unwrap();
     assert!(hit);
     assert_eq!(first, again);
     assert_eq!(program, again_program);
+    assert!(std::ptr::eq(program, again_program));
+    assert_eq!(capabilities, again_capabilities);
     // A surface change and an emission-policy change must not return the earlier bootstrap.
     for (policy, url) in [
         (policy.clone(), true),
@@ -173,7 +175,7 @@ fn bootstrap_emission_cache_reopens_and_separates_surface_and_policy() {
             false,
         ),
     ] {
-        let (_, _, hit) =
+        let (_, _, _, hit) =
             native_builtin_bootstrap_module(&reopened, "test-target", &policy, false, url).unwrap();
         assert!(!hit);
     }
@@ -446,7 +448,7 @@ fn native_graph_wiring_uses_resolved_star_export_origins() {
         1
     );
     assert!(!launcher.contains("kiln_graph_enter_module"));
-    let (bootstrap, _, _) = native_builtin_bootstrap_module(
+    let (bootstrap, _, _, _) = native_builtin_bootstrap_module(
         &root.cache(),
         "test-target",
         &NativeRealmPolicy::default().emission(),

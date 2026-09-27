@@ -2338,7 +2338,7 @@ impl NativeBuilder {
                 (!sites.is_empty()).then(|| (path.clone(), sites))
             })
             .collect();
-        let (bootstrap, bootstrap_program, bootstrap_generated_c_hit) =
+        let (bootstrap, _bootstrap_program, bootstrap_capabilities, bootstrap_generated_c_hit) =
             native_builtin_bootstrap_module(
                 &self.cache,
                 &target,
@@ -2409,8 +2409,6 @@ impl NativeBuilder {
         let paths = GraphBuildPaths::new(workspace.path(), &symbol_list);
         let profile = options.profile;
         let compiler = compiler_identity(&identity);
-        let bootstrap_capabilities =
-            kiln_liveness::program_provider_capabilities(&bootstrap_program, None);
         let required_provider_capabilities =
             kiln_liveness::retained_provider_capabilities(graph, &demand, &members)
                 .union(bootstrap_capabilities);

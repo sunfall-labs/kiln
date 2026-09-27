@@ -4,9 +4,13 @@
 
 Accepted. Amended 2026-08-30 when protocol `Sync` and daemon socket discovery were found to use
 FNV as their whole coherence or identity decision, while the implemented artifact cache had already
-chosen SHA-256 rather than the proposed blake3 dependency. The rule survives unchanged; the
-concrete strong digest is now the workspace's dependency-free, full-width SHA-256, shared by all
-three consumers through `kiln-digest`.
+chosen SHA-256 rather than the proposed blake3 dependency. Amended 2026-09-27 after release-mode
+measurements showed that the handwritten scalar SHA-256 made large native artifact hashes about
+6.3–6.6 times slower than the workspace-pinned `sha2` implementation. A release-mode comparison
+hashed the same deterministic buffers 100 times at 4 KiB, 64 KiB, 1 MiB and 16 MiB; at 16 MiB,
+100 hashes took 4.69 s with the old scalar code and 0.74 s with `sha2`. The rule and full-width
+SHA-256 format survive unchanged; `kiln-digest` now delegates to `sha2` rather than owning a
+handwritten compression loop.
 
 ## Context
 
@@ -72,8 +76,10 @@ enough to be re-instantiated at every use site. `rustc-hash` clears that easily 
 no build script, no non-optional dependencies, and `FxHashMap` is a type alias for std's
 `HashMap` under a different `BuildHasher`. That is one more instantiation of map machinery the
 crate already compiles, plus a hasher of a few multiplies — not a new generic layer. The eventual
-strong digest takes the other permitted route: a small concrete dependency with no macros, generic
-framework, external dependencies, or build script.
+strong digest uses the same route, now with a maintained concrete implementation. The pinned
+`sha2` crate brings several small RustCrypto crates. Its `generic-array` dependency has a small
+version-check build script, and the closure widens foundational rebuilds; both costs are accepted
+because the measured hashing improvement reaches every artifact-cache consumer.
 
 ## Decision
 
@@ -100,10 +106,11 @@ daemon socket discovery, and every content-addressed artifact key use the concre
 value is ever fed into a strong key; a strong hash over a weak summary would still have the weak
 summary's collision boundary.
 
-`kiln-digest` owns the pinned FIPS 180-4 implementation and reference vectors. It is deliberately
-small and dependency-free. `kiln-proto` owns the source-specific newtype and its strict wire form;
-`kiln-artifact-cache` re-exports the same digest type so its existing public API does not fork the
-algorithm.
+`kiln-digest` wraps the workspace-pinned `sha2` implementation and owns compatibility vectors plus
+a differential test against the former implementation. Its byte output, hexadecimal protocol
+encoding, compact daemon-socket encoding and artifact-cache identity do not change. `kiln-proto`
+owns the source-specific newtype and its strict wire form; `kiln-artifact-cache` re-exports the same
+digest type so its existing public API does not fork the algorithm.
 
 ## Consequences
 

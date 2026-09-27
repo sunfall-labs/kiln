@@ -858,17 +858,19 @@ pub(super) fn emit_native_graph_module_with_policy(
     }
 }
 
-pub(super) fn native_builtin_bootstrap_module(
-    cache: &ArtifactCache,
-    target: &str,
-    policy: &EmissionPolicy,
-    node: bool,
-    retain_url: bool,
-) -> Result<(kiln_backend_c::CModule, kiln_ir::ModuleProgram, bool), NativeError> {
+struct NativeBuiltinBootstrapProgram {
+    program: Result<kiln_ir::ModuleProgram, Vec<kiln_ir::CompileDiagnostic>>,
+    source_digest: Digest,
+    program_digest: Digest,
+    provider_capabilities: ProviderCapabilities,
+}
+
+static NATIVE_BOOTSTRAP_NODE: OnceLock<NativeBuiltinBootstrapProgram> = OnceLock::new();
+static NATIVE_BOOTSTRAP_URL: OnceLock<NativeBuiltinBootstrapProgram> = OnceLock::new();
+static NATIVE_BOOTSTRAP_CORE: OnceLock<NativeBuiltinBootstrapProgram> = OnceLock::new();
+
+fn compile_native_builtin_bootstrap(node: bool, retain_url: bool) -> NativeBuiltinBootstrapProgram {
     const LOGICAL_PATH: &str = "@kiln/runtime-bootstrap.ts";
-    // `URL` rides the retain group liveness computed: a program that names neither it nor
-    // anything built on it gets no class, and the prelude behind it compiled out. `--node`
-    // always has it, because `fetch` is built on it.
     let url = if retain_url || node {
         kiln_builtins::URL_BOOTSTRAP_SOURCE
     } else {
@@ -881,17 +883,62 @@ pub(super) fn native_builtin_bootstrap_module(
             kiln_builtins::WEB_BOOTSTRAP_SOURCE
         )
     } else {
-        // The Buffer bootstrap (Node mode) captures and deletes this bridge; without it the
-        // bridge would be the one global node does not have, so it goes here instead.
         format!(
             "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{common_ts_builtins}\n{url}\ndelete globalThis.__kilnBufferToString;\n"
         )
     };
+    let source_digest = Digest::hash(source.as_bytes());
     let hir = kiln_frontend_oxc::parse(LOGICAL_PATH, &source);
-    let program = kiln_ir::compile_module(&hir).map_err(|diagnostics| {
+    let program = kiln_ir::compile_module(&hir);
+    let program_digest = program
+        .as_ref()
+        .map(|program| Digest::hash(format!("{program:?}").as_bytes()))
+        .unwrap_or_default();
+    let provider_capabilities = program
+        .as_ref()
+        .map(|program| kiln_liveness::program_provider_capabilities(program, None))
+        .unwrap_or(ProviderCapabilities::NONE);
+    NativeBuiltinBootstrapProgram {
+        program,
+        source_digest,
+        program_digest,
+        provider_capabilities,
+    }
+}
+
+pub(super) fn native_builtin_bootstrap_module(
+    cache: &ArtifactCache,
+    target: &str,
+    policy: &EmissionPolicy,
+    node: bool,
+    retain_url: bool,
+) -> Result<
+    (
+        kiln_backend_c::CModule,
+        &'static kiln_ir::ModuleProgram,
+        ProviderCapabilities,
+        bool,
+    ),
+    NativeError,
+> {
+    const LOGICAL_PATH: &str = "@kiln/runtime-bootstrap.ts";
+    // `URL` rides the retain group liveness computed: a program that names neither it nor
+    // anything built on it gets no class, and the prelude behind it compiled out. `--node`
+    // always has it, because `fetch` is built on it.
+    let compiled = if node {
+        NATIVE_BOOTSTRAP_NODE.get_or_init(|| compile_native_builtin_bootstrap(true, true))
+    } else if retain_url {
+        NATIVE_BOOTSTRAP_URL.get_or_init(|| compile_native_builtin_bootstrap(false, true))
+    } else {
+        NATIVE_BOOTSTRAP_CORE.get_or_init(|| compile_native_builtin_bootstrap(false, false))
+    };
+    // The only source variants are fixed by the process build and runtime surface choice. Keep
+    // compiled immutable bytecode and its source/provider analysis once per variant; every realm
+    // still executes it into its own mutable objects.
+    let program = compiled.program.as_ref().map_err(|diagnostics| {
         NativeError::Graph(ModuleGraphError::Compile {
             path: PathBuf::from(LOGICAL_PATH),
-            diagnostics,
+            diagnostics: diagnostics.clone(),
         })
     })?;
     // The bootstrap is cold code every binary carries -- the console methods, the Set algebra,
@@ -902,18 +949,18 @@ pub(super) fn native_builtin_bootstrap_module(
     bootstrap_policy.generic_only = true;
     if !bootstrap_policy.decoupled_prelude {
         let module =
-            emit_module_with_logical_path_and_policy(&program, LOGICAL_PATH, bootstrap_policy)?;
-        return Ok((module, program, false));
+            emit_module_with_logical_path_and_policy(program, LOGICAL_PATH, bootstrap_policy)?;
+        return Ok((module, program, compiled.provider_capabilities, false));
     }
-    // The bootstrap is shared by hundreds of unrelated executables. Cache before C rendering,
-    // just like ordinary modules: hashing its rendered source only saves the downstream C
-    // compile and still rebuilds the entire Value Graph on every cache hit. Use compiled IR
-    // rather than source text, so frontend/IR changes participate in the identity too.
+    // Bind cached emission to both source text and the parsed/compiled IR. The full bootstraps
+    // keep their own precomputed fingerprints above, so a cache hit skips frontend work as well
+    // as Value Graph construction and C rendering.
     let input = Digest::hash(
         format!(
             "{:?}",
             (
-                &program,
+                compiled.source_digest,
+                compiled.program_digest,
                 ModuleSource::Source,
                 LOGICAL_PATH,
                 &bootstrap_policy
@@ -923,12 +970,12 @@ pub(super) fn native_builtin_bootstrap_module(
     );
     let (c_module, hit) = cached_emitted_module(cache, target, input, || {
         Ok(emit_module_with_logical_path_and_policy(
-            &program,
+            program,
             LOGICAL_PATH,
             bootstrap_policy,
         )?)
     })?;
-    Ok((c_module, program, hit))
+    Ok((c_module, program, compiled.provider_capabilities, hit))
 }
 
 pub(super) fn cached_payload(

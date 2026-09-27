@@ -1,10 +1,15 @@
-//! Kiln's stable, dependency-free SHA-256 value.
+//! Kiln's stable SHA-256 value, backed by the workspace-pinned RustCrypto implementation.
 //!
 //! Strong digests are used only where digest equality is the whole reuse, coherence, or identity
 //! decision.
-//! Keeping the concrete implementation in this small crate lets foundational protocol code and
-//! leaf artifact-cache code share one pinned algorithm without pulling generic hashing frameworks
-//! or build scripts onto the compiler's rebuild path.
+//! Keeping the concrete digest type here lets protocol and artifact-cache code share one pinned
+//! algorithm and output format. `sha2` replaces the original scalar implementation after release
+//! measurements showed 6.3–6.6x higher throughput on inputs from 4 KiB through 16 MiB. The
+//! dependency adds several small RustCrypto crates; `generic-array` runs a small version-check
+//! build script. That rebuild cost is lower than spending a measurable part of every warm native
+//! build hashing large generated C and cached artifacts.
+
+use sha2::{Digest as _, Sha256};
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -19,7 +24,7 @@ pub struct Digest([u8; DIGEST_BYTES]);
 impl Digest {
     /// Hash arbitrary bytes with the stable SHA-256 implementation.
     pub fn hash(bytes: &[u8]) -> Self {
-        Self(sha256(bytes))
+        Self(Sha256::digest(bytes).into())
     }
 
     /// Construct a digest from its raw bytes.
@@ -132,8 +137,10 @@ fn hex_value(value: u8) -> Option<u8> {
     }
 }
 
-// FIPS 180-4's 512-bit block schedule, written directly to keep this foundational primitive
-// dependency-free and straightforward to audit.
+// The previous in-crate implementation remains test-only as an independent compatibility oracle.
+// Production hashing has one maintained implementation above; the digest bytes and wire/cache
+// identity remain the same full-width FIPS 180-4 SHA-256 value.
+#[cfg(test)]
 fn sha256(input: &[u8]) -> [u8; DIGEST_BYTES] {
     const INITIAL: [u32; 8] = [
         0x6a09_e667,
@@ -386,6 +393,22 @@ mod tests {
             repeated(65),
             "635361c48bb9eab14198e76ea8ab7f1a41685d6ad62aa9146d301d4f17eb0ae0"
         );
+    }
+
+    #[test]
+    fn maintained_sha256_matches_the_previous_implementation_across_lengths() {
+        let lengths =
+            (0..=257).chain([4095, 4096, 4097, 55_999, 65_535, 65_536, 65_537, 1_000_000]);
+        for length in lengths {
+            let bytes = (0_usize..length)
+                .map(|index| (index.wrapping_mul(31) ^ (index >> 3)) as u8)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                Digest::hash(&bytes).as_bytes(),
+                &sha256(&bytes),
+                "digest differs at input length {length}"
+            );
+        }
     }
 
     /// The one-million-'a' vector, which is the only cheap check on the 64-bit length field.
