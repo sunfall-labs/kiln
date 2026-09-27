@@ -218,3 +218,83 @@ same; reset gained one flag test). Startup gains the constructors: a hash, probe
 unit constant, formerly paid at each unit's first entry into each realm (plus a heap copy), now
 paid once before `main` -- also for units never entered, and ~300 built-in names. Not
 re-benchmarked; worth watching in the quiet-machine pass for very large bundles' start time.
+
+### 2026-09-26 -- step 3 done (branch `alee/caches-restated`, commit fb335976)
+
+**Entries.** `kiln_c99_pic_entry` is now `shape, transition_to, slot, proto_slot, depth, absent,
+level_token[2], level_shape[2], key` (64 bytes, was ~112): no `holder`, `via`, `holder_value`,
+`holder_val` or `epoch`. An own property is `slot`. Anything else is a *path* of `depth` (1-2)
+prototype steps from the receiver; each level is named by its shape, a list-mode level by a
+layout token, and a list-mode *holder* by the key its record carries (`key`, the site's
+canonical pointer). A hit walks the receiver's live links, checks each level, reads the slot or
+list record live (accessor bit checked). `absent` states "not on the receiver or levels 1..depth,
+and the last level's prototype is null -- or undefined while this realm has not modified
+Object.prototype"; the same statement is what a transitioning store's clearance now caches
+(replacing `via` + epoch). A list-mode *intermediate* is new: the old walk stopped there, so
+`b.m()` through `B.prototype -> A.prototype` was never cached before and is now (a probe went
+397 -> 104 ms).
+
+**Layout tokens.** `kiln_object.cache_holder` (u8) became `layout_token` (u32, in the same
+padding). A list-mode object a path relies on gets a process-unique token from the shared block
+(`next_layout_token`, never reused, saturating to "don't cache"); `kiln_c99_prototype_touched`
+clears it -- the same mutation paths that used to move the epoch. A token never false-matches
+another realm or a reused address, but it is one object's number, so an entry through a
+list-mode intermediate or absent-proof level only *hits* in the realm that owns that object;
+another realm relearns (correct, not shared). Holders are key-checked and so are shared.
+`KILN_IC_CHECK` now traps when a token-trusted list level has gained the key.
+
+**Typed callees.** `_fn`, `_proto`, `_epoch`, `_upvalues` are gone, with the shape-first arm that
+called straight from `_shape` without loading the closure. A candidate is recognised by
+`plain->body == fn_i` on the closure the site just read live; upvalues are `plain->upvalues`.
+`_shape`/`_row` stay (shape-only; rows exist only for shared shapes), and when the receiver's
+shape is the remembered one the row is passed in known.
+
+**Built-ins.** A site stores `cached_builtin` only (no `cached_epoch`/`cached_generation`). The
+heap carries `modified_builtins` (a bitmap, plus a flag for ids >= 128), marked by
+`kiln_c99_callable_store(create)`; a hit asks `kiln_c99_realm_builtin_modified(id)`, which also
+counts Object/Function/%TypedArray%.prototype, only when `kiln_c99_builtin_store_epoch` is
+nonzero. That word stays, reclassified Process: "some realm modified some built-in", never
+stored in an entry; the emitted `== 0` speculations keep reading it (conservative for every
+realm). `kiln_c99_proto_epoch` is deleted.
+
+**Shapes and teardown.** `lit_shape`, `kiln_sp_shape_*`, receiver rows (`kiln_c99_recv_claim`)
+and private-field sites cache only `shape->shared` shapes -- installed/used without comparison
+or through process statics, they must never see a freeable address. Sites (`kiln_c99_site`) may
+hold realm-local shapes and keys (JSON-parsed objects with unnamed keys stay cached):
+`kiln_c99_gc_register_site` now registers a site only when an entry names a realm-local shape
+or key (`site->registered` is the heap serial), and teardown calls
+`kiln_c99_gc_forget_realm_local` *before* sweeping, dropping exactly those entries. The GC-time
+dead-holder sweep is gone (nothing in an entry is a heap object); `heap->sites` is now freed.
+
+**Verified.** `mbx test -p kiln-backend-c --offline`: 208 passed, 1 ignored; emitted_c 36 passed
+(snapshots updated). New test `a_site_forgets_a_torn_down_realms_local_shapes_and_keys` (two
+heaps: site registers only for local entries, forgets them at teardown and keeps the shared one;
+per-realm built-in record; token issue/clear/no-reuse). `scripts/native.sh`: 234 matched,
+1 refused, 0 diverged. `mise run native-stress`: 234 matched, 1 refused, 0 diverged.
+`scripts/thirdparty.sh`: 17 matched, 0 diverged (5 bundles not built); native 17/0/0.
+Hand probes (reassigned method, shadowing on the way, swapped prototype, same-shape classes,
+absent then gained, Object.prototype gained, accessor replacing a method, setter chain on a
+transitioning store, `Math.max` patched) agree with node and the interpreter, also with
+`KILN_IC_CHECK=1`.
+
+**Benchmarks** (native-release, before = fa213915, alternated; load average 21-24 throughout, so
+treat single numbers with suspicion). class-poly warm median: before 2.0 ms best / after 4.06
+(quiet passes), 4.8 / 10.6 under load -- a real ~1.9x regression: the removed shape-first typed
+arm never loaded the callee; ADR 0071 requires loading it and checking its code, and the path
+walk plus closure load is ~3-4 ns per call (a standalone copy: 79 -> 117 ms min of 15). An
+entry-index variant that skipped the entry search bought only ~3% and was dropped.
+collections: 17.25 / 16.5 ms min, 22.3 / 21.3 median (no change). json: noise-dominated
+(152 / 127 ms first pass). Small service (`app.mjs`, drive-mix, c=16, 5 alternating 4 s passes):
+6945 / 6904 rps median, server CPU 73.3 / 75.5 us per request (~3%, inside this machine's
+spread today).
+
+**Left / risks.**
+- class-poly-style typed dispatch through a class prototype is ~2x slower. Recovering it
+  realm-independently needs class prototypes to have shapes (so a hit is shape compares plus
+  one slot load) -- a shapes change, not a cache change.
+- Token-named entries (list-mode intermediates, absent/clearance through class prototypes) are
+  correct everywhere but per realm in effect; two live realms sharing such a site ping-pong.
+- A cached built-in member of a realm that has ever written Object/Function/%TypedArray%.prototype
+  stays uncached in that realm (sticky marks; the old epoch relearned).
+- Step 4 is untouched: entries are written non-atomically; the teardown sweep writes sites
+  another realm's thread could be reading once realms run concurrently.
