@@ -1,4 +1,35 @@
 
+/* An accessor property of a shaped object keeps its two halves in its one slot, as a pair: a
+ * two-element array, getter then setter, that no program ever sees. Every path that reads a slot
+ * it found by key checks the shape's `accessor_mask` first, and an inline cache only learns a
+ * slot whose attributes say it holds a value, so the pair is only ever read through here. It is
+ * an ordinary collected block, reached from the object's slot like any other value. */
+static int kiln_c99_accessor_pair_new(kiln_value getter, kiln_value setter, kiln_val *out) {
+    kiln_value pair;
+    kiln_array *array;
+    int status = kiln_c99_new_array(&pair);
+    if (status != KILN_C99_OK) return status;
+    array = kiln_c99_array_of(pair);
+    array->is_numeric = 0;
+    status = kiln_c99_array_reserve(array, 2);
+    if (status != KILN_C99_OK) return status;
+    array->elements[0] = kiln_val_from_boundary(getter);
+    array->elements[1] = kiln_val_from_boundary(setter);
+    array->count = 2;
+    *out = kiln_val_from_boundary(pair);
+    return KILN_C99_OK;
+}
+
+/* One half of a pair (0 the getter, 1 the setter); undefined for a half never defined. */
+static kiln_value kiln_c99_accessor_pair_half(kiln_val pair, int which) {
+    kiln_value boxed = kiln_val_to_boundary(pair);
+    const kiln_array *array;
+    if (boxed.tag != KILN_VALUE_ARRAY) return kiln_c99_undefined();
+    array = kiln_c99_array_of(boxed);
+    if (array->count != 2) return kiln_c99_undefined();
+    return kiln_val_to_boundary(array->elements[which]);
+}
+
 /* The one process-wide root (ADR 0071), in the shared block every unit reaches. */
 static inline struct kiln_shape *kiln_c99_shape_root(void) {
     return &kiln_c99_process()->root;
@@ -24,6 +55,13 @@ static int kiln_c99_shape_find_slot(const kiln_shape *shape, const kiln_string *
         }
     }
     return 0;
+}
+
+/* Whether the property in `slot` is enumerable, exactly as the list-mode record
+ * `kiln_c99_ensure_dictionary` would build for it says. */
+static inline int kiln_c99_shape_slot_enumerable(const kiln_shape *shape, uint32_t slot) {
+    return !kiln_c99_key_is_reserved(shape->keys[slot]) ^
+           ((shape->attrs[slot] & KILN_C99_ATTR_ENUM_FLIP) != 0);
 }
 
 /* The slot of the key spelt `bytes` in `shape`, or UINT32_MAX when the shape has no such key. A
@@ -67,27 +105,39 @@ static void kiln_c99_pin_interned_key(const kiln_string *ikey) {
  * reads; a realm-local shape's own edges lead to realm-local children. A realm-local edge out of
  * a shared shape -- a key of the realm's own, or a child the realm owns -- lives in the realm
  * heap's side table instead, so no realm ever follows an edge into another realm's memory. */
+/* Whether `child`, an edge of a shape with `count` properties, is the transition wanted: the
+ * double bit and the attributes of the slot it adds are part of the edge's key, as the key is. */
+static inline int kiln_c99_shape_edge_is(const kiln_shape *child, uint32_t count, uint32_t bit,
+                                         uint32_t expected_bit, uint32_t attrs) {
+    /* A slot's special bit is set exactly when its attributes are not zero, which answers the
+     * common case -- an assignment's edge -- from the word beside the double mask. */
+    return (child->double_slots_mask & bit) == expected_bit &&
+           (attrs == 0 ? (child->special_mask & bit) == 0 : child->attrs[count] == attrs);
+}
+
 static kiln_shape *kiln_c99_shape_inline_edge(const kiln_shape *current, uint32_t count,
                                               const kiln_string *ikey, uint32_t bit,
-                                              uint32_t expected_bit) {
+                                              uint32_t expected_bit, uint32_t attrs) {
     uint32_t i;
     for (i = 0; i < 2 && i < count; ++i) {
         if (current->inline_trans_ikey[i] == ikey) {
             kiln_shape *cand = current->inline_trans_next[i];
-            if ((cand->double_slots_mask & bit) == expected_bit) return cand;
+            if (kiln_c99_shape_edge_is(cand, current->property_count, bit, expected_bit, attrs))
+                return cand;
         }
     }
     return NULL;
 }
 
 static kiln_shape *kiln_c99_shape_list_edge(const kiln_shape *current, const kiln_string *ikey,
-                                            uint32_t bit, uint32_t expected_bit) {
+                                            uint32_t bit, uint32_t expected_bit, uint32_t attrs) {
     const kiln_shape_transition *tr;
     for (tr = __atomic_load_n(&current->transitions, __ATOMIC_ACQUIRE); tr != NULL;
          tr = tr->next_transition) {
         if (tr->ikey == ikey) {
             kiln_shape *cand = tr->next;
-            if ((cand->double_slots_mask & bit) == expected_bit) return cand;
+            if (kiln_c99_shape_edge_is(cand, current->property_count, bit, expected_bit, attrs))
+                return cand;
         }
     }
     return NULL;
@@ -101,12 +151,12 @@ static size_t kiln_c99_local_edge_home(const kiln_shape *parent, const kiln_stri
     return (size_t)hash & mask;
 }
 
-/* The side-table row for `parent` and `key` whose child agrees on the double bit, or with a NULL
- * `key` the parent's count row. */
+/* The side-table row for `parent` and `key` whose child agrees on the double bit and the
+ * attributes, or with a NULL `key` the parent's count row. */
 static kiln_c99_local_edge *kiln_c99_local_edge_row(const kiln_gc_heap *heap,
                                                     const kiln_shape *parent,
                                                     const kiln_string *key, uint32_t bit,
-                                                    uint32_t expected_bit) {
+                                                    uint32_t expected_bit, uint32_t attrs) {
     size_t mask;
     size_t at;
     if (heap->local_edge_count == 0) return NULL;
@@ -116,7 +166,8 @@ static kiln_c99_local_edge *kiln_c99_local_edge_row(const kiln_gc_heap *heap,
         kiln_c99_local_edge *row = &heap->local_edges[at];
         if (row->parent == NULL) return NULL;
         if (row->parent == parent && row->key == key &&
-            (key == NULL || (row->child->double_slots_mask & bit) == expected_bit))
+            (key == NULL || kiln_c99_shape_edge_is(row->child, parent->property_count, bit,
+                                                   expected_bit, attrs)))
             return row;
         at = (at + 1) & mask;
     }
@@ -149,7 +200,7 @@ static int kiln_c99_local_edge_reserve(kiln_gc_heap *heap) {
 
 /* How many realm-local edges `parent` has in this heap. */
 static uint32_t kiln_c99_local_edge_count(const kiln_gc_heap *heap, const kiln_shape *parent) {
-    const kiln_c99_local_edge *row = kiln_c99_local_edge_row(heap, parent, NULL, 0, 0);
+    const kiln_c99_local_edge *row = kiln_c99_local_edge_row(heap, parent, NULL, 0, 0, 0);
     return row == NULL ? 0 : (uint32_t)(uintptr_t)row->child;
 }
 
@@ -168,7 +219,7 @@ static int kiln_c99_local_edge_insert(kiln_gc_heap *heap, const kiln_shape *pare
     row.key = key;
     row.child = child;
     kiln_c99_local_edge_place(heap->local_edges, heap->local_edge_capacity, row);
-    count_row = kiln_c99_local_edge_row(heap, parent, NULL, 0, 0);
+    count_row = kiln_c99_local_edge_row(heap, parent, NULL, 0, 0, 0);
     if (count_row != NULL) {
         count_row->child = (kiln_shape *)(uintptr_t)((uintptr_t)count_row->child + 1);
     } else {
@@ -231,11 +282,13 @@ static void kiln_c99_shape_edge_claim(kiln_shape_edge_table *table, kiln_shape *
  * edges is separate and already hashed. */
 static kiln_shape *kiln_c99_shape_table_edge(const kiln_shape_edge_table *table,
                                              const kiln_string *ikey, uint32_t bit,
-                                             uint32_t expected_bit) {
+                                             uint32_t expected_bit, uint32_t attrs) {
     uint32_t at = kiln_c99_shape_edge_hash(ikey) & table->mask;
     kiln_shape *seen;
     while ((seen = __atomic_load_n(&table->edges[at], __ATOMIC_ACQUIRE)) != NULL) {
-        if (seen->ikey == ikey && (seen->double_slots_mask & bit) == expected_bit) return seen;
+        /* The slot a child adds is its parent's count, which is `bit`'s index. */
+        if (seen->ikey == ikey && kiln_c99_shape_edge_is(seen, seen->slot_index, bit, expected_bit, attrs))
+            return seen;
         at = (at + 1) & table->mask;
     }
     return NULL;
@@ -278,7 +331,8 @@ static int kiln_c99_shape_index_edge(kiln_shape *shape, uint32_t count, kiln_sha
 }
 
 static kiln_shape *kiln_c99_shape_child(kiln_shape *current, const kiln_string *ikey,
-                                        uint32_t expected_bit) {
+                                        uint32_t expected_bit, uint32_t attrs) {
+    uint32_t bit = 1u << current->property_count;
     kiln_shape *next_shape = (kiln_shape *)calloc(1, sizeof(kiln_shape));
     if (next_shape == NULL) return NULL;
     __atomic_fetch_add(&kiln_c99_shape_total, 1u, __ATOMIC_RELAXED);
@@ -294,6 +348,14 @@ static kiln_shape *kiln_c99_shape_child(kiln_shape *current, const kiln_string *
     memcpy((void *)next_shape->keys, (const void *)current->keys,
            current->property_count * sizeof(const kiln_string *));
     next_shape->keys[current->property_count] = ikey;
+    memcpy(next_shape->attrs, current->attrs, current->property_count);
+    next_shape->attrs[current->property_count] = (uint8_t)attrs;
+    next_shape->special_mask = current->special_mask | (attrs != 0 ? bit : 0);
+    next_shape->accessor_mask =
+        current->accessor_mask | ((attrs & KILN_C99_ATTR_ACCESSOR) != 0 ? bit : 0);
+    next_shape->store_mask =
+        current->store_mask |
+        ((attrs & (KILN_C99_ATTR_READONLY | KILN_C99_ATTR_ACCESSOR)) != 0 ? bit : 0);
     return next_shape;
 }
 
@@ -320,7 +382,7 @@ static int kiln_c99_shape_link(kiln_shape *current, const kiln_string *ikey, kil
 }
 
 static int kiln_c99_shape_add(kiln_shape *current, const kiln_string *ikey, int is_double,
-                              int unbounded, kiln_shape **out_shape) {
+                              uint32_t attrs, int unbounded, kiln_shape **out_shape) {
     uint32_t bit = 1u << current->property_count;
     uint32_t expected_bit = is_double ? bit : 0;
     int key_shared = kiln_c99_key_is_shared(ikey);
@@ -332,14 +394,14 @@ static int kiln_c99_shape_add(kiln_shape *current, const kiln_string *ikey, int 
         kiln_c99_process_lock(process);
         /* Another thread may have added it since the unlocked look. */
         next_shape = kiln_c99_shape_inline_edge(current, current->num_transitions, ikey, bit,
-                                                expected_bit);
+                                                expected_bit, attrs);
         if (next_shape == NULL)
-            next_shape = kiln_c99_shape_list_edge(current, ikey, bit, expected_bit);
+            next_shape = kiln_c99_shape_list_edge(current, ikey, bit, expected_bit, attrs);
         if (next_shape == NULL) {
             edges = current->num_transitions +
                     (heap != NULL ? kiln_c99_local_edge_count(heap, current) : 0);
             if (kiln_c99_shape_edge_room(edges, ikey, unbounded) &&
-                (next_shape = kiln_c99_shape_child(current, ikey, expected_bit)) != NULL) {
+                (next_shape = kiln_c99_shape_child(current, ikey, expected_bit, attrs)) != NULL) {
                 next_shape->shared = 1;
                 if (!kiln_c99_shape_link(current, ikey, next_shape)) {
                     free(next_shape);
@@ -356,7 +418,7 @@ static int kiln_c99_shape_add(kiln_shape *current, const kiln_string *ikey, int 
     edges = __atomic_load_n(&current->num_transitions, __ATOMIC_ACQUIRE);
     if (current->shared) edges += kiln_c99_local_edge_count(heap, current);
     if (!kiln_c99_shape_edge_room(edges, ikey, unbounded)) return 0;
-    next_shape = kiln_c99_shape_child(current, ikey, expected_bit);
+    next_shape = kiln_c99_shape_child(current, ikey, expected_bit, attrs);
     if (next_shape == NULL) return 0;
     if (current->shared ? !kiln_c99_local_edge_insert(heap, current, ikey, next_shape)
                         : !kiln_c99_shape_link(current, ikey, next_shape)) {
@@ -373,7 +435,8 @@ static int kiln_c99_shape_add(kiln_shape *current, const kiln_string *ikey, int 
 }
 
 static int kiln_c99_shape_transition_ex(kiln_shape *current, const kiln_string *ikey,
-                                        int is_double, int unbounded, kiln_shape **out_shape) {
+                                        int is_double, uint32_t attrs, int unbounded,
+                                        kiln_shape **out_shape) {
     uint32_t bit;
     uint32_t expected_bit;
     kiln_shape *next_shape;
@@ -387,7 +450,7 @@ static int kiln_c99_shape_transition_ex(kiln_shape *current, const kiln_string *
         if (table != NULL) {
             /* The index covers every own edge it was published with; one it has not seen yet is
              * found again by `kiln_c99_shape_add`'s rescan under the lock. */
-            next_shape = kiln_c99_shape_table_edge(table, ikey, bit, expected_bit);
+            next_shape = kiln_c99_shape_table_edge(table, ikey, bit, expected_bit, attrs);
             if (next_shape != NULL) {
                 *out_shape = next_shape;
                 return 1;
@@ -395,29 +458,87 @@ static int kiln_c99_shape_transition_ex(kiln_shape *current, const kiln_string *
         } else {
             next_shape = kiln_c99_shape_inline_edge(
                 current, __atomic_load_n(&current->num_transitions, __ATOMIC_ACQUIRE), ikey, bit,
-                expected_bit);
+                expected_bit, attrs);
         }
     }
     if (next_shape == NULL && current->shared) {
         const kiln_gc_heap *heap = kiln_c99_gc_heap();
         if (heap != NULL && heap->local_edge_count != 0) {
             const kiln_c99_local_edge *row =
-                kiln_c99_local_edge_row(heap, current, ikey, bit, expected_bit);
+                kiln_c99_local_edge_row(heap, current, ikey, bit, expected_bit, attrs);
             if (row != NULL) next_shape = row->child;
         }
     }
     if (next_shape == NULL && current->edge_table == NULL)
-        next_shape = kiln_c99_shape_list_edge(current, ikey, bit, expected_bit);
+        next_shape = kiln_c99_shape_list_edge(current, ikey, bit, expected_bit, attrs);
     if (next_shape != NULL) {
         *out_shape = next_shape;
         return 1;
     }
-    return kiln_c99_shape_add(current, ikey, is_double, unbounded, out_shape);
+    return kiln_c99_shape_add(current, ikey, is_double, attrs, unbounded, out_shape);
 }
 
 static int kiln_c99_shape_transition(kiln_shape *current, const kiln_string *ikey, int is_double,
                                      kiln_shape **out_shape) {
-    return kiln_c99_shape_transition_ex(current, ikey, is_double, 0, out_shape);
+    return kiln_c99_shape_transition_ex(current, ikey, is_double, 0, 0, out_shape);
+}
+
+/* Issue 04 step 3b: a definition that keeps its object shaped.
+ *
+ * Adds `ikey`, which the object does not have, as a new own property whose attributes are
+ * `attrs` (`KILN_C99_ATTR_*`) and whose slot holds `held` -- a value, or for an accessor its pair
+ * -- by the transition keyed by both. This is how a class prototype's `constructor`, methods and
+ * accessors, a private method, and a runtime object's non-enumerable members are defined without
+ * leaving shape mode. Returns 1 when done (`*status` says whether it succeeded), 0 when the object
+ * cannot stay shaped this way -- an index-like key, the fast-property limit, a branch that is
+ * full -- and the caller's list-mode path, unchanged, must do the definition. The counters
+ * `kiln_c99_put_mode_key`'s chain walk skips by are kept as the list would keep them. */
+static int kiln_c99_shape_define_new(kiln_object *object, const kiln_string *ikey, kiln_val held,
+                                     uint32_t attrs, int *status) {
+    kiln_shape *next;
+    uint32_t slot;
+    if (object->shape == NULL || object->properties != NULL || ikey == NULL ||
+        kiln_c99_key_index_key(ikey) >= 0.0) {
+        return 0;
+    }
+    if (!kiln_c99_shape_transition_ex(object->shape, ikey,
+                                      attrs == 0 && KILN_VAL_IS_NUMBER(held), attrs, 0, &next)) {
+        return 0;
+    }
+    slot = next->slot_index;
+    if (slot >= object->slot_capacity) {
+        size_t new_cap =
+            object->slot_capacity == 0 ? KILN_C99_INLINE_SLOTS : object->slot_capacity * 2;
+        kiln_val *new_slots;
+        size_t fill;
+        while (slot >= new_cap) new_cap *= 2;
+        if (object->slots == object->inline_slots) {
+            new_slots = (kiln_val *)malloc(new_cap * sizeof(kiln_val));
+            if (new_slots != NULL)
+                memcpy(new_slots, object->inline_slots, KILN_C99_INLINE_SLOTS * sizeof(kiln_val));
+        } else if (object->slots == NULL) {
+            new_slots = (kiln_val *)malloc(new_cap * sizeof(kiln_val));
+        } else {
+            new_slots = (kiln_val *)realloc(object->slots, new_cap * sizeof(kiln_val));
+        }
+        if (new_slots == NULL) {
+            *status = KILN_C99_OUT_OF_MEMORY;
+            return 1;
+        }
+        for (fill = object->slot_capacity; fill < new_cap; ++fill) new_slots[fill] = KILN_VAL_UNDEFINED;
+        object->slots = new_slots;
+        object->slot_capacity = new_cap;
+    }
+    kiln_c99_prototype_touched(object);
+    object->slots[slot] = held;
+    object->shape = next;
+    if (attrs & KILN_C99_ATTR_ACCESSOR) {
+        object->accessor_count += 1;
+    } else if (attrs & KILN_C99_ATTR_READONLY) {
+        object->read_only_seen = 1;
+    }
+    *status = KILN_C99_OK;
+    return 1;
 }
 
 static int kiln_c99_ensure_dictionary(kiln_object *object) {
@@ -477,20 +598,32 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
     for (i = 0; i < shape->property_count; ++i) {
         const kiln_string *key = shape->keys[i];
         size_t key_len = kiln_c99_key_len(key);
+        uint32_t attrs = shape->attrs[i];
+        kiln_val held = (object->slots != NULL && i < object->slot_capacity)
+                            ? object->slots[i]
+                            : KILN_VAL_UNDEFINED;
+        /* The record a list-mode object would carry for the same history: see
+         * `KILN_C99_ATTR_*`, which are its differences from an assignment's record. */
         object->properties[pos].key = key;
         object->properties[pos].key_len = key_len;
-        object->properties[pos].enumerable = !(key_len >= 2 && kiln_string_unit_at(key, 0) == '@' &&
-                                              kiln_string_unit_at(key, 1) == '@');
-        object->properties[pos].writable = 1;
-        object->properties[pos].configurable = 1;
+        object->properties[pos].enumerable =
+            !(key_len >= 2 && kiln_string_unit_at(key, 0) == '@' &&
+              kiln_string_unit_at(key, 1) == '@') ^
+            ((attrs & KILN_C99_ATTR_ENUM_FLIP) != 0);
+        object->properties[pos].writable = (attrs & KILN_C99_ATTR_READONLY) == 0;
+        object->properties[pos].configurable = (attrs & KILN_C99_ATTR_FIXED) == 0;
         object->properties[pos].symbol_hidden = 0;
-        object->properties[pos].accessor = 0;
+        object->properties[pos].accessor = (attrs & KILN_C99_ATTR_ACCESSOR) != 0;
         object->properties[pos].refused = 0;
-        object->properties[pos].value = (object->slots != NULL && i < object->slot_capacity)
-                                          ? kiln_val_to_boundary(object->slots[i])
-                                          : kiln_c99_undefined();
-        object->properties[pos].getter = kiln_c99_undefined();
-        object->properties[pos].setter = kiln_c99_undefined();
+        if (attrs & KILN_C99_ATTR_ACCESSOR) {
+            object->properties[pos].value = kiln_c99_undefined();
+            object->properties[pos].getter = kiln_c99_accessor_pair_half(held, 0);
+            object->properties[pos].setter = kiln_c99_accessor_pair_half(held, 1);
+        } else {
+            object->properties[pos].value = kiln_val_to_boundary(held);
+            object->properties[pos].getter = kiln_c99_undefined();
+            object->properties[pos].setter = kiln_c99_undefined();
+        }
         pos++;
     }
     object->count = pos;

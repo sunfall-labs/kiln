@@ -119,10 +119,9 @@ static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val va
         return 0;
     }
     if (kiln_c99_key_is_reserved(keystr)) {
-        /* A shape has no per-slot enumerable flag, and a `@@`-prefixed key must come out
-         * non-enumerable (own_slot_ikey's rule); the generic path's dictionary-mode store is
-         * where that is tracked. Reachable only via a computed key that happens to spell one --
-         * a literal key can never start with `@`. */
+        /* A `@@`-prefixed key must come out non-enumerable (own_slot_ikey's rule), which the
+         * generic path gets right; not worth teaching this one. Reachable only via a computed
+         * key that happens to spell one -- a literal key can never start with `@`. */
         return 0;
     }
     if (kiln_c99_same_name_key(keystr, "__proto__")) {
@@ -137,7 +136,8 @@ static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val va
         return 1;
     }
     if (kiln_c99_shape_find_slot(object->shape, ikey, &slot)) {
-        if (slot >= object->slot_capacity) {
+        /* Redefining an attribute-bearing slot changes its attributes: the generic path's. */
+        if (slot >= object->slot_capacity || (object->shape->special_mask & (1u << slot)) != 0) {
             return 0;
         }
         kiln_c99_define_named_teach(site, object->shape, NULL, slot);
@@ -210,6 +210,10 @@ static int kiln_c99_spread_object_fast(kiln_val target, kiln_val source, int *st
     }
     sshape = object->shape;
     scount = sshape->property_count;
+    if (sshape->special_mask != 0) {
+        /* A copy is plain data: a hidden, read-only or accessor slot is the per-key loop's. */
+        return 0;
+    }
     if (sshape->has_symbol_key) {
         /* A symbol key needs the validation kiln_c99_spread_object's per-key loop gives it. */
         return 0;
@@ -355,7 +359,8 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
         if (source->elements != NULL || source->accessor_count != 0 ||
             source->prototype.tag != KILN_VALUE_UNDEFINED || source->arguments_brand ||
             source->error_brand || source->module_namespace ||
-            (shape != NULL && (source->properties != NULL || shape->has_symbol_key))) {
+            (shape != NULL && (source->properties != NULL || shape->has_symbol_key ||
+                               shape->special_mask != 0))) {
             return KILN_C99_CLONE_BAIL;
         }
         if (shape == NULL) {
@@ -611,12 +616,16 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
      * the target must still be the shape's fresh, empty starting point (no keys, no properties,
      * no elements, extensible, no accessor could have intercepted a write because none exists to
      * intercept), and the source must have nothing that needs per-key attention -- no integer
-     * keys (handled separately below), no accessors (a shaped object can never hold one; see
-     * `kiln_c99_define_accessor`, which knocks `shape` to NULL the moment one is defined -- this
-     * checks it anyway rather than trust that invariant from a distance), and no symbol keys
+     * keys (handled separately below), no accessors or other attribute-bearing slots (a source
+     * with any leaves shape mode just below, for the list walk), and no symbol keys
      * (spelled "@@..." in a shape's keys, and needing the validation the loop below gives them).
      * Anything else -- a target with keys already, list-mode sources, arrays, proxies -- never
      * reaches here in the first place. */
+    /* A source with a hidden, read-only or accessor slot is copied by the list walk below,
+     * which knows which of its properties a spread sees and how. */
+    if (object->shape != NULL && object->shape->special_mask != 0) {
+        kiln_c99_ensure_dictionary(object);
+    }
     if (object->properties == NULL && object->shape != NULL && object->elements == NULL &&
         object->accessor_count == 0 && target.tag == KILN_VALUE_OBJECT) {
         kiln_object *dest = kiln_c99_object_of(target);
@@ -667,7 +676,8 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
          * limit -- leaves the rest to the generic path, which redefines what was copied to the
          * same value. */
         if (dest->properties == NULL && dest->shape != NULL && dest->elements == NULL &&
-            !dest->frozen && !dest->not_extensible && dest->accessor_count == 0) {
+            !dest->frozen && !dest->not_extensible && dest->accessor_count == 0 &&
+            dest->shape->special_mask == 0) {
             kiln_shape *sshape = object->shape;
             size_t scount = sshape->property_count;
             size_t k;

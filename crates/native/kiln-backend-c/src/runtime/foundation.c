@@ -653,6 +653,7 @@ static int kiln_c99_define_accessor_key(kiln_value target, const kiln_string *ke
 static int kiln_c99_set_function_name(kiln_value function, kiln_value key,
                                      const char *prefix);
 static double kiln_c99_key_index(const char *key, size_t key_len);
+static double kiln_c99_key_index_key(const kiln_string *key);
 static uint64_t kiln_c99_array_method(const char *key, size_t key_len);
 /* The containers currently being written, innermost first.
  *

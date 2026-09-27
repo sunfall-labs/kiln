@@ -3152,12 +3152,14 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 }
                 if (array->properties.tag == KILN_VALUE_OBJECT) {
                     kiln_object *extra = kiln_c99_object_of(array->properties);
-                    if (extra->properties == NULL && extra->shape != NULL) {
+                    if (extra->properties == NULL && extra->shape != NULL &&
+                        extra->shape->accessor_mask == 0) {
                         for (index = 0; index < extra->shape->property_count && status == KILN_C99_OK; ++index) {
                             const kiln_string *skey = extra->shape->keys[index];
                             kiln_value key;
                             kiln_value val;
-                            if (kiln_c99_key_is_reserved(skey)) {
+                            if (kiln_c99_key_is_reserved(skey) ||
+                                (extra->shape->attrs[index] & KILN_C99_ATTR_ENUM_FLIP) != 0) {
                                 continue;
                             }
                             key = kiln_c99_stable_key_value(skey);
@@ -3274,7 +3276,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             } else {
                 KILN_C99_REFUSE("an own-key listing of a value with no property store");
             }
-            if (object->properties == NULL && object->shape != NULL) {
+            if (object->properties == NULL && object->shape != NULL &&
+                object->shape->accessor_mask == 0) {
                 status = kiln_c99_new_array(&built);
                 if (object->elements != NULL) {
                     for (index = 0; index < object->element_count && status == KILN_C99_OK; ++index) {
@@ -3300,7 +3303,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     const kiln_string *skey = object->shape->keys[index];
                     kiln_value key;
                     kiln_value val;
-                    if (kiln_c99_key_is_reserved(skey)) {
+                    if (kiln_c99_key_is_reserved(skey) ||
+                        (object->shape->attrs[index] & KILN_C99_ATTR_ENUM_FLIP) != 0) {
                         continue;
                     }
                     key = kiln_c99_stable_key_value(skey);
@@ -3392,7 +3396,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                                     "property store");
                 }
                 source = kiln_c99_object_of(src_val);
-                if (source->properties == NULL && source->shape != NULL) {
+                if (source->properties == NULL && source->shape != NULL &&
+                    source->shape->special_mask == 0) {
                     if (source->elements != NULL) {
                         for (index = 0; index < source->element_count; ++index) {
                             if (source->elements[index] == KILN_VAL_HOLE) continue;

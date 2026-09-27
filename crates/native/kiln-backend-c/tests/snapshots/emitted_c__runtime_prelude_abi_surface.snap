@@ -1,6 +1,5 @@
 ---
 source: crates/native/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 804
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -936,6 +935,10 @@ struct kiln_shape;
 typedef struct kiln_shape_transition {
 typedef struct kiln_shape {
 typedef struct kiln_shape_edge_table {
+#define KILN_C99_ATTR_ENUM_FLIP 1u   /* enumerable is the opposite of an assignment's */
+#define KILN_C99_ATTR_READONLY 2u    /* not writable (an accessor always carries it) */
+#define KILN_C99_ATTR_FIXED 4u       /* not configurable */
+#define KILN_C99_ATTR_ACCESSOR 8u    /* the slot holds an accessor pair */
 typedef struct kiln_property {
 #define KILN_C99_INLINE_SLOTS 16
 typedef struct kiln_object {
@@ -970,12 +973,16 @@ static void kiln_c99_pic_absent_oracle(const kiln_object *obj, const kiln_string
 #ifdef KILN_IC_CHECK
 static __attribute__((noinline)) void kiln_c99_pic_oracle(const kiln_c99_pic_entry *entry,
 #endif
+static __attribute__((noinline, unused)) int kiln_c99_pic_list_holder(const kiln_c99_pic_entry *entry,
 static KILN_ALWAYS_INLINE inline int kiln_c99_pic_inherited(const kiln_c99_pic_entry *entry, const kiln_object *obj,
 #ifdef KILN_IC_CHECK
 #endif
 #ifdef KILN_IC_CHECK
 #endif
 static KILN_ALWAYS_INLINE inline kiln_val kiln_c99_site_cached_callee(const kiln_c99_site *site, const kiln_object *obj) {
+typedef struct kiln_c99_method_path {
+static KILN_ALWAYS_INLINE inline kiln_val kiln_c99_method_path_callee(const kiln_c99_method_path *path,
+static inline void kiln_c99_method_path_learn(kiln_c99_method_path *path, const kiln_c99_site *site,
 __attribute__((noinline, cold)) static double kiln_c99_int_slow(double value) {
 #define KILN_C99_SITE_NONE 0xFFFFFFFFu
 #define KILN_C99_SITE_GIVE_UP 8u
@@ -1488,6 +1495,7 @@ static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t k
 static int kiln_c99_define_accessor_key(kiln_value target, const kiln_string *key,
 static int kiln_c99_set_function_name(kiln_value function, kiln_value key,
 static double kiln_c99_key_index(const char *key, size_t key_len);
+static double kiln_c99_key_index_key(const kiln_string *key);
 static uint64_t kiln_c99_array_method(const char *key, size_t key_len);
 typedef struct kiln_json_frame {
 static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value value,
@@ -1721,7 +1729,7 @@ static int kiln_c99_key_is_shared(const kiln_string *ikey);
 static int kiln_c99_pic_entry_is_local(const kiln_c99_pic_entry *entry) {
 static void kiln_c99_site_learned(kiln_c99_site *site) {
 static void kiln_c99_gc_forget_realm_local(kiln_gc_heap *heap) {
-static void kiln_c99_site_remember(kiln_c99_site *site, const kiln_c99_pic_entry *entry) {
+static void kiln_c99_site_remember(kiln_c99_site *site, const kiln_c99_pic_entry *given) {
 static void kiln_c99_site_remember_own(kiln_c99_site *site, const kiln_shape *shape,
 static void kiln_c99_site_remember_transition(kiln_c99_site *site, const kiln_shape *from,
 static int kiln_c99_pic_name_level(const kiln_object *level, const kiln_shape **shape,
@@ -1814,10 +1822,14 @@ static void kiln_c99_gc_result_roots(void *opaque, void *context, int phase) {
 static char *kiln_c99_gc_alloc_text(size_t len) {
 static char *kiln_c99_gc_alloc_text_tenured(size_t len) {
 static size_t kiln_c99_gc_alloc_text_run(size_t count, const size_t *lens, char **out) {
+static int kiln_c99_accessor_pair_new(kiln_value getter, kiln_value setter, kiln_val *out) {
+static kiln_value kiln_c99_accessor_pair_half(kiln_val pair, int which) {
 static inline struct kiln_shape *kiln_c99_shape_root(void) {
 static int kiln_c99_shape_find_slot(const kiln_shape *shape, const kiln_string *ikey, uint32_t *out_slot) {
+static inline int kiln_c99_shape_slot_enumerable(const kiln_shape *shape, uint32_t slot) {
 static uint32_t kiln_c99_shape_slot_named(const kiln_shape *shape, const char *bytes, size_t len) {
 static void kiln_c99_pin_interned_key(const kiln_string *ikey) {
+static inline int kiln_c99_shape_edge_is(const kiln_shape *child, uint32_t count, uint32_t bit,
 static kiln_shape *kiln_c99_shape_inline_edge(const kiln_shape *current, uint32_t count,
 static kiln_shape *kiln_c99_shape_list_edge(const kiln_shape *current, const kiln_string *ikey,
 static size_t kiln_c99_local_edge_home(const kiln_shape *parent, const kiln_string *key,
@@ -1839,6 +1851,7 @@ static int kiln_c99_shape_link(kiln_shape *current, const kiln_string *ikey, kil
 static int kiln_c99_shape_add(kiln_shape *current, const kiln_string *ikey, int is_double,
 static int kiln_c99_shape_transition_ex(kiln_shape *current, const kiln_string *ikey,
 static int kiln_c99_shape_transition(kiln_shape *current, const kiln_string *ikey, int is_double,
+static int kiln_c99_shape_define_new(kiln_object *object, const kiln_string *ikey, kiln_val held,
 static int kiln_c99_ensure_dictionary(kiln_object *object) {
 static int kiln_c99_new_object(kiln_value *out) {
 static int kiln_c99_new_object_with_capacity(kiln_value *out, size_t capacity) {
@@ -1898,6 +1911,11 @@ static int kiln_c99_same_key(const kiln_property *property, const char *key, siz
 static size_t kiln_c99_own_index_key(const kiln_object *object, const kiln_string *ikey,
 static size_t kiln_c99_own_index(const kiln_object *object, const kiln_string *ikey,
 static int kiln_c99_has_inherited_setter_or_readonly(kiln_value proto) {
+#define KILN_C99_LEVEL_NONE 0
+#define KILN_C99_LEVEL_DATA 1
+#define KILN_C99_LEVEL_READONLY 2
+#define KILN_C99_LEVEL_ACCESSOR 3
+static int kiln_c99_level_write_answer(kiln_object *walked, const kiln_string *ikey,
 static int kiln_c99_inherited_write_blocked(kiln_value proto, const kiln_string *ikey,
 #define KILN_C99_PATH_NONE 0
 #define KILN_C99_PATH_FOUND 1
@@ -2591,6 +2609,8 @@ static int kiln_c99_clone_table_get(const kiln_c99_clone_table *table, kiln_val 
 static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, int depth,
 static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size_t argc) {
 static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value source,
+static int kiln_c99_define_shaped(kiln_value target, const kiln_string *key, kiln_val held,
+static int kiln_c99_define_accessor_shaped(kiln_value target, const kiln_string *key,
 static int kiln_c99_define_accessor_key(kiln_value target, const kiln_string *key,
 static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_definition_store(kiln_value target, kiln_value *out) {
@@ -2856,6 +2876,7 @@ static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln
 static void kiln_c99_pic_absent_oracle(const kiln_object *obj, const kiln_string *key) {
 #endif
 static int kiln_c99_val_read_property_view(kiln_host *host, kiln_val target,
+generic_read:;
 static int kiln_c99_val_read_property_key(kiln_host *host, kiln_val target,
 static int kiln_c99_val_read_property(kiln_host *host, kiln_val target,
 static int kiln_c99_val_write_property_view(kiln_host *host, kiln_val target,

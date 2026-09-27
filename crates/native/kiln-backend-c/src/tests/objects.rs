@@ -114,6 +114,122 @@ int main(void) {
     );
 }
 
+/// Issue 04 step 3b: definitions keep an object shaped, with the attributes the list-mode record
+/// would carry recorded in its shape; a transition is keyed by (key, attributes); dictionary mode
+/// materializes the same records; a method cache names a shaped prototype one step up.
+#[test]
+fn definitions_keep_objects_shaped_with_attributes() {
+    let generated = emit(&program(
+        vec![Constant::String("m".into())],
+        vec![
+            Instruction::LoadBuiltin(Builtin::Math),
+            Instruction::GetProperty(0),
+            Instruction::Return,
+        ],
+        0,
+    ))
+    .expect("a unit naming one key emits");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)malloc(sizeof *heap);
+    kiln_value proto, plain, receiver, getter;
+    kiln_object *p, *q, *r;
+    const kiln_string *m;
+    kiln_c99_site site;
+    kiln_c99_pic_entry entry;
+    uint32_t slot;
+    if (heap == NULL) return 1;
+    kiln_c99_gc_heap_init(heap);
+    heap->enabled = 0;
+    kiln_c99_gc_heap_register(heap);
+    kiln_test_heap = heap;
+    kiln_test_generation += 1;
+    m = kiln_c99_intern_static("m", 1);
+
+    /* A method definition is a transition with attributes, not a trip to dictionary mode. */
+    if (kiln_c99_new_object(&proto) != KILN_C99_OK) return 2;
+    p = kiln_c99_object_of(proto);
+    if (kiln_c99_define_method(proto, "m", 1, kiln_c99_number(1.0)) != KILN_C99_OK) return 3;
+    if (p->shape == NULL || p->properties != NULL) return 4;
+    if (p->shape->attrs[0] != KILN_C99_ATTR_ENUM_FLIP || p->shape->special_mask != 1u ||
+        p->shape->store_mask != 0u || !p->shape->shared) return 5;
+    /* An assignment of the same key from the same shape takes a different edge. */
+    if (kiln_c99_new_object(&plain) != KILN_C99_OK) return 6;
+    q = kiln_c99_object_of(plain);
+    if (kiln_c99_put(NULL, plain, "m", 1, kiln_c99_number(1.0), 0, NULL) != KILN_C99_OK) return 7;
+    if (q->shape == NULL || q->shape == p->shape || q->shape->parent != p->shape->parent ||
+        q->shape->special_mask != 0u) return 8;
+    /* A second object defined the same way shares the first one's shape. */
+    if (kiln_c99_new_object(&plain) != KILN_C99_OK) return 9;
+    q = kiln_c99_object_of(plain);
+    if (kiln_c99_define_method(plain, "m", 1, kiln_c99_number(2.0)) != KILN_C99_OK) return 10;
+    if (q->shape != p->shape) return 11;
+
+    /* An accessor keeps its pair in a slot; a private method is read-only. */
+    getter = kiln_c99_number(7.0);
+    if (kiln_c99_define_accessor(proto, "g", 1, getter, kiln_c99_undefined(), 0) != KILN_C99_OK)
+        return 12;
+    if (p->shape == NULL || (p->shape->accessor_mask & 2u) == 0 || (p->shape->store_mask & 2u) == 0 ||
+        p->accessor_count != 1) return 13;
+    if (kiln_c99_define_private(proto, "@@private:9:x", 13, kiln_c99_number(3.0), 0) != KILN_C99_OK)
+        return 14;
+    if (p->shape == NULL || p->shape->attrs[2] != KILN_C99_ATTR_READONLY || !p->read_only_seen)
+        return 15;
+
+    /* A method cache names the shaped prototype one step up and reads the slot live. */
+    if (kiln_c99_new_object(&receiver) != KILN_C99_OK) return 16;
+    r = kiln_c99_object_of(receiver);
+    r->prototype = proto;
+    memset(&site, 0, sizeof site);
+    memset(&entry, 0, sizeof entry);
+    entry.shape = r->shape;
+    entry.slot = UINT32_MAX;
+    entry.key = m;
+    {
+        const kiln_object *holder = NULL;
+        if (kiln_c99_pic_learn_path(&entry, r, m, &holder) != KILN_C99_PATH_FOUND ||
+            holder != p) return 17;
+    }
+    kiln_c99_site_remember(&site, &entry);
+    if (!site.entries[0].one_step) return 18;
+    if (kiln_c99_site_cached_callee(&site, r) != kiln_val_from_boundary(kiln_c99_number(1.0)))
+        return 19;
+    p->slots[0] = kiln_val_from_boundary(kiln_c99_number(5.0));
+    if (kiln_c99_site_cached_callee(&site, r) != kiln_val_from_boundary(kiln_c99_number(5.0)))
+        return 20;
+    /* The accessor's slot is never a path's answer. */
+    memset(&entry, 0, sizeof entry);
+    entry.shape = r->shape;
+    entry.slot = UINT32_MAX;
+    {
+        const kiln_object *holder = NULL;
+        if (kiln_c99_pic_learn_path(&entry, r, kiln_c99_intern_static("g", 1), &holder) !=
+            KILN_C99_PATH_NONE) return 21;
+    }
+
+    /* Dictionary mode carries exactly the records the list path would have made. */
+    if (!kiln_c99_shape_find_slot(p->shape, m, &slot) || slot != 0) return 22;
+    if (kiln_c99_ensure_dictionary(p) != KILN_C99_OK || p->shape != NULL || p->count != 3) return 23;
+    if (p->properties[0].enumerable || !p->properties[0].writable ||
+        !p->properties[0].configurable || p->properties[0].accessor) return 24;
+    if (!p->properties[1].accessor || p->properties[1].writable ||
+        p->properties[1].getter.tag != KILN_VALUE_NUMBER ||
+        p->properties[1].setter.tag != KILN_VALUE_UNDEFINED) return 25;
+    if (p->properties[2].writable || p->properties[2].enumerable) return 26;
+    /* The prototype left shape mode: the entry no longer answers. */
+    if (kiln_c99_site_cached_callee(&site, r) != 0) return 27;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "shape-attributes");
+    assert!(
+        run.status.success(),
+        "definitions and attribute-bearing shapes disagree ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
 /// ADR 0071, keys and shapes: grow the shape tree from two heaps in turn on one thread, the way
 /// a thread hosting several realms does, and check that constant keys and the shapes built from
 /// them are the same pointers in both, that each realm's run-time keys stay its own, that no edge
@@ -248,7 +364,7 @@ int main(void) {
     if (kiln_test_shared_edge_names(a1, xray2) || kiln_test_shared_edge_names(a1, epsilon2)) return 24;
     /* The first realm's edge is invisible here: its key is not ours, and asking by our own key
      * made our own shape. */
-    if (kiln_c99_local_edge_row(second, a1, xray1, 1u << 1, 0) != NULL) return 25;
+    if (kiln_c99_local_edge_row(second, a1, xray1, 1u << 1, 0, 0) != NULL) return 25;
 
     /* Back to the first: its own edges, and the shared ones, unchanged. */
     kiln_test_enter(first);

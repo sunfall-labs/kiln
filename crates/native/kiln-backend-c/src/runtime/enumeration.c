@@ -843,7 +843,7 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
             }
             for (index = 0; index < object->shape->property_count; ++index) {
                 const kiln_string *skey = object->shape->keys[index];
-                if (kiln_c99_key_is_reserved(skey)) {
+                if (!kiln_c99_shape_slot_enumerable(object->shape, (uint32_t)index)) {
                     continue;
                 }
                 status = kiln_c99_array_push(built, kiln_c99_stable_key_value(skey));
@@ -882,7 +882,7 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
             if (extra->properties == NULL && extra->shape != NULL) {
                 for (index = 0; index < extra->shape->property_count; ++index) {
                     const kiln_string *skey = extra->shape->keys[index];
-                    if (kiln_c99_key_is_reserved(skey)) continue;
+                    if (!kiln_c99_shape_slot_enumerable(extra->shape, (uint32_t)index)) continue;
                     status = kiln_c99_array_push(built, kiln_c99_stable_key_value(skey));
                     if (status != KILN_C99_OK) return status;
                 }
@@ -1018,11 +1018,14 @@ static int kiln_c99_enumerate_keys(kiln_host *host, kiln_value target, kiln_valu
             }
             for (index = 0; index < object->shape->property_count; ++index) {
                 const kiln_string *key = object->shape->keys[index];
-                if (kiln_c99_key_is_reserved(key)) continue;
+                int enumerable = kiln_c99_shape_slot_enumerable(object->shape, (uint32_t)index);
+                if (kiln_c99_key_is_reserved(key) && !enumerable) continue;
                 if (kiln_c99_keys_contain(shadowed, key)) continue;
                 kiln_value key_value = kiln_c99_stable_key_value(key);
                 status = kiln_c99_array_push(shadowed, key_value);
                 if (status != KILN_C99_OK) return status;
+                /* A method a class defined is a name that shadows, and is not enumerated. */
+                if (!enumerable) continue;
                 status = kiln_c99_array_push(built, key_value);
                 if (status != KILN_C99_OK) return status;
             }

@@ -665,7 +665,8 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
         frame.parent = parents;
         frame.container = (const void *)object;
         KILN_JSON_OPEN("{");
-        if (object->properties == NULL && object->shape != NULL) {
+        if (object->properties == NULL && object->shape != NULL &&
+            object->shape->accessor_mask == 0) {
             /* The shaped fast path: every member is read straight out of `elements`/`slots`
              * with no `kiln_c99_own_keys` array of copied key strings and no `get_computed` by
              * boundary key, and every member is written straight into the parent builder with
@@ -720,7 +721,8 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
                 kiln_value member;
                 size_t mark;
                 int wrote;
-                if (kiln_c99_key_is_reserved(skey)) {
+                if (kiln_c99_key_is_reserved(skey) ||
+                    (object->shape->attrs[index] & KILN_C99_ATTR_ENUM_FLIP) != 0) {
                     continue;
                 }
                 mark = text->len;

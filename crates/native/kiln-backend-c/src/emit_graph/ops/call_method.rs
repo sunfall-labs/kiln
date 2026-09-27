@@ -958,7 +958,10 @@ pub(super) fn emit_call_method(
     let fn_id = ctx
         .self_index
         .map_or("entry".to_string(), |i| i.to_string());
-    let typed_chain: String = typed_candidates
+    // Each arm is the candidate's typed call, entered when the callee in hand -- `plain` -- has
+    // the candidate's code. The arms run twice over: first behind the candidate's method path
+    // (receiver shape -> prototype shape -> slot, read live), then behind the site's cache.
+    let typed_arms: Vec<(String, String)> = typed_candidates
                 .iter()
                 .map(|&i| {
                     let pfx = format!("{symbol}_fn_{fn_id}_v{v}_t_{i}");
@@ -1026,20 +1029,37 @@ pub(super) fn emit_call_method(
                             )
                         }
                     };
-                    if needs.row {
-                        // The receiver's shape is the one whose row this site remembered: the
-                        // row goes in known, so the callee's own lookup folds away.
-                        let known = invoke("__row", "");
-                        let learning = invoke("NULL", &row_learn);
-                        format!(
-                            "if ({matched}) {{ if (obj->shape != NULL && obj->shape == {shape_var}) {{ const uint32_t *__row = {row_var}; if (__row == NULL) __builtin_unreachable(); {known} }} else {{ {learning} }} handled = 1; }} else "
-                        )
-                    } else {
-                        let plain_call = invoke("", "");
-                        format!("if ({matched}) {{ {plain_call} handled = 1; }} else ")
-                    }
+                    // ADR 0071, issue 04 step 3b: a call answered through the site's cache
+                    // teaches the candidate's method path, when the entry that answered is a
+                    // shaped prototype one step up and both shapes are shared.
+                    let path_learn = format!(
+                        " kiln_c99_method_path_learn(&{pfx}_path, &site, obj);"
+                    );
+                    let arm = |learn_path: &str| -> String {
+                        if needs.row {
+                            // The receiver's shape is the one whose row this site remembered: the
+                            // row goes in known, so the callee's own lookup folds away.
+                            let known = invoke("__row", learn_path);
+                            let learning = invoke("NULL", &format!("{row_learn}{learn_path}"));
+                            format!(
+                                "if ({matched}) {{ if (obj->shape != NULL && obj->shape == {shape_var}) {{ const uint32_t *__row = {row_var}; if (__row == NULL) __builtin_unreachable(); {known} }} else {{ {learning} }} handled = 1; }}"
+                            )
+                        } else {
+                            let plain_call = invoke("", learn_path);
+                            format!("if ({matched}) {{ {plain_call} handled = 1; }}")
+                        }
+                    };
+                    // The method path's hit: the receiver's shape, its prototype's shape, one
+                    // slot load, the code check -- no walk of the site's entries.
+                    let front = format!(
+                        "if (!handled && obj->shape != NULL && obj->shape == {pfx}_path.recv) {{ kiln_val kiln_path_fn = kiln_c99_method_path_callee(&{pfx}_path, obj); if (KILN_VAL_IS_CLOSURE(kiln_path_fn)) {{ kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(kiln_path_fn); {} }} }} ",
+                        arm("")
+                    );
+                    (front, format!("{} else ", arm(&path_learn)))
                 })
                 .collect();
+    let typed_front: String = typed_arms.iter().map(|(front, _)| front.as_str()).collect();
+    let typed_chain: String = typed_arms.iter().map(|(_, chain)| chain.as_str()).collect();
     // One dispatch guard for every typed arm of the site: the constructor flag and the depth
     // are the same for each, and `depth` is a local only where a typed arm can be entered.
     let typed_guard_decl = if typed_candidates.is_empty() {
@@ -3170,6 +3190,7 @@ pub(super) fn emit_call_method(
                 {await_resolve_s}{math_s}{array_is_array_s}{number_predicate_s}{push_s}{regex_s}{map_s}{parallel_pool_s}{parallel_map_s}{filter_s}{reduce_s}{slice_s}{join_s}{split_s}{index_of_s}{substring_s}{collection_s}{json_s}{sort_s}{array_extra_s}{string_extra_s}{iterator_s} \
                 if (!handled && KILN_VAL_IS_OBJECT(v{o})) {{ \
                     const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); if (obj == NULL) __builtin_unreachable(); \
+                    {typed_front}\
                     if (!handled && site.pic_count > 0) {{ \
                         kiln_val cached_fn = kiln_c99_site_cached_callee(&site, obj); \
                         if (cached_fn != 0 && KILN_VAL_IS_CLOSURE(cached_fn)) {{ \

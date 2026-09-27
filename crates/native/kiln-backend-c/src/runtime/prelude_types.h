@@ -689,6 +689,21 @@ typedef struct kiln_shape {
      * above stays complete, so the table is only ever an index over it. A grown table replaces
      * its predecessor without freeing it (see `kiln_c99_shape_index_edge`). */
     struct kiln_shape_edge_table *edge_table;
+    /* Issue 04 step 3b. Every slot's attributes (`KILN_C99_ATTR_*`), as the property record a
+     * list-mode object would carry for it: zero is what an assignment creates -- a writable,
+     * configurable data property, enumerable unless the key is reserved (`@@`) -- so every shape
+     * built by assignment is all zeros and reads exactly as it did before shapes had attributes.
+     * A transition is keyed by (key, attributes), so the attributes are part of the layout: two
+     * objects of one shape agree on every slot's, and an inline cache that compared a shape
+     * compared them too. The masks summarise `attrs` by slot bit for the hot tests:
+     * `special_mask`, a slot that is anything but a plain assignment's property (a walk that
+     * reads slots as enumerable data must leave shape mode first); `accessor_mask`, a slot that
+     * holds an accessor pair (`kiln_c99_accessor_pair`), never a value; `store_mask`, a slot an
+     * assignment may not simply overwrite (not writable, or an accessor). */
+    uint32_t special_mask;
+    uint32_t accessor_mask;
+    uint32_t store_mask;
+    uint8_t attrs[KILN_SHAPE_MAX_FAST_PROPERTIES];
 } kiln_shape;
 
 /* The mask lives with the slots it describes, so one pointer load gives a reader both. A slot is
@@ -698,6 +713,11 @@ typedef struct kiln_shape_edge_table {
     uint32_t mask;
     struct kiln_shape *edges[];
 } kiln_shape_edge_table;
+/* A slot's attributes, as differences from what an assignment creates. */
+#define KILN_C99_ATTR_ENUM_FLIP 1u   /* enumerable is the opposite of an assignment's */
+#define KILN_C99_ATTR_READONLY 2u    /* not writable (an accessor always carries it) */
+#define KILN_C99_ATTR_FIXED 4u       /* not configurable */
+#define KILN_C99_ATTR_ACCESSOR 8u    /* the slot holds an accessor pair */
 
 /* A plain data object: own string-keyed properties, scanned linearly.
  *
@@ -816,7 +836,10 @@ typedef struct kiln_object {
      * (`kiln_c99_prototype_touched`) -- clears it. A cache entry that names the token is valid
      * while the object still carries it. Tokens are never reused, so an entry can never match
      * another realm's object, or a later object at a freed one's address. Zero means none; a
-     * shaped object never has one. Occupies what was padding after the last member. */
+     * shaped object never has one. Since shapes carry attributes (issue 04 step 3b) a class
+     * prototype is shaped and needs none: a token names only a dictionary-mode level -- an object
+     * past the shape limits, or one a deletion, `defineProperty`, a freeze or a reconfiguration
+     * moved out of shape mode. Occupies what was padding after the last member. */
     uint32_t layout_token;
 } kiln_object;
 
@@ -877,7 +900,9 @@ static inline void kiln_c99_prototype_touched(const kiln_object *object) {
  *
  *   - a member found at `depth` (1 or 2) is `proto_slot` there -- a slot of a shaped holder, or the
  *     index into a list-mode holder's property list, valid while the record there still carries
- *     `key` (a class prototype keeps its methods in its list, not enumerable). So a
+ *     `key` (a dictionary-mode prototype: past the shape limits, or reconfigured). A class
+ *     prototype is shaped -- shapes carry attributes (issue 04 step 3b) -- so its methods are
+ *     slots, and the common entry, one step to a shaped holder, is marked `one_step`. So a
  *     reassigned method is seen (the value is read, not remembered), a shadowing property added
  *     on the way changes a shape or clears a token and misses, and a receiver whose prototype was
  *     swapped reaches a different level and misses.
@@ -896,6 +921,11 @@ typedef struct kiln_c99_pic_entry {
     uint32_t proto_slot;
     uint8_t depth;
     uint8_t absent;
+    /* Set by `kiln_c99_site_remember` when the entry is the common prototype member: found one
+     * step up, in a shaped holder named by `level_shape[0]` (a class prototype's method, since
+     * shapes carry attributes). The hit is then the prototype's shape check and one slot load,
+     * with no walk. Derived from the fields above, never learned on its own. */
+    uint8_t one_step;
     uint32_t level_token[2];
     const kiln_shape *level_shape[2];
     /* The canonical key the path was learned for. A list-mode holder is not named by a token:
@@ -1032,9 +1062,32 @@ static __attribute__((noinline)) void kiln_c99_pic_oracle(const kiln_c99_pic_ent
 /* The answer an entry that is not an own slot gives for `obj`, whose shape it has matched: the
  * member at the end of its path, read live, or undefined for a key absent along it. 0 when the
  * entry is an own slot, or the path from `obj` is not the one remembered. */
+/* A dictionary-mode holder's record at `proto_slot`, when it still carries the entry's key as a
+ * data property. Out of line: since shapes carry attributes (issue 04 step 3b) a class prototype
+ * is shaped, and a list-mode holder is the uncommon case this keeps off every inlined site. */
+static __attribute__((noinline, unused)) int kiln_c99_pic_list_holder(const kiln_c99_pic_entry *entry,
+                                                                     const kiln_object *level,
+                                                                     kiln_val *out) {
+    const kiln_property *record;
+    if (KILN_UNLIKELY(entry->proto_slot >= level->count)) return 0;
+    record = &level->properties[entry->proto_slot];
+    if (KILN_UNLIKELY(record->key != entry->key || record->accessor)) return 0;
+    *out = record->value.tag == KILN_VALUE_FUNCTION
+               ? KILN_VAL_TAG_PTR(KILN_TAG_CLOSURE_PREFIX, (const void *)(uintptr_t)record->value.bits)
+               : kiln_val_from_boundary(record->value);
+    return 1;
+}
+
 static KILN_ALWAYS_INLINE inline int kiln_c99_pic_inherited(const kiln_c99_pic_entry *entry, const kiln_object *obj,
                                          kiln_val *out) {
     const kiln_object *level;
+    if (KILN_LIKELY(entry->one_step)) {
+        if (KILN_UNLIKELY(obj->prototype.tag != KILN_VALUE_OBJECT)) return 0;
+        level = (const kiln_object *)(uintptr_t)obj->prototype.bits;
+        if (KILN_UNLIKELY(level->shape != entry->level_shape[0])) return 0;
+        *out = level->slots[entry->proto_slot];
+        return 1;
+    }
     if (entry->depth == 0 && !entry->absent) return 0;
     level = kiln_c99_pic_path(entry, obj);
     if (level == NULL) return 0;
@@ -1064,16 +1117,7 @@ static KILN_ALWAYS_INLINE inline int kiln_c99_pic_inherited(const kiln_c99_pic_e
         *out = level->slots[entry->proto_slot];
         return 1;
     }
-    {
-        const kiln_property *record;
-        if (KILN_UNLIKELY(entry->proto_slot >= level->count)) return 0;
-        record = &level->properties[entry->proto_slot];
-        if (KILN_UNLIKELY(record->key != entry->key || record->accessor)) return 0;
-        *out = record->value.tag == KILN_VALUE_FUNCTION
-                   ? KILN_VAL_TAG_PTR(KILN_TAG_CLOSURE_PREFIX, (const void *)(uintptr_t)record->value.bits)
-                   : kiln_val_from_boundary(record->value);
-        return 1;
-    }
+    return kiln_c99_pic_list_holder(entry, level, out);
 }
 
 /* The callee a method-call site remembers for an object of `obj`'s shape, or 0. One that is the
@@ -1095,6 +1139,48 @@ static KILN_ALWAYS_INLINE inline kiln_val kiln_c99_site_cached_callee(const kiln
     }
     return 0;
 }
+/* A typed method-call site's memory of one candidate's path (ADR 0071, issue 04 step 3b): the
+ * receiver's shape, its prototype's shape, and the slot there that held a closure with the
+ * candidate's code. Layouts only, and both shapes shared -- never freed, the same in every realm
+ * -- so the static serves every realm. A hit is the receiver's shape, the prototype's shape and
+ * one slot load; the caller checks the loaded closure's code. The receiver's shape is the proof
+ * the name is not an own property, and the prototype's shape, which carries its slots'
+ * attributes, that the slot holds a data property. */
+typedef struct kiln_c99_method_path {
+    const kiln_shape *recv;
+    const kiln_shape *proto;
+    uint32_t slot;
+} kiln_c99_method_path;
+
+/* The value at the end of `path` for `obj`, whose shape the caller has matched to `path->recv`,
+ * or 0. */
+static KILN_ALWAYS_INLINE inline kiln_val kiln_c99_method_path_callee(const kiln_c99_method_path *path,
+                                                                     const kiln_object *obj) {
+    const kiln_object *level;
+    if (KILN_UNLIKELY(obj->prototype.tag != KILN_VALUE_OBJECT)) return 0;
+    level = (const kiln_object *)(uintptr_t)obj->prototype.bits;
+    return KILN_LIKELY(level->shape == path->proto) ? level->slots[path->slot] : 0;
+}
+
+/* Teach `path` from the site entry that just answered for `obj`: only an entry that is a shaped
+ * prototype one step up, and only shared shapes, since the path is a process-wide static. */
+static inline void kiln_c99_method_path_learn(kiln_c99_method_path *path, const kiln_c99_site *site,
+                                              const kiln_object *obj) {
+    const kiln_shape *shape = obj->shape;
+    uint32_t p;
+    if (shape == NULL || !shape->shared) return;
+    for (p = 0; p < site->pic_count; ++p) {
+        const kiln_c99_pic_entry *entry = &site->entries[p];
+        if (entry->shape != shape) continue;
+        if (entry->one_step && entry->level_shape[0]->shared) {
+            path->proto = entry->level_shape[0];
+            path->slot = entry->proto_slot;
+            path->recv = shape;
+        }
+        return;
+    }
+}
+
 /* The slow path of integer arithmetic -- a result outside the safe range, computed as a
  * double -- passes through here so that it stays a branch. Inlined beside the fast path, the
  * compiler folds both into a select, and the loop-carried integer then waits on the double
@@ -1239,7 +1325,9 @@ static inline const uint32_t *kiln_c99_recv_claim(const kiln_shape **shapes,
                 break;
             }
         }
-        if (found == UINT32_MAX || ((double_mask & (1u << c)) && !(shape->double_slots_mask & (1u << found)))) {
+        /* An accessor's slot holds its pair, not the value a read of the name answers. */
+        if (found == UINT32_MAX || (shape->accessor_mask & (1u << found)) != 0 ||
+            ((double_mask & (1u << c)) && !(shape->double_slots_mask & (1u << found)))) {
             size_t r;
             for (r = 0; r < 4; ++r) {
                 if (refused[r] == NULL) {
