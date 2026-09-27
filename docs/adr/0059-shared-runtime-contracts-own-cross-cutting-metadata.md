@@ -11,7 +11,7 @@ Cross-cutting runtime metadata has one authoritative owner per boundary:
 - `kiln-native-provider-contract` owns the provider metadata view consumed by packaging and checker
   scripts. Its ABI/export values are derived from the existing `kiln-native-number-abi` registry,
   its format and parse values come from `kiln-native-number`, and its ordered source inventory is
-  the existing `crates/kiln-native/provider-sources.txt`. `ProviderManifest` is constructed from
+  the existing `crates/native/kiln-native/provider-sources.txt`. `ProviderManifest` is constructed from
   named build facts and owns the canonical structured identity: it includes the provider policy,
   source/archive digests, and deployment facts, while deliberately excluding the relocatable
   archive filename. The contract CLI is the shell boundary; source digest computation and

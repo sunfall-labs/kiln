@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "bench"]
+members = ["crates/*/*"]
 # `fuzz` carries its own lockfile and its own dependency tree (libfuzzer, bolero). Excluding it
 # keeps that tree off every ordinary `cargo check --workspace`, which is the compiler developer's
 # loop (docs/design.md §12, ADR 0004).
@@ -13,42 +13,42 @@ license = "MIT"
 repository = "https://github.com/sunfall-labs/kiln"
 
 [workspace.dependencies]
+kiln-graph = { path = "crates/compile/kiln-graph" }
+kiln-module-eval = { path = "crates/interp/kiln-module-eval" }
 bitflags = { version = "2.13", default-features = false }
-kiln-artifact-cache = { path = "crates/kiln-artifact-cache" }
-kiln-backend-c = { path = "crates/kiln-backend-c" }
-kiln-builtin-surface = { path = "crates/kiln-builtin-surface" }
-kiln-builtins = { path = "crates/kiln-builtins" }
-kiln-data-formats = { path = "crates/kiln-data-formats" }
-kiln-db = { path = "crates/kiln-db" }
-kiln-digest = { path = "crates/kiln-digest" }
-kiln-hir = { path = "crates/kiln-hir" }
-kiln-host-abi = { path = "crates/kiln-host-abi" }
-kiln-ir = { path = "crates/kiln-ir" }
-kiln-string = { path = "crates/kiln-string" }
-kiln-interpreter = { path = "crates/kiln-interpreter" }
-kiln-liveness = { path = "crates/kiln-liveness" }
-kiln-module-graph = { path = "crates/kiln-module-graph" }
-kiln-module-resolver = { path = "crates/kiln-module-resolver" }
-kiln-native = { path = "crates/kiln-native" }
-kiln-native-number = { path = "crates/kiln-native-number" }
-kiln-native-number-abi = { path = "crates/kiln-native-number-abi" }
-kiln-native-provider-contract = { path = "crates/kiln-native-provider-contract" }
-kiln-native-provider-ffi = { path = "crates/kiln-native-provider-ffi" }
-kiln-native-runtime = { path = "crates/kiln-native-runtime" }
-kiln-number-core = { path = "crates/kiln-number-core" }
-kiln-runtime = { path = "crates/kiln-runtime" }
-kiln-temporal = { path = "crates/kiln-temporal" }
-kiln-json = { path = "crates/kiln-json" }
-kiln-intl = { path = "crates/kiln-intl" }
-kiln-native-toolchain = { path = "crates/kiln-native-toolchain" }
-kiln-node-path = { path = "crates/kiln-node-path" }
-kiln-url = { path = "crates/kiln-url" }
-kiln-conformance = { path = "crates/kiln-conformance" }
-kiln-proto = { path = "crates/kiln-proto" }
-kiln-daemon = { path = "crates/kiln-daemon" }
-kiln-test-selector = { path = "crates/kiln-test-selector" }
-kiln-test262 = { path = "crates/kiln-test262" }
-frontend-oxc = { path = "crates/frontend-oxc" }
+kiln-artifact-cache = { path = "crates/foundation/kiln-artifact-cache" }
+kiln-backend-c = { path = "crates/native/kiln-backend-c" }
+kiln-builtin-surface = { path = "crates/semantics/kiln-builtin-surface" }
+kiln-builtins = { path = "crates/semantics/kiln-builtins" }
+kiln-data-formats = { path = "crates/foundation/kiln-data-formats" }
+kiln-db = { path = "crates/compile/kiln-db" }
+kiln-digest = { path = "crates/foundation/kiln-digest" }
+kiln-hir = { path = "crates/syntax/kiln-hir" }
+kiln-host-abi = { path = "crates/foundation/kiln-host-abi" }
+kiln-ir = { path = "crates/compile/kiln-ir" }
+kiln-string = { path = "crates/foundation/kiln-string" }
+kiln-interpreter = { path = "crates/interp/kiln-interpreter" }
+kiln-liveness = { path = "crates/compile/kiln-liveness" }
+kiln-module-graph = { path = "crates/compile/kiln-module-graph" }
+kiln-module-resolver = { path = "crates/semantics/kiln-module-resolver" }
+kiln-native = { path = "crates/native/kiln-native" }
+kiln-native-provider-contract = { path = "crates/semantics/kiln-native-provider-contract" }
+kiln-native-provider-ffi = { path = "crates/native/kiln-native-provider-ffi" }
+kiln-native-runtime = { path = "crates/native/kiln-native-runtime" }
+kiln-number-core = { path = "crates/foundation/kiln-number-core" }
+kiln-runtime = { path = "crates/host/kiln-runtime" }
+kiln-temporal = { path = "crates/semantics/kiln-temporal" }
+kiln-json = { path = "crates/semantics/kiln-json" }
+kiln-intl = { path = "crates/semantics/kiln-intl" }
+kiln-native-toolchain = { path = "crates/native/kiln-native-toolchain" }
+kiln-node-path = { path = "crates/semantics/kiln-node-path" }
+kiln-url = { path = "crates/semantics/kiln-url" }
+kiln-conformance = { path = "crates/tools/kiln-conformance" }
+kiln-proto = { path = "crates/foundation/kiln-proto" }
+kiln-daemon = { path = "crates/tools/kiln-daemon" }
+kiln-test-selector = { path = "crates/tools/kiln-test-selector" }
+kiln-test262 = { path = "crates/tools/kiln-test262" }
+kiln-frontend-oxc = { path = "crates/syntax/kiln-frontend-oxc" }
 libc = { version = "0.2", default-features = false }
 # The Linux io_uring transport in kiln-runtime (src/uring.rs). Used directly, without Tokio's
 # `tokio_unstable` io-uring integration; its only dependencies (bitflags, cfg-if, libc) are

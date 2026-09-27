@@ -65,10 +65,10 @@ fi
 # §13 "incremental build after leaf edit". kiln-cli is the leaf: nothing depends on it. The
 # rule from §12 is that this must not drag the foundational crates with it.
 "${PROBE[@]}" leaf-edit --json-out "$RESULTS" \
-	--touch crates/kiln-cli/src/main.rs \
+	--touch crates/tools/kiln-cli/src/main.rs \
 	--expect-rebuilt kiln-cli \
 	--expect-fresh kiln-proto --expect-fresh kiln-hir --expect-fresh kiln-db \
-	--expect-fresh frontend-oxc --expect-fresh kiln-daemon
+	--expect-fresh kiln-frontend-oxc --expect-fresh kiln-daemon
 
 # §13 "incremental build after IR edit". kiln-hir is the central compiler type crate and the
 # honest stand-in for that measurement. The bytecode compiler, interpreter, native C backend and
@@ -77,10 +77,10 @@ fi
 # never observe a rebuild would pass them vacuously. Protocol and the cache/toolchain/runtime
 # implementation branches are siblings and must stay out of it.
 "${PROBE[@]}" central-edit --json-out "$RESULTS" \
-	--touch crates/kiln-hir/src/lib.rs \
+	--touch crates/syntax/kiln-hir/src/lib.rs \
 	--expect-rebuilt kiln-hir --expect-rebuilt kiln-ir --expect-rebuilt kiln-interpreter \
 	--expect-rebuilt kiln-backend-c --expect-rebuilt kiln-native \
-	--expect-rebuilt kiln-db --expect-rebuilt frontend-oxc \
+	--expect-rebuilt kiln-db --expect-rebuilt kiln-frontend-oxc \
 	--expect-rebuilt kiln-conformance \
 	--expect-rebuilt kiln-daemon --expect-rebuilt kiln-cli --expect-rebuilt kiln-bench \
 	--expect-fresh kiln-proto --expect-fresh kiln-host-abi --expect-fresh kiln-runtime \

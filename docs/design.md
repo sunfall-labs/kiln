@@ -380,7 +380,7 @@ Design rules:
 
 - Keep foundational type crates small and stable.
 - Avoid changing central generic types frequently.
-- Keep Oxc isolated behind `frontend-oxc`.
+- Keep Oxc isolated behind `kiln-frontend-oxc`.
 - Separate interfaces from implementations.
 - Minimize procedural macros in frequently edited crates.
 - Avoid expensive build scripts.

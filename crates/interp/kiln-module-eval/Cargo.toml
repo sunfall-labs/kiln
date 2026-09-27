@@ -1,0 +1,17 @@
+[package]
+name = "kiln-module-eval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kiln-module-graph = { workspace = true }
+kiln-interpreter = { workspace = true }
+kiln-host-abi = { workspace = true }
+kiln-ir = { workspace = true }
+kiln-module-resolver = { workspace = true }
+kiln-runtime = { workspace = true }
+kiln-builtins = { workspace = true }
+kiln-frontend-oxc = { workspace = true }
+url = { workspace = true }

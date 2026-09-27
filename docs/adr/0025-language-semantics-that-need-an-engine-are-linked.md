@@ -41,7 +41,7 @@ which is a much larger promise than "give me somewhere to print".
 
 **Link a Rust provider.** There is already a precedent for exactly this, and it was adopted for
 exactly this reason: `kiln-native-number-ffi` is a `no_std` staticlib with a C ABI, built and
-packaged by `crates/kiln-native/src/number_provider.rs` and linked into every artifact. It exists
+packaged by `crates/native/kiln-native/src/number_provider.rs` and linked into every artifact. It exists
 because ECMAScript's `Number::toString` cannot be expressed by any printf conversion, so the
 behaviour had to come from one implementation rather than two.
 
@@ -75,7 +75,7 @@ object model is.
 
 **The provider crate stops being about numbers.** It is `kiln-native-number-ffi` today, and the
 alternative -- a second archive -- means threading it through the five places
-`crates/kiln-native/src/lib.rs` materialises and links `libkiln_native_number_provider.a`. One
+`crates/native/kiln-native/src/lib.rs` materialises and links `libkiln_native_number_provider.a`. One
 archive with a wider scope is much less code than two archives, so the crate should be renamed
 (`kiln-native-provider-ffi`) along with `PROVIDER_NAME`, the archive filename, the manifest
 `provider` field and `KILN_NATIVE_NUMBER_PROVIDER_MANIFEST`. That is a packaging contract between

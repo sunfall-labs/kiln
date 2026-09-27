@@ -1,0 +1,425 @@
+//! C99 code generation directly from the SSA Value Graph.
+//!
+//! As specified in Phase 1 Step 1.3 of `fastest-native-plan.md` and ADR 0056:
+//! - Eliminates the memory-bound `stack[]` array and `sp` stack pointer.
+//! - Emits SSA intermediate values directly as C local variables (`kiln_val v0`, `v1`, ...).
+//! - Retains `locals[]` only when needed for closure cells or generator suspension frames.
+//! - Materializes call arguments into local stack arrays at call sites only, avoiding whole-body address-taking.
+
+mod body;
+mod clones;
+mod ops;
+pub(crate) mod sites;
+
+pub use body::{
+    emit_async_entry_body, emit_entry_from_graph, emit_entry_from_graph_with_profile,
+    emit_function_from_graph, emit_function_from_graph_with_profile, retain_used_entry_context,
+};
+pub use clones::{emit_fast_clone, emit_restartable};
+pub(crate) use sites::{method_candidates, method_candidates_map, this_site_count};
+
+use crate::direct::TypedNeeds;
+use crate::graph::{FunctionGraph, GraphOp, ValueId};
+use kiln_ir::{ExportBinding, FunctionProto};
+use std::collections::HashSet;
+
+/// The first operation or terminator in `graph` that has no lowering below, as a short name,
+/// for the census. `None` when everything lowers.
+pub fn first_unlowerable(graph: &FunctionGraph) -> Option<String> {
+    for block in &graph.blocks {
+        for (_, op) in &block.operations {
+            if !lowers(op) {
+                let name = format!("{op:?}");
+                return Some(name.split([' ', '(', '{']).next().unwrap_or("?").to_owned());
+            }
+        }
+    }
+    None
+}
+
+fn lowers(op: &GraphOp) -> bool {
+    matches!(
+        op,
+        GraphOp::Const { .. }
+            | GraphOp::LoadLocal(_)
+            | GraphOp::StoreLocal { .. }
+            | GraphOp::LoadCell(_)
+            | GraphOp::StoreCell { .. }
+            | GraphOp::LoadUpvalue(_)
+            | GraphOp::StoreUpvalue { .. }
+            | GraphOp::LoadBuiltin(_)
+            | GraphOp::ResumeValue
+            | GraphOp::CaughtValue
+            | GraphOp::Bridge { .. }
+            | GraphOp::MakeCell(_)
+            | GraphOp::LoadGlobal(_)
+            | GraphOp::StoreGlobal { .. }
+            | GraphOp::LoadThis
+            | GraphOp::LoadNewTarget
+            | GraphOp::MarkUninitialized(_)
+            | GraphOp::CheckTdz { .. }
+            | GraphOp::Unary { .. }
+            | GraphOp::Binary { .. }
+            | GraphOp::Call { .. }
+            | GraphOp::CallMethod { .. }
+            | GraphOp::NewArray { .. }
+            | GraphOp::NewObject { .. }
+            | GraphOp::New { .. }
+            | GraphOp::MakeFunction { .. }
+            | GraphOp::GetProperty { .. }
+            | GraphOp::SetProperty { .. }
+            | GraphOp::SetPropertyStrict { .. }
+            | GraphOp::GetComputed { .. }
+            | GraphOp::SetComputed { .. }
+            | GraphOp::SetComputedStrict { .. }
+            | GraphOp::IsReturnSignal(_)
+            | GraphOp::Phi { .. }
+    )
+}
+
+/// Which clone of a function body this is. The boxed entry is what a closure carries and what
+/// every generic call reaches. The typed entry (`_t`) is reached only by direct calls that
+/// proved every argument a number and passed exactly the parameter count: inside it the
+/// parameters are numbers by contract, and nothing checks what the caller already proved.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    Boxed,
+    /// The boxed signature, with every slow path replaced by a restart through the boxed
+    /// entry. Only a body that can be restarted gets one: nothing in it has an effect before
+    /// the point a slow path could be taken, so running it again from the top is the same
+    /// as running the slow path. With no runtime call left in it, the clone needs no saved
+    /// registers and the C compiler inlines it where a cached callee is called by name.
+    Fast,
+    /// The parameters arrive as `double`s. When the plan proved the return a number, the result
+    /// leaves as one too, through `double *result`; otherwise through `kiln_val *result`.
+    Typed {
+        returns_number: bool,
+        /// The typed signature over a restartable body: every slow path is a restart through
+        /// the boxed entry, exactly as in the fast clone, so what the fast path computes is
+        /// known to be a number and stays in a register. The restart boxes the parameters,
+        /// runs the boxed body once, and hands its answer back through the typed result.
+        restartable: bool,
+    },
+}
+
+/// What a versioned body's fast clone assumes beyond its parameters, and how it leaves when
+/// an assumption fails. An invariant read in `arrays` is an array, checked once at entry. A
+/// method call in `calls` answers a number: checked where it answers, and a call that answers
+/// anything else leaves for the generic clone at the label after that same call, with every
+/// value before it already computed. The generic clone, `exits` false, only carries the labels.
+#[derive(Default, Clone, Debug)]
+pub struct Speculation {
+    pub arrays: HashSet<ValueId>,
+    pub calls: HashSet<ValueId>,
+    /// Field reads of a sunk literal (`FunctionGraph::spread_sinks`) assumed to answer numbers;
+    /// the fast clone checks each and leaves when one does not.
+    pub fields: HashSet<ValueId>,
+    /// Operations the fast clone leaves for the generic clone to run itself, after rebuilding
+    /// the sunk literal on the heap: the spread whose source failed its guard, and each checked
+    /// field read. The generic clone labels each before the operation.
+    pub sinks: HashSet<ValueId>,
+    pub exits: bool,
+}
+
+impl EntryKind {
+    /// Whether every slow path of this body is a restart through the boxed entry.
+    pub fn restarts(self) -> bool {
+        matches!(
+            self,
+            EntryKind::Fast
+                | EntryKind::Typed {
+                    restartable: true,
+                    ..
+                }
+        )
+    }
+}
+
+/// Which body a graph is emitted as: a function, called through a closure, or the unit's entry
+/// point, which the embedding calls once with the module's imports and takes the exports from.
+pub enum Site<'a> {
+    Function {
+        /// This function's index, so a call to itself can reuse its own upvalue table.
+        index: u32,
+    },
+    Entry {
+        /// The module's exports, read from `locals[]` at the return; `None` for a scalar unit.
+        exports: Option<&'a [ExportBinding]>,
+        /// A CommonJS unit: its one export is `module.exports`, read from the `module` slot.
+        commonjs: bool,
+    },
+    /// An asynchronous unit entry body: runs top-level await using a generator frame.
+    AsyncEntry,
+}
+
+/// The typed entry's declaration: the result in a register, `double` where the plan proved
+/// it and `kiln_val` otherwise, with `KILN_VAL_TYPED_FAIL` for a failure; then the depth, what
+/// the body needs and nothing it does not, and the parameters as the doubles they are.
+pub fn typed_signature(
+    proto: &FunctionProto,
+    returns_number: bool,
+    needs: TypedNeeds,
+) -> (&'static str, String) {
+    let result = if returns_number { "double" } else { "kiln_val" };
+    let mut params = String::from("int depth");
+    if needs.upvalues {
+        params.push_str(", kiln_val * restrict upvalues");
+    }
+    if needs.receiver {
+        params.push_str(", kiln_val receiver");
+    }
+    if needs.row {
+        params.push_str(", const uint32_t * restrict recv_row_in");
+    }
+    if needs.runtime {
+        params.push_str(", kiln_host *host, kiln_value *thrown");
+    }
+    for k in 0..proto.parameter_count {
+        params.push_str(&format!(", double p{k}"));
+    }
+    (result, params)
+}
+
+thread_local! {
+    /// Set while the parallel clone of a typed entry is being emitted (ADR 0058, application
+    /// 2). It changes two things and nothing else: the entry's name ends in `_p` instead of
+    /// `_t`, and a `Math.<name>` call on the builtin with proven-number arguments lowers to the
+    /// bare libm call with no generic fallback, because the clone runs on a thread with no realm
+    /// to fall back to. The site that calls the clone checks `kiln_c99_builtin_store_epoch` on the
+    /// realm thread first, so an overridden `Math.sqrt` never reaches it. A thread-local rather
+    /// than a parameter because every emitter signature between `lib.rs` and the op would
+    /// otherwise carry a flag that only one op reads.
+    static PARALLEL_CLONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The upvalue indices, ascending, whose values the parallel clone of proto `index` takes as
+/// `double cap<k>` parameters after its own (tier 1, ADR 0069). Empty for a proto that
+/// captures nothing or does not qualify.
+pub fn parallel_captures(plan: &crate::direct::CallPlan, index: usize) -> Vec<u32> {
+    match plan.parallel.get(index) {
+        Some(Ok(shape)) => shape.captures.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether the parallel clone is being emitted on this thread.
+pub fn parallel_clone() -> bool {
+    PARALLEL_CLONE.with(|c| c.get())
+}
+
+/// Run `f` with the parallel-clone flag set, restoring it after.
+pub fn with_parallel_clone<R>(f: impl FnOnce() -> R) -> R {
+    let before = PARALLEL_CLONE.with(|c| c.replace(true));
+    let out = f();
+    PARALLEL_CLONE.with(|c| c.set(before));
+    out
+}
+
+/// The `parallelMap` chunk worker over a proto's parallel clone (ADR 0058, application 2): the
+/// provider's pool calls it over disjoint `[start, end)` ranges of the input and output element
+/// arrays, on a thread that owns no realm. That is sound only because the entry it calls reads
+/// its `double` parameters and returns a `double` -- `parallel::parallel_safe` on the body, and
+/// the clone's text scanned for any mention of the host, receiver, upvalues or heap before it
+/// is admitted (`lib.rs`) -- so no host, receiver, upvalue table, shape row or thread-local heap
+/// cache is reached from here. An entry that bails out (`KILN_VAL_TYPED_FAIL`)
+/// flags `ctx` and stops; the caller then takes the sequential lowering, which recomputes.
+pub fn emit_parallel_chunk(
+    output: &mut String,
+    symbol: &str,
+    index: usize,
+    parameter_count: u32,
+    captures: &[u32],
+    should_chunk: bool,
+) {
+    use std::fmt::Write as _;
+    let linkage = if should_chunk { "" } else { "static " };
+    let mut index_arg = if parameter_count == 2 {
+        ", (double)i".to_owned()
+    } else {
+        String::new()
+    };
+    // Tier 1 (ADR 0069): `ctx` is `struct { int failed; double caps[N]; }`, the captured values
+    // the call site read and guarded on the realm thread, in the clone's `cap<k>` order.
+    let caps_decl = if captures.is_empty() {
+        String::new()
+    } else {
+        for j in 0..captures.len() {
+            index_arg.push_str(&format!(", pmap_caps[{j}]"));
+        }
+        format!(
+            "    const double * pmap_caps = ((const struct {{ int failed; double caps[{}]; }} *)ctx)->caps;\n",
+            captures.len()
+        )
+    };
+    writeln!(
+        output,
+        "static inline uint32_t {symbol}_to_u32_{index}(double value) {{\n\
+    if (!isfinite(value) || value == 0.0) return 0;\n\
+    double wrapped = fmod(trunc(value), 4294967296.0);\n\
+    if (wrapped < 0.0) wrapped += 4294967296.0;\n\
+    return (uint32_t)wrapped;\n\
+}}\n\
+static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
+    if (isnan(value) || value <= 0.0) return 0;\n\
+    if (value >= 255.0) return 255;\n\
+    double rounded = floor(value);\n\
+    if (value - rounded > 0.5 || (value - rounded == 0.5 && fmod(rounded, 2.0) != 0.0)) {{\n\
+        rounded += 1.0;\n\
+    }}\n\
+    return (uint8_t)rounded;\n\
+}}\n\
+{linkage}void __attribute__((unused)) {symbol}_pmap_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n{caps_decl}\
+    const kiln_val * restrict in_arr = (const kiln_val * restrict)in;\n\
+    kiln_val * restrict out_arr = (kiln_val * restrict)out;\n\
+    int failed = 0;\n\
+    #pragma clang loop vectorize(enable) interleave(enable)\n\
+    for (size_t i = start; i < end; ++i) {{\n\
+        double d; memcpy(&d, &in_arr[i], sizeof d);\n\
+        double r = {symbol}_fn_{index}_p(1, d{index_arg});\n\
+        failed |= kiln_c99_typed_failed(r);\n\
+        out_arr[i] = kiln_c99_val_from_double(r);\n\
+    }}\n\
+    if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
+}}\n\
+{linkage}void __attribute__((unused)) {symbol}_pmap_f64_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n{caps_decl}\
+    const double * restrict in_arr = (const double * restrict)in;\n\
+    double * restrict out_arr = (double * restrict)out;\n\
+    int failed = 0;\n\
+    #pragma clang loop vectorize(enable) interleave(enable)\n\
+    for (size_t i = start; i < end; ++i) {{\n\
+        double r = {symbol}_fn_{index}_p(1, in_arr[i]{index_arg});\n\
+        failed |= kiln_c99_typed_failed(r);\n\
+        out_arr[i] = r;\n\
+    }}\n\
+    if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
+}}\n\
+{linkage}void __attribute__((unused)) {symbol}_pmap_f32_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n{caps_decl}\
+    const float * restrict in_arr = (const float * restrict)in;\n\
+    float * restrict out_arr = (float * restrict)out;\n\
+    int failed = 0;\n\
+    #pragma clang loop vectorize(enable) interleave(enable)\n\
+    for (size_t i = start; i < end; ++i) {{\n\
+        double r = {symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
+        failed |= kiln_c99_typed_failed(r);\n\
+        out_arr[i] = (float)r;\n\
+    }}\n\
+    if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
+}}\n\
+{linkage}void __attribute__((unused)) {symbol}_pmap_i32_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n{caps_decl}\
+    const int32_t * restrict in_arr = (const int32_t * restrict)in;\n\
+    int32_t * restrict out_arr = (int32_t * restrict)out;\n\
+    int failed = 0;\n\
+    #pragma clang loop vectorize(enable) interleave(enable)\n\
+    for (size_t i = start; i < end; ++i) {{\n\
+        double r = {symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
+        failed |= kiln_c99_typed_failed(r);\n\
+        out_arr[i] = (int32_t){symbol}_to_u32_{index}(r);\n\
+    }}\n\
+    if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
+}}\n\
+{linkage}void __attribute__((unused)) {symbol}_pmap_u32_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n{caps_decl}\
+    const uint32_t * restrict in_arr = (const uint32_t * restrict)in;\n\
+    uint32_t * restrict out_arr = (uint32_t * restrict)out;\n\
+    int failed = 0;\n\
+    #pragma clang loop vectorize(enable) interleave(enable)\n\
+    for (size_t i = start; i < end; ++i) {{\n\
+        double r = {symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
+        failed |= kiln_c99_typed_failed(r);\n\
+        out_arr[i] = {symbol}_to_u32_{index}(r);\n\
+    }}\n\
+    if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
+}}\n\
+{linkage}void __attribute__((unused)) {symbol}_pmap_i16_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n{caps_decl}\
+    const int16_t * restrict in_arr = (const int16_t * restrict)in;\n\
+    int16_t * restrict out_arr = (int16_t * restrict)out;\n\
+    int failed = 0;\n\
+    #pragma clang loop vectorize(enable) interleave(enable)\n\
+    for (size_t i = start; i < end; ++i) {{\n\
+        double r = {symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
+        failed |= kiln_c99_typed_failed(r);\n\
+        out_arr[i] = (int16_t)(uint16_t){symbol}_to_u32_{index}(r);\n\
+    }}\n\
+    if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
+}}\n\
+{linkage}void __attribute__((unused)) {symbol}_pmap_u16_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n{caps_decl}\
+    const uint16_t * restrict in_arr = (const uint16_t * restrict)in;\n\
+    uint16_t * restrict out_arr = (uint16_t * restrict)out;\n\
+    int failed = 0;\n\
+    #pragma clang loop vectorize(enable) interleave(enable)\n\
+    for (size_t i = start; i < end; ++i) {{\n\
+        double r = {symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
+        failed |= kiln_c99_typed_failed(r);\n\
+        out_arr[i] = (uint16_t){symbol}_to_u32_{index}(r);\n\
+    }}\n\
+    if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
+}}\n\
+{linkage}void __attribute__((unused)) {symbol}_pmap_i8_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n{caps_decl}\
+    const int8_t * restrict in_arr = (const int8_t * restrict)in;\n\
+    int8_t * restrict out_arr = (int8_t * restrict)out;\n\
+    int failed = 0;\n\
+    #pragma clang loop vectorize(enable) interleave(enable)\n\
+    for (size_t i = start; i < end; ++i) {{\n\
+        double r = {symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
+        failed |= kiln_c99_typed_failed(r);\n\
+        out_arr[i] = (int8_t)(uint8_t){symbol}_to_u32_{index}(r);\n\
+    }}\n\
+    if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
+}}\n\
+{linkage}void __attribute__((unused)) {symbol}_pmap_u8_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n{caps_decl}\
+    const uint8_t * restrict in_arr = (const uint8_t * restrict)in;\n\
+    uint8_t * restrict out_arr = (uint8_t * restrict)out;\n\
+    int failed = 0;\n\
+    #pragma clang loop vectorize(enable) interleave(enable)\n\
+    for (size_t i = start; i < end; ++i) {{\n\
+        double r = {symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
+        failed |= kiln_c99_typed_failed(r);\n\
+        out_arr[i] = (uint8_t){symbol}_to_u32_{index}(r);\n\
+    }}\n\
+    if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
+}}\n\
+{linkage}void __attribute__((unused)) {symbol}_pmap_u8c_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n{caps_decl}\
+    const uint8_t * restrict in_arr = (const uint8_t * restrict)in;\n\
+    uint8_t * restrict out_arr = (uint8_t * restrict)out;\n\
+    int failed = 0;\n\
+    #pragma clang loop vectorize(enable) interleave(enable)\n\
+    for (size_t i = start; i < end; ++i) {{\n\
+        double r = {symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
+        failed |= kiln_c99_typed_failed(r);\n\
+        out_arr[i] = {symbol}_clamp_u8_{index}(r);\n\
+    }}\n\
+    if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
+}}\n\
+{linkage}void __attribute__((unused)) {symbol}_pmap_typed_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n{caps_decl}\
+    kiln_typed_array * restrict in_arr = (kiln_typed_array * restrict)in;\n\
+    kiln_typed_array * restrict out_arr = (kiln_typed_array * restrict)out;\n\
+    int failed = 0;\n\
+    for (size_t i = start; i < end; ++i) {{\n\
+        double d = kiln_c99_typed_get(in_arr, i);\n\
+        double r = {symbol}_fn_{index}_p(1, d{index_arg});\n\
+        failed |= kiln_c99_typed_failed(r);\n\
+        kiln_c99_typed_set(out_arr, i, r);\n\
+    }}\n\
+    if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
+}}"
+    )
+    .unwrap();
+}
+
+pub(crate) use crate::graph::array_slots;
+
+/// Whether every operation in `graph` has a lowering below. This is the one place that decides
+/// what the emitter takes; `graph_for` asks it and fails the unit's emission otherwise.
+pub fn can_lower(graph: &FunctionGraph) -> bool {
+    first_unlowerable(graph).is_none()
+}

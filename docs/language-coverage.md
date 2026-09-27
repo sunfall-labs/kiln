@@ -37,7 +37,7 @@ console.log("kiln", state, total);
 
 ### What that does imply
 
-It is a real end-to-end pipeline, not a demo. Oxc parses TypeScript, `frontend-oxc` lowers to
+It is a real end-to-end pipeline, not a demo. Oxc parses TypeScript, `kiln-frontend-oxc` lowers to
 owned HIR with the type annotation stripped, `kiln-ir` compiles that to stack bytecode, and
 `kiln-interpreter` executes it against `HostOps::WriteStdout`, which `kiln-runtime` implements.
 Five crates and a versioned ABI are load-bearing for those seven lines.
@@ -136,7 +136,7 @@ function calls, constructor calls, builtin statics and method calls all at once.
 Verified by single-line probes, it is emitted for object literals, array literals, template
 literals, `new`, arrow functions, and `++`. When acting on this backlog, splitting that one
 feature name into real ones is cheap and would make the next round of measurement far sharper.
-(That is a change inside `crates/frontend-oxc`, which this document does not touch.)
+(That is a change inside `crates/syntax/kiln-frontend-oxc`, which this document does not touch.)
 
 ---
 
@@ -599,8 +599,8 @@ blocker sets in §3; the diagnostic and identifier counts in §5. `examples/hell
 `kiln ready 3`. The 727 diagnostics and zero parse errors on the 209 KB bundle. The `-0` divergence
 against node v25.9.0.
 
-**Inferred from reading the source** (`crates/kiln-ir/src/lib.rs`,
-`crates/kiln-interpreter/src/lib.rs`, `crates/kiln-hir/src/lib.rs`, `crates/kiln-host-abi`): the
+**Inferred from reading the source** (`crates/compile/kiln-ir/src/lib.rs`,
+`crates/interp/kiln-interpreter/src/lib.rs`, `crates/syntax/kiln-hir/src/lib.rs`, `crates/foundation/kiln-host-abi`): the
 absence of a heap, of call frames, and of any object representation; the `console.log` special case
 and its `resolve("console")` guard; the shape of the `Value` and `HostValue` enums.
 
