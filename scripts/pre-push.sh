@@ -44,7 +44,7 @@ matches_pattern() {
 
 # 1. HTTP close contract
 echo "=== 1/3: HTTP close contract ==="
-if matches_pattern "(crates/kiln-runtime/|crates/kiln-native-provider-ffi/src/realm/|crates/kiln-native/src/.*http|scripts/check-http-close-contract\.sh)"; then
+if matches_pattern "(crates/host/kiln-runtime/|crates/native/kiln-native-provider-ffi/src/(realm/|provider/realm[/.])|crates/native/kiln-native/src/.*http|scripts/check-http-close-contract\.sh)"; then
 	bash scripts/check-http-close-contract.sh
 else
 	echo "Skipped: no HTTP runtime or close authority changes detected."
@@ -52,7 +52,7 @@ fi
 
 # 2. Native number FFI contract
 echo "=== 2/3: Native number FFI contract ==="
-PROVIDER_PATTERN="(crates/kiln-native-number|crates/kiln-native-provider|crates/kiln-number-core|crates/kiln-temporal|crates/kiln-runtime|crates/kiln-node-path|crates/kiln-artifact-cache|crates/kiln-digest|crates/kiln-host-abi|scripts/check-native-number-ffi\.sh|scripts/package-native-number-provider\.sh)"
+PROVIDER_PATTERN="(crates/semantics/kiln-native-provider-contract|crates/native/kiln-native-provider-ffi|crates/foundation/kiln-number-core|crates/semantics/kiln-temporal|crates/host/kiln-runtime|crates/semantics/kiln-node-path|crates/foundation/kiln-artifact-cache|crates/foundation/kiln-digest|crates/foundation/kiln-host-abi|scripts/check-native-number-ffi\.sh|scripts/package-native-number-provider\.sh)"
 if matches_pattern "$PROVIDER_PATTERN"; then
 	scripts/check-native-number-ffi.sh
 else
@@ -64,22 +64,22 @@ echo "=== 3/3: Core workspace test suites ==="
 PACKAGES=()
 
 # If global manifest/lockfile or shared core IR changed, test all 5
-if matches_pattern "(Cargo\.(toml|lock)|crates/kiln-ir/|crates/kiln-builtin-surface/|crates/kiln-host-abi/)"; then
+if matches_pattern "(Cargo\.(toml|lock)|crates/compile/kiln-ir/|crates/compile/kiln-graph/|crates/semantics/kiln-builtin-surface/|crates/foundation/kiln-host-abi/)"; then
 	PACKAGES=(kiln-cli kiln-daemon kiln-native kiln-backend-c kiln-interpreter)
 else
-	if matches_pattern "crates/kiln-interpreter/"; then
+	if matches_pattern "(crates/interp/kiln-interpreter/|crates/interp/kiln-module-eval/)"; then
 		PACKAGES+=(kiln-interpreter kiln-native kiln-cli)
 	fi
-	if matches_pattern "crates/kiln-backend-c/"; then
+	if matches_pattern "crates/native/kiln-backend-c/"; then
 		PACKAGES+=(kiln-backend-c kiln-native kiln-cli)
 	fi
-	if matches_pattern "(crates/kiln-native/|crates/kiln-runtime/|crates/kiln-module-graph/)"; then
+	if matches_pattern "(crates/native/kiln-native/|crates/host/kiln-runtime/|crates/compile/kiln-module-graph/)"; then
 		PACKAGES+=(kiln-native kiln-cli)
 	fi
-	if matches_pattern "crates/kiln-daemon/"; then
+	if matches_pattern "crates/tools/kiln-daemon/"; then
 		PACKAGES+=(kiln-daemon kiln-cli)
 	fi
-	if matches_pattern "crates/kiln-cli/"; then
+	if matches_pattern "crates/tools/kiln-cli/"; then
 		PACKAGES+=(kiln-cli)
 	fi
 fi

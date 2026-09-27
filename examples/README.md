@@ -3,7 +3,7 @@
 `small/` and `medium/` are the fixture projects `kiln-bench` measures against (design.md §13).
 They are **generated, not authored** — `kiln-bench` renders them from a fixed seed and rewrites
 those two owned directories whenever their manifests no longer match. The generator lives in
-`bench/src/workload.rs`.
+`crates/tools/kiln-bench/src/workload.rs`.
 
 `hello.ts` and `modules/` are small, hand-authored public CLI smoke fixtures. The latter exercises
 exact relative resolution, dependency-first side effects, and a named scalar import.

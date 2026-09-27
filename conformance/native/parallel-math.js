@@ -4,9 +4,10 @@
 // the listed `Math` functions, which the parallel clone lowers to bare libm calls, against the
 // same calls in `map`; and the smallest arrays, which the pool runs inline.
 //
-// A release module past 16 functions or 512 instructions is emitted with generic bodies only
-// (`kiln-native`'s specialization limit), which has no parallel lowering at all, so each file
-// in this harness stays under it: one `check` and at most seven pairs.
+// Each file stays under `kiln-native`'s release specialization limit (16 functions, 512
+// instructions), so its bodies are specialized: one `check` and at most seven pairs.
+// `parallel-large-module.js` is the harness past the limit, where every body is generic and
+// only the qualifying sites are lowered (issue 13).
 function check(label, p, m) {
   let ok = p.length === m.length;
   for (let i = 0; ok && i < p.length; i++) ok = i in p === i in m && Object.is(p[i], m[i]);

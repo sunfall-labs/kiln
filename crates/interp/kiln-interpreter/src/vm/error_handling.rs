@@ -1,0 +1,331 @@
+use super::*;
+
+impl<H: HostOps + ?Sized> Vm<'_, H> {
+    /// Resume a generator, recovering what it threw rather than unwinding past this point.
+    pub(super) fn resume_catching(
+        &mut self,
+        generator: &Rc<RefCell<GeneratorState>>,
+        resume: Resume,
+        instruction: usize,
+    ) -> Result<Result<(Value, bool), Value>, ExecutionError> {
+        // A `.return()` unwinds by throwing a marker, and the host handler installed just below
+        // catches everything -- including that marker, which is not an exception. What it means
+        // is that the body ran out of `finally` blocks and finished with the value the consumer
+        // asked to return, so the value has to be kept here to answer with.
+        let returning = match &resume {
+            Resume::Return(value) => Some(value.clone()),
+            // A `Send` that resumes an unwind already in flight is still that unwind: what is
+            // finishing is the `finally` block which awaited, not the body.
+            Resume::Send(_) | Resume::Throw(_) => generator.borrow().returning.clone(),
+        };
+        let installed = self.handlers.len();
+        self.handlers.push(Handler {
+            target: HOST_HANDLER,
+            frame_depth: self.frames.len(),
+            stack_height: self.stack.len(),
+            native_depth: self.native_depth,
+        });
+        let outcome = self.resume_generator_with(generator, resume, instruction);
+        self.handlers.truncate(installed);
+        match outcome {
+            // Suspended again with the unwind still travelling: remember it, so the resumption
+            // that finishes the `finally` recognises the marker as this return rather than as a
+            // thrown value.
+            Ok(value @ (_, false)) => {
+                generator.borrow_mut().returning = returning;
+                Ok(Ok(value))
+            }
+            Ok(value) => {
+                generator.borrow_mut().returning = None;
+                Ok(Ok(value))
+            }
+            Err(ExecutionError::CaughtByHost) => {
+                let caught = self.caught.take().unwrap_or(Value::Undefined);
+                if let (Value::Native(Native::ReturnSignal, _), Some(value)) = (&caught, returning)
+                {
+                    let mut state = generator.borrow_mut();
+                    state.done = true;
+                    state.returning = None;
+                    drop(state);
+                    return Ok(Ok((value, true)));
+                }
+                generator.borrow_mut().returning = None;
+                Ok(Err(caught))
+            }
+            Err(ExecutionError::GeneratorReturned) => {
+                let mut state = generator.borrow_mut();
+                state.done = true;
+                state.returning = None;
+                drop(state);
+                Ok(Ok((returning.unwrap_or(Value::Undefined), true)))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Settle a promise, queueing whatever was waiting on it.
+    ///
+    /// Only the first settlement counts: a promise is a value that arrives once, and both
+    /// `resolve` and `reject` are handed to the program, which may call either twice.
+    /// Take the result of a step, turning an error a program could catch into a thrown value.
+    ///
+    /// `Ok(None)` means control has already moved to a handler and the caller should go round the
+    /// loop again rather than using a result that does not exist.
+    pub(super) fn catchable<T>(
+        &mut self,
+        result: Result<T, ExecutionError>,
+        instruction: usize,
+    ) -> Result<Option<T>, ExecutionError> {
+        match result {
+            Ok(value) => Ok(Some(value)),
+            // The Rust stack is flat again here, so the handler that could not be reached
+            // from inside a callback can take the value now.
+            Err(ExecutionError::ThrownAcrossNative) => {
+                let thrown = self.caught.take().unwrap_or(Value::Undefined);
+                self.unwind(thrown, instruction)?;
+                Ok(None)
+            }
+            Err(error) => match error.as_javascript_error() {
+                Some((kind, message)) => {
+                    self.throw_error(kind, message, instruction)?;
+                    Ok(None)
+                }
+                None => Err(error),
+            },
+        }
+    }
+
+    // ----------------------------------------------------------------------------------------
+    // The generic `Array.prototype` walk.
+    //
+    // Every method on `Array.prototype` is defined on an arbitrary object rather than on an
+    // array: each step is `HasProperty(O, k)`, `Get(O, k)`, `Set(O, k, v, true)` or
+    // `DeletePropertyOrThrow(O, k)` against the receiver the program supplied, and the bound
+    // comes from `Get(O, "length")`. `Array.prototype.slice.call(arguments)` is why they are
+    // written that way, and the whole family below is what a redirected call reaches.
+    //
+    // A copy walked in the receiver's place answers from a snapshot, and three things are then
+    // wrong at once: a mutating method writes nothing back, an index the walk deleted or that
+    // only the prototype carries is visited anyway, and the receiver a callback is handed is an
+    // array the program never saw. An array receiver keeps its dense fast path, which is the
+    // same walk with the indirection removed.
+    // ----------------------------------------------------------------------------------------
+}
+
+impl<H: HostOps + ?Sized> Vm<'_, H> {
+    /// The call stack as names, innermost first, at the moment this error object was built.
+    ///
+    /// A closure that was never given a name shows as `<anonymous>` -- which is most of them in
+    /// a bundle, but the named ones between them are usually enough to locate the call.
+    pub(super) fn trace(&self) -> Vec<String> {
+        std::iter::once(self.function.as_ref())
+            .chain(
+                self.frames
+                    .iter()
+                    .rev()
+                    .map(|frame| frame.function.as_ref()),
+            )
+            .map(|function| match function {
+                Some(closure) => closure.name.as_deref().unwrap_or("<anonymous>").to_owned(),
+                None => "<module>".to_owned(),
+            })
+            .collect()
+    }
+
+    /// V8-compatible stack capture over Kiln's logical frames.
+    ///
+    /// Kiln does not retain source-map locations in the VM, so CallSites deliberately use one
+    /// deterministic virtual filename and zero locations. Their function names are real: they
+    /// come from the same closures used by uncaught-error traces.
+    pub(super) fn capture_stack_trace(
+        &mut self,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+        let Value::Object(target_object) = &target else {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "invalid argument to Error.captureStackTrace".to_owned(),
+            });
+        };
+        let mut names = self.trace();
+        // The capture helper itself is a native call rather than a JavaScript frame. V8's
+        // constructorOpt removes frames through the named constructor; approximating that rule
+        // by dropping the first matching name keeps library helper frames out deterministically.
+        if let Some(Value::Function(constructor)) = arguments.get(1)
+            && let Some(name) = constructor.name.as_deref()
+            && let Some(index) = names.iter().position(|candidate| candidate == name)
+        {
+            names.drain(..=index);
+        }
+        let sites = Value::Array(ArrayData::new(
+            names.into_iter().map(call_site_object).collect(),
+        ));
+        let error_constructor = Value::Native(Native::Error(ErrorKind::Error), RealmId::PRIMARY);
+        let prepare = self.read_property(&error_constructor, "prepareStackTrace", instruction)?;
+        let stack = if is_callable(&prepare) {
+            self.call_value(
+                &prepare,
+                error_constructor,
+                vec![target.clone(), sites],
+                instruction,
+            )?
+        } else {
+            Value::String("Error".to_owned().into())
+        };
+        target_object
+            .borrow_mut()
+            .set_non_enumerable("stack", stack);
+        Ok(Value::Undefined)
+    }
+
+    pub(super) fn throw_error(
+        &mut self,
+        kind: ErrorKind,
+        message: String,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let error = self.construct_error(kind, &[Value::String(message.into())]);
+        self.unwind(error, instruction)
+    }
+
+    /// The value a failed call threw, for a built-in that has to keep going and report later.
+    ///
+    /// An error the machine raised carries a kind and a sentence rather than an object, so one
+    /// is built here -- which is what a `catch` around the same call would have seen.
+    pub(super) fn thrown_value(&mut self, error: ExecutionError) -> Result<Value, ExecutionError> {
+        match error {
+            ExecutionError::ThrownAcrossNative | ExecutionError::CaughtByHost => {
+                Ok(self.caught.take().unwrap_or(Value::Undefined))
+            }
+            other => match other.as_javascript_error() {
+                Some((kind, message)) => {
+                    Ok(self.construct_error(kind, &[Value::String(message.into())]))
+                }
+                None => Err(other),
+            },
+        }
+    }
+
+    /// The error constructor a *program* reached, as opposed to one the machine raised itself.
+    ///
+    /// They differ in exactly one place. `new AggregateError(errors, message)` iterates its
+    /// first argument -- it is `IterableToList`, not an array-like read -- so it can run the
+    /// program's own `Symbol.iterator` and can fail. Every other kind takes its arguments as
+    /// they are, which is why [`Vm::construct_error`] stays infallible and every internal
+    /// `TypeError` the machine raises can keep using it.
+    pub(super) fn construct_error_reached(
+        &mut self,
+        kind: ErrorKind,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        if !matches!(kind, ErrorKind::Aggregate) {
+            return Ok(self.construct_error(kind, arguments));
+        }
+        let source = arguments.first().cloned().unwrap_or(Value::Undefined);
+        let errors = Value::Array(ArrayData::new(self.drain_iterable(&source, instruction)?));
+        let mut listed = arguments.to_vec();
+        match listed.first_mut() {
+            Some(slot) => *slot = errors,
+            None => listed.push(errors),
+        }
+        Ok(self.construct_error(kind, &listed))
+    }
+
+    /// Build an error instance whose prototype is this run's prototype for that kind.
+    pub(super) fn construct_error(&mut self, kind: ErrorKind, arguments: &[Value]) -> Value {
+        let prototype = self.error_prototype(kind);
+        let error = build_error(kind, arguments);
+        if let Value::Object(object) = &error {
+            let mut object = object.borrow_mut();
+            object.set_prototype(prototype);
+            // Recorded where the error was *made*, not where it was reported: a rejection
+            // surfaces after the stack that produced it is gone, and that is exactly the case
+            // where a trace is worth having.
+            object.set(
+                ERROR_TRACE,
+                Value::Array(ArrayData::new(
+                    self.trace()
+                        .into_iter()
+                        .map(|value| Value::String(value.into()))
+                        .collect(),
+                )),
+            );
+        }
+        error
+    }
+}
+
+impl<H: HostOps + ?Sized> Vm<'_, H> {
+    /// Describe a value that is about to end the run as an uncaught throw.
+    ///
+    /// A host reports an uncaught value the way the program would print it, which for a
+    /// user-defined error type means its own `toString`. Test262's whole assertion library throws
+    /// `Test262Error`, whose `toString` is an ordinary function, so without this every failure in
+    /// the suite reads `uncaught [object Object]` and the assertion message -- the only part that
+    /// says what broke -- is lost.
+    ///
+    /// This runs user code, which is only acceptable because both callers are terminal: the run
+    /// is ending either way. A `toString` that throws, or that answers something other than a
+    /// string, falls back to the built-in description rather than replacing one uncaught error
+    /// with another.
+    pub(super) fn describe_uncaught(&mut self, thrown: &Value, instruction: usize) -> String {
+        if has_error_to_string(thrown) {
+            return error_to_string(thrown);
+        }
+        if matches!(
+            thrown,
+            Value::Object(_) | Value::Function(_) | Value::Array(_)
+        ) && let Ok(Value::String(text)) =
+            self.as_primitive(thrown, PrimitiveHint::String, instruction)
+        {
+            return text.to_lossy_string();
+        }
+        describe_thrown(thrown)
+    }
+
+    /// Find the constructor name in a thrown value's prototype chain.
+    ///
+    /// This is the name Test262's negative contract compares, not the mutable `name` property
+    /// used for display. The latter can be changed by a program, and primitives can be displayed
+    /// with exactly the same spelling as an error. Starting at the thrown value itself means a
+    /// program-supplied `constructor` property is observed just as `value.constructor` would be.
+    pub(super) fn error_constructor(&self, thrown: &Value) -> Option<String> {
+        let mut current = Some(thrown.clone());
+        for _ in 0..MAX_PROTOTYPE_DEPTH {
+            let value = current?;
+            current = match &value {
+                Value::Object(object) => {
+                    let object = object.borrow();
+                    if let Some(Property::Value(constructor)) =
+                        object.get_own_property("constructor")
+                    {
+                        return constructor_name(constructor);
+                    }
+                    object.prototype.clone()
+                }
+                Value::Function(function) => {
+                    let properties = function.properties.borrow();
+                    if let Some(Property::Value(constructor)) =
+                        properties.get_own_property("constructor")
+                    {
+                        return constructor_name(constructor);
+                    }
+                    properties.prototype.clone()
+                }
+                Value::Array(array) => {
+                    let properties = array.properties.borrow();
+                    if let Some(Property::Value(constructor)) =
+                        properties.get_own_property("constructor")
+                    {
+                        return constructor_name(constructor);
+                    }
+                    properties.prototype.clone()
+                }
+                _ => return None,
+            };
+        }
+        None
+    }
+}

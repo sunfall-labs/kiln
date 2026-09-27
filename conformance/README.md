@@ -402,7 +402,7 @@ rather than a hollow green.
   keeping: strip ANSI escapes, compare merged stdout+stderr byte for byte against `node`, and run
   the cases in parallel because almost all the wall time is compilation.
 - **`guard/ab.sh`.** A test262 A/B harness specific to porffor's test262 runner and its
-  `--json-results` flag. `crates/kiln-test262` is the right home for the equivalent. The lesson
+  `--json-results` flag. `crates/tools/kiln-test262` is the right home for the equivalent. The lesson
   it encodes — a partial run must never write a full baseline — is recorded above.
 - **`GOAL.md`, `STACK.md`, `REPORT.md`.** Read for this port and distilled into the two sections
   above. What is left in them is porffor implementation detail: which file each fix landed in,

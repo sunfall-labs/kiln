@@ -1,0 +1,22 @@
+[package]
+name = "kiln-module-graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kiln-hir = { path = "../../syntax/kiln-hir" }
+kiln-ir = { path = "../kiln-ir" }
+kiln-module-resolver = { path = "../../semantics/kiln-module-resolver" }
+kiln-data-formats = { workspace = true }
+kiln-builtins = { workspace = true }
+kiln-frontend-oxc = { workspace = true }
+serde = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+kiln-module-eval = { workspace = true }
+kiln-interpreter = { workspace = true }
+kiln-runtime = { workspace = true }
+kiln-host-abi = { workspace = true }

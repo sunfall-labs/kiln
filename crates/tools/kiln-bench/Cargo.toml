@@ -1,0 +1,29 @@
+[package]
+name = "kiln-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kiln-backend-c = { workspace = true }
+kiln-db = { workspace = true }
+kiln-proto = { workspace = true }
+kiln-daemon = { workspace = true }
+kiln-interpreter = { workspace = true }
+kiln-runtime = { workspace = true }
+kiln-conformance = { workspace = true }
+kiln-test262 = { workspace = true }
+kiln-frontend-oxc = { workspace = true }
+kiln-artifact-cache = { workspace = true }
+kiln-native-toolchain = { workspace = true }
+kiln-ir = { workspace = true }
+kiln-module-graph = { workspace = true }
+kiln-module-eval = { workspace = true }
+kiln-native = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "kiln-bench"
+path = "src/main.rs"

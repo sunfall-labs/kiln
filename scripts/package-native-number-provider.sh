@@ -109,7 +109,7 @@ kiln_provider_sha256_stream() {
 # Rust panics before returning across the private C ABI.
 
 # Without `default-features = false` on the `kiln-runtime` edge in
-# `crates/kiln-native-number-ffi/Cargo.toml`, the common `--no-default-features` selection
+# `crates/native/kiln-native-provider-ffi/Cargo.toml`, the common `--no-default-features` selection
 # below would still unify `kiln-runtime/http` back on through that dependency's defaults
 # and ship a full archive under a slim manifest.
 if [[ $KILN_PROVIDER_VARIANT == full ]]; then
@@ -220,7 +220,7 @@ if command -v "$KILN_PROVIDER_NM" >/dev/null 2>&1; then
 			'Most often the archive was built without the requested features. Full builds every engine;' \
 			'all other variants use --no-default-features with the exact contract feature set. Check that' \
 			'the refusal stubs still cover every group in' \
-			'provider_abi_registry! in crates/kiln-native-number-abi/src/lib.rs.' >&2
+			'provider_abi_registry! in crates/semantics/kiln-native-provider-contract/src/abi.rs.' >&2
 		exit 1
 	fi
 else
@@ -237,7 +237,7 @@ KILN_PROVIDER_SOURCE_DIGEST=$(
 )
 while IFS= read -r KILN_PROVIDER_SOURCE || [[ -n $KILN_PROVIDER_SOURCE ]]; do
 	[[ -z $KILN_PROVIDER_SOURCE ]] || printf '%s\n' "$KILN_PROVIDER_SOURCE" >>"$KILN_PROVIDER_LISTED"
-done < crates/kiln-native/provider-sources.txt
+done < crates/semantics/kiln-native-provider-contract/provider-sources.txt
 
 # The manifest is intentionally explicit, and an explicit list of inputs has one failure mode: a
 # file that belongs in it and is not. That file's contents then cannot change the digest,
@@ -264,7 +264,7 @@ if [[ -f $KILN_PROVIDER_DEP_INFO ]]; then
 	if [[ -n $KILN_PROVIDER_UNLISTED ]]; then
 		printf 'the provider archive is compiled from workspace sources the identity list does not name:\n%s\n' \
 			"$KILN_PROVIDER_UNLISTED" >&2
-		printf 'add them to crates/kiln-native/provider-sources.txt, or their edits cannot invalidate the archive.\n' >&2
+		printf 'add them to crates/semantics/kiln-native-provider-contract/provider-sources.txt, or their edits cannot invalidate the archive.\n' >&2
 		exit 1
 	fi
 fi

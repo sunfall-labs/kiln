@@ -1,6 +1,6 @@
 //! The memo oracle: a memoized query engine must answer what a from-scratch one answers.
 //!
-//! The property, the frontend, the text pool and the reasoning are `crates/kiln-db/tests/oracle.rs`'s.
+//! The property, the frontend, the text pool and the reasoning are `crates/compile/kiln-db/tests/oracle.rs`'s.
 //! That file is a proptest suite and stays exactly as it is; this is the same property behind a
 //! coverage-guided generator, which is the one thing proptest cannot give it. Random histories
 //! find bugs in proportion to how often they happen to hit a shape; a coverage-guided engine
@@ -192,7 +192,7 @@ fn observe(db: &mut MemoEngine, files: usize, top_down: bool) -> Observed {
 /// `None` means interned but never written, which the engine distinguishes from written-empty:
 /// a first write is a real edit even when the text is `""`.
 fn from_scratch(inputs: &[(String, Option<String>)]) -> MemoEngine {
-    let mut db = MemoEngine::new(oracle_frontend);
+    let mut db = MemoEngine::with_summary_query(oracle_frontend, kiln_backend_c::summarize_program);
     for (path, text) in inputs {
         let file = db.intern(path);
         if let Some(text) = text {
@@ -243,7 +243,7 @@ pub struct Disagreement(pub String);
 
 /// Memoized equals from-scratch, after every single step.
 pub fn memoized_agrees_at_every_step(history: &History) -> Result<(), Disagreement> {
-    let mut db = MemoEngine::new(oracle_frontend);
+    let mut db = MemoEngine::with_summary_query(oracle_frontend, kiln_backend_c::summarize_program);
     let mut inputs: Vec<(String, Option<String>)> = Vec::new();
     let mut warm = false;
 
@@ -299,7 +299,7 @@ pub fn memoized_agrees_at_every_step(history: &History) -> Result<(), Disagreeme
 /// never occurs. Here only the generated queries run, so several edits land between reads and a
 /// memo has room to go quietly wrong.
 pub fn memoized_agrees_after_a_batch(history: &History) -> Result<(), Disagreement> {
-    let mut db = MemoEngine::new(oracle_frontend);
+    let mut db = MemoEngine::with_summary_query(oracle_frontend, kiln_backend_c::summarize_program);
     let mut inputs: Vec<(String, Option<String>)> = Vec::new();
     for op in history.0.iter().take(MAX_STEPS) {
         apply(&mut db, &mut inputs, *op);
@@ -353,7 +353,7 @@ fn identical_rewrite_is_free(
 /// the coverage would be an illusion. Callable so a test can fail loudly instead of quietly
 /// weakening the oracle.
 pub fn text_pool_produces_distinguishable_ir() -> bool {
-    let mut db = MemoEngine::new(oracle_frontend);
+    let mut db = MemoEngine::with_summary_query(oracle_frontend, kiln_backend_c::summarize_program);
     let file = db.intern("a.js");
 
     let mut distinct: Vec<Compiled> = Vec::new();

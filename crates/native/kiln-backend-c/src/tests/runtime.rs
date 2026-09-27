@@ -1,0 +1,1697 @@
+use super::*;
+
+#[test]
+fn runtime_module_materializer_stays_inside_the_backend_value_abi() {
+    let module = ModuleProgram {
+        program: Program {
+            source: "".into(),
+            version: BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: vec![Instruction::Return],
+            local_count: 1,
+            functions: Vec::new(),
+            template_sites: Vec::new(),
+        },
+        dependencies: Vec::new(),
+        imports: Vec::new(),
+        exports: vec![kiln_ir::ExportBinding {
+            exported: "probe".to_owned(),
+            local_slot: 0,
+        }],
+        strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
+    };
+    let emitted = emit_runtime_module_with_logical_path(
+        &module,
+        ".kiln/builtins/probe.builtin",
+        "exports[0] = kiln_c99_method(KILN_C99_METHOD_QUEUE_MICROTASK);",
+    )
+    .expect("runtime module emits");
+
+    assert!(
+        emitted
+            .source
+            .contains("exports[0] = kiln_c99_method(KILN_C99_METHOD_QUEUE_MICROTASK);")
+    );
+    assert!(emitted.source.contains("static int kiln_module_path_"));
+    assert!(emitted.source.contains("kiln_realm_enter"));
+    assert!(!emitted.source.contains("extern kiln_value"));
+
+    let decoupled = emit_runtime_module_with_logical_path_and_policy(
+        &module,
+        ".kiln/builtins/probe.builtin",
+        "exports[0] = kiln_c99_method(KILN_C99_METHOD_QUEUE_MICROTASK);",
+        EmissionPolicy {
+            decoupled_prelude: true,
+            ..EmissionPolicy::default()
+        },
+    )
+    .expect("decoupled runtime module emits");
+    assert!(
+        decoupled
+            .source
+            .contains(&format!("#include \"{RUNTIME_PRELUDE_HEADER_NAME}\""))
+    );
+    assert!(!decoupled.source.contains("enum kiln_value_tag"));
+}
+
+#[test]
+fn method_metadata_is_registry_generated_and_unknown_codes_are_zero() {
+    let source = runtime_prelude_source();
+    assert!(source.contains("typedef struct kiln_c99_method_metadata"));
+    assert!(source.contains("kiln_c99_method_metadata_for(uint64_t code)"));
+    assert!(source.contains(
+        "case KILN_C99_METHOD_ARRAY_COPY_WITHIN: return (kiln_c99_method_metadata){UINT32_C(2), UINT32_C(0x7), UINT32_C(0)};"
+    ));
+    assert!(source.contains(
+        "case KILN_C99_METHOD_ESCAPE: return (kiln_c99_method_metadata){UINT32_C(8), UINT32_C(0), UINT32_C(0x1)};"
+    ));
+    assert!(
+        source
+            .contains("return (kiln_c99_method_metadata){UINT32_C(0), UINT32_C(0), UINT32_C(0)};")
+    );
+    assert!(source.contains("code >= KILN_C99_METHOD_TEMPORAL_FROM"));
+    assert!(source.contains("KILN_C99_GROUP_TEMPORAL | KILN_C99_GROUP_TEMPORAL_OP"));
+    assert!(!source.contains("kiln_c99_numeric_arguments(uint64_t code)"));
+    assert!(!source.contains("kiln_c99_textual_arguments(uint64_t code)"));
+}
+
+#[test]
+fn executable_namespace_wrapper_materializes_sorted_immutable_namespace() {
+    let module = ModuleProgram {
+        program: Program {
+            version: BYTECODE_VERSION,
+            source: String::new().into(),
+            constants: Vec::new(),
+            code: vec![Instruction::Return],
+            local_count: 0,
+            functions: Vec::new(),
+            template_sites: Vec::new(),
+        },
+        dependencies: Vec::new(),
+        imports: Vec::new(),
+        exports: Vec::new(),
+        strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
+    };
+    let generated = emit_module_with_logical_path(&module, "src/namespace.js")
+        .expect("namespace helper module emits");
+    let same = emit_module_with_logical_path(&module, "src/namespace.js")
+        .expect("namespace helper module emits deterministically");
+    assert_eq!(generated, same);
+    let wrapper = format!(
+        r#"
+int main(void) {{
+    static const char *names[] = {{"z", "a"}};
+    static const size_t lengths[] = {{1, 1}};
+    static const char *numeric_names[] = {{"2", "10"}};
+    static const size_t numeric_lengths[] = {{1, 2}};
+    static const char *reserved_names[] = {{"@@toStringTag"}};
+    static const size_t reserved_lengths[] = {{13}};
+    kiln_value values[2] = {{kiln_c99_number(2.0), kiln_c99_number(1.0)}};
+    kiln_value namespace_object;
+    kiln_value numeric_namespace;
+    kiln_value empty_namespace;
+    kiln_value cell = values[0];
+    kiln_value read;
+    kiln_value descriptor;
+    kiln_value thrown = kiln_c99_undefined();
+    kiln_value args[3];
+    int found;
+    if (kiln_c99_make_cell(&cell) != KILN_C99_OK) return 1;
+    *kiln_c99_cell_of(cell) = kiln_c99_val_from_double(9.0);
+    values[0] = cell;
+    if ({symbol}_namespace_wrapper(&namespace_object, names, lengths, values, 2) != KILN_C99_OK)
+        return 2;
+    if (namespace_object.tag != KILN_VALUE_OBJECT) return 3;
+    if (kiln_c99_object_of(namespace_object)->prototype.tag != KILN_VALUE_NULL) return 4;
+    if (!kiln_c99_object_of(namespace_object)->module_namespace ||
+        kiln_c99_object_of(namespace_object)->frozen) return 5;
+    if (kiln_c99_object_of(namespace_object)->count != 3 ||
+        !kiln_test_key_equal(kiln_c99_object_of(namespace_object)->properties[0].key, "a", 1) ||
+        !kiln_test_key_equal(kiln_c99_object_of(namespace_object)->properties[1].key, "z", 1) ||
+        !kiln_test_key_equal(kiln_c99_object_of(namespace_object)->properties[2].key,
+                             "@@toStringTag", 13))
+        return 6;
+    if (kiln_c99_object_of(namespace_object)->properties[0].refused ||
+        kiln_c99_object_of(namespace_object)->properties[0].symbol_hidden ||
+        kiln_c99_object_of(namespace_object)->properties[1].refused ||
+        kiln_c99_object_of(namespace_object)->properties[1].symbol_hidden)
+        return 28;
+    if (kiln_c99_get(NULL, namespace_object, "z", 1, &read, 0, &thrown) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(read) != 9.0) return 7;
+    if (kiln_c99_describe_property(NULL, namespace_object, "a", 1, &descriptor, &found, 0,
+                                   &thrown) != KILN_C99_OK || !found) return 8;
+    if (kiln_c99_get(NULL, descriptor, "writable", 8, &read, 0, &thrown) != KILN_C99_OK ||
+        !kiln_c99_truthy(read)) return 9;
+    if (kiln_c99_get(NULL, descriptor, "enumerable", 10, &read, 0, &thrown) != KILN_C99_OK ||
+        !kiln_c99_truthy(read)) return 10;
+    if (kiln_c99_get(NULL, descriptor, "configurable", 12, &read, 0, &thrown) != KILN_C99_OK ||
+        kiln_c99_truthy(read)) return 11;
+    args[0] = namespace_object;
+    args[1] = kiln_c99_copy_text("a", 1);
+    args[2] = descriptor;
+    if (kiln_c99_invoke_method(NULL, &read, KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY,
+                               kiln_c99_undefined(), args, 3, 0, &thrown) != KILN_C99_OK)
+        return 12;
+    if (kiln_c99_put(NULL, descriptor, "writable", 8, kiln_c99_boolean(0), 0, &thrown) !=
+        KILN_C99_OK ||
+        kiln_c99_invoke_method(NULL, &read, KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY,
+                               kiln_c99_undefined(), args, 3, 0, &thrown) != KILN_C99_THROWN)
+        return 13;
+    if (kiln_c99_get(NULL, namespace_object, "@@toStringTag", 13, &read, 0, &thrown) !=
+            KILN_C99_OK ||
+        read.tag != KILN_VALUE_STRING || !kiln_test_units_equal(read, "Module", 6))
+        return 13;
+    if (kiln_c99_put_mode(NULL, namespace_object, "a", 1, kiln_c99_number(3.0), 1, 0,
+                          &thrown) != KILN_C99_THROWN)
+        return 14;
+    if (kiln_c99_get(NULL, thrown, "message", 7, &read, 0, &thrown) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_STRING || !kiln_test_units_contain(read, "module namespace"))
+        return 15;
+    if (kiln_c99_write_would_accept(namespace_object, "a", 1)) return 16;
+    if (kiln_c99_delete(NULL, namespace_object, "a", 1, &found, 0, &thrown) != KILN_C99_OK ||
+        found != 0) return 17;
+    if (kiln_c99_delete(NULL, namespace_object, "missing", 7, &found, 0, &thrown) !=
+            KILN_C99_OK ||
+        found != 1) return 18;
+    args[0] = namespace_object;
+    if (kiln_c99_invoke_method(NULL, &read, KILN_C99_METHOD_OBJECT_IS_FROZEN,
+                               kiln_c99_undefined(), args, 1, 0, &thrown) != KILN_C99_OK ||
+        kiln_c99_truthy(read)) return 19;
+    if (kiln_c99_invoke_method(NULL, &read, KILN_C99_METHOD_OBJECT_FREEZE,
+                               kiln_c99_undefined(), args, 1, 0, &thrown) != KILN_C99_THROWN)
+        return 20;
+    if (kiln_c99_set_prototype(namespace_object, kiln_c99_undefined()) !=
+        KILN_C99_CONTROL_ERROR) return 21;
+    if ({symbol}_namespace_wrapper(&numeric_namespace, numeric_names, numeric_lengths, values, 2)
+        != KILN_C99_OK) return 22;
+    if (kiln_c99_object_of(numeric_namespace)->count != 3 ||
+        !kiln_test_key_equal(kiln_c99_object_of(numeric_namespace)->properties[0].key, "10", 2) ||
+        !kiln_test_key_equal(kiln_c99_object_of(numeric_namespace)->properties[1].key, "2", 1))
+        return 23;
+    if ({symbol}_namespace_wrapper(&read, reserved_names, reserved_lengths, values, 1) !=
+        KILN_C99_INVALID_ARGUMENT) return 24;
+    if ({symbol}_namespace_wrapper(&empty_namespace, NULL, NULL, NULL, 0) != KILN_C99_OK)
+        return 25;
+    args[0] = empty_namespace;
+    if (kiln_c99_invoke_method(NULL, &read, KILN_C99_METHOD_OBJECT_FREEZE,
+                               kiln_c99_undefined(), args, 1, 0, &thrown) != KILN_C99_OK ||
+        !kiln_c99_strict_equal(read, empty_namespace)) return 26;
+    if (kiln_c99_invoke_method(NULL, &read, KILN_C99_METHOD_OBJECT_IS_FROZEN,
+                               kiln_c99_undefined(), args, 1, 0, &thrown) != KILN_C99_OK ||
+        !kiln_c99_truthy(read)) return 27;
+    return 0;
+}}
+"#,
+        symbol = generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "namespace-wrapper");
+    assert!(
+        run.status.success(),
+        "generated namespace wrapper failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_runtime_event_emitter_preserves_order_once_and_removal() {
+    let module = ModuleProgram {
+        program: Program {
+            source: "".into(),
+            version: BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: vec![Instruction::Return],
+            local_count: 1,
+            functions: Vec::new(),
+            template_sites: Vec::new(),
+        },
+        dependencies: Vec::new(),
+        imports: Vec::new(),
+        exports: vec![kiln_ir::ExportBinding {
+            exported: "EventEmitter".to_owned(),
+            local_slot: 0,
+        }],
+        strictness: kiln_ir::Strictness::default(),
+        ..Default::default()
+    };
+    let generated = emit_runtime_module_with_logical_path(
+        &module,
+        ".kiln/builtins/events.builtin",
+        "exports[0] = kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_EMITTER);",
+    )
+    .expect("events runtime module emits");
+    let wrapper = format!(
+        r#"
+static int calls = 0;
+static int listener(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
+                    const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {{
+    (void)ctx; (void)upvalues; (void)receiver_ptr;
+    if (argc != 1 || !KILN_VAL_IS_NUMBER(args[0])) return 91;
+    double d; memcpy(&d, &args[0], sizeof(d));
+    calls = calls * 10 + (int)d;
+    *result = KILN_VAL_UNDEFINED;
+    return KILN_C99_OK;
+}}
+static int child_constructor(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
+                             const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {{
+    (void)ctx; (void)upvalues; (void)args; (void)argc;
+    *result = receiver_ptr ? *receiver_ptr : KILN_VAL_UNDEFINED;
+    return KILN_C99_OK;
+}}
+/* Headed closure names: the closure keeps the pointer. */
+static const kiln_string listener_name = {{ 8, KILN_STRING_LATIN1, "listener" }};
+static const kiln_string child_name = {{ 5, KILN_STRING_LATIN1, "Child" }};
+int main(void) {{
+    uint64_t realm;
+    kiln_value exports[1];
+    kiln_value result;
+    kiln_value emitter;
+    kiln_value callback;
+    kiln_value child;
+    kiln_value child_instance;
+    kiln_value child_prototype;
+    kiln_value parent_prototype;
+    kiln_value inherited;
+    kiln_value args[2];
+    kiln_value thrown = kiln_c99_undefined();
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
+    kiln_test_realm_active = 1;
+    if (kiln_c99_make_closure(&callback, listener, &listener_name, NULL, 0, "<test>", 0, 1, 0, 0, 0, 0, 0,
+                              1, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED, 0, 1, 0, 0,
+                              NULL, 0) != KILN_C99_OK) return 1;
+    if ({symbol}(NULL, &result, NULL, 0, exports, 1) != KILN_C99_OK) return 2;
+    if (kiln_c99_construct(NULL, &emitter, exports[0], NULL, 0, 0,
+                           &thrown) != KILN_C99_OK) return 3;
+    if (emitter.tag != KILN_VALUE_OBJECT) return 31;
+    {{ kiln_value keys;
+       if (kiln_c99_own_keys(NULL, emitter, &keys, 0, &thrown) != KILN_C99_OK) return 32;
+       if (kiln_c99_array_of(keys)->count != 0) return 33;
+    }}
+    if (kiln_c99_make_closure(&child, child_constructor, &child_name, NULL, 0, "<test>", 0, 0, 0, 0, 0, 0, 0,
+                              1, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED, 0, 1, 0, 0,
+                              NULL, 0) != KILN_C99_OK) return 34;
+    if (kiln_c99_callable_prototype(child, &child_prototype) != KILN_C99_OK ||
+        kiln_c99_callable_prototype(exports[0], &parent_prototype) != KILN_C99_OK ||
+        kiln_c99_set_prototype(child_prototype, parent_prototype) != KILN_C99_OK) return 35;
+    if (kiln_c99_construct(NULL, &child_instance, child, NULL, 0, 0,
+                           &thrown) != KILN_C99_OK) return 36;
+    if (kiln_c99_get(NULL, child_instance, "on", 2, &inherited, 0,
+                     &thrown) != KILN_C99_OK ||
+        inherited.tag != KILN_VALUE_METHOD ||
+        inherited.bits != KILN_C99_METHOD_NODE_EVENT_ON) return 37;
+    if (kiln_c99_callable_prototype(child, &child_prototype) != KILN_C99_OK ||
+        kiln_c99_callable_prototype(exports[0], &parent_prototype) != KILN_C99_OK ||
+        kiln_c99_object_of(child_prototype)->prototype.bits != parent_prototype.bits) return 38;
+    args[0] = kiln_c99_copy_text("tick", 4); args[1] = callback;
+    if (kiln_c99_invoke_method(NULL, &result, KILN_C99_METHOD_NODE_EVENT_ON, emitter, args, 2,
+                               0, &thrown) != KILN_C99_OK) return 4;
+    if (kiln_c99_invoke_method(NULL, &result, KILN_C99_METHOD_NODE_EVENT_ONCE, emitter, args, 2,
+                               0, &thrown) != KILN_C99_OK) return 5;
+    args[1] = kiln_c99_number(7.0);
+    if (kiln_c99_invoke_method(NULL, &result, KILN_C99_METHOD_NODE_EVENT_EMIT, emitter, args, 2,
+                               0, &thrown) != KILN_C99_OK || !kiln_c99_truthy(result)) return 6;
+    args[1] = kiln_c99_number(8.0);
+    if (kiln_c99_invoke_method(NULL, &result, KILN_C99_METHOD_NODE_EVENT_EMIT, emitter, args, 2,
+                               0, &thrown) != KILN_C99_OK || calls != 778) return 7;
+    args[1] = callback;
+    if (kiln_c99_invoke_method(NULL, &result, KILN_C99_METHOD_NODE_EVENT_REMOVE_LISTENER,
+                               emitter, args, 2, 0, &thrown) != KILN_C99_OK) return 8;
+    args[1] = kiln_c99_number(9.0);
+    if (kiln_c99_invoke_method(NULL, &result, KILN_C99_METHOD_NODE_EVENT_EMIT, emitter, args, 2,
+                               0, &thrown) != KILN_C99_OK || kiln_c99_truthy(result)) return 9;
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 39;
+}}
+"#,
+        symbol = generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "runtime-event-emitter");
+    assert!(
+        run.status.success(),
+        "runtime EventEmitter failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_server_response_inherits_writable_through_the_native_graph() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_value constructor = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE);
+    kiln_value prototype;
+    kiln_value writable_prototype;
+    kiln_value instance;
+    kiln_value method;
+    kiln_value thrown = kiln_c99_undefined();
+    if (kiln_c99_callable_prototype(constructor, &prototype) != KILN_C99_OK) return 1;
+    if (kiln_c99_callable_prototype(kiln_c99_method(KILN_C99_METHOD_NODE_WRITABLE),
+                                    &writable_prototype) != KILN_C99_OK) return 2;
+    if (kiln_c99_object_of(prototype)->prototype.bits != writable_prototype.bits) return 3;
+    if (kiln_c99_get(NULL, prototype, "writeHead", 9, &method, 0, &thrown) != KILN_C99_OK ||
+        method.tag != KILN_VALUE_METHOD ||
+        method.bits != KILN_C99_METHOD_NODE_RESPONSE_WRITE_HEAD) return 4;
+    if (kiln_c99_get(NULL, prototype, "on", 2, &method, 0, &thrown) != KILN_C99_OK ||
+        method.tag != KILN_VALUE_METHOD || method.bits != KILN_C99_METHOD_NODE_EVENT_ON) return 5;
+    if (kiln_c99_construct(NULL, &instance, constructor, NULL, 0, 0, &thrown) != KILN_C99_OK)
+        return 6;
+    if (kiln_c99_get(NULL, instance, "write", 5, &method, 0, &thrown) != KILN_C99_OK ||
+        method.tag != KILN_VALUE_METHOD ||
+        method.bits != KILN_C99_METHOD_NODE_RESPONSE_WRITE) return 7;
+    return 0;
+}
+"#;
+    let run = run_with_main(
+        &generated,
+        wrapper,
+        "native-server-response-prototype-graph",
+    );
+    assert!(
+        run.status.success(),
+        "native ServerResponse prototype graph failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+/// Every value kind that answers "yes" to `kiln_c99_is_callable` converts to text.
+///
+/// `Function.prototype.toString` reaches a value by two routes -- `String(f)` through the
+/// text conversion and `f.toString()` through a member lookup -- and both end at
+/// `kiln_c99_text`. `kiln_c99_is_callable` listed six tags and `kiln_c99_text` handled three,
+/// so a bound function, a promise settler and a `require` all fell to `default:` and answered
+/// `undefined`. Nothing failed: `String(f)` was right for a plain function, and no probe
+/// called the method on any of the other three.
+///
+/// This is the pairing, not the symptom. Adding a callable tag without a text case is now a
+/// test failure here rather than a wrong answer discovered later by whoever happens to call
+/// `toString` on the one shape nobody wrote a probe for.
+#[test]
+fn callable_text_covers_every_callable_tag() {
+    let runtime = HEADER;
+
+    fn body<'a>(runtime: &'a str, signature: &str) -> &'a str {
+        let start = runtime
+            .split(signature)
+            .nth(1)
+            .unwrap_or_else(|| panic!("{signature} must exist"));
+        // The C function ends at the first line that closes it in column zero.
+        let end = start.find("\n}").expect("function must be closed");
+        &start[..end]
+    }
+
+    let callable = body(
+        runtime,
+        "static int kiln_c99_is_callable(kiln_value value) {",
+    );
+    let text = body(
+        runtime,
+        "static kiln_value kiln_c99_text(kiln_value value) {",
+    );
+
+    let tags: Vec<&str> = callable
+        .split("value.tag == ")
+        .skip(1)
+        .filter_map(|rest| {
+            rest.split(|c: char| !c.is_ascii_uppercase() && c != '_')
+                .next()
+        })
+        .filter(|tag| tag.starts_with("KILN_VALUE_"))
+        .collect();
+    // A guard that has quietly stopped reading the thing it checks is worse than none.
+    assert!(
+        tags.len() >= 5,
+        "read only {tags:?} out of `kiln_c99_is_callable`; the parse has stopped working"
+    );
+    assert!(
+        text.contains("case KILN_VALUE_FUNCTION:"),
+        "the parse of `kiln_c99_text` has stopped working"
+    );
+
+    let missing: Vec<&&str> = tags
+        .iter()
+        .filter(|tag| !text.contains(&format!("case {tag}:")))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "`kiln_c99_is_callable` accepts {missing:?}, which `kiln_c99_text` has no case for. \
+             Each would fall to `default:` and answer `undefined`, so `String(x)` and \
+             `x.toString()` on that shape would report a value the program never wrote. A \
+             callable with no source text of its own takes the NativeFunction form, which is what \
+             the interpreter answers and what the specification allows for a built-in."
+    );
+}
+
+#[test]
+fn every_mutable_c99_static_has_an_explicit_owner() {
+    let generated =
+        emit(&program(vec![], vec![Instruction::Return], 0)).expect("empty program emits");
+    // Declarations are gathered as *statements*, not lines. A mutable static split over two
+    // lines -- by a long type, a `sizeof` expression, or a human -- used to be invisible here,
+    // which is the one failure this guard exists to prevent: unregistered mutable state that
+    // nobody is told about. A function definition is dropped when its brace arrives, and its
+    // parameter list would exclude it below in any case.
+    let mut statements: Vec<String> = Vec::new();
+    let mut pending = String::new();
+    for line in generated.source.lines() {
+        let line = line.trim();
+        if pending.is_empty() {
+            if !line.starts_with("static ") {
+                continue;
+            }
+            pending.push_str(line);
+        } else {
+            pending.push(' ');
+            pending.push_str(line);
+        }
+        if pending.ends_with(';') {
+            statements.push(std::mem::take(&mut pending));
+        } else if pending
+            .split('{')
+            .next()
+            .is_some_and(|before| before.contains('(') && pending.contains('{'))
+        {
+            pending.clear();
+        }
+    }
+    let mut discovered = statements
+        .iter()
+        .filter_map(|line| {
+            let line = line.trim();
+            let declaration = line.split('=').next().unwrap_or(line);
+            let name_start = line.find("kiln_c99_")?;
+            let before_name = &line[..name_start];
+            let immutable = if before_name.contains('*') {
+                // `*const` and `* const` declare the same thing, so the guard must not depend
+                // on which one somebody wrote.
+                before_name
+                    .split_whitespace()
+                    .collect::<String>()
+                    .ends_with("*const")
+            } else {
+                before_name.starts_with("static const ")
+            };
+            if !line.starts_with("static ")
+                || immutable
+                || declaration.contains('(')
+                || !line.contains("kiln_c99_")
+                || !line.ends_with(';')
+            {
+                return None;
+            }
+            let tail = &line[name_start..];
+            let end = tail
+                .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                .unwrap_or(tail.len());
+            Some(tail[..end].to_owned())
+        })
+        .collect::<Vec<_>>();
+    discovered.sort();
+    discovered.dedup();
+    let mut classified = C99_MUTABLE_STATE_OWNERS
+        .iter()
+        .map(|(name, _)| (*name).to_owned())
+        .collect::<Vec<_>>();
+    classified.sort();
+    assert_eq!(
+        discovered, classified,
+        "mutable generated-C state must say whether the realm, dynamic frame, or test fixture owns it"
+    );
+    assert!(
+        !generated
+            .source
+            .contains("static kiln_value kiln_c99_globals;"),
+        "globalThis identity must live in the active realm slot, not one module"
+    );
+    assert!(
+        generated.source.contains("kiln_realm_value_slot("),
+        "generated value operations must reach realm singleton identity through the typed slot ABI"
+    );
+}
+
+#[test]
+fn an_instruction_replaces_the_function_body_fallback_at_the_same_depth() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("diagnostic ownership probe emits");
+    let wrapper = r#"
+int main(void) {
+    kiln_c99_diagnostic_site = "callee.js";
+    kiln_c99_diagnostic_instruction = 0;
+    kiln_c99_diagnostic_operation = "FunctionBody";
+    kiln_c99_diagnostic_depth = 2;
+    kiln_c99_diagnostic_function = "callee";
+    kiln_c99_diagnostic_function_len = 6;
+    kiln_c99_diagnostic_receiver_tag = KILN_VALUE_FUNCTION;
+    kiln_c99_diagnostic_detail =
+        "generated function body refused before an instruction owned the failure";
+    kiln_c99_note_refusal("callee.js", 37, "CallMethod(listen)", 2);
+    if (kiln_c99_diagnostic_instruction != 37) return 1;
+    if (strcmp(kiln_c99_diagnostic_operation, "CallMethod(listen)") != 0) return 2;
+    if (kiln_c99_diagnostic_function != NULL) return 3;
+    if (kiln_c99_diagnostic_detail != NULL) return 4;
+    if (kiln_c99_diagnostic_receiver_tag != 0) return 5;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "instruction-replaces-body-fallback");
+    assert!(
+        run.status.success(),
+        "diagnostic ownership failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn module_linkage_is_deterministic_and_part_of_identity() {
+    let body = program(
+        vec![Constant::Number(1.0f64.to_bits())],
+        vec![Instruction::LoadLocal(0), Instruction::Return],
+        1,
+    );
+    let first = module(
+        body.clone(),
+        vec![kiln_ir::ImportBinding {
+            source: "dep".into(),
+            imported: "value".into(),
+            local: "input".into(),
+            local_slot: 0,
+        }],
+        Vec::new(),
+    );
+    let second = module(
+        body,
+        vec![kiln_ir::ImportBinding {
+            source: "other-dep".into(),
+            imported: "value".into(),
+            local: "input".into(),
+            local_slot: 0,
+        }],
+        Vec::new(),
+    );
+    let emitted = emit_module(&first).expect("module emits");
+    assert_eq!(emitted, emit_module(&first).expect("module emits again"));
+    assert_ne!(
+        emitted.program_hash,
+        emit_module(&second).unwrap().program_hash
+    );
+    assert!(emitted.source.contains("const kiln_value *imports"));
+    assert!(emitted.source.contains("size_t import_count"));
+}
+
+#[test]
+fn rejects_invalid_module_linkage_metadata() {
+    let body = program(Vec::new(), vec![Instruction::Return], 1);
+    let out_of_bounds = module(
+        body.clone(),
+        vec![kiln_ir::ImportBinding {
+            source: "dep".into(),
+            imported: "value".into(),
+            local: "input".into(),
+            local_slot: 1,
+        }],
+        Vec::new(),
+    );
+    assert!(matches!(
+        emit_module(&out_of_bounds),
+        Err(EmitError::InvalidProgram { message }) if message.contains("import 0") && message.contains("out of bounds")
+    ));
+    let duplicate = module(
+        body.clone(),
+        vec![
+            kiln_ir::ImportBinding {
+                source: "a".into(),
+                imported: "x".into(),
+                local: "x".into(),
+                local_slot: 0,
+            },
+            kiln_ir::ImportBinding {
+                source: "b".into(),
+                imported: "y".into(),
+                local: "y".into(),
+                local_slot: 0,
+            },
+        ],
+        Vec::new(),
+    );
+    assert!(matches!(
+        emit_module(&duplicate),
+        Err(EmitError::InvalidProgram { message }) if message.contains("initialized more than once")
+    ));
+    let bad_export = module(
+        body,
+        Vec::new(),
+        vec![kiln_ir::ExportBinding {
+            exported: "value".into(),
+            local_slot: 1,
+        }],
+    );
+    assert!(matches!(
+        emit_module(&bad_export),
+        Err(EmitError::InvalidProgram { message }) if message.contains("export 0") && message.contains("out of bounds")
+    ));
+}
+
+#[test]
+fn refuses_to_make_a_realm_by_name_rather_than_answering_from_its_only_one() {
+    // The backend's global object is one copy built in C. A program that reached the host's
+    // realm hook would get an object whose intrinsics were secretly this realm's, and every
+    // cross-realm identity question would be answered confidently and wrongly -- so the hook
+    // is refused where it is named, not where its answer is used.
+    for code in [
+        vec![
+            Instruction::RequireGlobalBinding(0),
+            Instruction::Pop,
+            Instruction::Return,
+        ],
+        vec![
+            Instruction::LoadGlobalBindingOrUndefined(0),
+            Instruction::Pop,
+            Instruction::Return,
+        ],
+    ] {
+        let refused = emit(&program(
+            vec![Constant::String(HOST_CREATE_REALM.to_owned().into())],
+            code,
+            0,
+        ));
+        let Err(EmitError::Unsupported { feature }) = refused else {
+            panic!("the backend must refuse {HOST_CREATE_REALM}, not compile it");
+        };
+        assert!(
+            feature.contains(HOST_CREATE_REALM),
+            "the refusal must name what it refused, got {feature}"
+        );
+        let refused_eval = emit(&program(
+            vec![Constant::String(HOST_EVAL_SCRIPT.to_owned().into())],
+            vec![
+                Instruction::LoadGlobalBindingOrUndefined(0),
+                Instruction::Pop,
+                Instruction::Return,
+            ],
+            0,
+        ));
+        let Err(EmitError::Unsupported { feature }) = refused_eval else {
+            panic!("the backend must refuse {HOST_EVAL_SCRIPT}, not compile it");
+        };
+        assert!(
+            feature.contains(HOST_EVAL_SCRIPT),
+            "the refusal must name what it refused, got {feature}"
+        );
+        // And each of the eight agent hooks, by its own name. A backend that quietly compiled
+        // `$262AgentStart` into a no-op would answer every `Atomics.wait` "timed-out" while
+        // the interpreter answered "ok", which is the divergence this refusal prevents.
+        for hook in HOST_AGENT_HOOKS {
+            let refused_agent = emit(&program(
+                vec![Constant::String(hook.to_owned().into())],
+                vec![
+                    Instruction::LoadGlobalBindingOrUndefined(0),
+                    Instruction::Pop,
+                    Instruction::Return,
+                ],
+                0,
+            ));
+            let Err(EmitError::Unsupported { feature }) = refused_agent else {
+                panic!("the backend must refuse {hook}, not compile it");
+            };
+            assert!(
+                feature.contains(hook),
+                "the refusal must name what it refused, got {feature}"
+            );
+        }
+        // `ShadowRealm` is refused for a sharper reason than the two hooks above: it is a
+        // language built-in a program may name without any host granting it, and this
+        // backend has one global object. Compiling it would answer `new ShadowRealm()` with
+        // a realm whose intrinsics were secretly this one's.
+        let refused_shadow = emit(&program(
+            vec![Constant::String(SHADOW_REALM.to_owned().into())],
+            vec![
+                Instruction::LoadGlobalBindingOrUndefined(0),
+                Instruction::Pop,
+                Instruction::Return,
+            ],
+            0,
+        ));
+        let Err(EmitError::Unsupported { feature }) = refused_shadow else {
+            panic!("the backend must refuse {SHADOW_REALM}, not compile it");
+        };
+        assert!(
+            feature.contains(SHADOW_REALM),
+            "the refusal must name what it refused, got {feature}"
+        );
+        // The instruction that actually carries `ShadowRealm` in a compiled program. A name
+        // this backend has no global for never reaches the lookup arms above: the compiler
+        // emits the miss as `ThrowReference`, so refusing only the lookup let
+        // `new ShadowRealm()` compile and answer `ReferenceError` at run time. That is a
+        // claim about the *language* rather than about this backend, and the two engines
+        // diverged on it.
+        let refused_reference = emit(&program(
+            vec![Constant::String(SHADOW_REALM.to_owned().into())],
+            vec![Instruction::ThrowReference(0), Instruction::Return],
+            0,
+        ));
+        let Err(EmitError::Unsupported { feature }) = refused_reference else {
+            panic!("the backend must refuse a {SHADOW_REALM} reference, not compile it");
+        };
+        assert!(
+            feature.contains(SHADOW_REALM),
+            "the refusal must name what it refused, got {feature}"
+        );
+    }
+    // An ordinary global of another name is untouched: this refuses one hook, not a class of
+    // instruction the backend already supports.
+    assert!(
+        emit(&program(
+            vec![Constant::String("Array".to_owned().into())],
+            vec![
+                Instruction::LoadGlobalBindingOrUndefined(0),
+                Instruction::Pop,
+                Instruction::Return,
+            ],
+            0,
+        ))
+        .is_ok()
+    );
+}
+
+#[test]
+fn rejects_out_of_bounds_jumps_and_locals() {
+    let jump = program(Vec::new(), vec![Instruction::Jump(9)], 0);
+    assert!(matches!(emit(&jump), Err(EmitError::InvalidProgram { .. })));
+    let local = program(
+        Vec::new(),
+        vec![Instruction::LoadLocal(0), Instruction::Return],
+        0,
+    );
+    assert!(matches!(
+        emit(&local),
+        Err(EmitError::InvalidProgram { .. })
+    ));
+}
+
+#[test]
+fn hash_changes_for_semantically_distinct_programs() {
+    let one = emit(&program(
+        vec![Constant::Number(1)],
+        vec![Instruction::Const(0), Instruction::Return],
+        0,
+    ))
+    .unwrap();
+    let two = emit(&program(
+        vec![Constant::Number(2)],
+        vec![Instruction::Const(0), Instruction::Return],
+        0,
+    ))
+    .unwrap();
+    assert_ne!(one.program_hash, two.program_hash);
+    assert_ne!(one.symbol, two.symbol);
+}
+
+#[test]
+fn generated_translation_unit_is_valid_c99() {
+    let generated = emit(&program(
+        vec![
+            Constant::Number(2.0f64.to_bits()),
+            Constant::String("hello\0world".into()),
+        ],
+        vec![
+            Instruction::Const(1),
+            Instruction::HostCall {
+                op: HostOp::WriteStdout,
+                argc: 1,
+            },
+            Instruction::Const(0),
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::Return,
+        ],
+        0,
+    ))
+    .expect("program emits");
+    let mut child = Command::new("cc")
+        .args([
+            "-std=c99",
+            "-pedantic",
+            "-Werror=implicit-function-declaration",
+            "-fsyntax-only",
+            "-x",
+            "c",
+            "-",
+        ])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("a C compiler is available for backend tests");
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(generated.source.as_bytes())
+        .expect("source is accepted by cc stdin");
+    let result = child.wait_with_output().expect("cc exits");
+    assert!(
+        result.status.success(),
+        "generated C did not compile:\n{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn executable_promise_with_resolvers_exposes_and_settles_one_deferred() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_value method;
+    kiln_value deferred;
+    kiln_value promise;
+    kiln_value resolve;
+    kiln_value value = kiln_c99_number(42.0);
+    kiln_value result;
+    kiln_value thrown = kiln_c99_undefined();
+    if (kiln_c99_get(NULL, kiln_c99_builtin(KILN_C99_BUILTIN_PROMISE),
+                     "withResolvers", 13, &method, 0, &thrown) != KILN_C99_OK) return 1;
+    if (method.tag != KILN_VALUE_METHOD ||
+        method.bits != KILN_C99_METHOD_PROMISE_WITH_RESOLVERS) return 2;
+    if (kiln_c99_call(NULL, &deferred, method, kiln_c99_builtin(KILN_C99_BUILTIN_PROMISE),
+                      NULL, 0, 0, &thrown) != KILN_C99_OK) return 3;
+    if (kiln_c99_get(NULL, deferred, "promise", 7, &promise, 0, &thrown) != KILN_C99_OK ||
+        promise.tag != KILN_VALUE_PROMISE) return 4;
+    if (kiln_c99_get(NULL, deferred, "resolve", 7, &resolve, 0, &thrown) != KILN_C99_OK ||
+        resolve.tag != KILN_VALUE_SETTLER) return 5;
+    if (kiln_c99_call(NULL, &result, resolve, kiln_c99_undefined(), &value, 1, 0,
+                      &thrown) != KILN_C99_OK) return 6;
+    if (kiln_c99_promise_of(promise)->state != KILN_C99_FULFILLED ||
+        kiln_c99_as_number(kiln_c99_promise_of(promise)->value) != 42.0) return 7;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "promise-with-resolvers");
+    assert!(
+        run.status.success(),
+        "Promise.withResolvers failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_accessor_definition_bypasses_an_inherited_setter() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_value parent;
+    kiln_value child;
+    kiln_value inherited = kiln_c99_method(KILN_C99_METHOD_NODE_UTIL_NOOP);
+    kiln_value own = kiln_c99_method(KILN_C99_METHOD_NODE_UTIL_FORMAT);
+    kiln_value descriptor;
+    kiln_value read;
+    kiln_value thrown = kiln_c99_undefined();
+    int found = 0;
+    if (kiln_c99_new_object(&parent) != KILN_C99_OK ||
+        kiln_c99_new_object(&child) != KILN_C99_OK) return 1;
+    if (kiln_c99_define_accessor(parent, "value", 5, kiln_c99_undefined(), inherited, 0) !=
+        KILN_C99_OK) return 2;
+    if (kiln_c99_set_prototype(child, parent) != KILN_C99_OK) return 3;
+    if (kiln_c99_define_accessor(child, "value", 5, own, kiln_c99_undefined(), 1) !=
+        KILN_C99_OK) return 4;
+    if (kiln_c99_describe_property(NULL, child, "value", 5, &descriptor, &found, 0, &thrown) !=
+            KILN_C99_OK || !found) return 5;
+    if (kiln_c99_get(NULL, descriptor, "get", 3, &read, 0, &thrown) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_METHOD || read.bits != own.bits) return 6;
+    if (kiln_c99_get(NULL, descriptor, "set", 3, &read, 0, &thrown) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_UNDEFINED) return 7;
+    if (kiln_c99_get(NULL, descriptor, "enumerable", 10, &read, 0, &thrown) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_BOOLEAN || read.bits != 1) return 8;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "accessor-definition-own-slot");
+    assert!(
+        run.status.success(),
+        "accessor definition failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_scalar_operators_match_javascript() {
+    fn push_constant(constants: &mut Vec<Constant>, value: Constant) -> u32 {
+        let index = constants.len() as u32;
+        constants.push(value);
+        index
+    }
+
+    fn check_unary(
+        constants: &mut Vec<Constant>,
+        code: &mut Vec<Instruction>,
+        failures: &mut Vec<usize>,
+        operator: UnaryOp,
+        input: Constant,
+        expected: Constant,
+    ) {
+        let input = push_constant(constants, input);
+        let expected = push_constant(constants, expected);
+        code.extend([
+            Instruction::Const(input),
+            Instruction::Unary(operator),
+            Instruction::Const(expected),
+            Instruction::Binary(BinaryOp::StrictEqual),
+        ]);
+        failures.push(code.len());
+        code.push(Instruction::JumpIfFalse(0));
+    }
+
+    fn check_binary(
+        constants: &mut Vec<Constant>,
+        code: &mut Vec<Instruction>,
+        failures: &mut Vec<usize>,
+        operator: BinaryOp,
+        left: Constant,
+        right: Constant,
+        expected: Constant,
+    ) {
+        let left = push_constant(constants, left);
+        let right = push_constant(constants, right);
+        let expected = push_constant(constants, expected);
+        code.extend([
+            Instruction::Const(left),
+            Instruction::Const(right),
+            Instruction::Binary(operator),
+            Instruction::Const(expected),
+            Instruction::Binary(BinaryOp::StrictEqual),
+        ]);
+        failures.push(code.len());
+        code.push(Instruction::JumpIfFalse(0));
+    }
+
+    let number = |value: f64| Constant::Number(value.to_bits());
+    let mut constants = Vec::new();
+    let mut code = Vec::new();
+    let mut failures = Vec::new();
+
+    for (input, expected) in [
+        (Constant::Undefined, "undefined"),
+        (Constant::Null, "object"),
+        (Constant::Boolean(true), "boolean"),
+        (number(1.0), "number"),
+        (Constant::String("x".into()), "string"),
+    ] {
+        check_unary(
+            &mut constants,
+            &mut code,
+            &mut failures,
+            UnaryOp::TypeOf,
+            input,
+            Constant::String(expected.into()),
+        );
+    }
+    check_unary(
+        &mut constants,
+        &mut code,
+        &mut failures,
+        UnaryOp::BitwiseNot,
+        number(5.0),
+        number(-6.0),
+    );
+    check_unary(
+        &mut constants,
+        &mut code,
+        &mut failures,
+        UnaryOp::BitwiseNot,
+        number(4_294_967_296.0),
+        number(-1.0),
+    );
+    check_unary(
+        &mut constants,
+        &mut code,
+        &mut failures,
+        UnaryOp::Void,
+        number(42.0),
+        Constant::Undefined,
+    );
+
+    for (left, right, expected) in [
+        (Constant::Null, Constant::Undefined, true),
+        (number(0.0), Constant::Boolean(false), true),
+        (Constant::String("42".into()), number(42.0), true),
+        (Constant::String(String::new().into()), number(0.0), true),
+        (Constant::Null, number(0.0), false),
+    ] {
+        check_binary(
+            &mut constants,
+            &mut code,
+            &mut failures,
+            BinaryOp::LooseEqual,
+            left,
+            right,
+            Constant::Boolean(expected),
+        );
+    }
+    check_binary(
+        &mut constants,
+        &mut code,
+        &mut failures,
+        BinaryOp::LooseNotEqual,
+        number(f64::NAN),
+        number(f64::NAN),
+        Constant::Boolean(true),
+    );
+
+    for (operator, left, right, expected) in [
+        (BinaryOp::BitwiseAnd, 5.0, 3.0, 1.0),
+        (BinaryOp::BitwiseOr, 5.0, 2.0, 7.0),
+        (BinaryOp::BitwiseXor, 5.0, 3.0, 6.0),
+        (BinaryOp::ShiftLeft, 1.0, 31.0, -2_147_483_648.0),
+        (BinaryOp::ShiftLeft, 1.0, 32.0, 1.0),
+        (BinaryOp::ShiftRight, -1.0, 1.0, -1.0),
+        (BinaryOp::UnsignedShiftRight, -1.0, 1.0, 2_147_483_647.0),
+        (BinaryOp::BitwiseOr, 4_294_967_296.0, 0.0, 0.0),
+        (BinaryOp::BitwiseOr, -1.9, 0.0, -1.0),
+        (BinaryOp::BitwiseOr, f64::INFINITY, 0.0, 0.0),
+    ] {
+        check_binary(
+            &mut constants,
+            &mut code,
+            &mut failures,
+            operator,
+            number(left),
+            number(right),
+            number(expected),
+        );
+    }
+
+    let success = push_constant(&mut constants, Constant::Boolean(true));
+    code.extend([Instruction::Const(success), Instruction::Return]);
+    let failure = code.len() as u32;
+    let failed = push_constant(&mut constants, Constant::Boolean(false));
+    code.extend([Instruction::Const(failed), Instruction::Return]);
+    for instruction in failures {
+        code[instruction] = Instruction::JumpIfFalse(failure);
+    }
+
+    let generated = emit(&program(constants, code, 0)).expect("scalar operators emit");
+    let executable = std::env::temp_dir().join(format!(
+        "kiln-backend-c-operators-{}-{}",
+        std::process::id(),
+        generated.program_hash
+    ));
+    let wrapper = format!(
+        "int main(void) {{ kiln_value result; if ({}(NULL, &result) != 0) return 2; return !(result.tag == KILN_VALUE_BOOLEAN && result.bits == 1); }}\n",
+        generated.symbol
+    );
+    let mut child = Command::new("cc")
+        .args([
+            "-std=c99",
+            "-pedantic",
+            "-Werror=implicit-function-declaration",
+            "-x",
+            "c",
+            "-",
+            "-lm",
+            "-o",
+        ])
+        .arg(&executable)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("a C compiler is available for backend tests");
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(linked_source(&generated.source, &wrapper).as_bytes())
+        .expect("operator source is accepted by cc stdin");
+    let compile = child.wait_with_output().expect("cc exits");
+    assert!(
+        compile.status.success(),
+        "generated operator C did not compile:\n{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new(&executable)
+        .output()
+        .expect("generated operator executable runs");
+    let _ = std::fs::remove_file(&executable);
+    assert!(
+        run.status.success(),
+        "generated scalar operator returned the wrong result"
+    );
+}
+
+#[test]
+fn the_reference_operators_emit_rather_than_answering_undefined() {
+    for operator in [BinaryOp::In, BinaryOp::InstanceOf] {
+        let result = emit(&program(
+            vec![Constant::Null],
+            vec![
+                Instruction::Const(0),
+                Instruction::Const(0),
+                Instruction::Binary(operator),
+                Instruction::Return,
+            ],
+            0,
+        ));
+        assert!(result.is_ok(), "{operator:?} should emit");
+    }
+}
+
+#[test]
+fn dictionary_cache_index_encoding_preserves_empty_and_extreme_indices() {
+    let generated = emit(&program(
+        vec![Constant::Undefined],
+        vec![Instruction::Const(0), Instruction::Return],
+        0,
+    ))
+    .expect("minimal program emits");
+    let run = run_with_main(
+        &generated,
+        r#"
+int main(void) {
+    static kiln_c99_site site = {0};
+    if (kiln_c99_site_decode_dictionary_index(site.own) != UINT32_MAX) return 1;
+    if (kiln_c99_site_decode_dictionary_index(site.proto) != UINT32_MAX) return 2;
+    if (kiln_c99_site_encode_dictionary_index(0) != 1) return 3;
+    if (kiln_c99_site_encode_dictionary_index(1) != 2) return 4;
+    if (kiln_c99_site_decode_dictionary_index(1) != 0) return 5;
+    if (kiln_c99_site_decode_dictionary_index(2) != 1) return 6;
+    if (kiln_c99_site_encode_dictionary_index((size_t)UINT32_MAX - 1) != UINT32_MAX) return 7;
+    if (kiln_c99_site_decode_dictionary_index(UINT32_MAX) != UINT32_MAX - 1) return 8;
+    if (kiln_c99_site_encode_dictionary_index((size_t)UINT32_MAX) != 0) return 9;
+    return 0;
+}
+"#,
+        "dictionary-cache-indices",
+    );
+    assert!(
+        run.status.success(),
+        "index encoding failed: {:?}",
+        run.status
+    );
+}
+
+/// An arrow has no call-time receiver. It snapshots the receiver of the frame that creates
+/// it, even when a later plain call supplies `undefined` as `this`.
+#[test]
+fn executable_arrow_captures_its_defining_receiver() {
+    let arrow = FunctionProto {
+        inferred_name: None,
+        prologue_end: 0,
+        arrow: true,
+        code: vec![Instruction::LoadThis, Instruction::Return],
+        ..function(Vec::new())
+    };
+    let maker = FunctionProto {
+        inferred_name: None,
+        prologue_end: 0,
+        code: vec![Instruction::MakeFunction(1), Instruction::Return],
+        ..function(Vec::new())
+    };
+    let generated = emit(&Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: vec![Constant::String("make".into())],
+        code: vec![
+            Instruction::MakeFunction(0),
+            Instruction::StoreLocal(0),
+            Instruction::NewObject { count: 0 },
+            Instruction::StoreLocal(1),
+            Instruction::LoadLocal(1),
+            Instruction::LoadLocal(0),
+            Instruction::SetProperty(0),
+            Instruction::Pop,
+            Instruction::LoadLocal(1),
+            Instruction::CallMethod { name: 0, argc: 0 },
+            Instruction::StoreLocal(2),
+            Instruction::LoadLocal(2),
+            Instruction::Call { argc: 0 },
+            Instruction::LoadLocal(1),
+            Instruction::Binary(BinaryOp::StrictEqual),
+            Instruction::Return,
+        ],
+        local_count: 3,
+        functions: vec![maker, arrow],
+        template_sites: Vec::new(),
+    })
+    .expect("arrow receiver program emits");
+    let wrapper = format!(
+        "int main(void) {{ kiln_value result; int status = {}(NULL, &result); if (status != 0) return 2; return result.tag == KILN_VALUE_BOOLEAN && result.bits == 1 ? 0 : 3; }}\n",
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "arrow-receiver");
+    assert!(
+        run.status.success(),
+        "an arrow observed its call-time receiver instead of its defining receiver (exit {:?})",
+        run.status.code()
+    );
+}
+
+/// Recursion is bounded rather than left to exhaust the C stack, which aborts the process
+/// instead of reporting anything. It reports as a *thrown* `RangeError` rather than a
+/// status, because that is what a real engine raises and what a program that recurses on its
+/// input has to be able to catch.
+#[test]
+fn executable_runaway_recursion_reports_rather_than_crashing() {
+    let forever = FunctionProto {
+        inferred_name: None,
+        prologue_end: 0,
+        local_count: 0,
+        upvalues: vec![Upvalue::ParentLocal(0)],
+        code: vec![
+            Instruction::LoadUpvalue(0),
+            Instruction::Call { argc: 0 },
+            Instruction::Return,
+        ],
+        ..function(Vec::new())
+    };
+    let generated = emit(&Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: Vec::new(),
+        code: vec![
+            Instruction::NewCell(0),
+            Instruction::MakeFunction(0),
+            Instruction::StoreCell(0),
+            Instruction::LoadCell(0),
+            Instruction::Call { argc: 0 },
+            Instruction::Return,
+        ],
+        local_count: 1,
+        functions: vec![forever],
+        template_sites: Vec::new(),
+    })
+    .expect("program emits");
+    let wrapper = format!(
+        "int main(void) {{ kiln_value result; return {}(NULL, &result) == KILN_C99_THROWN ? 0 : 1; }}\n",
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "depth");
+    assert!(
+        run.status.success(),
+        "unbounded recursion did not report a thrown RangeError (exit {:?})",
+        run.status.code()
+    );
+}
+
+#[test]
+fn executable_relational_comparison_uses_utf16_code_units() {
+    let generated = emit(&program(
+        vec![
+            Constant::String("😀".into()),
+            Constant::String("\u{e000}".into()),
+            Constant::String("é".into()),
+            Constant::String("e".into()),
+            Constant::Boolean(true),
+            Constant::Boolean(false),
+        ],
+        vec![
+            // U+1F600 is encoded as D83D DE00, so it sorts before U+E000 in UTF-16.
+            Instruction::Const(0),
+            Instruction::Const(1),
+            Instruction::Binary(BinaryOp::LessThan),
+            Instruction::JumpIfFalse(11),
+            Instruction::Const(2),
+            Instruction::Const(3),
+            Instruction::Binary(BinaryOp::GreaterThan),
+            Instruction::JumpIfFalse(11),
+            Instruction::Const(4),
+            Instruction::Return,
+            Instruction::Const(5),
+            Instruction::Return,
+        ],
+        0,
+    ))
+    .expect("program emits");
+    let executable = std::env::temp_dir().join(format!(
+        "kiln-backend-c-utf16-{}-{}",
+        std::process::id(),
+        generated.program_hash
+    ));
+    let wrapper = format!(
+        "int main(void) {{ kiln_value result; if ({}(NULL, &result) != 0) return 2; return !(result.tag == KILN_VALUE_BOOLEAN && result.bits == 1); }}\n",
+        generated.symbol
+    );
+    let mut child = Command::new("cc")
+        .args([
+            "-std=c99",
+            "-pedantic",
+            "-Werror=implicit-function-declaration",
+            "-x",
+            "c",
+            "-",
+            "-lm",
+            "-o",
+        ])
+        .arg(&executable)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("a C compiler is available for backend tests");
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(linked_source(&generated.source, &wrapper).as_bytes())
+        .expect("source is accepted by cc stdin");
+    let compile = child.wait_with_output().expect("cc exits");
+    assert!(
+        compile.status.success(),
+        "generated C did not compile:\n{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new(&executable)
+        .output()
+        .expect("generated executable runs");
+    let _ = std::fs::remove_file(&executable);
+    assert!(
+        run.status.success(),
+        "UTF-16 relational comparison returned the wrong result"
+    );
+}
+
+/// The explanation for the `KILN_C99_ABSENT` half of the `const` gate above, which can only
+/// say *that* the count moved.
+///
+/// This says which file, which line and which enclosing function, and it checks the half the
+/// gate cannot see: that the sites are in the functions `ABSENT_ANSWER_SITES` claims and in
+/// the numbers it claims. A row is a promise that a membership predicate decides that site,
+/// and a site in a function no row names is a place a read answers `undefined` with nobody
+/// having said why.
+#[test]
+fn absent_answers_are_where_they_say() {
+    let sources = crate::prelude_source_parts();
+
+    let mut by_function: Vec<(String, usize)> = Vec::new();
+    let mut by_hand = Vec::new();
+    for (path, source) in sources {
+        let lines: Vec<&str> = source.lines().collect();
+        // A top-level definition starts in column zero; everything inside one is indented.
+        let mut function = String::from("<file scope>");
+        for (index, line) in lines.iter().enumerate() {
+            if line.starts_with(|first: char| first.is_ascii_alphabetic())
+                && let Some((head, _)) = line.split_once('(')
+                && let Some(name) = head
+                    .split(|byte: char| !(byte.is_alphanumeric() || byte == '_'))
+                    .next_back()
+            {
+                function = name.to_owned();
+            }
+            if line.trim() == "*out = kiln_c99_undefined();"
+                && lines
+                    .get(index + 1)
+                    .is_some_and(|next| next.trim() == "return KILN_C99_OK;")
+            {
+                by_hand.push(format!("{path}:{} in {function}", index + 1));
+            }
+            if line.contains("KILN_C99_ABSENT(") {
+                match by_function.iter_mut().find(|(name, _)| *name == function) {
+                    Some((_, count)) => *count += 1,
+                    None => by_function.push((function.clone(), 1)),
+                }
+            }
+        }
+    }
+
+    assert!(
+        by_hand.is_empty(),
+        "these prelude sites answer a read with `undefined` by hand, so nothing there says \
+         why the name is absent rather than unimplemented -- which is the difference between \
+         what the language answers and a silent wrong answer a feature test walks past. Use \
+         KILN_C99_ABSENT with the predicate that proves absence:\n  {}",
+        by_hand.join("\n  ")
+    );
+
+    for row in ABSENT_ANSWER_SITES {
+        let found = by_function
+            .iter()
+            .find(|(name, _)| name == row.function)
+            .map(|(_, count)| *count)
+            .unwrap_or(0);
+        assert_eq!(
+            found, row.sites,
+            "ABSENT_ANSWER_SITES says {} answers `undefined` at {} sites, proved absent by {}, \
+             and the prelude holds {}",
+            row.function, row.sites, row.proved_by, found
+        );
+    }
+    for (function, count) in &by_function {
+        assert!(
+            ABSENT_ANSWER_SITES
+                .iter()
+                .any(|row| row.function == function.as_str()),
+            "{function} answers `undefined` at {count} sites and no ABSENT_ANSWER_SITES row \
+             says what proves those names absent"
+        );
+    }
+}
+
+#[test]
+fn executable_dynamic_function_construction_and_evaluation() {
+    let generated =
+        emit(&program(vec![], vec![Instruction::Return], 0)).expect("empty program emits");
+    let wrapper = format!(
+        r#"
+int main(void) {{
+    uint64_t realm = 0;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 99;
+    kiln_test_realm_active = 1;
+
+    kiln_value dummy;
+    int mod_status = {}(NULL, &dummy);
+    if (mod_status != KILN_C99_OK) return 100;
+
+    kiln_value thrown = kiln_c99_undefined();
+    kiln_value result = kiln_c99_undefined();
+
+    // 1. Dynamic function with no arguments returning constant:
+    kiln_value args1[1] = {{ kiln_c99_copy_text("return 42;", 10) }};
+    int status = kiln_c99_dynamic_new_function(NULL, &result, args1, 1, 0, &thrown);
+    if (status != KILN_C99_OK || result.tag != KILN_VALUE_FUNCTION) return 1;
+
+    kiln_value call_res = kiln_c99_undefined();
+    status = kiln_c99_call(NULL, &call_res, result, kiln_c99_undefined(), NULL, 0, 0, &thrown);
+    if (status != KILN_C99_OK) return 2;
+    if (call_res.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(call_res) != 42.0) return 3;
+
+    // 2. Dynamic function with two parameters:
+    kiln_value args2[3] = {{
+        kiln_c99_copy_text("a", 1),
+        kiln_c99_copy_text("b", 1),
+        kiln_c99_copy_text("return a + b;", 13)
+    }};
+    status = kiln_c99_dynamic_new_function(NULL, &result, args2, 3, 0, &thrown);
+    if (status != KILN_C99_OK) return 4;
+
+    kiln_value call_args2[2] = {{ kiln_c99_number(100.0), kiln_c99_number(23.0) }};
+    status = kiln_c99_call(NULL, &call_res, result, kiln_c99_undefined(), call_args2, 2, 0, &thrown);
+    if (status != KILN_C99_OK || kiln_c99_as_number(call_res) != 123.0) return 5;
+
+    // 3. Dynamic function mutating an object on the native heap:
+    kiln_value my_obj;
+    status = kiln_c99_new_object(&my_obj);
+    if (status != KILN_C99_OK) return 6;
+    status = kiln_c99_put(NULL, my_obj, "count", 5, kiln_c99_number(10.0), 0, &thrown);
+    if (status != KILN_C99_OK) return 7;
+
+    kiln_value args3[2] = {{
+        kiln_c99_copy_text("obj", 3),
+        kiln_c99_copy_text("obj.count = obj.count + 5; return obj.count;", 44)
+    }};
+    status = kiln_c99_dynamic_new_function(NULL, &result, args3, 2, 0, &thrown);
+    if (status != KILN_C99_OK) return 8;
+
+    kiln_value call_args3[1] = {{ my_obj }};
+    status = kiln_c99_call(NULL, &call_res, result, kiln_c99_undefined(), call_args3, 1, 0, &thrown);
+    if (status != KILN_C99_OK || kiln_c99_as_number(call_res) != 15.0) return 9;
+
+    kiln_value read_back;
+    status = kiln_c99_get(NULL, my_obj, "count", 5, &read_back, 0, &thrown);
+    if (status != KILN_C99_OK || kiln_c99_as_number(read_back) != 15.0) return 10;
+
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 101;
+}}
+"#,
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "dynamic-function");
+    assert!(
+        run.status.success(),
+        "dynamic function execution failed with exit code {:?}:\nstdout:\n{}\nstderr:\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_native_alu_and_bitwise_operations_execute_correctly() {
+    let constants = vec![
+        Constant::String("imul".into()),             // 0: "imul"
+        Constant::Number(3.0f64.to_bits()),          // 1: 3
+        Constant::Number(4.0f64.to_bits()),          // 2: 4
+        Constant::Number(5.0f64.to_bits()),          // 3: 5
+        Constant::Number(2.0f64.to_bits()),          // 4: 2
+        Constant::Number(1.0f64.to_bits()),          // 5: 1
+        Constant::Number((-16.0f64).to_bits()),      // 6: -16
+        Constant::Number(1073741947.0f64.to_bits()), // 7: expected sum
+    ];
+
+    let code = vec![
+        // local 0 = Math.imul(3, 4) (= 12), local 1 = 5
+        Instruction::LoadBuiltin(kiln_ir::Builtin::Math),
+        Instruction::Const(1),
+        Instruction::Const(2),
+        Instruction::CallMethod { name: 0, argc: 2 },
+        Instruction::StoreLocal(0),
+        Instruction::Const(3),
+        Instruction::StoreLocal(1),
+        // (a & b)
+        Instruction::LoadLocal(0),
+        Instruction::LoadLocal(1),
+        Instruction::Binary(BinaryOp::BitwiseAnd),
+        // + (a | b)
+        Instruction::LoadLocal(0),
+        Instruction::LoadLocal(1),
+        Instruction::Binary(BinaryOp::BitwiseOr),
+        Instruction::Binary(BinaryOp::Add),
+        // + (a ^ b)
+        Instruction::LoadLocal(0),
+        Instruction::LoadLocal(1),
+        Instruction::Binary(BinaryOp::BitwiseXor),
+        Instruction::Binary(BinaryOp::Add),
+        // + (a << 2)
+        Instruction::LoadLocal(0),
+        Instruction::Const(4),
+        Instruction::Binary(BinaryOp::ShiftLeft),
+        Instruction::Binary(BinaryOp::Add),
+        // + (a >> 1)
+        Instruction::LoadLocal(0),
+        Instruction::Const(5),
+        Instruction::Binary(BinaryOp::ShiftRight),
+        Instruction::Binary(BinaryOp::Add),
+        // + ((-16) >>> 2)
+        Instruction::Const(6),
+        Instruction::Const(4),
+        Instruction::Binary(BinaryOp::UnsignedShiftRight),
+        Instruction::Binary(BinaryOp::Add),
+        // + (a * b)
+        Instruction::LoadLocal(0),
+        Instruction::LoadLocal(1),
+        Instruction::Binary(BinaryOp::Multiply),
+        Instruction::Binary(BinaryOp::Add),
+        // + (~a)
+        Instruction::LoadLocal(0),
+        Instruction::Unary(UnaryOp::BitwiseNot),
+        Instruction::Binary(BinaryOp::Add),
+        // == 1073741947
+        Instruction::Const(7),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::Return,
+    ];
+
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants,
+        code,
+        local_count: 2,
+        functions: Vec::new(),
+        template_sites: Vec::new(),
+    };
+
+    let generated = emit(&program).expect("program emits");
+    assert!(
+        generated.source.contains("__builtin_mul_overflow"),
+        "expected __builtin_mul_overflow in generated source:\n{}",
+        generated.source
+    );
+    let wrapper = format!(
+        "int main(void) {{ kiln_value result; int status = {}(NULL, &result); if (status != 0) return 2; return (result.tag == KILN_VALUE_BOOLEAN && result.bits == 1) ? 0 : 3; }}\n",
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "alu-and-bitwise-optimizations");
+    assert!(
+        run.status.success(),
+        "alu and bitwise optimizations execution failed ({:?}):\nstdout: {}\nstderr: {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_length_specialization() {
+    let constants = vec![
+        Constant::String("length".into()),   // 0: "length"
+        Constant::Number(10.0f64.to_bits()), // 1: 10
+        Constant::Number(20.0f64.to_bits()), // 2: 20
+        Constant::Number(30.0f64.to_bits()), // 3: 30
+        Constant::Number(3.0f64.to_bits()),  // 4: expected array length
+        Constant::String("hello".into()),    // 5: "hello"
+        Constant::Number(5.0f64.to_bits()),  // 6: expected string length
+    ];
+
+    let code = vec![
+        // arr = [10, 20, 30]
+        Instruction::Const(1),
+        Instruction::Const(2),
+        Instruction::Const(3),
+        Instruction::NewArray { count: 3 },
+        Instruction::StoreLocal(0),
+        // len1 = arr.length
+        Instruction::LoadLocal(0),
+        Instruction::GetProperty(0),
+        Instruction::StoreLocal(1),
+        // check len1 === 3
+        Instruction::LoadLocal(1),
+        Instruction::Const(4),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::StoreLocal(2),
+        // str = "hello"
+        Instruction::Const(5),
+        Instruction::StoreLocal(3),
+        // len2 = str.length
+        Instruction::LoadLocal(3),
+        Instruction::GetProperty(0),
+        Instruction::StoreLocal(4),
+        // check len2 === 5
+        Instruction::LoadLocal(4),
+        Instruction::Const(6),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::StoreLocal(5),
+        // result = check1 && check2
+        Instruction::LoadLocal(2),
+        Instruction::LoadLocal(5),
+        Instruction::Binary(BinaryOp::StrictEqual),
+        Instruction::Return,
+    ];
+
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants,
+        code,
+        local_count: 6,
+        functions: Vec::new(),
+        template_sites: Vec::new(),
+    };
+
+    let generated = emit(&program).expect("length program emits");
+    let wrapper = format!(
+        "int main(void) {{ kiln_value result; int status = {}(NULL, &result); if (status != 0) return 2; return (result.tag == KILN_VALUE_BOOLEAN && result.bits == 1) ? 0 : 3; }}\n",
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "length-specialization");
+    assert!(
+        run.status.success(),
+        "length specialization execution failed ({:?}):\nstdout: {}\nstderr: {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}

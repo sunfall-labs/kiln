@@ -10,7 +10,7 @@ form; the correction is recorded in the Context below rather than edited out of 
 
 Design.md §12 lists ten design rules for keeping Rust rebuild time under control: keep
 foundational type crates small and stable, avoid changing central generic types frequently, keep
-Oxc isolated behind `frontend-oxc`, separate interfaces from implementations, minimize
+Oxc isolated behind `kiln-frontend-oxc`, separate interfaces from implementations, minimize
 procedural macros in frequently edited crates, avoid expensive build scripts, disable
 unnecessary dependency features, keep the dependency graph shallow, put experimental optimizers
 in leaf crates, and avoid forcing the runtime to rebuild when the compiler changes.
@@ -84,7 +84,7 @@ Interfaces are separated from implementations at the crate boundary. `kiln-db` d
 reasoning. The same shape applies as the compiler grows: the crate that defines what an
 optimizer is is not the crate that contains one.
 
-Oxc is isolated behind a `frontend-oxc` crate whose public surface is kiln's own HIR. No type
+Oxc is isolated behind a `kiln-frontend-oxc` crate whose public surface is kiln's own HIR. No type
 from Oxc appears in a signature outside that crate. Oxc is a large dependency tree and a moving
 target, and the two things this buys are worth the cost separately: an Oxc upgrade touches one
 crate rather than every crate, and an edit anywhere else in the compiler does not put Oxc's
@@ -118,7 +118,7 @@ of thing and so should we.
 
 Breaking a rule is allowed and sometimes right. What is not allowed is breaking one silently.
 A change that adds a macro-bearing or generic-heavy dependency to `kiln-proto` or `kiln-db`,
-introduces a build script, names an Oxc type outside `frontend-oxc`, or makes the runtime depend
+introduces a build script, names an Oxc type outside `kiln-frontend-oxc`, or makes the runtime depend
 on a compiler crate carries its justification in the commit message together with the
 `cargo build --timings` critical path before and after. If it moves one of §13's recorded
 numbers, it needs an ADR of its own. The failure mode this is aimed at is not the deliberate

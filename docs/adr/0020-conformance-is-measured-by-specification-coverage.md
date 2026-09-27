@@ -6,7 +6,7 @@ Accepted. This extends ADR 0008 rather than replacing it: the four explicit outc
 Test262 checkout, and the failures-first selector all stand. What it adds is the number the project
 steers by, and a stronger differential oracle to feed it.
 
-It lands in `conformance/`, `crates/kiln-conformance`, `crates/kiln-test-selector` and
+It lands in `conformance/`, `crates/tools/kiln-conformance`, `crates/tools/kiln-test-selector` and
 `docs/language-coverage.md`, which are this session's files under the split recorded in `NOTES.md`.
 
 ## Context

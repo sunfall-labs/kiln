@@ -1,4 +1,4 @@
-// JSON.parse's reader is one implementation shared by both engines (crates/kiln-json, over the
+// JSON.parse's reader is one implementation shared by both engines (crates/semantics/kiln-json, over the
 // simd-json tape). These are the corners where a scanner and the language disagree and the crate
 // has to put the language back; each one is also a unit test there, and this pins it against node.
 function caught(label, run) {
