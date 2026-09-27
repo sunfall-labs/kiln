@@ -54,20 +54,22 @@ use url::Url;
 static WORK_COUNTER: AtomicU64 = AtomicU64::new(0);
 static MATERIALIZE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// A release build that opts in (`release_bootstrap_specialized`) emits the builtin bootstrap
+/// A release build (`release_bootstrap_specialized`) emits the builtin bootstrap
 /// specialized and compiles it at -O2 (issue 17), in translation units of about this many bytes
 /// of generated C, so its one-time compile is parallel units instead of one minute-long one. The
 /// bootstrap is not subject to the user-module specialization budget: it is one module per
 /// toolchain and build configuration, cached by content, and its methods are hot loops.
 const RELEASE_BOOTSTRAP_UNIT_BYTES: usize = 1 << 20;
 
-/// Whether a release build emits the bootstrap specialized: opt-in, `KILN_BOOTSTRAP_SPECIALIZED=1`,
-/// until the specialized emitter's miscompile recorded on issue 17 is fixed. Specialized, the
-/// bootstrap's `headerListRemove` (`Headers.set`/`delete`) loses the `from = end` that follows a
-/// `kept += list.slice(from, at)` in its loop and never terminates -- the same code in any small
-/// user module does the same today; the generic-only bootstrap was hiding it.
+/// Whether a release build emits the bootstrap specialized: yes, unless
+/// `KILN_BOOTSTRAP_SPECIALIZED=0`. It was opt-in until the specialized emitter's miscompile of
+/// `headerListRemove` (`Headers.set`/`delete` never returned: a versioned body's generic clone
+/// read a speculated value's twin it never wrote) was fixed -- parallel-builtins issue 18 -- and
+/// a `native-release` pass over every `conformance/native` probe answered the same with the
+/// bootstrap specialized as generic. The opt-out is for bisecting a release-only divergence: it
+/// restores the generic `-O0` bootstrap.
 fn release_bootstrap_specialized() -> bool {
-    std::env::var("KILN_BOOTSTRAP_SPECIALIZED").as_deref() == Ok("1")
+    std::env::var("KILN_BOOTSTRAP_SPECIALIZED").as_deref() != Ok("0")
 }
 
 // Object misses for the same or colliding bucket share one process mutex and one OS lock. The
