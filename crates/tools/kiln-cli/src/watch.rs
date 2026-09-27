@@ -1430,6 +1430,14 @@ mod tests {
         dir
     }
 
+    // A completed editor save is one content change. Truncate/write can expose an empty
+    // intermediate file when the writer is descheduled, causing an extra real watch event.
+    fn publish_edit(path: &Path, source: &str) {
+        let staged = path.with_extension("tmp");
+        std::fs::write(&staged, source).expect("stage edit");
+        std::fs::rename(&staged, path).expect("publish edit");
+    }
+
     /// Starts a watch on `path` and hands back streams of stdout and notes.
     fn watch_in_background(path: &Path) -> (mpsc::Receiver<String>, mpsc::Receiver<String>) {
         let (printed, notes, _) = watch_in_background_observed(path);
@@ -1505,7 +1513,7 @@ mod tests {
         printed
             .recv_timeout(Duration::from_secs(5))
             .expect("initial run");
-        std::fs::write(&path, "export const value = 2;\n").expect("edit entry");
+        publish_edit(&path, "export const value = 2;\n");
         printed
             .recv_timeout(Duration::from_secs(5))
             .expect("incremental run");
@@ -1638,7 +1646,7 @@ mod tests {
             "initial resolution must target a.js: {initial:?}"
         );
 
-        std::fs::write(&manifest, r#"{"exports":"./b.js"}"#).expect("retarget package");
+        publish_edit(&manifest, r#"{"exports":"./b.js"}"#);
         printed
             .recv_timeout(Duration::from_secs(5))
             .expect("package metadata edit must rerun the entry");
@@ -1732,7 +1740,7 @@ mod tests {
 
         let dependency = dir.join("dependency-0.js");
         let dependency_canonical = commands::canonical_path(&dependency).expect("dependency path");
-        std::fs::write(&dependency, "export const value0 = 100;\n").expect("edit dependency");
+        publish_edit(&dependency, "export const value0 = 100;\n");
         assert_eq!(
             printed
                 .recv_timeout(Duration::from_secs(5))
@@ -1766,7 +1774,7 @@ mod tests {
         );
 
         let added = dir.join("added.js");
-        std::fs::write(&added, "export const added = true;\n").expect("add dependency");
+        publish_edit(&added, "export const added = true;\n");
         printed
             .recv_timeout(Duration::from_secs(5))
             .expect("an added source should rerun the entry");
@@ -1810,20 +1818,13 @@ mod tests {
 
         // Rewriting the same bytes must not spend a recompute. That is the whole reason the
         // content comparison outlives the poll it was written for.
-        // Publish a complete edit. A truncate/write can expose a real empty file when the
-        // writer is descheduled, which is a second content change this test does not model.
-        let save = |source: &str| {
-            let staged = path.with_extension("tmp");
-            std::fs::write(&staged, source).expect("stage edit");
-            std::fs::rename(&staged, &path).expect("publish edit");
-        };
-        save("export const a = 1;");
+        publish_edit(&path, "export const a = 1;");
         assert!(
             printed.recv_timeout(Duration::from_millis(750)).is_err(),
             "an unchanged save re-checked"
         );
 
-        save("export const a = 2;");
+        publish_edit(&path, "export const a = 2;");
         let second = printed
             .recv_timeout(Duration::from_secs(5))
             .expect("a real edit should run");
@@ -1850,7 +1851,7 @@ mod tests {
             .expect("initial run");
         while requests.try_recv().is_ok() {}
 
-        std::fs::write(&path, "export const a = 2;").expect("edit");
+        publish_edit(&path, "export const a = 2;");
         assert_eq!(
             printed
                 .recv_timeout(Duration::from_secs(15))
@@ -1887,7 +1888,7 @@ mod tests {
             .expect("the first run should be reported");
 
         std::fs::remove_file(&path).expect("remove");
-        std::fs::write(&path, "export const a = 3;").expect("recreate");
+        publish_edit(&path, "export const a = 3;");
         let after = printed
             .recv_timeout(Duration::from_secs(5))
             .expect("the recreated file should run");
@@ -1916,7 +1917,7 @@ mod tests {
             "program: good one\n"
         );
 
-        std::fs::write(&path, "fail one").expect("write failing source");
+        publish_edit(&path, "fail one");
         assert_eq!(
             printed
                 .recv_timeout(Duration::from_secs(5))
@@ -1931,7 +1932,7 @@ mod tests {
             "{diagnostic}"
         );
 
-        std::fs::write(&path, "good two").expect("write recovered source");
+        publish_edit(&path, "good two");
         assert_eq!(
             printed
                 .recv_timeout(Duration::from_secs(5))
