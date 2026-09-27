@@ -1044,8 +1044,12 @@ fn runtime_prelude_size() {
     // inline halves in the header, the walks and the absent-name check in `read.c`), the
     // no-write frame a worker enters, the collection that refuses to run on a frozen heap, issue
     // 06's `KILN_PARALLEL_PROTECT` write detector, and the comments saying what each proves.
+    // Widened on 2026-09-27 for parallel issue 08 (+~620 lines): tier 3's worker arenas and the
+    // ownership-transfer join in `heap.c`, the builders a pool thread uses (object and array
+    // literals, spreads, strings, the flatten) in `spread.c`, the worker's shape step, and the
+    // comments saying what each proves.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 56_200;
+    const CEILING_LINES: usize = 56_900;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

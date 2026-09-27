@@ -882,6 +882,7 @@ static inline kiln_val kiln_c99_val_from_double(double d) {
 int32_t kiln_bigint_is_zero(const void *handle);
 typedef void (*kiln_parallel_chunk_fn)(const void * restrict in, void * restrict out, size_t start, size_t end,
 int32_t kiln_parallel_map(const void *in, size_t count, void *out, kiln_parallel_chunk_fn chunk,
+size_t kiln_parallel_threads(void);
 int32_t kiln_parallel_sort(void *data, size_t count, int32_t kind, int32_t order);
 static inline int kiln_c99_val_truthy(kiln_val v) {
 static inline const char *kiln_c99_string_ascii_bytes(kiln_value value, size_t *length) {
@@ -1071,6 +1072,7 @@ typedef struct kiln_array {
 static inline int kiln_c99_array_elements_owned(const kiln_array *array) {
 typedef struct kiln_c99_par_env {
 typedef struct kiln_c99_par_site {
+typedef struct kiln_c99_par_arena kiln_c99_par_arena;
 typedef struct kiln_c99_par_frame {
 #ifdef KILN_SEPARATE_PRELUDE
 extern void kiln_c99_par_enter(const kiln_c99_par_env *env, kiln_c99_par_frame *frame);
@@ -1079,6 +1081,18 @@ extern int kiln_c99_par_get_slow(const kiln_c99_par_env *env, kiln_c99_par_site 
 extern int kiln_c99_par_index_slow(const kiln_c99_par_env *env, kiln_val object, kiln_val key,
 extern struct kiln_gc_heap *kiln_c99_par_prepare(void);
 extern void kiln_c99_par_section(int frozen);
+extern int kiln_c99_par_arenas_open(kiln_c99_par_env *env, size_t threads);
+extern int kiln_c99_par_arenas_join(kiln_c99_par_env *env, int keep);
+extern kiln_c99_par_arena *kiln_c99_par_arena_claim(kiln_c99_par_env *env);
+extern const kiln_string *kiln_c99_par_intern(const kiln_string *key);
+extern int kiln_c99_par_object(kiln_c99_par_arena *arena, kiln_val *out);
+extern int kiln_c99_par_define(kiln_c99_par_arena *arena, kiln_c99_par_site *site, kiln_val target,
+extern int kiln_c99_par_define_computed(kiln_c99_par_arena *arena, kiln_val target, kiln_val key,
+extern int kiln_c99_par_spread(kiln_c99_par_arena *arena, kiln_val target, kiln_val source);
+extern int kiln_c99_par_array(kiln_c99_par_arena *arena, const kiln_val *elements, size_t count,
+extern int kiln_c99_par_to_string(kiln_c99_par_arena *arena, kiln_val value, kiln_val *out);
+extern int kiln_c99_par_concat(kiln_c99_par_arena *arena, kiln_val a, kiln_val b, kiln_val *out);
+extern int kiln_c99_par_flatten(kiln_val mapped, size_t count, kiln_val *out);
 #else
 static void kiln_c99_par_enter(const kiln_c99_par_env *env, kiln_c99_par_frame *frame);
 static void kiln_c99_par_leave(kiln_c99_par_frame *frame);
@@ -1086,6 +1100,18 @@ static int kiln_c99_par_get_slow(const kiln_c99_par_env *env, kiln_c99_par_site 
 static int kiln_c99_par_index_slow(const kiln_c99_par_env *env, kiln_val object, kiln_val key,
 static struct kiln_gc_heap *kiln_c99_par_prepare(void);
 static void kiln_c99_par_section(int frozen);
+static int kiln_c99_par_arenas_open(kiln_c99_par_env *env, size_t threads);
+static int kiln_c99_par_arenas_join(kiln_c99_par_env *env, int keep);
+static kiln_c99_par_arena *kiln_c99_par_arena_claim(kiln_c99_par_env *env);
+static const kiln_string *kiln_c99_par_intern(const kiln_string *key);
+static int kiln_c99_par_object(kiln_c99_par_arena *arena, kiln_val *out);
+static int kiln_c99_par_define(kiln_c99_par_arena *arena, kiln_c99_par_site *site, kiln_val target,
+static int kiln_c99_par_define_computed(kiln_c99_par_arena *arena, kiln_val target, kiln_val key,
+static int kiln_c99_par_spread(kiln_c99_par_arena *arena, kiln_val target, kiln_val source);
+static int kiln_c99_par_array(kiln_c99_par_arena *arena, const kiln_val *elements, size_t count,
+static int kiln_c99_par_to_string(kiln_c99_par_arena *arena, kiln_val value, kiln_val *out);
+static int kiln_c99_par_concat(kiln_c99_par_arena *arena, kiln_val a, kiln_val b, kiln_val *out);
+static int kiln_c99_par_flatten(kiln_val mapped, size_t count, kiln_val *out);
 #endif
 static KILN_ALWAYS_INLINE inline int kiln_c99_par_number(kiln_val v, double *out) {
 static KILN_ALWAYS_INLINE inline int kiln_c99_par_get(const kiln_c99_par_env *env,
@@ -1095,6 +1121,7 @@ static KILN_ALWAYS_INLINE inline int kiln_c99_par_relational(int op, kiln_val a,
 static KILN_ALWAYS_INLINE inline int kiln_c99_par_strict_equal(kiln_val a, kiln_val b) {
 static inline int kiln_c99_par_loose_equal(kiln_val a, kiln_val b) {
 static KILN_ALWAYS_INLINE inline int kiln_c99_par_char_code_at(kiln_val s, kiln_val pos,
+static KILN_ALWAYS_INLINE inline int kiln_c99_par_add(kiln_c99_par_arena *arena, kiln_val a,
 typedef struct kiln_generator {
 typedef struct kiln_date_parts {
 typedef struct kiln_entry {
@@ -1791,7 +1818,9 @@ static void kiln_c99_gc_heap_unregister(kiln_gc_heap *heap) {
 static inline void kiln_c99_gc_bound(kiln_gc_heap *heap, const void *base, size_t size) {
 static int kiln_c99_gc_stress_checks;
 #define KILN_NURSERY_HEADER ((sizeof(kiln_nursery_chunk) + 63) & ~(size_t)63)
+static kiln_nursery_chunk *kiln_c99_chunk_lay_out(char *region, size_t bitmap_words);
 static kiln_nursery_chunk *kiln_c99_nursery_new_region(kiln_gc_nursery *nursery) {
+static kiln_nursery_chunk *kiln_c99_chunk_lay_out(char *region, size_t bitmap_words) {
 static void kiln_c99_nursery_free_region(kiln_gc_nursery *nursery, kiln_nursery_chunk *chunk) {
 static void kiln_c99_nursery_use(kiln_gc_nursery *nursery, kiln_nursery_chunk *chunk) {
 static kiln_nursery_chunk *kiln_c99_nursery_seal(kiln_gc_nursery *nursery) {
@@ -1973,6 +2002,20 @@ static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_alloc_pointer_free(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_alloc_tenured(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
+static kiln_nursery_chunk *kiln_c99_arena_chunk(size_t capacity, size_t bitmap_words) {
+static void kiln_c99_arena_chunks_free(kiln_nursery_chunk *chunks) {
+static int kiln_c99_heap_adopt_chunks(kiln_gc_heap *heap, kiln_nursery_chunk *chunks) {
+struct kiln_c99_par_arena {
+static size_t kiln_c99_par_arena_budget_bytes;
+static size_t kiln_c99_par_arena_budget(void) {
+static void kiln_c99_par_arena_seal(kiln_c99_par_arena *arena) {
+static int kiln_c99_par_arena_refill(kiln_c99_par_arena *arena) {
+static void *kiln_c99_par_alloc(kiln_c99_par_arena *arena, uint32_t kind, size_t size) {
+static int kiln_c99_par_arenas_open(kiln_c99_par_env *env, size_t threads) {
+static kiln_c99_par_arena *kiln_c99_par_arena_claim(kiln_c99_par_env *env) {
+static int kiln_c99_par_trace_state;
+static void kiln_c99_par_trace(uint32_t arenas, size_t chunks, size_t bytes, int kept, int adopted) {
+static int kiln_c99_par_arenas_join(kiln_c99_par_env *env, int keep) {
 #define kiln_c99_key_empty ((const kiln_string *)&kiln_c99_process()->empty_key)
 static void kiln_c99_gc_mark_block(kiln_gc_heap *heap, const void *payload);
 static kiln_string *kiln_c99_gc_alloc_key_copy(const kiln_string *view);
@@ -2083,7 +2126,9 @@ static int kiln_c99_shape_index_edge(kiln_shape *shape, uint32_t count, kiln_sha
 static kiln_shape *kiln_c99_shape_child(kiln_shape *current, const kiln_string *ikey,
 static int kiln_c99_shape_link(kiln_shape *current, const kiln_string *ikey, kiln_shape *next) {
 static int kiln_c99_shape_add(kiln_shape *current, const kiln_string *ikey, int is_double,
+static kiln_shape *kiln_c99_shape_edge_find(kiln_shape *current, const kiln_string *ikey,
 static int kiln_c99_shape_transition_code(kiln_shape *current, const kiln_string *ikey,
+static int kiln_c99_par_shape_step(kiln_shape *current, const kiln_string *ikey, int is_double,
 static int kiln_c99_shape_transition_ex(kiln_shape *current, const kiln_string *ikey,
 static int kiln_c99_shape_transition(kiln_shape *current, const kiln_string *ikey, int is_double,
 static int kiln_c99_shape_define_new(kiln_object *object, const kiln_string *ikey, kiln_val held,
@@ -2634,6 +2679,7 @@ static int kiln_c99_par_walk(kiln_c99_par_site *site, kiln_val object, const kil
 static int kiln_c99_par_get_slow(const kiln_c99_par_env *env, kiln_c99_par_site *site,
 static int kiln_c99_par_index_slow(const kiln_c99_par_env *env, kiln_val object, kiln_val key,
 static struct kiln_gc_heap *kiln_c99_par_prepare(void) {
+static const kiln_string *kiln_c99_par_intern(const kiln_string *key) {
 static int kiln_c99_put_site_key(kiln_host *host, kiln_value target, const kiln_string *key,
 static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_reduce_key(kiln_host *host, kiln_value target, kiln_value key,
@@ -2935,6 +2981,17 @@ static kiln_shape *kiln_c99_clone_list_shape(const kiln_object *source, kiln_sha
 static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, int depth,
 static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size_t argc) {
 static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value source,
+static int kiln_c99_par_key_plain(const kiln_string *ikey) {
+static int kiln_c99_par_object(kiln_c99_par_arena *arena, kiln_val *out) {
+static int kiln_c99_par_define(kiln_c99_par_arena *arena, kiln_c99_par_site *site, kiln_val target,
+static int kiln_c99_par_define_computed(kiln_c99_par_arena *arena, kiln_val target, kiln_val key,
+static int kiln_c99_par_spread(kiln_c99_par_arena *arena, kiln_val target, kiln_val source) {
+static int kiln_c99_par_array(kiln_c99_par_arena *arena, const kiln_val *elements, size_t count,
+static int kiln_c99_par_text(kiln_val value, char buffer[32], kiln_string *view,
+static int kiln_c99_par_join(kiln_c99_par_arena *arena, const kiln_string *left,
+static int kiln_c99_par_to_string(kiln_c99_par_arena *arena, kiln_val value, kiln_val *out) {
+static int kiln_c99_par_concat(kiln_c99_par_arena *arena, kiln_val a, kiln_val b, kiln_val *out) {
+static int kiln_c99_par_flatten(kiln_val mapped, size_t count, kiln_val *out) {
 static void kiln_c99_hide_symbol_property(kiln_property *property) {
 static int kiln_c99_define_shaped(kiln_value target, const kiln_string *key, kiln_val held,
 static int kiln_c99_define_accessor_shaped(kiln_value target, const kiln_string *key,

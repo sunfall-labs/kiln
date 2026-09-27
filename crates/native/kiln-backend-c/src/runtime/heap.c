@@ -3219,8 +3219,13 @@ static void kiln_c99_par_trace(uint32_t arenas, size_t chunks, size_t bytes, int
         __atomic_store_n(&kiln_c99_par_trace_state, state, __ATOMIC_RELAXED);
     }
     if (KILN_LIKELY(state != 2)) return;
-    fprintf(stderr, "kiln parallel: arenas %u chunks %zu bytes %zu %s\n", (unsigned)arenas, chunks,
-            bytes, adopted ? "adopted" : kept ? "adoption refused" : "freed (sequential)");
+    kiln_c99_gc_trace_text("kiln parallel: arenas ");
+    kiln_c99_gc_trace_count(arenas);
+    kiln_c99_gc_trace_text(" chunks ");
+    kiln_c99_gc_trace_count(chunks);
+    kiln_c99_gc_trace_text(" bytes ");
+    kiln_c99_gc_trace_count(bytes);
+    kiln_c99_gc_trace_text(adopted ? " adopted\n" : kept ? " adoption refused\n" : " freed (sequential)\n");
 }
 
 /* On the realm thread, once the pool has returned: every arena sealed, the heap unpaused, and
