@@ -2618,7 +2618,9 @@ const _: () = assert_refusals_name_themselves(
 /// now `memchr`) and the request-method table (lengths now stored beside the names).
 /// One added the same day by `kiln_c99_register_builtin_keys` (surface.c), which measures a
 /// surface row's `name`: a C string literal out of the generated table, as its other readers do.
-pub const C_STRING_LENGTH_SITES: usize = 73;
+/// One added 2026-09-27 by `kiln_c99_realm_tag_method_pristine` (stores.c, parallel issue 30),
+/// which measures `kiln_c99_method_name`'s answer: a C string literal out of the method table.
+pub const C_STRING_LENGTH_SITES: usize = 74;
 
 /// How far the `strlen(` scan may skip after reading the last byte of its seven-byte window:
 /// the Horspool shift, as `refusal_scan_shift` is for the refusal scan, so the const evaluator

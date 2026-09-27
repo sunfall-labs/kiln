@@ -77,6 +77,49 @@ static int kiln_c99_prototype_store_read(kiln_host *host, uint64_t prototype,
     return KILN_C99_OK;
 }
 
+/* Issue 30: a receiver whose members come from a method table -- a string's `trim`, an array's
+ * `join`, a number's `toFixed` -- inherits them from a prototype built-in, and a member the program
+ * wrote onto that built-in (`String.prototype.trim = f`) shadows the table's, exactly as it does
+ * in the language. So before a table answers, the prototype's store is asked -- only once the
+ * program has written onto it (`kiln_c99_program_wrote_builtin`), which in a realm that has never
+ * written onto a built-in is one compare. */
+static int kiln_c99_written_prototype_read(kiln_host *host, uint64_t prototype,
+                                           const kiln_string *key, const kiln_string *ikey,
+                                           kiln_value *out, int depth, kiln_value *thrown,
+                                           int *found) {
+    *found = 0;
+    if (KILN_LIKELY(!kiln_c99_program_wrote_builtin((uint32_t)prototype))) return KILN_C99_OK;
+    return kiln_c99_prototype_store_read(host, prototype, key, ikey, out, depth, thrown, found);
+}
+#define KILN_C99_WRITTEN_MEMBER_FIRST(prototype)                                                   \
+    do {                                                                                           \
+        int written_found_;                                                                        \
+        int written_status_ = kiln_c99_written_prototype_read(host, (prototype), key, ikey, out,  \
+                                                              depth, thrown, &written_found_);     \
+        if (written_status_ != KILN_C99_OK || written_found_) return written_status_;              \
+    } while (0)
+
+/* The end of a primitive's chain: its wrapper prototype had no such member, so the lookup goes on
+ * to Object.prototype, as `GetV` does -- `"x".hasOwnProperty`, `(1).isPrototypeOf`. What the
+ * program stored there comes first, then the members the runtime answers for it. `*found` says
+ * whether either had the name. */
+static int kiln_c99_primitive_object_prototype_read(kiln_host *host, const kiln_string *key,
+                                                    const kiln_string *ikey, const char *intrinsic_key,
+                                                    size_t intrinsic_len, kiln_value *out, int depth,
+                                                    kiln_value *thrown, int *found) {
+    int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_OBJECT_PROTOTYPE, key, ikey,
+                                               out, depth, thrown, found);
+    uint64_t code;
+    if (status != KILN_C99_OK || *found) return status;
+    if (kiln_c99_same_name_key(key, "__proto__")) return KILN_C99_OK;
+    code = kiln_c99_namespace_method(KILN_C99_BUILTIN_OBJECT_PROTOTYPE, intrinsic_key, intrinsic_len);
+    if (code != 0) {
+        *out = kiln_c99_method(code);
+        *found = 1;
+    }
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_string *key,
                                  const kiln_string *ikey, kiln_value *out, int depth,
                                  kiln_value *thrown) {
@@ -233,6 +276,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                     return KILN_C99_OK;
                 }
             }
+            KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_OBJECT_PROTOTYPE);
             inherited = kiln_c99_namespace_method(KILN_C99_BUILTIN_OBJECT_PROTOTYPE,
                                                   intrinsic_key, intrinsic_len);
             if (inherited != 0) {
@@ -307,6 +351,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             *out = target;
             return KILN_C99_OK;
         }
+        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_FUNCTION_PROTOTYPE);
         {
             (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
                                                 &intrinsic_len);
@@ -332,6 +377,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
          * `kiln_c99_callable_method`. `Object.prototype.valueOf` hands back the receiver, so it
          * shadows nothing -- `ToPrimitive` gets a non-primitive from it and falls through to
          * `toString` exactly as it does for a plain object. */
+        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_OBJECT_PROTOTYPE);
         {
             uint64_t borrowed =
                 kiln_c99_same_name_key(key, "hasOwnProperty") ? KILN_C99_METHOD_HAS_OWN_PROPERTY
@@ -514,6 +560,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             *out = kiln_c99_boolean(present);
             return KILN_C99_OK;
         }
+        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_REGEXP_PROTOTYPE);
         {
             (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
                                                 &intrinsic_len);
@@ -761,12 +808,23 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         if (kiln_c99_same_name_key(key, "@@unscopables")) {
             return kiln_c99_get_array_unscopables(out);
         }
+        if (KILN_UNLIKELY(kiln_c99_builtin_store_epoch != 0) &&
+            kiln_c99_array_of(target)->properties.tag != KILN_VALUE_UNDEFINED &&
+            kiln_c99_program_wrote_builtin(KILN_C99_BUILTIN_ARRAY_PROTOTYPE)) {
+            /* The array's own store (and a subclass prototype on its chain) sits in front of the
+             * written prototype member it would otherwise shadow. */
+            int found;
+            int status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+        }
+        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_ARRAY_PROTOTYPE);
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         code = kiln_c99_array_method(intrinsic_key, intrinsic_len);
         if (code != 0) {
             *out = kiln_c99_method(code);
             return KILN_C99_OK;
         }
+        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_OBJECT_PROTOTYPE);
         code = kiln_c99_same_name_key(key, "isPrototypeOf")
                    ? KILN_C99_METHOD_IS_PROTOTYPE_OF
                : kiln_c99_same_name_key(key, "propertyIsEnumerable")
@@ -837,6 +895,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         KILN_C99_REFUSE("an Array.prototype member this backend has not implemented");
     }
     case KILN_VALUE_BOOLEAN: {
+        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE);
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
                                             &intrinsic_len);
         uint64_t code = kiln_c99_namespace_method(KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE, intrinsic_key,
@@ -853,6 +912,16 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             *out = kiln_c99_method(KILN_C99_METHOD_PRIMITIVE_TO_STRING);
             return KILN_C99_OK;
         }
+        {
+            int found;
+            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE, key,
+                                                       ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+            status = kiln_c99_primitive_object_prototype_read(host, key, ikey, intrinsic_key,
+                                                              intrinsic_len, out, depth, thrown,
+                                                              &found);
+            if (status != KILN_C99_OK || found) return status;
+        }
     }
         /* `GetV` boxes a primitive and then performs an ordinary prototype lookup. A name the
          * wrapper prototype does not contain is absent, not a backend refusal. Keeping that
@@ -861,6 +930,16 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         KILN_C99_ABSENT("not a member of the wrapper prototype this primitive boxes to", out);
     case KILN_VALUE_STRING: {
         uint64_t code;
+        /* `length` is the string's own; every other name here is String.prototype's, where a
+         * member the program wrote comes first. */
+        if (KILN_UNLIKELY(kiln_c99_builtin_store_epoch != 0) &&
+            !kiln_c99_same_name_key(key, "length")) {
+            KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_STRING_PROTOTYPE);
+        }
+        if (kiln_c99_same_name_key(key, "@@iterator")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_ARRAY_VALUES);
+            return KILN_C99_OK;
+        }
         if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_STRING);
             return KILN_C99_OK;
@@ -875,10 +954,6 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         }
         if (kiln_c99_same_name_key(key, "length")) {
             *out = kiln_c99_number((double)kiln_c99_string_length(target));
-            return KILN_C99_OK;
-        }
-        if (kiln_c99_same_name_key(key, "@@iterator")) {
-            *out = kiln_c99_method(KILN_C99_METHOD_ARRAY_VALUES);
             return KILN_C99_OK;
         }
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
@@ -896,6 +971,13 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         if (kiln_c99_is_string_member(intrinsic_key, intrinsic_len)) {
             KILN_C99_REFUSE("a String.prototype member this backend has not implemented");
         }
+        {
+            int found;
+            int status = kiln_c99_primitive_object_prototype_read(host, key, ikey, intrinsic_key,
+                                                                  intrinsic_len, out, depth, thrown,
+                                                                  &found);
+            if (status != KILN_C99_OK || found) return status;
+        }
         /* Not an index, not `length`, not a member: the property is absent, and absent has an
          * answer. */
         KILN_C99_ABSENT("not a member of String.prototype; kiln_c99_is_string_member holds the "
@@ -912,6 +994,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 return status;
             }
         }
+        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_PROMISE_PROTOTYPE);
         uint64_t code = kiln_c99_namespace_method(KILN_C99_BUILTIN_PROMISE_PROTOTYPE, intrinsic_key,
                                                   intrinsic_len);
         if (code != 0) {
@@ -952,6 +1035,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                                                               : KILN_C99_BUILTIN_SET));
             return KILN_C99_OK;
         }
+        KILN_C99_WRITTEN_MEMBER_FIRST(
+            collection->is_weak
+                ? (collection->is_map ? KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE : KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE)
+                : (collection->is_map ? KILN_C99_BUILTIN_MAP_PROTOTYPE : KILN_C99_BUILTIN_SET_PROTOTYPE));
         code = kiln_c99_lookup_method(
             intrinsic_key, intrinsic_len, KILN_C99_METHOD_COLLECTION_GET,
             collection->is_weak ? KILN_C99_METHOD_COLLECTION_DELETE
@@ -975,6 +1062,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
              * be resolved here rather than fall to the absent answer below: turning
              * `m.hasOwnProperty` into undefined would replace a refusal with a wrong answer,
              * which is the trade this whole path exists to avoid. */
+            KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_OBJECT_PROTOTYPE);
             code = kiln_c99_same_name_key(key, "isPrototypeOf")
                        ? KILN_C99_METHOD_IS_PROTOTYPE_OF
                    : kiln_c99_same_name_key(key, "propertyIsEnumerable")
@@ -1086,6 +1174,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION);
             return KILN_C99_OK;
         }
+        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_FUNCTION_PROTOTYPE);
         callable = kiln_c99_callable_method(intrinsic_key, intrinsic_len);
         if (callable != 0) {
             *out = kiln_c99_method(callable);
@@ -1101,6 +1190,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
          * `kiln_c99_callable_method`. `Object.prototype.valueOf` hands back the receiver, so it
          * shadows nothing -- `ToPrimitive` gets a non-primitive from it and falls through to
          * `toString` exactly as it does for a plain object. */
+        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_OBJECT_PROTOTYPE);
         {
             uint64_t borrowed =
                 kiln_c99_same_name_key(key, "hasOwnProperty") ? KILN_C99_METHOD_HAS_OWN_PROPERTY
@@ -1790,6 +1880,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                                         ? "Cannot read properties of null"
                                         : "Cannot read properties of undefined");
     case KILN_VALUE_BIGINT: {
+        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_BIGINT_PROTOTYPE);
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
                                             &intrinsic_len);
         uint64_t code = kiln_c99_namespace_method(KILN_C99_BUILTIN_BIGINT_PROTOTYPE, intrinsic_key,
@@ -1810,10 +1901,22 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 return KILN_C99_OK;
             }
         }
-        KILN_C99_ABSENT("not a member of BigInt.prototype; BUILTIN_SURFACE holds the ones that are",
+        {
+            int found;
+            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_BIGINT_PROTOTYPE, key,
+                                                       ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+            status = kiln_c99_primitive_object_prototype_read(host, key, ikey, intrinsic_key,
+                                                              intrinsic_len, out, depth, thrown,
+                                                              &found);
+            if (status != KILN_C99_OK || found) return status;
+        }
+        KILN_C99_ABSENT("not a member of BigInt.prototype, its store or Object.prototype; "
+                        "BUILTIN_SURFACE holds the ones that are",
                         out);
     }
     case KILN_VALUE_NUMBER: {
+        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_NUMBER_PROTOTYPE);
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
                                             &intrinsic_len);
         uint64_t code = kiln_c99_namespace_method(KILN_C99_BUILTIN_NUMBER_PROTOTYPE, intrinsic_key,
@@ -1826,9 +1929,20 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_NUMBER);
             return KILN_C99_OK;
         }
-        KILN_C99_ABSENT("not a member of Number.prototype", out);
+        {
+            int found;
+            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_NUMBER_PROTOTYPE, key,
+                                                       ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+            status = kiln_c99_primitive_object_prototype_read(host, key, ikey, intrinsic_key,
+                                                              intrinsic_len, out, depth, thrown,
+                                                              &found);
+            if (status != KILN_C99_OK || found) return status;
+        }
+        KILN_C99_ABSENT("not a member of Number.prototype, its store or Object.prototype", out);
     }
     case KILN_VALUE_SYMBOL: {
+        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_SYMBOL_PROTOTYPE);
         if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_SYMBOL);
             return KILN_C99_OK;
@@ -1858,7 +1972,17 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                                                        ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
         }
-        KILN_C99_ABSENT("not a member of Symbol.prototype", out);
+        {
+            int found;
+            int status;
+            (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
+                                                &intrinsic_len);
+            status = kiln_c99_primitive_object_prototype_read(host, key, ikey, intrinsic_key,
+                                                              intrinsic_len, out, depth, thrown,
+                                                              &found);
+            if (status != KILN_C99_OK || found) return status;
+        }
+        KILN_C99_ABSENT("not a member of Symbol.prototype, its store or Object.prototype", out);
     }
     default:
         /* A boolean or callable has no own properties here. */

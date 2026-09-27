@@ -1051,9 +1051,13 @@ fn runtime_prelude_size() {
     // Widened on 2026-09-27 for parallel issue 09 (+~1,300 lines): tier 4's worker paths of the
     // built-ins marked pure (`boxed.c`: string, number and array methods, `Number`/`parseInt`/
     // `parseFloat`, `JSON.stringify` of plain data, and their declarations in the header), and
-    // `toFixed`/`parseInt`/`parseFloat` split into pure helpers both paths share.
+    // `toFixed`/`parseInt`/`parseFloat` split into pure helpers both paths share. Raised to
+    // 59,000 on 2026-09-27 (58,650 measured) for parallel issue 30: the per-realm answers to
+    // "has the program written this member onto a kind's prototype" (`stores.c`), the reads that
+    // let a written member shadow a method table (`read.c`), the stack floor (`foundation.c`),
+    // `split`'s limit and `parseInt` on UTF-16 text.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 58_300;
+    const CEILING_LINES: usize = 59_000;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

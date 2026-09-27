@@ -974,6 +974,24 @@ extern int kiln_c99_realm_builtin_modified(uint32_t builtin);
 #else
 static int kiln_c99_realm_builtin_modified(uint32_t builtin);
 #endif
+#ifdef KILN_SEPARATE_PRELUDE
+extern int kiln_c99_realm_tag_method_pristine(uint8_t tag, uint64_t code) __attribute__((pure))
+#else
+static int kiln_c99_realm_tag_method_pristine(uint8_t tag, uint64_t code) __attribute__((pure))
+#endif
+static KILN_ALWAYS_INLINE inline int kiln_c99_tag_method_pristine(uint8_t tag, uint64_t code) {
+#ifdef KILN_SEPARATE_PRELUDE
+extern int kiln_c99_realm_kind_member_untouched(const char *member, size_t len)
+#else
+static int kiln_c99_realm_kind_member_untouched(const char *member, size_t len)
+#endif
+#define kiln_c99_kind_member_unmodified(member)                                                    \
+#ifdef KILN_SEPARATE_PRELUDE
+extern int kiln_c99_realm_program_wrote(uint32_t builtin);
+#else
+static int kiln_c99_realm_program_wrote(uint32_t builtin);
+#endif
+static KILN_ALWAYS_INLINE inline int kiln_c99_program_wrote_builtin(uint32_t builtin) {
 static inline void kiln_c99_prototype_touched(const kiln_object *object) {
 #define KILN_C99_MAX_PROTOTYPE_DEPTH 10000
 #define KILN_C99_PIC_SIZE 8
@@ -2708,12 +2726,26 @@ typedef char kiln_c99_folded_prototypes_fit_word_0[KILN_C99_BUILTIN_FUNCTION_PRO
 static __attribute__((noinline)) KILN_C99_RARE_CALL int kiln_c99_realm_builtins_untouched_uncached(uint64_t mask0,
 static __attribute__((noinline, pure)) KILN_C99_RARE_CALL int
 kiln_c99_realm_builtins_untouched(uint64_t mask0, uint64_t mask1, int beyond) {
+static __attribute__((noinline)) int kiln_c99_realm_program_wrote(uint32_t builtin) {
 static int kiln_c99_builtin_store_has_own(uint32_t builtin, const char *member, size_t len) {
 static inline size_t kiln_c99_member_answer_at(uint32_t builtin, const char *member) {
 static inline int kiln_c99_realm_member_known(const kiln_gc_heap *heap, uint32_t builtin,
 static __attribute__((noinline)) KILN_C99_RARE_CALL int kiln_c99_realm_member_answer(uint32_t builtin,
 static __attribute__((noinline, pure)) KILN_C99_RARE_CALL int
 kiln_c99_realm_builtin_member_untouched(uint32_t builtin, const char *member, size_t len) {
+static const uint32_t kiln_c99_kind_prototypes[] = {
+#define KILN_C99_ANY_KIND_PROTOTYPE UINT32_C(0xfffffffe)
+static int kiln_c99_realm_kind_member_compute(const kiln_gc_heap *heap, const char *member,
+static __attribute__((noinline)) KILN_C99_RARE_CALL int kiln_c99_realm_kind_member_answer(const char *member,
+static __attribute__((noinline, pure)) KILN_C99_RARE_CALL int
+kiln_c99_realm_kind_member_untouched(const char *member, size_t len) {
+static int kiln_c99_realm_tag_prototypes_pristine(const kiln_gc_heap *heap, uint8_t tag) {
+#define KILN_C99_TAG_PROTO(id)                                                                      \
+#undef KILN_C99_TAG_PROTO
+typedef char kiln_c99_tag_prototypes_fit_the_bitmap[KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE < 128 &&
+static int kiln_c99_realm_tag_method_compute(const kiln_gc_heap *heap, uint64_t code) {
+static int kiln_c99_realm_tag_method_pristine_in(kiln_gc_heap *heap, uint8_t tag, uint64_t code) {
+static __attribute__((noinline, pure)) KILN_C99_RARE_CALL int kiln_c99_realm_tag_method_pristine(uint8_t tag,
 static int kiln_c99_store_get_key(kiln_host *host, kiln_value target,
 static int kiln_c99_object_prototype_lacks(const kiln_string *key) {
 static int kiln_c99_proxy_trap(kiln_host *host, kiln_value proxy, const char *name,
@@ -2740,6 +2772,9 @@ static kiln_value kiln_c99_key_value(const kiln_string *view, const kiln_string 
 #include <assert.h>
 static kiln_value kiln_c99_stable_key_value(const kiln_string *stable) {
 static int kiln_c99_prototype_store_read(kiln_host *host, uint64_t prototype,
+static int kiln_c99_written_prototype_read(kiln_host *host, uint64_t prototype,
+#define KILN_C99_WRITTEN_MEMBER_FIRST(prototype)                                                   \
+static int kiln_c99_primitive_object_prototype_read(kiln_host *host, const kiln_string *key,
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_string *key,
 #if KILN_RETAIN_GROUP_TEMPORAL
 #endif

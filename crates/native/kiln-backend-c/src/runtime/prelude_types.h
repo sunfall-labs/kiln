@@ -1091,6 +1091,45 @@ extern int kiln_c99_realm_builtin_modified(uint32_t builtin);
 static int kiln_c99_realm_builtin_modified(uint32_t builtin);
 #endif
 
+/* Issue 30: a method a site remembered for a receiver kind (`kiln_c99_cached_method_matches`) is
+ * the kind's method table's, which a member of that name the program wrote onto the kind's
+ * prototype (or onto Object.prototype) shadows. The hot side is the summary's one compare. */
+#ifdef KILN_SEPARATE_PRELUDE
+extern int kiln_c99_realm_tag_method_pristine(uint8_t tag, uint64_t code) __attribute__((pure))
+    KILN_C99_RARE_CALL;
+#else
+static int kiln_c99_realm_tag_method_pristine(uint8_t tag, uint64_t code) __attribute__((pure))
+    KILN_C99_RARE_CALL;
+#endif
+static KILN_ALWAYS_INLINE inline int kiln_c99_tag_method_pristine(uint8_t tag, uint64_t code) {
+    return KILN_LIKELY(kiln_c99_builtin_store_epoch == 0) || kiln_c99_realm_tag_method_pristine(tag, code);
+}
+
+/* Issue 30: an emitted method fast path (`s.trim()`, `a.join(",")`, `m.get(k)`) answers by name
+ * for whichever kind the receiver is, so it relies on that name being the table's on every kind
+ * prototype: none of them holds a member of that name the program wrote. Hot side: one compare. */
+#ifdef KILN_SEPARATE_PRELUDE
+extern int kiln_c99_realm_kind_member_untouched(const char *member, size_t len)
+    __attribute__((pure)) KILN_C99_RARE_CALL;
+#else
+static int kiln_c99_realm_kind_member_untouched(const char *member, size_t len)
+    __attribute__((pure)) KILN_C99_RARE_CALL;
+#endif
+#define kiln_c99_kind_member_unmodified(member)                                                    \
+    (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0) ||                                              \
+     kiln_c99_realm_kind_member_untouched((member), sizeof(member) - 1))
+
+/* Issue 30: whether the program has written onto `builtin` in this realm, for a read that is
+ * about to answer from `builtin`'s method table and must let a written member shadow it. */
+#ifdef KILN_SEPARATE_PRELUDE
+extern int kiln_c99_realm_program_wrote(uint32_t builtin);
+#else
+static int kiln_c99_realm_program_wrote(uint32_t builtin);
+#endif
+static KILN_ALWAYS_INLINE inline int kiln_c99_program_wrote_builtin(uint32_t builtin) {
+    return KILN_UNLIKELY(kiln_c99_builtin_store_epoch != 0) && kiln_c99_realm_program_wrote(builtin);
+}
+
 /* Every mutation of an object some inline cache might read a property through calls this: an own
  * property written, defined or deleted, a prototype link changed, a conversion to dictionary
  * mode. A shaped object's key set is its shape, which such a mutation changes when it matters;

@@ -325,6 +325,9 @@ static inline kiln_val *kiln_c99_unit_vals(kiln_c99_unit *unit, kiln_c99_unit_ca
 static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln_val target) {
     if (site == NULL || !kiln_c99_site_has_method(site)) return 0;
     uint8_t ctag = site->cached_tag;
+    /* Issue 30: a kind's remembered method is its table's, which a member the program wrote onto
+     * the kind's prototype shadows. One compare while no realm has written onto a built-in. */
+    if (ctag != KILN_VALUE_BUILTIN && KILN_UNLIKELY(!kiln_c99_tag_method_pristine(ctag, site->cached_method))) return 0;
     if (ctag == KILN_VALUE_COLLECTION && (KILN_VAL_IS_OBJECT(target) || ((target & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX))) {
         void *ptr = KILN_VAL_PTR(target);
         return kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_COLLECTION;

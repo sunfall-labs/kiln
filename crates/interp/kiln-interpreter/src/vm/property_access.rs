@@ -614,12 +614,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     method => method,
                 },
             },
+            // `test`, `exec` and `toString` are `RegExp.prototype`'s, answered below through the
+            // realm's store first: a program's `RegExp.prototype.test = f` is what every regexp
+            // then calls (parallel issue 30). They used to be answered here, ahead of the store.
             Value::RegExp(regexp) => match name {
-                "test" => Value::Native(Native::RegExpTest, RealmId::PRIMARY),
-                "exec" => Value::Native(Native::RegExpExec, RealmId::PRIMARY),
-                // Its own, not the error one: a regexp prints as `/source/flags`, and reusing
-                // `Error.prototype.toString` made every regexp stringify as "Error".
-                "toString" => Value::Native(Native::RegExpToString, RealmId::PRIMARY),
                 // Escaped, exactly as the accessor on the prototype escapes it: the two must
                 // not disagree about what `re.source` is, and the raw pattern would not survive
                 // being written back between slashes.
@@ -664,7 +662,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             },
             // The same table `Promise.prototype` answers from, so an instance and the
             // prototype can never resolve a name differently.
-            Value::Promise(_) => match promise_method(name) {
+            // Through the realm's store first, like every other kind: `Promise.prototype.then = f`
+            // is what every promise then answers (parallel issue 30).
+            Value::Promise(_) => match table_step(
+                &self.intrinsics,
+                PrototypeTable::Promise,
+                name,
+                promise_method(name),
+                value_realm(target),
+            ) {
                 Value::Undefined => {
                     inherited_object_property(&self.intrinsics, name, value_realm(target))
                 }

@@ -3395,7 +3395,7 @@ pub(super) fn emit_call_method(
 
     let json_intrinsic = match (key_str.as_str(), argc) {
         ("stringify", 1) => Some(format!(
-            "if (!handled && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_JSON) {{ \
+            "if (!handled && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_JSON && kiln_c99_builtin_member_unmodified(KILN_C99_BUILTIN_JSON, \"stringify\")) {{ \
                          if (kiln_c99_val_json_stringify_fast(host, v{a0}, &v{v}, depth, thrown) == KILN_C99_OK) {{ \
                              handled = 1; \
                          }} \
@@ -3405,7 +3405,7 @@ pub(super) fn emit_call_method(
             v = v
         )),
         ("parse", 1) => Some(format!(
-            "if (!handled && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_JSON) {{ \
+            "if (!handled && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_JSON && kiln_c99_builtin_member_unmodified(KILN_C99_BUILTIN_JSON, \"parse\")) {{ \
                          if (kiln_c99_val_json_parse_fast(host, v{a0}, &v{v}, depth, thrown) == KILN_C99_OK) {{ \
                              handled = 1; \
                          }} \
@@ -4016,6 +4016,26 @@ pub(super) fn emit_call_method(
     let iterator_s = iterator_intrinsic
         .map(|s| format!(" {s}"))
         .unwrap_or_default();
+    // Issue 30: every prototype-method fast path above answers by name for the kind the receiver
+    // turns out to be (`s.trim()`, `a.join(",")`, `m.get(k)`), so all of them rely on that name
+    // being the table's on every kind prototype. (An iterator's `next` is not a member of any of
+    // them, and stays outside.) One guard for the lot -- one compare while no
+    // realm has written onto a built-in; after that, whether this realm's program wrote this name
+    // onto one of them, remembered per name. A written member falls through to the cached and
+    // named paths below, which find it.
+    let kind_intrinsics = format!(
+        "{push_s}{regex_s}{map_s}{filter_s}{reduce_s}{slice_s}{join_s}{split_s}{index_of_s}{substring_s}{collection_s}{sort_s}{array_extra_s}{string_extra_s}"
+    );
+    let kind_intrinsics = if kind_intrinsics.trim().is_empty() {
+        String::new()
+    } else if key_str
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$')
+    {
+        format!(" if (kiln_c99_kind_member_unmodified(\"{key_str}\")) {{{kind_intrinsics} }}")
+    } else {
+        String::new()
+    };
     let n = argc.max(1);
 
     let typed_sync = if typed && spec.exits && spec.calls.contains(&vid) {
@@ -4107,7 +4127,7 @@ pub(super) fn emit_call_method(
                 "    {{ static kiln_c99_site site = {{0}}; \
                 kiln_val call_args[{n}]; int call_args_ready = 0; (void)call_args_ready; \
                 int handled = 0; int kiln_twin = 0; (void)kiln_twin; {typed_remembered}\
-                {await_resolve_s}{math_s}{array_is_array_s}{number_predicate_s}{push_s}{regex_s}{parallel_pool_s}{map_s}{filter_s}{reduce_s}{slice_s}{join_s}{split_s}{index_of_s}{substring_s}{collection_s}{json_s}{sort_s}{array_extra_s}{string_extra_s}{iterator_s} \
+                {await_resolve_s}{math_s}{array_is_array_s}{number_predicate_s}{parallel_pool_s}{json_s}{kind_intrinsics}{iterator_s} \
                 if (!handled && KILN_VAL_IS_OBJECT(v{o})) {{ \
                     const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); if (obj == NULL) __builtin_unreachable(); \
                     {typed_front}\

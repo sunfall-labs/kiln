@@ -451,13 +451,23 @@ typedef struct kiln_gc_heap {
     uint64_t builtin_store_serial;
     /* `kiln_c99_realm_builtin_member_untouched`'s answers, each valid while `serial` is the
      * heap's `builtin_store_serial`: a speculation on `Math.sqrt` in a realm that wrote
-     * `Math.foo` asks the store once per store, not once per call. */
+     * `Math.foo` asks the store once per store, not once per call. Sixty-four of them: a realm
+     * that wrote onto Array.prototype asks one per method name its call sites use (issue 30). */
     struct {
         uint64_t serial;
         const char *member;
         uint32_t builtin;
         uint8_t untouched;
-    } member_answers[8];
+    } member_answers[64];
+    /* `kiln_c99_realm_tag_method_pristine`'s answers, by method code and receiver kind, valid
+     * while `serial` is the heap's `builtin_store_serial` (parallel issue 30): a cached method
+     * asks its name's stores once per store onto a built-in, not once per call. */
+    struct {
+        uint64_t serial;
+        uint64_t code;
+        uint8_t tag;
+        uint8_t pristine;
+    } method_answers[64];
     /* The promise job lane (Phase 6.3). A promise reaction and an await resumption used to be a
      * GC cell and a call across the private ABI each; they are values in this array now, which
      * the realm drains by calling back into the prelude. It lives in the heap because the heap
