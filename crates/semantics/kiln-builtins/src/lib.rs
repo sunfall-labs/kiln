@@ -1420,6 +1420,30 @@ mod web_tests {
         assert!(common.starts_with(EXTENSIONS_BOOTSTRAP_SOURCE));
     }
 
+    /// ADR 0060 kind 7: a member the description says the bootstrap owns has no engine
+    /// implementation, so the bootstrap has to be what defines it -- or it is simply absent.
+    #[test]
+    fn bootstrap_owned_members_are_defined_by_the_bootstrap() {
+        let common = common_bootstrap_source();
+        for (global, member) in kiln_builtin_surface::BOOTSTRAP_STATICS {
+            assert!(
+                common.contains(&format!("defineMethod({global}, \"{member}\"",))
+                    || common.contains(&format!("defineProperty({global}, \"{member}\"")),
+                "{global}.{member} is declared bootstrap-owned but the common bootstrap does not \
+                 define it"
+            );
+        }
+        for row in kiln_builtin_surface::PROTOTYPE_SURFACE {
+            if row.binding == kiln_builtin_surface::SemanticBinding::Bootstrap {
+                let key = row.key.property_key();
+                assert!(
+                    common.contains(&format!("\"{key}\"")),
+                    "{key} is declared bootstrap-owned but the common bootstrap does not define it"
+                );
+            }
+        }
+    }
+
     #[test]
     fn typedarray_bootstrap_compiles_cleanly() {
         let hir =

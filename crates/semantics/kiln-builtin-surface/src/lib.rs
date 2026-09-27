@@ -78,6 +78,38 @@ pub const NAME_IS_SHARED: &[(&str, &str)] = &[
     ("Array.prototype", "@@iterator"),
 ];
 
+/// The statics in [`SURFACE`] whose one implementation is the shared bootstrap TypeScript
+/// (`kiln-builtins`, ADR 0060 kind 7), as `(global, member)`.
+///
+/// Neither engine implements these; the realm bootstrap defines each before any program runs. They
+/// stay in [`SURFACE`] because that table is also the key order reflection reports, and an engine
+/// that lists a built-in's statics from it reserves these slots so that the bootstrap's definition
+/// lands where node lists the member (`Array.fromAsync` before `Array.of`) rather than last.
+/// The prototype members the bootstrap owns are the [`PROTOTYPE_SURFACE`] rows bound to
+/// [`SemanticBinding::Bootstrap`].
+pub const BOOTSTRAP_STATICS: &[(&str, &str)] = &[
+    ("Object", "seal"),
+    ("Object", "isSealed"),
+    ("Array", "fromAsync"),
+    ("Promise", "try"),
+    ("Promise", "allKeyed"),
+    ("Promise", "allSettledKeyed"),
+    ("Reflect", "isExtensible"),
+    ("Reflect", "preventExtensions"),
+    ("Reflect", "setPrototypeOf"),
+    ("RegExp", "escape"),
+    ("Iterator", "concat"),
+    ("Iterator", "zip"),
+    ("Iterator", "zipKeyed"),
+];
+
+/// Whether `global.member` is one of the [`BOOTSTRAP_STATICS`].
+pub fn is_bootstrap_static(global: &str, member: &str) -> bool {
+    BOOTSTRAP_STATICS
+        .iter()
+        .any(|(owner, name)| *owner == global && *name == member)
+}
+
 /// A built-in global and the members it owns.
 pub struct Builtin {
     /// The global as a program spells it. Two entries are not globals a program can name:
@@ -845,10 +877,6 @@ pub enum ObjectMethod {
     ToString,
     ToLocaleString,
     ValueOf,
-    DefineGetter,
-    DefineSetter,
-    LookupGetter,
-    LookupSetter,
 }
 
 /// Built-in methods of `Function.prototype`.
@@ -868,8 +896,6 @@ pub enum MapMethod {
     Entries,
     ForEach,
     Get,
-    GetOrInsert,
-    GetOrInsertComputed,
     Has,
     Keys,
     Set,
@@ -943,6 +969,10 @@ pub enum SemanticBinding {
     WeakSetMethod(WeakSetMethod),
     CollectionSize(bool),     // true = Map, false = Set
     CollectionIterator(bool), // true = Map, false = Set
+    /// Owned by the shared bootstrap TypeScript (`kiln-builtins`, ADR 0060 kind 7): the realm
+    /// bootstrap defines it, and neither engine implements it. The row still declares that the
+    /// member exists, where it sits in the prototype's key order and what its descriptor is.
+    Bootstrap,
 }
 
 /// One declarative row describing a prototype member.
@@ -1500,28 +1530,28 @@ pub const PROTOTYPE_SURFACE: &[PrototypeMember] = &[
         key: MemberKey::Named("__defineGetter__"),
         kind: MemberKind::Method { length: 2 },
         attributes: DescriptorAttributes::METHOD,
-        binding: SemanticBinding::ObjectMethod(ObjectMethod::DefineGetter),
+        binding: SemanticBinding::Bootstrap,
     },
     PrototypeMember {
         prototype: PrototypeId::Object,
         key: MemberKey::Named("__defineSetter__"),
         kind: MemberKind::Method { length: 2 },
         attributes: DescriptorAttributes::METHOD,
-        binding: SemanticBinding::ObjectMethod(ObjectMethod::DefineSetter),
+        binding: SemanticBinding::Bootstrap,
     },
     PrototypeMember {
         prototype: PrototypeId::Object,
         key: MemberKey::Named("__lookupGetter__"),
         kind: MemberKind::Method { length: 1 },
         attributes: DescriptorAttributes::METHOD,
-        binding: SemanticBinding::ObjectMethod(ObjectMethod::LookupGetter),
+        binding: SemanticBinding::Bootstrap,
     },
     PrototypeMember {
         prototype: PrototypeId::Object,
         key: MemberKey::Named("__lookupSetter__"),
         kind: MemberKind::Method { length: 1 },
         attributes: DescriptorAttributes::METHOD,
-        binding: SemanticBinding::ObjectMethod(ObjectMethod::LookupSetter),
+        binding: SemanticBinding::Bootstrap,
     },
     PrototypeMember {
         prototype: PrototypeId::Object,
@@ -1634,14 +1664,14 @@ pub const PROTOTYPE_SURFACE: &[PrototypeMember] = &[
         key: MemberKey::Named("getOrInsert"),
         kind: MemberKind::Method { length: 2 },
         attributes: DescriptorAttributes::METHOD,
-        binding: SemanticBinding::MapMethod(MapMethod::GetOrInsert),
+        binding: SemanticBinding::Bootstrap,
     },
     PrototypeMember {
         prototype: PrototypeId::Map,
         key: MemberKey::Named("getOrInsertComputed"),
         kind: MemberKind::Method { length: 2 },
         attributes: DescriptorAttributes::METHOD,
-        binding: SemanticBinding::MapMethod(MapMethod::GetOrInsertComputed),
+        binding: SemanticBinding::Bootstrap,
     },
     PrototypeMember {
         prototype: PrototypeId::Map,
@@ -2137,6 +2167,18 @@ pub const fn prototype_has(prototype: PrototypeId, key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bootstrap-owned static is still a declared member: it has to be in [`SURFACE`] for its
+    /// slot, and for the name and order reflection reports.
+    #[test]
+    fn every_bootstrap_static_is_a_surface_member() {
+        for (global, member) in BOOTSTRAP_STATICS {
+            assert!(
+                find(global).is_some_and(|members| members.contains(member)),
+                "{global}.{member} is bootstrap-owned but not declared in SURFACE"
+            );
+        }
+    }
 
     /// ADR 0068 rule 2, over the description itself: every member marked as kiln's own is
     /// non-enumerable, in its own row and in the prototype row that installs it.

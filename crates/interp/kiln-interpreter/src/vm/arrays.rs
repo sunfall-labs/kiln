@@ -1,6 +1,11 @@
 use super::*;
 
 impl<H: HostOps + ?Sized> Vm<'_, H> {
+    /// `Array.from(source, mapFn?)`.
+    ///
+    /// Anything iterable is walked through the protocol. Anything else is treated as array-like
+    /// and read by index up to its `length`, which is the other half of what the specification
+    /// says and what makes `Array.from({ length: 2 })` two undefineds rather than an error.
     pub(crate) fn array_from(
         &mut self,
         arguments: &[Value],

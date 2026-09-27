@@ -240,11 +240,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     message: format!("Constructor {} requires 'new'", native_js_name(&native)),
                 });
             }
-            // Closing runs the program's `return`, so this needs the machine too.
-            Native::IteratorDispose => {
-                self.close_iterator(receiver, instruction)?;
-                return Ok(Value::Undefined);
-            }
             // All five read `exec` off the receiver and call it, so none of them can be answered
             // without a machine to run the program's own matcher on.
             Native::RegExpSymbol(method) => {
@@ -253,18 +248,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::RegExpStringIteratorNext => {
                 return self.regexp_string_iterator_next(receiver, instruction);
             }
-            Native::IteratorConcat => return self.iterator_concat(arguments, instruction),
-            Native::IteratorConcatNext => {
-                return self.iterator_concat_next(receiver, instruction);
-            }
-            Native::IteratorConcatReturn => {
-                return self.iterator_concat_return(receiver, instruction);
-            }
-            Native::IteratorZip { keyed } => {
-                return self.iterator_zip(keyed, arguments, instruction);
-            }
-            Native::IteratorZipNext => return self.iterator_zip_next(receiver, instruction),
-            Native::IteratorZipReturn => return self.iterator_zip_return(receiver, instruction),
             // These four had an `unreachable!` arm in `call_native` and no route here, which is
             // the pairing that fails silently: nothing refuses to compile, and the first program
             // to call one aborts the process instead of answering. `Iterator.from`,
@@ -285,70 +268,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::ObjectGroupBy => return self.group_by(false, arguments, instruction),
             Native::MapGroupBy => return self.group_by(true, arguments, instruction),
-            Native::LegacyAccessor { defines, setter } => {
-                return self.legacy_accessor(defines, setter, receiver, arguments, instruction);
-            }
-            // `Promise.try(f, ...args)` runs `f` *now* and wraps whatever happens: the value it
-            // returned, or the error it threw. That last half is the whole point -- a synchronous
-            // throw from a function that was meant to be asynchronous becomes a rejection rather
-            // than escaping past the promise chain that was waiting to handle it.
-            Native::PromiseTry => {
-                let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
-                let rest = arguments.get(1..).unwrap_or_default().to_vec();
-                if !is_an_object(receiver) {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message: "Promise.try called on a non-object".to_owned(),
-                    });
-                }
-                // Reached through a subclass, the promise is built by *that* constructor and the
-                // outcome goes through the pair its executor was handed -- the same capability
-                // every other promise-producing static takes.
-                if !Self::reached_through_intrinsic_promise(receiver) {
-                    let (promise, resolve, reject) =
-                        self.new_promise_capability(receiver, instruction)?;
-                    let settled = if is_callable(&callback) {
-                        self.call_catching(&callback, Value::Undefined, rest, instruction)?
-                    } else {
-                        Err(self.construct_error(
-                            ErrorKind::Type,
-                            &[Value::String(
-                                format!("{} is not a function", callback.to_display_string())
-                                    .into(),
-                            )],
-                        ))
-                    };
-                    match settled {
-                        Ok(value) => {
-                            self.call_value(&resolve, Value::Undefined, vec![value], instruction)?;
-                        }
-                        Err(thrown) => {
-                            self.call_value(&reject, Value::Undefined, vec![thrown], instruction)?;
-                        }
-                    }
-                    return Ok(promise);
-                }
-                let promise = PromiseState::pending();
-                // A non-callable argument rejects rather than throwing, like every other failure
-                // here: the caller was handed a promise and is waiting on it, and a synchronous
-                // throw would arrive somewhere nothing is listening.
-                if !is_callable(&callback) {
-                    let thrown = self.construct_error(
-                        ErrorKind::Type,
-                        &[Value::String(
-                            format!("{} is not a function", callback.to_display_string()).into(),
-                        )],
-                    );
-                    self.settle(&promise, &Settled::Rejected(thrown));
-                    return Ok(Value::Promise(promise));
-                }
-                // Caught rather than propagated, which is the whole contract: the caller asked
-                // for a promise, so a throw has to arrive as a rejection on it.
-                match self.call_catching(&callback, Value::Undefined, rest, instruction)? {
-                    Ok(value) => self.resolve_promise(&promise, value),
-                    Err(thrown) => self.settle(&promise, &Settled::Rejected(thrown)),
-                }
-                return Ok(Value::Promise(promise));
-            }
             _ => {}
         }
         // And ahead of them for `Intl`, for a sharper reason: every constructor here reads an
@@ -1052,8 +971,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | Native::PromiseReject
                 | Native::PromiseAll
                 | Native::PromiseAllSettled
-                | Native::PromiseAllKeyed
-                | Native::PromiseAllSettledKeyed
                 | Native::PromiseRace
                 | Native::PromiseAny
         ) && !is_constructor(receiver)
@@ -1350,7 +1267,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | Native::UrlSearchParamsGetAll
             | Native::UrlSearchParamsToString => url::dispatch(native, receiver, arguments),
             Native::ArrayFrom => self.array_from(arguments, instruction),
-            Native::ArrayFromAsync => self.array_from_async(receiver, arguments, instruction),
             Native::ArrayBufferConstructor => {
                 self.construct_array_buffer(false, arguments, instruction)
             }
@@ -1599,8 +1515,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // they collect, so they share one walk over the inputs.
             Native::PromiseAll
             | Native::PromiseAllSettled
-            | Native::PromiseAllKeyed
-            | Native::PromiseAllSettledKeyed
             | Native::PromiseRace
             | Native::PromiseAny => {
                 let source = arguments.first().cloned().unwrap_or(Value::Undefined);
@@ -1628,28 +1542,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     stack_height: self.stack.len(),
                     native_depth: self.native_depth,
                 });
-                let walked = if matches!(
+                let walked = self.perform_promise_combinator(
                     native,
-                    Native::PromiseAllKeyed | Native::PromiseAllSettledKeyed
-                ) {
-                    self.perform_promise_combinator_keyed(
-                        native,
-                        receiver,
-                        &source,
-                        &resolve,
-                        &reject,
-                        instruction,
-                    )
-                } else {
-                    self.perform_promise_combinator(
-                        native,
-                        receiver,
-                        &source,
-                        &resolve,
-                        &reject,
-                        instruction,
-                    )
-                };
+                    receiver,
+                    &source,
+                    &resolve,
+                    &reject,
+                    instruction,
+                );
                 self.handlers.truncate(installed);
                 let reason = match walked {
                     Ok(()) => return Ok(promise),
@@ -2139,21 +2039,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 Ok(target)
             }
-            Native::ObjectFreeze | Native::ObjectSeal
-                if matches!(arguments.first(), Some(Value::Proxy(_))) =>
-            {
+            Native::ObjectFreeze if matches!(arguments.first(), Some(Value::Proxy(_))) => {
                 let target = arguments.first().cloned().unwrap_or(Value::Undefined);
-                self.proxy_integrity_level(&target, native == Native::ObjectFreeze, instruction)
+                self.proxy_integrity_level(&target, true, instruction)
             }
-            Native::ObjectIsFrozen | Native::ObjectIsSealed
-                if matches!(arguments.first(), Some(Value::Proxy(_))) =>
-            {
+            Native::ObjectIsFrozen if matches!(arguments.first(), Some(Value::Proxy(_))) => {
                 let target = arguments.first().cloned().unwrap_or(Value::Undefined);
-                self.proxy_is_integrity_level(
-                    &target,
-                    native == Native::ObjectIsFrozen,
-                    instruction,
-                )
+                self.proxy_is_integrity_level(&target, true, instruction)
             }
             // `Object.prototype.toLocaleString()` is `Invoke(this, "toString")`: it calls the
             // receiver's own `toString`, wherever on the chain that is, rather than producing the
@@ -2633,18 +2525,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     &target,
                     &key,
                 )?))
-            }
-            Native::ReflectIsExtensible => {
-                let target = self.reflect_target(arguments.first(), "isExtensible")?;
-                if matches!(target, Value::Proxy(_)) {
-                    return Ok(Value::Boolean(
-                        self.proxy_is_extensible(&target, instruction)?,
-                    ));
-                }
-                Ok(Value::Boolean(is_extensible_target(
-                    &self.intrinsics,
-                    &target,
-                )))
             }
             Native::ReflectPreventExtensions => {
                 let target = self.reflect_target(arguments.first(), "preventExtensions")?;

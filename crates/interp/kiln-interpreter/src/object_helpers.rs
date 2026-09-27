@@ -790,6 +790,13 @@ pub(super) fn has_property_ascii(intrinsics: &Intrinsics, target: &Value, name: 
                         )
                         .is_some()
                     })
+                // An iterator this realm made inherits `%IteratorPrototype%`, as the read does.
+                || ((object.borrow().get_own("@@iterated").is_some()
+                    || object.borrow().get_own(HELPER_SOURCE).is_some())
+                    && !matches!(
+                        iterator_prototype_property(intrinsics, &name, value_realm(target)),
+                        Value::Undefined
+                    ))
                 || !matches!(inherited_object_property(intrinsics, &name, value_realm(target)), Value::Undefined)
                 // A property the program *defined* on `Object.prototype` that reads as
                 // undefined is still there: an accessor given only a setter answers `undefined`
@@ -909,11 +916,17 @@ pub(super) fn has_property_ascii(intrinsics: &Intrinsics, target: &Value, name: 
             // is every constructor and method table but that one. Answering from the built-in's
             // own names alone denied them `hasOwnProperty`, and denied `Math` a property the
             // program had put on `Object.prototype` and could read straight off it.
+            let inherited = if matches!(
+                native,
+                Native::PrototypeOf(PrototypeTable::IteratorFor(_) | PrototypeTable::Generator)
+            ) {
+                // One link further: these reach `%IteratorPrototype%` before `Object.prototype`.
+                native_inherited_property(intrinsics, target, &name)
+            } else {
+                inherited_object_property(intrinsics, &name, value_realm(target))
+            };
             own || (!matches!(native, Native::PrototypeOf(PrototypeTable::Object))
-                && !matches!(
-                    inherited_object_property(intrinsics, &name, value_realm(target)),
-                    Value::Undefined
-                ))
+                && !matches!(inherited, Value::Undefined))
         }
         // Mirrors the read: a function answers from its own store, then from `name`, `length`
         // and `prototype`, then from the methods every callable inherits. `in` has to agree with

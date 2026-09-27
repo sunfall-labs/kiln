@@ -580,14 +580,8 @@ pub(super) fn iterator_method(name: &str) -> Value {
             Native::IteratorTerminal(TerminalKind::Find),
             RealmId::PRIMARY,
         ),
-        "chunks" => Value::Native(Native::IteratorLazy(HelperKind::Chunks), RealmId::PRIMARY),
-        "windows" => Value::Native(Native::IteratorLazy(HelperKind::Windows), RealmId::PRIMARY),
         "includes" => Value::Native(
             Native::IteratorTerminal(TerminalKind::Includes),
-            RealmId::PRIMARY,
-        ),
-        "join" => Value::Native(
-            Native::IteratorTerminal(TerminalKind::Join),
             RealmId::PRIMARY,
         ),
         "constructor" => Value::Native(Native::IteratorConstructor, RealmId::PRIMARY),
@@ -595,11 +589,6 @@ pub(super) fn iterator_method(name: &str) -> Value {
         // `for-of` or to `Array.from`.
         key if key == WellKnown::Iterator.property_key() => {
             Value::Native(Native::IteratorSelf, RealmId::PRIMARY)
-        }
-        // Closing an iterator is exactly what disposing of one means, so `using it = ...` ends
-        // the iteration the same way an early `break` does.
-        key if key == WellKnown::Dispose.property_key() => {
-            Value::Native(Native::IteratorDispose, RealmId::PRIMARY)
         }
         _ => Value::Undefined,
     }
@@ -668,34 +657,6 @@ pub(super) fn object_method_value(
             Value::Native(Native::ObjectToLocaleString, realm)
         }
         kiln_builtin_surface::ObjectMethod::ValueOf => Value::Native(Native::ObjectValueOf, realm),
-        kiln_builtin_surface::ObjectMethod::DefineGetter => Value::Native(
-            Native::LegacyAccessor {
-                defines: true,
-                setter: false,
-            },
-            realm,
-        ),
-        kiln_builtin_surface::ObjectMethod::DefineSetter => Value::Native(
-            Native::LegacyAccessor {
-                defines: true,
-                setter: true,
-            },
-            realm,
-        ),
-        kiln_builtin_surface::ObjectMethod::LookupGetter => Value::Native(
-            Native::LegacyAccessor {
-                defines: false,
-                setter: false,
-            },
-            realm,
-        ),
-        kiln_builtin_surface::ObjectMethod::LookupSetter => Value::Native(
-            Native::LegacyAccessor {
-                defines: false,
-                setter: true,
-            },
-            realm,
-        ),
     }
 }
 
@@ -1519,16 +1480,7 @@ pub(super) fn needs_number_conversion(value: &Value) -> bool {
 pub(super) const fn textual_arguments(native: Native) -> &'static [usize] {
     use Native as N;
     match native {
-        // `CreateHTML` converts the attribute value only when there *is* an attribute; the nine
-        // wrappers that take none ignore whatever they are passed, symbols included.
-        N::StringHtml(
-            HtmlWrapper::Anchor
-            | HtmlWrapper::FontColor
-            | HtmlWrapper::FontSize
-            | HtmlWrapper::Link,
-        )
-        | N::Escape
-        | N::Unescape => &[0],
+        N::Escape | N::Unescape => &[0],
         // The search string converts before the position does: `"s".indexOf(a, b)` is
         // `ToString(a)` then `ToIntegerOrInfinity(b)`, and running the numeric pass first
         // reversed a pair of conversions a program counting its own `toString` calls can see.

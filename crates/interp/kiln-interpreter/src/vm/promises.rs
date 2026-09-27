@@ -130,11 +130,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<(), ExecutionError> {
         // Neither of these carries handlers: the bookkeeping *is* the reaction.
         match &reaction.sink {
-            Sink::FromAsync(state) => {
-                let state = Rc::clone(state);
-                self.async_resume(&state, outcome, self.instruction);
-                return Ok(());
-            }
             Sink::AsyncDisposal(state) => {
                 let state = Rc::clone(state);
                 self.async_disposal_resume(&state, outcome, self.instruction);
@@ -580,7 +575,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let walk = Rc::new(CombinatorWalk {
             native,
             values: RefCell::new(Vec::new()),
-            keys: RefCell::new(Vec::new()),
             remaining: std::cell::Cell::new(1),
             resolve: resolve.clone(),
             reject: reject.clone(),
@@ -620,89 +614,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // The walk itself held one count, so that an input settling before the last one is read
         // cannot resolve the whole combinator early. Releasing it here is what makes an empty
         // input settle immediately, and a fully-settled one settle on the last release instead.
-        walk.remaining.set(walk.remaining.get().saturating_sub(1));
-        if walk.remaining.get() == 0 {
-            self.finish_combinator(&walk, instruction)?;
-        }
-        Ok(())
-    }
-
-    /// `PerformPromiseAllKeyed` and `PerformPromiseAllSettledKeyed`: the same walk, over an
-    /// object's own enumerable keys rather than over an iterable.
-    ///
-    /// The differences from the iterable form are all in what is being walked. The order is the
-    /// object's own-key order and is fixed before anything settles, so a result is keyed the way
-    /// the input was written no matter which input finishes first. A key is included only if it
-    /// has an own descriptor that is enumerable -- and the value is *not* read for one that is
-    /// not, which a getter can see. Every step here is a place a proxy trap or a getter can run
-    /// arbitrary code, so each one propagates, and the caller turns that into a rejection.
-    pub(crate) fn perform_promise_combinator_keyed(
-        &mut self,
-        native: Native,
-        constructor: &Value,
-        source: &Value,
-        resolve: &Value,
-        reject: &Value,
-        instruction: usize,
-    ) -> Result<(), ExecutionError> {
-        // `GetPromiseResolve(C)` before anything else and exactly once, as in the iterable form.
-        let promise_resolve = self.read_property(constructor, "resolve", instruction)?;
-        if !is_callable(&promise_resolve) {
-            return Err(ExecutionError::TypeErrorMessage {
-                message: "Promise resolve is not a function".to_owned(),
-            });
-        }
-        // An iterable combinator asks for `@@iterator`; this one requires an object outright,
-        // because there is nothing to enumerate on a primitive.
-        if !is_an_object(source) {
-            return Err(ExecutionError::TypeErrorMessage {
-                message: format!("{} is not an object", source.to_display_string()),
-            });
-        }
-
-        let walk = Rc::new(CombinatorWalk {
-            native,
-            values: RefCell::new(Vec::new()),
-            keys: RefCell::new(Vec::new()),
-            remaining: std::cell::Cell::new(1),
-            resolve: resolve.clone(),
-            reject: reject.clone(),
-        });
-
-        // `[[OwnPropertyKeys]]` once, up front: the result's key order is this order, and a
-        // trap that answers differently on a second call cannot change it half way through.
-        let mut index = 0usize;
-        for key in self.own_keys_reflected(source, instruction)? {
-            let Some(descriptor) = self.own_descriptor_value(source, &key, instruction)? else {
-                continue;
-            };
-            let enumerable = self.read_property(&descriptor, "enumerable", instruction)?;
-            if !enumerable.is_truthy() {
-                continue;
-            }
-            // Only now is the value read: a non-enumerable key's getter must not run.
-            let item = self.read_computed(source, &key, instruction)?;
-            walk.keys.borrow_mut().push(key);
-            self.subscribe_combinator_input(
-                &walk,
-                constructor,
-                &promise_resolve,
-                item,
-                index,
-                instruction,
-            )?;
-            index += 1;
-            if index > self.limits.max_steps as usize {
-                return Err(ExecutionError::StepLimitExceeded {
-                    steps: index as u64,
-                    limit: self.limits.max_steps,
-                });
-            }
-        }
-
-        // The walk's own count, released here so that an input settling early cannot resolve the
-        // combinator before every key has been read -- and so that an object with no enumerable
-        // keys settles immediately, with an empty result.
         walk.remaining.set(walk.remaining.get().saturating_sub(1));
         if walk.remaining.get() == 0 {
             self.finish_combinator(&walk, instruction)?;
@@ -755,10 +666,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }))
         };
         let (on_fulfilled, on_rejected) = match walk.native {
-            Native::PromiseAll | Native::PromiseAllKeyed => (element(false), walk.reject.clone()),
-            Native::PromiseAllSettled | Native::PromiseAllSettledKeyed => {
-                (element(false), element(true))
-            }
+            Native::PromiseAll => (element(false), walk.reject.clone()),
+            Native::PromiseAllSettled => (element(false), element(true)),
             Native::PromiseAny => (walk.resolve.clone(), element(true)),
             _ => (walk.resolve.clone(), walk.reject.clone()),
         };
@@ -798,21 +707,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // An empty `race` never settles at all -- there is no input to settle it, and the
             // specification says so rather than leaving it undefined.
             Native::PromiseRace => {}
-            // `CreateKeyedPromiseCombinatorResultObject`: an ordinary object with *no*
-            // prototype, carrying one data property per key in the order the keys were read
-            // rather than the order they settled in. The null prototype is what lets a result
-            // be indexed by an arbitrary key without `toString` or `constructor` answering for
-            // a key the input never had.
-            Native::PromiseAllKeyed | Native::PromiseAllSettledKeyed => {
-                let mut data = ObjectData::default();
-                data.set_prototype(Value::Null);
-                for (key, value) in walk.keys.borrow().iter().zip(collected) {
-                    let key = key.property_key_units_checked()?;
-                    data.set_units(&key, value);
-                }
-                let result = Value::Object(Rc::new(RefCell::new(data)));
-                self.call_value(&walk.resolve, Value::Undefined, vec![result], instruction)?;
-            }
             _ => {
                 let values = Value::Array(ArrayData::new(collected));
                 self.call_value(&walk.resolve, Value::Undefined, vec![values], instruction)?;
@@ -830,13 +724,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<Value, ExecutionError> {
         let walk = Rc::clone(&element.walk);
         let collected = match (walk.native, element.rejects) {
-            (Native::PromiseAllSettled | Native::PromiseAllSettledKeyed, false) => {
+            (Native::PromiseAllSettled, false) => {
                 let mut data = ObjectData::default();
                 data.set("status", Value::String("fulfilled".to_owned().into()));
                 data.set("value", argument);
                 Value::Object(Rc::new(RefCell::new(data)))
             }
-            (Native::PromiseAllSettled | Native::PromiseAllSettledKeyed, true) => {
+            (Native::PromiseAllSettled, true) => {
                 let mut data = ObjectData::default();
                 data.set("status", Value::String("rejected".to_owned().into()));
                 data.set("reason", argument);

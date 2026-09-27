@@ -66,8 +66,6 @@ pub enum Native {
     /// One variant with a payload for the reason `Temporal` has one: the six services answer
     /// to overlapping method names and the receiver decides what a name means.
     Intl(intl::Op),
-    /// `RegExp.escape(text)`: the text as a pattern that matches it literally.
-    RegExpEscape,
     /// `Error.isError(value)`: whether a value really is an error rather than an object shaped
     /// like one. The distinction cannot be made from JavaScript, which is why it exists.
     ErrorIsError,
@@ -397,7 +395,6 @@ pub enum Native {
     ArrayIsArray,
     ArrayFrom,
     /// `Array.fromAsync`: `Array.from` with an await at every element.
-    ArrayFromAsync,
     ObjectKeys,
     ObjectSetPrototypeOf,
     ObjectGetPrototypeOf,
@@ -512,7 +509,6 @@ pub enum Native {
     /// is the whole reason the language grew them.
     ArrayCopy(ArrayCopy),
     /// One of Annex B's HTML wrappers on `String.prototype`.
-    StringHtml(HtmlWrapper),
     /// `Number.prototype.toExponential` and `toPrecision`, which differ only in what the digit
     /// count means.
     NumberToExponential,
@@ -541,18 +537,11 @@ pub enum Native {
     /// compares the getter it takes off `arguments` with the one it takes off `Function.prototype`
     /// and requires them to be the same value.
     ThrowTypeError,
-    /// Annex B's four accessor helpers on `Object.prototype`. The payload is which half of which
-    /// pair: defining or looking up, a getter or a setter.
-    LegacyAccessor {
-        defines: bool,
-        setter: bool,
-    },
     /// `Object.groupBy` and `Map.groupBy`: one walk, two shapes of result.
     ObjectGroupBy,
     MapGroupBy,
-    /// `Promise.withResolvers` and `Promise.try`.
+    /// `Promise.withResolvers`.
     PromiseWithResolvers,
-    PromiseTry,
     /// One of the five symbol-keyed methods on `RegExp.prototype`. These are what
     /// `String.prototype.match` and its four siblings are *defined* to call, which is what lets a
     /// program hand any of them an object of its own that answers the same symbol.
@@ -662,7 +651,6 @@ pub enum Native {
     ReflectSetPrototypeOf,
     ReflectGetOwnPropertyDescriptor,
     ReflectDeleteProperty,
-    ReflectIsExtensible,
     ReflectPreventExtensions,
     ObjectHasOwn,
     BigIntConstructor,
@@ -797,30 +785,9 @@ pub enum Native {
     IteratorLazy(HelperKind),
     /// One of the methods that consumes an iterator and answers a value.
     IteratorTerminal(TerminalKind),
-    /// `next` and `return` on a helper this realm made.
-    /// `%IteratorPrototype%[@@dispose]`: close the iterator, if it has a way to be closed.
-    ///
-    /// Deliberately not brand-checked and not even receiver-checked: the specification goes
-    /// straight to `GetMethod(this, "return")`, so anything with a `return` is disposable and
-    /// anything without one disposes to nothing. That is what lets `using` work over an object
-    /// that only ever implemented the iterator protocol.
-    IteratorDispose,
     /// `next` on the iterator `RegExp.prototype[@@matchAll]` produced.
     RegExpStringIteratorNext,
-    /// `Iterator.concat` and the two methods of the helper it builds.
-    IteratorConcat,
-    IteratorConcatNext,
-    IteratorConcatReturn,
-    /// `Iterator.zip` and `Iterator.zipKeyed`, and the two methods of the helper they build.
-    ///
-    /// One marker with a flag rather than two, because the pair differ only in where the sources
-    /// come from and what a step is shaped like -- positional and an array, or keyed and an
-    /// object. The modes, the padding and the closing rules are one algorithm.
-    IteratorZip {
-        keyed: bool,
-    },
-    IteratorZipNext,
-    IteratorZipReturn,
+    /// `next` and `return` on a helper this realm made.
     IteratorHelperNext(HelperKind),
     IteratorHelperReturn,
     ProxyRevocable,
@@ -833,8 +800,6 @@ pub enum Native {
     FunctionBind,
     ObjectPreventExtensions,
     ObjectIsExtensible,
-    ObjectSeal,
-    ObjectIsSealed,
     ObjectGetOwnPropertySymbols,
     ObjectDefineProperties,
     ObjectGetOwnPropertyDescriptor,
@@ -876,8 +841,6 @@ pub enum Native {
     /// `Promise.allKeyed` and `Promise.allSettledKeyed`: the same two combinators, walking an
     /// object's own enumerable keys instead of an iterable, and settling with an object keyed the
     /// same way rather than an array indexed by position.
-    PromiseAllKeyed,
-    PromiseAllSettledKeyed,
     PromiseRace,
     PromiseAny,
     PromiseThen,
@@ -1225,10 +1188,6 @@ impl Native {
                 | Self::StringCodePointAt
                 | Self::StringLocaleCompare
                 | Self::StringNormalize
-                // `CreateHTML` opens with `RequireObjectCoercible` and `ToString` exactly as
-                // every other `String.prototype` method does, and being Annex B does not change
-                // that: `String.prototype.bold.call(5)` is `"5".bold()`.
-                | Self::StringHtml(_)
         )
     }
 
@@ -1327,13 +1286,6 @@ impl Native {
                 ("abort", FixedOwnValue::Native(Self::AbortSignalAbort)),
                 ("timeout", FixedOwnValue::Native(Self::AbortSignalTimeout)),
                 ("any", FixedOwnValue::Native(Self::AbortSignalAny)),
-            ],
-            Self::PromiseConstructor => &[
-                ("allKeyed", FixedOwnValue::Native(Self::PromiseAllKeyed)),
-                (
-                    "allSettledKeyed",
-                    FixedOwnValue::Native(Self::PromiseAllSettledKeyed),
-                ),
             ],
             Self::AsyncGeneratorFunctionPrototype => &[
                 (
@@ -1483,9 +1435,6 @@ impl Native {
             // `e.constructor.name` reaches this: the instance finds its constructor through the
             // prototype, and the constructor knows which kind it is.
             (Self::Error(kind), "name") => Some(Value::String(kind.name().to_owned().into())),
-            (Self::RegExpConstructor, "escape") => {
-                Some(Value::Native(Self::RegExpEscape, RealmId::PRIMARY))
-            }
             (Self::Error(ErrorKind::Error), "isError") => {
                 Some(Value::Native(Self::ErrorIsError, RealmId::PRIMARY))
             }
@@ -1494,9 +1443,6 @@ impl Native {
             }
             (Self::ArrayConstructor, "from") => {
                 Some(Value::Native(Self::ArrayFrom, RealmId::PRIMARY))
-            }
-            (Self::ArrayConstructor, "fromAsync") => {
-                Some(Value::Native(Self::ArrayFromAsync, RealmId::PRIMARY))
             }
             (Self::ObjectConstructor, "keys") => {
                 Some(Value::Native(Self::ObjectKeys, RealmId::PRIMARY))
@@ -1556,9 +1502,6 @@ impl Native {
             (Self::Reflect, "getPrototypeOf") => {
                 Some(Value::Native(Self::ReflectGetPrototypeOf, RealmId::PRIMARY))
             }
-            (Self::Reflect, "setPrototypeOf") => {
-                Some(Value::Native(Self::ReflectSetPrototypeOf, RealmId::PRIMARY))
-            }
             (Self::Reflect, "defineProperty") => {
                 Some(Value::Native(Self::ReflectDefineProperty, RealmId::PRIMARY))
             }
@@ -1569,13 +1512,6 @@ impl Native {
             (Self::Reflect, "deleteProperty") => {
                 Some(Value::Native(Self::ReflectDeleteProperty, RealmId::PRIMARY))
             }
-            (Self::Reflect, "isExtensible") => {
-                Some(Value::Native(Self::ReflectIsExtensible, RealmId::PRIMARY))
-            }
-            (Self::Reflect, "preventExtensions") => Some(Value::Native(
-                Self::ReflectPreventExtensions,
-                RealmId::PRIMARY,
-            )),
             (Self::ObjectConstructor, "hasOwn") => {
                 Some(Value::Native(Self::ObjectHasOwn, RealmId::PRIMARY))
             }
@@ -1587,9 +1523,6 @@ impl Native {
             }
             (Self::PromiseConstructor, "withResolvers") => {
                 Some(Value::Native(Self::PromiseWithResolvers, RealmId::PRIMARY))
-            }
-            (Self::PromiseConstructor, "try") => {
-                Some(Value::Native(Self::PromiseTry, RealmId::PRIMARY))
             }
             (Self::ObjectConstructor, "is") => {
                 Some(Value::Native(Self::ObjectIs, RealmId::PRIMARY))
@@ -1640,17 +1573,6 @@ impl Native {
             (Self::IteratorConstructor, "from") => {
                 Some(Value::Native(Self::IteratorFrom, RealmId::PRIMARY))
             }
-            (Self::IteratorConstructor, "concat") => {
-                Some(Value::Native(Self::IteratorConcat, RealmId::PRIMARY))
-            }
-            (Self::IteratorConstructor, "zip") => Some(Value::Native(
-                Self::IteratorZip { keyed: false },
-                RealmId::PRIMARY,
-            )),
-            (Self::IteratorConstructor, "zipKeyed") => Some(Value::Native(
-                Self::IteratorZip { keyed: true },
-                RealmId::PRIMARY,
-            )),
             (Self::BooleanConstructor, "prototype") => Some(Value::Native(
                 Self::PrototypeOf(PrototypeTable::Boolean),
                 RealmId::PRIMARY,
@@ -1834,15 +1756,6 @@ impl Native {
             (Self::ObjectConstructor, "isExtensible") => {
                 Some(Value::Native(Self::ObjectIsExtensible, RealmId::PRIMARY))
             }
-            // Sealing is preventing extensions plus making each property non-configurable, and
-            // configurability is not tracked per-property, so the two coincide here. The
-            // difference only shows through `delete`, which `frozen` already covers.
-            (Self::ObjectConstructor, "seal") => {
-                Some(Value::Native(Self::ObjectSeal, RealmId::PRIMARY))
-            }
-            (Self::ObjectConstructor, "isSealed") => {
-                Some(Value::Native(Self::ObjectIsSealed, RealmId::PRIMARY))
-            }
             (Self::ObjectConstructor, "getOwnPropertySymbols") => Some(Value::Native(
                 Self::ObjectGetOwnPropertySymbols,
                 RealmId::PRIMARY,
@@ -1964,13 +1877,6 @@ impl Native {
             (Self::PromiseConstructor, "allSettled") => {
                 Some(Value::Native(Self::PromiseAllSettled, RealmId::PRIMARY))
             }
-            (Self::PromiseConstructor, "allKeyed") => {
-                Some(Value::Native(Self::PromiseAllKeyed, RealmId::PRIMARY))
-            }
-            (Self::PromiseConstructor, "allSettledKeyed") => Some(Value::Native(
-                Self::PromiseAllSettledKeyed,
-                RealmId::PRIMARY,
-            )),
             (Self::PromiseConstructor, "race") => {
                 Some(Value::Native(Self::PromiseRace, RealmId::PRIMARY))
             }

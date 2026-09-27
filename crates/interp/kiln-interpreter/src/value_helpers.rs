@@ -200,23 +200,14 @@ pub(super) fn native_js_name(native: &Native) -> String {
         Native::SetOperation(operation) => operation.property_key().to_owned(),
         Native::Uint8Text(conversion) => conversion.key().to_owned(),
         Native::ArrayCopy(method) => method.property_key().to_owned(),
-        Native::StringHtml(wrapper) => wrapper.property_key().to_owned(),
         Native::RegExpSymbol(method) => method.js_name(),
         // The derivation works from the variant's `Debug` spelling, and for these the payload is
         // the whole of the name: `IteratorLazy(Map)` would otherwise be `iteratorLazy`.
         Native::IteratorLazy(kind) => kind.property_key().to_owned(),
         Native::IteratorTerminal(kind) => kind.property_key().to_owned(),
-        Native::IteratorDispose => "[Symbol.dispose]".to_owned(),
         // The derivation has no `Iterator` in its table of type prefixes, so these three would
         // keep it. Only the first is a name a program can read; the other two are the helper's
         // own methods, named for what they are.
-        Native::IteratorConcat => "concat".to_owned(),
-        Native::IteratorConcatNext => "next".to_owned(),
-        Native::IteratorConcatReturn => "return".to_owned(),
-        Native::IteratorZip { keyed: false } => "zip".to_owned(),
-        Native::IteratorZip { keyed: true } => "zipKeyed".to_owned(),
-        Native::IteratorZipNext => "next".to_owned(),
-        Native::IteratorZipReturn => "return".to_owned(),
         // The derivation strips a leading type name, which for these three takes a word that is
         // part of the method rather than part of the type: `WeakRefDeref` lowers to `refDeref`.
         Native::AtomicsOp(op) => op.property_key().to_owned(),
@@ -250,12 +241,6 @@ pub(super) fn native_js_name(native: &Native) -> String {
         Native::ThrowTypeError => String::new(),
         Native::ProtoGetter => "get __proto__".to_owned(),
         Native::ProtoSetter => "set __proto__".to_owned(),
-        Native::LegacyAccessor { defines, setter } => match (defines, setter) {
-            (true, false) => "__defineGetter__".to_owned(),
-            (true, true) => "__defineSetter__".to_owned(),
-            (false, false) => "__lookupGetter__".to_owned(),
-            (false, true) => "__lookupSetter__".to_owned(),
-        },
         // The derivation strips the type and lowers what is left, which spells this `utc`. A
         // case distinction the variant does not carry cannot be recovered from it.
         Native::DateUtc => "UTC".to_owned(),
