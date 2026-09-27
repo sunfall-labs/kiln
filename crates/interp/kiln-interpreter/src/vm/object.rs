@@ -1831,6 +1831,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(removed)
     }
 
+    /// Whether a missing array element can be created. An inherited setter is consulted
+    /// before this storage constraint because calling it creates no own element.
+    pub(crate) fn array_index_creation_allowed(items: &ArrayData, index: usize) -> bool {
+        items.properties.borrow().is_extensible()
+            && (index < items.borrow().len() || items.length_writable.get())
+    }
+
     /// The indexed array write shared by numeric and string keys. Descriptor/refusal handling
     /// stays here so avoiding a numeric key's string allocation cannot bypass an exotic element.
     pub(crate) fn set_array_index(
@@ -1841,13 +1848,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         value: Value,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
-        if items.properties.borrow().is_frozen() {
-            return Ok(());
-        }
         // An element the program defined answers for itself: a setter is a call, and
         // a data property that is not writable discards the write the same way a
         // frozen object's does.
-        if let Some(entry) = array_exotic_element(items, index) {
+        let exotic = array_exotic_element(items, index);
+        let has_own_element = exotic.is_some()
+            || items
+                .borrow()
+                .get(index)
+                .is_some_and(|value| !Self::is_hole(value));
+        if let Some(entry) = exotic {
             match entry.property {
                 Property::Accessor { set, .. } => {
                     if let Some(setter) = set {
@@ -1859,14 +1869,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Property::Value(_) => {}
             }
         }
-        // An index past the end is a *new* property and grows `length`, so an array
-        // that is closed to new properties, or whose `length` is not writable,
-        // refuses it. The write is discarded rather than raised for the same reason
-        // a frozen object's is: the machine does not know whether the code that
-        // wrote it was strict.
-        if index >= items.borrow().len()
-            && (!items.length_writable.get() || !items.properties.borrow().is_extensible())
-        {
+        if !has_own_element {
+            // Ordinary arrays with untouched intrinsic numeric properties cannot encounter
+            // a setter. Otherwise reuse the same descriptor walk as the other exotic stores.
+            if (self.intrinsics.indexed_array_prototype.get()
+                || items.properties.borrow().prototype().is_some())
+                && self.chain_setter_key(
+                    target,
+                    PropertyKeyRef::Utf8(&index.to_string()),
+                    &value,
+                    instruction,
+                )?
+            {
+                return Ok(());
+            }
+            if !Self::array_index_creation_allowed(items, index) {
+                return Ok(());
+            }
+        }
+        if items.properties.borrow().is_frozen() {
             return Ok(());
         }
         let mut elements = items.borrow_mut();
@@ -1986,10 +2007,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return Err(restricted_property_error());
         }
         match target {
-            // A frozen array ignores an element write, the same way a frozen object ignores a
-            // property write. Sloppy mode discards it and strict mode throws; the machine does
-            // not know which it is in, and discarding is the one that cannot invent an error.
-            Value::Array(items) if items.properties.borrow().is_frozen() => Ok(()),
+            // Indexed writes still reach their descriptor walk: even a frozen array may
+            // inherit a setter, and invoking it does not create or change an own element.
+            Value::Array(items)
+                if items.properties.borrow().is_frozen()
+                    && array_index_key(property_key).is_none() =>
+            {
+                Ok(())
+            }
             Value::Array(items) => match array_index_key(property_key) {
                 Some(index) => self.set_array_index(target, items, index, value, instruction),
                 // `length` is derived, not stored: writing it truncates or extends. The write

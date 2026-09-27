@@ -246,17 +246,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Some((Property::Accessor { set, .. }, _)) => return set.is_some(),
             None => {}
         }
-        // The chain, built-in prototypes included. An earlier version stopped at the objects the
-        // program itself built, because a table answers for names it does not really carry -- a
-        // well-known symbol, the arity of a callable -- and reading a refusal out of one turned
-        // `obj[Symbol.species] = x` on a plain object into a TypeError.
-        //
-        // `intrinsic_own_attributes` is the question that was missing: it answers `None` for a
-        // name the table does not actually hold, so the derived answers no longer look like
-        // properties. What it does hold is nearly all writable (`Attributes::BUILT_IN`), so a
-        // method can still be shadowed; the handful that are not are the ones the specification
-        // locks -- `Function.prototype[@@hasInstance]`, `Date.prototype[@@toPrimitive]`, every
-        // `@@toStringTag` -- and assigning over one of those was silently accepted.
+        // Use the same descriptor authority for ordinary and intrinsic prototypes. The
+        // latter may have materialized properties that replace (or add to) the static table.
         let mut current = prototype_of(target);
         while matches!(
             current,
@@ -266,25 +257,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | Value::Bound(_)
                 | Value::Native(_, _)
         ) {
-            if let Value::Native(native, _) = &current {
-                // An accessor on a table is not this refusal's business: it is answered by
-                // whether it has a setter, which the table reports separately.
-                let is_accessor = key.known_ascii().is_some_and(|name| {
-                    matches!(native, Native::PrototypeOf(table)
-                        if intrinsic_members::is_accessor(*table, name.as_ref()))
-                });
-                if !is_accessor
-                    && let Some(name) = key.known_ascii()
-                    && let Some(attributes) = intrinsic_own_attributes(&current, name.as_ref())
-                {
-                    if !attributes.writable {
-                        return false;
-                    }
-                    break;
-                }
-                current = prototype_of(&current);
-                continue;
-            }
             match own_property_state_key(&self.intrinsics, &current, key) {
                 // A non-writable data property on a prototype cannot be shadowed by an
                 // assignment: `Object.create(Object.freeze({x: 1})).x = 2` is refused.
@@ -295,6 +267,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 None => {}
             }
             current = prototype_of(&current);
+        }
+        if let Value::Array(items) = target
+            && let Some(index) = array_index_key(key)
+        {
+            return Self::array_index_creation_allowed(items, index);
         }
         is_extensible_target(&self.intrinsics, target)
     }

@@ -1294,6 +1294,87 @@ mod tests {
     }
 
     #[test]
+    fn array_index_writes_honor_inherited_descriptors_before_creation() {
+        let mut probe = case(
+            r#"
+            function check(ok, label) { if (!ok) throw new Error(label); }
+            function strictWrite(a, key, value) { 'use strict'; a[key] = value; }
+            function sloppyWrite(a, key, value) { a[key] = value; }
+            function refuses(a, key) {
+                var threw = false;
+                try { strictWrite(a, key, 91); } catch (e) { threw = e instanceof TypeError; }
+                check(threw, 'strict inherited refusal');
+                sloppyWrite(a, key, 91);
+                check(!Object.prototype.hasOwnProperty.call(a, key), 'sloppy refusal creates nothing');
+            }
+            // Defining from a child VM must invalidate the caller's dense-write guard.
+            function installGetter() {
+                Object.defineProperty(Array.prototype, '0', {get: function() {return 7;}, configurable: true});
+            }
+            installGetter();
+            try {
+                var a = [];
+                refuses(a, 0);
+                refuses(a, '0');
+                check(a[0] === 7 && a.length === 0, 'inherited getter remains visible');
+            } finally { delete Array.prototype[0]; }
+
+            var seen, calls = 0, receiver;
+            Object.defineProperty(Array.prototype, '3', {set: function(value) {
+                seen = value; receiver = this; calls++;
+            }, configurable: true});
+            try {
+                var arrays = [[], Object.preventExtensions([]), Object.freeze([]), new Array(4)];
+                Object.defineProperty(arrays[0], 'length', {writable: false});
+                for (var i = 0; i < arrays.length; i++) {
+                    var a = arrays[i];
+                    var originalLength = a.length;
+                    for (var j = 0; j < 2; j++) {
+                        var key = j === 0 ? 3 : '3';
+                        strictWrite(a, key, i + 10);
+                        check(receiver === a && seen === i + 10, 'inherited setter receives array');
+                        check(a.length === originalLength && !Object.prototype.hasOwnProperty.call(a, key), 'setter creates no element');
+                    }
+                }
+                check(calls === 8, 'setter call count');
+                var own = [0, 1, 2, 3];
+                strictWrite(own, 3, 99);
+                check(own[3] === 99 && calls === 8, 'own element shadows setter');
+            } finally { delete Array.prototype[3]; }
+
+            Object.defineProperty(Object.prototype, '2', {value: 7, writable: false, configurable: true});
+            try {
+                refuses([], 2);
+                refuses(new Array(3), '2');
+            } finally { delete Object.prototype[2]; }
+            Object.defineProperty(Array.prototype, '0', {value: 7, writable: true, configurable: true});
+            try {
+                var a = [];
+                strictWrite(a, -0, 8);
+                check(a[0] === 8 && a.length === 1 && Array.prototype[0] === 7, 'writable inherited data is shadowed');
+            } finally { delete Array.prototype[0]; }
+            var closedHole = new Array(1);
+            Object.preventExtensions(closedHole);
+            refuses(closedHole, 0);
+            var fixedLength = [];
+            Object.defineProperty(fixedLength, 'length', {writable: false});
+            refuses(fixedLength, 0);
+            var setterCalls = 0;
+            var custom = {};
+            Object.defineProperty(custom, '0', {set: function(v) {receiver = this; setterCalls += v;}});
+            var a = [];
+            Object.setPrototypeOf(a, custom);
+            Object.preventExtensions(a);
+            strictWrite(a, 0, 5);
+            check(setterCalls === 5 && receiver === a && a.length === 0, 'custom prototype setter');
+        "#,
+        );
+        probe.metadata.flags.push("raw".to_owned());
+        let result = run_case(&probe, RunMode::Interpreter);
+        assert_eq!(result.outcome, Outcome::Pass, "{:?}", result.diagnostics);
+    }
+
+    #[test]
     fn typed_array_numeric_keys_preserve_index_and_coercion_contracts() {
         let mut probe = case(
             r#"
