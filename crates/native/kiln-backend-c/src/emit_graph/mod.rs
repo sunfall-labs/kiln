@@ -185,7 +185,7 @@ thread_local! {
     /// 2). It changes two things and nothing else: the entry's name ends in `_p` instead of
     /// `_t`, and a `Math.<name>` call on the builtin with proven-number arguments lowers to the
     /// bare libm call with no generic fallback, because the clone runs on a thread with no realm
-    /// to fall back to. The site that calls the clone checks `kiln_c99_builtin_store_epoch` on the
+    /// to fall back to. The site that calls the clone checks `kiln_c99_builtins_unmodified()` on the
     /// realm thread first, so an overridden `Math.sqrt` never reaches it. A thread-local rather
     /// than a parameter because every emitter signature between `lib.rs` and the op would
     /// otherwise carry a flag that only one op reads.
@@ -200,6 +200,12 @@ pub fn parallel_captures(plan: &crate::direct::CallPlan, index: usize) -> Vec<u3
         Some(Ok(shape)) => shape.captures.clone(),
         _ => Vec::new(),
     }
+}
+
+/// Whether proto `index`'s parallel clone is a predicate: it answers a boxed number or boolean
+/// rather than a double (`parallel::parallel_result`), and only the filter workers call it.
+pub fn parallel_boolean_result(plan: &crate::direct::CallPlan, index: usize) -> bool {
+    matches!(plan.parallel.get(index), Some(Ok(shape)) if shape.boolean_result)
 }
 
 /// Whether the parallel clone is being emitted on this thread.
@@ -234,6 +240,7 @@ pub fn emit_parallel_chunk(
     clone_symbol: &str,
     index: usize,
     parameter_count: u32,
+    boolean_result: bool,
     captures: &[u32],
     should_chunk: bool,
 ) {
@@ -257,6 +264,24 @@ pub fn emit_parallel_chunk(
             captures.len()
         )
     };
+    // The family's workers (parallel issue 10) share the prelude's element read and the clone's
+    // calling convention; which kinds a proto gets follows from how many parameters it declares.
+    let kinds = parallel_chunk_kinds(parameter_count, boolean_result);
+    emit_family_chunks(
+        output,
+        symbol,
+        clone_symbol,
+        index,
+        &kinds,
+        boolean_result,
+        &caps_decl,
+        &index_arg,
+        captures.len(),
+        linkage,
+    );
+    if !kinds.contains(&"") {
+        return;
+    }
     writeln!(
         output,
         "static inline uint32_t {symbol}_to_u32_{index}(double value) {{\n\
@@ -422,11 +447,174 @@ static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
     .unwrap();
 }
 
-/// The suffixes of the chunk workers `emit_parallel_chunk` defines for one proto, in the order
-/// they are declared: `{symbol}_pmap{suffix}_{index}`.
+/// The suffixes of `parallelMap`'s chunk workers, in the order they are declared:
+/// `{symbol}_pmap{suffix}_{index}`.
 pub const PARALLEL_CHUNK_KINDS: [&str; 11] = [
     "", "_f64", "_f32", "_i32", "_u32", "_i16", "_u16", "_i8", "_u8", "_u8c", "_typed",
 ];
+
+/// The family's chunk workers (parallel issue 10): `parallelFilter`'s keep masks over an
+/// array's elements and a view, `parallelReduce`'s leaf folds over the same two, and its
+/// pairwise combine over a level of doubles.
+pub const PARALLEL_FAMILY_CHUNK_KINDS: [&str; 5] =
+    ["_filt", "_filt_typed", "_fold", "_fold_typed", "_comb"];
+
+/// Every chunk worker `emit_parallel_chunk` defines for a proto that declares
+/// `parameter_count` parameters, in declaration order: the ones whose call passes that many --
+/// `map` and `filter` pass the element and the index (1 or 2), `parallelReduce`'s callback the
+/// accumulator, the element and the index (2 or 3), and its combine two results (2).
+///
+/// A predicate's clone (`boolean_result`) answers a boxed value, which only the filter workers
+/// read, so it gets those alone.
+pub fn parallel_chunk_kinds(parameter_count: u32, boolean_result: bool) -> Vec<&'static str> {
+    let mut kinds = Vec::new();
+    if boolean_result {
+        if (1..=2).contains(&parameter_count) {
+            kinds.extend(["_filt", "_filt_typed"]);
+        }
+        return kinds;
+    }
+    if (1..=2).contains(&parameter_count) {
+        kinds.extend(PARALLEL_CHUNK_KINDS);
+        kinds.extend(["_filt", "_filt_typed"]);
+    }
+    if (2..=3).contains(&parameter_count) {
+        kinds.extend(["_fold", "_fold_typed"]);
+    }
+    if parameter_count == 2 {
+        kinds.push("_comb");
+    }
+    kinds
+}
+
+/// The family's workers for one clone (see [`PARALLEL_FAMILY_CHUNK_KINDS`]), each only where
+/// `kinds` has it. Their contracts, which the call site in `call_method.rs` keeps:
+///
+/// - `_filt`: `in` an array's elements (numbers), `out` a byte per element, 1 where the callback's
+///   result is truthy (`ToBoolean` of a number: neither `0`, `-0` nor `NaN`).
+/// - `_filt_typed`: the same over a view (`in` the view).
+/// - `_fold`/`_fold_typed`: `in` a `struct { const void *elems; size_t count; double initial; }`,
+///   `out` one double per leaf of `REDUCE_LEAF` elements, `[start, end)` a range of leaves; each
+///   leaf folded left to right from `initial`, as `parallel.ts` folds it.
+/// - `_comb`: `in` and `out` doubles, `out[k] = combine(in[2k], in[2k + 1])`.
+#[allow(clippy::too_many_arguments)]
+fn emit_family_chunks(
+    output: &mut String,
+    symbol: &str,
+    clone_symbol: &str,
+    index: usize,
+    kinds: &[&str],
+    boolean_result: bool,
+    caps_decl: &str,
+    index_arg: &str,
+    capture_count: usize,
+    linkage: &str,
+) {
+    use std::fmt::Write as _;
+    let caps_args: String = (0..capture_count)
+        .map(|j| format!(", pmap_caps[{j}]"))
+        .collect();
+    let leaf = crate::parallel::REDUCE_LEAF;
+    let prologue = |name: &str| {
+        format!(
+            "{linkage}void __attribute__((unused)) {symbol}_pmap{name}_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n{caps_decl}\
+    int failed = 0;\n"
+        )
+    };
+    let epilogue = "    if (KILN_UNLIKELY(failed)) { __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }\n}\n";
+    // `ToBoolean` of the answer: a double (neither 0, -0 nor NaN), or a predicate's boxed value.
+    let keep_stmt = if boolean_result {
+        format!(
+            "kiln_val r = {clone_symbol}_fn_{index}_p(1, d{index_arg}); failed |= (r == KILN_VAL_TYPED_FAIL); keep[i] = (uint8_t)kiln_c99_val_truthy(r);"
+        )
+    } else {
+        format!(
+            "double r = {clone_symbol}_fn_{index}_p(1, d{index_arg}); failed |= kiln_c99_typed_failed(r); keep[i] = (uint8_t)!(r == 0.0 || isnan(r));"
+        )
+    };
+    if kinds.contains(&"_filt") {
+        write!(
+            output,
+            "{}\
+    const kiln_val * restrict in_arr = (const kiln_val * restrict)in;\n\
+    uint8_t * restrict keep = (uint8_t * restrict)out;\n\
+    for (size_t i = start; i < end; ++i) {{\n\
+        double d; memcpy(&d, &in_arr[i], sizeof d);\n\
+        {keep_stmt}\n\
+    }}\n{epilogue}",
+            prologue("_filt")
+        )
+        .unwrap();
+    }
+    if kinds.contains(&"_filt_typed") {
+        write!(
+            output,
+            "{}\
+    const kiln_typed_array *view = (const kiln_typed_array *)in;\n\
+    uint8_t * restrict keep = (uint8_t * restrict)out;\n\
+    for (size_t i = start; i < end; ++i) {{\n\
+        double d = kiln_typed_load(view, i);\n\
+        {keep_stmt}\n\
+    }}\n{epilogue}",
+            prologue("_filt_typed")
+        )
+        .unwrap();
+    }
+    // `parallelReduce`'s callback: (accumulator, element) or (accumulator, element, index).
+    let fold_args = if kinds.contains(&"_fold") && !kinds.contains(&"_comb") {
+        format!(", (double)i{caps_args}")
+    } else {
+        caps_args.clone()
+    };
+    for (name, element) in [
+        (
+            "_fold",
+            "({ double d; memcpy(&d, &((const kiln_val *)src->elems)[i], sizeof d); d; })",
+        ),
+        (
+            "_fold_typed",
+            "kiln_typed_load((const kiln_typed_array *)src->elems, i)",
+        ),
+    ] {
+        if !kinds.contains(&name) {
+            continue;
+        }
+        write!(
+            output,
+            "{}\
+    const struct {{ const void *elems; size_t count; double initial; }} *src = in;\n\
+    double * restrict leaves = (double * restrict)out;\n\
+    for (size_t l = start; l < end && !failed; ++l) {{\n\
+        size_t first = l * {leaf};\n\
+        size_t last = first + {leaf} < src->count ? first + {leaf} : src->count;\n\
+        double acc = src->initial;\n\
+        for (size_t i = first; i < last; ++i) {{\n\
+            acc = {clone_symbol}_fn_{index}_p(1, acc, {element}{fold_args});\n\
+            failed |= kiln_c99_typed_failed(acc);\n\
+        }}\n\
+        leaves[l] = acc;\n\
+    }}\n{epilogue}",
+            prologue(name)
+        )
+        .unwrap();
+    }
+    if kinds.contains(&"_comb") {
+        write!(
+            output,
+            "{}\
+    const double * restrict level = (const double * restrict)in;\n\
+    double * restrict next = (double * restrict)out;\n\
+    for (size_t k = start; k < end; ++k) {{\n\
+        double r = {clone_symbol}_fn_{index}_p(1, level[2 * k], level[2 * k + 1]{caps_args});\n\
+        failed |= kiln_c99_typed_failed(r);\n\
+        next[k] = r;\n\
+    }}\n{epilogue}",
+            prologue("_comb")
+        )
+        .unwrap();
+    }
+}
 
 pub(crate) use crate::graph::array_slots;
 

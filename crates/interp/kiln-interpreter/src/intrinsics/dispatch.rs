@@ -47,18 +47,7 @@ pub(crate) fn call_native(
                 message: "Temporal reached the machine-free dispatch path".to_owned(),
             });
         }
-        // Unwrapped to the `Array.prototype` method it shares the moment `ValidateTypedArray`
-        // has run, by both of the paths that can call one. Arriving here would mean a third
-        // path had been added that skipped the check, so it says so rather than quietly
-        // answering `undefined`.
-        Native::TypedArrayGeneric(method) => {
-            return Err(ExecutionError::TypeErrorMessage {
-                message: format!(
-                    "%TypedArray%.prototype.{method} was dispatched without being validated"
-                ),
-            });
-        }
-        // Routed the same way and unreachable for the same reason: `of` builds through its `this`
+        // Unreachable: `of` builds through its `this`        // Routed the same way and unreachable for the same reason: `of` builds through its `this`
         // and so needs the machine that can run a constructor.
         Native::TypedArrayOf(_) => {
             return Err(ExecutionError::TypeErrorMessage {
@@ -456,7 +445,7 @@ pub(crate) fn call_native(
         // non-configurable, so a view with anything in it cannot be frozen or sealed at all.
         // Answering `undefined` and quietly doing less made `Object.isFrozen` disagree with the
         // call right above it.
-        Native::ObjectFreeze | Native::ObjectSeal
+        Native::ObjectFreeze
             if matches!(arguments.first(), Some(Value::TypedArray(view)) if view.len() > 0) =>
         {
             return Err(ExecutionError::TypeErrorMessage {
@@ -532,57 +521,22 @@ pub(crate) fn call_native(
             }
             Value::Object(Rc::new(RefCell::new(data)))
         }
-        // Sealing does one thing more than preventing extensions: it makes every property that
-        // is already there non-configurable, so nothing can be deleted or redefined either.
-        Native::ObjectPreventExtensions | Native::ObjectSeal => {
+        // `Object.seal` is the shared bootstrap's (`kiln-builtins/src/object_reflect.ts`), over
+        // this and `defineProperty`.
+        Native::ObjectPreventExtensions => {
             let target = arguments.first().cloned().unwrap_or(Value::Undefined);
-            let sealing = matches!(native, Native::ObjectSeal);
-            let close = |data: &mut ObjectData| {
-                if sealing {
-                    data.seal();
-                } else {
-                    data.prevent_extensions();
-                }
-            };
+            let close = |data: &mut ObjectData| data.prevent_extensions();
             match &target {
                 Value::Object(object) => close(&mut object.borrow_mut()),
                 Value::Function(closure) => close(&mut closure.properties.borrow_mut()),
                 Value::Bound(bound) => close(&mut bound.properties.borrow_mut()),
                 Value::Array(items) => {
-                    // An element is only non-configurable if something says so, and the dense
-                    // storage has nowhere to say it -- so sealing records it, element by
-                    // element, in the same place `defineProperty` would. Without this a sealed
-                    // array reported itself unsealed and gave its elements away to `delete`.
-                    if sealing {
-                        let present: Vec<usize> = items
-                            .borrow()
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole, _)))
-                            .map(|(index, _)| index)
-                            .collect();
-                        let mut elements = items.elements.borrow_mut();
-                        for index in present {
-                            match elements.iter_mut().find(|entry| entry.index == index) {
-                                Some(entry) => entry.attributes.configurable = false,
-                                None => elements.push(ExoticElement {
-                                    index,
-                                    property: Property::Value(Value::Undefined),
-                                    attributes: Attributes {
-                                        writable: true,
-                                        enumerable: true,
-                                        configurable: false,
-                                    },
-                                }),
-                            }
-                        }
-                    }
                     close(&mut items.properties.borrow_mut());
                 }
                 // A built-in has no store of its own; the realm keeps one for it, and that is
                 // where the closure has to be recorded or the next `isExtensible` undoes it.
                 Value::Native(_, _) | Value::Callback(_, _) | Value::Settler(..) | Value::Capability(..) | Value::Element(_) => {
-                    intrinsics.close(&target, sealing);
+                    intrinsics.close(&target, false);
                 }
                 // An exotic object closes its named store. Its elements are not slots of that
                 // store and keep the flags the specification fixes for them, which is why a
@@ -601,31 +555,6 @@ pub(crate) fn call_native(
             None | Some(Value::Undefined | Value::Null) => false,
             Some(target) if !is_reflect_target(target) => false,
             Some(target) => is_extensible_target(intrinsics, target),
-        }),
-        Native::ObjectIsSealed => Value::Boolean(match arguments.first() {
-            Some(Value::Object(object)) => object.borrow().is_sealed(),
-            Some(Value::Function(closure)) => closure.properties.borrow().is_sealed(),
-            Some(Value::Bound(bound)) => bound.properties.borrow().is_sealed(),
-            // Sealed means closed *and* every element non-configurable, which an array records
-            // one element at a time beside its dense storage.
-            Some(Value::Array(items)) => {
-                items.properties.borrow().is_sealed()
-                    && (0..items.borrow().len()).all(|index| {
-                        own_attributes(intrinsics, &Value::Array(Rc::clone(items)), &index.to_string())
-                            .is_none_or(|attributes| !attributes.configurable)
-                    })
-            }
-            // A view with any element in it is never sealed: an integer-indexed property is
-            // configurable and stays configurable, so its shape can still change.
-            Some(Value::TypedArray(view)) => {
-                view.len() == 0 && view.properties.borrow().is_sealed()
-            }
-            Some(target) if exotic_properties(target).is_some() => exotic_properties(target)
-                .is_some_and(|store| store.borrow().is_sealed()),
-            // Everything left is either a built-in object, which has configurable properties and
-            // so is not sealed, or a primitive, which has no properties to seal and so is.
-            Some(target) => !is_object_type(target),
-            None => true,
         }),
         // Symbol keys are stored as reserved strings, and a string cannot be turned back into
         // the symbol it came from -- so this reports none rather than inventing any.
@@ -834,24 +763,6 @@ pub(crate) fn call_native(
                 value: "abstract iterator intrinsic".into(),
             });
         }
-        // `rab.resize(n)` moves the length; a buffer with no ceiling has no length to move.
-        Native::ArrayBufferResize => {
-            let Value::ArrayBuffer(buffer) = receiver else {
-                return Err(ExecutionError::NotABuffer);
-            };
-            let length = to_index(arguments.first())?;
-            buffer.resize(bounded_buffer(length, 1)?)?;
-            Value::Undefined
-        }
-        // `sab.grow(n)` moves the length up; a buffer with no ceiling has no room to move into.
-        Native::ArrayBufferGrow => {
-            let Value::ArrayBuffer(buffer) = receiver else {
-                return Err(ExecutionError::NotABuffer);
-            };
-            let length = to_index(arguments.first())?;
-            buffer.grow(bounded_buffer(length, 1)?)?;
-            Value::Undefined
-        }
         // `slice` *copies*: the result is a fixed-length buffer of its own, so a later resize of
         // the original -- or a write through a view onto it -- is not visible through the copy.
         // A *view*, not a buffer: `isView` asks whether the value reads bytes through one, which
@@ -885,6 +796,31 @@ pub(crate) fn call_native(
         // TypeScript has already brand-checked. Anything else is not a view with a window.
         Native::TypedArrayOutOfBoundsRaw => match arguments.first() {
             Some(Value::TypedArray(view)) => Value::Boolean(view.out_of_bounds()),
+            _ => Value::Boolean(false),
+        },
+        // `__kilnTypedArrayCopy(target, targetIndex, source, sourceIndex, count)` and
+        // `__kilnTypedArraySort(view)` (ADR 0065, representation): the shared TypeScript has
+        // computed every index; anything else answers `false`, "run the loop".
+        Native::TypedArrayCopyRaw => {
+            let index = |at: usize| match arguments.get(at) {
+                Some(Value::Number(n)) if *n >= 0.0 && n.fract() == 0.0 && *n <= 9007199254740991.0 => {
+                    Some(*n as usize)
+                }
+                _ => None,
+            };
+            match (arguments.first(), arguments.get(2), index(1), index(3), index(4)) {
+                (
+                    Some(Value::TypedArray(target)),
+                    Some(Value::TypedArray(source)),
+                    Some(target_index),
+                    Some(source_index),
+                    Some(count),
+                ) => Value::Boolean(target.copy_elements_from(target_index, source, source_index, count)?),
+                _ => Value::Boolean(false),
+            }
+        }
+        Native::TypedArraySortRaw => match arguments.first() {
+            Some(Value::TypedArray(view)) => Value::Boolean(view.sort_default()?),
             _ => Value::Boolean(false),
         },
         Native::ArrayBufferResizeRaw => {
@@ -1032,67 +968,6 @@ pub(crate) fn call_native(
         }
         // `of` takes its elements as arguments where the constructor takes one list, which is
         // the whole difference: `Uint8Array.of(3)` is one element, `new Uint8Array(3)` is three.
-        // `view.set(source, offset?)` copies elements in, converting each as an assignment does.
-        Native::TypedArraySet => {
-            let Value::TypedArray(view) = receiver else {
-                return Ok(Value::Undefined);
-            };
-            if view.buffer.detached() {
-                return Err(ExecutionError::BufferDetached);
-            }
-            let offset = bounded_buffer(to_index(arguments.get(1))?, 1)?;
-            let items = typed_source(arguments.first());
-            if offset > view.len() || items.len() > view.len() - offset {
-                return Err(ExecutionError::InvalidArrayLength);
-            }
-            same_content_type(view.kind, arguments.first())?;
-            for (index, item) in items.into_iter().enumerate() {
-                view.set(offset + index, &item)?;
-            }
-            Value::Undefined
-        }
-        // `subarray` shares the buffer; `slice` copies it. That difference is the whole reason
-        // both exist, and getting it backwards would make a write visible where it should not be.
-        Native::TypedArraySubarray => {
-            let Value::TypedArray(view) = receiver else {
-                return Ok(Value::Undefined);
-            };
-            // Not a check `subarray` performs itself -- it is the *constructor* it delegates to
-            // that refuses, because a view onto a buffer with no bytes is not a short view but
-            // an impossible one. The observable answer is the same TypeError either way.
-            if view.buffer.detached() {
-                return Err(ExecutionError::BufferDetached);
-            }
-            let (start, end) = slice_bounds(arguments, view.len());
-            // A slice of a length-tracking view is itself length-tracking when no end was
-            // named: "from here to wherever the buffer ends" survives a resize, where the
-            // element count computed from today's length would freeze at it.
-            let tracking = view.length.is_none()
-                && matches!(arguments.get(1), None | Some(Value::Undefined));
-            Value::TypedArray(Rc::new(TypedArrayData {
-                kind: view.kind,
-                buffer: Rc::clone(&view.buffer),
-                offset: view.offset + start * view.kind.width(),
-                length: (!tracking).then(|| end.saturating_sub(start)),
-                properties: RefCell::new(ObjectData::default()),
-            }))
-        }
-        Native::TypedArrayFill => {
-            let Value::TypedArray(view) = receiver else {
-                return Ok(Value::Undefined);
-            };
-            if view.buffer.detached() {
-                return Err(ExecutionError::BufferDetached);
-            }
-            // Converted once, and before the range is worked out, so `fill` refuses a Number
-            // on a BigInt array whether or not there is a slot for it to land in.
-            let filler = coerce_element(view.kind, arguments.first().unwrap_or(&Value::Undefined))?;
-            let (start, end) = slice_bounds(arguments.get(1..).unwrap_or_default(), view.len());
-            for index in start..end {
-                view.set(index, &filler)?;
-            }
-            receiver.clone()
-        }
         // `escape` and `unescape` are the pre-Unicode pair the specification keeps in Annex B
         // and marks as deprecated. They are here because real code still reaches for them: the
         // `unescape(encodeURIComponent(s))` idiom is how a library gets a string's UTF-8 bytes
@@ -1323,7 +1198,6 @@ pub(crate) fn call_native(
         | Native::ReflectSetPrototypeOf
         | Native::ReflectGetOwnPropertyDescriptor
         | Native::ReflectDeleteProperty
-        | Native::ReflectIsExtensible
         | Native::ReflectPreventExtensions => {
             unreachable!("these built-ins are dispatched by the interpreter")
         }
@@ -1352,7 +1226,6 @@ pub(crate) fn call_native(
             unreachable!("the copying array methods are dispatched by the interpreter")
         }
         Native::RegExpSymbol(_)
-        | Native::ArrayFromAsync
         | Native::JsonRawJson
         | Native::JsonIsRawJson
         | Native::WeakRefConstructor
@@ -1373,19 +1246,10 @@ pub(crate) fn call_native(
         | Native::FinalizationRegistryRegister
         | Native::FinalizationRegistryUnregister
         | Native::RegExpStringIteratorNext
-        | Native::IteratorConcat
-        | Native::IteratorConcatNext
-        | Native::IteratorConcatReturn
-        | Native::IteratorZip { .. }
-        | Native::IteratorZipNext
-        | Native::IteratorZipReturn
-        | Native::IteratorDispose
         | Native::IteratorFrom
         | Native::IteratorWrapNext
-        | Native::LegacyAccessor { .. }
         | Native::ObjectGroupBy
-        | Native::MapGroupBy
-        | Native::PromiseTry => {
+        | Native::MapGroupBy => {
             unreachable!("these built-ins are dispatched by the interpreter")
         }
         // `%ThrowTypeError%`, in full. The message is the one every engine gives, because a
@@ -1478,8 +1342,6 @@ pub(crate) fn call_native(
         | Native::FunctionHasInstance
         | Native::PromiseAll
         | Native::PromiseAllSettled
-        | Native::PromiseAllKeyed
-        | Native::PromiseAllSettledKeyed
         | Native::PromiseRace
         | Native::PromiseAny
         | Native::PromiseThen
@@ -1886,19 +1748,6 @@ pub(crate) fn call_native(
                 // A radix outside 2..=36 is a RangeError; returning NaN would look like a result.
                 _ => return Err(ExecutionError::RadixOutOfRange),
             }
-        }
-        // `ToString(this)` has already happened -- these are `walks_a_string` built-ins -- so
-        // what is left is the wrapping, and the attribute's own coercion.
-        Native::StringHtml(wrapper) => {
-            let Value::String(text) = receiver else {
-                return Err(ExecutionError::TypeErrorMessage {
-                    message: "Method called on an incompatible receiver".to_owned(),
-                });
-            };
-            let attribute = arguments
-                .first()
-                .map_or_else(String::new, Value::to_display_string);
-            Value::String(html_wrapper(wrapper, &text.to_lossy_string(), &attribute).into())
         }
         Native::NumberToExponential => {
             let value = branded_number(receiver)?;
@@ -2598,15 +2447,6 @@ pub(crate) fn call_native(
             arguments.first(),
             Some(Value::Object(object)) if object.borrow().error_brand
         )),
-        // `RegExp.escape(text)`: the same characters, as a pattern that matches them literally.
-        Native::RegExpEscape => {
-            let Some(Value::String(text)) = arguments.first() else {
-                return Err(ExecutionError::TypeErrorMessage {
-                    message: "RegExp.escape requires a string".to_owned(),
-                });
-            };
-            Value::String(escape_regexp_source(&text.to_lossy_string()).into())
-        }
         Native::SetAdd | Native::MapSet | Native::WeakSetAdd | Native::WeakMapSet => {
             let (entries, is_map) = require_collection(receiver, native)?;
             let key = arguments.first().cloned().unwrap_or(Value::Undefined);
@@ -3012,6 +2852,7 @@ pub(crate) fn call_native(
         | Native::UrlAdoptRaw
         | Native::JobsPendingRaw
         | Native::QueueIoRaw
+        | Native::PromiseRejectionsRaw
         | Native::ProcessStdinSetRawMode
         | Native::UrlConstructor
         | Native::UrlSearchParamsGet

@@ -58,8 +58,8 @@ static int kiln_c99_new_typed_iterator(kiln_value *out, kiln_value source, int p
  *
  * The interpreter is the contract: every one of these mirrors the `Native::IteratorLazy` and
  * `Native::IteratorTerminal` arms of `kiln-interpreter`, including which failures close the
- * source. `chunks`, `windows` and `join` are in the interpreter and not here; they refuse by
- * name through `kiln_c99_iterator_prototype_gap` rather than reading as undefined. */
+ * source. `chunks`, `windows`, `join`, `@@dispose` and the `Iterator` statics are the shared
+ * bootstrap's (`kiln-builtins/src/iterator.ts`), in `Iterator.prototype`'s store. */
 static kiln_value kiln_c99_iterator_state(kiln_value target, const char *key, size_t key_len) {
     kiln_property *slot = kiln_c99_own_private(target, key, key_len);
     return slot == NULL ? kiln_c99_undefined() : slot->value;

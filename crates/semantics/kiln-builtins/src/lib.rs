@@ -1260,6 +1260,9 @@ pub const DATE_BOOTSTRAP_SOURCE: &str = include_str!("date.ts");
 
 /// `%TypedArray%.prototype` (ADR 0005, ADR 0063 rule 4, Phase 5.1).
 pub const TYPEDARRAY_BOOTSTRAP_SOURCE: &str = include_str!("typedarray.ts");
+/// The parallel collection family (ADR 0068, ADR 0069): kiln extensions on `Array.prototype`
+/// and `%TypedArray%.prototype`, after `typedarray.ts`, whose intrinsics it borrows.
+pub const PARALLEL_BOOTSTRAP_SOURCE: &str = include_str!("parallel.ts");
 /// Whether the realm installs kiln's own members (ADR 0068); first in the common bootstrap.
 pub const EXTENSIONS_BOOTSTRAP_SOURCE: &str = include_str!("extensions.ts");
 
@@ -1289,6 +1292,9 @@ pub const MAPUPSERT_BOOTSTRAP_SOURCE: &str = include_str!("mapupsert.ts");
 /// `Promise.try`, `Promise.allKeyed`, and `Promise.allSettledKeyed`.
 pub const PROMISE_BOOTSTRAP_SOURCE: &str = include_str!("promise.ts");
 
+/// Node's unhandled-rejection tracking over each engine's `__kilnPromiseRejections` hook.
+pub const REJECTIONS_BOOTSTRAP_SOURCE: &str = include_str!("rejections.ts");
+
 /// `Iterator` combinators (`concat`, `zip`, `zipKeyed`) and `Iterator.prototype` methods (`chunks`, `windows`, `join`, `[Symbol.dispose]`).
 pub const ITERATOR_BOOTSTRAP_SOURCE: &str = include_str!("iterator.ts");
 
@@ -1297,13 +1303,15 @@ pub const OBJECT_REFLECT_BOOTSTRAP_SOURCE: &str = include_str!("object_reflect.t
 
 /// Part of every realm's bootstrap, in both interpreter and native execution.
 /// Includes Date.prototype, %TypedArray%.prototype, Error subclasses, Annex B, DisposableStack,
-/// RegExp.prototype, ArrayBuffer/SharedArrayBuffer, structuredClone, Map.upsert, Promise extensions, Iterator extensions, and Object/Reflect extensions.
+/// RegExp.prototype, ArrayBuffer/SharedArrayBuffer, structuredClone, Map.upsert, Promise extensions, unhandled-rejection tracking, Iterator extensions, and Object/Reflect extensions.
 pub fn common_bootstrap_source() -> String {
-    format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+    // A list rather than a format string, so adding a source cannot leave the placeholders and
+    // the arguments out of step (two branches adding one each once merged into a mismatch).
+    [
         EXTENSIONS_BOOTSTRAP_SOURCE,
         DATE_BOOTSTRAP_SOURCE,
         TYPEDARRAY_BOOTSTRAP_SOURCE,
+        PARALLEL_BOOTSTRAP_SOURCE,
         ERRORS_BOOTSTRAP_SOURCE,
         ANNEXB_BOOTSTRAP_SOURCE,
         DISPOSABLE_BOOTSTRAP_SOURCE,
@@ -1312,9 +1320,11 @@ pub fn common_bootstrap_source() -> String {
         STRUCTURED_CLONE_BOOTSTRAP_SOURCE,
         MAPUPSERT_BOOTSTRAP_SOURCE,
         PROMISE_BOOTSTRAP_SOURCE,
+        REJECTIONS_BOOTSTRAP_SOURCE,
         ITERATOR_BOOTSTRAP_SOURCE,
         OBJECT_REFLECT_BOOTSTRAP_SOURCE,
-    )
+    ]
+    .join("\n")
 }
 
 #[cfg(test)]
@@ -1386,38 +1396,122 @@ mod web_tests {
         assert!(!program.program.code.is_empty());
     }
 
-    /// ADR 0068: the bootstrap installs a kiln extension only through `defineExtension`, which
-    /// asks whether the realm installs them, and only one the description declares. A member
-    /// installed with a bare `defineMethod` would survive `KILN_EXTENSIONS=0`; one installed
-    /// through `defineExtension` without a row would be counted as "extra (node lacks it)".
+    /// ADR 0068: the bootstrap installs a kiln extension only through its `define*Extension`
+    /// helpers, which run only when the realm installs them, and only one the description
+    /// declares as the bootstrap's. A member installed with a bare `defineMethod` would survive
+    /// `KILN_EXTENSIONS=0`; one installed as an extension without a row would be counted as
+    /// "extra (node lacks it)".
     #[test]
-    fn typedarray_extensions_match_the_description() {
-        let declared: Vec<&str> = kiln_builtin_surface::KILN_EXTENSIONS
-            .iter()
-            .filter(|extension| extension.owner == "%TypedArray%.prototype")
-            .map(|extension| extension.key.property_key())
-            .collect();
-        assert!(!declared.is_empty());
-        for key in &declared {
-            assert!(
-                TYPEDARRAY_BOOTSTRAP_SOURCE.contains(&format!("defineExtension(\"{key}\"")),
-                "%TypedArray%.prototype.{key} is declared a kiln extension but not installed as one"
-            );
-            assert!(
-                !TYPEDARRAY_BOOTSTRAP_SOURCE.contains(&format!("defineMethod(\"{key}\"")),
-                "%TypedArray%.prototype.{key} is installed unconditionally"
-            );
+    fn bootstrap_extensions_match_the_description() {
+        use kiln_builtin_surface::ExtensionInstaller;
+        // (owner, the helper that installs on it, the sources that may call it)
+        let installers: [(&str, &str, &[&str]); 3] = [
+            (
+                "%TypedArray%.prototype",
+                "defineExtension(\"",
+                &[TYPEDARRAY_BOOTSTRAP_SOURCE],
+            ),
+            (
+                "%TypedArray%.prototype",
+                "defineTypedArrayExtension(\"",
+                &[PARALLEL_BOOTSTRAP_SOURCE],
+            ),
+            (
+                "Array.prototype",
+                "defineArrayExtension(\"",
+                &[PARALLEL_BOOTSTRAP_SOURCE],
+            ),
+        ];
+        let installed = |owner: &str| -> Vec<String> {
+            let mut keys = Vec::new();
+            for (o, helper, sources) in &installers {
+                if *o != owner {
+                    continue;
+                }
+                for source in *sources {
+                    for (index, _) in source.match_indices(helper) {
+                        let rest = &source[index + helper.len()..];
+                        keys.push(rest[..rest.find('"').expect("a quoted key")].to_owned());
+                    }
+                }
+            }
+            keys
+        };
+        for owner in ["%TypedArray%.prototype", "Array.prototype"] {
+            let declared: Vec<&str> = kiln_builtin_surface::KILN_EXTENSIONS
+                .iter()
+                .filter(|e| e.owner == owner && e.installed_by == ExtensionInstaller::Bootstrap)
+                .map(|e| e.key.property_key())
+                .collect();
+            assert!(!declared.is_empty(), "{owner}");
+            let keys = installed(owner);
+            for key in &declared {
+                assert!(
+                    keys.iter().any(|k| k == key),
+                    "{owner}.{key} is declared a bootstrap kiln extension but not installed as one"
+                );
+                assert!(
+                    !TYPEDARRAY_BOOTSTRAP_SOURCE.contains(&format!("defineMethod(\"{key}\"")),
+                    "{owner}.{key} is installed unconditionally"
+                );
+            }
+            for key in &keys {
+                assert!(
+                    declared.contains(&key.as_str()),
+                    "{owner}.{key} is installed as a kiln extension but not declared"
+                );
+            }
         }
-        for (index, _) in TYPEDARRAY_BOOTSTRAP_SOURCE.match_indices("defineExtension(\"") {
-            let rest = &TYPEDARRAY_BOOTSTRAP_SOURCE[index + "defineExtension(\"".len()..];
-            let key = &rest[..rest.find('"').expect("a quoted key")];
-            assert!(
-                declared.contains(&key),
-                "%TypedArray%.prototype.{key} is installed as a kiln extension but not declared"
-            );
-        }
+        // The family's file installs nothing unless the realm installs extensions.
+        assert!(PARALLEL_BOOTSTRAP_SOURCE.contains("if (!kilnExtensions) {\n    return;"));
         let common = common_bootstrap_source();
         assert!(common.starts_with(EXTENSIONS_BOOTSTRAP_SOURCE));
+    }
+
+    /// ADR 0060 kind 7: a member the description says the bootstrap owns has no engine
+    /// implementation, so the bootstrap has to be what defines it -- or it is simply absent.
+    #[test]
+    fn bootstrap_owned_members_are_defined_by_the_bootstrap() {
+        let common = common_bootstrap_source();
+        for (global, member) in kiln_builtin_surface::BOOTSTRAP_STATICS {
+            assert!(
+                common.contains(&format!("defineMethod({global}, \"{member}\"",))
+                    || common.contains(&format!("defineProperty({global}, \"{member}\"")),
+                "{global}.{member} is declared bootstrap-owned but the common bootstrap does not \
+                 define it"
+            );
+        }
+        for row in kiln_builtin_surface::PROTOTYPE_SURFACE {
+            if row.binding == kiln_builtin_surface::SemanticBinding::Bootstrap {
+                let key = row.key.property_key();
+                assert!(
+                    common.contains(&format!("\"{key}\"")),
+                    "{key} is declared bootstrap-owned but the common bootstrap does not define it"
+                );
+            }
+        }
+    }
+
+    /// `parallelReduce`'s tree is part of its meaning (ADR 0069): the leaf the TypeScript
+    /// definition folds and the leaf the native lowering folds are one number.
+    #[test]
+    fn parallel_reduce_leaf_is_one_number() {
+        let line = format!(
+            "const REDUCE_LEAF = {};",
+            kiln_builtin_surface::PARALLEL_REDUCE_LEAF
+        );
+        assert!(PARALLEL_BOOTSTRAP_SOURCE.contains(&line), "{line}");
+    }
+
+    #[test]
+    fn parallel_bootstrap_compiles_cleanly() {
+        let hir = kiln_frontend_oxc::parse(
+            "@kiln/parallel-bootstrap.ts",
+            &format!("const kilnExtensions = true;\n{PARALLEL_BOOTSTRAP_SOURCE}"),
+        );
+        let program = kiln_ir::compile_module(&hir)
+            .expect("parallel bootstrap should compile to IR without error");
+        assert!(!program.program.code.is_empty());
     }
 
     #[test]

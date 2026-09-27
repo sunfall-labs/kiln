@@ -200,7 +200,6 @@ static int32_t kiln_c99_temporal_kind_of_builtin(uint64_t builtin);
 static uint64_t kiln_c99_temporal_builtin_of(kiln_value value);
 /* These helpers are defined in later concatenated runtime units.  Keep their headed
  * declarations here so a caller cannot silently fall back to an implicit byte-key ABI. */
-static uint64_t kiln_c99_typed_prototype_method(const char *key, size_t key_len);
 static kiln_value kiln_c99_key_value(const kiln_string *view, const kiln_string **canonical);
 static kiln_value kiln_c99_stable_key_value(const kiln_string *stable);
 static int kiln_c99_symbol_of_key_view(const kiln_string *key, kiln_value *out);
@@ -254,6 +253,7 @@ static kiln_value kiln_c99_text(kiln_value value);
 static size_t kiln_c99_double_to_js(double value, char out[32]);
 static kiln_value kiln_c99_copy_text(const char *text, size_t len);
 static kiln_value kiln_c99_inspect(kiln_value value);
+static kiln_value kiln_c99_console_inspect(kiln_host *host, kiln_value value);
 static int kiln_c99_reserve(void **items, size_t *capacity, size_t needed, size_t item_size);
 static int kiln_c99_text_append_c(kiln_text *text, const char *literal);
 static kiln_value kiln_c99_text_value(kiln_text *text);
@@ -286,9 +286,17 @@ static int kiln_c99_new_data_view(kiln_value *out, kiln_value source, size_t byt
 static int kiln_c99_to_index(kiln_value value, size_t *out, kiln_value *thrown);
 static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size_t argc);
 static int kiln_c99_jobs_pending_raw(kiln_value *out);
+static int kiln_c99_promise_rejections_raw(kiln_value *out, const kiln_value *args, size_t argc);
+static int kiln_c99_promise_observe(kiln_promise *state);
 static size_t kiln_c99_typed_width(kiln_typed_kind kind);
 static double kiln_c99_typed_get(kiln_typed_array *view, size_t index);
 static void kiln_c99_typed_set(kiln_typed_array *view, size_t index, double value);
+static int kiln_c99_typed_kind_is_bigint(kiln_typed_kind kind);
+static int kiln_c99_typed_element(kiln_typed_array *view, size_t index, kiln_value *out);
+static int kiln_c99_typed_store(kiln_host *host, kiln_typed_array *view, size_t index,
+                                kiln_value value, int depth, kiln_value *thrown);
+static int kiln_c99_to_bigint64_bits(kiln_host *host, kiln_value value, uint64_t *out, int depth,
+                                     kiln_value *thrown);
 static int kiln_c99_new_typed_iterator(kiln_value *out, kiln_value source, int part);
 static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
                              kiln_property **out);
@@ -723,6 +731,9 @@ static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, s
 
 /* Realm stream semantics. The transport adapters only feed data and lifecycle events into these
  * ordinary objects; no socket, reactor, clock, or scheduler state is duplicated here. */
+/* The descriptor a write aimed at `fd` goes to in the current realm (`kiln_c99_realm_state`). */
+static int kiln_c99_realm_output(int fd);
+
 static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t code,
                                 kiln_value receiver, const kiln_value *args, size_t argc,
                                 int depth, kiln_value *thrown) {
@@ -859,7 +870,7 @@ static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t co
             kiln_value fd_val;
             if (kiln_c99_get(host, receiver, "fd", 2, &fd_val, depth, NULL) == KILN_C99_OK &&
                 fd_val.tag == KILN_VALUE_NUMBER) {
-                int fd = (int)kiln_c99_as_number(fd_val);
+                int fd = kiln_c99_realm_output((int)kiln_c99_as_number(fd_val));
                 if (fd >= 0) {
                     kiln_value data_val = argc > 0 ? args[0] : kiln_c99_undefined();
                     if (data_val.tag == KILN_VALUE_STRING) {
@@ -963,10 +974,24 @@ typedef struct kiln_c99_realm_state {
     /* Every compiled unit's block, by the unit's process-wide id; NULL until the realm enters it. */
     kiln_c99_unit_block **units;
     size_t unit_capacity;
+    /* Where the realm's standard streams go when its host gave it a descriptor of its own -- a
+     * realm hosted beside others in one process (realms issue 05) -- or 0 for the process's. */
+    int output_fd;
 } kiln_c99_realm_state;
 
 /* This thread's realm's context: its heap's, or the fallback heap's outside a realm. */
 static kiln_c99_realm_state *kiln_c99_realm(void);
+
+/* The launcher, inside the realm before any module runs: both standard streams go to `fd`. */
+static void kiln_c99_realm_capture_output(int fd) {
+    kiln_c99_realm()->output_fd = fd;
+}
+
+/* The descriptor a write the program aims at `fd` goes to. */
+static int kiln_c99_realm_output(int fd) {
+    int output = kiln_c99_realm()->output_fd;
+    return (fd == 1 || fd == 2) && output > 0 ? output : fd;
+}
 
 typedef struct kiln_ffi_function_meta {
     uint64_t handle;

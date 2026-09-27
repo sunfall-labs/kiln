@@ -369,7 +369,7 @@ fn return_signal_rejected_promise_does_not_surface_as_unhandled_rejection() {
         )
         .is_ok()
     );
-    assert!(vm.check_unhandled_rejection().is_ok());
+    assert!(matches!(vm.process_rejections(), Ok(false)));
 }
 
 /// Every `"@@..."` literal in this crate is a key `is_reserved` recognises.

@@ -31,7 +31,9 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
         kiln_typed_array *view = kiln_c99_typed_array_of(source);
         /* Read each element at the moment it is visited: a view is live over its shared buffer. */
         for (index = 0; index < view->length; ++index) {
-            status = kiln_c99_array_push(target, kiln_c99_number(kiln_c99_typed_get(view, index)));
+            kiln_value element;
+            status = kiln_c99_typed_element(view, index, &element);
+            if (status == KILN_C99_OK) status = kiln_c99_array_push(target, element);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -468,9 +470,6 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
                         }
                     }
                 }
-                if (!*answer) {
-                    *answer = kiln_c99_typed_prototype_method(intrinsic_key, intrinsic_len) != 0;
-                }
             }
         }
         return KILN_C99_OK;
@@ -551,6 +550,21 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
         *answer = kiln_c99_same_name_key(key, "@@iterator") ||
                   kiln_c99_same_name_key(key, "@@unscopables") ||
                   kiln_c99_array_method(intrinsic_key, intrinsic_len) != 0;
+        if (!*answer) {
+            /* A member defined on `Array.prototype` itself (the bootstrap's parallel family, a
+             * program's polyfill): the store the array read consults after the table. */
+            kiln_value store;
+            if (kiln_c99_callable_store(kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_PROTOTYPE), &store,
+                                        0) == KILN_C99_OK &&
+                store.tag == KILN_VALUE_OBJECT) {
+                kiln_object *properties = kiln_c99_object_of(store);
+                size_t pidx;
+                if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
+                for (pidx = 0; pidx < properties->count && !*answer; ++pidx) {
+                    *answer = kiln_c99_same_key_view(&properties->properties[pidx], key);
+                }
+            }
+        }
         return KILN_C99_OK;
     }
     if (target.tag == KILN_VALUE_COLLECTION) {

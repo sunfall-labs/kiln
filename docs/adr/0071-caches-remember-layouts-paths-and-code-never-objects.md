@@ -8,6 +8,27 @@ Accepted, 2026-09-26, under the project owner's delegation of the concurrency an
 Makes ADR 0070 (a realm is a schedulable unit) sound and cheap. Refines ADR 0050 (an object points
 at a shape) and ADR 0047 (interned keys). Uses ADR 0041's turn boundary a third time.
 
+## Amendment: a wide answer is a slot, not a record behind a pointer (2026-09-27)
+
+Realms issue 04 step 4 implemented "Publishing and reclaiming shared state" below, and refined how
+a wide answer is published. Every cache answer is a *slot*: its words, named by one key word (the
+receiver shape it is for). A writer claims the slot by compare-and-swap on the key word, writes the
+other words, and publishes them with a release store of the key; a reader loads the key word with
+acquire and reads the rest only after it matches. A published slot is never changed. Replacing an
+answer claims the slot; while no other thread runs a realm it is rewritten at once, and otherwise it
+is *retired* -- its key word holds the retirement's tag -- and claimed again only once every thread
+that was running a realm at that tag has passed a turn boundary. That is the decision's
+quiescent-state reclamation, applied to storage that stays where it is.
+
+Why not an immutable record behind a pointer, as written below: it costs the dependent load on every
+hit the decision accepted, and an allocation per learn, which a site that relearns in a loop pays
+per iteration and cannot free until its thread's turn ends. A slot costs neither: on x86-64 the hit
+path is the same instructions as before (an acquire load is a plain one there), and retirement needs
+no memory. What a slot costs instead is capacity: a retired entry is unusable until its grace
+period ends, so a site relearning many times within one turn, while other realms run, learns less.
+Records that genuinely are replaced whole -- a grown shared key table, a grown shape edge index --
+are retired to the provider (`kiln_realm_retire`) and freed at a later boundary, as below.
+
 ## Context
 
 ADR 0070 runs many realms in one process, each moving between threads at turn boundaries. The

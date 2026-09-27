@@ -78,11 +78,6 @@ static int kiln_c99_key_ascii_view(const kiln_string *key, char scratch[256], co
     return 1;
 }
 
-static uint64_t kiln_c99_typed_prototype_method_key(const kiln_string *key) {
-    (void)key;
-    return 0;
-}
-
 static void kiln_c99_typed_own_key(kiln_value target, const kiln_string *key, int *found,
                                    int *enumerable) {
     double index = kiln_c99_key_index_key(key);
@@ -206,8 +201,11 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_URL_PARSE_RAW: return "__kilnUrlParse";
     case KILN_C99_METHOD_ARRAY_BUFFER_DETACH_RAW: return "__kilnArrayBufferDetach";
     case KILN_C99_METHOD_CLONE_DATA_RAW: return "__kilnCloneData";
+    case KILN_C99_METHOD_TYPED_ARRAY_COPY_RAW: return "__kilnTypedArrayCopy";
+    case KILN_C99_METHOD_TYPED_ARRAY_SORT_RAW: return "__kilnTypedArraySort";
     case KILN_C99_METHOD_JOBS_PENDING_RAW: return "__kilnJobsPending";
     case KILN_C99_METHOD_QUEUE_IO_RAW: return "__kilnQueueIo";
+    case KILN_C99_METHOD_PROMISE_REJECTIONS_RAW: return "__kilnPromiseRejections";
     case KILN_C99_METHOD_URL_SET_RAW: return "__kilnUrlSet";
     case KILN_C99_METHOD_URL_FAST_RAW: return "__kilnUrlFast";
     case KILN_C99_METHOD_URL_ADOPT_RAW: return "__kilnUrlAdopt";
@@ -386,18 +384,6 @@ static const char *kiln_c99_method_name(uint64_t code) {
      * generator that is already finished. */
     case KILN_C99_METHOD_GENERATOR_SELF: return "@@iterator";
     case KILN_C99_METHOD_GET_TIME: return "getTime";
-    case KILN_C99_METHOD_GET_FULL_YEAR: return "getFullYear";
-    case KILN_C99_METHOD_GET_MONTH: return "getMonth";
-    case KILN_C99_METHOD_GET_DATE: return "getDate";
-    case KILN_C99_METHOD_GET_DAY: return "getDay";
-    case KILN_C99_METHOD_GET_HOURS: return "getHours";
-    case KILN_C99_METHOD_GET_MINUTES: return "getMinutes";
-    case KILN_C99_METHOD_GET_SECONDS: return "getSeconds";
-    case KILN_C99_METHOD_GET_MILLISECONDS: return "getMilliseconds";
-    case KILN_C99_METHOD_GET_TIMEZONE_OFFSET: return "getTimezoneOffset";
-    case KILN_C99_METHOD_TO_ISO_STRING: return "toISOString";
-    case KILN_C99_METHOD_TO_JSON: return "toJSON";
-    case KILN_C99_METHOD_DATE_TO_STRING: return "toString";
     case KILN_C99_METHOD_DATE_NOW: return "now";
     case KILN_C99_METHOD_DATE_UTC: return "UTC";
     case KILN_C99_METHOD_DATE_PARSE: return "parse";
@@ -465,9 +451,6 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_REGEXP_TEST: return "test";
     case KILN_C99_METHOD_REGEXP_EXEC: return "exec";
     case KILN_C99_METHOD_REGEXP_TO_STRING: return "toString";
-    case KILN_C99_METHOD_TYPED_SUBARRAY: return "subarray";
-    case KILN_C99_METHOD_TYPED_SET: return "set";
-    case KILN_C99_METHOD_TYPED_FILL: return "fill";
     case KILN_C99_METHOD_TYPED_OF: return "of";
     case KILN_C99_METHOD_TYPED_FROM: return "from";
     case KILN_C99_METHOD_TYPED_TO_STRING_TAG: return "get [Symbol.toStringTag]";
@@ -508,13 +491,6 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_OBJECT_FROM_ENTRIES: return "fromEntries";
     case KILN_C99_METHOD_ARRAY_FROM: return "from";
     case KILN_C99_METHOD_SET_TIME: return "setTime";
-    case KILN_C99_METHOD_SET_FULL_YEAR: return "setUTCFullYear";
-    case KILN_C99_METHOD_SET_MONTH: return "setUTCMonth";
-    case KILN_C99_METHOD_SET_DATE: return "setUTCDate";
-    case KILN_C99_METHOD_SET_HOURS: return "setUTCHours";
-    case KILN_C99_METHOD_SET_MINUTES: return "setUTCMinutes";
-    case KILN_C99_METHOD_SET_SECONDS: return "setUTCSeconds";
-    case KILN_C99_METHOD_SET_MILLISECONDS: return "setUTCMilliseconds";
     case KILN_C99_METHOD_STRING_RAW: return "raw";
     case KILN_C99_METHOD_STRING_FROM_CHAR_CODE: return "fromCharCode";
     case KILN_C99_METHOD_STRING_FROM_CODE_POINT: return "fromCodePoint";

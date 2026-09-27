@@ -1,4 +1,5 @@
-//! Allocation-free ECMAScript number conversion.
+//! Allocation-free ECMAScript number conversion, and the default numeric order of typed-array
+//! elements ([`typed_order`]).
 //!
 //! This crate is the semantic-core proof for ADR 0018. It deliberately owns no C ABI, allocator,
 //! runtime packaging, or host values: callers provide a byte span to parse or a byte buffer to
@@ -12,6 +13,8 @@
     clippy::panic,
     clippy::unwrap_used
 )]
+
+pub mod typed_order;
 
 /// The largest ECMAScript spelling emitted by `dragonbox_ecma` for an `f64`.
 pub const MAX_FORMATTED_LEN: usize = 25;

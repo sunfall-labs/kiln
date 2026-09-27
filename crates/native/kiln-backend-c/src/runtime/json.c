@@ -532,9 +532,11 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
             }
             /* Through the same recursion an object member takes, so a `Float64Array` holding
              * NaN spells it `null` here for the same reason a plain number does. */
-            status = kiln_c99_json_value(host, text, kiln_c99_number(kiln_c99_typed_get(view, index)),
-                                         indent, indent_len, nested.bytes, nested.len, &wrote,
-                                         depth, parents, thrown);
+            kiln_value element;
+            status = kiln_c99_typed_element(view, index, &element);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_json_value(host, text, element, indent, indent_len, nested.bytes,
+                                             nested.len, &wrote, depth, parents, thrown);
             if (status != KILN_C99_OK) {
                 kiln_c99_json_drop_nested(&nested);
                 return status;

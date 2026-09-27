@@ -1407,7 +1407,9 @@ fn render_functions(
                 strict_functions,
                 typed,
                 emit_graph::EntryKind::Typed {
-                    returns_number: true,
+                    // A predicate (a boolean on some path) answers boxed, for
+                    // `parallelFilter`'s workers alone (`parallel::parallel_result`).
+                    returns_number: !emit_graph::parallel_boolean_result(&direct.entry, index),
                     restartable: false,
                 },
                 None,
@@ -1566,7 +1568,10 @@ fn render_functions(
                 } else {
                     "static "
                 };
-                for kind in emit_graph::PARALLEL_CHUNK_KINDS {
+                for kind in emit_graph::parallel_chunk_kinds(
+                    program.functions[index].parameter_count,
+                    emit_graph::parallel_boolean_result(&direct.entry, index),
+                ) {
                     writeln!(
                         output,
                         "{pmap_link}void {worker_symbol}_pmap{kind}_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);"
@@ -1789,13 +1794,6 @@ fn render_functions(
                         continue;
                     }
                     let pfx = format!("{symbol}_fn_{index}_v{}_t_{i}", vid.0);
-                    if typed.typed_needs[i as usize].row {
-                        writeln!(
-                            target_buf,
-                            "static const kiln_shape *{pfx}_shape = NULL;\nstatic const uint32_t *{pfx}_row = NULL;"
-                        )
-                        .unwrap();
-                    }
                     writeln!(
                         target_buf,
                         "static kiln_c99_method_path {pfx}_path = KILN_C99_UNLEARNED_METHOD_PATH;"
@@ -1837,6 +1835,7 @@ fn render_functions(
                         symbol,
                         index,
                         proto.parameter_count,
+                        emit_graph::parallel_boolean_result(&direct.entry, index),
                         &captures,
                         true,
                     );
@@ -1848,6 +1847,7 @@ fn render_functions(
                         symbol,
                         index,
                         proto.parameter_count,
+                        emit_graph::parallel_boolean_result(&direct.entry, index),
                         &captures,
                         should_chunk,
                     );
@@ -2763,7 +2763,8 @@ fn property_key_constants(program: &Program) -> Vec<u32> {
     keys
 }
 
-/// The string constants an object literal (`NewObject`) takes as its static keys, added to `keys`.
+/// The string constants an object literal takes as its static keys -- under `NewObject`, or one
+/// `DefineNamedProperty` at a time -- added to `keys`.
 ///
 /// They join the unit's key table so the load-time constructor registers them as shared keys
 /// (ADR 0071): a literal built from shared keys gets a shared shape, and a shared shape is the
@@ -2810,6 +2811,19 @@ fn literal_key_constants(program: &Program, code: &[Instruction], keys: &mut Vec
                     }
                     labels.resize(next_height, None);
                 }
+                // `{ ...rest, name: value }`: a member after a spread (or beside a computed key)
+                // is defined one at a time, its static key the constant beneath its value.
+                Instruction::DefineNamedProperty => {
+                    if let Some(Some(constant)) = labels.len().checked_sub(2).map(|at| labels[at])
+                        && matches!(
+                            program.constants.get(constant as usize),
+                            Some(Constant::String(_))
+                        )
+                    {
+                        keys.push(constant);
+                    }
+                    labels.resize(next_height, None);
+                }
                 _ => labels.resize(next_height, None),
             }
             if terminal {
@@ -2841,10 +2855,12 @@ fn literal_key_constants(program: &Program, code: &[Instruction], keys: &mut Vec
 
 /// One canonical pointer per key the unit names. A load-time constructor registers the unit's
 /// constants into the process's shared key table before the first realm exists (ADR 0071) and
-/// fills the pointers from it once, for every realm; `{symbol}_keys_shared` records that, and the
-/// realm reset leaves such pointers alone. When registration could not vouch for every key -- a
-/// library loaded after a heap existed, or out of memory -- the pointers are filled at the first
-/// entry into each realm instead and cleared by that realm's `KILN_GC_PHASE_RESET`, as before.
+/// fills the pointers from it once, for every realm; `{symbol}_keys_shared` records that. When
+/// registration could not vouch for every key -- a library loaded after a heap existed, or out of
+/// memory -- the pointers are that of one realm at a time: `{symbol}_keys_owner` is the realm that
+/// filled them at its entry (`kiln_c99_unit_keys_claim`), which gives them back at its
+/// `KILN_GC_PHASE_RESET`, and a second live realm entering the unit meanwhile is refused rather
+/// than handed the first one's keys.
 ///
 /// The constructor names only this unit's own constants, so registration adds nothing to the
 /// unit's cache key that its content did not already decide, and no launcher, embedding host or
@@ -2875,7 +2891,7 @@ fn render_key_table(
             writeln!(output, "{linkage}const kiln_string *{symbol}_key_{index};").unwrap();
         }
     }
-    writeln!(output, "static int {symbol}_keys_ready;").unwrap();
+    writeln!(output, "static uint64_t {symbol}_keys_owner;").unwrap();
     writeln!(output, "static int {symbol}_keys_shared;").unwrap();
     writeln!(
         output,
@@ -2891,6 +2907,13 @@ fn render_key_table(
     }
     writeln!(output, "}};").unwrap();
     writeln!(output, "static int {symbol}_intern_keys(void) {{").unwrap();
+    writeln!(
+        output,
+        "    int claim = kiln_c99_unit_keys_claim(&{symbol}_keys_owner);
+    if (claim > 0) return KILN_C99_OK;
+    if (claim < 0) return kiln_c99_refuse(\"a module loaded after the first realm started running in a second live realm at once\");"
+    )
+    .unwrap();
     if symbol == "ku" && keys.len() > 4 {
         writeln!(
             output,
@@ -2923,11 +2946,7 @@ fn render_key_table(
             }
         }
     }
-    writeln!(
-        output,
-        "    {symbol}_keys_ready = 1;\n    return KILN_C99_OK;\n}}"
-    )
-    .unwrap();
+    writeln!(output, "    return KILN_C99_OK;\n}}").unwrap();
     // Registration. `ku` registers straight into its key array; any other symbol's keys are
     // separate statics, filled from a local array only once every key is known to be shared.
     writeln!(
@@ -2954,11 +2973,7 @@ fn render_key_table(
             writeln!(output, "    {symbol}_key_{index} = shared[{i}];").unwrap();
         }
     }
-    writeln!(
-        output,
-        "    {symbol}_keys_shared = 1;\n    {symbol}_keys_ready = 1;\n}}"
-    )
-    .unwrap();
+    writeln!(output, "    {symbol}_keys_shared = 1;\n}}").unwrap();
 }
 
 fn render_key_table_extern(output: &mut String, symbol: &str, keys: &[u32]) {
@@ -2984,7 +2999,7 @@ fn render_key_prologue(output: &mut String, symbol: &str, keyed: bool) {
     if keyed {
         writeln!(
             output,
-            "    if (!{symbol}_keys_ready) {{ int keyed = {symbol}_intern_keys(); if (keyed != KILN_C99_OK) return keyed; }}"
+            "    if (!{symbol}_keys_shared) {{ int keyed = {symbol}_intern_keys(); if (keyed != KILN_C99_OK) return keyed; }}"
         )
         .unwrap();
     }
@@ -3172,11 +3187,11 @@ fn render_unit_roots(output: &mut String, symbol: &str, keyed: bool) {
     )
     .unwrap();
     if keyed {
-        // Unless registration made them shared, the canonical pointers belong to the realm's
-        // intern table, which dies with the realm.
+        // Unless registration made them shared, the canonical pointers belong to the owning
+        // realm's intern table, which dies with the realm.
         writeln!(
             output,
-            "    if (phase == KILN_GC_PHASE_RESET && !{symbol}_keys_shared) {symbol}_keys_ready = 0;"
+            "    if (phase == KILN_GC_PHASE_RESET && !{symbol}_keys_shared) kiln_c99_unit_keys_release(&{symbol}_keys_owner, heap);"
         )
         .unwrap();
     }
@@ -3623,19 +3638,19 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
         output.push_str("#define KU_BINARY(DST, CODE, LEFT, RIGHT, PC, OP, UNWIND) do { int status = KILN_C99_OK; (DST) = ku_binary_fast((CODE), host, (LEFT), (RIGHT), &status, depth, thrown); KU_STATUS((PC), (OP), UNWIND); } while (0)\n");
     }
     if has_read_property {
+        // The inline check reads the first entry only, so an entry that keeps answering here moves
+        // to the front -- while no other thread runs a realm (`kiln_c99_site_answered`).
         output.push_str("static __attribute__((unused, noinline)) kiln_val ku_pic_poly_read(const kiln_object *obj, kiln_c99_site *site) {\n\
     const kiln_shape *shape = obj->shape;\n\
-    for (int i = 1; i < (int)site->pic_count && i < KILN_C99_PIC_SIZE; ++i) {\n\
-        if (shape == site->entries[i].shape) {\n\
-            kiln_c99_pic_entry tmp = site->entries[0];\n\
-            site->entries[0] = site->entries[i];\n\
-            site->entries[i] = tmp;\n\
-            {\n\
-                uint32_t slot = site->entries[0].slot;\n\
-                kiln_val answer;\n\
-                if (KILN_LIKELY(slot < obj->slot_capacity)) return obj->slots[slot];\n\
-                if (kiln_c99_pic_inherited(&site->entries[0], obj, &answer)) return answer;\n\
-            }\n\
+    uint32_t count = kiln_c99_site_count(site);\n\
+    for (uint32_t i = 1; i < count; ++i) {\n\
+        if (shape == kiln_c99_slot_key(&site->entries[i].shape)) {\n\
+            uint32_t slot = site->entries[i].slot;\n\
+            kiln_val answer;\n\
+            if (KILN_LIKELY(slot < obj->slot_capacity)) answer = obj->slots[slot];\n\
+            else if (!kiln_c99_pic_inherited(&site->entries[i], obj, &answer)) continue;\n\
+            kiln_c99_site_answered(site, i);\n\
+            return answer;\n\
         }\n\
     }\n\
     return KILN_VAL_HOLE;\n\
@@ -3643,9 +3658,9 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
         output.push_str("#define KU_READ_PROPERTY(DST, OBJECT, KEY, KEY_LEN, SITE, PC, OP, UNWIND) do { \\\n\
     kiln_c99_site *ku_s = (SITE); \\\n\
     kiln_val ku_t = (OBJECT); \\\n\
-    if (KILN_LIKELY(ku_s != NULL && ku_s->entries[0].shape != NULL && KILN_VAL_IS_OBJECT(ku_t))) { \\\n\
+    if (KILN_LIKELY(ku_s != NULL && kiln_c99_site_count(ku_s) != 0 && KILN_VAL_IS_OBJECT(ku_t))) { \\\n\
         const kiln_object *ku_obj = (const kiln_object *)KILN_VAL_PTR(ku_t); \\\n\
-        if (KILN_LIKELY(ku_obj != NULL && ku_obj->shape == ku_s->entries[0].shape)) { \\\n\
+        if (KILN_LIKELY(ku_obj != NULL && ku_obj->shape != NULL && ku_obj->shape == kiln_c99_slot_key(&ku_s->entries[0].shape))) { \\\n\
             uint32_t ku_s0 = ku_s->entries[0].slot; \\\n\
             if (KILN_LIKELY(ku_s0 < ku_obj->slot_capacity)) { \\\n\
                 (DST) = ku_obj->slots[ku_s0]; \\\n\
@@ -3653,16 +3668,16 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
             } else if (kiln_c99_pic_inherited(&ku_s->entries[0], ku_obj, &(DST))) { \\\n\
                 break; \\\n\
             } \\\n\
-        } else if (ku_obj != NULL && ku_s->pic_count > 1) { \\\n\
+        } else if (ku_obj != NULL && kiln_c99_site_count(ku_s) > 1) { \\\n\
             kiln_val ku_pv = ku_pic_poly_read(ku_obj, ku_s); \\\n\
             if (ku_pv != KILN_VAL_HOLE) { (DST) = ku_pv; break; } \\\n\
         } \\\n\
-    } else if (ku_s != NULL && !ku_s->has_cached_method) { \\\n\
-        if (ku_s->cached_tag == KILN_VALUE_ARRAY && ((ku_t & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) { \\\n\
+    } else if (ku_s != NULL && kiln_c99_site_length_hint(ku_s) != 0) { \\\n\
+        if (kiln_c99_site_length_hint(ku_s) == KILN_VALUE_ARRAY && ((ku_t & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX) && kiln_c99_gc_payload_kind(KILN_VAL_PTR(ku_t)) == KILN_GC_ARRAY) { \\\n\
             const kiln_array *ku_arr = (const kiln_array *)KILN_VAL_PTR(ku_t); \\\n\
             (DST) = kiln_c99_val_from_double((double)ku_arr->count); \\\n\
             break; \\\n\
-        } else if (ku_s->cached_tag == KILN_VALUE_STRING && KILN_VAL_IS_STRING(ku_t)) { \\\n\
+        } else if (kiln_c99_site_length_hint(ku_s) == KILN_VALUE_STRING && KILN_VAL_IS_STRING(ku_t)) { \\\n\
             const kiln_string *ku_str = (const kiln_string *)KILN_VAL_PTR(ku_t); \\\n\
             (DST) = kiln_c99_val_from_double((double)(ku_str != NULL ? ku_str->unit_len : 0)); \\\n\
             break; \\\n\
@@ -3674,14 +3689,14 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
 } while (0)\n");
     }
     if has_write_property {
-        output.push_str("static __attribute__((unused, noinline)) int ku_pic_poly_write(kiln_object *obj, kiln_c99_site *site, kiln_val val) {\n    const kiln_shape *shape = obj->shape;\n    for (int i = 1; i < (int)site->pic_count && i < KILN_C99_PIC_SIZE; ++i) {\n        if (shape == site->entries[i].shape && site->entries[i].transition_to == NULL) {\n            uint32_t slot = site->entries[i].slot;\n            if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity && !obj->frozen)) {\n                kiln_c99_pic_entry tmp = site->entries[0];\n                site->entries[0] = site->entries[i];\n                site->entries[i] = tmp;\n                kiln_c99_prototype_touched(obj);\n                obj->slots[slot] = val;\n                return 1;\n            }\n        }\n    }\n    return 0;\n}\n");
+        output.push_str("static __attribute__((unused, noinline)) int ku_pic_poly_write(kiln_object *obj, kiln_c99_site *site, kiln_val val) {\n    const kiln_shape *shape = obj->shape;\n    uint32_t count = kiln_c99_site_count(site);\n    for (uint32_t i = 1; i < count; ++i) {\n        if (shape == kiln_c99_slot_key(&site->entries[i].shape) && site->entries[i].transition_to == NULL) {\n            uint32_t slot = site->entries[i].slot;\n            if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity && !obj->frozen)) {\n                kiln_c99_prototype_touched(obj);\n                obj->slots[slot] = val;\n                kiln_c99_site_answered(site, i);\n                return 1;\n            }\n        }\n    }\n    return 0;\n}\n");
         output.push_str("#define KU_WRITE_PROPERTY(OBJECT, KEY, VAL, STRICT, SITE, PC, OP, UNWIND) do { \\\n\
     kiln_c99_site *ku_s = (SITE); \\\n\
     kiln_val ku_t = (OBJECT); \\\n\
     kiln_val ku_v = (VAL); \\\n\
-    if (KILN_LIKELY(ku_s != NULL && ku_s->entries[0].shape != NULL && KILN_VAL_IS_OBJECT(ku_t))) { \\\n\
+    if (KILN_LIKELY(ku_s != NULL && kiln_c99_site_count(ku_s) != 0 && KILN_VAL_IS_OBJECT(ku_t))) { \\\n\
         kiln_object *ku_obj = (kiln_object *)KILN_VAL_PTR(ku_t); \\\n\
-        if (KILN_LIKELY(ku_obj != NULL && ku_obj->shape == ku_s->entries[0].shape && ku_s->entries[0].transition_to == NULL && !ku_obj->frozen)) { \\\n\
+        if (KILN_LIKELY(ku_obj != NULL && ku_obj->shape != NULL && ku_obj->shape == kiln_c99_slot_key(&ku_s->entries[0].shape) && ku_s->entries[0].transition_to == NULL && !ku_obj->frozen)) { \\\n\
             uint32_t ku_s0 = ku_s->entries[0].slot; \\\n\
             if (KILN_LIKELY((ku_obj->shape->double_slots_mask & (1u << ku_s0)) == 0 || KILN_VAL_IS_NUMBER(ku_v))) { \\\n\
                 if (KILN_LIKELY(ku_s0 < ku_obj->slot_capacity)) { \\\n\
@@ -3690,7 +3705,7 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
                     break; \\\n\
                 } \\\n\
             } \\\n\
-        } else if (ku_obj != NULL && ku_s->pic_count > 1) { \\\n\
+        } else if (ku_obj != NULL && kiln_c99_site_count(ku_s) > 1) { \\\n\
             if (ku_pic_poly_write(ku_obj, ku_s, ku_v)) break; \\\n\
         } \\\n\
     } \\\n\
@@ -3755,7 +3770,7 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
         if (KILN_UNLIKELY(kiln_c99_cached_method_matches(ku_s, ku_recv) && depth < KILN_C99_MAX_CALL_DEPTH)) {\n\
             return kiln_c99_val_invoke_cached_method(host, ku_s->cached_method, ku_recv, args, argc, depth, thrown, dst);\n\
         }\n\
-        if (KILN_LIKELY(KILN_VAL_IS_OBJECT(ku_recv) && ku_s->pic_count > 0)) {\n\
+        if (KILN_LIKELY(KILN_VAL_IS_OBJECT(ku_recv) && kiln_c99_site_count(ku_s) > 0)) {\n\
             const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(ku_recv);\n\
             kiln_val cached_fn = kiln_c99_site_cached_callee(ku_s, obj);\n\
             if (KILN_LIKELY(cached_fn != 0 && KILN_VAL_IS_CLOSURE(cached_fn))) {\n\
@@ -4724,6 +4739,17 @@ fn binary_code(operator: BinaryOp) -> u16 {
 
 pub(crate) fn host_op_code(operation: HostOp) -> u16 {
     operation as u16
+}
+
+/// The call that reduces a host call's argument when it cannot cross the boundary, up to its
+/// operand: a console write shows it as node's console does, `util.inspect.custom` included;
+/// anything else as its plain inspection.
+pub(crate) fn host_argument_inspection(operation: HostOp) -> &'static str {
+    if matches!(operation, HostOp::WriteStdout | HostOp::WriteStderr) {
+        "kiln_c99_console_inspect(host, "
+    } else {
+        "kiln_c99_inspect("
+    }
 }
 
 mod identity;

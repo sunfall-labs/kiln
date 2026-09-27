@@ -1937,7 +1937,7 @@ export async function microtasks() {
     .expect("emit microtasks fixture");
     let guard_start = emitted
         .source
-        .find("kiln_c99_builtin_store_epoch == 0 && KILN_VAL_IS_BUILTIN")
+        .find("kiln_c99_builtins_unmodified() && KILN_VAL_IS_BUILTIN")
         .expect("Promise.resolve await guard emitted");
     let guard = &emitted.source[guard_start..guard_start + 300];
     assert!(guard.contains("KILN_VAL_IS_NUMBER(v"), "{guard}");

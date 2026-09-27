@@ -311,10 +311,10 @@ fn reason_clone_rejected() {
     assert!(plan.entry.parallel_safe[0]);
     plan.set_parallel(&[false]);
     assert!(!plan.entry.parallel_safe[0]);
-    assert_eq!(
-        plan.entry.parallel[0].as_ref().err().map(|r| r.reason),
-        Some(Reason::CloneRejected)
-    );
+    // The verdict is kept (a `parallelSort` comparator needs its proven order and no clone);
+    // a site whose callback would run on the pool reads `parallel_safe` and says
+    // `clone-rejected`.
+    assert!(plan.entry.parallel[0].is_ok());
 }
 
 #[test]
@@ -858,7 +858,7 @@ fn a_generic_only_module_puts_its_parallel_workers_in_their_own_unit() {
         !apart.source.contains("_fn_0_p("),
         "the clone left the module"
     );
-    for kind in crate::emit_graph::PARALLEL_CHUNK_KINDS {
+    for kind in crate::emit_graph::parallel_chunk_kinds(1, false) {
         let name = format!("{symbol}_pmap{kind}_0(");
         assert!(workers.contains(&format!("void __attribute__((unused)) {name}")));
         assert!(
@@ -916,4 +916,173 @@ fn a_generic_only_module_puts_its_parallel_workers_in_their_own_unit() {
     assert_eq!(flagged.parallel_workers, None);
     assert_eq!(flagged.source, plain.source);
     assert_eq!(flagged.symbol, plain.symbol);
+}
+
+/// `[].<method>(<callbacks>..., <extra constants>...)` at the top level: each callback its own
+/// proto, in order.
+fn family_site(
+    method: &str,
+    callbacks: Vec<FunctionProto>,
+    extra: usize,
+    mut constants: Constants,
+) -> Program {
+    let name = constants.string(method);
+    let zero = constants.number(0.0);
+    let mut code = vec![Instruction::NewArray { count: 0 }];
+    for index in 0..callbacks.len() {
+        code.push(Instruction::MakeFunction(index as u32));
+    }
+    for _ in 0..extra {
+        code.push(Instruction::Const(zero));
+    }
+    code.push(Instruction::CallMethod {
+        name,
+        argc: (callbacks.len() + extra) as u16,
+    });
+    code.push(Instruction::Return);
+    Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: constants.0,
+        code,
+        local_count: 0,
+        functions: callbacks,
+        template_sites: Vec::new(),
+    }
+}
+
+/// `(a, b) => a <op> b`.
+fn binary(op: BinaryOp) -> FunctionProto {
+    proto(
+        vec![
+            Instruction::LoadLocal(0),
+            Instruction::LoadLocal(1),
+            Instruction::Binary(op),
+            Instruction::Return,
+        ],
+        2,
+        Vec::new(),
+    )
+}
+
+/// The family (parallel issue 10): each site is recorded under its own method, a predicate
+/// (a boolean answer) qualifies for `parallelFilter`, `parallelReduce` needs both callbacks and
+/// its three arguments, and `parallelSort` needs no comparator or a proven one.
+#[test]
+fn the_family_sites_are_decided_per_method() {
+    use crate::parallel::ParallelMethod;
+    let decided = |program: Program| {
+        let records = sites(&program, EmissionPolicy::default());
+        assert_eq!(records.len(), 1, "one site: {records:?}");
+        (
+            records[0].method,
+            records[0].refusal.as_ref().map(|r| r.reason),
+            records[0].default_order,
+        )
+    };
+    // `x => x > 1`: a predicate.
+    let mut constants = Constants::default();
+    let one = constants.number(1.0);
+    let predicate = proto(
+        vec![
+            Instruction::LoadLocal(0),
+            Instruction::Const(one),
+            Instruction::Binary(BinaryOp::GreaterThan),
+            Instruction::Return,
+        ],
+        1,
+        Vec::new(),
+    );
+    assert_eq!(
+        decided(family_site(
+            "parallelFilter",
+            vec![predicate.clone()],
+            0,
+            constants
+        )),
+        (ParallelMethod::Filter, None, false)
+    );
+    // ...which `parallelFlatMap` cannot take: its answers are elements.
+    let mut constants = Constants::default();
+    constants.number(1.0);
+    assert_eq!(
+        decided(family_site(
+            "parallelFlatMap",
+            vec![predicate],
+            0,
+            constants
+        )),
+        (
+            ParallelMethod::FlatMap,
+            Some(Reason::ReturnsNonNumber),
+            false
+        )
+    );
+    let mut constants = Constants::default();
+    let callback = arithmetic(&mut constants);
+    assert_eq!(
+        decided(family_site("parallelFlatMap", vec![callback], 0, constants)),
+        (ParallelMethod::FlatMap, None, false)
+    );
+    let fold = || binary(BinaryOp::Add);
+    assert_eq!(
+        decided(family_site(
+            "parallelReduce",
+            vec![fold(), fold()],
+            1,
+            Constants::default()
+        )),
+        (ParallelMethod::Reduce, None, false)
+    );
+    assert_eq!(
+        decided(family_site(
+            "parallelReduce",
+            vec![fold(), fold()],
+            0,
+            Constants::default()
+        )),
+        (ParallelMethod::Reduce, Some(Reason::ArgumentShape), false)
+    );
+    let mut constants = Constants::default();
+    let one_parameter = arithmetic(&mut constants);
+    assert_eq!(
+        decided(family_site(
+            "parallelReduce",
+            vec![one_parameter, fold()],
+            1,
+            constants
+        )),
+        (ParallelMethod::Reduce, Some(Reason::Arity), false)
+    );
+    assert_eq!(
+        decided(family_site(
+            "parallelSort",
+            vec![binary(BinaryOp::Subtract)],
+            0,
+            Constants::default()
+        )),
+        (ParallelMethod::Sort, None, false)
+    );
+    assert_eq!(
+        decided(family_site(
+            "parallelSort",
+            vec![binary(BinaryOp::Multiply)],
+            0,
+            Constants::default()
+        )),
+        (
+            ParallelMethod::Sort,
+            Some(Reason::ComparatorUnproven),
+            false
+        )
+    );
+    assert_eq!(
+        decided(family_site(
+            "parallelSort",
+            Vec::new(),
+            0,
+            Constants::default()
+        )),
+        (ParallelMethod::Sort, None, true)
+    );
 }

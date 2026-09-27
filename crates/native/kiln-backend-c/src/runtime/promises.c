@@ -112,6 +112,8 @@ static int kiln_c99_new_promise(kiln_value *out) {
         return KILN_C99_OUT_OF_MEMORY;
     }
     promise->state = KILN_C99_PENDING;
+    promise->handled = 0;
+    promise->rejection = KILN_C99_REJECTION_NONE;
     promise->value = kiln_c99_undefined();
     promise->reactions = NULL;
     promise->count = 0;
@@ -123,6 +125,129 @@ static int kiln_c99_new_promise(kiln_value *out) {
 
 static kiln_promise *kiln_c99_promise_of(kiln_value value) {
     return (kiln_promise *)(uintptr_t)value.bits;
+}
+
+/* Node's unhandled-rejection tracking (`kiln-builtins/src/rejections.ts`, shared with the
+ * interpreter). This side keeps what needs a `kiln_promise`: the handled bit, the promises that
+ * rejected with nothing attached (`[promise, reason, ...]`), and the reported ones something
+ * handled since (`[promise, ...]`). The promise lane hands both lists to the registered tracking
+ * once the tick and promise queues are empty -- node's `processPromiseRejections` point. */
+#define KILN_C99_REALM_SLOT_REJECTED UINT32_C(9)
+#define KILN_C99_REALM_SLOT_HANDLED_LATE UINT32_C(10)
+#define KILN_C99_REALM_SLOT_REJECTION_TRACKING UINT32_C(11)
+
+static int kiln_c99_rejection_note(uint32_t slot_key, kiln_value first, const kiln_value *second) {
+    kiln_value *slot;
+    int status = kiln_c99_realm_value_slot(slot_key, &slot);
+    if (status != KILN_C99_OK) return status;
+    if (slot->tag != KILN_VALUE_ARRAY) {
+        status = kiln_c99_new_array(slot);
+        if (status != KILN_C99_OK) return status;
+    }
+    status = kiln_c99_array_push(*slot, first);
+    if (status == KILN_C99_OK && second != NULL) status = kiln_c99_array_push(*slot, *second);
+    if (status == KILN_C99_OK) kiln_c99_gc_heap()->rejections_waiting += 1;
+    return status;
+}
+
+/* HostPromiseRejectionTracker's "reject": `promise` rejected with nothing attached. */
+static int kiln_c99_rejection_track(kiln_value promise, kiln_value reason) {
+    kiln_c99_promise_of(promise)->rejection = KILN_C99_REJECTION_WAITING;
+    return kiln_c99_rejection_note(KILN_C99_REALM_SLOT_REJECTED, promise, &reason);
+}
+
+/* HostPromiseRejectionTracker's "handle", from every place a reaction attaches. A rejection
+ * still waiting is simply no longer reported (its list entry is skipped); a reported one is
+ * `rejectionHandled`. */
+static int kiln_c99_promise_observe(kiln_promise *state) {
+    unsigned char rejection;
+    if (state->handled) return KILN_C99_OK;
+    state->handled = 1;
+    rejection = state->rejection;
+    if (rejection == KILN_C99_REJECTION_NONE) return KILN_C99_OK;
+    state->rejection = KILN_C99_REJECTION_NONE;
+    if (rejection == KILN_C99_REJECTION_WAITING) {
+        kiln_c99_gc_heap()->rejections_waiting -= 1;
+        return KILN_C99_OK;
+    }
+    return kiln_c99_rejection_note(KILN_C99_REALM_SLOT_HANDLED_LATE,
+                                   kiln_c99_value(KILN_VALUE_PROMISE, (uint64_t)(uintptr_t)state,
+                                                  NULL, 0),
+                                   NULL);
+}
+
+/* `__kilnPromiseRejections(process)`: the realm bootstrap registers the shared tracking. The
+ * first registration stands. */
+static int kiln_c99_promise_rejections_raw(kiln_value *result, const kiln_value *args,
+                                           size_t argc) {
+    kiln_value *slot;
+    int status;
+    /* A registration, not a read: its answer is the call's `undefined`. */
+    *result = kiln_c99_undefined();
+    status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_REJECTION_TRACKING, &slot);
+    if (status == KILN_C99_OK && argc > 0 && kiln_c99_is_callable(args[0]) &&
+        !kiln_c99_is_callable(*slot))
+        *slot = args[0];
+    return status;
+}
+
+/* Take a list out of its slot, leaving the slot empty for whatever the tracking itself causes. */
+static kiln_value kiln_c99_rejection_take(uint32_t slot_key) {
+    kiln_value *slot;
+    kiln_value taken = kiln_c99_undefined();
+    if (kiln_c99_realm_value_slot(slot_key, &slot) == KILN_C99_OK) {
+        taken = *slot;
+        *slot = kiln_c99_undefined();
+    }
+    return taken;
+}
+
+/* Node's `processPromiseRejections`, run by the promise lane once both queues are empty: the
+ * rejections still unhandled, marked reported, and the late handles, to the tracking. What it
+ * throws -- the default `throw` mode's report -- ends the checkpoint as an uncaught exception. */
+static int kiln_c99_process_rejections(kiln_gc_heap *heap, kiln_host *host, kiln_value *thrown) {
+    kiln_value rejected = kiln_c99_rejection_take(KILN_C99_REALM_SLOT_REJECTED);
+    kiln_value handled = kiln_c99_rejection_take(KILN_C99_REALM_SLOT_HANDLED_LATE);
+    kiln_value reported;
+    kiln_value *tracking;
+    kiln_value arguments[2];
+    kiln_value produced = kiln_c99_undefined();
+    size_t index;
+    int status;
+    heap->rejections_waiting = 0;
+    status = kiln_c99_new_array(&reported);
+    if (status != KILN_C99_OK) return status;
+    if (rejected.tag == KILN_VALUE_ARRAY) {
+        kiln_array *entries = kiln_c99_array_of(rejected);
+        for (index = 0; index + 1 < entries->count; index += 2) {
+            kiln_value promise = kiln_val_to_boundary(entries->elements[index]);
+            kiln_promise *state = kiln_c99_promise_of(promise);
+            if (state->rejection != KILN_C99_REJECTION_WAITING) continue;
+            state->rejection = KILN_C99_REJECTION_REPORTED;
+            status = kiln_c99_array_push(reported, promise);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_array_push(reported,
+                                             kiln_val_to_boundary(entries->elements[index + 1]));
+            if (status != KILN_C99_OK) return status;
+        }
+    }
+    if (handled.tag != KILN_VALUE_ARRAY) {
+        if (kiln_c99_array_of(reported)->count == 0) return KILN_C99_OK;
+        status = kiln_c99_new_array(&handled);
+        if (status != KILN_C99_OK) return status;
+    }
+    status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_REJECTION_TRACKING, &tracking);
+    if (status != KILN_C99_OK) return status;
+    if (!kiln_c99_is_callable(*tracking)) {
+        /* A realm without the bootstrap: the first rejection is the uncaught exception. */
+        if (kiln_c99_array_of(reported)->count == 0) return KILN_C99_OK;
+        *thrown = kiln_val_to_boundary(kiln_c99_array_of(reported)->elements[1]);
+        return KILN_C99_THROWN;
+    }
+    arguments[0] = reported;
+    arguments[1] = handled;
+    return kiln_c99_call(host, &produced, *tracking, kiln_c99_undefined(), arguments, 2, 0,
+                         thrown);
 }
 
 static int kiln_c99_bind_with(kiln_value *out, kiln_value target, kiln_value receiver,
@@ -252,6 +377,10 @@ static int kiln_c99_settle(kiln_value promise, kiln_value value, int rejected) {
     }
     state->state = rejected ? KILN_C99_REJECTED : KILN_C99_FULFILLED;
     state->value = value;
+    if (rejected && !state->handled) {
+        status = kiln_c99_rejection_track(promise, value);
+        if (status != KILN_C99_OK) return status;
+    }
     for (index = 0; index < state->count; ++index) {
         status = kiln_c99_schedule(state, &state->reactions[index]);
         if (status != KILN_C99_OK) {
@@ -286,7 +415,8 @@ static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value
                          kiln_value *out) {
     kiln_promise *state = kiln_c99_promise_of(promise);
     kiln_reaction reaction;
-    int status = kiln_c99_new_promise(&reaction.derived);
+    int status = kiln_c99_promise_observe(state);
+    if (status == KILN_C99_OK) status = kiln_c99_new_promise(&reaction.derived);
     if (status != KILN_C99_OK) {
         return status;
     }
@@ -313,6 +443,8 @@ static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value
 static int kiln_c99_react(kiln_value promise, kiln_value on_fulfilled, kiln_value on_rejected) {
     kiln_promise *state = kiln_c99_promise_of(promise);
     kiln_reaction reaction;
+    int status = kiln_c99_promise_observe(state);
+    if (status != KILN_C99_OK) return status;
     reaction.on_fulfilled = on_fulfilled;
     reaction.on_rejected = on_rejected;
     reaction.derived = kiln_c99_undefined();
@@ -332,6 +464,8 @@ static int kiln_c99_react(kiln_value promise, kiln_value on_fulfilled, kiln_valu
 static int kiln_c99_then_continue_mode(kiln_value promise, kiln_value generator, int mode) {
     kiln_promise *state = kiln_c99_promise_of(promise);
     kiln_reaction reaction;
+    int status = kiln_c99_promise_observe(state);
+    if (status != KILN_C99_OK) return status;
     reaction.on_fulfilled = generator;
     reaction.on_rejected = generator;
     reaction.derived = kiln_c99_undefined();
@@ -482,8 +616,9 @@ static int kiln_c99_run_job(kiln_microtask *task, kiln_host *host, kiln_value *t
 }
 
 /* `__kilnJobsPending()`: what a microtask checkpoint would run now, as bits -- 1 for a
- * `process.nextTick` callback, 2 for a promise job or `queueMicrotask` callback (ADR 0065,
- * representation: it reads the realm's queues). A message port delivers its next message in the
+ * `process.nextTick` callback, 2 for a promise job or `queueMicrotask` callback, 4 for a
+ * rejection to report (node's `hasRejectionToWarn`) (ADR 0065, representation: it reads the
+ * realm's queues). A message port delivers its next message in the
  * same macrotask when this is 0, because a checkpoint between the two would run nothing, and
  * otherwise waits at the back of the checkpoint (`web_events_streams.ts`). */
 static int kiln_c99_jobs_pending_raw(kiln_value *out) {
@@ -492,15 +627,19 @@ static int kiln_c99_jobs_pending_raw(kiln_value *out) {
     if (heap != NULL) {
         if (heap->next_ticks_queued != 0) bits |= 1;
         if (heap->job_head < heap->job_tail) bits |= 2;
+        if (heap->rejections_waiting != 0) bits |= 4;
     }
     *out = kiln_c99_number((double)bits);
     return KILN_C99_OK;
 }
 
-/* Does the lane hold a job the realm has not run yet? */
+/* Does the lane hold a job the realm has not run yet -- or, with no tick left ahead of it, a
+ * rejection to report? */
 static int kiln_c99_promise_jobs_pending(void *context) {
     kiln_gc_heap *heap = (kiln_gc_heap *)context;
-    return heap != NULL && heap->job_head < heap->job_tail;
+    return heap != NULL &&
+           (heap->job_head < heap->job_tail ||
+            (heap->rejections_waiting != 0 && heap->next_ticks_queued == 0));
 }
 
 /* Run the lane empty, including everything queued while it runs -- which is the whole point: a
@@ -528,6 +667,10 @@ static int kiln_c99_run_promise_jobs(void *context, void *host_pointer, void *th
         status = kiln_c99_run_job(&job, host, thrown);
         if (status != KILN_C99_OK) return status;
     }
+    /* Node's `processTicksAndRejections`: ticks and promise jobs both run out, then the
+     * rejections; the realm's drain comes back around for whatever reporting them queued. */
+    if (heap->rejections_waiting != 0 && heap->next_ticks_queued == 0)
+        return kiln_c99_process_rejections(heap, host, thrown);
     return KILN_C99_OK;
 }
 

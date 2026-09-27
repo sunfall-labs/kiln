@@ -240,11 +240,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     message: format!("Constructor {} requires 'new'", native_js_name(&native)),
                 });
             }
-            // Closing runs the program's `return`, so this needs the machine too.
-            Native::IteratorDispose => {
-                self.close_iterator(receiver, instruction)?;
-                return Ok(Value::Undefined);
-            }
             // All five read `exec` off the receiver and call it, so none of them can be answered
             // without a machine to run the program's own matcher on.
             Native::RegExpSymbol(method) => {
@@ -253,18 +248,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::RegExpStringIteratorNext => {
                 return self.regexp_string_iterator_next(receiver, instruction);
             }
-            Native::IteratorConcat => return self.iterator_concat(arguments, instruction),
-            Native::IteratorConcatNext => {
-                return self.iterator_concat_next(receiver, instruction);
-            }
-            Native::IteratorConcatReturn => {
-                return self.iterator_concat_return(receiver, instruction);
-            }
-            Native::IteratorZip { keyed } => {
-                return self.iterator_zip(keyed, arguments, instruction);
-            }
-            Native::IteratorZipNext => return self.iterator_zip_next(receiver, instruction),
-            Native::IteratorZipReturn => return self.iterator_zip_return(receiver, instruction),
             // These four had an `unreachable!` arm in `call_native` and no route here, which is
             // the pairing that fails silently: nothing refuses to compile, and the first program
             // to call one aborts the process instead of answering. `Iterator.from`,
@@ -285,70 +268,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::ObjectGroupBy => return self.group_by(false, arguments, instruction),
             Native::MapGroupBy => return self.group_by(true, arguments, instruction),
-            Native::LegacyAccessor { defines, setter } => {
-                return self.legacy_accessor(defines, setter, receiver, arguments, instruction);
-            }
-            // `Promise.try(f, ...args)` runs `f` *now* and wraps whatever happens: the value it
-            // returned, or the error it threw. That last half is the whole point -- a synchronous
-            // throw from a function that was meant to be asynchronous becomes a rejection rather
-            // than escaping past the promise chain that was waiting to handle it.
-            Native::PromiseTry => {
-                let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
-                let rest = arguments.get(1..).unwrap_or_default().to_vec();
-                if !is_an_object(receiver) {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message: "Promise.try called on a non-object".to_owned(),
-                    });
-                }
-                // Reached through a subclass, the promise is built by *that* constructor and the
-                // outcome goes through the pair its executor was handed -- the same capability
-                // every other promise-producing static takes.
-                if !Self::reached_through_intrinsic_promise(receiver) {
-                    let (promise, resolve, reject) =
-                        self.new_promise_capability(receiver, instruction)?;
-                    let settled = if is_callable(&callback) {
-                        self.call_catching(&callback, Value::Undefined, rest, instruction)?
-                    } else {
-                        Err(self.construct_error(
-                            ErrorKind::Type,
-                            &[Value::String(
-                                format!("{} is not a function", callback.to_display_string())
-                                    .into(),
-                            )],
-                        ))
-                    };
-                    match settled {
-                        Ok(value) => {
-                            self.call_value(&resolve, Value::Undefined, vec![value], instruction)?;
-                        }
-                        Err(thrown) => {
-                            self.call_value(&reject, Value::Undefined, vec![thrown], instruction)?;
-                        }
-                    }
-                    return Ok(promise);
-                }
-                let promise = PromiseState::pending();
-                // A non-callable argument rejects rather than throwing, like every other failure
-                // here: the caller was handed a promise and is waiting on it, and a synchronous
-                // throw would arrive somewhere nothing is listening.
-                if !is_callable(&callback) {
-                    let thrown = self.construct_error(
-                        ErrorKind::Type,
-                        &[Value::String(
-                            format!("{} is not a function", callback.to_display_string()).into(),
-                        )],
-                    );
-                    self.settle(&promise, &Settled::Rejected(thrown));
-                    return Ok(Value::Promise(promise));
-                }
-                // Caught rather than propagated, which is the whole contract: the caller asked
-                // for a promise, so a throw has to arrive as a rejection on it.
-                match self.call_catching(&callback, Value::Undefined, rest, instruction)? {
-                    Ok(value) => self.resolve_promise(&promise, value),
-                    Err(thrown) => self.settle(&promise, &Settled::Rejected(thrown)),
-                }
-                return Ok(Value::Promise(promise));
-            }
             _ => {}
         }
         // And ahead of them for `Intl`, for a sharper reason: every constructor here reads an
@@ -719,8 +638,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     arguments: Vec::new(),
                     context: Rc::clone(&self.async_context),
                 };
-                let delay = duration_from_milliseconds(milliseconds.max(0.0));
-                self.with_realm_mut(|realm| realm.set_timeout(delay, timer));
+                // A timer like `setTimeout`'s, so 0 is node's 1 ms here too.
+                self.with_realm_mut(|realm| {
+                    let (delay, _) = realm.node_timer_delay(Some(milliseconds.max(0.0)));
+                    realm.set_timeout(delay, timer)
+                });
                 return Ok(signal);
             }
             // `AbortSignal.any(signals)`: one signal that follows whichever of them settles
@@ -1052,8 +974,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | Native::PromiseReject
                 | Native::PromiseAll
                 | Native::PromiseAllSettled
-                | Native::PromiseAllKeyed
-                | Native::PromiseAllSettledKeyed
                 | Native::PromiseRace
                 | Native::PromiseAny
         ) && !is_constructor(receiver)
@@ -1350,7 +1270,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | Native::UrlSearchParamsGetAll
             | Native::UrlSearchParamsToString => url::dispatch(native, receiver, arguments),
             Native::ArrayFrom => self.array_from(arguments, instruction),
-            Native::ArrayFromAsync => self.array_from_async(receiver, arguments, instruction),
             Native::ArrayBufferConstructor => {
                 self.construct_array_buffer(false, arguments, instruction)
             }
@@ -1424,12 +1343,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // An immediate and an I/O callback have no delay, so their arguments start one
                 // earlier: `setImmediate(fn, x)` calls `fn(x)`.
                 let undelayed = matches!(native, Native::SetImmediate | Native::QueueIoRaw);
-                let delay = match arguments.get(1).map(Value::as_number) {
-                    // A negative, missing or NaN delay is zero: "as soon as possible", which is
-                    // still after everything already queued.
-                    Some(delay) if !undelayed && delay.is_finite() && delay > 0.0 => delay,
-                    _ => 0.0,
+                let (delay, warning) = if undelayed {
+                    (std::time::Duration::ZERO, None)
+                } else {
+                    let requested = match arguments.get(1) {
+                        None | Some(Value::Undefined) => None,
+                        Some(delay) => Some(delay.as_number()),
+                    };
+                    self.with_realm_mut(|realm| realm.node_timer_delay(requested))
                 };
+                if let Some(warning) = warning {
+                    let text = Value::String(warning.trim_end_matches('\n').to_owned().into());
+                    self.host
+                        .call(HostOp::WriteStderr, &[HostValue::from(text)])
+                        .map_err(|error| ExecutionError::Host {
+                            instruction,
+                            message: error.to_string(),
+                        })?;
+                }
                 let timer = Timer {
                     callback: arguments.first().cloned().unwrap_or(Value::Undefined),
                     // Everything after the delay is handed to the callback, which is how a
@@ -1441,7 +1372,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // Captured where the timer was set, not where it fires.
                     context: Rc::clone(&self.async_context),
                 };
-                let delay = duration_from_milliseconds(delay);
                 let id = self.with_realm_mut(|realm| match native {
                     Native::SetInterval => realm.set_interval(delay, timer),
                     Native::SetImmediate => realm.set_immediate(timer),
@@ -1588,8 +1518,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // they collect, so they share one walk over the inputs.
             Native::PromiseAll
             | Native::PromiseAllSettled
-            | Native::PromiseAllKeyed
-            | Native::PromiseAllSettledKeyed
             | Native::PromiseRace
             | Native::PromiseAny => {
                 let source = arguments.first().cloned().unwrap_or(Value::Undefined);
@@ -1617,28 +1545,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     stack_height: self.stack.len(),
                     native_depth: self.native_depth,
                 });
-                let walked = if matches!(
+                let walked = self.perform_promise_combinator(
                     native,
-                    Native::PromiseAllKeyed | Native::PromiseAllSettledKeyed
-                ) {
-                    self.perform_promise_combinator_keyed(
-                        native,
-                        receiver,
-                        &source,
-                        &resolve,
-                        &reject,
-                        instruction,
-                    )
-                } else {
-                    self.perform_promise_combinator(
-                        native,
-                        receiver,
-                        &source,
-                        &resolve,
-                        &reject,
-                        instruction,
-                    )
-                };
+                    receiver,
+                    &source,
+                    &resolve,
+                    &reject,
+                    instruction,
+                );
                 self.handlers.truncate(installed);
                 let reason = match walked {
                     Ok(()) => return Ok(promise),
@@ -2128,21 +2042,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 Ok(target)
             }
-            Native::ObjectFreeze | Native::ObjectSeal
-                if matches!(arguments.first(), Some(Value::Proxy(_))) =>
-            {
+            Native::ObjectFreeze if matches!(arguments.first(), Some(Value::Proxy(_))) => {
                 let target = arguments.first().cloned().unwrap_or(Value::Undefined);
-                self.proxy_integrity_level(&target, native == Native::ObjectFreeze, instruction)
+                self.proxy_integrity_level(&target, true, instruction)
             }
-            Native::ObjectIsFrozen | Native::ObjectIsSealed
-                if matches!(arguments.first(), Some(Value::Proxy(_))) =>
-            {
+            Native::ObjectIsFrozen if matches!(arguments.first(), Some(Value::Proxy(_))) => {
                 let target = arguments.first().cloned().unwrap_or(Value::Undefined);
-                self.proxy_is_integrity_level(
-                    &target,
-                    native == Native::ObjectIsFrozen,
-                    instruction,
-                )
+                self.proxy_is_integrity_level(&target, true, instruction)
             }
             // `Object.prototype.toLocaleString()` is `Invoke(this, "toString")`: it calls the
             // receiver's own `toString`, wherever on the chain that is, rather than producing the
@@ -2623,18 +2529,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     &key,
                 )?))
             }
-            Native::ReflectIsExtensible => {
-                let target = self.reflect_target(arguments.first(), "isExtensible")?;
-                if matches!(target, Value::Proxy(_)) {
-                    return Ok(Value::Boolean(
-                        self.proxy_is_extensible(&target, instruction)?,
-                    ));
-                }
-                Ok(Value::Boolean(is_extensible_target(
-                    &self.intrinsics,
-                    &target,
-                )))
-            }
             Native::ReflectPreventExtensions => {
                 let target = self.reflect_target(arguments.first(), "preventExtensions")?;
                 if matches!(target, Value::Proxy(_)) {
@@ -2947,60 +2841,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 ));
                 Ok(Value::Array(ArrayData::new(parts)))
             }
-            // `%TypedArray%.prototype.fill` converts all three of its arguments, and the
-            // machine-free implementation converted none of them: `view.fill({ valueOf: () => 5
-            // })` filled with zeroes and `view.fill(7, { valueOf: () => 1 })` filled nothing.
-            //
-            // The order is observable and is value, then start, then end -- a probe with three
-            // logging objects sees `v,s,e` in node. The value becomes a *primitive* rather than a
-            // number, so that a `BigInt64Array` still gets a BigInt and the existing per-element
-            // conversion keeps deciding what is allowed.
-            Native::TypedArrayFill
-                if matches!(receiver, Value::TypedArray(_))
-                    && arguments
-                        .iter()
-                        .take(3)
-                        .any(|argument| is_an_object(argument) && !is_callable(argument)) =>
-            {
-                let mut converted = arguments.to_vec();
-                for index in 0..converted.len().min(3) {
-                    if !is_an_object(&converted[index]) || is_callable(&converted[index]) {
-                        continue;
-                    }
-                    converted[index] = if index == 0 {
-                        self.as_primitive(
-                            &converted[index].clone(),
-                            PrimitiveHint::Number,
-                            instruction,
-                        )?
-                    } else {
-                        Value::Number(
-                            self.as_number_argument(Some(&converted[index].clone()), instruction)?,
-                        )
-                    };
-                }
-                self.dispatch_native(native, receiver, &converted, instruction)
-            }
-            Native::TypedArraySet
-                if arguments.first().is_some_and(|source| {
-                    !matches!(source, Value::Array(_) | Value::TypedArray(_))
-                        && (is_an_object(source) || matches!(source, Value::String(_)))
-                }) =>
-            {
-                let source = arguments.first().cloned().unwrap_or(Value::Undefined);
-                let length = self.array_like_length(&source, instruction)?;
-                let mut collected = Vec::with_capacity(length.min(1 << 20) as usize);
-                for index in 0..length {
-                    collected.push(self.read_property(&source, &index.to_string(), instruction)?);
-                }
-                let mut converted = arguments.to_vec();
-                converted[0] = Value::Array(ArrayData::new(collected));
-                self.dispatch_native(native, receiver, &converted, instruction)
-            }
-            // `subarray` builds a second view over the same bytes, and it is specified over
-            // `TypedArraySpeciesCreate` like `slice` and `map` -- so a subclass gets its own type
-            // back and `@@species` is read. The machine-free implementation stamped out an
-            // intrinsic of the receiver's kind and read neither.
             // `ArrayBuffer.prototype.slice` builds its result with `SpeciesConstructor`, which
             // is why it is here and not in the machine-free table: reading `constructor` and
             // `@@species` runs the program's own getters, and validating what they answered is
@@ -3065,29 +2905,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     destination[..length].copy_from_slice(&source[start..end]);
                 }
                 Ok(out)
-            }
-            Native::TypedArraySubarray => {
-                let Value::TypedArray(view) = receiver else {
-                    return Ok(Value::Undefined);
-                };
-                let view = Rc::clone(view);
-                if view.buffer.detached() {
-                    return Err(ExecutionError::BufferDetached);
-                }
-                let (start, end) = slice_bounds(arguments, view.len());
-                // A slice of a length-tracking view is itself length-tracking when no end was
-                // given, so the length is left off the argument list entirely rather than frozen
-                // at what today's length happens to be.
-                let tracking = view.length.is_none()
-                    && matches!(arguments.get(1), None | Some(Value::Undefined));
-                let mut built = vec![
-                    Value::ArrayBuffer(Rc::clone(&view.buffer)),
-                    Value::Number((view.offset + start * view.kind.width()) as f64),
-                ];
-                if !tracking {
-                    built.push(Value::Number(end.saturating_sub(start) as f64));
-                }
-                self.typed_array_species_over(receiver, view.kind, &built, instruction)
             }
             Native::StringSearch => {
                 let Value::String(text) = receiver else {
@@ -3158,15 +2975,31 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
                 Ok(Value::Undefined)
             }
-            // 4: a rejection nothing handled, which the loop reports at the end of this turn's
-            // checkpoint -- so a delivery ends its batch there, as node reports one before the
-            // next message.
-            Native::JobsPendingRaw => Ok(Value::Number(
-                self.with_realm(|realm| {
-                    f64::from(u8::from(realm.has_queued_next_ticks()))
-                        + 2.0 * f64::from(u8::from(realm.has_queued_microtasks()))
-                }) + 4.0 * f64::from(u8::from(self.unhandled.is_some())),
-            )),
+            // 4: a rejection to report (node's `hasRejectionToWarn`), which the end of this
+            // checkpoint does -- so a delivery ends its batch there, as node reports one before
+            // the next message.
+            Native::JobsPendingRaw => {
+                let rejections = self.with_rejections_mut(|rejections| {
+                    !rejections.rejected.is_empty() || !rejections.handled.is_empty()
+                });
+                Ok(Value::Number(
+                    self.with_realm(|realm| {
+                        f64::from(u8::from(realm.has_queued_next_ticks()))
+                            + 2.0 * f64::from(u8::from(realm.has_queued_microtasks()))
+                    }) + 4.0 * f64::from(u8::from(rejections)),
+                ))
+            }
+            // The first registration is the realm's own bootstrap; a later realm's (a
+            // `ShadowRealm`) reports through it.
+            Native::PromiseRejectionsRaw => {
+                let process = arguments.first().cloned().unwrap_or(Value::Undefined);
+                if is_callable(&process) {
+                    self.with_rejections_mut(|rejections| {
+                        rejections.process.get_or_insert(process);
+                    });
+                }
+                Ok(Value::Undefined)
+            }
             Native::ProcessNextTick => {
                 let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
                 if !is_callable(&callback) {

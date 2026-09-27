@@ -235,15 +235,6 @@ impl ErrorKind {
     }
 }
 
-/// Whether a `%TypedArray%.prototype` method checks only that its receiver is a view, or the
-/// whole of `ValidateTypedArray`.
-///
-/// A named type rather than a bare `bool` because the two calls that pass it are three
-/// arguments apart from the name they qualify, and a flag read the wrong way round is a check
-/// that silently does nothing -- which is how it first went in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct BrandOnly(bool);
-
 mod native;
 pub use native::*;
 
@@ -379,7 +370,10 @@ fn iterator_prototype_method(kind: IteratorKind, name: &str) -> Value {
         // itself. The chain walk follows one marker and stops, so the step is taken here -- the
         // same shape `inherit_from_object` gives every other table for `Object.prototype`.
         // Without it `[..."a".matchAll(re)]` stopped working: `next` resolved and the object was
-        // still not iterable, which is a spread refusing an iterator.
+        // still not iterable, which is a spread refusing an iterator. A table has no store, so
+        // this answers only what the table itself holds; the members the shared bootstrap
+        // defines there (`chunks`, `join`, ...) are found by the reads that can consult it
+        // (`iterator_prototype_property`).
         other => iterator_method(other),
     }
 }
@@ -391,14 +385,6 @@ pub enum HelperKind {
     Take,
     Drop,
     FlatMap,
-    /// `chunks(n)`: consecutive groups of `n`, the last one short if the source ran out mid-way.
-    Chunks,
-    /// `windows(n)`: every run of `n` consecutive elements, one element apart.
-    ///
-    /// Its buffer is a sliding window rather than a bucket that empties: after a group is handed
-    /// on, the oldest element leaves and the next one joins, which is the whole difference
-    /// between this and `chunks` and the reason both are one buffer with two eviction rules.
-    Windows,
 }
 
 impl HelperKind {
@@ -410,8 +396,6 @@ impl HelperKind {
             Self::Take => "take",
             Self::Drop => "drop",
             Self::FlatMap => "flatMap",
-            Self::Chunks => "chunks",
-            Self::Windows => "windows",
         }
     }
 }
@@ -431,8 +415,6 @@ pub enum TerminalKind {
     Find,
     /// `includes(x)`: whether the source ever produces `x`, by `SameValueZero`.
     Includes,
-    /// `join(sep)`: every element as text, separated.
-    Join,
 }
 
 impl TerminalKind {
@@ -446,7 +428,6 @@ impl TerminalKind {
             Self::Every => "every",
             Self::Find => "find",
             Self::Includes => "includes",
-            Self::Join => "join",
         }
     }
 }
@@ -469,78 +450,15 @@ const HELPER_DONE: &str = "@@helper-done";
 /// `flatMap`'s current inner iterator, and the `next` it was captured with.
 /// The regexp `@@matchAll`'s iterator walks with -- a clone of the receiver, so the program's
 /// own regexp keeps its cursor.
-/// The state a zip helper keeps. `iters` is indexed by source position and never shrinks --
-/// a retired source becomes `null` there so its slot can still be padded -- while `open` is the
-/// list a close sweep walks, and a source leaves it the moment it ends or fails.
-const ZIP_ITERS: &str = "@@zip-iters";
-const ZIP_OPEN: &str = "@@zip-open";
-const ZIP_PADDING: &str = "@@zip-padding";
-const ZIP_KEYS: &str = "@@zip-keys";
-const ZIP_KEYED: &str = "@@zip-keyed";
-const ZIP_MODE: &str = "@@zip-mode";
-
-/// What a zip does when its sources are not all the same length.
-///
-/// Three answers to one question, and the specification makes the program choose rather than
-/// picking one: truncating silently loses elements, padding invents them, and refusing is the
-/// only one that can tell the program its assumption was wrong.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ZipMode {
-    /// Stop at the first source that ends.
-    Shortest,
-    /// Carry on to the last, padding the ones that have ended.
-    Longest,
-    /// Require every source to end on the same step, and throw when they do not.
-    Strict,
-}
-
-impl ZipMode {
-    /// Read back from the number the helper's slot holds.
-    fn from_number(number: f64) -> Self {
-        match number as u8 {
-            1 => Self::Longest,
-            2 => Self::Strict,
-            _ => Self::Shortest,
-        }
-    }
-}
-
-/// Drop one iterator from the list a close sweep will walk.
-///
-/// By identity, and only the first match: two sources may be the *same* iterator, and retiring
-/// one of them must not silently retire the other.
-fn remove_open(open: &Rc<ArrayData>, iterator: &Value) {
-    let mut open = open.borrow_mut();
-    if let Some(at) = open.iter().position(|held| strict_equal(held, iterator)) {
-        open.remove(at);
-    }
-}
-
-/// The `[method, iterable]` pairs `Iterator.concat` was given, and how far the walk has read.
-const CONCAT_SOURCES: &str = "@@concat-sources";
-const CONCAT_INDEX: &str = "@@concat-index";
-
 const MATCH_ALL_REGEXP: &str = "@@matchall-regexp";
 const MATCH_ALL_SUBJECT: &str = "@@matchall-subject";
 const MATCH_ALL_GLOBAL: &str = "@@matchall-global";
 const MATCH_ALL_UNICODE: &str = "@@matchall-unicode";
 
-/// The elements a chunking helper has taken from its source and not yet handed on.
-///
-/// An array rather than a count, because these two helpers are the only ones that hold more than
-/// one element at a time: everything else in the family passes each element straight through.
-const HELPER_BUFFER: &str = "@@helper-buffer";
-/// Whether `windows` hands on a final short window. `chunks` always does and has no flag.
-const HELPER_PARTIAL: &str = "@@helper-partial";
 const HELPER_INNER: &str = "@@helper-inner";
 const HELPER_INNER_NEXT: &str = "@@helper-inner-next";
 
 /// One reserved slot of a helper.
-/// Whether a `windows` helper was asked for a final short window.
-fn allow_partial(state: &Rc<RefCell<ObjectData>>) -> bool {
-    helper_slot(state, HELPER_PARTIAL).is_truthy()
-}
-
 fn helper_slot(state: &Rc<RefCell<ObjectData>>, key: &str) -> Value {
     state
         .borrow()
@@ -1922,6 +1840,7 @@ struct ModuleRealmShared {
     global_objects: Vec<Option<Value>>,
     pending_host: Vec<PendingHostRequest>,
     pending_node: Vec<PendingNodeRequest>,
+    rejections: Rejections,
     node_servers: Vec<Rc<RefCell<NodeServerState>>>,
     http_client_requests: std::collections::BTreeMap<u64, Rc<RefCell<HttpClientRequestState>>>,
     next_http_client_request_id: u64,
@@ -1941,6 +1860,7 @@ impl Default for ModuleRealmSession {
                 global_objects: vec![None],
                 pending_host: Vec::new(),
                 pending_node: Vec::new(),
+                rejections: Rejections::default(),
                 node_servers: Vec::new(),
                 http_client_requests: std::collections::BTreeMap::new(),
                 next_http_client_request_id: 1,
@@ -2459,10 +2379,10 @@ pub use object_helpers::CollectionKey;
 use object_helpers::*;
 mod intrinsic_helpers;
 use intrinsic_helpers::*;
-pub use intrinsic_helpers::{ArrayCopy, CallbackMethod, HtmlWrapper, RegExpSymbol, SetOperation};
+pub use intrinsic_helpers::{ArrayCopy, CallbackMethod, RegExpSymbol, SetOperation};
 mod date;
+pub use date::DateMethod;
 use date::*;
-pub use date::{DateField, DateMethod};
 mod builtin_members;
 pub use builtin_members::BuiltinAccessor;
 use builtin_members::*;

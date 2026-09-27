@@ -9,7 +9,7 @@
 use std::sync::OnceLock;
 
 /// Version of the generated native runtime source and its C ABI.
-pub const NATIVE_RUNTIME_VERSION: u32 = 12;
+pub const NATIVE_RUNTIME_VERSION: u32 = 13;
 
 /// Environment variable that enables private scalar-result sidecar emission by the CLI launcher.
 pub const NATIVE_RESULT_PATH_ENV: &str = "KILN_NATIVE_RESULT_PATH_V1";
@@ -233,13 +233,17 @@ _Static_assert(sizeof(kiln_value) == 16, "kiln_value fits the AAPCS64 register t
 /// The CLI host's per-realm state (ADR 0070, realms issue 04 step 5): the last host refusal and
 /// the string header its text is read through. A launcher owns one per realm and passes it as the
 /// context of `kiln_cli_host_call`; a static would be one refusal that every realm in the process
-/// overwrites and every launcher then reports. Requires the value and string declarations.
+/// overwrites and every launcher then reports. `output` is where the realm's standard streams go:
+/// NULL for the process's own stdout and stderr, or one file for both when the realm's host gave
+/// it one -- a realm hosted beside others in one process (realms issue 05). Requires the value and
+/// string declarations and `<stdio.h>`.
 #[macro_export]
 macro_rules! kiln_cli_host_state_declaration {
     () => {
         r#"typedef struct kiln_cli_host_state {
     kiln_value last_error;
     kiln_string error_text;
+    FILE *output;
 } kiln_cli_host_state;
 "#
     };
@@ -499,9 +503,10 @@ const EMBEDDING_HEADER: &str = concat!(
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
-#define KILN_NATIVE_RUNTIME_VERSION 12
+#define KILN_NATIVE_RUNTIME_VERSION 13
 #define KILN_C_ABI_VERSION 1
 #define KILN_HOST_ABI_VERSION 4
 #define KILN_MODULE_API_VERSION 2
@@ -968,29 +973,38 @@ kiln_value kiln_cli_describe_error(kiln_value value) {
 }
 
 
-/* A line on stderr from the launcher, which has no stdio of its own. */
-void kiln_cli_warn(const char *message) {
-    fputs(message, stderr);
-    fputc('\n', stderr);
+/* Where a realm's `standard` stream goes: its host's output when it was given one. */
+static FILE *kiln_cli_sink(const kiln_cli_host_state *state, FILE *standard) {
+    return state != NULL && state->output != NULL ? state->output : standard;
+}
+
+/* A line on the realm's stderr from the launcher, which has no stdio of its own. `host_state` is
+ * the realm's, or NULL outside one. */
+void kiln_cli_warn(const char *message, const kiln_cli_host_state *host_state) {
+    FILE *sink = kiln_cli_sink(host_state, stderr);
+    fputs(message, sink);
+    fputc('\n', sink);
+    fflush(sink);
 }
 
 /* `host_state` is the failing realm's (`kiln_cli_host_state`), whose last refusal names a host
- * error the value does not; NULL reads this thread's. */
+ * error the value does not, and whose output the report goes to; NULL reads this thread's. */
 void kiln_cli_report_failure_with(int status, kiln_value value, const char *phase,
                                   const kiln_cli_host_state *host_state) {
     kiln_value last_host_error =
         (host_state != NULL ? host_state : &kiln_cli_thread_host_state)->last_error;
+    FILE *sink = kiln_cli_sink(host_state, stderr);
     value = kiln_cli_describe_error(value);
     value.flags = 0;
-    fputs("kiln: ", stderr);
+    fputs("kiln: ", sink);
     if (status == KILN_C99_THROWN) {
-        fputs("uncaught ", stderr);
+        fputs("uncaught ", sink);
         if (value.tag == KILN_VALUE_STRING && value.len != 0 && value.ptr != NULL) {
-            kiln_cli_write_string(stderr, (const kiln_string *)value.ptr);
+            kiln_cli_write_string(sink, (const kiln_string *)value.ptr);
         } else {
-            fputs("exception", stderr);
+            fputs("exception", sink);
         }
-        fputc('\n', stderr);
+        fputc('\n', sink);
         return;
     }
     /* Say what the status *means*, not just what it is. `-2` is by far the most common one a
@@ -1000,46 +1014,46 @@ void kiln_cli_report_failure_with(int status, kiln_value value, const char *phas
      * what makes the difference between a refusal you can see and an exit code with no words. */
     switch (status) {
     case KILN_C99_CONTROL_ERROR:
-        fputs("native backend refusal", stderr);
+        fputs("native backend refusal", sink);
         if (value.tag == KILN_VALUE_STRING && value.len != 0 && value.ptr != NULL) {
-            fputs(": ", stderr);
-            kiln_cli_write_string(stderr, (const kiln_string *)value.ptr);
+            fputs(": ", sink);
+            kiln_cli_write_string(sink, (const kiln_string *)value.ptr);
         } else if (phase != NULL) {
             /* The module body carries its own diagnostic; everything else has none to carry, so
              * the phase is the only thing that can be said -- and saying it beats a bare line. */
-            fputs(" in ", stderr);
-            fputs(phase, stderr);
+            fputs(" in ", sink);
+            fputs(phase, sink);
         }
-        fputc('\n', stderr);
+        fputc('\n', sink);
         return;
     case KILN_C99_OUT_OF_MEMORY:
-        fputs("out of memory\n", stderr);
+        fputs("out of memory\n", sink);
         return;
     case KILN_C99_CALL_DEPTH_ERROR:
-        fputs("call depth exceeded\n", stderr);
+        fputs("call depth exceeded\n", sink);
         return;
     case KILN_C99_UNINITIALIZED_ERROR:
-        fputs("a binding was read before it was initialised\n", stderr);
+        fputs("a binding was read before it was initialised\n", sink);
         return;
     case KILN_C99_HOST_ERROR:
-        fputs("the host refused an operation", stderr);
+        fputs("the host refused an operation", sink);
         if (value.tag == KILN_VALUE_STRING && value.len != 0 && value.ptr != NULL) {
-            fputs(": ", stderr);
-            kiln_cli_write_string(stderr, (const kiln_string *)value.ptr);
+            fputs(": ", sink);
+            kiln_cli_write_string(sink, (const kiln_string *)value.ptr);
         } else if (last_host_error.tag == KILN_VALUE_STRING && last_host_error.len != 0 && last_host_error.ptr != NULL) {
-            fputs(": ", stderr);
-            kiln_cli_write_string(stderr, (const kiln_string *)last_host_error.ptr);
+            fputs(": ", sink);
+            kiln_cli_write_string(sink, (const kiln_string *)last_host_error.ptr);
         } else if (phase != NULL) {
-            fputs(" in ", stderr);
-            fputs(phase, stderr);
+            fputs(" in ", sink);
+            fputs(phase, sink);
         }
-        fputc('\n', stderr);
+        fputc('\n', sink);
         return;
     case KILN_C99_INVALID_ARGUMENT:
-        fputs("an argument was not valid\n", stderr);
+        fputs("an argument was not valid\n", sink);
         return;
     default:
-        fprintf(stderr, "the program stopped with status %d\n", status);
+        fprintf(sink, "the program stopped with status %d\n", status);
         return;
     }
 }
@@ -1189,7 +1203,7 @@ int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
     /* Which stream a line went to is observable -- a caller that redirects one and not the other
      * sees the difference -- so `console.error` and `console.warn` reach the same place here that
      * they reach in node. */
-    sink = operation == KILN_HOST_OP_WRITE_STDERR ? stderr : stdout;
+    sink = kiln_cli_sink(state, operation == KILN_HOST_OP_WRITE_STDERR ? stderr : stdout);
     for (index = 0; index < argc; ++index) {
         if (index != 0 && fputc(' ', sink) == EOF) {
             *result = kiln_cli_refused(state, "terminal I/O", 12);
@@ -1264,7 +1278,7 @@ int main(int argc, char **argv) {
     kiln_cli_entry_context context;
     /* This realm's host state and the header its launcher messages are read through: the
      * realm's, not the process's (ADR 0070). */
-    kiln_cli_host_state host_state = { { .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }, { 0, 0, NULL } };
+    kiln_cli_host_state host_state = { { .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }, { 0, 0, NULL }, NULL };
     kiln_string message = { 0, 0, NULL };
     uint64_t realm = 0;
     const char *phase;
@@ -1370,7 +1384,7 @@ mod tests {
 
     #[test]
     fn runtime_identity_tracks_native_launcher_changes() {
-        assert_eq!(NATIVE_RUNTIME_VERSION, 12);
+        assert_eq!(NATIVE_RUNTIME_VERSION, 13);
         assert!(embedding_header().contains(&format!(
             "#define KILN_NATIVE_RUNTIME_VERSION {NATIVE_RUNTIME_VERSION}"
         )));

@@ -42,4 +42,8 @@ try {
 } catch (e) {
   console.log("typed", e instanceof TypeError);
 }
+// The parallel family (ADR 0069), installed by the bootstrap only when extensions are.
+for (const name of ["parallelFilter", "parallelFlatMap", "parallelSort", "parallelReduce"]) {
+  console.log(name, name in [], typeof (Array.prototype as any)[name], name in typedProto);
+}
 console.log("__kilnExtensions" in globalThis);

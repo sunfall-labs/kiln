@@ -1,4 +1,5 @@
 use super::OpContext;
+use super::callback_loops;
 use super::{method_candidates, status_check};
 use crate::diagnostic_source;
 use crate::direct::TypedNeeds;
@@ -12,11 +13,11 @@ use std::fmt::Write;
 /// typed. `arity` is the proto's own declared parameter count (1 or 2 for map/filter's element
 /// and optional index; always 2 for reduce's accumulator and element), already checked against
 /// the loop's own expectation by [`typed_callback`].
-struct TypedCallback {
-    target: u32,
-    needs: TypedNeeds,
-    returns_double: bool,
-    arity: u32,
+pub(super) struct TypedCallback {
+    pub(super) target: u32,
+    pub(super) needs: TypedNeeds,
+    pub(super) returns_double: bool,
+    pub(super) arity: u32,
 }
 
 /// The callback argument's typed entry, when this callsite may call it typed: known by proto,
@@ -49,38 +50,68 @@ fn typed_callback(
     })
 }
 
-/// The `parallelMap` decision at one call site: the proto whose parallel chunk the site may
-/// run, or the first rule that kept it sequential, with the site's position -- one function,
-/// so the lowering below and the record `--explain-parallel` reads are the same answer.
+/// What a parallel call site lowers to once [`parallel_site`] admits it: the protos of its
+/// callbacks, in argument order (`parallelReduce`: the callback, then the combine), and for
+/// `parallelSort` the order the pool runs.
+struct ParallelSitePlan {
+    method: crate::parallel::ParallelMethod,
+    targets: Vec<u32>,
+    order: Option<crate::parallel::SortOrder>,
+}
+
+/// The decision at one parallel call site (`parallelMap` and the family, ADR 0069): the plan the
+/// site may run, or the first rule that kept it sequential, with the site's position -- one
+/// function, so the lowering below and the record `--explain-parallel` reads are the same answer.
 ///
-/// The order is the order the lowering tests: the unit's plan, the arguments, the callback's
-/// identity, its typed entry, then the proto's own verdict (`parallel::parallel_verdict`,
-/// narrowed by the clone check in `lib.rs`).
+/// The order is the order the lowering tests: the unit's plan, the arguments, then per callback
+/// its identity, its own verdict (`parallel::parallel_verdict`), the parameters this method
+/// passes, its typed entry and the clone check in `lib.rs`. A `parallelSort` comparator is never
+/// called on the pool -- the order it is proven to be is -- so it needs the verdict and a
+/// proven order ([`crate::parallel::comparator_order`]), and nothing emitted.
 fn parallel_site(
     plan: &crate::direct::CallPlan,
     program: &kiln_ir::Program,
     enclosing: Option<u32>,
     defs: &std::collections::HashMap<ValueId, &GraphOp>,
+    method: crate::parallel::ParallelMethod,
     args: &[ValueId],
-) -> (crate::parallel::SiteRecord, Option<u32>) {
-    use crate::parallel::{Reason, Refusal, SiteRecord};
-    let target = args.first().and_then(|a| plan.known.get(a)).copied();
+    vid: ValueId,
+) -> (crate::parallel::SiteRecord, Option<ParallelSitePlan>) {
+    use crate::parallel::{ParallelMethod, Reason, Refusal, SiteRecord};
+    let first = args.first().and_then(|a| plan.known.get(a)).copied();
     // Where the site is, even where the plan knows no callee (a generic unit knows none): the
     // closure written at the call.
     let written = args.first().and_then(|a| match defs.get(a) {
         Some(GraphOp::MakeFunction { index, .. }) => Some(*index),
         _ => None,
     });
-    let (line, column) = SiteRecord::locate(program, enclosing, target.or(written));
+    let (line, column) = if args.is_empty() {
+        // No callback to place it by: the how-many-th such call of this body it is.
+        let ordinal = defs
+            .iter()
+            .filter(|(id, op)| {
+                id.0 < vid.0
+                    && matches!(op, GraphOp::CallMethod { name, args, .. }
+                        if args.is_empty()
+                            && matches!(program.constants.get(*name as usize),
+                                Some(Constant::String(k)) if k == method.name()))
+            })
+            .count();
+        SiteRecord::locate_bare(program, method, enclosing, ordinal)
+    } else {
+        SiteRecord::locate(program, method, enclosing, first.or(written))
+    };
     let mut record = SiteRecord {
+        method,
         line,
         column,
         refusal: None,
         captures: 0,
         at: None,
+        default_order: false,
     };
-    let refuse = |record: &mut SiteRecord, refusal: Refusal| {
-        if let (Some(cb), Some(name)) = (target, refusal.detail.as_deref())
+    let refuse = |record: &mut SiteRecord, callback: Option<u32>, refusal: Refusal| {
+        if let (Some(cb), Some(name)) = (callback, refusal.detail.as_deref())
             && matches!(
                 refusal.reason,
                 Reason::CapturesReassigned | Reason::CapturesUnresolved | Reason::WritesCapture
@@ -93,49 +124,219 @@ fn parallel_site(
     // A generic-only unit lowers its qualifying sites unless it is a development build
     // (`DirectPlan::plan_parallel_sites`); the checks below then read the narrow plan.
     if plan.generic_only && !plan.parallel_in_generic {
-        refuse(&mut record, Refusal::new(Reason::DevProfile));
+        refuse(&mut record, None, Refusal::new(Reason::DevProfile));
         return (record, None);
     }
-    if args.len() > 1 {
-        refuse(&mut record, Refusal::new(Reason::ExtraArguments));
+    // `parallelSort()`: a typed array's default order is numeric, and the pool runs it.
+    if method == ParallelMethod::Sort && args.is_empty() {
+        record.default_order = true;
+        return (
+            record,
+            Some(ParallelSitePlan {
+                method,
+                targets: Vec::new(),
+                order: None,
+            }),
+        );
+    }
+    let callbacks = method.callbacks(args.len());
+    if callbacks.is_empty() {
+        let reason = match method {
+            ParallelMethod::Map | ParallelMethod::Filter | ParallelMethod::FlatMap
+                if args.len() > 1 =>
+            {
+                Reason::ExtraArguments
+            }
+            ParallelMethod::Map | ParallelMethod::Filter | ParallelMethod::FlatMap => {
+                Reason::CallbackUnknown
+            }
+            _ => Reason::ArgumentShape,
+        };
+        refuse(&mut record, None, Refusal::new(reason));
         return (record, None);
     }
-    let Some(target) = target else {
-        refuse(&mut record, Refusal::new(Reason::CallbackUnknown));
-        return (record, None);
-    };
-    let verdict = plan.parallel.get(target as usize).cloned();
-    if let Some(Err(refusal)) = verdict {
-        refuse(&mut record, refusal);
-        return (record, None);
-    }
-    // The typed entry the sequential lowering and the clone's references hang off.
-    if typed_callback(plan, program, args[0], &[1, 2]).is_none() {
-        refuse(&mut record, Refusal::new(Reason::NotTyped));
-        return (record, None);
-    }
-    match verdict {
-        Some(Ok(shape))
-            if plan
-                .parallel_safe
-                .get(target as usize)
-                .copied()
-                .unwrap_or(false) =>
+    let mut targets = Vec::with_capacity(callbacks.len());
+    let mut order = None;
+    for &(position, arities) in callbacks {
+        let Some(target) = plan.known.get(&args[position]).copied() else {
+            refuse(&mut record, None, Refusal::new(Reason::CallbackUnknown));
+            return (record, None);
+        };
+        // The parameters this method passes, first: a callback declared for another method has
+        // no typed entry or clone for this one, and its verdict would say so less plainly.
+        let declared = program.functions[target as usize].parameter_count;
+        if !arities.contains(&declared) {
+            refuse(
+                &mut record,
+                Some(target),
+                Refusal::with(Reason::Arity, format!("{declared} parameters")),
+            );
+            return (record, None);
+        }
+        let verdict = plan.parallel.get(target as usize).cloned();
+        let shape = match verdict {
+            Some(Ok(shape)) => shape,
+            Some(Err(refusal)) => {
+                refuse(&mut record, Some(target), refusal);
+                return (record, None);
+            }
+            None => {
+                refuse(
+                    &mut record,
+                    Some(target),
+                    Refusal::new(Reason::CallbackUnknown),
+                );
+                return (record, None);
+            }
+        };
+        // A predicate's clone answers boxed, which only `parallelFilter`'s workers read.
+        if shape.boolean_result
+            && method != ParallelMethod::Filter
+            && method != ParallelMethod::Sort
         {
-            record.captures = shape.captures.len();
-            (record, Some(target))
+            refuse(
+                &mut record,
+                Some(target),
+                Refusal::new(Reason::ReturnsNonNumber),
+            );
+            return (record, None);
         }
-        _ => {
-            refuse(&mut record, Refusal::new(Reason::CloneRejected));
-            (record, None)
+        if method == ParallelMethod::Sort {
+            let Some(proven) = shape.comparator else {
+                refuse(
+                    &mut record,
+                    Some(target),
+                    Refusal::new(Reason::ComparatorUnproven),
+                );
+                return (record, None);
+            };
+            order = Some(proven);
+            targets.push(target);
+            continue;
         }
+        // The typed entry the sequential lowering and the clone's references hang off.
+        if typed_callback(plan, program, args[position], arities).is_none() {
+            refuse(&mut record, Some(target), Refusal::new(Reason::NotTyped));
+            return (record, None);
+        }
+        if !plan
+            .parallel_safe
+            .get(target as usize)
+            .copied()
+            .unwrap_or(false)
+        {
+            refuse(
+                &mut record,
+                Some(target),
+                Refusal::new(Reason::CloneRejected),
+            );
+            return (record, None);
+        }
+        record.captures += shape.captures.len();
+        targets.push(target);
+    }
+    (
+        record,
+        Some(ParallelSitePlan {
+            method,
+            targets,
+            order,
+        }),
+    )
+}
+
+/// The tier-1 environment of one pooled callback (ADR 0069): the captured bindings its clone
+/// reads, each written once in the unit, read here on the realm thread from `closure`'s upvalue
+/// table -- after the closure is known to be the target, so the table is the one the proof is
+/// about -- and required to be numbers; otherwise `{prefix}_caps_ok` stays clear and the
+/// sequential lowering answers. Nothing can write them while the pool runs: the callback writes
+/// nothing and the realm thread is blocked in the call.
+///
+/// Returns the declarations, the `ctx` pointer the chunk workers take, the failure flag they set,
+/// and the name of the guard. The layout (`struct { int failed; double caps[N]; }`, the flag at
+/// offset 0) is the one `emit_parallel_chunk` reads.
+fn parallel_env(
+    plan: &crate::direct::CallPlan,
+    target: u32,
+    closure: &str,
+    prefix: &str,
+) -> (String, String, String, String) {
+    let captures = crate::emit_graph::parallel_captures(plan, target as usize);
+    let ok = format!("{prefix}_caps_ok");
+    if captures.is_empty() {
+        return (
+            format!("int {prefix}_failed = 0; int {ok} = 1;"),
+            format!("&{prefix}_failed"),
+            format!("{prefix}_failed"),
+            ok,
+        );
+    }
+    let mut decl = format!(
+        "struct {{ int failed; double caps[{}]; }} {prefix}_env; {prefix}_env.failed = 0; int {ok} = 1;",
+        captures.len()
+    );
+    for (j, k) in captures.iter().enumerate() {
+        decl.push_str(&format!(
+            " {{ kiln_val {prefix}_cap = *(const kiln_val *)KILN_VAL_PTR({closure}->upvalues[{k}]); if (KILN_VAL_IS_NUMBER({prefix}_cap)) memcpy(&{prefix}_env.caps[{j}], &{prefix}_cap, sizeof(double)); else {ok} = 0; }}"
+        ));
+    }
+    (
+        decl,
+        format!("&{prefix}_env"),
+        format!("{prefix}_env.failed"),
+        ok,
+    )
+}
+
+/// The pooled lowering of one admitted parallel site (see [`parallel_site`]): tried first,
+/// leaving `handled` clear -- for the sequential lowering or the generic call after it --
+/// whenever it does not answer. Shared by the specialized emission and the generic-only one
+/// (issue 13). Every form stands down when the realm withholds kiln's extensions (ADR 0068) or
+/// the current realm has written some built-in since its bootstrap (`kiln_c99_builtins_unmodified`), which
+/// covers a program that replaced the method itself.
+fn parallel_lowering(
+    plan: &crate::direct::CallPlan,
+    symbol: &str,
+    site: &ParallelSitePlan,
+    object: u32,
+    args: &[ValueId],
+    v: u32,
+) -> String {
+    use crate::parallel::ParallelMethod;
+    match site.method {
+        ParallelMethod::Map => {
+            parallel_pool_lowering(plan, symbol, site.targets[0], object, args[0].0, v, false)
+        }
+        // A numeric callback's result is never an array, so `flatMap` flattens nothing: its
+        // answer is `map`'s. Arrays only: typed arrays have no `flatMap`.
+        ParallelMethod::FlatMap => {
+            parallel_pool_lowering(plan, symbol, site.targets[0], object, args[0].0, v, true)
+        }
+        ParallelMethod::Filter => {
+            parallel_filter_lowering(plan, symbol, site.targets[0], object, args[0].0, v)
+        }
+        ParallelMethod::Reduce => parallel_reduce_lowering(
+            plan,
+            symbol,
+            site.targets[0],
+            site.targets[1],
+            object,
+            args,
+            v,
+        ),
+        ParallelMethod::Sort => parallel_sort_lowering(
+            symbol,
+            site.targets.first().copied(),
+            site.order,
+            object,
+            args.first().map(|a| a.0),
+            v,
+        ),
     }
 }
 
-/// The pooled `parallelMap` lowering of one site whose callback is proto `target` (see
-/// `parallel_site`): tried first, leaving `handled` clear -- for the sequential lowering or the
-/// generic call after it -- whenever it does not answer. Shared by the specialized emission and
-/// the generic-only one (issue 13).
+/// The pooled `parallelMap` (and `parallelFlatMap`) lowering of one site whose callback is proto
+/// `target`: the chunk workers write the result array (or view) directly.
 fn parallel_pool_lowering(
     plan: &crate::direct::CallPlan,
     symbol: &str,
@@ -143,61 +344,19 @@ fn parallel_pool_lowering(
     object: u32,
     callback: u32,
     v: u32,
+    arrays_only: bool,
 ) -> String {
-    // Tier 1 (ADR 0069): the captured bindings the callback reads, each written once in
-    // the unit, are read here on the realm thread -- after the closure is known to be
-    // the target, so its upvalue table is the one the proof is about -- and must all be
-    // numbers; otherwise `handled` stays clear and the sequential lowering answers.
-    // Nothing can write them while the pool runs: the callback writes nothing and the
-    // realm thread is blocked in the call.
-    let captures = crate::emit_graph::parallel_captures(plan, target as usize);
-    let (env_decl, env_ptr, env_failed) = if captures.is_empty() {
-        (
-            "int pmap_failed = 0; int pmap_caps_ok = 1;".to_owned(),
-            "&pmap_failed",
-            "pmap_failed",
-        )
+    let (env_decl, env_ptr, env_failed, env_ok) = parallel_env(plan, target, "plain", "pmap");
+    let typed_branch = if arrays_only {
+        String::new()
     } else {
-        let mut decl = format!(
-            "struct {{ int failed; double caps[{}]; }} pmap_env; pmap_env.failed = 0; int pmap_caps_ok = 1;",
-            captures.len()
-        );
-        for (j, k) in captures.iter().enumerate() {
-            decl.push_str(&format!(
-                    " {{ kiln_val pmap_cap = *(const kiln_val *)KILN_VAL_PTR(plain->upvalues[{k}]); if (KILN_VAL_IS_NUMBER(pmap_cap)) memcpy(&pmap_env.caps[{j}], &pmap_cap, sizeof(double)); else pmap_caps_ok = 0; }}"
-                ));
-        }
-        (decl, "&pmap_env", "pmap_env.failed")
-    };
-    format!(
-        "if (!handled && kiln_c99_kiln_extensions_on() && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
-                 void *ptr = KILN_VAL_PTR(v{o}); \
-                 if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
-                     kiln_array *arr = (kiln_array *)ptr; \
-                     kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                     if (arr->is_numeric && kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
-                         {env_decl} \
-                         if (pmap_caps_ok) {{ \
-                         size_t count0 = arr->count; \
-                         kiln_value built_val; \
-                         int status = kiln_c99_new_array_with_capacity(&built_val, count0, 1); \
-                         if (status != KILN_C99_OK) return status; \
-                         kiln_array *built_arr = kiln_c99_array_of(built_val); \
-                         const kiln_val * restrict in_elems = (const kiln_val * restrict)arr->elements; \
-                         kiln_val * restrict out_elems = (kiln_val * restrict)built_arr->elements; \
-                         if (kiln_parallel_map(in_elems, count0, out_elems, {symbol}_pmap_{target}, {env_ptr}) == 0 && !{env_failed}) {{ \
-                             built_arr->count = count0; \
-                             v{v} = kiln_val_from_boundary(built_val); \
-                             handled = 1; \
-                         }} \
-                         }} \
-                     }} \
-                 }} else if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY) {{ \
+        format!(
+            "else if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY) {{ \
                      kiln_typed_array *view = (kiln_typed_array *)ptr; \
                      kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                     if (kiln_c99_builtin_store_epoch == 0 && !kiln_c99_inheriting_new_target && !view->buffer->detached && depth < KILN_C99_MAX_CALL_DEPTH && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
+                     if (kiln_c99_builtins_unmodified() && !kiln_c99_inheriting_new_target && !view->buffer->detached && depth < KILN_C99_MAX_CALL_DEPTH && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
                          {env_decl} \
-                         if (pmap_caps_ok) {{ \
+                         if ({env_ok}) {{ \
                          size_t count0 = view->length; \
                          kiln_value built_val; \
                          int status = kiln_c99_typed_alloc_ex(&built_val, view->kind, count0, 0); \
@@ -231,6 +390,109 @@ fn parallel_pool_lowering(
                          }} \
                          }} \
                      }} \
+                 }}",
+            a0 = callback,
+        )
+    };
+    format!(
+        "if (!handled && kiln_c99_kiln_extensions_on() && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
+                 void *ptr = KILN_VAL_PTR(v{o}); \
+                 if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
+                     kiln_array *arr = (kiln_array *)ptr; \
+                     kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
+                     if (arr->is_numeric && kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
+                         {env_decl} \
+                         if ({env_ok}) {{ \
+                         size_t count0 = arr->count; \
+                         kiln_value built_val; \
+                         int status = kiln_c99_new_array_with_capacity(&built_val, count0, 1); \
+                         if (status != KILN_C99_OK) return status; \
+                         kiln_array *built_arr = kiln_c99_array_of(built_val); \
+                         const kiln_val * restrict in_elems = (const kiln_val * restrict)arr->elements; \
+                         kiln_val * restrict out_elems = (kiln_val * restrict)built_arr->elements; \
+                         if (kiln_parallel_map(in_elems, count0, out_elems, {symbol}_pmap_{target}, {env_ptr}) == 0 && !{env_failed}) {{ \
+                             built_arr->count = count0; \
+                             v{v} = kiln_val_from_boundary(built_val); \
+                             handled = 1; \
+                         }} \
+                         }} \
+                     }} \
+                 }} {typed_branch} \
+             }}",
+        o = object,
+        a0 = callback,
+        v = v,
+    )
+}
+
+/// The pooled `parallelFilter` lowering: the chunk workers write a keep mask (one byte per
+/// element, the callback's result through `ToBoolean`), and the realm thread copies the kept
+/// elements into the result in index order -- per-chunk answers concatenated in order, which is
+/// `filter`'s. The mask is `malloc`'d: the collector never sees it.
+fn parallel_filter_lowering(
+    plan: &crate::direct::CallPlan,
+    symbol: &str,
+    target: u32,
+    object: u32,
+    callback: u32,
+    v: u32,
+) -> String {
+    let (env_decl, env_ptr, env_failed, env_ok) = parallel_env(plan, target, "plain", "pflt");
+    format!(
+        "if (!handled && kiln_c99_kiln_extensions_on() && kiln_c99_builtins_unmodified() && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
+                 void *ptr = KILN_VAL_PTR(v{o}); \
+                 kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
+                 if (plain->body == (kiln_body_fn){symbol}_fn_{target} && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                 if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
+                     kiln_array *arr = (kiln_array *)ptr; \
+                     if (arr->is_numeric && arr->properties.tag == KILN_VALUE_UNDEFINED) {{ \
+                         {env_decl} \
+                         size_t count0 = arr->count; \
+                         uint8_t *pflt_mask = {env_ok} ? (uint8_t *)malloc(count0 + 1) : NULL; \
+                         if (pflt_mask != NULL) {{ \
+                             if (kiln_parallel_map(arr->elements, count0, pflt_mask, {symbol}_pmap_filt_{target}, {env_ptr}) == 0 && !{env_failed}) {{ \
+                                 size_t kept = 0; \
+                                 for (size_t i = 0; i < count0; ++i) kept += pflt_mask[i]; \
+                                 kiln_value built_val; \
+                                 int status = kiln_c99_new_array_with_capacity(&built_val, kept, 1); \
+                                 if (status != KILN_C99_OK) {{ free(pflt_mask); return status; }} \
+                                 kiln_array *built_arr = kiln_c99_array_of(built_val); \
+                                 const kiln_val *in_elems = arr->elements; \
+                                 size_t n = 0; \
+                                 for (size_t i = 0; i < count0; ++i) if (pflt_mask[i]) built_arr->elements[n++] = in_elems[i]; \
+                                 built_arr->count = kept; \
+                                 v{v} = kiln_val_from_boundary(built_val); \
+                                 handled = 1; \
+                             }} \
+                             free(pflt_mask); \
+                         }} \
+                     }} \
+                 }} else if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY) {{ \
+                     kiln_typed_array *view = (kiln_typed_array *)ptr; \
+                     if (!view->buffer->detached && !view->is_buffer && view->kind <= KILN_TYPED_FLOAT64) {{ \
+                         {env_decl} \
+                         size_t count0 = view->length; \
+                         uint8_t *pflt_mask = {env_ok} ? (uint8_t *)malloc(count0 + 1) : NULL; \
+                         if (pflt_mask != NULL) {{ \
+                             if (kiln_parallel_map(view, count0, pflt_mask, {symbol}_pmap_filt_typed_{target}, {env_ptr}) == 0 && !{env_failed}) {{ \
+                                 size_t kept = 0; \
+                                 for (size_t i = 0; i < count0; ++i) kept += pflt_mask[i]; \
+                                 kiln_value built_val; \
+                                 int status = kiln_c99_typed_alloc_ex(&built_val, view->kind, kept, 0); \
+                                 if (status != KILN_C99_OK) {{ free(pflt_mask); return status; }} \
+                                 kiln_typed_array *built_view = kiln_c99_typed_array_of(built_val); \
+                                 size_t width = view->kind <= KILN_TYPED_UINT8_CLAMPED ? 1 : view->kind <= KILN_TYPED_UINT16 ? 2 : view->kind <= KILN_TYPED_FLOAT32 ? 4 : 8; \
+                                 const uint8_t *src_bytes = view->buffer->bytes + view->byte_offset; \
+                                 uint8_t *dst_bytes = built_view->buffer->bytes + built_view->byte_offset; \
+                                 size_t n = 0; \
+                                 for (size_t i = 0; i < count0; ++i) if (pflt_mask[i]) {{ memcpy(dst_bytes + n * width, src_bytes + i * width, width); ++n; }} \
+                                 v{v} = kiln_val_from_boundary(built_val); \
+                                 handled = 1; \
+                             }} \
+                             free(pflt_mask); \
+                         }} \
+                     }} \
+                 }} \
                  }} \
              }}",
         o = object,
@@ -239,17 +501,155 @@ fn parallel_pool_lowering(
     )
 }
 
+/// The pooled `parallelReduce(callback, combine, initial)` lowering (ADR 0069): the tree the
+/// TypeScript definition applies, over the same leaves. The chunk workers fold whole leaves of
+/// [`crate::parallel::REDUCE_LEAF`] from `initial` into one double each; then each level of the
+/// tree is one more pooled call, `combine(r[2k], r[2k + 1])` for every pair, an odd last one
+/// carried up. So the answer is fixed by the input length, whatever the core count, and equals
+/// the interpreter's. `initial` must be a number here (the clones take doubles); anything else
+/// is the sequential definition's.
+fn parallel_reduce_lowering(
+    plan: &crate::direct::CallPlan,
+    symbol: &str,
+    fold: u32,
+    combine: u32,
+    object: u32,
+    args: &[ValueId],
+    v: u32,
+) -> String {
+    let (fold_decl, fold_ptr, fold_failed, fold_ok) = parallel_env(plan, fold, "plain", "pfold");
+    let (comb_decl, comb_ptr, comb_failed, comb_ok) =
+        parallel_env(plan, combine, "pcomb_closure", "pcomb");
+    let leaf = crate::parallel::REDUCE_LEAF;
+    format!(
+        "if (!handled && kiln_c99_kiln_extensions_on() && kiln_c99_builtins_unmodified() && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0}) && KILN_VAL_IS_CLOSURE(v{a1}) && KILN_VAL_IS_NUMBER(v{a2})) {{ \
+                 void *ptr = KILN_VAL_PTR(v{o}); \
+                 kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
+                 kiln_closure *pcomb_closure = (kiln_closure *)KILN_VAL_PTR(v{a1}); \
+                 if (plain->body == (kiln_body_fn){symbol}_fn_{fold} && pcomb_closure->body == (kiln_body_fn){symbol}_fn_{combine} && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                     struct {{ const void *elems; size_t count; double initial; }} pfold_in = {{ NULL, 0, 0.0 }}; \
+                     kiln_parallel_chunk_fn pfold_fn = NULL; \
+                     memcpy(&pfold_in.initial, &v{a2}, sizeof(double)); \
+                     if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
+                         kiln_array *arr = (kiln_array *)ptr; \
+                         if (arr->is_numeric && arr->properties.tag == KILN_VALUE_UNDEFINED) {{ pfold_in.elems = arr->elements; pfold_in.count = arr->count; pfold_fn = {symbol}_pmap_fold_{fold}; }} \
+                     }} else if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY) {{ \
+                         kiln_typed_array *view = (kiln_typed_array *)ptr; \
+                         if (!view->buffer->detached && view->kind <= KILN_TYPED_FLOAT64) {{ pfold_in.elems = view; pfold_in.count = view->length; pfold_fn = {symbol}_pmap_fold_typed_{fold}; }} \
+                     }} \
+                     if (pfold_fn != NULL) {{ \
+                         {fold_decl} \
+                         {comb_decl} \
+                         size_t leaves = (pfold_in.count + {leaf} - 1) / {leaf}; \
+                         if (leaves == 0) {{ \
+                             v{v} = v{a2}; \
+                             handled = 1; \
+                         }} else if ({fold_ok} && {comb_ok}) {{ \
+                             double *pfold_buf = (double *)malloc(2 * leaves * sizeof(double)); \
+                             if (pfold_buf != NULL) {{ \
+                                 if (kiln_parallel_map(&pfold_in, leaves, pfold_buf, pfold_fn, {fold_ptr}) == 0 && !{fold_failed}) {{ \
+                                     double *cur = pfold_buf; \
+                                     double *nxt = pfold_buf + leaves; \
+                                     size_t m = leaves; \
+                                     int pfold_ok = 1; \
+                                     while (m > 1) {{ \
+                                         size_t pairs = m / 2; \
+                                         if (kiln_parallel_map(cur, pairs, nxt, {symbol}_pmap_comb_{combine}, {comb_ptr}) != 0 || {comb_failed}) {{ pfold_ok = 0; break; }} \
+                                         if (m & 1) nxt[pairs] = cur[m - 1]; \
+                                         m = pairs + (m & 1); \
+                                         double *swap = cur; cur = nxt; nxt = swap; \
+                                     }} \
+                                     if (pfold_ok) {{ \
+                                         v{v} = kiln_c99_val_from_double(cur[0]); \
+                                         handled = 1; \
+                                     }} \
+                                 }} \
+                                 free(pfold_buf); \
+                             }} \
+                         }} \
+                     }} \
+                 }} \
+             }}",
+        o = object,
+        a0 = args[0].0,
+        a1 = args[1].0,
+        a2 = args[2].0,
+        v = v,
+    )
+}
+
+/// The pooled `parallelSort` lowering: a stable sort on the provider's pool
+/// (`kiln_parallel_sort`) of a typed array's elements by the default order, or of a typed
+/// array's or a numeric array's by a comparator proven to be `a - b` or `b - a`. The answer of a
+/// stable sort under a consistent order is unique, so it is `sort`'s; a `NaN` under a comparator
+/// (whose order `sort` leaves to the engine) makes the provider decline, and `sort` answers.
+fn parallel_sort_lowering(
+    symbol: &str,
+    comparator: Option<u32>,
+    order: Option<crate::parallel::SortOrder>,
+    object: u32,
+    comparator_value: Option<u32>,
+    v: u32,
+) -> String {
+    let code = order.map_or(0, crate::parallel::SortOrder::provider_code);
+    let (guard, identity) = match (comparator, comparator_value) {
+        (Some(target), Some(value)) => (
+            format!(" && KILN_VAL_IS_CLOSURE(v{value})"),
+            format!(
+                " && ((kiln_closure *)KILN_VAL_PTR(v{value}))->body == (kiln_body_fn){symbol}_fn_{target}"
+            ),
+        ),
+        _ => (String::new(), String::new()),
+    };
+    // An array's default order compares strings: only a proven comparator sorts one here.
+    let array_branch = if comparator.is_some() {
+        format!(
+            "else if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
+                 kiln_array *arr = (kiln_array *)ptr; \
+                 if (arr->is_numeric && !arr->frozen && arr->properties.tag == KILN_VALUE_UNDEFINED && kiln_parallel_sort(arr->elements, arr->count, 100, {code}) == 0) {{ \
+                     v{v} = v{object}; \
+                     handled = 1; \
+                 }} \
+             }}"
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "if (!handled && kiln_c99_kiln_extensions_on() && kiln_c99_builtins_unmodified() && (v{object} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX{guard}{identity}) {{ \
+             void *ptr = KILN_VAL_PTR(v{object}); \
+             if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY) {{ \
+                 kiln_typed_array *view = (kiln_typed_array *)ptr; \
+                 if (!view->buffer->detached && view->kind <= KILN_TYPED_FLOAT64 && kiln_parallel_sort(view->buffer->bytes + view->byte_offset, view->length, (int32_t)view->kind, {code}) == 0) {{ \
+                     v{v} = v{object}; \
+                     handled = 1; \
+                 }} \
+             }} {array_branch} \
+         }}"
+    )
+}
+
 /// The typed entry's own argument list, in its declared order: depth, then whatever
 /// `TypedNeeds` says it reaches for beyond its parameters (upvalues, the receiver `vrecv`, a
 /// `NULL` receiver-shape row -- this call site keeps none, exactly as the direct `Call` arm
 /// does -- and the runtime), then one `double` per declared parameter, named by `params`.
 fn typed_call_args(needs: TypedNeeds, params: &[&str]) -> String {
+    typed_call_args_for(needs, "plain", "vrecv", params)
+}
+
+/// [`typed_call_args`] for the closure named `closure`, whose receiver is `recv`.
+pub(super) fn typed_call_args_for(
+    needs: TypedNeeds,
+    closure: &str,
+    recv: &str,
+    params: &[&str],
+) -> String {
     let mut args = String::from("depth + 1");
     if needs.upvalues {
-        args.push_str(", plain->upvalues");
+        args.push_str(&format!(", {closure}->upvalues"));
     }
     if needs.receiver {
-        args.push_str(", vrecv");
+        args.push_str(&format!(", {recv}"));
     }
     if needs.row {
         args.push_str(", NULL");
@@ -284,6 +684,7 @@ fn emit_map_typed(
     typed_failed: &str,
     c: &TypedCallback,
     known_arr: bool,
+    (this_arg, this_ok): (&str, &str),
 ) -> String {
     let target = c.target;
     let mut params = vec!["d_elem".to_string()];
@@ -367,8 +768,8 @@ fn emit_map_typed(
     };
     format!(
         "{header} \
-             if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
-                 kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
+             if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
+                 kiln_val vrecv = plain->arrow ? plain->captured_this : {this_arg}; \
                  if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
                  if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
                      size_t count0 = arr->count; \
@@ -392,7 +793,7 @@ fn emit_map_typed(
                       * that shrinks it leaves holes, as `map` does. */ \
                      size_t count0 = arr->count; \
                      kiln_value built_val; \
-                     int status = kiln_c99_new_array_with_capacity(&built_val, count0, arr->is_numeric); \
+                     int status = kiln_c99_new_array_with_capacity(&built_val, count0, 1); \
                      if (status != KILN_C99_OK) return status; \
                      kiln_array *built_arr = kiln_c99_array_of(built_val); \
                      for (size_t idx = 0; idx < count0; ++idx) {{ \
@@ -437,6 +838,7 @@ fn emit_filter_typed(
     typed_failed: &str,
     c: &TypedCallback,
     known_arr: bool,
+    (this_arg, this_ok): (&str, &str),
 ) -> String {
     let target = c.target;
     let mut params = vec!["d_elem".to_string()];
@@ -489,8 +891,8 @@ fn emit_filter_typed(
     };
     format!(
         "{header} \
-             if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
-                 kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
+             if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
+                 kiln_val vrecv = plain->arrow ? plain->captured_this : {this_arg}; \
                  if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
                  if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
                      size_t count0 = arr->count; \
@@ -508,7 +910,7 @@ fn emit_filter_typed(
                      handled = 1; \
                  }} else if (!plain->generator) {{ \
                      kiln_value built_val; \
-                     int status = kiln_c99_new_array_with_capacity(&built_val, arr->count, arr->is_numeric); \
+                     int status = kiln_c99_new_array_with_capacity(&built_val, arr->count, 1); \
                      if (status != KILN_C99_OK) return status; \
                      kiln_array *built_arr = kiln_c99_array_of(built_val); \
                      for (size_t idx = 0; idx < arr->count; ++idx) {{ \
@@ -523,6 +925,7 @@ fn emit_filter_typed(
                              {check} \
                          }} \
                          if (kiln_c99_val_truthy(prod)) {{ \
+                             if (built_arr->is_numeric && !KILN_VAL_IS_NUMBER(elem)) built_arr->is_numeric = 0; \
                              built_arr->elements[built_arr->count++] = elem; \
                          }} \
                      }} \
@@ -581,7 +984,7 @@ fn emit_reduce_typed(
     };
     format!(
         "{header} \
-             if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
+             if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
                  kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
                  if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
                  if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
@@ -628,18 +1031,22 @@ fn is_proven_array(
             Some(GraphOp::StoreLocal { value, .. })
             | Some(GraphOp::StoreCell { value, .. })
             | Some(GraphOp::CheckTdz { value, .. }) => curr = *value,
-            Some(GraphOp::CallMethod { name, .. }) => {
-                let is_arr_method = program
-                    .constants
-                    .get(*name as usize)
-                    .and_then(|c| match c {
-                        Constant::String(s) => s.to_scalar_string().ok(),
-                        _ => None,
-                    })
-                    .is_some_and(|m| {
-                        matches!(m.as_str(), "map" | "filter" | "slice" | "concat" | "split")
-                    });
-                return is_arr_method;
+            Some(GraphOp::CallMethod { object, name, .. }) => {
+                let method = program.constants.get(*name as usize).and_then(|c| match c {
+                    Constant::String(s) => s.to_scalar_string().ok(),
+                    _ => None,
+                });
+                // `map`, `filter`, `slice` and `concat` answer an array only on an array: a
+                // typed array's answer a typed array, and a string's `slice` a string. So they
+                // prove an array only when their own receiver is one -- `view.slice().sort()`
+                // took the array `sort` over a typed array's block and left it unsorted.
+                return match method.as_deref() {
+                    Some("split") => true,
+                    Some("map" | "filter" | "slice" | "concat") => {
+                        is_proven_array(*object, defs, program)
+                    }
+                    _ => false,
+                };
             }
             _ => return false,
         }
@@ -718,7 +1125,7 @@ pub(super) fn emit_call_method(
     // In the parallel clone (ADR 0058, application 2) a `Math.<name>` call on the builtin
     // itself, with every argument proven a number, is the bare libm call and nothing else: no
     // generic fallback, because the clone runs on a thread with no realm to fall back to. The
-    // site that enters the clone has already checked `kiln_c99_builtin_store_epoch == 0` on the
+    // site that enters the clone has already checked `kiln_c99_builtins_unmodified()` on the
     // realm thread, so `Math.<name>` is the table's. `parallel::parallel_safe` admits only these
     // calls into a clone, so any other `CallMethod` here would be a bug in that predicate; the
     // generic lowering below then mentions `host`, and the clone is rejected by the scan.
@@ -839,12 +1246,13 @@ pub(super) fn emit_call_method(
         _ => String::new(),
     };
     let diagnostic_source = diagnostic_source(diagnostic_site);
-    // Every `parallelMap` site says, in the C, what was decided for it and why; see
-    // `parallel::SiteRecord`.
-    let parallel_site = (key_str == "parallelMap").then(|| {
-        let (record, target) = parallel_site(plan, program, ctx.self_index, ctx.defs, args);
+    // Every parallel site (`parallelMap` and the family) says, in the C, what was decided for it
+    // and why; see `parallel::SiteRecord`.
+    let parallel_site = crate::parallel::ParallelMethod::from_name(&key_str).map(|method| {
+        let (record, site) =
+            parallel_site(plan, program, ctx.self_index, ctx.defs, method, args, vid);
         writeln!(output, "    {}", record.marker()).unwrap();
-        target
+        site
     });
     if plan.generic_only {
         let n = argc.max(1);
@@ -877,8 +1285,9 @@ pub(super) fn emit_call_method(
         // A qualifying `parallelMap` site in a generic-only unit (issue 13): the pooled
         // lowering first, and the generic call below only when it did not answer.
         let pool = parallel_site
-            .flatten()
-            .map(|target| parallel_pool_lowering(plan, symbol, target, object.0, args[0].0, v));
+            .as_ref()
+            .and_then(Option::as_ref)
+            .map(|site| parallel_lowering(plan, symbol, site, object.0, args, v));
         if let Some(pool) = &pool {
             writeln!(
                 output,
@@ -965,8 +1374,6 @@ pub(super) fn emit_call_method(
                 .iter()
                 .map(|&i| {
                     let pfx = format!("{symbol}_fn_{fn_id}_v{v}_t_{i}");
-                    let shape_var = format!("{pfx}_shape");
-                    let row_var = format!("{pfx}_row");
 
                     let needs = plan.typed_needs[i as usize];
                     let mut call_args = String::from("depth + 1");
@@ -976,21 +1383,17 @@ pub(super) fn emit_call_method(
                     if needs.receiver {
                         call_args.push_str(&format!(", v{}", object.0));
                     }
-                    // The callee's row for this receiver's shape, remembered here from the
-                    // callee's own table after the first call, so the callee does no lookup.
-                    let (row_arg, row_learn) = if needs.row {
+                    // The callee's row for this receiver's shape, looked up here in the callee's
+                    // own table (write-once rows, ADR 0071), so the callee does no lookup.
+                    let row_lookup = if needs.row {
                         let columns = plan.receiver_columns.get(i as usize).copied().unwrap_or(0);
                         call_args.push_str(", {ROW}");
-                        (
-                            String::new(),
-                            format!(
-                                " if (obj->shape != {shape_var}) {{ const uint32_t *__r = kiln_c99_recv_row({symbol}_fn_{i}_typed_recv_shape, &{symbol}_fn_{i}_typed_recv_slot[0][0], {columns}, obj->shape); if (__r != NULL) {{ {shape_var} = obj->shape; {row_var} = __r; }} }}"
-                            ),
+                        format!(
+                            "const uint32_t *__row = kiln_c99_recv_row({symbol}_fn_{i}_typed_recv_shape, &{symbol}_fn_{i}_typed_recv_slot[0][0], {columns}, obj->shape); "
                         )
                     } else {
-                        (String::new(), String::new())
+                        String::new()
                     };
-                    let _ = row_arg;
                     if needs.runtime {
                         call_args.push_str(", host, thrown");
                     }
@@ -1036,7 +1439,7 @@ pub(super) fn emit_call_method(
                     // for the slot is learned.
                     let path_learn = if needs.row {
                         format!(
-                            " kiln_c99_method_path_learn(&{pfx}_path, &site, obj, (kiln_body_fn){symbol}_fn_{i}, obj->shape == {shape_var} ? {row_var} : NULL, 1);"
+                            " kiln_c99_method_path_learn(&{pfx}_path, &site, obj, (kiln_body_fn){symbol}_fn_{i}, __row, 1);"
                         )
                     } else {
                         format!(
@@ -1045,12 +1448,12 @@ pub(super) fn emit_call_method(
                     };
                     let arm = |learn_path: &str, matched: &str| -> String {
                         if needs.row {
-                            // The receiver's shape is the one whose row this site remembered: the
-                            // row goes in known, so the callee's own lookup folds away.
+                            // A receiver whose shape has a row: the row goes in known, so the
+                            // callee's own lookup folds away. Otherwise the callee claims one.
                             let known = invoke("__row", learn_path);
-                            let learning = invoke("NULL", &format!("{row_learn}{learn_path}"));
+                            let learning = invoke("NULL", "");
                             format!(
-                                "if ({matched}) {{ if (obj->shape != NULL && obj->shape == {shape_var}) {{ const uint32_t *__row = {row_var}; if (__row == NULL) __builtin_unreachable(); {known} }} else {{ {learning} }} handled = 1; }}"
+                                "if ({matched}) {{ {row_lookup}if (__row != NULL) {{ {known} }} else {{ {learning} }} handled = 1; }}"
                             )
                         } else {
                             let plain_call = invoke("", learn_path);
@@ -1078,7 +1481,7 @@ pub(super) fn emit_call_method(
                         invoke("", "")
                     };
                     let front = format!(
-                        "if (!handled && obj->shape == {pfx}_path.recv) {{ const kiln_object *kiln_path_level; if (kiln_c99_method_path_hit(&{pfx}_path, obj, &kiln_path_level) && kiln_typed_ok) {{ {front_closure}{front_call} handled = 1; }} }} "
+                        "if (!handled && obj->shape == kiln_c99_slot_key(&{pfx}_path.recv)) {{ const kiln_object *kiln_path_level; if (kiln_c99_method_path_hit(&{pfx}_path, obj, &kiln_path_level) && kiln_typed_ok) {{ {front_closure}{front_call} handled = 1; }} }} "
                     );
                     (front, format!("{} else ", arm(&path_learn, &matched)))
                 })
@@ -1140,7 +1543,7 @@ pub(super) fn emit_call_method(
         && argc == 1
     {
         Some(format!(
-            "if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_PROMISE && KILN_VAL_IS_NUMBER(v{a0}))) {{ v{v} = v{a0}; handled = 1; }}",
+            "if (KILN_LIKELY(kiln_c99_builtins_unmodified() && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_PROMISE && KILN_VAL_IS_NUMBER(v{a0}))) {{ v{v} = v{a0}; handled = 1; }}",
             o = object.0,
             a0 = args[0].0,
             v = v,
@@ -1461,7 +1864,7 @@ pub(super) fn emit_call_method(
     // written onto any builtin: `Math.max = f` and `Promise.resolve = f` move the store epoch,
     // and every intrinsic above then takes the general call, which finds the override.
     let math_intrinsic = math_intrinsic
-        .map(|text| format!("if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0)) {{ {text} }}"));
+        .map(|text| format!("if (KILN_LIKELY(kiln_c99_builtins_unmodified())) {{ {text} }}"));
 
     // 1b. Array.isArray static predicate
     let array_is_array_intrinsic = if key_str == "isArray" {
@@ -1484,7 +1887,7 @@ pub(super) fn emit_call_method(
             }
         };
         Some(format!(
-            "if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_ARRAY)) {{ \
+            "if (KILN_LIKELY(kiln_c99_builtins_unmodified() && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_ARRAY)) {{ \
                  {arg_check} \
              }}",
             o = object.0,
@@ -1497,7 +1900,7 @@ pub(super) fn emit_call_method(
     // 1c. Number.* static predicates (isFinite, isNaN, isInteger, isSafeInteger)
     let number_predicate_intrinsic = match (key_str.as_str(), argc) {
         ("isFinite" | "isNaN" | "isInteger" | "isSafeInteger", 0) => Some(format!(
-            "if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
+            "if (KILN_LIKELY(kiln_c99_builtins_unmodified() && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
                  v{v} = KILN_VAL_FALSE; \
                  handled = 1; \
              }}",
@@ -1521,7 +1924,7 @@ pub(super) fn emit_call_method(
                 )
             };
             Some(format!(
-                "if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
+                "if (KILN_LIKELY(kiln_c99_builtins_unmodified() && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
                      {check} \
                  }}",
                 o = object.0,
@@ -1545,7 +1948,7 @@ pub(super) fn emit_call_method(
                 )
             };
             Some(format!(
-                "if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
+                "if (KILN_LIKELY(kiln_c99_builtins_unmodified() && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
                      {check} \
                  }}",
                 o = object.0,
@@ -1571,7 +1974,7 @@ pub(super) fn emit_call_method(
                 )
             };
             Some(format!(
-                "if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
+                "if (KILN_LIKELY(kiln_c99_builtins_unmodified() && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
                      {check} \
                  }}",
                 o = object.0,
@@ -1597,7 +2000,7 @@ pub(super) fn emit_call_method(
                 )
             };
             Some(format!(
-                "if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
+                "if (KILN_LIKELY(kiln_c99_builtins_unmodified() && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
                      {check} \
                  }}",
                 o = object.0,
@@ -1733,15 +2136,66 @@ pub(super) fn emit_call_method(
         None
     };
 
+    // The sequential method this site runs: `key_str` itself, or -- at a site of the parallel
+    // family -- the method the family member means (`parallelMap` is `map`, ADR 0068 rule 3).
+    // A family site lowers exactly as a call of that method would at this site, behind the pooled
+    // lowering and behind `kiln_c99_kiln_extensions_on()` (a realm without kiln's members has no
+    // `parallelMap` to call), so a call the pool declines at run time runs `map`'s own fastest
+    // path here, never the generic call into the TypeScript definition (parallel issue 15). With
+    // the built-ins untouched (`kiln_c99_builtins_unmodified()`, which the guard checks for the
+    // `sort` loop, the one loop that does not check it itself) the member is the bootstrap's,
+    // which calls that method. `parallelReduce` has no sequential method; its tree is
+    // `callback_loops::reduce_tree`. `parallelFlatMap` has no lowering of its own: `flatMap` has
+    // none either, and both call the same built-in.
+    let family = crate::parallel::ParallelMethod::from_name(&key_str);
+    let seq_key: &str = match family {
+        Some(crate::parallel::ParallelMethod::Map) => "map",
+        Some(crate::parallel::ParallelMethod::Filter) => "filter",
+        Some(crate::parallel::ParallelMethod::Sort) => "sort",
+        _ => key_str.as_str(),
+    };
+    let family_guard = |text: String| {
+        if family.is_some() {
+            format!(
+                "if (kiln_c99_kiln_extensions_on() && kiln_c99_builtins_unmodified()) {{ {text} }}"
+            )
+        } else {
+            text
+        }
+    };
+    // `map` and `filter` take a thisArg: the callback's `this`, else undefined -- which a sloppy
+    // callback sees as the global object. A sloppy callback given a primitive thisArg would see it
+    // boxed; that case is left to the generic call.
+    let callback_loop = (seq_key == "map" || seq_key == "filter") && (argc == 1 || argc == 2);
+    let (this_arg, this_ok) = if argc == 2 {
+        let t = args[1].0;
+        (
+            format!("v{t}"),
+            format!("plain->arrow || plain->strict || KILN_VAL_IS_NULLISH(v{t})"),
+        )
+    } else {
+        ("KILN_VAL_UNDEFINED".to_owned(), "1".to_owned())
+    };
+    let loop_site = callback_loops::LoopSite {
+        symbol,
+        object: object.0,
+        callback: args.first().map_or(0, |a| a.0),
+        v,
+        check: &check,
+        typed_failed: "",
+        this_arg: &this_arg,
+        this_ok: &this_ok,
+    };
+
     // A callback whose proto this compile proves the identity of -- `plan.known`, not a cache --
     // and whose own declared arity the loop can call typed, is entered through its typed entry
     // directly from the loop, ahead of the generic (boxed) one. `DirectPlan::plan`'s
-    // `callback_targets` references such a proto from the same three call shapes read here, so
+    // `callback_targets` references such a proto from the same call shapes read here, so
     // its typed entry exists exactly when one of these finds it.
-    let map_typed = (key_str == "map" && argc == 1)
+    let map_typed = (seq_key == "map" && callback_loop)
         .then(|| typed_callback(plan, program, args[0], &[1, 2]))
         .flatten();
-    let filter_typed = (key_str == "filter" && argc == 1)
+    let filter_typed = (seq_key == "filter" && callback_loop)
         .then(|| typed_callback(plan, program, args[0], &[1, 2]))
         .flatten();
     // `reduce`'s accumulator has to stay a `double` for the whole loop, so the typed loop is
@@ -1757,9 +2211,45 @@ pub(super) fn emit_call_method(
     let typed_failed = format!(
         "{{ int status = kiln_c99_typed_status; if (status == KILN_C99_THROWN) *thrown = kiln_c99_typed_thrown; {diag} {typed_check} }}"
     );
+    let loop_site = callback_loops::LoopSite {
+        typed_failed: &typed_failed,
+        ..loop_site
+    };
+    // The receiver checks every array loop below opens with: a proven array needs none, anything
+    // else must be an array block. Each loop's `{footer}` closes what its header opened.
+    let array_header = |a0: u32| -> (String, &'static str) {
+        if known_arr {
+            (
+                format!(
+                    "if (!handled && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
+                         kiln_array *arr = (kiln_array *)KILN_VAL_PTR(v{o}); \
+                         kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0});",
+                    o = object.0
+                ),
+                "}",
+            )
+        } else {
+            (
+                format!(
+                    "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
+                         void *ptr = KILN_VAL_PTR(v{o}); \
+                         if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
+                             kiln_array *arr = (kiln_array *)ptr; \
+                             kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0});",
+                    o = object.0
+                ),
+                "} }",
+            )
+        }
+    };
+    // A typed array's loop, beside the array one wherever the receiver is not proven an array.
+    let typed_array_loop = |text: String| if known_arr { String::new() } else { text };
 
-    let map_intrinsic = if key_str == "map" && argc == 1 {
-        Some(match &map_typed {
+    let map_intrinsic = callback_loop.then(|| {
+        if seq_key != "map" {
+            return String::new();
+        }
+        let array = match &map_typed {
             Some(c) => emit_map_typed(
                 symbol,
                 object.0,
@@ -1769,56 +2259,33 @@ pub(super) fn emit_call_method(
                 &typed_failed,
                 c,
                 known_arr,
+                (&this_arg, &this_ok),
             ),
             None => {
-                let (header, footer) = if known_arr {
-                    (
-                        format!(
-                            "if (!handled && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
-                                 kiln_array *arr = (kiln_array *)KILN_VAL_PTR(v{o}); \
-                                 kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0});",
-                            a0 = args[0].0,
-                            o = object.0
-                        ),
-                        "}",
-                    )
-                } else {
-                    (
-                        format!(
-                            "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
-                                 void *ptr = KILN_VAL_PTR(v{o}); \
-                                 if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
-                                     kiln_array *arr = (kiln_array *)ptr; \
-                                     kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0});",
-                            a0 = args[0].0,
-                            o = object.0
-                        ),
-                        "} }",
-                    )
-                };
+                let (header, footer) = array_header(args[0].0);
                 format!(
                     "{header} \
-                         if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
+                         if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
+                             /* `map`, element for element: the length read once, each element \
+                              * read when it is visited (a callback may grow, shrink or \
+                              * reallocate the array), and the result's length kept current so \
+                              * the collector sees every value stored so far. The result is \
+                              * numeric until a value that is not a number lands in it. */ \
+                             size_t count0 = arr->count; \
                              kiln_value built_val; \
-                             int status = kiln_c99_new_array_with_capacity(&built_val, arr->count, arr->is_numeric); \
+                             int status = kiln_c99_new_array_with_capacity(&built_val, count0, 1); \
                              if (status != KILN_C99_OK) return status; \
                              kiln_array *built_arr = kiln_c99_array_of(built_val); \
-                             kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
+                             kiln_val vrecv = plain->arrow ? plain->captured_this : {this_arg}; \
                              if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
-                             for (size_t idx = 0; idx < arr->count; ++idx) {{ \
-                                 if (arr->elements[idx] == KILN_VAL_HOLE) {{ \
+                             for (size_t idx = 0; idx < count0; ++idx) {{ \
+                                 if (idx >= arr->count || arr->elements[idx] == KILN_VAL_HOLE) {{ \
                                      built_arr->elements[built_arr->count++] = KILN_VAL_HOLE; \
                                      built_arr->is_numeric = 0; \
                                      continue; \
                                  }} \
-                                 kiln_val vargs[3] = {{ arr->elements[idx], kiln_c99_val_from_double((double)idx), v{o} }}; \
                                  kiln_val prod = KILN_VAL_UNDEFINED; \
-                                 int status; \
-                                 if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
-                                 else status = kiln_c99_invoke_closure(host, &prod, plain, vrecv, vargs, (size_t)3, depth, thrown, NULL, 0); \
-                                 if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ \
-                                     {check} \
-                                 }} \
+                                 {call} \
                                  if (built_arr->is_numeric && !KILN_VAL_IS_NUMBER(prod)) {{ \
                                      built_arr->is_numeric = 0; \
                                  }} \
@@ -1828,133 +2295,46 @@ pub(super) fn emit_call_method(
                              handled = 1; \
                          }} \
                      {footer}",
-                    header = header,
-                    o = object.0,
-                    check = check,
-                    v = v,
-                    footer = footer
+                    call = callback_loops::closure_call(
+                        "plain",
+                        "vrecv",
+                        &[
+                            "arr->elements[idx]",
+                            "kiln_c99_val_from_double((double)idx)",
+                            &format!("v{}", object.0)
+                        ],
+                        "prod",
+                        &check
+                    ),
                 )
             }
-        })
-    } else {
-        None
-    };
+        };
+        let typed_array =
+            typed_array_loop(callback_loops::typed_array_map(&loop_site, map_typed.as_ref()));
+        family_guard(format!("{array} {typed_array}"))
+    });
 
-    // The pooled `parallelMap` (ADR 0058, application 2): the callback is this site's known proto,
-    // its body passes `parallel::parallel_safe`, its typed entry returns a double, and its
-    // parallel clone (`_p`) was emitted and scanned clean (`lib.rs`), so it can run on a provider
-    // pool thread that owns no realm. `kiln_c99_builtin_store_epoch == 0` is checked here, on the
-    // realm thread, because the clone calls `Math.<name>` as bare libm.
-    // Tried before the sequential lowering below and only when the receiver is a numeric array
-    // whose closure really is that proto; a typed entry that bails out, or a provider that could
-    // not run the pool, leaves `handled` clear and the sequential lowering answers -- the same
-    // answer, recomputed. Nothing is refused here.
-    // Both lowerings of `parallelMap` stand down when the realm withholds kiln's extensions
-    // (ADR 0068): the call then goes through the ordinary lookup, which misses, and throws the
-    // TypeError Node throws for a method that is not there.
+    // The pooled `parallelMap` (ADR 0058, application 2) and the family's other pooled
+    // lowerings (issue 10): the callback is this site's known proto, its body passes
+    // `parallel::parallel_safe`, its typed entry returns a double, and its parallel clone (`_p`)
+    // was emitted and scanned clean (`lib.rs`), so it can run on a provider pool thread that owns
+    // no realm. `kiln_c99_builtins_unmodified()` is checked on the realm thread, because the
+    // clone calls `Math.<name>` as bare libm. Tried before the sequential lowering and only when
+    // the receiver qualifies; a typed entry that bails out, or a provider that could not run the
+    // pool, leaves `handled` clear and the sequential lowering answers -- the same answer,
+    // recomputed. Nothing is refused here. Every pooled form stands down when the realm withholds
+    // kiln's extensions (ADR 0068): the call then goes through the ordinary lookup, which misses,
+    // and throws the TypeError Node throws for a method that is not there.
     let parallel_pool_intrinsic = parallel_site
-        .flatten()
-        .map(|target| parallel_pool_lowering(plan, symbol, target, object.0, args[0].0, v));
+        .as_ref()
+        .and_then(Option::as_ref)
+        .map(|site| parallel_lowering(plan, symbol, site, object.0, args, v));
 
-    // `parallelMap`'s `this` is `map`'s: the thisArg, else undefined -- which a sloppy callback
-    // sees as the global object. A sloppy callback given a primitive thisArg would see it boxed;
-    // that case is left to the generic call below rather than lowered here.
-    let (this_arg, this_ok) = if argc >= 2 {
-        let t = args[1].0;
-        (
-            format!("v{t}"),
-            format!("plain->arrow || plain->strict || KILN_VAL_IS_NULLISH(v{t})"),
-        )
-    } else {
-        ("KILN_VAL_UNDEFINED".to_owned(), "1".to_owned())
-    };
-    let parallel_map_intrinsic = if key_str == "parallelMap" && argc >= 1 {
-        Some(format!(
-            "if (!handled && kiln_c99_kiln_extensions_on() && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
-                         void *ptr = KILN_VAL_PTR(v{o}); \
-                         if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
-                             kiln_array *arr = (kiln_array *)ptr; \
-                             kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                             if (!plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok})) {{ \
-                                 /* `map`, element for element: the length read once, each element \
-                                  * read when it is visited (a callback may grow, shrink or \
-                                  * reallocate the array), the result's length kept current so the \
-                                  * collector sees every value stored so far, and `this` the \
-                                  * thisArg, or undefined. */ \
-                                 size_t count0 = arr->count; \
-                                 kiln_value built_val; \
-                                 int status = kiln_c99_new_array_with_capacity(&built_val, count0, arr->is_numeric); \
-                                 if (status != KILN_C99_OK) return status; \
-                                 kiln_array *built_arr = kiln_c99_array_of(built_val); \
-                                 kiln_val vrecv = plain->arrow ? plain->captured_this : {this_arg}; \
-                                 if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
-                                 for (size_t idx = 0; idx < count0; ++idx) {{ \
-                                     if (idx >= arr->count || arr->elements[idx] == KILN_VAL_HOLE) {{ \
-                                         built_arr->elements[built_arr->count++] = KILN_VAL_HOLE; \
-                                         built_arr->is_numeric = 0; \
-                                         continue; \
-                                     }} \
-                                     kiln_val vargs[3] = {{ arr->elements[idx], kiln_c99_val_from_double((double)idx), v{o} }}; \
-                                     kiln_val prod = KILN_VAL_UNDEFINED; \
-                                     int status; \
-                                     if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
-                                     else status = kiln_c99_invoke_closure(host, &prod, plain, vrecv, vargs, (size_t)3, depth, thrown, NULL, 0); \
-                                     if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ \
-                                         {check} \
-                                     }} \
-                                     if (built_arr->is_numeric && !KILN_VAL_IS_NUMBER(prod)) {{ \
-                                         built_arr->is_numeric = 0; \
-                                     }} \
-                                     built_arr->elements[built_arr->count++] = prod; \
-                                 }} \
-                                 v{v} = kiln_val_from_boundary(built_val); \
-                                 handled = 1; \
-                             }} \
-                         }} else if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY) {{ \
-                             kiln_typed_array *view = (kiln_typed_array *)ptr; \
-                             kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                             if (!plain->generator && !kiln_inheriting && !view->buffer->detached && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok})) {{ \
-                                 kiln_value built_val; \
-                                 int status = kiln_c99_typed_alloc(&built_val, view->kind, view->length); \
-                                 if (status != KILN_C99_OK) return status; \
-                                 kiln_typed_array *built_view = kiln_c99_typed_array_of(built_val); \
-                                 kiln_val vrecv = plain->arrow ? plain->captured_this : {this_arg}; \
-                                 if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
-                                 for (size_t idx = 0; idx < view->length; ++idx) {{ \
-                                     kiln_val vargs[3] = {{ kiln_c99_val_from_double(kiln_c99_typed_get(view, idx)), kiln_c99_val_from_double((double)idx), v{o} }}; \
-                                     kiln_val prod = KILN_VAL_UNDEFINED; \
-                                     int status; \
-                                     if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
-                                     else status = kiln_c99_invoke_closure(host, &prod, plain, vrecv, vargs, (size_t)3, depth, thrown, NULL, 0); \
-                                     if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ \
-                                         {check} \
-                                     }} \
-                                     double num_val = 0.0; \
-                                     if (KILN_VAL_IS_NUMBER(prod)) {{ memcpy(&num_val, &prod, sizeof(num_val)); }} \
-                                     else {{ \
-                                         status = kiln_c99_to_number_checked(host, kiln_val_to_boundary(prod), &num_val, depth, thrown); \
-                                         if (status != KILN_C99_OK) return status; \
-                                     }} \
-                                     kiln_c99_typed_set(built_view, idx, num_val); \
-                                 }} \
-                                 v{v} = kiln_val_from_boundary(built_val); \
-                                 handled = 1; \
-                             }} \
-                         }} \
-                     }}",
-            o = object.0,
-            a0 = args[0].0,
-            v = v,
-            check = check,
-            this_arg = this_arg,
-            this_ok = this_ok,
-        ))
-    } else {
-        None
-    };
-
-    let filter_intrinsic = if key_str == "filter" && argc == 1 {
-        Some(match &filter_typed {
+    let filter_intrinsic = callback_loop.then(|| {
+        if seq_key != "filter" {
+            return String::new();
+        }
+        let array = match &filter_typed {
             Some(c) => emit_filter_typed(
                 symbol,
                 object.0,
@@ -1964,54 +2344,26 @@ pub(super) fn emit_call_method(
                 &typed_failed,
                 c,
                 known_arr,
+                (&this_arg, &this_ok),
             ),
             None => {
-                let (header, footer) = if known_arr {
-                    (
-                        format!(
-                            "if (!handled && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
-                                 kiln_array *arr = (kiln_array *)KILN_VAL_PTR(v{o}); \
-                                 kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0});",
-                            a0 = args[0].0,
-                            o = object.0
-                        ),
-                        "}",
-                    )
-                } else {
-                    (
-                        format!(
-                            "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
-                                 void *ptr = KILN_VAL_PTR(v{o}); \
-                                 if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
-                                     kiln_array *arr = (kiln_array *)ptr; \
-                                     kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0});",
-                            a0 = args[0].0,
-                            o = object.0
-                        ),
-                        "} }",
-                    )
-                };
+                let (header, footer) = array_header(args[0].0);
                 format!(
                     "{header} \
-                         if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
+                         if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
                              kiln_value built_val; \
-                             int status = kiln_c99_new_array_with_capacity(&built_val, arr->count, arr->is_numeric); \
+                             int status = kiln_c99_new_array_with_capacity(&built_val, arr->count, 1); \
                              if (status != KILN_C99_OK) return status; \
                              kiln_array *built_arr = kiln_c99_array_of(built_val); \
-                             kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
+                             kiln_val vrecv = plain->arrow ? plain->captured_this : {this_arg}; \
                              if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
                              for (size_t idx = 0; idx < arr->count; ++idx) {{ \
                                  if (arr->elements[idx] == KILN_VAL_HOLE) continue; \
                                  kiln_val elem = arr->elements[idx]; \
-                                 kiln_val vargs[3] = {{ elem, kiln_c99_val_from_double((double)idx), v{o} }}; \
                                  kiln_val prod = KILN_VAL_UNDEFINED; \
-                                 int status; \
-                                 if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
-                                 else status = kiln_c99_invoke_closure(host, &prod, plain, vrecv, vargs, (size_t)3, depth, thrown, NULL, 0); \
-                                 if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ \
-                                     {check} \
-                                 }} \
+                                 {call} \
                                  if (kiln_c99_val_truthy(prod)) {{ \
+                                     if (built_arr->is_numeric && !KILN_VAL_IS_NUMBER(elem)) built_arr->is_numeric = 0; \
                                      built_arr->elements[built_arr->count++] = elem; \
                                  }} \
                              }} \
@@ -2019,95 +2371,109 @@ pub(super) fn emit_call_method(
                              handled = 1; \
                          }} \
                      {footer}",
-                    header = header,
-                    o = object.0,
-                    check = check,
-                    v = v,
-                    footer = footer
+                    call = callback_loops::closure_call(
+                        "plain",
+                        "vrecv",
+                        &[
+                            "elem",
+                            "kiln_c99_val_from_double((double)idx)",
+                            &format!("v{}", object.0)
+                        ],
+                        "prod",
+                        &check
+                    ),
                 )
             }
-        })
-    } else {
-        None
-    };
+        };
+        let typed_array = typed_array_loop(callback_loops::typed_array_filter(
+            &loop_site,
+            filter_typed.as_ref(),
+        ));
+        family_guard(format!("{array} {typed_array}"))
+    });
 
+    let reduce_init_dacc = |initial: ValueId| {
+        if ctx.live_ints.contains(&initial) && !ctx.live_numbers.contains(&initial) {
+            format!("(double)i{}", initial.0)
+        } else {
+            format!("d{}", initial.0)
+        }
+    };
     let reduce_intrinsic = if key_str == "reduce" && argc == 2 {
-        Some(match &reduce_typed {
-            Some(c) => {
-                let init_dacc = if ctx.live_numbers.contains(&args[1]) {
-                    format!("d{}", args[1].0)
-                } else if ctx.live_ints.contains(&args[1]) {
-                    format!("(double)i{}", args[1].0)
-                } else {
-                    format!("d{}", args[1].0)
-                };
-                emit_reduce_typed(
-                    symbol,
-                    (object.0, args[0].0, args[1].0, v),
-                    &check,
-                    &typed_failed,
-                    c,
-                    known_arr,
-                    &init_dacc,
-                )
-            }
+        let array = match &reduce_typed {
+            Some(c) => emit_reduce_typed(
+                symbol,
+                (object.0, args[0].0, args[1].0, v),
+                &check,
+                &typed_failed,
+                c,
+                known_arr,
+                &reduce_init_dacc(args[1]),
+            ),
             None => {
-                let (header, footer) = if known_arr {
-                    (
-                        format!(
-                            "if (!handled && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
-                                 kiln_array *arr = (kiln_array *)KILN_VAL_PTR(v{o}); \
-                                 kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0});",
-                            a0 = args[0].0,
-                            o = object.0
-                        ),
-                        "}",
-                    )
-                } else {
-                    (
-                        format!(
-                            "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
-                                 void *ptr = KILN_VAL_PTR(v{o}); \
-                                 if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
-                                     kiln_array *arr = (kiln_array *)ptr; \
-                                     kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0});",
-                            a0 = args[0].0,
-                            o = object.0
-                        ),
-                        "} }",
-                    )
-                };
+                let (header, footer) = array_header(args[0].0);
                 format!(
                     "{header} \
-                         if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
+                         if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
                              kiln_val vacc = v{a1}; \
                              kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
                              if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
                              for (size_t idx = 0; idx < arr->count; ++idx) {{ \
                                  if (arr->elements[idx] == KILN_VAL_HOLE) continue; \
-                                 kiln_val vargs[4] = {{ vacc, arr->elements[idx], kiln_c99_val_from_double((double)idx), v{o} }}; \
                                  kiln_val prod = KILN_VAL_UNDEFINED; \
-                                 int status; \
-                                 if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)4); }} \
-                                 else status = kiln_c99_invoke_closure(host, &prod, plain, vrecv, vargs, (size_t)4, depth, thrown, NULL, 0); \
-                                 if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ \
-                                     {check} \
-                                 }} \
+                                 {call} \
                                  vacc = prod; \
                              }} \
                              v{v} = vacc; \
                              handled = 1; \
                          }} \
                      {footer}",
-                    header = header,
-                    o = object.0,
                     a1 = args[1].0,
-                    check = check,
-                    v = v,
-                    footer = footer
+                    call = callback_loops::closure_call(
+                        "plain",
+                        "vrecv",
+                        &[
+                            "vacc",
+                            "arr->elements[idx]",
+                            "kiln_c99_val_from_double((double)idx)",
+                            &format!("v{}", object.0)
+                        ],
+                        "prod",
+                        &check
+                    ),
                 )
             }
-        })
+        };
+        // `reduce` calls its callback with `this` undefined, whatever the site passes.
+        let reduce_site = callback_loops::LoopSite {
+            this_arg: "KILN_VAL_UNDEFINED",
+            this_ok: "1",
+            ..loop_site
+        };
+        let init = reduce_init_dacc(args[1]);
+        let typed_array = typed_array_loop(callback_loops::typed_array_reduce(
+            &reduce_site,
+            args[1].0,
+            reduce_typed.as_ref().map(|c| (c, init.as_str())),
+        ));
+        Some(format!("{array} {typed_array}"))
+    } else if family == Some(crate::parallel::ParallelMethod::Reduce) && argc == 3 {
+        // `parallelReduce` when the pool declines: its tree, sequentially, at `reduce`'s speed.
+        // The typed tree needs both callbacks' typed entries (the fold's declared as `reduce`'s,
+        // with the index or without) and an initial value that is a number at run time.
+        let fold = typed_callback(plan, program, args[0], &[2, 3]);
+        let combine = typed_callback(plan, program, args[1], &[2]);
+        let reduce_site = callback_loops::LoopSite {
+            this_arg: "KILN_VAL_UNDEFINED",
+            this_ok: "1",
+            ..loop_site
+        };
+        Some(callback_loops::reduce_tree(
+            &reduce_site,
+            args[1].0,
+            args[2].0,
+            fold.as_ref().zip(combine.as_ref()),
+        ))
     } else {
         None
     };
@@ -2185,7 +2551,7 @@ pub(super) fn emit_call_method(
             Some(format!(
                 "if (!handled{guard}) {{ \
                      kiln_array *arr = (kiln_array *)KILN_VAL_PTR(v{o}); \
-                     if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED)) {{ \
+                     if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED)) {{ \
                          {array_body} \
                      }} \
                  }}",
@@ -2196,7 +2562,7 @@ pub(super) fn emit_call_method(
         } else if known_str {
             Some(format!(
                 "if (!handled{guard}) {{ \
-                     if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0)) {{ \
+                     if (KILN_LIKELY(kiln_c99_builtins_unmodified())) {{ \
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                          if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
                              {string_body} \
@@ -2213,12 +2579,12 @@ pub(super) fn emit_call_method(
                      void *ptr = KILN_VAL_PTR(v{o}); \
                      if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                          kiln_array *arr = (kiln_array *)ptr; \
-                         if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED)) {{ \
+                         if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED)) {{ \
                              {array_body} \
                          }} \
                      }} \
                  }} else if (!handled && KILN_VAL_IS_STRING(v{o}){guard}) {{ \
-                     if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0)) {{ \
+                     if (KILN_LIKELY(kiln_c99_builtins_unmodified())) {{ \
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                          if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
                              {string_body} \
@@ -2261,7 +2627,7 @@ pub(super) fn emit_call_method(
         };
         Some(format!(
             "{header} \
-                 if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED)) {{ \
+                 if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED)) {{ \
                      const kiln_string *sep = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
                      size_t total_bytes = 0; \
                      int can_fast = (sep != NULL && !kiln_string_is_utf16(sep)); \
@@ -2313,7 +2679,7 @@ pub(super) fn emit_call_method(
             format!("KILN_VAL_IS_STRING(v{o}) && ", o = object.0)
         };
         Some(format!(
-            "if (!handled && KILN_LIKELY(kiln_c99_builtin_store_epoch == 0) && {str_check}KILN_VAL_IS_STRING(v{a0})) {{ \
+            "if (!handled && KILN_LIKELY(kiln_c99_builtins_unmodified()) && {str_check}KILN_VAL_IS_STRING(v{a0})) {{ \
                          const kiln_string *src = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                          const kiln_string *sep = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
                          if (src != NULL && sep != NULL && !kiln_string_is_utf16(src) && !kiln_string_is_utf16(sep) && sep->unit_len == 1) {{ \
@@ -2371,7 +2737,7 @@ pub(super) fn emit_call_method(
             format!("KILN_VAL_IS_STRING(v{o}) && ", o = object.0)
         };
         Some(format!(
-            "if (!handled && KILN_LIKELY(kiln_c99_builtin_store_epoch == 0) && {str_check}KILN_VAL_IS_STRING(v{a0})) {{ \
+            "if (!handled && KILN_LIKELY(kiln_c99_builtins_unmodified()) && {str_check}KILN_VAL_IS_STRING(v{a0})) {{ \
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                          const kiln_string *s_ndl = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
                          if (s_recv != NULL && s_ndl != NULL && !kiln_string_is_utf16(s_recv) && !kiln_string_is_utf16(s_ndl)) {{ \
@@ -2434,7 +2800,7 @@ pub(super) fn emit_call_method(
             format!(" && KILN_VAL_IS_STRING(v{o})", o = object.0)
         };
         Some(format!(
-            "if (!handled && KILN_LIKELY(kiln_c99_builtin_store_epoch == 0){str_check}{guard}) {{ \
+            "if (!handled && KILN_LIKELY(kiln_c99_builtins_unmodified()){str_check}{guard}) {{ \
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                          if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
                              {check_and_extract} \
@@ -2568,14 +2934,14 @@ pub(super) fn emit_call_method(
         _ => None,
     };
 
-    let sort_intrinsic = if key_str == "sort" && argc <= 1 {
+    let sort_intrinsic = if seq_key == "sort" && argc <= 1 {
         let cmp_expr = if argc == 1 {
             format!("v{}", args[0].0)
         } else {
             "KILN_VAL_UNDEFINED".to_string()
         };
-        if known_arr {
-            Some(format!(
+        let text = if known_arr {
+            format!(
                 "if (!handled) {{ \
                      kiln_array *arr = (kiln_array *)KILN_VAL_PTR(v{o}); \
                      if (kiln_c99_val_array_sort_fast(host, arr, {cmp}, depth, thrown) == KILN_C99_OK) {{ \
@@ -2586,9 +2952,9 @@ pub(super) fn emit_call_method(
                 o = object.0,
                 cmp = cmp_expr,
                 v = v
-            ))
+            )
         } else {
-            Some(format!(
+            format!(
                 "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX) {{ \
                      void *ptr = KILN_VAL_PTR(v{o}); \
                      if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
@@ -2602,8 +2968,9 @@ pub(super) fn emit_call_method(
                 o = object.0,
                 cmp = cmp_expr,
                 v = v
-            ))
-        }
+            )
+        };
+        Some(family_guard(text))
     } else {
         None
     };
@@ -3134,9 +3501,6 @@ pub(super) fn emit_call_method(
     let push_s = push_intrinsic.map(|s| format!(" {s}")).unwrap_or_default();
     let regex_s = regex_intrinsic.map(|s| format!(" {s}")).unwrap_or_default();
     let map_s = map_intrinsic.map(|s| format!(" {s}")).unwrap_or_default();
-    let parallel_map_s = parallel_map_intrinsic
-        .map(|s| format!(" {s}"))
-        .unwrap_or_default();
     let parallel_pool_s = parallel_pool_intrinsic
         .map(|s| format!(" {s}"))
         .unwrap_or_default();
@@ -3214,11 +3578,11 @@ pub(super) fn emit_call_method(
                 "    {{ static kiln_c99_site site = {{0}}; \
                 kiln_val call_args[{n}]; int call_args_ready = 0; (void)call_args_ready; \
                 int handled = 0; int kiln_twin = 0; (void)kiln_twin; {typed_remembered}\
-                {await_resolve_s}{math_s}{array_is_array_s}{number_predicate_s}{push_s}{regex_s}{map_s}{parallel_pool_s}{parallel_map_s}{filter_s}{reduce_s}{slice_s}{join_s}{split_s}{index_of_s}{substring_s}{collection_s}{json_s}{sort_s}{array_extra_s}{string_extra_s}{iterator_s} \
+                {await_resolve_s}{math_s}{array_is_array_s}{number_predicate_s}{push_s}{regex_s}{parallel_pool_s}{map_s}{filter_s}{reduce_s}{slice_s}{join_s}{split_s}{index_of_s}{substring_s}{collection_s}{json_s}{sort_s}{array_extra_s}{string_extra_s}{iterator_s} \
                 if (!handled && KILN_VAL_IS_OBJECT(v{o})) {{ \
                     const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); if (obj == NULL) __builtin_unreachable(); \
                     {typed_front}\
-                    if (!handled && site.pic_count > 0) {{ \
+                    if (!handled && kiln_c99_site_count(&site) > 0) {{ \
                         kiln_val cached_fn = kiln_c99_site_cached_callee(&site, obj); \
                         if (cached_fn != 0 && KILN_VAL_IS_CLOSURE(cached_fn)) {{ \
                             kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(cached_fn); \

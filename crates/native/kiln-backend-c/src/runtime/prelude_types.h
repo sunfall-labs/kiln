@@ -332,6 +332,12 @@ typedef void (*kiln_parallel_chunk_fn)(const void * restrict in, void * restrict
                                        void *ctx);
 int32_t kiln_parallel_map(const void *in, size_t count, void *out, kiln_parallel_chunk_fn chunk,
                           void *ctx);
+/* `parallelSort` (ADR 0069): a stable in-place sort of `count` elements -- a `kiln_typed_kind`
+ * (0..8), or 100 for an array's own numeric elements -- by 0 (the typed-array default order), 1
+ * (`(a, b) => a - b`) or 2 (`(a, b) => b - a`), on the same pool. 0 sorted; 1 a comparator order
+ * met a NaN and nothing was written; -1 an argument it does not take. The emitter asks only where
+ * the order is proven and the elements are numbers, so the answer is `sort`'s. */
+int32_t kiln_parallel_sort(void *data, size_t count, int32_t kind, int32_t order);
 
 static inline int kiln_c99_val_truthy(kiln_val v) {
     if (v == KILN_VAL_FALSE || v == KILN_VAL_UNDEFINED || v == KILN_VAL_NULL) return 0;
@@ -385,34 +391,58 @@ static inline int kiln_c99_string_starts_ascii(kiln_value value, const char *asc
 static int kiln_c99_speculate_mode = -2;
 
 static inline int kiln_c99_speculate_exit_active(void) {
-    if (kiln_c99_speculate_mode == -2) {
+    /* One word, the same from every thread that reads the environment. */
+    int mode = __atomic_load_n(&kiln_c99_speculate_mode, __ATOMIC_RELAXED);
+    if (mode == -2) {
         const char *s = getenv("KILN_SPECULATE");
         if (s && strcmp(s, "exit") == 0) {
-            kiln_c99_speculate_mode = 1;
+            mode = 1;
         } else if (s && strcmp(s, "0") == 0) {
-            kiln_c99_speculate_mode = -1;
+            mode = -1;
         } else {
-            kiln_c99_speculate_mode = 0;
+            mode = 0;
         }
+        __atomic_store_n(&kiln_c99_speculate_mode, mode, __ATOMIC_RELAXED);
     }
-    return kiln_c99_speculate_mode;
+    return mode;
 }
 
 /* The guard with the mode already read: a versioned body reads it once at entry, and a loop
  * head then tests a register instead of re-reading the flag every iteration. */
+/* Build a derived constant -- a sorted index over a constant table -- exactly once per process
+ * copy of the prelude, whichever realm's thread asks first. `state` is 0 unbuilt, 1 building, 2
+ * built; a thread that finds another building waits for it, which happens at most once, for
+ * microseconds. Building in place twice at once would let one thread search the table while the
+ * other is still sorting it. */
+static __attribute__((noinline, unused)) void kiln_c99_once_slow(int *state, void (*build)(void)) {
+    int unbuilt = 0;
+    if (__atomic_compare_exchange_n(state, &unbuilt, 1, 0, __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE)) {
+        build();
+        __atomic_store_n(state, 2, __ATOMIC_RELEASE);
+        return;
+    }
+    while (__atomic_load_n(state, __ATOMIC_ACQUIRE) != 2) {
+    }
+}
+
+static KILN_ALWAYS_INLINE inline void kiln_c99_once(int *state, void (*build)(void)) {
+    if (KILN_UNLIKELY(__atomic_load_n(state, __ATOMIC_ACQUIRE) != 2)) kiln_c99_once_slow(state, build);
+}
+
 static inline int kiln_c99_guard_should_exit_in(int mode, uint32_t *counter) {
     if (KILN_UNLIKELY(mode == -1)) {
         return 1;
     }
     if (KILN_UNLIKELY(mode == 1)) {
-        if ((*counter)++ == 0) {
+        if (__atomic_fetch_add(counter, 1u, __ATOMIC_RELAXED) == 0) {
             return 1;
         }
-        static uint64_t rng = 0x853c49e6748fea9bULL;
-        rng ^= rng >> 12;
-        rng ^= rng << 25;
-        rng ^= rng >> 27;
-        return (rng & 1) != 0;
+        /* Per thread: the exits it draws only have to be arbitrary, not shared. */
+        static _Thread_local uint64_t kiln_c99_speculate_rng = 0x853c49e6748fea9bULL;
+        kiln_c99_speculate_rng ^= kiln_c99_speculate_rng >> 12;
+        kiln_c99_speculate_rng ^= kiln_c99_speculate_rng << 25;
+        kiln_c99_speculate_rng ^= kiln_c99_speculate_rng >> 27;
+        return (kiln_c99_speculate_rng & 1) != 0;
     }
     return 0;
 }
@@ -567,6 +597,14 @@ extern const uint64_t *kiln_realm_generation_slot(void);
  * the process, or NULL when `size` exceeds what the provider reserved. The prelude is emitted per
  * translation unit with internal linkage, so a static of its own would be one table per unit. */
 extern void *kiln_realm_process_shared(uint64_t size);
+/* Quiescent-state reclamation of that shared state (ADR 0071, realms issue 04 step 4; see
+ * `KILN_C99_SLOT_*` below). `retire_tag` is asked by a writer that has just unpublished some: the
+ * tag to keep beside it, or 0 when no other thread is running a realm and it may be rewritten at
+ * once. `retired_safe` answers whether every thread that was running a realm at that tag has since
+ * passed a turn boundary. `retire` gives up a `malloc`ed record, freed once that is so. */
+extern uint64_t kiln_realm_retire_tag(void);
+extern int kiln_realm_retired_safe(uint64_t tag);
+extern int kiln_realm_retire(void *record);
 extern int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap);
 extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
 extern int kiln_realm_gc_mark_roots(void *heap);
@@ -935,8 +973,43 @@ typedef struct kiln_object {
  * One per program: the prelude unit defines it and exports it, and the copy of this header a
  * decoupled module unit compiles declares it `extern` instead (`runtime_prelude_header`), since
  * a definition in every unit would give each a copy of its own that never moves. Hidden in that
- * declaration, so a read is PC-relative rather than a load through the GOT. */
+ * declaration, so a read is PC-relative rather than a load through the GOT.
+ *
+ * Realms on several threads move it with atomic adds; the emitted speculations read it as a plain
+ * word (`kiln_c99_builtins_unmodified`), which is sound because the only change that matters to a
+ * realm's reading is its own store, made earlier on the same thread -- another realm's add only
+ * sends it to its own record.
+ * The stores a realm's bootstrap makes (installing TypeScript built-ins) are part of what the
+ * built-ins *are*, not a modification of them: each realm takes its own back when its bootstrap
+ * ends (`kiln_c99_builtin_bootstrap_done`), and everything else it added when it is torn down. So
+ * the word is the number of stores live realms have made to built-ins outside their bootstraps,
+ * and zero whenever none has -- which the launcher used to arrange by zeroing it after each
+ * bootstrap, erasing whatever another realm running at the time had done. */
 static uint64_t kiln_c99_builtin_store_epoch;
+
+/* Whether the built-ins are the current realm's pristine ones, which is what every emitted
+ * built-in speculation asks (an inlined `Math.sqrt`, an `arr.map` loop): at once while no live
+ * realm has stored onto a built-in outside its bootstrap, and otherwise by asking the current
+ * realm's own record -- another realm's bootstrap or modification is not this realm's, and a
+ * typed body that took the summary alone would refuse whenever any realm in the process did. */
+/* Pure: it writes nothing a caller can see (at most it fills this thread's heap cache), so a loop
+ * that asks it can still hoist the summary's load. Cold, and on clang for x86-64 it saves every
+ * register it uses itself, vector registers included: an ordinary call on the unlikely side made
+ * the hot side keep a typed body's doubles on the stack across it (1.5 instructions per call on
+ * a class-poly loop, measured). */
+#if defined(__clang__) && defined(__x86_64__)
+#define KILN_C99_RARE_CALL __attribute__((cold, preserve_all))
+#else
+#define KILN_C99_RARE_CALL __attribute__((cold))
+#endif
+#ifdef KILN_SEPARATE_PRELUDE
+extern int kiln_c99_realm_builtins_unmodified(void) __attribute__((pure)) KILN_C99_RARE_CALL;
+#else
+static int kiln_c99_realm_builtins_unmodified(void) __attribute__((pure)) KILN_C99_RARE_CALL;
+#endif
+static KILN_ALWAYS_INLINE inline int kiln_c99_builtins_unmodified(void) {
+    return KILN_LIKELY(kiln_c99_builtin_store_epoch == 0) || kiln_c99_realm_builtins_unmodified();
+}
 
 #ifdef KILN_SEPARATE_PRELUDE
 extern int kiln_c99_realm_builtin_modified(uint32_t builtin);
@@ -969,6 +1042,103 @@ static inline void kiln_c99_prototype_touched(const kiln_object *object) {
  * a block-scope static at each GetProperty, SetProperty, SetPropertyStrict and CallMethod. */
 #define KILN_C99_PIC_SIZE 8
 
+/* ---- Publishing shared cache state (ADR 0071, realms issue 04 step 4) ----------------------
+ *
+ * Every cache below is one process-wide static that the realms of the process share, and those
+ * realms may run on several threads at once. An answer a cache holds is a *slot*: a few words
+ * named by one key word, the receiver shape the answer is for. The key word is the protocol:
+ *
+ *   - A reader loads it with acquire (`kiln_c99_slot_key`) and compares it with its object's
+ *     shape. It reads the other words only after a match, and they are complete by then.
+ *   - A writer claims a slot by moving its key word to CLAIMED with a compare-and-swap, writes
+ *     the other words, and publishes them with a release store of the shape
+ *     (`kiln_c99_slot_claim`, `kiln_c99_slot_publish`). A writer that finds a slot claimed by
+ *     another does not learn this time; it never waits.
+ *   - A writer that replaces an answer claims the published slot the same way. It may rewrite it
+ *     at once only when no other thread is running a realm (`kiln_realm_retire_tag` answers 0),
+ *     which is every single-realm process. Otherwise the slot is RETIRED with that tag in its key
+ *     word, and is claimed again only once the tag is safe: every thread that could have been
+ *     reading the old answer has since passed a turn boundary (quiescent-state reclamation, the
+ *     turn as its quantum).
+ *
+ * So a reader can never pair one answer's key with another answer's words, and a slot's words
+ * are never rewritten under a reader -- with no lock, no allocation, and on the hit path nothing
+ * but the acquire load, which on x86-64 is the plain load it replaced. No state below is a shape
+ * any object has (shapes are at least 4-byte aligned, and an object's shape is one or NULL), so a
+ * reader needs no test beyond its compare. */
+/* The loads the hit paths make of shared cache words. An acquire load on x86-64 is a plain `mov`
+ * -- the machine never reorders a load before an older load -- so all it asks of the compiler is
+ * not to move later loads above it. Spelled as an atomic load, it also stops the compiler folding
+ * the load into the compare that uses it (one more instruction on every hit); spelled as a
+ * volatile load followed by a compiler-only acquire fence, it folds and keeps its order, which is
+ * the same machine code an acquire load has minus that instruction. Elsewhere it is the atomic
+ * acquire load. `KILN_C99_LOAD_ONCE` is the relaxed kind, for a word that is an answer by itself
+ * (a hint, an index checked where it is used): one untorn load the compiler neither splits nor
+ * repeats. */
+#if defined(__x86_64__) || defined(__i386__)
+#define KILN_C99_LOAD_ACQUIRE(pointer)                                                    \
+    __extension__({                                                                    \
+        __typeof__(*(pointer)) kiln_c99_loaded_ = *(volatile __typeof__(*(pointer)) *)(pointer); \
+        __atomic_signal_fence(__ATOMIC_ACQUIRE);                                        \
+        kiln_c99_loaded_;                                                              \
+    })
+#else
+#define KILN_C99_LOAD_ACQUIRE(pointer) __atomic_load_n((pointer), __ATOMIC_ACQUIRE)
+#endif
+#define KILN_C99_LOAD_ONCE(pointer) (*(volatile __typeof__(*(pointer)) *)(pointer))
+
+#define KILN_C99_SLOT_UNLEARNED ((const kiln_shape *)(uintptr_t)1)
+#define KILN_C99_SLOT_CLAIMED ((const kiln_shape *)(uintptr_t)2)
+#define KILN_C99_SLOT_RETIRED(tag) ((const kiln_shape *)(uintptr_t)(((uint64_t)(tag) << 2) | 3u))
+#define KILN_C99_SLOT_IS_RETIRED(key) (((uintptr_t)(key) & 3u) == 3u)
+#define KILN_C99_SLOT_RETIRED_TAG(key) ((uint64_t)(uintptr_t)(key) >> 2)
+/* A slot's key word names an answer: a shape, not NULL (never written) or a state above. */
+#define KILN_C99_SLOT_IS_ANSWER(key) ((key) != NULL && ((uintptr_t)(key) & 3u) == 0u)
+
+static KILN_ALWAYS_INLINE inline const kiln_shape *kiln_c99_slot_key(const kiln_shape *const *key) {
+    return KILN_C99_LOAD_ACQUIRE(key);
+}
+
+static inline void kiln_c99_slot_publish(const kiln_shape **key, const kiln_shape *shape) {
+    __atomic_store_n(key, shape, __ATOMIC_RELEASE);
+}
+
+/* Claim the slot named by `key` for writing. A free slot (never written, or UNLEARNED) is taken;
+ * a retired one only once its tag is safe; a published answer only when `replace` says the caller
+ * means to replace it -- and then, when another thread may be reading it, it is retired instead
+ * and the claim fails. 1: the slot is CLAIMED and the caller must publish it (or retire it). */
+static __attribute__((noinline, unused)) int kiln_c99_slot_claim(const kiln_shape **key,
+                                                                   int replace) {
+    const kiln_shape *seen = __atomic_load_n(key, __ATOMIC_ACQUIRE);
+    uint64_t tag;
+    if (seen == KILN_C99_SLOT_CLAIMED) return 0;
+    if (KILN_C99_SLOT_IS_RETIRED(seen) && !kiln_realm_retired_safe(KILN_C99_SLOT_RETIRED_TAG(seen)))
+        return 0;
+    if (KILN_C99_SLOT_IS_ANSWER(seen) && !replace) return 0;
+    /* Sequentially consistent: unpublishing an answer must be ordered before the count of online
+     * threads `kiln_realm_retire_tag` reads (a thread coming online announces itself, then
+     * reads). */
+    if (!__atomic_compare_exchange_n(key, &seen, KILN_C99_SLOT_CLAIMED, 0, __ATOMIC_SEQ_CST,
+                                     __ATOMIC_RELAXED))
+        return 0;
+    if (!KILN_C99_SLOT_IS_ANSWER(seen)) return 1;
+    tag = kiln_realm_retire_tag();
+    if (tag == 0) return 1;
+    __atomic_store_n(key, KILN_C99_SLOT_RETIRED(tag), __ATOMIC_RELEASE);
+    return 0;
+}
+
+/* Unpublish the answer `key` names, if it still names `shape`: RETIRED, reusable once safe. */
+static __attribute__((noinline, unused)) void kiln_c99_slot_retire(const kiln_shape **key,
+                                                                    const kiln_shape *shape) {
+    const kiln_shape *seen = shape;
+    if (!KILN_C99_SLOT_IS_ANSWER(shape) ||
+        !__atomic_compare_exchange_n(key, &seen, KILN_C99_SLOT_CLAIMED, 0, __ATOMIC_SEQ_CST,
+                                     __ATOMIC_RELAXED))
+        return;
+    __atomic_store_n(key, KILN_C99_SLOT_RETIRED(kiln_realm_retire_tag()), __ATOMIC_RELEASE);
+}
+
 /* One entry of a site's polymorphic cache (ADR 0071): an answer stated in realm-independent
  * terms -- layouts, paths and slots, never an object -- so one process-wide site serves every
  * realm, and a new realm starts with the caches earlier ones warmed.
@@ -994,9 +1164,12 @@ static inline void kiln_c99_prototype_touched(const kiln_object *object) {
  *
  * A shape is a key path and says nothing about the prototype, so two classes with one field
  * order share a receiver shape; only the live walk tells their methods apart. A member deeper
- * than two steps is not remembered. The hit-path fields are few and fixed-size, so a later
- * atomic publication (ADR 0071, issue 04 step 4) can swap an entry whole. */
+ * than two steps is not remembered.
+ *
+ * An entry is a slot (see `KILN_C99_SLOT_*` above) keyed by `shape`: published whole, never
+ * changed while published, replaced only by the slot protocol (`kiln_c99_site_remember`). */
 typedef struct kiln_c99_pic_entry {
+    /* The key word: read with `kiln_c99_slot_key`, written only by the slot protocol. */
     const kiln_shape *shape;
     const kiln_shape *transition_to;
     uint32_t slot;
@@ -1024,8 +1197,11 @@ typedef struct kiln_c99_site {
     uint32_t own;
     uint32_t proto;
     /* Slow-path answers that taught the site nothing: a name answered from a builtin table or a
-     * deeper prototype. After `KILN_C99_SITE_GIVE_UP` of them the site stops scanning to learn. */
+     * deeper prototype. After `KILN_C99_SITE_GIVE_UP` of them the site stops scanning to learn.
+     * A count, so a lost increment between two realms' threads only delays giving up. */
     uint32_t misses;
+    /* How many entries have ever been claimed (`kiln_c99_site_count`); the ones past it were never
+     * written. Only grows: a forgotten entry is retired in place, not removed. */
     uint32_t pic_count;
     kiln_c99_pic_entry entries[KILN_C99_PIC_SIZE];
     uint8_t cached_tag;
@@ -1041,11 +1217,167 @@ typedef struct kiln_c99_site {
     uint64_t registered;
 } kiln_c99_site;
 
+/* The one-word fields of a site -- the dictionary indices `own` and `proto`, `misses`, the
+ * cached method's flag -- are each an answer on its own, checked where it is used (a dictionary
+ * index by the key its record must carry), so they are read and written as single relaxed words;
+ * only the cached method's other words are published behind its flag
+ * (`kiln_c99_site_cache_method`). */
+
+static KILN_ALWAYS_INLINE inline uint32_t kiln_c99_site_count(const kiln_c99_site *site) {
+    return KILN_C99_LOAD_ACQUIRE(&site->pic_count);
+}
+
+/* The published entry that answers for `shape`, or NULL. */
+static KILN_ALWAYS_INLINE inline const kiln_c99_pic_entry *kiln_c99_site_entry(
+    const kiln_c99_site *site, const kiln_shape *shape) {
+    uint32_t p, count = kiln_c99_site_count(site);
+    for (p = 0; p < count; ++p) {
+        if (kiln_c99_slot_key(&site->entries[p].shape) == shape) return &site->entries[p];
+    }
+    return NULL;
+}
+
+/* Whether the site should learn an answer for `shape`: it has one (to be replaced) or has room. */
+static inline int kiln_c99_site_may_learn(const kiln_c99_site *site, const kiln_shape *shape) {
+    return kiln_c99_site_count(site) < KILN_C99_PIC_SIZE || kiln_c99_site_entry(site, shape) != NULL;
+}
+
+static inline uint32_t kiln_c99_site_own(const kiln_c99_site *site) {
+    return KILN_C99_LOAD_ONCE(&site->own);
+}
+
+static inline uint32_t kiln_c99_site_proto(const kiln_c99_site *site) {
+    return KILN_C99_LOAD_ONCE(&site->proto);
+}
+
+static inline void kiln_c99_site_set_dictionary(kiln_c99_site *site, uint32_t own, uint32_t proto) {
+    __atomic_store_n(&site->own, own, __ATOMIC_RELAXED);
+    __atomic_store_n(&site->proto, proto, __ATOMIC_RELAXED);
+}
+
+/* A site's cached method -- a method-call or property-read site whose receiver is a built-in
+ * kind -- is three words behind `has_cached_method`, a one-byte slot: 0 none, 2 being written, 1
+ * published with release. A published answer stays true for its receiver kind, so it is replaced
+ * (a site that sees strings, then arrays) only when no other thread can be reading it; otherwise
+ * the site keeps the first answer and the other kind takes the slow path. */
+#define KILN_C99_SITE_METHOD_WRITING 2u
+
+static KILN_ALWAYS_INLINE inline int kiln_c99_site_has_method(const kiln_c99_site *site) {
+    return KILN_C99_LOAD_ACQUIRE(&site->has_cached_method) == 1u;
+}
+
+static __attribute__((noinline, unused)) void kiln_c99_site_cache_method(kiln_c99_site *site,
+                                                                          uint8_t tag,
+                                                                          uint64_t method,
+                                                                          uint32_t builtin) {
+    uint8_t seen = __atomic_load_n(&site->has_cached_method, __ATOMIC_ACQUIRE);
+    if (seen == 1u && site->cached_tag == tag && site->cached_method == method &&
+        site->cached_builtin == builtin)
+        return;
+    if (seen == KILN_C99_SITE_METHOD_WRITING ||
+        !__atomic_compare_exchange_n(&site->has_cached_method, &seen,
+                                     (uint8_t)KILN_C99_SITE_METHOD_WRITING, 0, __ATOMIC_SEQ_CST,
+                                     __ATOMIC_RELAXED))
+        return;
+    if (seen == 1u && kiln_realm_retire_tag() != 0) {
+        __atomic_store_n(&site->has_cached_method, (uint8_t)1u, __ATOMIC_RELEASE);
+        return;
+    }
+    site->cached_tag = tag;
+    site->cached_method = method;
+    site->cached_builtin = builtin;
+    __atomic_store_n(&site->has_cached_method, (uint8_t)1u, __ATOMIC_RELEASE);
+}
+
+/* A `length` site's receiver-kind hint -- the kind it last saw -- kept in the same two bytes a
+ * method site uses for its method; a site is only ever one of the two. A hint is never trusted: it
+ * picks which check to make first, and the receiver's own kind confirms it (an array and a typed
+ * array share a boxing prefix, and another realm's thread may have just written the hint). */
+static inline uint8_t kiln_c99_site_hint(const kiln_c99_site *site) {
+    return KILN_C99_LOAD_ONCE(&site->cached_tag);
+}
+
+/* The hint of a site that has never cached a method (a method site's tag names its method's
+ * receiver kind, not a `length`), or 0. */
+static KILN_ALWAYS_INLINE inline uint8_t kiln_c99_site_length_hint(const kiln_c99_site *site) {
+    return KILN_C99_LOAD_ONCE(&site->has_cached_method) == 0u ? kiln_c99_site_hint(site)
+                                                                              : 0u;
+}
+
+/* Hints are written only when they change: a site is a line every realm's thread reads, and a
+ * store of the value already there would still take the line from all of them. */
+static inline void kiln_c99_site_set_hint(kiln_c99_site *site, uint8_t tag) {
+    if (KILN_C99_LOAD_ONCE(&site->cached_tag) != tag)
+        __atomic_store_n(&site->cached_tag, tag, __ATOMIC_RELAXED);
+    if (KILN_C99_LOAD_ONCE(&site->has_cached_method) != 0u)
+        __atomic_store_n(&site->has_cached_method, (uint8_t)0u, __ATOMIC_RELAXED);
+}
+
+
+/* The compact emission's inline check reads only a site's first entry, and a later one answers
+ * through a call. When the same later entry has answered `KILN_C99_SITE_PROMOTE_AFTER` times
+ * running -- the site has changed phase -- it moves to the front (`kiln_c99_site_promote`). A site
+ * whose receivers alternate never promotes, so it never pays a swap per access; and a streak whose
+ * promotion was declined (another thread runs a realm) stays full.
+ *
+ * The streak is this thread's own: which later entry of which site answered it last, and how many
+ * times running, in a small direct-mapped table. Counting on the site itself would write a
+ * process-wide line on every such hit, which every other realm's thread reading the site would
+ * then miss on; a collision in the table only restarts a streak. */
+#define KILN_C99_SITE_PROMOTE_AFTER 8u
+#ifdef KILN_SEPARATE_PRELUDE
+extern int kiln_c99_site_promote(kiln_c99_site *site, uint32_t hot);
+#else
+static int kiln_c99_site_promote(kiln_c99_site *site, uint32_t hot);
+#endif
+
+typedef struct kiln_site_streak {
+    const kiln_c99_site *site;
+    uint32_t entry;
+    uint32_t length;
+} kiln_site_streak;
+static _Thread_local kiln_site_streak kiln_c99_streaks[64];
+
+static inline void kiln_c99_site_answered(kiln_c99_site *site, uint32_t hot) {
+    kiln_site_streak *streak = &kiln_c99_streaks[((uintptr_t)site >> 6) & 63u];
+    if (streak->site != site || streak->entry != hot) {
+        streak->site = site;
+        streak->entry = hot;
+        streak->length = 0;
+    } else if (streak->length >= KILN_C99_SITE_PROMOTE_AFTER) {
+        return;
+    }
+    /* Promoted, the entry at `hot` is now the one that was first: its streak starts over. */
+    if (++streak->length == KILN_C99_SITE_PROMOTE_AFTER && kiln_c99_site_promote(site, hot))
+        streak->length = 0;
+}
+
+static inline void kiln_c99_site_missed(kiln_c99_site *site) {
+    __atomic_fetch_add(&site->misses, 1u, __ATOMIC_RELAXED);
+}
+
+static inline uint32_t kiln_c99_site_misses(const kiln_c99_site *site) {
+    return KILN_C99_LOAD_ONCE(&site->misses);
+}
+
+/* A private-field site: one slot (`KILN_C99_SLOT_*`) keyed by the receiver's shape, which is
+ * only ever a shared one -- a process-wide site outlives the realm, and a realm-local shape is
+ * freed with it, when a later shape could take its address (ADR 0071). */
 typedef struct kiln_c99_private_site {
     const struct kiln_shape *shape;
     uint32_t brand_slot;
     uint32_t member_slot;
 } kiln_c99_private_site;
+
+static inline void kiln_c99_private_site_learn(kiln_c99_private_site *site, const kiln_shape *shape,
+                                               uint32_t brand_slot, uint32_t member_slot) {
+    if (!shape->shared || kiln_c99_slot_key(&site->shape) == shape ||
+        !kiln_c99_slot_claim(&site->shape, 1))
+        return;
+    site->brand_slot = brand_slot;
+    site->member_slot = member_slot;
+    kiln_c99_slot_publish(&site->shape, shape);
+}
 
 /* Whether a literal site may remember `shape` and hand it to objects of any realm without the
  * transitions that would have produced it (ADR 0071). Only a *shared* shape qualifies: it is a
@@ -1059,13 +1391,9 @@ typedef struct kiln_c99_private_site {
 /* The slot a property-read site remembers for `shape`, or UINT32_MAX when it remembers none
  * or remembers a path instead. */
 static inline uint32_t kiln_c99_site_slot_for(const kiln_c99_site *site, const kiln_shape *shape) {
-    uint32_t p;
-    for (p = 0; p < site->pic_count; ++p) {
-        if (site->entries[p].shape == shape && site->entries[p].depth == 0 &&
-            !site->entries[p].absent && site->entries[p].transition_to == NULL) {
-            return site->entries[p].slot;
-        }
-    }
+    const kiln_c99_pic_entry *entry = kiln_c99_site_entry(site, shape);
+    if (entry != NULL && entry->depth == 0 && !entry->absent && entry->transition_to == NULL)
+        return entry->slot;
     return UINT32_MAX;
 }
 
@@ -1209,16 +1537,11 @@ static KILN_ALWAYS_INLINE inline int kiln_c99_pic_inherited(const kiln_c99_pic_e
  * live at the end of the entry's path, after the path from this object is checked level by
  * level. */
 static KILN_ALWAYS_INLINE inline kiln_val kiln_c99_site_cached_callee(const kiln_c99_site *site, const kiln_object *obj) {
-    uint32_t p;
-    for (p = 0; p < site->pic_count; ++p) {
-        const kiln_c99_pic_entry *entry = &site->entries[p];
-        if (entry->shape == obj->shape) {
-            kiln_val answer;
-            if (entry->slot < obj->slot_capacity) return obj->slots[entry->slot];
-            if (kiln_c99_pic_inherited(entry, obj, &answer)) return answer;
-            return 0;
-        }
-    }
+    const kiln_c99_pic_entry *entry = kiln_c99_site_entry(site, obj->shape);
+    kiln_val answer;
+    if (entry == NULL) return 0;
+    if (entry->slot < obj->slot_capacity) return obj->slots[entry->slot];
+    if (kiln_c99_pic_inherited(entry, obj, &answer)) return answer;
     return 0;
 }
 /* Issue 04 step 3c. The code `shape` records for `slot`, or NULL: the record lives on the shape
@@ -1240,7 +1563,10 @@ static inline kiln_body_fn kiln_c99_shape_slot_code(const kiln_shape *shape, uin
  * is true of every object that has it; see `kiln_shape.code_mask`). The slot is read only for
  * what the call takes from the closure itself, its upvalues. `row` is the candidate's receiver
  * row for `recv` (`kiln_c99_recv_row`), learned with it, for a candidate that takes one; a path
- * is only learned once the row is known, so a hit passes it without another shape check. */
+ * is only learned once the row is known, so a hit passes it without another shape check.
+ *
+ * A path is one slot (`KILN_C99_SLOT_*`) keyed by `recv`, which a hit reads with
+ * `kiln_c99_slot_key` before anything else. */
 typedef struct kiln_c99_method_path {
     const kiln_shape *recv;
     const kiln_shape *proto;
@@ -1248,9 +1574,9 @@ typedef struct kiln_c99_method_path {
     uint32_t slot;
 } kiln_c99_method_path;
 
-/* A path nothing has taught: its receiver shape is an address no shape has, so a hit needs no
+/* A path nothing has taught: its receiver shape is a slot state no shape is, so a hit needs no
  * separate test that the receiver is shaped (a dictionary-mode receiver's NULL never matches). */
-#define KILN_C99_UNLEARNED_METHOD_PATH { (const kiln_shape *)(uintptr_t)1, NULL, NULL, 0 }
+#define KILN_C99_UNLEARNED_METHOD_PATH { KILN_C99_SLOT_UNLEARNED, NULL, NULL, 0 }
 
 /* Whether the prototype at the end of `path` for `obj`, whose shape the caller has matched to
  * `path->recv`, has the path's shape; `*level` is that prototype. */
@@ -1270,20 +1596,21 @@ static inline void kiln_c99_method_path_learn(kiln_c99_method_path *path, const 
                                               const kiln_object *obj, kiln_body_fn code,
                                               const uint32_t *row, int need_row) {
     const kiln_shape *shape = obj->shape;
-    uint32_t p;
+    const kiln_c99_pic_entry *entry;
     if (shape == NULL || !shape->shared || (need_row && row == NULL)) return;
-    for (p = 0; p < site->pic_count; ++p) {
-        const kiln_c99_pic_entry *entry = &site->entries[p];
-        if (entry->shape != shape) continue;
-        if (entry->one_step && entry->level_shape[0]->shared &&
-            kiln_c99_shape_slot_code(entry->level_shape[0], entry->proto_slot) == code) {
-            path->proto = entry->level_shape[0];
-            path->slot = entry->proto_slot;
-            path->row = row;
-            path->recv = shape;
-        }
+    entry = kiln_c99_site_entry(site, shape);
+    if (entry == NULL || !entry->one_step || !entry->level_shape[0]->shared ||
+        kiln_c99_shape_slot_code(entry->level_shape[0], entry->proto_slot) != code)
         return;
-    }
+    /* Already this answer: nothing to publish (and nothing for another realm to lose). */
+    if (kiln_c99_slot_key(&path->recv) == shape && path->proto == entry->level_shape[0] &&
+        path->slot == entry->proto_slot && path->row == row)
+        return;
+    if (!kiln_c99_slot_claim(&path->recv, 1)) return;
+    path->proto = entry->level_shape[0];
+    path->slot = entry->proto_slot;
+    path->row = row;
+    kiln_c99_slot_publish(&path->recv, shape);
 }
 
 /* The slow path of integer arithmetic -- a result outside the safe range, computed as a
@@ -1369,17 +1696,40 @@ typedef enum kiln_gc_kind {
     KILN_GC_KIND_COUNT
 } kiln_gc_kind;
 
+/* The kind of a heap payload, read from the block header in front of it. The header is exactly
+ * one `kiln_gc_block` (`heap.c`) before the payload whatever its origin -- nursery, slab or
+ * malloc -- so this is pointer arithmetic and one load, inline wherever a boxed pointer's kind is
+ * asked on a hit path (an element site telling an array from a typed array, which share a boxing
+ * prefix). `heap.c` asserts the offset and mask against the struct. */
+#define KILN_C99_BLOCK_KIND_OFFSET 8u
+#define KILN_C99_BLOCK_KIND_MASK ((uint32_t)0x07FFFFFFu)
+static KILN_ALWAYS_INLINE inline uint32_t kiln_c99_gc_payload_kind(const void *payload) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    /* Every kind is below 256 and the flags live in the top bits, so the kind is the word's low
+     * byte: one byte compare, where masking the word costs a load, a constant and an `and`. */
+    return *((const uint8_t *)payload - KILN_C99_BLOCK_KIND_OFFSET);
+#else
+    uint32_t kind;
+    memcpy(&kind, (const char *)payload - KILN_C99_BLOCK_KIND_OFFSET, sizeof kind);
+    return kind & KILN_C99_BLOCK_KIND_MASK;
+#endif
+}
+
+
 /* A function's receiver-shape cache: four rows of shapes seen as `this`, and for each a slot
  * per name the body reads of `this`. The row for `shape`, or NULL: a read through a row is one
  * indexed load, with no absent-slot test and no capacity test, because a row is only ever
  * claimed whole (below) and an object holds every slot its shape names. */
+/* A function's receiver rows are write-once slots (`KILN_C99_SLOT_*`): row `j` is claimed, filled
+ * and published by a release store of `shapes[j]`, and never written again -- a row is a pure
+ * function of its shape, so it never needs replacing, and nothing is ever retired. */
 static inline const uint32_t *kiln_c99_recv_row(const kiln_shape **shapes, const uint32_t *slots,
                                                 size_t columns, const kiln_shape *shape) {
     size_t j;
-    for (j = 0; j < 4 && shapes[j] != NULL; ++j) {
-        if (shapes[j] == shape) {
-            return slots + j * columns;
-        }
+    for (j = 0; j < 4; ++j) {
+        const kiln_shape *row_shape = kiln_c99_slot_key(&shapes[j]);
+        if (row_shape == shape) return slots + j * columns;
+        if (row_shape == NULL) break;
     }
     return NULL;
 }
@@ -1395,7 +1745,7 @@ static inline const uint32_t *kiln_c99_recv_row(const kiln_shape **shapes, const
 static inline int kiln_c99_recv_refused(const kiln_shape *const *refused, const kiln_shape *shape) {
     size_t j;
     for (j = 0; j < 4; ++j) {
-        if (refused[j] == shape) {
+        if (KILN_C99_LOAD_ONCE(&refused[j]) == shape) {
             return 1;
         }
     }
@@ -1416,7 +1766,21 @@ static inline const uint32_t *kiln_c99_recv_claim(const kiln_shape **shapes,
     if (shape == NULL || !shape->shared) {
         return NULL;
     }
-    for (j = 0; j < 4 && shapes[j] != NULL; ++j) {
+    /* Rows are claimed in order, one claim in flight per table: a claimer that meets a row
+     * another thread is filling waits the few instructions that takes and then reads the row
+     * again, so realms starting together fill one row per shape exactly as one realm alone
+     * would -- racing claimers must not each take a row for the same shape and leave none for
+     * the next. */
+    for (j = 0; j < 4; ++j) {
+        const kiln_shape *seen = kiln_c99_slot_key(&shapes[j]);
+        const kiln_shape *empty = NULL;
+        while (seen == KILN_C99_SLOT_CLAIMED) seen = kiln_c99_slot_key(&shapes[j]);
+        if (seen == shape) return slots + j * columns;
+        if (seen != NULL) continue;
+        if (__atomic_compare_exchange_n(&shapes[j], &empty, KILN_C99_SLOT_CLAIMED, 0,
+                                        __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+            break;
+        --j; /* Another claim won this row: read it again. */
     }
     if (j == 4) {
         return NULL;
@@ -1435,16 +1799,18 @@ static inline const uint32_t *kiln_c99_recv_claim(const kiln_shape **shapes,
             ((double_mask & (1u << c)) && !(shape->double_slots_mask & (1u << found)))) {
             size_t r;
             for (r = 0; r < 4; ++r) {
-                if (refused[r] == NULL) {
-                    refused[r] = shape;
+                const kiln_shape *empty = NULL;
+                if (__atomic_compare_exchange_n(&refused[r], &empty, shape, 0, __ATOMIC_RELAXED,
+                                                __ATOMIC_RELAXED))
                     break;
-                }
             }
+            /* The claimed row goes back unwritten: nothing read it, and it is free again. */
+            __atomic_store_n(&shapes[j], (const kiln_shape *)NULL, __ATOMIC_RELEASE);
             return NULL;
         }
         slots[j * columns + c] = found;
     }
-    shapes[j] = shape;
+    kiln_c99_slot_publish(&shapes[j], shape);
     return slots + j * columns;
 }
 
@@ -1626,6 +1992,10 @@ typedef struct kiln_reaction {
 
 typedef struct kiln_promise {
     int state;
+    /* [[PromiseIsHandled]], and where a rejection nothing handled stands in node's tracking
+     * (`KILN_C99_REJECTION_*`, promises.c). Both fit in the padding before `value`. */
+    unsigned char handled;
+    unsigned char rejection;
     kiln_value value;
     /* `inline_reaction` while at most one reaction waits -- the case for nearly every promise,
      * which one `await` or one `then` watches -- and a malloc'd array only past that. A pending
@@ -1638,6 +2008,13 @@ typedef struct kiln_promise {
     kiln_value properties;
     kiln_reaction inline_reaction;
 } kiln_promise;
+
+/* `kiln_promise.rejection`: never rejected unhandled (or handled in time); rejected with nothing
+ * attached and waiting for the end of the checkpoint; handed to node's tracking, so a handler
+ * attached now is `rejectionHandled`. */
+#define KILN_C99_REJECTION_NONE 0
+#define KILN_C99_REJECTION_WAITING 1
+#define KILN_C99_REJECTION_REPORTED 2
 
 #define KILN_C99_PENDING 0
 #define KILN_C99_FULFILLED 1
@@ -2051,6 +2428,9 @@ static inline int kiln_c99_text_append(kiln_text *text, const char *bytes, size_
  * language counts in (ADR 0022) and matching over UTF-16 makes them so without a conversion. */
 int kiln_number_to_js_string(double value, char *buffer, size_t capacity);
 double kiln_string_to_number(const char *bytes, size_t len);
+/* `%TypedArray%.prototype.sort`'s default order, in place on the calling thread (the order
+ * `kiln_number_core::typed_order` owns for both engines); `kind` is a `kiln_typed_kind`. */
+int32_t kiln_typed_array_sort(uint8_t *data, size_t count, int32_t kind);
 int kiln_intl_segment(const uint8_t *bytes, size_t len, uint32_t granularity,
                       const uint32_t **out_records, size_t *out_count);
 typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);

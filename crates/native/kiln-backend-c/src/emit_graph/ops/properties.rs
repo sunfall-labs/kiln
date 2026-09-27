@@ -190,7 +190,7 @@ pub(super) fn emit_get_property(
         format!(
             "if (KILN_LIKELY((v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) {{ \
                          void *ptr = KILN_VAL_PTR(v{o}); \
-                         uint32_t kind = kiln_c99_gc_kind_of_ptr(ptr); \
+                         uint32_t kind = kiln_c99_gc_payload_kind(ptr); \
                          if (KILN_LIKELY(kind == KILN_GC_ARRAY)) {{ \
                              {int_stmt}{double_stmt}{box_stmt} \
                              handled = 1; \
@@ -362,8 +362,8 @@ pub(super) fn emit_get_property(
     } else {
         format!(
             "else if (shape != NULL) {{ \
-                for (int i = 1; i < (int)site.pic_count && i < 4; ++i) {{ \
-                    if (shape == site.entries[i].shape) {{ \
+                for (int i = 1; i < (int)kiln_c99_site_count(&site) && i < 4; ++i) {{ \
+                    if (shape == kiln_c99_slot_key(&site.entries[i].shape)) {{ \
                         uint32_t slot = site.entries[i].slot; \
                         if (slot < obj->slot_capacity) {{ v{v} = obj->slots[slot]; handled = 1; break; }} \
                         if (kiln_c99_pic_inherited(&site.entries[i], obj, &v{v})) {{ handled = 1; break; }} \
@@ -379,7 +379,7 @@ pub(super) fn emit_get_property(
                 if (!handled && KILN_VAL_IS_OBJECT(v{o})) {{ \
                     const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); \
                     const kiln_shape *shape = obj->shape; \
-                    if (KILN_LIKELY(shape != NULL && shape == site.entries[0].shape)) {{ \
+                    if (KILN_LIKELY(shape != NULL && shape == kiln_c99_slot_key(&site.entries[0].shape))) {{ \
                         uint32_t s0 = site.entries[0].slot; \
                         if (KILN_LIKELY(s0 < obj->slot_capacity)) {{ \
                             v{v} = obj->slots[s0]; \
@@ -588,9 +588,9 @@ pub(super) fn emit_set_property(
         format!(
             "else if (shape != NULL) {{ \
                 uint32_t slot = UINT32_MAX; \
-                if (shape == site.entries[1].shape && site.entries[1].transition_to == NULL) slot = site.entries[1].slot; \
-                else if (shape == site.entries[2].shape && site.entries[2].transition_to == NULL) slot = site.entries[2].slot; \
-                else if (shape == site.entries[3].shape && site.entries[3].transition_to == NULL) slot = site.entries[3].slot; \
+                if (shape == kiln_c99_slot_key(&site.entries[1].shape) && site.entries[1].transition_to == NULL) slot = site.entries[1].slot; \
+                else if (shape == kiln_c99_slot_key(&site.entries[2].shape) && site.entries[2].transition_to == NULL) slot = site.entries[2].slot; \
+                else if (shape == kiln_c99_slot_key(&site.entries[3].shape) && site.entries[3].transition_to == NULL) slot = site.entries[3].slot; \
                 if (slot != UINT32_MAX && KILN_LIKELY(slot < obj->slot_capacity && !obj->frozen)) {{ \
                     kiln_c99_prototype_touched(obj); \
                     obj->slots[slot] = v{val}; \
@@ -607,7 +607,7 @@ pub(super) fn emit_set_property(
                 if (KILN_VAL_IS_OBJECT(v{o})) {{ \
                     kiln_object *obj = (kiln_object *)KILN_VAL_PTR(v{o}); \
                     const kiln_shape *shape = obj->shape; \
-                    if (KILN_LIKELY(shape != NULL && shape == site.entries[0].shape && site.entries[0].transition_to == NULL)) {{ \
+                    if (KILN_LIKELY(shape != NULL && shape == kiln_c99_slot_key(&site.entries[0].shape) && site.entries[0].transition_to == NULL)) {{ \
                         uint32_t s0 = site.entries[0].slot; \
                         if (KILN_LIKELY(s0 < obj->slot_capacity && !obj->frozen)) {{ \
                             kiln_c99_prototype_touched(obj); obj->slots[s0] = v{val}; \
@@ -866,7 +866,7 @@ pub(super) fn emit_get_computed(
                 "    {{ int handled = 0; {array_tier}{vk_decl}\
                 if (!handled && KILN_LIKELY((v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX{number_guard})) {{ \
                     void *ptr = KILN_VAL_PTR(v{o}); \
-                    uint32_t kind = kiln_c99_gc_kind_of_ptr(ptr); \
+                    uint32_t kind = kiln_c99_gc_payload_kind(ptr); \
                     if (kind == KILN_GC_ARRAY) {{ \
                         {array_body} \
                     }} else if (kind == KILN_GC_TYPED_ARRAY) {{ \
@@ -1081,7 +1081,7 @@ pub(super) fn emit_set_computed(
                 "    {{ int handled = 0; {vk_decl}\
                 if (KILN_LIKELY((v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX{number_guard})) {{ \
                     void *ptr = KILN_VAL_PTR(v{o}); \
-                    uint32_t kind = kiln_c99_gc_kind_of_ptr(ptr); \
+                    uint32_t kind = kiln_c99_gc_payload_kind(ptr); \
                     if (kind == KILN_GC_ARRAY) {{ \
                         {array_body} \
                     }} else if (kind == KILN_GC_TYPED_ARRAY) {{ \

@@ -1006,49 +1006,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         )
     }
 
-    /// `ValidateTypedArray(O, order)`: what stands at the head of every `%TypedArray%.prototype`
-    /// method.
-    ///
-    /// Three refusals in one, and they are three because the specification's are: a receiver
-    /// with no `[[TypedArrayName]]` slot is not one of these objects at all, a detached buffer
-    /// leaves the view addressing memory that is gone, and a resizable buffer that shrank under
-    /// a view leaves it addressing bytes that were never given back. `brand_only` stops after
-    /// the first, for the two methods the specification stops after the first for.
-    ///
-    /// The message names the method, because the whole point of the check is that the program
-    /// reached a method through a table its receiver does not belong to, and a bare "incompatible
-    /// receiver" leaves it guessing which one.
-    pub(crate) fn validate_typed_array(
-        &self,
-        receiver: &Value,
-        method: &str,
-        BrandOnly(brand_only): BrandOnly,
-    ) -> Result<(), ExecutionError> {
-        let Value::TypedArray(view) = receiver else {
-            return Err(ExecutionError::TypeErrorMessage {
-                message: format!(
-                    "Method %TypedArray%.prototype.{method} called on incompatible receiver {}",
-                    receiver.to_display_string()
-                ),
-            });
-        };
-        if brand_only {
-            return Ok(());
-        }
-        if view.buffer.detached() {
-            return Err(ExecutionError::BufferDetached);
-        }
-        if view.out_of_bounds() {
-            return Err(ExecutionError::TypeErrorMessage {
-                message: format!(
-                    "Method %TypedArray%.prototype.{method} called on a view whose buffer no \
-                     longer holds it"
-                ),
-            });
-        }
-        Ok(())
-    }
-
     /// The receiver an array method should walk, when one is being redirected onto something
     /// that is not an array.
     ///

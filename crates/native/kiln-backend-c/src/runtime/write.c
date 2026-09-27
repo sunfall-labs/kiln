@@ -20,35 +20,31 @@ static int kiln_c99_put_site_key(kiln_host *host, kiln_value target, const kiln_
     {
         kiln_object *object = kiln_c99_object_of(target);
         if (object->shape != NULL && !object->frozen && !object->module_namespace) {
-            uint32_t p;
-            for (p = 0; p < site->pic_count; ++p) {
-                if (site->entries[p].shape == object->shape) {
+            const kiln_c99_pic_entry *entry = kiln_c99_site_entry(site, object->shape);
+            if (entry != NULL) {
+                /* A published entry never changes; these are its words. */
+                const uint32_t slot = entry->slot;
+                const kiln_shape *next_shape = entry->transition_to;
+                if (next_shape == NULL) {
                     /* Polymorphic existing-property hit */
-                    if (site->entries[p].transition_to == NULL) {
-                        if (site->entries[p].slot < object->slot_capacity) {
-                            if ((object->shape->double_slots_mask & (1u << site->entries[p].slot)) &&
-                                value.tag != KILN_VALUE_NUMBER) {
-                                kiln_c99_ensure_dictionary(object);
-                                return kiln_c99_put_site_key(host, target, key, stable, value, strict, depth, thrown, site);
-                            }
-                            object->slots[site->entries[p].slot] = kiln_val_from_boundary(value);
-                            return KILN_C99_OK;
-                        }
-                    }
-                    /* Polymorphic transitioning store hit */
-                    else if (!object->not_extensible &&
-                             site->entries[p].slot < object->slot_capacity &&
-                             kiln_c99_transition_store_clear(site, &site->entries[p], object,
-                                                             stable, key)) {
-                        const kiln_shape *next_shape = site->entries[p].transition_to;
-                        if ((next_shape->double_slots_mask & (1u << site->entries[p].slot)) &&
+                    if (slot < object->slot_capacity) {
+                        if ((object->shape->double_slots_mask & (1u << slot)) &&
                             value.tag != KILN_VALUE_NUMBER) {
-                            /* Non-double written to double slot transition; fall through */
-                        } else {
-                            object->slots[site->entries[p].slot] = kiln_val_from_boundary(value);
-                            object->shape = (kiln_shape *)site->entries[p].transition_to;
-                            return KILN_C99_OK;
+                            kiln_c99_ensure_dictionary(object);
+                            return kiln_c99_put_site_key(host, target, key, stable, value, strict, depth, thrown, site);
                         }
+                        object->slots[slot] = kiln_val_from_boundary(value);
+                        return KILN_C99_OK;
+                    }
+                } else if (!object->not_extensible && slot < object->slot_capacity &&
+                           kiln_c99_transition_store_clear(site, entry, object, stable, key)) {
+                    /* Polymorphic transitioning store hit; a non-double written to a double slot
+                     * falls through. */
+                    if (!((next_shape->double_slots_mask & (1u << slot)) &&
+                          value.tag != KILN_VALUE_NUMBER)) {
+                        object->slots[slot] = kiln_val_from_boundary(value);
+                        object->shape = (kiln_shape *)next_shape;
+                        return KILN_C99_OK;
                     }
                 }
             }
@@ -58,7 +54,7 @@ static int kiln_c99_put_site_key(kiln_host *host, kiln_value target, const kiln_
                     (object->shape->store_mask & (1u << slot)) == 0) {
                     if (slot < object->slot_capacity) {
                         object->slots[slot] = kiln_val_from_boundary(value);
-                        if (site->pic_count < KILN_C99_PIC_SIZE) {
+                        if (kiln_c99_site_count(site) < KILN_C99_PIC_SIZE) {
                             kiln_c99_site_remember_own(site, object->shape, slot);
                         }
                         return KILN_C99_OK;
@@ -66,7 +62,7 @@ static int kiln_c99_put_site_key(kiln_host *host, kiln_value target, const kiln_
                 }
             }
         }
-        uint32_t own = kiln_c99_site_decode_dictionary_index(site->own);
+        uint32_t own = kiln_c99_site_decode_dictionary_index(kiln_c99_site_own(site));
         if (own < object->count && object->properties != NULL &&
             object->properties[own].key == stable && !object->frozen && !object->module_namespace) {
             kiln_property *property = &object->properties[own];
@@ -79,41 +75,31 @@ static int kiln_c99_put_site_key(kiln_host *host, kiln_value target, const kiln_
             const kiln_shape *orig_shape = object->shape;
             status = kiln_c99_put_mode_key(host, target, key, stable, value, strict, depth,
                                            thrown);
-            if (status == KILN_C99_OK && site->misses < KILN_C99_SITE_GIVE_UP) {
+            if (status == KILN_C99_OK && kiln_c99_site_misses(site) < KILN_C99_SITE_GIVE_UP) {
                 if (object->shape != NULL) {
                     if (orig_shape != NULL && object->shape != orig_shape) {
-                        uint32_t p;
-                        int found = 0;
                         /* Only the one edge this write took: a setter that ran instead may have
                          * moved the object along some other key. */
                         if (object->shape->parent != orig_shape || object->shape->ikey != stable)
                             return status;
-                        for (p = 0; p < site->pic_count; ++p) {
-                            if (site->entries[p].shape == orig_shape) found = 1;
-                        }
-                        if (found || site->pic_count < KILN_C99_PIC_SIZE) {
+                        if (kiln_c99_site_may_learn(site, orig_shape)) {
                             kiln_c99_site_remember_transition(site, orig_shape, object->shape,
                                                               object->shape->slot_index);
                         }
                     } else {
                         uint32_t slot;
                         if (kiln_c99_shape_find_slot(object->shape, stable, &slot)) {
-                            uint32_t p;
-                            int found = 0;
-                            for (p = 0; p < site->pic_count; ++p) {
-                                if (site->entries[p].shape == object->shape) found = 1;
-                            }
                             /* A read-only slot or an accessor's pair is never stored into. */
-                            if ((found || site->pic_count < KILN_C99_PIC_SIZE) &&
+                            if (kiln_c99_site_may_learn(site, object->shape) &&
                                 (object->shape->store_mask & (1u << slot)) == 0) {
                                 kiln_c99_site_remember_own(site, object->shape, slot);
                             }
                         } else if (!kiln_c99_site_learn(site, object, key, stable)) {
-                            site->misses += 1;
+                            kiln_c99_site_missed(site);
                         }
                     }
                 } else if (!kiln_c99_site_learn(site, object, key, stable)) {
-                    site->misses += 1;
+                    kiln_c99_site_missed(site);
                 }
             }
             return status;
@@ -275,7 +261,7 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
     if (target.tag == KILN_VALUE_TYPED_ARRAY && index >= 0.0) {
         kiln_typed_array *view = kiln_c99_typed_array_of(target);
         if ((size_t)index < view->length) {
-            *out = kiln_c99_number(kiln_c99_typed_get(view, (size_t)index));
+            return kiln_c99_typed_element(view, (size_t)index, out);
         } else {
             *out = kiln_c99_undefined();
         }
@@ -366,6 +352,8 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
     }
     if (target.tag == KILN_VALUE_TYPED_ARRAY && index >= 0.0) {
         kiln_typed_array *view = kiln_c99_typed_array_of(target);
+        if (kiln_c99_typed_kind_is_bigint(view->kind))
+            return kiln_c99_typed_store(host, view, (size_t)index, value, depth, thrown);
         kiln_c99_typed_set(view, (size_t)index, kiln_c99_as_number(value));
         return KILN_C99_OK;
     }

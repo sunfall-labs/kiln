@@ -109,6 +109,13 @@ pub enum Reason {
     CallbackUnknown,
     /// More than the callback was passed (a `thisArg`).
     ExtraArguments,
+    /// The call does not have the arguments the method's parallel lowering takes:
+    /// `parallelReduce(callback, combine, initial)` with other than three, or a `parallelSort`
+    /// with more than a comparator.
+    ArgumentShape,
+    /// `parallelSort`'s comparator is not one the compiler proves consistent (tier 1 knows
+    /// `(a, b) => a - b` and `(a, b) => b - a`); `sort`'s order for any other is the engine's.
+    ComparatorUnproven,
     /// The module is emitted with generic bodies only and without the per-site parallel
     /// lowering. No build profile produces this any more (issue 13: release modules past the
     /// specialization limit still lower their qualifying sites, and the development profile
@@ -147,6 +154,8 @@ impl Reason {
         Reason::ExtraArguments,
         Reason::GenericOnly,
         Reason::DevProfile,
+        Reason::ArgumentShape,
+        Reason::ComparatorUnproven,
     ];
 
     /// The stable code printed by `--explain-parallel`.
@@ -176,6 +185,8 @@ impl Reason {
             Reason::ExtraArguments => "extra-arguments",
             Reason::GenericOnly => "generic-only",
             Reason::DevProfile => "dev-profile",
+            Reason::ArgumentShape => "argument-shape",
+            Reason::ComparatorUnproven => "comparator-unproven",
         }
     }
 
@@ -188,7 +199,10 @@ impl Reason {
     pub const fn describe(self) -> &'static str {
         match self {
             Reason::NotPlainFunction => "the callback is a generator or async function",
-            Reason::Arity => "the callback does not declare one or two parameters",
+            Reason::Arity => {
+                "the callback does not declare the parameters this method passes (one or two; \
+                 two or three for parallelReduce's callback, two for its combine)"
+            }
             Reason::RestParameter => "the callback reads a rest parameter",
             Reason::ExceptionHandler => "the callback has a try block",
             Reason::Throws => "the callback can throw",
@@ -216,12 +230,20 @@ impl Reason {
             Reason::CallbackUnknown => {
                 "the callback is not a function literal the compiler can identify here"
             }
-            Reason::ExtraArguments => "parallelMap is passed more than the callback",
+            Reason::ExtraArguments => "the method is passed more than the callback (a thisArg)",
             Reason::GenericOnly => {
                 "the module is compiled with generic bodies only and no parallel lowering"
             }
             Reason::DevProfile => {
                 "this is a development build, which emits no parallel code; build with `--profile native-release`"
+            }
+            Reason::ArgumentShape => {
+                "the call does not pass the arguments the parallel lowering takes \
+                 (parallelReduce: callback, combine, initial)"
+            }
+            Reason::ComparatorUnproven => {
+                "the comparator is not proven consistent (tier 1 knows `(a, b) => a - b` and \
+                 `(a, b) => b - a`)"
             }
         }
     }
@@ -274,6 +296,189 @@ pub struct ParallelShape {
     /// The `LoadUpvalue` values of those captures, which the plan proves numbers under the
     /// call site's run-time guard.
     pub captured_values: Vec<crate::graph::ValueId>,
+    /// As a `parallelSort` comparator: the order it is proven to be, over numbers that are not
+    /// `NaN` ([`comparator_order`]).
+    pub comparator: Option<SortOrder>,
+    /// Some reachable `return` is a boolean (the rest numbers): a predicate. Its clone answers a
+    /// boxed value rather than a double, and only `parallelFilter` -- which reads the answer
+    /// through `ToBoolean` -- runs it on the pool ([`parallel_result`]).
+    pub boolean_result: bool,
+}
+
+/// What every reachable `return` of a callback is proven to be, with its parameters and captures
+/// seeded as numbers (the plan's settle): `Some(false)` numbers only, `Some(true)` numbers and
+/// booleans with at least one boolean (a predicate), `None` anything else.
+pub fn parallel_result(
+    graph: &FunctionGraph,
+    proven: &std::collections::HashMap<crate::graph::ValueId, Proven>,
+) -> Option<bool> {
+    let mut boolean = false;
+    for block in graph
+        .blocks
+        .iter()
+        .filter(|b| b.is_reachable_from_entry(graph.entry_block))
+    {
+        match &block.terminator {
+            Terminator::Return(Some(v)) => match proven.get(v) {
+                Some(k) if k.is_number() => {}
+                Some(Proven::Boolean) => boolean = true,
+                _ => return None,
+            },
+            Terminator::Return(None) => return None,
+            _ => {}
+        }
+    }
+    Some(boolean)
+}
+
+/// The kiln extensions with a parallel lowering (ADR 0058 application 2; ADR 0069; parallel
+/// issue 10). Each has one sequential definition (`kiln-builtins`: `parallelMap` in the engines'
+/// tables, the family in `parallel.ts`) and, at a call site whose callbacks this module proves
+/// pure and numeric, a pooled lowering with the same answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ParallelMethod {
+    /// `map`, element for element.
+    Map,
+    /// `filter`: a mask computed in parallel, the kept elements copied in order.
+    Filter,
+    /// `flatMap` (arrays only): a numeric callback's result is never an array, so it is `map`.
+    FlatMap,
+    /// `parallelReduce(callback, combine, initial)`: leaves of [`REDUCE_LEAF`] folded in
+    /// parallel, then combined pairwise level by level.
+    Reduce,
+    /// `sort`, stable: the typed-array default order, or a comparator proven consistent.
+    Sort,
+}
+
+/// `parallelReduce`'s leaf (see `kiln_builtin_surface::PARALLEL_REDUCE_LEAF`).
+pub const REDUCE_LEAF: usize = kiln_builtin_surface::PARALLEL_REDUCE_LEAF;
+
+impl ParallelMethod {
+    pub const ALL: [ParallelMethod; 5] = [
+        ParallelMethod::Map,
+        ParallelMethod::Filter,
+        ParallelMethod::FlatMap,
+        ParallelMethod::Reduce,
+        ParallelMethod::Sort,
+    ];
+
+    /// The member name.
+    pub const fn name(self) -> &'static str {
+        match self {
+            ParallelMethod::Map => "parallelMap",
+            ParallelMethod::Filter => "parallelFilter",
+            ParallelMethod::FlatMap => "parallelFlatMap",
+            ParallelMethod::Reduce => "parallelReduce",
+            ParallelMethod::Sort => "parallelSort",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.name() == name)
+    }
+
+    /// The arguments of a call with `argc` arguments that are callbacks the parallel lowering
+    /// runs (and so need a verdict and a clone), and the parameter counts each may declare.
+    /// Empty when a call of that shape has no parallel lowering.
+    pub fn callbacks(self, argc: usize) -> &'static [(usize, &'static [u32])] {
+        match (self, argc) {
+            (ParallelMethod::Map | ParallelMethod::Filter | ParallelMethod::FlatMap, 1) => {
+                &[(0, &[1, 2])]
+            }
+            (ParallelMethod::Reduce, 3) => &[(0, &[2, 3]), (1, &[2])],
+            (ParallelMethod::Sort, 1) => &[(0, &[2])],
+            _ => &[],
+        }
+    }
+}
+
+/// A `parallelSort` order the pool can run: the answer of a stable sort under a consistent
+/// comparator is unique, so running it on the pool is `sort` (ADR 0068 rule 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortOrder {
+    /// `(a, b) => a - b`.
+    Ascending,
+    /// `(a, b) => b - a`.
+    Descending,
+}
+
+impl SortOrder {
+    /// The provider's `order` argument (`kiln_parallel_sort`).
+    pub const fn provider_code(self) -> i32 {
+        match self {
+            SortOrder::Ascending => 1,
+            SortOrder::Descending => 2,
+        }
+    }
+}
+
+/// The order a two-parameter comparator is, when every reachable `return` returns the
+/// difference of its two parameters -- `(a, b) => a - b` or `(a, b) => b - a`.
+///
+/// Over numbers none of which is `NaN` such a comparator is consistent (ECMA-262 23.1.3.30.2):
+/// `a - b` has the sign of the comparison, `-0 - +0` and `Infinity - Infinity` read as equal, and
+/// equal is an equivalence. The pool checks the `NaN` half at run time (`kiln_parallel_sort`
+/// declines, and `sort` answers). Anything else -- a comparator with a branch, a capture, a
+/// `Math` call -- may be consistent, but tier 1 does not prove it, so it is sequential.
+pub fn comparator_order(graph: &FunctionGraph, proto: &FunctionProto) -> Option<SortOrder> {
+    use crate::graph::ValueId;
+    if proto.parameter_count != 2 {
+        return None;
+    }
+    let defs: std::collections::HashMap<ValueId, &GraphOp> = graph
+        .blocks
+        .iter()
+        .flat_map(|b| b.operations.iter())
+        .map(|(v, op)| (*v, op))
+        .collect();
+    let stored: std::collections::HashSet<u32> = graph
+        .blocks
+        .iter()
+        .flat_map(|b| b.operations.iter())
+        .filter_map(|(_, op)| match op {
+            GraphOp::StoreLocal { slot, .. } => Some(*slot),
+            _ => None,
+        })
+        .collect();
+    let parameter = |v: &ValueId| -> Option<usize> {
+        if let Some(k) = graph.initial_locals.iter().take(2).position(|p| p == v) {
+            return Some(k);
+        }
+        match defs.get(v) {
+            Some(GraphOp::LoadLocal(slot)) if *slot < 2 && !stored.contains(slot) => {
+                Some(*slot as usize)
+            }
+            _ => None,
+        }
+    };
+    let mut order = None;
+    for block in graph
+        .blocks
+        .iter()
+        .filter(|b| b.is_reachable_from_entry(graph.entry_block))
+    {
+        if let Terminator::Return(value) = &block.terminator {
+            let value = value.as_ref()?;
+            let Some(GraphOp::Binary {
+                op: kiln_ir::BinaryOp::Subtract,
+                left,
+                right,
+            }) = defs.get(value)
+            else {
+                return None;
+            };
+            let this = match (parameter(left)?, parameter(right)?) {
+                (0, 1) => SortOrder::Ascending,
+                (1, 0) => SortOrder::Descending,
+                _ => return None,
+            };
+            if order.is_some_and(|o| o != this) {
+                return None;
+            }
+            order = Some(this);
+        }
+    }
+    order
 }
 
 /// Whether `graph` (the body of `proto`) may be lowered to a `parallelMap` chunk, with no
@@ -347,7 +552,10 @@ pub fn parallel_verdict(
     {
         return Err(Refusal::new(Reason::RestParameter));
     }
-    if !(1..=2).contains(&proto.parameter_count) {
+    // One or two (`map`, `filter`: the element and the index), up to three (`parallelReduce`:
+    // the accumulator, the element and the index). Which a call site takes is the site's
+    // question (`ParallelMethod::callbacks`); this is the body's.
+    if !(1..=3).contains(&proto.parameter_count) {
         return Err(Refusal::with(
             Reason::Arity,
             format!("{} parameters", proto.parameter_count),
@@ -550,6 +758,7 @@ pub fn parallel_verdict(
             }
         }
     }
+    shape.comparator = comparator_order(graph, proto);
     Ok(shape)
 }
 
@@ -560,6 +769,8 @@ pub fn parallel_verdict(
 /// is the decision, read off the artifact, and cannot disagree with it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SiteRecord {
+    /// Which method the site calls (`parallelMap` in a record written before the family).
+    pub method: ParallelMethod,
     /// 1-based line and column of the call in the module's source (the `parallelMap` name
     /// before the callback, or the callback, or the enclosing function when neither is known).
     pub line: u32,
@@ -570,6 +781,8 @@ pub struct SiteRecord {
     pub captures: usize,
     /// For a refusal about one captured binding: where the callback reads it.
     pub at: Option<(u32, u32)>,
+    /// `parallelSort` with no comparator: parallel on typed arrays only.
+    pub default_order: bool,
 }
 
 thread_local! {
@@ -656,7 +869,12 @@ impl SiteRecord {
     /// The site of a call whose callback is proto `callback` (when the compiler knows it)
     /// inside proto `enclosing` (`None` for the unit's top level), in the module's original
     /// source.
-    pub fn locate(program: &Program, enclosing: Option<u32>, callback: Option<u32>) -> (u32, u32) {
+    pub fn locate(
+        program: &Program,
+        method: ParallelMethod,
+        enclosing: Option<u32>,
+        callback: Option<u32>,
+    ) -> (u32, u32) {
         with_original(program, |source, spans| {
             let span = |index: u32| {
                 spans
@@ -674,11 +892,38 @@ impl SiteRecord {
                         from += 1;
                     }
                     source[from..start]
-                        .rfind("parallelMap")
+                        .rfind(method.name())
                         .map_or(start, |i| from + i)
                 }
                 None => enclosing.and_then(span).map_or(0, |s| s.start as usize),
             };
+            line_column(source, at)
+        })
+    }
+
+    /// The site of the `ordinal`-th call of `method` that passes no callback (`parallelSort()`)
+    /// inside proto `enclosing` (`None` for the top level): its name, found by counting the
+    /// calls written `.{method}()` in the enclosing source, since an instruction carries no span.
+    pub fn locate_bare(
+        program: &Program,
+        method: ParallelMethod,
+        enclosing: Option<u32>,
+        ordinal: usize,
+    ) -> (u32, u32) {
+        with_original(program, |source, spans| {
+            let (start, end) = match enclosing.and_then(|i| spans.get(i as usize)) {
+                Some(s) if s.start <= s.end && s.end as usize <= source.len() => {
+                    (s.start as usize, s.end as usize)
+                }
+                _ => (0, source.len()),
+            };
+            let text = &source[start..end];
+            let needle = format!("{}()", method.name());
+            let at = text
+                .match_indices(&needle)
+                .nth(ordinal)
+                .or_else(|| text.match_indices(&needle).next())
+                .map_or(start, |(i, _)| start + i);
             line_column(source, at)
         })
     }
@@ -709,6 +954,9 @@ impl SiteRecord {
     /// The comment the emitter writes at the site.
     pub fn marker(&self) -> String {
         let mut out = format!("{MARKER}line={} column={}", self.line, self.column);
+        if self.method != ParallelMethod::Map {
+            out.push_str(&format!(" method={}", self.method.name()));
+        }
         match &self.refusal {
             None => out.push_str(&format!(" verdict=parallel captures={}", self.captures)),
             Some(r) => {
@@ -723,6 +971,9 @@ impl SiteRecord {
         }
         if let Some((line, column)) = self.at {
             out.push_str(&format!(" at={line}:{column}"));
+        }
+        if self.default_order {
+            out.push_str(" order=default");
         }
         out.push_str(" */");
         out
@@ -748,11 +999,13 @@ impl SiteRecord {
 
     fn parse(fields: &str) -> Option<SiteRecord> {
         let mut record = SiteRecord {
+            method: ParallelMethod::Map,
             line: 0,
             column: 0,
             refusal: None,
             captures: 0,
             at: None,
+            default_order: false,
         };
         let mut parallel = None;
         let mut reason = None;
@@ -761,6 +1014,7 @@ impl SiteRecord {
         for field in fields.split(' ') {
             let (key, value) = field.split_once('=')?;
             match key {
+                "method" => record.method = ParallelMethod::from_name(value)?,
                 "line" => record.line = value.parse().ok()?,
                 "column" => record.column = value.parse().ok()?,
                 "verdict" => parallel = Some(value == "parallel"),
@@ -768,6 +1022,7 @@ impl SiteRecord {
                 "reason" => reason = Reason::from_code(value),
                 "detail" => detail = Some(unescape(value)),
                 "writes" => writes = value.parse().ok(),
+                "order" => record.default_order = value == "default",
                 "at" => {
                     let (l, c) = value.split_once(':')?;
                     record.at = Some((l.parse().ok()?, c.parse().ok()?));
@@ -792,10 +1047,20 @@ impl SiteRecord {
     ///   captures-reassigned: captures `total` (src/report.ts:43:20), which is assigned 2 times
     /// ```
     pub fn render(&self, path: &str) -> String {
-        let head = format!("{path}:{}:{}  parallelMap  ", self.line, self.column);
+        let head = format!(
+            "{path}:{}:{}  {}  ",
+            self.line,
+            self.column,
+            self.method.name()
+        );
         match &self.refusal {
             None if self.captures > 0 => {
                 format!("{head}parallel (tier 1: reads captured values)\n")
+            }
+            // A sort with no comparator has a parallel order only on a typed array: an array's
+            // default order compares strings, and that call runs `sort`.
+            None if self.default_order => {
+                format!("{head}parallel (typed arrays: the default numeric order)\n")
             }
             None => format!("{head}parallel\n"),
             Some(r) => {
@@ -845,7 +1110,7 @@ pub fn format_explain_section(modules: &[(String, Vec<SiteRecord>)], main_path: 
     let report = render_report(modules, main_path);
     let mut out = String::from("parallel:\n");
     if report.is_empty() {
-        out.push_str("  no parallelMap call sites\n");
+        out.push_str("  no parallel call sites\n");
     }
     for line in report.lines() {
         out.push_str("  ");
@@ -948,7 +1213,10 @@ mod tests {
         a.asynchronous = true;
         assert!(!safe(a));
         assert!(!safe(proto(arithmetic(), 0)));
-        assert!(!safe(proto(arithmetic(), 3)));
+        // Three: `parallelReduce`'s accumulator, element and index. Which a site takes is the
+        // site's question (`ParallelMethod::callbacks`).
+        assert!(safe(proto(arithmetic(), 3)));
+        assert!(!safe(proto(arithmetic(), 4)));
         let mut rest = arithmetic();
         rest.insert(0, Instruction::RestArguments(0));
         rest.insert(1, Instruction::Pop);
@@ -1042,7 +1310,7 @@ mod tests {
     #[test]
     fn reason_arity() {
         assert_eq!(why(proto(arithmetic(), 0)), Some(Reason::Arity));
-        assert_eq!(why(proto(arithmetic(), 3)), Some(Reason::Arity));
+        assert_eq!(why(proto(arithmetic(), 4)), Some(Reason::Arity));
     }
 
     #[test]
@@ -1242,17 +1510,81 @@ mod tests {
         }
     }
 
+    fn comparator(code: Vec<Instruction>) -> Option<SortOrder> {
+        let proto = proto(code, 2);
+        let program = program(&proto);
+        let graph = build_function_graph(&proto, &program).unwrap();
+        parallel_verdict(&graph, &proto, &program, &[])
+            .ok()
+            .and_then(|shape| shape.comparator)
+    }
+
+    #[test]
+    fn a_comparator_is_proven_consistent_only_as_a_difference_of_its_parameters() {
+        let sub = |a, b| {
+            vec![
+                Instruction::LoadLocal(a),
+                Instruction::LoadLocal(b),
+                Instruction::Binary(BinaryOp::Subtract),
+                Instruction::Return,
+            ]
+        };
+        assert_eq!(comparator(sub(0, 1)), Some(SortOrder::Ascending));
+        assert_eq!(comparator(sub(1, 0)), Some(SortOrder::Descending));
+        assert_eq!(comparator(sub(0, 0)), None);
+        // `a < b ? -1 : 1`-like shapes, a product, a difference of something else: unproven.
+        let product = vec![
+            Instruction::LoadLocal(0),
+            Instruction::LoadLocal(1),
+            Instruction::Binary(BinaryOp::Multiply),
+            Instruction::Return,
+        ];
+        assert_eq!(comparator(product), None);
+        let shifted = vec![
+            Instruction::LoadLocal(0),
+            Instruction::Const(0),
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::LoadLocal(1),
+            Instruction::Binary(BinaryOp::Subtract),
+            Instruction::Return,
+        ];
+        assert_eq!(comparator(shifted), None);
+    }
+
+    #[test]
+    fn the_family_names_its_callbacks_by_position_and_arity() {
+        for method in ParallelMethod::ALL {
+            assert_eq!(ParallelMethod::from_name(method.name()), Some(method));
+        }
+        assert_eq!(ParallelMethod::Map.callbacks(1), &[(0, &[1u32, 2][..])]);
+        assert!(ParallelMethod::Filter.callbacks(2).is_empty(), "a thisArg");
+        assert_eq!(
+            ParallelMethod::Reduce.callbacks(3),
+            &[(0, &[2u32, 3][..]), (1, &[2u32][..])]
+        );
+        assert!(ParallelMethod::Reduce.callbacks(2).is_empty());
+        assert_eq!(ParallelMethod::Sort.callbacks(1), &[(0, &[2u32][..])]);
+        assert!(
+            ParallelMethod::Sort.callbacks(0).is_empty(),
+            "the default order has none"
+        );
+        assert_eq!(REDUCE_LEAF, 256);
+    }
+
     #[test]
     fn site_records_round_trip_through_the_generated_c() {
         let records = vec![
             SiteRecord {
+                method: ParallelMethod::Map,
                 line: 6,
                 column: 23,
                 refusal: None,
                 captures: 1,
                 at: None,
+                default_order: false,
             },
             SiteRecord {
+                method: ParallelMethod::Map,
                 line: 7,
                 column: 23,
                 refusal: Some(Refusal {
@@ -1261,6 +1593,25 @@ mod tests {
                 }),
                 captures: 0,
                 at: Some((7, 54)),
+                default_order: false,
+            },
+            SiteRecord {
+                method: ParallelMethod::Sort,
+                line: 8,
+                column: 3,
+                refusal: None,
+                captures: 0,
+                at: None,
+                default_order: true,
+            },
+            SiteRecord {
+                method: ParallelMethod::Reduce,
+                line: 9,
+                column: 3,
+                refusal: Some(Refusal::new(Reason::ArgumentShape)),
+                captures: 0,
+                at: None,
+                default_order: false,
             },
         ];
         let c: String = records
@@ -1275,7 +1626,11 @@ mod tests {
             report,
             "src/a.ts:6:23  parallelMap  parallel (tier 1: reads captured values)\n\
              src/a.ts:7:23  parallelMap  sequential\n  \
-             captures-reassigned: captures `bump */ x=y%` (src/a.ts:7:54), which is assigned 2 times\n"
+             captures-reassigned: captures `bump */ x=y%` (src/a.ts:7:54), which is assigned 2 times\n\
+             src/a.ts:8:3  parallelSort  parallel (typed arrays: the default numeric order)\n\
+             src/a.ts:9:3  parallelReduce  sequential\n  \
+             argument-shape: the call does not pass the arguments the parallel lowering takes \
+             (parallelReduce: callback, combine, initial)\n"
         );
     }
 }

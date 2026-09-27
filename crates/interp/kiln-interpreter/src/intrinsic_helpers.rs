@@ -182,12 +182,6 @@ pub(super) fn string_property(name: &str) -> Value {
         // `String.prototype.trimLeft === String.prototype.trimStart` is true.
         "trimLeft" => Value::Native(Native::StringTrimStart, RealmId::PRIMARY),
         "trimRight" => Value::Native(Native::StringTrimEnd, RealmId::PRIMARY),
-        html if HtmlWrapper::named(html).is_some() => Value::Native(
-            Native::StringHtml(
-                HtmlWrapper::named(html).unwrap_or_else(|| unreachable!("the guard just found it")),
-            ),
-            RealmId::PRIMARY,
-        ),
         "startsWith" => Value::Native(Native::StringStartsWith, RealmId::PRIMARY),
         "endsWith" => Value::Native(Native::StringEndsWith, RealmId::PRIMARY),
         "repeat" => Value::Native(Native::StringRepeat, RealmId::PRIMARY),
@@ -498,104 +492,6 @@ impl RegExpSymbol {
         Self::ALL
             .into_iter()
             .find(|found| found.symbol().property_key() == key)
-    }
-}
-
-/// One of Annex B's HTML wrappers on `String.prototype`.
-///
-/// Deprecated in the specification and still normative: they are what `"x".link(url)` produces,
-/// and the escaping rule is the only interesting part -- a quote inside an attribute becomes
-/// `&quot;`, or the tag it builds would not be one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HtmlWrapper {
-    Anchor,
-    Big,
-    Blink,
-    Bold,
-    Fixed,
-    FontColor,
-    FontSize,
-    Italics,
-    Link,
-    Small,
-    Strike,
-    Sub,
-    Sup,
-}
-
-impl HtmlWrapper {
-    const ALL: [Self; 13] = [
-        Self::Anchor,
-        Self::Big,
-        Self::Blink,
-        Self::Bold,
-        Self::Fixed,
-        Self::FontColor,
-        Self::FontSize,
-        Self::Italics,
-        Self::Link,
-        Self::Small,
-        Self::Strike,
-        Self::Sub,
-        Self::Sup,
-    ];
-
-    /// The method's name, which is not the tag it produces: `bold` makes a `<b>`.
-    pub(super) const fn property_key(self) -> &'static str {
-        match self {
-            Self::Anchor => "anchor",
-            Self::Big => "big",
-            Self::Blink => "blink",
-            Self::Bold => "bold",
-            Self::Fixed => "fixed",
-            Self::FontColor => "fontcolor",
-            Self::FontSize => "fontsize",
-            Self::Italics => "italics",
-            Self::Link => "link",
-            Self::Small => "small",
-            Self::Strike => "strike",
-            Self::Sub => "sub",
-            Self::Sup => "sup",
-        }
-    }
-
-    /// The element name, and the attribute it takes -- or none, for the nine that take nothing.
-    pub(super) const fn tag(self) -> (&'static str, Option<&'static str>) {
-        match self {
-            Self::Anchor => ("a", Some("name")),
-            Self::Big => ("big", None),
-            Self::Blink => ("blink", None),
-            Self::Bold => ("b", None),
-            Self::Fixed => ("tt", None),
-            Self::FontColor => ("font", Some("color")),
-            Self::FontSize => ("font", Some("size")),
-            Self::Italics => ("i", None),
-            Self::Link => ("a", Some("href")),
-            Self::Small => ("small", None),
-            Self::Strike => ("strike", None),
-            Self::Sub => ("sub", None),
-            Self::Sup => ("sup", None),
-        }
-    }
-
-    pub(super) fn named(key: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|found| found.property_key() == key)
-    }
-}
-
-/// `CreateHTML`: the receiver wrapped in a tag, with the attribute value quoted.
-pub(super) fn html_wrapper(wrapper: HtmlWrapper, text: &str, attribute: &str) -> String {
-    let (tag, name) = wrapper.tag();
-    match name {
-        // A quote inside the value is doubled into an entity, which is the whole of the
-        // specification's escaping here -- `<` and `&` are deliberately left alone.
-        Some(name) => format!(
-            "<{tag} {name}=\"{}\">{text}</{tag}>",
-            attribute.replace('"', "&quot;")
-        ),
-        None => format!("<{tag}>{text}</{tag}>"),
     }
 }
 
@@ -1198,78 +1094,6 @@ pub(super) fn atomics_combine(
         _ => right,
     } as f64;
     Value::Number(combined)
-}
-
-/// `RegExp.escape`: a string as a pattern that matches exactly it.
-///
-/// More is escaped than the grammar strictly needs, and deliberately: the result has to be safe
-/// to *paste*, so punctuation that a regexp gives no meaning to is escaped anyway, and every
-/// whitespace character becomes a numeric escape rather than staying a space that a later reader
-/// might trim. A leading letter or digit is escaped too, so that concatenating the result after
-/// something else can never continue an identifier or a back-reference.
-pub(super) fn escape_regexp_source(text: &str) -> String {
-    /// The characters the grammar itself gives meaning to, plus `/`, which ends a literal.
-    const SYNTAX: &str = "^$\\.*+?()[]{}|/";
-    /// Punctuation the grammar gives no meaning to, escaped so the result is safe to paste.
-    const PUNCTUATORS: &str = ",-=<>#&!%:;@~\'`\"";
-    let mut escaped = String::new();
-    for character in text.chars() {
-        // Only the *first* code point: the rule exists so the result cannot be read as the tail
-        // of a name, and only the first position can be.
-        if escaped.is_empty() && character.is_ascii_alphanumeric() {
-            escaped.push_str(&format!("\\x{:02x}", character as u32));
-            continue;
-        }
-        if SYNTAX.contains(character) {
-            escaped.push('\\');
-            escaped.push(character);
-            continue;
-        }
-        if let Some(control) = match character {
-            '\t' => Some("\\t"),
-            '\n' => Some("\\n"),
-            '\u{b}' => Some("\\v"),
-            '\u{c}' => Some("\\f"),
-            '\r' => Some("\\r"),
-            _ => None,
-        } {
-            escaped.push_str(control);
-            continue;
-        }
-        if !PUNCTUATORS.contains(character) && !is_pattern_whitespace(character) {
-            escaped.push(character);
-            continue;
-        }
-        let point = character as u32;
-        if point <= 0xff {
-            escaped.push_str(&format!("\\x{point:02x}"));
-        } else {
-            for unit in character.encode_utf16(&mut [0; 2]) {
-                escaped.push_str(&format!("\\u{unit:04x}"));
-            }
-        }
-    }
-    escaped
-}
-
-/// Whitespace and the line terminators, which `RegExp.escape` turns into numeric escapes so that
-/// a pattern carrying one cannot be silently reformatted.
-pub(super) fn is_pattern_whitespace(character: char) -> bool {
-    matches!(
-        character,
-        '\t' | '\u{b}'
-            | '\u{c}'
-            | ' '
-            | '\u{a0}'
-            | '\u{feff}'
-            | '\n'
-            | '\r'
-            | '\u{2028}'
-            | '\u{2029}'
-    ) || matches!(
-        character,
-        '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{202f}' | '\u{205f}' | '\u{3000}'
-    )
 }
 
 /// `CanonicalNumericIndexString(P)`: the number a property name spells, when the name is exactly

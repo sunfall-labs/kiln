@@ -121,6 +121,50 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(Value::Object(Rc::new(RefCell::new(data))))
     }
 
+    /// Node's `util.inspect.custom` for what a console prints: an object with a callable
+    /// `[Symbol.for("nodejs.util.inspect.custom")]` shows what it answers for
+    /// `(depth, options, inspect)` -- a string as it stands, anything else inspected in its place.
+    /// Only at the top level, where the host's formatter cannot call back into the program. A
+    /// hook that throws, which one that needs the `inspect` argument this does not have will,
+    /// leaves the value to the ordinary formatting.
+    pub(super) fn console_arguments(
+        &mut self,
+        mut arguments: Vec<Value>,
+        instruction: usize,
+    ) -> Result<Vec<Value>, ExecutionError> {
+        // `Symbol.for`'s: until something registers it, nothing can carry the hook.
+        let registered = match &self.module_realm {
+            Some(realm) => realm.borrow().symbol_registry.clone(),
+            None => self.symbol_registry.clone(),
+        };
+        let Some((_, custom)) = registered
+            .into_iter()
+            .find(|(name, _)| name.to_lossy_string() == "nodejs.util.inspect.custom")
+        else {
+            return Ok(arguments);
+        };
+        for argument in &mut arguments {
+            if !is_reflect_target(argument) {
+                continue;
+            }
+            let Ok(hook) = self.catching(|vm| vm.read_computed(argument, &custom, instruction))
+            else {
+                continue;
+            };
+            if !is_callable(&hook) {
+                continue;
+            }
+            let options = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+            let hook_arguments = vec![Value::Number(2.0), options, Value::Undefined];
+            if let Ok(shown) =
+                self.call_catching(&hook, argument.clone(), hook_arguments, instruction)?
+            {
+                *argument = shown;
+            }
+        }
+        Ok(arguments)
+    }
+
     pub(super) fn write_console_output(
         &mut self,
         receiver: &Value,
@@ -148,9 +192,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             )?;
             return Ok(Value::Undefined);
         }
-        let host_args = arguments
-            .iter()
-            .cloned()
+        let host_args = self
+            .console_arguments(arguments.to_vec(), instruction)?
+            .into_iter()
             .map(HostValue::from)
             .collect::<Vec<_>>();
         let operation = if is_stderr {

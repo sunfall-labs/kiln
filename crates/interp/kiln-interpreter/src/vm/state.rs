@@ -26,9 +26,39 @@ pub struct PromiseState {
     pub(super) settled: Option<Settled>,
     /// Reactions registered while still pending, in the order `then` was called.
     pub(super) reactions: Vec<Reaction>,
-    /// Whether a rejection has somewhere to go. A promise rejected with nothing attached is a
-    /// silent failure, which is worth reporting rather than dropping.
+    /// Whether a rejection has somewhere to go: the specification's [[PromiseIsHandled]].
     pub(super) handled: bool,
+    /// Where a rejection that nothing handled stands in node's tracking.
+    pub(super) rejection: RejectionReport,
+}
+
+/// Where a promise that rejected with nothing attached stands in node's unhandled-rejection
+/// tracking (`kiln-builtins/src/rejections.ts`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum RejectionReport {
+    /// Never rejected unhandled, or handled before its checkpoint ended.
+    #[default]
+    None,
+    /// Queued for the end of this checkpoint, unless something handles it first.
+    Waiting,
+    /// Handed to the tracking, so a handler attached now is `rejectionHandled`.
+    Reported,
+}
+
+/// The rejections a checkpoint has to report, beside the tracking that reports them.
+///
+/// One per realm session, like the job queues: a promise settled by one module's machine is
+/// reported by whichever machine ends the checkpoint.
+#[derive(Debug, Default)]
+pub(super) struct Rejections {
+    /// Promises rejected with nothing attached, in order, with their reasons. An entry whose
+    /// promise is no longer `Waiting` was handled in time and is skipped.
+    pub(super) rejected: Vec<(Rc<PromiseData>, Value)>,
+    /// `Reported` promises something has handled since.
+    pub(super) handled: Vec<Rc<PromiseData>>,
+    /// The shared tracking's entry point, registered by the realm bootstrap. Without one (a realm
+    /// with no bootstrap) the first rejection is reported as an uncaught exception.
+    pub(super) process: Option<Value>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -76,9 +106,6 @@ pub(super) enum Sink {
     /// The promise here belongs to one step rather than to the whole function, which is the
     /// whole difference between the two.
     AsyncGenerator(Rc<RefCell<GeneratorState>>, Rc<PromiseData>),
-    /// One `await` inside `Array.fromAsync`. Like `Combinator`, the bookkeeping *is* the
-    /// reaction: there is no JavaScript handler, only a walk to resume.
-    FromAsync(Rc<FromAsync>),
     /// One awaited disposer inside `AsyncDisposableStack.prototype.disposeAsync`. Like the two
     /// above, there is no JavaScript handler: what resumes is the walk down the stack.
     AsyncDisposal(Rc<AsyncDisposal>),
@@ -115,9 +142,8 @@ pub(super) enum Sink {
 
 /// One `AsyncDisposableStack.prototype.disposeAsync` in flight.
 ///
-/// On the heap for the same reason [`FromAsync`] is: the walk is suspended at every disposer,
-/// so what a synchronous loop would keep on the Rust stack has to survive a return to the
-/// microtask queue.
+/// On the heap because the walk is suspended at every disposer: what a synchronous loop would
+/// keep on the Rust stack has to survive a return to the microtask queue.
 #[derive(Debug, PartialEq)]
 pub(super) struct AsyncDisposal {
     /// The promise the caller is holding.
@@ -138,52 +164,6 @@ pub(super) struct AsyncDisposal {
     pub(super) has_awaited: std::cell::Cell<bool>,
 }
 
-/// One `Array.fromAsync` in flight.
-///
-/// On the heap because the walk is suspended at every element: what a synchronous loop would
-/// keep on the Rust stack has to survive a return to the microtask queue, so it lives here and
-/// the reaction that resumes the walk carries a handle to it.
-#[derive(Debug, PartialEq)]
-pub(super) struct FromAsync {
-    /// The promise the caller is holding.
-    pub(super) result: Rc<PromiseData>,
-    /// What the elements are being collected into.
-    pub(super) target: Value,
-    pub(super) mapper: Value,
-    pub(super) this_value: Value,
-    pub(super) source: RefCell<FromAsyncSource>,
-    /// How many elements have been placed, which is also the index the mapper is told.
-    pub(super) index: std::cell::Cell<usize>,
-    /// Which of the three awaits the walk is suspended at.
-    pub(super) stage: std::cell::Cell<FromAsyncStage>,
-}
-
-/// Where an `Array.fromAsync` is drawing its elements from.
-#[derive(Clone, Debug, PartialEq)]
-pub(super) enum FromAsyncSource {
-    /// An iterator and its `next`. `synchronous` is the whole difference between the two
-    /// protocols: an async iterator hands back a promise of each result object, where a
-    /// synchronous one hands back the object and it is each *value* that has to be awaited.
-    Iterator {
-        iterator: Value,
-        next: Value,
-        synchronous: bool,
-    },
-    /// A value with a `length` and indices, walked as `Array.from` walks one.
-    ArrayLike { source: Value, length: usize },
-}
-
-/// Which await an `Array.fromAsync` is suspended at, and so what the value it resumes with is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum FromAsyncStage {
-    /// The result object an async iterator's `next` produced.
-    Step,
-    /// One element: a synchronous iterator's value, or an array-like's slot.
-    Element,
-    /// What the mapper returned.
-    Mapped,
-}
-
 /// The state one `Promise.all`/`allSettled`/`any` walk shares across its element functions.
 ///
 /// The specification keeps this in the element functions' internal slots, all of them pointing
@@ -194,10 +174,6 @@ pub(super) enum FromAsyncStage {
 pub(super) struct CombinatorWalk {
     pub(super) native: Native,
     pub(super) values: RefCell<Vec<Value>>,
-    /// The keys the keyed combinators collected, parallel to `values` and empty for the four
-    /// that walk an iterable. Kept as `Value` rather than as the reserved string so that a
-    /// symbol-keyed input can put the symbol back on the result object.
-    pub(super) keys: RefCell<Vec<Value>>,
     pub(super) remaining: std::cell::Cell<usize>,
     pub(super) resolve: Value,
     pub(super) reject: Value,
@@ -233,6 +209,7 @@ impl PromiseState {
                 settled: None,
                 reactions: Vec::new(),
                 handled: false,
+                rejection: RejectionReport::None,
             }),
             properties: RefCell::new(ObjectData::default()),
         })

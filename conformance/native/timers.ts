@@ -33,10 +33,12 @@ queueMicrotask(() => { chain.push(1); queueMicrotask(() => chain.push(2)); });
 setTimeout(() => console.log(chain.join(",")), 0);
 
 // Arguments after the delay reach the callback, which is how a timer carries state without a
-// closure. A missing or negative delay is "as soon as possible", not "before what is queued".
+// closure. A missing or zero delay is node's 1 ms, "as soon as possible", not "before what is
+// queued". (A negative one is too, with a warning on stderr naming the process, which two
+// processes cannot print alike; conformance/regress/r25 holds it.)
 setTimeout((a: string, b: number) => console.log("args", a, b), 10, "x", 2);
 setTimeout(() => console.log("no delay"));
-setTimeout(() => console.log("negative"), -5);
+setTimeout(() => console.log("zero delay"), 0);
 
 // A cleared timer never runs, clearing an id that is gone is harmless, and the two clear
 // functions are interchangeable however the timer was made.

@@ -187,12 +187,6 @@ pub enum Adapter {
     NumberToLocaleString,
     /// `String.prototype.localeCompare`.
     StringLocaleCompare,
-    /// `Date.prototype.toLocaleString`.
-    DateToLocaleString,
-    /// `Date.prototype.toLocaleDateString`.
-    DateToLocaleDateString,
-    /// `Date.prototype.toLocaleTimeString`.
-    DateToLocaleTimeString,
     /// `String.prototype.toLocaleLowerCase`.
     StringToLocaleLowerCase,
     /// `String.prototype.toLocaleUpperCase`.
@@ -203,10 +197,8 @@ impl Adapter {
     /// The name the method reports through `.name`.
     const fn name(self) -> &'static str {
         match self {
-            Self::NumberToLocaleString | Self::DateToLocaleString => "toLocaleString",
+            Self::NumberToLocaleString => "toLocaleString",
             Self::StringLocaleCompare => "localeCompare",
-            Self::DateToLocaleDateString => "toLocaleDateString",
-            Self::DateToLocaleTimeString => "toLocaleTimeString",
             Self::StringToLocaleLowerCase => "toLocaleLowerCase",
             Self::StringToLocaleUpperCase => "toLocaleUpperCase",
         }
@@ -617,59 +609,6 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     } else {
                         text.to_uppercase().into()
                     },
-                ))
-            }
-            Adapter::DateToLocaleString
-            | Adapter::DateToLocaleDateString
-            | Adapter::DateToLocaleTimeString => {
-                let Value::Date(instant) = receiver else {
-                    return Err(type_error("this is not a Date object."));
-                };
-                let time = instant.time.get();
-                // Before any option is read: an invalid date is the string, not a formatting
-                // attempt, so a throwing getter on the options bag never runs for one.
-                if !time.is_finite() {
-                    return Ok(Value::String("Invalid Date".to_owned().into()));
-                }
-                let (wants_date, wants_time) = match adapter {
-                    Adapter::DateToLocaleDateString => (true, false),
-                    Adapter::DateToLocaleTimeString => (false, true),
-                    _ => (true, true),
-                };
-                // The locale list is canonicalized before the options bag is read, which is the
-                // specification's order and is observable: an invalid tag is refused before a
-                // getter on `options` can run.
-                let locales = self.canonicalize_locale_list(arguments.first(), instruction)?;
-                let mut options = self.intl_date_time_options(arguments.get(1), instruction)?;
-                // `ToDateTimeOptions`'s two refusals: a date-only method may not be handed a time
-                // style, and a time-only method may not be handed a date style.
-                if !wants_time && options.time_style.is_some() {
-                    return Err(type_error("toLocaleDateString cannot take a timeStyle"));
-                }
-                if !wants_date && options.date_style.is_some() {
-                    return Err(type_error("toLocaleTimeString cannot take a dateStyle"));
-                }
-                if needs_date_time_defaults(&options, wants_date, wants_time) {
-                    let numeric = || Some("numeric".to_owned());
-                    if wants_date {
-                        options.year = numeric();
-                        options.month = numeric();
-                        options.day = numeric();
-                    }
-                    if wants_time {
-                        options.hour = numeric();
-                        options.minute = numeric();
-                        options.second = numeric();
-                    }
-                }
-                let formatter = engine::datetime::DateTimeFormat::new_with_default(
-                    &locales,
-                    &self.default_locale,
-                    options,
-                )
-                .map_err(failure)?;
-                Ok(Value::String(
-                    formatter.format(time).map_err(failure)?.into(),
                 ))
             }
         }
@@ -2103,45 +2042,6 @@ fn this_number_value(receiver: &Value) -> Result<f64, ExecutionError> {
 /// One positional argument, with the absent ones spelled `undefined` the way a call does.
 fn argument(arguments: &[Value], index: usize) -> Value {
     arguments.get(index).cloned().unwrap_or(Value::Undefined)
-}
-
-/// `ToDateTimeOptions`' `needDefaults`: whether the request named nothing the method cares about.
-///
-/// Only the fields the method is *for* count. `toLocaleTimeString(undefined, { year: "numeric" })`
-/// still defaults its hour, minute and second, because a year is not a time -- and it keeps the
-/// year too, since the operation adds defaults rather than replacing what it was given.
-fn needs_date_time_defaults(
-    options: &engine::datetime::Options,
-    wants_date: bool,
-    wants_time: bool,
-) -> bool {
-    let date_named = options.weekday.is_some()
-        || options.year.is_some()
-        || options.month.is_some()
-        || options.day.is_some();
-    let time_named = options.day_period.is_some()
-        || options.hour.is_some()
-        || options.minute.is_some()
-        || options.second.is_some()
-        || options.fractional_second_digits.is_some();
-    if wants_date && date_named {
-        return false;
-    }
-    if wants_time && time_named {
-        return false;
-    }
-    // A style is a complete request on its own, and a method that takes both accepts either one
-    // as evidence that the caller has said what they want.
-    if wants_date && wants_time && (options.date_style.is_some() || options.time_style.is_some()) {
-        return false;
-    }
-    if wants_date && !wants_time && options.date_style.is_some() {
-        return false;
-    }
-    if wants_time && !wants_date && options.time_style.is_some() {
-        return false;
-    }
-    true
 }
 
 fn utf16(text: &str) -> Vec<u16> {

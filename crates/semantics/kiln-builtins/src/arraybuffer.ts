@@ -116,9 +116,9 @@ delete (globalThis as any).__kilnArrayBufferResize;
     (__kilnResizeBuffer as (buffer: any, length: number) => void)(this, newByteLength);
   } }.resize;
 
+  defineMethod(Proto, "resize", resize);
   defineMethod(Proto, "transfer", transfer);
   defineMethod(Proto, "transferToFixedLength", transferToFixedLength);
-  defineMethod(Proto, "resize", resize);
 
   // --- SharedArrayBuffer.prototype extensions ---
 

@@ -821,6 +821,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 "__kilnTypedArrayOutOfBounds",
                 Native::TypedArrayOutOfBoundsRaw,
             ),
+            // A same-type element copy and the default-order sort (`typedarray.ts`, every realm).
+            ("__kilnTypedArrayCopy", Native::TypedArrayCopyRaw),
+            ("__kilnTypedArraySort", Native::TypedArraySortRaw),
             // `[[SetPrototypeOf]]` and `[[PreventExtensions]]` answering their boolean, which the
             // shared `Reflect` methods (`object_reflect.ts`) cannot read off `Object`'s spellings:
             // those turn `false` into a TypeError indistinguishable from a proxy trap's own.
@@ -834,6 +837,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             ("__kilnJobsPending", Native::JobsPendingRaw),
             // The poll phase's lane, where message delivery (the same file) is queued.
             ("__kilnQueueIo", Native::QueueIoRaw),
+            // Node's unhandled-rejection tracking registers itself here
+            // (`kiln-builtins/src/rejections.ts`).
+            ("__kilnPromiseRejections", Native::PromiseRejectionsRaw),
         ] {
             globals.set_non_enumerable(name, Value::Native(native, realm));
         }

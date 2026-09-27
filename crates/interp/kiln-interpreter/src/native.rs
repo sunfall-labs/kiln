@@ -66,8 +66,6 @@ pub enum Native {
     /// One variant with a payload for the reason `Temporal` has one: the six services answer
     /// to overlapping method names and the receiver decides what a name means.
     Intl(intl::Op),
-    /// `RegExp.escape(text)`: the text as a pattern that matches it literally.
-    RegExpEscape,
     /// `Error.isError(value)`: whether a value really is an error rather than an object shaped
     /// like one. The distinction cannot be made from JavaScript, which is why it exists.
     ErrorIsError,
@@ -397,7 +395,6 @@ pub enum Native {
     ArrayIsArray,
     ArrayFrom,
     /// `Array.fromAsync`: `Array.from` with an await at every element.
-    ArrayFromAsync,
     ObjectKeys,
     ObjectSetPrototypeOf,
     ObjectGetPrototypeOf,
@@ -512,7 +509,6 @@ pub enum Native {
     /// is the whole reason the language grew them.
     ArrayCopy(ArrayCopy),
     /// One of Annex B's HTML wrappers on `String.prototype`.
-    StringHtml(HtmlWrapper),
     /// `Number.prototype.toExponential` and `toPrecision`, which differ only in what the digit
     /// count means.
     NumberToExponential,
@@ -541,18 +537,11 @@ pub enum Native {
     /// compares the getter it takes off `arguments` with the one it takes off `Function.prototype`
     /// and requires them to be the same value.
     ThrowTypeError,
-    /// Annex B's four accessor helpers on `Object.prototype`. The payload is which half of which
-    /// pair: defining or looking up, a getter or a setter.
-    LegacyAccessor {
-        defines: bool,
-        setter: bool,
-    },
     /// `Object.groupBy` and `Map.groupBy`: one walk, two shapes of result.
     ObjectGroupBy,
     MapGroupBy,
-    /// `Promise.withResolvers` and `Promise.try`.
+    /// `Promise.withResolvers`.
     PromiseWithResolvers,
-    PromiseTry,
     /// One of the five symbol-keyed methods on `RegExp.prototype`. These are what
     /// `String.prototype.match` and its four siblings are *defined* to call, which is what lets a
     /// program hand any of them an object of its own that answers the same symbol.
@@ -662,7 +651,6 @@ pub enum Native {
     ReflectSetPrototypeOf,
     ReflectGetOwnPropertyDescriptor,
     ReflectDeleteProperty,
-    ReflectIsExtensible,
     ReflectPreventExtensions,
     ObjectHasOwn,
     BigIntConstructor,
@@ -733,16 +721,15 @@ pub enum Native {
     ProxyConstructor,
     /// `ArrayBuffer`, and one constructor per view kind.
     ArrayBufferConstructor,
-    ArrayBufferResize,
-    /// `SharedArrayBuffer`, and the one method that is its own rather than `ArrayBuffer`'s.
+    /// `SharedArrayBuffer`.
     ///
     /// A separate constructor rather than a flag on the one above, because a program tells the
-    /// two apart by identity: `sab instanceof ArrayBuffer` is false, the prototypes are
-    /// different objects, and `ArrayBuffer.prototype.resize` called on a shared buffer is a
-    /// `TypeError`. One constructor answering both would make every one of those agree when the
+    /// two apart by identity: `sab instanceof ArrayBuffer` is false and the prototypes are
+    /// different objects. One constructor answering both would make those agree when the
     /// language says they disagree.
     SharedArrayBufferConstructor,
-    ArrayBufferGrow,
+    /// `ArrayBuffer.prototype.slice`. `SharedArrayBuffer.prototype.slice`, `resize` and `grow`
+    /// are the shared bootstrap's (`kiln-builtins/src/arraybuffer.ts`).
     ArrayBufferSlice,
     /// `__kilnArrayBufferDetach(buffer, length, preserveResizability)`: move the bytes into a new
     /// buffer and detach this one -- the primitive under `transfer`, `transferToFixedLength` and
@@ -757,6 +744,12 @@ pub enum Native {
     /// -- detached, or a resizable buffer shrunk under the window. The shared `%TypedArray%`
     /// methods ask it in `ValidateTypedArray` (`kiln-builtins/src/typedarray.ts`).
     TypedArrayOutOfBoundsRaw,
+    /// `__kilnTypedArrayCopy(target, targetIndex, source, sourceIndex, count)`: a same-type element
+    /// copy as bytes (ADR 0065, representation), `false` when the TypeScript's loop must run.
+    TypedArrayCopyRaw,
+    /// `__kilnTypedArraySort(view)`: the default-order sort in place (ADR 0065, representation),
+    /// over the order `kiln_number_core::typed_order` owns for both engines.
+    TypedArraySortRaw,
     /// `__kilnCloneData(value)`: the structured clone's plain-data fast path, which this engine
     /// never takes (it answers `undefined`, "not handled").
     CloneDataRaw,
@@ -766,6 +759,9 @@ pub enum Native {
     /// `__kilnQueueIo(callback, argument)`: `callback(argument)` as an I/O callback, node's poll
     /// phase (`kiln_runtime::Realm::queue_io`), which is where a message port delivers.
     QueueIoRaw,
+    /// `__kilnPromiseRejections(process)`: registers the shared unhandled-rejection tracking
+    /// (`kiln-builtins/src/rejections.ts`), which the end of every microtask checkpoint calls.
+    PromiseRejectionsRaw,
     ArrayBufferIsView,
     /// `%TypedArray%`: the abstract constructor the nine view constructors inherit from.
     ///
@@ -776,23 +772,6 @@ pub enum Native {
     TypedArrayConstructor(TypedKind),
     TypedArrayOf(TypedKind),
     TypedArrayFrom(TypedKind),
-    TypedArraySet,
-    TypedArraySubarray,
-    TypedArrayFill,
-    /// A method on `%TypedArray%.prototype` that shares an `Array.prototype` implementation,
-    /// named by the payload.
-    ///
-    /// The two tables ran the same implementations and so held the same *values*: reading `map`
-    /// off `%TypedArray%.prototype` and off `Array.prototype` answered one marker, which made
-    /// them the same function object -- and left the brand check every one of these performs
-    /// with nothing to hang itself on, because by the time a call was dispatched there was no
-    /// longer any record of which table it had been reached through. The payload is that record.
-    /// It is unwrapped to the `Array.prototype` method the moment `ValidateTypedArray` has run,
-    /// so exactly one implementation still carries out the work.
-    ///
-    /// `toString` is deliberately not one of these: the specification says it *is*
-    /// `Array.prototype.toString`, and a distinct marker would be a wrong answer the other way.
-    TypedArrayGeneric(&'static str),
     /// `DataView`, and the accessors that read and write one element through it.
     ///
     /// The element type rides in the variant rather than on the receiver because a `DataView`
@@ -819,30 +798,9 @@ pub enum Native {
     IteratorLazy(HelperKind),
     /// One of the methods that consumes an iterator and answers a value.
     IteratorTerminal(TerminalKind),
-    /// `next` and `return` on a helper this realm made.
-    /// `%IteratorPrototype%[@@dispose]`: close the iterator, if it has a way to be closed.
-    ///
-    /// Deliberately not brand-checked and not even receiver-checked: the specification goes
-    /// straight to `GetMethod(this, "return")`, so anything with a `return` is disposable and
-    /// anything without one disposes to nothing. That is what lets `using` work over an object
-    /// that only ever implemented the iterator protocol.
-    IteratorDispose,
     /// `next` on the iterator `RegExp.prototype[@@matchAll]` produced.
     RegExpStringIteratorNext,
-    /// `Iterator.concat` and the two methods of the helper it builds.
-    IteratorConcat,
-    IteratorConcatNext,
-    IteratorConcatReturn,
-    /// `Iterator.zip` and `Iterator.zipKeyed`, and the two methods of the helper they build.
-    ///
-    /// One marker with a flag rather than two, because the pair differ only in where the sources
-    /// come from and what a step is shaped like -- positional and an array, or keyed and an
-    /// object. The modes, the padding and the closing rules are one algorithm.
-    IteratorZip {
-        keyed: bool,
-    },
-    IteratorZipNext,
-    IteratorZipReturn,
+    /// `next` and `return` on a helper this realm made.
     IteratorHelperNext(HelperKind),
     IteratorHelperReturn,
     ProxyRevocable,
@@ -855,8 +813,6 @@ pub enum Native {
     FunctionBind,
     ObjectPreventExtensions,
     ObjectIsExtensible,
-    ObjectSeal,
-    ObjectIsSealed,
     ObjectGetOwnPropertySymbols,
     ObjectDefineProperties,
     ObjectGetOwnPropertyDescriptor,
@@ -898,8 +854,6 @@ pub enum Native {
     /// `Promise.allKeyed` and `Promise.allSettledKeyed`: the same two combinators, walking an
     /// object's own enumerable keys instead of an iterable, and settling with an object keyed the
     /// same way rather than an array indexed by position.
-    PromiseAllKeyed,
-    PromiseAllSettledKeyed,
     PromiseRace,
     PromiseAny,
     PromiseThen,
@@ -1035,24 +989,6 @@ impl Native {
         )
     }
 
-    /// The `%TypedArray%.prototype` method this is, and whether it checks only the brand.
-    ///
-    /// Every method on that table checks its receiver before it does anything else -- before it
-    /// even coerces its arguments -- and naming them here is what lets the two call paths run
-    /// that check once rather than each method growing a guard it can be written without. The
-    /// distinction the flag draws is the specification's own: `set` and `subarray` perform
-    /// `RequireInternalSlot` alone, which is why `new Uint8Array(detached).subarray(0)` answers
-    /// an empty view where `.slice(0)` throws.
-    pub(crate) fn typed_array_prototype_method(self) -> Option<(&'static str, BrandOnly)> {
-        match self {
-            Self::TypedArrayGeneric(name) => Some((name, BrandOnly(false))),
-            Self::TypedArrayFill => Some(("fill", BrandOnly(false))),
-            Self::TypedArraySet => Some(("set", BrandOnly(true))),
-            Self::TypedArraySubarray => Some(("subarray", BrandOnly(true))),
-            _ => None,
-        }
-    }
-
     /// Whether this built-in changes how many elements its array has.
     ///
     /// A typed array's length is fixed, so these are the ones it does not have. The other
@@ -1145,22 +1081,6 @@ impl Native {
             Self::DateConstructor => Some(PrimitiveHint::Number),
             _ => None,
         }
-    }
-
-    /// Whether this built-in hands back a *new* array rather than a value out of the old one.
-    ///
-    /// Called on a typed array, such a method returns a typed array of the same kind. That is
-    /// the difference a console shows, and the reason this classification exists.
-    pub(crate) fn returns_a_new_array(self) -> bool {
-        // The three copying methods a view has answer a view of the same kind -- which is the
-        // one thing that separates them from the array methods they otherwise share.
-        matches!(
-            self,
-            Self::ArraySlice
-                | Self::ArrayConcat
-                | Self::ArrayFlat
-                | Self::ArrayCopy(ArrayCopy::With | ArrayCopy::ToReversed | ArrayCopy::ToSorted)
-        )
     }
 
     /// Whether this built-in rearranges its array in place, keeping the length.
@@ -1281,10 +1201,6 @@ impl Native {
                 | Self::StringCodePointAt
                 | Self::StringLocaleCompare
                 | Self::StringNormalize
-                // `CreateHTML` opens with `RequireObjectCoercible` and `ToString` exactly as
-                // every other `String.prototype` method does, and being Annex B does not change
-                // that: `String.prototype.bold.call(5)` is `"5".bold()`.
-                | Self::StringHtml(_)
         )
     }
 
@@ -1300,7 +1216,9 @@ impl Native {
             PrototypeTable::Date => date_method(name),
             PrototypeTable::ArrayBuffer => array_buffer_method(false, name),
             PrototypeTable::SharedArrayBuffer => array_buffer_method(true, name),
-            PrototypeTable::TypedArray => typed_array_method(name),
+            // Every method on `%TypedArray%.prototype` is the shared bootstrap's
+            // (`kiln-builtins/src/typedarray.ts`), in the realm's store.
+            PrototypeTable::TypedArray => Value::Undefined,
             // The per-view table carries only what differs between the views; everything
             // else is inherited from `%TypedArray%.prototype` one link up the chain, which
             // is why reading it here rather than there would be the wrong shape.
@@ -1381,13 +1299,6 @@ impl Native {
                 ("abort", FixedOwnValue::Native(Self::AbortSignalAbort)),
                 ("timeout", FixedOwnValue::Native(Self::AbortSignalTimeout)),
                 ("any", FixedOwnValue::Native(Self::AbortSignalAny)),
-            ],
-            Self::PromiseConstructor => &[
-                ("allKeyed", FixedOwnValue::Native(Self::PromiseAllKeyed)),
-                (
-                    "allSettledKeyed",
-                    FixedOwnValue::Native(Self::PromiseAllSettledKeyed),
-                ),
             ],
             Self::AsyncGeneratorFunctionPrototype => &[
                 (
@@ -1537,9 +1448,6 @@ impl Native {
             // `e.constructor.name` reaches this: the instance finds its constructor through the
             // prototype, and the constructor knows which kind it is.
             (Self::Error(kind), "name") => Some(Value::String(kind.name().to_owned().into())),
-            (Self::RegExpConstructor, "escape") => {
-                Some(Value::Native(Self::RegExpEscape, RealmId::PRIMARY))
-            }
             (Self::Error(ErrorKind::Error), "isError") => {
                 Some(Value::Native(Self::ErrorIsError, RealmId::PRIMARY))
             }
@@ -1548,9 +1456,6 @@ impl Native {
             }
             (Self::ArrayConstructor, "from") => {
                 Some(Value::Native(Self::ArrayFrom, RealmId::PRIMARY))
-            }
-            (Self::ArrayConstructor, "fromAsync") => {
-                Some(Value::Native(Self::ArrayFromAsync, RealmId::PRIMARY))
             }
             (Self::ObjectConstructor, "keys") => {
                 Some(Value::Native(Self::ObjectKeys, RealmId::PRIMARY))
@@ -1610,9 +1515,6 @@ impl Native {
             (Self::Reflect, "getPrototypeOf") => {
                 Some(Value::Native(Self::ReflectGetPrototypeOf, RealmId::PRIMARY))
             }
-            (Self::Reflect, "setPrototypeOf") => {
-                Some(Value::Native(Self::ReflectSetPrototypeOf, RealmId::PRIMARY))
-            }
             (Self::Reflect, "defineProperty") => {
                 Some(Value::Native(Self::ReflectDefineProperty, RealmId::PRIMARY))
             }
@@ -1623,13 +1525,6 @@ impl Native {
             (Self::Reflect, "deleteProperty") => {
                 Some(Value::Native(Self::ReflectDeleteProperty, RealmId::PRIMARY))
             }
-            (Self::Reflect, "isExtensible") => {
-                Some(Value::Native(Self::ReflectIsExtensible, RealmId::PRIMARY))
-            }
-            (Self::Reflect, "preventExtensions") => Some(Value::Native(
-                Self::ReflectPreventExtensions,
-                RealmId::PRIMARY,
-            )),
             (Self::ObjectConstructor, "hasOwn") => {
                 Some(Value::Native(Self::ObjectHasOwn, RealmId::PRIMARY))
             }
@@ -1641,9 +1536,6 @@ impl Native {
             }
             (Self::PromiseConstructor, "withResolvers") => {
                 Some(Value::Native(Self::PromiseWithResolvers, RealmId::PRIMARY))
-            }
-            (Self::PromiseConstructor, "try") => {
-                Some(Value::Native(Self::PromiseTry, RealmId::PRIMARY))
             }
             (Self::ObjectConstructor, "is") => {
                 Some(Value::Native(Self::ObjectIs, RealmId::PRIMARY))
@@ -1694,17 +1586,6 @@ impl Native {
             (Self::IteratorConstructor, "from") => {
                 Some(Value::Native(Self::IteratorFrom, RealmId::PRIMARY))
             }
-            (Self::IteratorConstructor, "concat") => {
-                Some(Value::Native(Self::IteratorConcat, RealmId::PRIMARY))
-            }
-            (Self::IteratorConstructor, "zip") => Some(Value::Native(
-                Self::IteratorZip { keyed: false },
-                RealmId::PRIMARY,
-            )),
-            (Self::IteratorConstructor, "zipKeyed") => Some(Value::Native(
-                Self::IteratorZip { keyed: true },
-                RealmId::PRIMARY,
-            )),
             (Self::BooleanConstructor, "prototype") => Some(Value::Native(
                 Self::PrototypeOf(PrototypeTable::Boolean),
                 RealmId::PRIMARY,
@@ -1888,15 +1769,6 @@ impl Native {
             (Self::ObjectConstructor, "isExtensible") => {
                 Some(Value::Native(Self::ObjectIsExtensible, RealmId::PRIMARY))
             }
-            // Sealing is preventing extensions plus making each property non-configurable, and
-            // configurability is not tracked per-property, so the two coincide here. The
-            // difference only shows through `delete`, which `frozen` already covers.
-            (Self::ObjectConstructor, "seal") => {
-                Some(Value::Native(Self::ObjectSeal, RealmId::PRIMARY))
-            }
-            (Self::ObjectConstructor, "isSealed") => {
-                Some(Value::Native(Self::ObjectIsSealed, RealmId::PRIMARY))
-            }
             (Self::ObjectConstructor, "getOwnPropertySymbols") => Some(Value::Native(
                 Self::ObjectGetOwnPropertySymbols,
                 RealmId::PRIMARY,
@@ -2018,13 +1890,6 @@ impl Native {
             (Self::PromiseConstructor, "allSettled") => {
                 Some(Value::Native(Self::PromiseAllSettled, RealmId::PRIMARY))
             }
-            (Self::PromiseConstructor, "allKeyed") => {
-                Some(Value::Native(Self::PromiseAllKeyed, RealmId::PRIMARY))
-            }
-            (Self::PromiseConstructor, "allSettledKeyed") => Some(Value::Native(
-                Self::PromiseAllSettledKeyed,
-                RealmId::PRIMARY,
-            )),
             (Self::PromiseConstructor, "race") => {
                 Some(Value::Native(Self::PromiseRace, RealmId::PRIMARY))
             }

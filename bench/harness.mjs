@@ -96,14 +96,19 @@ export function floor() {
 ///
 /// Returns a promise when the workload does, so an async benchmark needs no special spelling at
 /// the call site and no top-level await.
+///
+/// `options.checksum`, when given, turns the last result into the reported checksum. It runs
+/// once, after the clock has stopped, so a workload can return the array it built and have it
+/// summed outside the measurement rather than paying a sequential pass inside every call.
 export function bench(name, workload, options = {}) {
   const budgetMs = options.budgetMs ?? 2000;
   const iterations = options.externalIterations ?? 1;
+  const summarise = options.checksum ?? ((value) => value);
 
   if (clockKind() !== "real") {
     // Nothing here can be timed from the inside. Do a known amount of work and let the runner
     // time the process; reporting a zero would be worse than reporting no number at all.
-    const done = (sink) => report({ name, mode: "external", iterations, checksum: String(sink) });
+    const done = (sink) => report({ name, mode: "external", iterations, checksum: String(summarise(sink)) });
     let sink;
     let chain = null;
     for (let i = 0; i < iterations; i += 1) {
@@ -122,12 +127,12 @@ export function bench(name, workload, options = {}) {
   const first = Date.now();
   const cold = workload();
   if (cold && typeof cold.then === "function") {
-    return cold.then((value) => timedAsync(name, workload, budgetMs, Date.now() - first, value));
+    return cold.then((value) => timedAsync(name, workload, budgetMs, Date.now() - first, value, summarise));
   }
-  return timedSync(name, workload, budgetMs, Date.now() - first, cold);
+  return timedSync(name, workload, budgetMs, Date.now() - first, cold, summarise);
 }
 
-function timedSync(name, workload, budgetMs, cold, coldValue) {
+function timedSync(name, workload, budgetMs, cold, coldValue, summarise) {
   let sink = coldValue;
   let batch = 1;
   // Bounded twice over. `clockKind` has already ruled out the clock that cannot answer this, and
@@ -149,11 +154,11 @@ function timedSync(name, workload, budgetMs, cold, coldValue) {
   samples.sort((a, b) => a - b);
   report({
     name, mode: "in-process", cold, warm_median: median(samples), warm_best: samples[0],
-    batch, samples: samples.length, checksum: String(sink),
+    batch, samples: samples.length, checksum: String(summarise(sink)),
   });
 }
 
-async function timedAsync(name, workload, budgetMs, cold, coldValue) {
+async function timedAsync(name, workload, budgetMs, cold, coldValue, summarise) {
   let sink = coldValue;
   let batch = 1;
   for (;;) {
@@ -172,6 +177,6 @@ async function timedAsync(name, workload, budgetMs, cold, coldValue) {
   samples.sort((a, b) => a - b);
   report({
     name, mode: "in-process", cold, warm_median: median(samples), warm_best: samples[0],
-    batch, samples: samples.length, checksum: String(sink),
+    batch, samples: samples.length, checksum: String(summarise(sink)),
   });
 }

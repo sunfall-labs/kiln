@@ -1025,8 +1025,14 @@ fn runtime_prelude_size() {
     // (+~140, most of it the comments saying what is per realm, per thread and per process).
     // Landed together on 2026-09-27: issue 15, realms issue 04 step 5 and step 3c (shapes record a
     // method's code) measure 52,312 lines as one tree; the three deltas are listed above.
+    // Realms issue 18 and 19 (2026-09-27): the promise's rejection tracking and its lane, the
+    // BigInt element reads and stores, and the console's `util.inspect.custom`: 52,748 lines.
+    // Widened on 2026-09-27 for realms issue 04 step 4 (+403 lines on its own base): the slot
+    // protocol every shared cache is published and replaced by, site entry scans and promotion
+    // through it, once-built indexes, and the comments saying what each shared word's
+    // publication is and why (about half of it comments).
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 52_700;
+    const CEILING_LINES: usize = 53_500;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
@@ -1814,9 +1820,12 @@ fn in_place_induction_variable_loop_emission() {
 fn polymorphic_inline_cache_prelude_surface() {
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
-    // Asserts 4-shape polymorphic unrolling exists in read_property and write_property
-    assert!(prelude.contains("for (p = 0; p < site->pic_count; ++p)"));
-    assert!(prelude.contains("object->shape == site->entries[p].shape"));
+    // Every entry scan goes through the one reader that loads each entry's key word with acquire
+    // (the slot protocol, issue 04 step 4), and every write through the one remembering path.
+    assert!(prelude.contains("for (p = 0; p < count; ++p) {\n        if (kiln_c99_slot_key(&site->entries[p].shape) == shape) return &site->entries[p];"));
+    assert!(prelude.contains(
+        "static void kiln_c99_site_remember(kiln_c99_site *site, const kiln_c99_pic_entry *given)"
+    ));
 }
 
 #[test]

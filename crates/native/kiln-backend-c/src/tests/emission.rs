@@ -1258,7 +1258,7 @@ fn emitted_static_object_literal_uses_cached_shape_and_inline_slots() {
         "expected inline slot 1 store in emitted source:\n{gen_numbers}"
     );
     assert!(
-        gen_numbers.contains("obj->shape = (kiln_shape *)lit_shape;"),
+        gen_numbers.contains("obj->shape = (kiln_shape *)lit;"),
         "expected shape assignment in emitted source:\n{gen_numbers}"
     );
     assert!(
@@ -1294,7 +1294,7 @@ fn emitted_static_object_literal_uses_cached_shape_and_inline_slots() {
         "mixed-type object literal should generate dynamic mask:\n{gen_mixed}"
     );
     assert!(
-        gen_mixed.contains("lit_shape->double_slots_mask == mask"),
+        gen_mixed.contains("lit->double_slots_mask == mask"),
         "mixed-type object literal should guard on mask:\n{gen_mixed}"
     );
 
@@ -1429,7 +1429,7 @@ int main(void) {
     kiln_value exports[1] = { kiln_c99_undefined() };
     int status = ku_body(&host, &result, NULL, 0, exports, 1);
     if (status != KILN_C99_OK) return 1;
-    if (ku_keys_ready != 1) return 2;
+    if (ku_keys_shared != 1) return 2;
     if (ku_keys[0] == NULL || ku_keys[1] == NULL) return 3;
     return 0;
 }
@@ -1511,13 +1511,13 @@ int main(void) {
     memset(&host, 0, sizeof(host));
     kiln_value result = kiln_c99_undefined();
     int status;
-    if (ku_keys_shared != 1 || ku_keys_ready != 1) return 4;
+    if (ku_keys_shared != 1) return 4;
     for (size_t i = 0; i < 6; ++i) {
         if (ku_keys[i] == NULL || !kiln_c99_key_is_shared(ku_keys[i])) return 5;
     }
     status = ku_body(&host, &result, NULL, 0, NULL, 0);
     (void)status;
-    if (ku_keys_ready != 1) return 2;
+    if (ku_keys_shared != 1) return 2;
     for (size_t i = 0; i < 6; ++i) {
         if (ku_keys[i] == NULL) return 3;
     }

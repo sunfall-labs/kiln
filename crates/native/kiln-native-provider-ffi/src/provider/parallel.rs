@@ -238,12 +238,158 @@ pub unsafe extern "C" fn kiln_parallel_map(
     }
 }
 
+/// `parallelSort`'s orders (ADR 0069, parallel issue 10). The emitter passes one of these only
+/// where the answer is fixed by the order alone: a stable sort under a consistent comparator has
+/// exactly one result, so the pool's answer is `sort`'s.
+///
+/// `%TypedArray%.prototype.sort` with no comparator: numeric ascending, `-0` before `+0`, `NaN`
+/// last (and `NaN`s kept in their order).
+pub const SORT_DEFAULT: i32 = 0;
+/// A comparator proven to be `(a, b) => a - b` over numbers none of which is `NaN`: ascending,
+/// with `-0` and `+0` equal (kept in their order).
+pub const SORT_ASCENDING: i32 = 1;
+/// `(a, b) => b - a`, likewise.
+pub const SORT_DESCENDING: i32 = 2;
+
+/// The element kind of an array's own element storage -- NaN-boxed values, each a number whose
+/// bits are its `double` -- beside the `kiln_typed_kind` values 0..=8 of a typed array.
+pub const SORT_KIND_VALUES: i32 = 100;
+
+/// Below this many elements the sort runs on the calling thread: a sort of 10,000 doubles takes
+/// about as long as waking the pool twice (issue 04's 45-90 us fork-join).
+pub const SORT_PARALLEL_MIN: usize = 10_000;
+
+// `%TypedArray%` default order over floats (`SORT_DEFAULT`); integers compare as integers. The
+// order is `kiln_number_core::typed_order`'s, which the sequential sort runs too.
+use kiln_number_core::typed_order::compare_default as default_float_order;
+
+/// `a - b < 0`, `> 0`, else equal, for numbers that are not `NaN` -- `Infinity - Infinity` is
+/// `NaN`, which the comparator's caller reads as `+0`, so equal.
+fn difference_order(x: f64, y: f64) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let d = x - y;
+    if d < 0.0 {
+        Ordering::Less
+    } else if d > 0.0 {
+        Ordering::Greater
+    } else {
+        Ordering::Equal
+    }
+}
+
+/// A stable sort of `slice` by `cmp`, on the pool when it is large enough and there is one.
+fn stable_sort<T: Send + Copy>(slice: &mut [T], cmp: impl Fn(&T, &T) -> std::cmp::Ordering + Sync) {
+    if slice.len() >= SORT_PARALLEL_MIN
+        && let Some(pool) = pool()
+    {
+        use rayon::slice::ParallelSliceMut;
+        pool.install(|| slice.par_sort_by(|a, b| cmp(a, b)));
+    } else {
+        slice.sort_by(|a, b| cmp(a, b));
+    }
+}
+
+/// # Safety
+///
+/// `data` must be valid for reads and writes of `count` elements of `T`, suitably aligned (or
+/// the call declines), and nothing else may touch it during the call.
+unsafe fn sort_typed<T: Send + Copy + Into<f64>>(
+    data: *mut c_void,
+    count: usize,
+    order: i32,
+) -> i32 {
+    if !(data as usize).is_multiple_of(std::mem::align_of::<T>()) {
+        return INVALID_ARGUMENT;
+    }
+    // SAFETY: the caller's contract.
+    let slice = unsafe { std::slice::from_raw_parts_mut(data.cast::<T>(), count) };
+    let key = |v: &T| -> f64 { (*v).into() };
+    match order {
+        SORT_DEFAULT => stable_sort(slice, |a, b| default_float_order(key(a), key(b))),
+        SORT_ASCENDING | SORT_DESCENDING => {
+            if slice.iter().any(|v| key(v).is_nan()) {
+                return 1;
+            }
+            if order == SORT_ASCENDING {
+                stable_sort(slice, |a, b| difference_order(key(a), key(b)));
+            } else {
+                stable_sort(slice, |a, b| difference_order(key(b), key(a)));
+            }
+        }
+        _ => return INVALID_ARGUMENT,
+    }
+    0
+}
+
+/// Sort `count` elements at `data` in place for `parallelSort`: `kind` is a `kiln_typed_kind`
+/// (0..=8; the BigInt kinds are not taken) or [`SORT_KIND_VALUES`] for an array's own numeric
+/// elements; `order` is [`SORT_DEFAULT`] (typed arrays only), [`SORT_ASCENDING`] or
+/// [`SORT_DESCENDING`].
+///
+/// Returns 0 when sorted, 1 when a comparator order met a `NaN` -- nothing was written and the
+/// caller runs `sort` itself, whose comparator then answers `NaN` and whose order is the
+/// engine's -- and -1 for an argument it does not take (also nothing written).
+///
+/// # Safety
+///
+/// `data` must be valid for reads and writes of `count` elements of the kind, and nothing else
+/// may read or write it during the call (the realm thread is blocked in it).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_parallel_sort(
+    data: *mut c_void,
+    count: usize,
+    kind: i32,
+    order: i32,
+) -> i32 {
+    if count < 2 {
+        return 0;
+    }
+    if data.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    // SAFETY (every arm): the caller's contract, for the element type `kind` names.
+    unsafe {
+        match kind {
+            0 => sort_typed::<i8>(data, count, order),
+            1 | 2 => sort_typed::<u8>(data, count, order),
+            3 => sort_typed::<i16>(data, count, order),
+            4 => sort_typed::<u16>(data, count, order),
+            5 => sort_typed::<i32>(data, count, order),
+            6 => sort_typed::<u32>(data, count, order),
+            7 => sort_typed::<f32>(data, count, order),
+            8 => sort_typed::<f64>(data, count, order),
+            SORT_KIND_VALUES if order != SORT_DEFAULT => {
+                // A number's value bits are its double; `NaN` (the one boxed spelling) is
+                // refused by the comparator orders, the only ones an array takes.
+                if !(data as usize).is_multiple_of(std::mem::align_of::<u64>()) {
+                    return INVALID_ARGUMENT;
+                }
+                let slice = std::slice::from_raw_parts_mut(data.cast::<u64>(), count);
+                let key = |v: &u64| f64::from_bits(*v);
+                if slice.iter().any(|v| key(v).is_nan()) {
+                    return 1;
+                }
+                if order == SORT_ASCENDING {
+                    stable_sort(slice, |a, b| difference_order(key(a), key(b)));
+                } else {
+                    stable_sort(slice, |a, b| difference_order(key(b), key(a)));
+                }
+                0
+            }
+            _ => INVALID_ARGUMENT,
+        }
+    }
+}
+
 macro_rules! assert_provider_export {
         ($(($group:ident, $name:ident, $signature:ident);)*) => {
             $(assert_provider_export!($group, $name, $signature);)*
         };
         (parallel, kiln_parallel_map, parallel_map) => {
             const _: unsafe extern "C" fn(*const c_void, usize, *mut c_void, Option<ChunkFn>, *mut c_void) -> i32 = kiln_parallel_map;
+        };
+        (parallel, kiln_parallel_sort, parallel_sort) => {
+            const _: unsafe extern "C" fn(*mut c_void, usize, i32, i32) -> i32 = kiln_parallel_sort;
         };
         ($group:ident, $name:ident, $signature:ident) => {};
     }
@@ -340,6 +486,87 @@ mod tests {
         assert_eq!(pool_size(Some("6"), Some("4"), 16), 6);
         assert_eq!(pool_size(Some("0"), None, 16), 1);
         assert_eq!(pool_size(Some("x"), None, 16), 1);
+    }
+
+    #[test]
+    fn sort_orders_match_the_sequential_comparators() {
+        // Large enough for the pool, with ties the stable sort must keep in order.
+        let n = SORT_PARALLEL_MIN * 3 + 17;
+        let mut xs: Vec<f64> = (0..n)
+            .map(|i| match i % 7 {
+                0 => -0.0,
+                1 => 0.0,
+                2 => f64::NAN,
+                3 => f64::INFINITY,
+                _ => ((i * 7919) % 1000) as f64 - 500.0,
+            })
+            .collect();
+        let mut expected = xs.clone();
+        expected.sort_by(|a, b| default_float_order(*a, *b));
+        // SAFETY: the vector is live and sized to `n`.
+        assert_eq!(
+            unsafe { kiln_parallel_sort(xs.as_mut_ptr().cast(), n, 8, SORT_DEFAULT) },
+            0
+        );
+        assert!(
+            xs.iter()
+                .zip(&expected)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        );
+        // A comparator order declines a NaN and writes nothing.
+        let before = xs.clone();
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { kiln_parallel_sort(xs.as_mut_ptr().cast(), n, 8, SORT_ASCENDING) },
+            1
+        );
+        assert!(
+            xs.iter()
+                .zip(&before)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        );
+        // `a - b` keeps -0 and +0 in their order; `b - a` reverses the values only.
+        let mut zs: Vec<u64> = (0..n)
+            .map(|i| {
+                if i % 2 == 0 {
+                    (-0.0f64).to_bits()
+                } else {
+                    ((i % 5) as f64).to_bits()
+                }
+            })
+            .collect();
+        let mut expected: Vec<u64> = zs.clone();
+        expected.sort_by(|a, b| difference_order(f64::from_bits(*b), f64::from_bits(*a)));
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe {
+                kiln_parallel_sort(zs.as_mut_ptr().cast(), n, SORT_KIND_VALUES, SORT_DESCENDING)
+            },
+            0
+        );
+        assert_eq!(zs, expected);
+        let mut ints: Vec<i32> = (0..n as i32).map(|i| (i * 7919) % 1013 - 500).collect();
+        let mut sorted = ints.clone();
+        sorted.sort();
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { kiln_parallel_sort(ints.as_mut_ptr().cast(), n, 5, SORT_DEFAULT) },
+            0
+        );
+        assert_eq!(ints, sorted);
+        // An array never takes the default order (it compares strings), nor a BigInt kind.
+        // SAFETY: nothing is written for an argument the call does not take.
+        assert_eq!(
+            unsafe {
+                kiln_parallel_sort(ints.as_mut_ptr().cast(), 4, SORT_KIND_VALUES, SORT_DEFAULT)
+            },
+            INVALID_ARGUMENT
+        );
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { kiln_parallel_sort(ints.as_mut_ptr().cast(), 4, 9, SORT_DEFAULT) },
+            INVALID_ARGUMENT
+        );
     }
 
     #[test]

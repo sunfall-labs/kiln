@@ -32,6 +32,8 @@ extern const kiln_string *kiln_c99_intern_key(const kiln_string *view);
 extern const kiln_string *kiln_c99_intern_static_key(const kiln_string *view);
 extern int kiln_c99_register_static_keys(const kiln_string *const *keys, const kiln_string **out,
                                          size_t count);
+extern int kiln_c99_unit_keys_claim(uint64_t *owner);
+extern void kiln_c99_unit_keys_release(uint64_t *owner, void *heap);
 extern const kiln_string *kiln_c99_interned_key_in(struct kiln_gc_heap *heap,
                                                    const kiln_string *view);
 #if defined(__GNUC__) || defined(__clang__)
@@ -92,6 +94,8 @@ extern const kiln_string *kiln_c99_intern_key(const kiln_string *view);
 extern const kiln_string *kiln_c99_intern_static_key(const kiln_string *view);
 extern int kiln_c99_register_static_keys(const kiln_string *const *keys, const kiln_string **out,
                                          size_t count);
+extern int kiln_c99_unit_keys_claim(uint64_t *owner);
+extern void kiln_c99_unit_keys_release(uint64_t *owner, void *heap);
 extern void kiln_c99_gc_release(void *payload);
 extern void kiln_c99_gc_result_roots(void *opaque, void *context, int phase);
 extern int kiln_c99_new_object(kiln_value *out);
@@ -229,6 +233,7 @@ extern int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
 extern int kiln_c99_array_push(kiln_value target, kiln_value value);
 extern int kiln_c99_array_push_val(kiln_value target, kiln_val value);
 extern kiln_value kiln_c99_inspect(kiln_value value);
+extern kiln_value kiln_c99_console_inspect(kiln_host *host, kiln_value value);
 extern int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event, void *host, void *thrown);
 extern int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown);
 extern int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth, kiln_value *thrown);
@@ -316,7 +321,7 @@ static inline kiln_val *kiln_c99_unit_vals(kiln_c99_unit *unit, kiln_c99_unit_ca
 #ifndef KILN_C99_CACHED_METHOD_MATCHES_DEFINED
 #define KILN_C99_CACHED_METHOD_MATCHES_DEFINED
 static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln_val target) {
-    if (site == NULL || !site->has_cached_method) return 0;
+    if (site == NULL || !kiln_c99_site_has_method(site)) return 0;
     uint8_t ctag = site->cached_tag;
     if (ctag == KILN_VALUE_COLLECTION && (KILN_VAL_IS_OBJECT(target) || ((target & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX))) {
         void *ptr = KILN_VAL_PTR(target);
@@ -359,9 +364,9 @@ extern int kiln_c99_val_write_property_key(kiln_host *host, kiln_val target, con
 #define KILN_C99_VAL_PRIVATE_CACHED_DEFINED
 static inline int kiln_c99_val_get_private_cached(kiln_val *out, kiln_val receiver, kiln_val brand,
                                                  const kiln_c99_private_site *site) {
-    if (KILN_LIKELY(site != NULL && site->shape != NULL && KILN_VAL_IS_OBJECT(receiver))) {
+    if (KILN_LIKELY(site != NULL && KILN_VAL_IS_OBJECT(receiver))) {
         kiln_object *obj = (kiln_object *)KILN_VAL_PTR(receiver);
-        if (KILN_LIKELY(obj != NULL && obj->shape == site->shape &&
+        if (KILN_LIKELY(obj != NULL && obj->shape != NULL && obj->shape == kiln_c99_slot_key(&site->shape) &&
                         kiln_c99_gc_kind_of_ptr(obj) == KILN_GC_OBJECT)) {
             if (brand == KILN_VAL_UNDEFINED ||
                 (site->brand_slot < obj->slot_capacity && obj->slots[site->brand_slot] == brand)) {
@@ -377,9 +382,9 @@ static inline int kiln_c99_val_get_private_cached(kiln_val *out, kiln_val receiv
 
 static inline int kiln_c99_val_set_private_cached(kiln_val receiver, kiln_val brand, kiln_val member,
                                                  const kiln_c99_private_site *site) {
-    if (KILN_LIKELY(site != NULL && site->shape != NULL && KILN_VAL_IS_OBJECT(receiver))) {
+    if (KILN_LIKELY(site != NULL && KILN_VAL_IS_OBJECT(receiver))) {
         kiln_object *obj = (kiln_object *)KILN_VAL_PTR(receiver);
-        if (KILN_LIKELY(obj != NULL && obj->shape == site->shape &&
+        if (KILN_LIKELY(obj != NULL && obj->shape != NULL && obj->shape == kiln_c99_slot_key(&site->shape) &&
                         !obj->frozen && kiln_c99_gc_kind_of_ptr(obj) == KILN_GC_OBJECT)) {
             if (brand == KILN_VAL_UNDEFINED ||
                 (site->brand_slot < obj->slot_capacity && obj->slots[site->brand_slot] == brand)) {

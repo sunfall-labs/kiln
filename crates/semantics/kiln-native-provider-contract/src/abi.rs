@@ -103,6 +103,10 @@ macro_rules! provider_abi_registry {
             (realm, kiln_realm_gc_current_heap, realm_gc_current_heap);
             (realm, kiln_realm_generation_slot, realm_generation_slot);
             (realm, kiln_realm_process_shared, realm_process_shared);
+            (realm, kiln_realm_retire_tag, realm_retire_tag);
+            (realm, kiln_realm_retired_safe, realm_retired_safe);
+            (realm, kiln_realm_retire, realm_retire);
+            (realm, kiln_realm_run_pinned, realm_run_pinned);
             (realm, kiln_realm_gc_attach, realm_gc_attach);
             (realm, kiln_realm_gc_register_roots, realm_gc_register_roots);
             (realm, kiln_realm_gc_unregister_roots, realm_gc_unregister_roots);
@@ -154,6 +158,7 @@ macro_rules! provider_abi_registry {
             (realm, kiln_node_fs_rmdir_sync, node_fs_rmdir_sync);
             (root, kiln_number_to_js_string, number_to_js_string);
             (root, kiln_string_to_number, string_to_number);
+            (root, kiln_typed_array_sort, typed_array_sort);
             (regexp, kiln_regexp_compile, regexp_compile);
             (regexp, kiln_regexp_free, regexp_free);
             (regexp, kiln_regexp_search, regexp_search);
@@ -189,6 +194,7 @@ macro_rules! provider_abi_registry {
             (intl, kiln_string_normalize, string_normalize);
             (intl, kiln_intl_collate, intl_collate);
             (parallel, kiln_parallel_map, parallel_map);
+            (parallel, kiln_parallel_sort, parallel_sort);
             (ffi, kiln_ffi_open, ffi_open);
             (ffi, kiln_ffi_close, ffi_close);
             (ffi, kiln_ffi_prepare, ffi_prepare);
@@ -207,7 +213,7 @@ macro_rules! provider_export_names {
 }
 
 /// Version of the private provider ABI represented by [`provider_abi_registry!`].
-pub const PROVIDER_ABI_VERSION: u32 = 43;
+pub const PROVIDER_ABI_VERSION: u32 = 46;
 
 /// Canonical ordered export names required in a packaged provider manifest.
 pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_names);
@@ -226,7 +232,18 @@ mod tests {
 
     #[test]
     fn registry_has_the_packaged_contract_shape() {
-        // 43 and 116 exports: `kiln_realm_set_immediate` and `kiln_realm_queue_io` joined when
+        // 46 and 122 exports: `kiln_realm_retire_tag`, `kiln_realm_retired_safe` and
+        // `kiln_realm_retire` joined when shared cache state became safe to write from realms on
+        // several threads at once (ADR 0071, quiescent-state reclamation at turn boundaries), and
+        // `kiln_realm_run_pinned` when a launcher could run several realms in one process, each
+        // pinned to a thread of the runtime's `WorkerPool` (realms issue 05).
+        // Before that, 45 and 118 exports: `kiln_typed_array_sort` joined for the sequential
+        // `%TypedArray%.prototype.sort` default order (parallel issue 16): one sort per call, on
+        // the calling thread, over the order `kiln_number_core::typed_order` owns for both
+        // engines. Before that, 44 and 117 exports: `kiln_parallel_sort` joined for `parallelSort` (ADR 0069, parallel
+        // issue 10): a stable sort of a typed array's elements, or of a numeric array's, in place
+        // on the parallel pool, for a default order or a comparator the backend proved
+        // consistent. Before that, 43 and 116 exports: `kiln_realm_set_immediate` and `kiln_realm_queue_io` joined when
         // the realm gained node's check and poll lanes beside its timers, so an immediate and a
         // message port's delivery each run in their own phase of a turn. Before that, 42 and 114:
         // `kiln_realm_process_shared` joined when shared keys and shapes (ADR 0071) moved into one
@@ -247,8 +264,8 @@ mod tests {
         // one realm the other's cache. A shipped archive built before any of these does not export
         // the newer symbol, and the version is how a resolver knows to rebuild rather than to fail
         // at link time.
-        assert_eq!(PROVIDER_ABI_VERSION, 43);
-        assert_eq!(PROVIDER_EXPORTS.len(), 116);
+        assert_eq!(PROVIDER_ABI_VERSION, 46);
+        assert_eq!(PROVIDER_EXPORTS.len(), 122);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_ffi_last_error"));
     }

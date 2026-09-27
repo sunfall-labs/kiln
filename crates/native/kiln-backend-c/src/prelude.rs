@@ -710,18 +710,6 @@ method_ids! {
     (KILN_C99_METHOD_GENERATOR_RETURN, 72, Generic; 0, 0),
     (KILN_C99_METHOD_GENERATOR_SELF, 73, Generic; 0, 0),
     (KILN_C99_METHOD_GET_TIME, 74, Generic; 0, 0),
-    (KILN_C99_METHOD_GET_FULL_YEAR, 75, Generic; 0, 0),
-    (KILN_C99_METHOD_GET_MONTH, 76, Generic; 0, 0),
-    (KILN_C99_METHOD_GET_DATE, 77, Generic; 0, 0),
-    (KILN_C99_METHOD_GET_DAY, 78, Generic; 0, 0),
-    (KILN_C99_METHOD_GET_HOURS, 79, Generic; 0, 0),
-    (KILN_C99_METHOD_GET_MINUTES, 80, Generic; 0, 0),
-    (KILN_C99_METHOD_GET_SECONDS, 81, Generic; 0, 0),
-    (KILN_C99_METHOD_GET_MILLISECONDS, 82, Generic; 0, 0),
-    (KILN_C99_METHOD_GET_TIMEZONE_OFFSET, 83, Generic; 0, 0),
-    (KILN_C99_METHOD_TO_ISO_STRING, 84, Generic; 0, 0),
-    (KILN_C99_METHOD_TO_JSON, 85, Generic; 0, 0),
-    (KILN_C99_METHOD_DATE_TO_STRING, 86, Generic; 0, 0),
     (KILN_C99_METHOD_DATE_NOW, 87, Generic; 0, 0),
     (KILN_C99_METHOD_DATE_UTC, 88, Generic; 0, 0),
     (KILN_C99_METHOD_DATE_PARSE, 89, Generic; 0, 0),
@@ -832,9 +820,6 @@ method_ids! {
     (KILN_C99_METHOD_REGEXP_TO_STRING, 174, Generic; 0, 0),
     (KILN_C99_METHOD_COLLECTION_ITERATOR_NEXT, 175, Generic; 0, 0),
     (KILN_C99_METHOD_PRIMITIVE_TO_STRING, 176, Generic; 0, 0),
-    (KILN_C99_METHOD_TYPED_SUBARRAY, 230, Direct; 0x3, 0),
-    (KILN_C99_METHOD_TYPED_SET, 231, Direct; 0x2, 0),
-    (KILN_C99_METHOD_TYPED_FILL, 232, Direct; 0, 0),
     (KILN_C99_METHOD_TYPED_OF, 233, Direct; 0, 0),
     (KILN_C99_METHOD_TYPED_FROM, 234, Direct; 0, 0),
     (KILN_C99_METHOD_ARRAY_GENERIC_MAP, 235, Direct; 0, 0),
@@ -1016,16 +1001,9 @@ method_ids! {
     (KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS, 337, Temporal; 0, 0),
     (KILN_C99_METHOD_TEMPORAL_LAST, 337, Temporal; 0, 0),
     (KILN_C99_METHOD_SET_TIME, 177, Generic, DateSetter; 0, 0),
-    (KILN_C99_METHOD_SET_FULL_YEAR, 178, Generic, DateSetter; 0, 0),
-    (KILN_C99_METHOD_SET_MONTH, 179, Generic, DateSetter; 0, 0),
-    (KILN_C99_METHOD_SET_DATE, 180, Generic, DateSetter; 0, 0),
-    (KILN_C99_METHOD_SET_HOURS, 181, Generic, DateSetter; 0, 0),
-    (KILN_C99_METHOD_SET_MINUTES, 182, Generic, DateSetter; 0, 0),
-    (KILN_C99_METHOD_SET_SECONDS, 183, Generic, DateSetter; 0, 0),
-    (KILN_C99_METHOD_SET_MILLISECONDS, 184, Generic, DateSetter; 0, 0),
     // `DataView.prototype`. `Direct` because the whole block is answered by one handler the
     // dispatcher reaches through a range test, which is what the group means here -- the same
-    // arrangement `KILN_C99_METHOD_TYPED_SUBARRAY` and its neighbours already use.
+    // arrangement `KILN_C99_METHOD_TYPED_OF` and its neighbours already use.
     (KILN_C99_METHOD_DATA_VIEW_GET_INT8, 447, Direct; 0, 0),
     (KILN_C99_METHOD_DATA_VIEW_GET_UINT8, 448, Direct; 0, 0),
     (KILN_C99_METHOD_DATA_VIEW_GET_INT16, 449, Direct; 0, 0),
@@ -1117,6 +1095,14 @@ method_ids! {
     // The realm's I/O lane, node's poll phase, where the same file queues a port's delivery;
     // the timer case of the generic dispatch, beside `setImmediate`.
     (KILN_C99_METHOD_QUEUE_IO_RAW, 535, Generic; 0, 0),
+    // Node's unhandled-rejection tracking registers itself here; captured and deleted by
+    // `kiln-builtins/src/rejections.ts`.
+    (KILN_C99_METHOD_PROMISE_REJECTIONS_RAW, 536, Direct; 0, 0),
+    // `%TypedArray%.prototype`'s element-storage primitives (ADR 0065, representation; parallel
+    // issue 16), captured and deleted by `kiln-builtins/src/typedarray.ts`: a same-type element
+    // copy, and the default-order sort through the provider's `kiln_typed_array_sort`.
+    (KILN_C99_METHOD_TYPED_ARRAY_COPY_RAW, 537, Direct; 0, 0),
+    (KILN_C99_METHOD_TYPED_ARRAY_SORT_RAW, 538, Direct; 0, 0),
     (KILN_C99_METHOD_PROCESS_EXIT, 513, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC, 514, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC, 515, Direct; 0, 0),
@@ -3537,18 +3523,6 @@ enum kiln_value_tag {
  * that happen to agree. */
 "#,
     emit_method_define!(KILN_C99_METHOD_GET_TIME),
-    emit_method_define!(KILN_C99_METHOD_GET_FULL_YEAR),
-    emit_method_define!(KILN_C99_METHOD_GET_MONTH),
-    emit_method_define!(KILN_C99_METHOD_GET_DATE),
-    emit_method_define!(KILN_C99_METHOD_GET_DAY),
-    emit_method_define!(KILN_C99_METHOD_GET_HOURS),
-    emit_method_define!(KILN_C99_METHOD_GET_MINUTES),
-    emit_method_define!(KILN_C99_METHOD_GET_SECONDS),
-    emit_method_define!(KILN_C99_METHOD_GET_MILLISECONDS),
-    emit_method_define!(KILN_C99_METHOD_GET_TIMEZONE_OFFSET),
-    emit_method_define!(KILN_C99_METHOD_TO_ISO_STRING),
-    emit_method_define!(KILN_C99_METHOD_TO_JSON),
-    emit_method_define!(KILN_C99_METHOD_DATE_TO_STRING),
     emit_method_define!(KILN_C99_METHOD_DATE_NOW),
     emit_method_define!(KILN_C99_METHOD_DATE_UTC),
     emit_method_define!(KILN_C99_METHOD_DATE_PARSE),
@@ -3745,6 +3719,9 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_CLONE_DATA_RAW),
     emit_method_define!(KILN_C99_METHOD_JOBS_PENDING_RAW),
     emit_method_define!(KILN_C99_METHOD_QUEUE_IO_RAW),
+    emit_method_define!(KILN_C99_METHOD_PROMISE_REJECTIONS_RAW),
+    emit_method_define!(KILN_C99_METHOD_TYPED_ARRAY_COPY_RAW),
+    emit_method_define!(KILN_C99_METHOD_TYPED_ARRAY_SORT_RAW),
     emit_method_define!(KILN_C99_METHOD_PROCESS_EXIT),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC),
@@ -3829,9 +3806,6 @@ enum kiln_value_tag {
  * Library code reaches for it constantly on values it has already coerced. */
 "#,
     emit_method_define!(KILN_C99_METHOD_PRIMITIVE_TO_STRING),
-    emit_method_define!(KILN_C99_METHOD_TYPED_SUBARRAY),
-    emit_method_define!(KILN_C99_METHOD_TYPED_SET),
-    emit_method_define!(KILN_C99_METHOD_TYPED_FILL),
     r#"/* The two statics a concrete view constructor carries. Kept below the string block that
  * begins at 240, which `kiln_c99_invoke_method` routes by range. */
 "#,
@@ -4005,13 +3979,6 @@ enum kiln_value_tag {
  * is full. */
 "#,
     emit_method_define!(KILN_C99_METHOD_SET_TIME),
-    emit_method_define!(KILN_C99_METHOD_SET_FULL_YEAR),
-    emit_method_define!(KILN_C99_METHOD_SET_MONTH),
-    emit_method_define!(KILN_C99_METHOD_SET_DATE),
-    emit_method_define!(KILN_C99_METHOD_SET_HOURS),
-    emit_method_define!(KILN_C99_METHOD_SET_MINUTES),
-    emit_method_define!(KILN_C99_METHOD_SET_SECONDS),
-    emit_method_define!(KILN_C99_METHOD_SET_MILLISECONDS),
     r#"
 /* The iterator helpers. 470..481 is a name range -- `kiln_c99_lookup_method` walks it to answer
  * `Iterator.prototype.map` -- and 470..484 is the dispatch range. A helper's own `next` and
@@ -4107,12 +4074,16 @@ typedef struct kiln_method_entry {
 static kiln_method_entry kiln_c99_method_index[sizeof kiln_c99_method_codes / sizeof *kiln_c99_method_codes];
 
 static uint64_t kiln_c99_method_code_end(void) {
-    static uint64_t end = 0;
+    /* One word, the same from every thread that computes it: a racing second computation only
+     * repeats the first. */
+    static uint64_t kiln_c99_method_code_end_cached = 0;
+    uint64_t end = __atomic_load_n(&kiln_c99_method_code_end_cached, __ATOMIC_RELAXED);
     size_t index;
     if (end != 0) return end;
     for (index = 0; index < sizeof kiln_c99_method_codes / sizeof *kiln_c99_method_codes; ++index) {
         if ((uint64_t)kiln_c99_method_codes[index] >= end) end = (uint64_t)kiln_c99_method_codes[index] + 1;
     }
+    __atomic_store_n(&kiln_c99_method_code_end_cached, end, __ATOMIC_RELAXED);
     return end;
 }
 static size_t kiln_c99_method_index_len;
@@ -4156,7 +4127,6 @@ static void kiln_c99_method_index_build(void) {
         kiln_c99_method_index[behind] = pending;
     }
     kiln_c99_method_index_len = count;
-    kiln_c99_method_index_ready = 1;
 }
 
 static uint64_t kiln_c99_lookup_method_group(const char *key, size_t key_len, uint32_t group) {
@@ -4164,7 +4134,7 @@ static uint64_t kiln_c99_lookup_method_group(const char *key, size_t key_len, ui
     size_t high;
     size_t at;
     if (key == NULL || key_len == 0) return 0;
-    if (!kiln_c99_method_index_ready) kiln_c99_method_index_build();
+    kiln_c99_once(&kiln_c99_method_index_ready, kiln_c99_method_index_build);
     high = kiln_c99_method_index_len;
     while (low < high) {
         size_t middle = low + (high - low) / 2;
@@ -4209,7 +4179,7 @@ static uint64_t kiln_c99_lookup_method(const char *key, size_t key_len, uint64_t
     size_t high;
     size_t at;
     if (key == NULL || key_len == 0) return 0;
-    if (!kiln_c99_method_index_ready) kiln_c99_method_index_build();
+    kiln_c99_once(&kiln_c99_method_index_ready, kiln_c99_method_index_build);
     high = kiln_c99_method_index_len;
     while (low < high) {
         size_t middle = low + (high - low) / 2;
@@ -4244,15 +4214,6 @@ static uint64_t kiln_c99_iterator_prototype_method(const char *key, size_t key_l
     }
     return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_ITERATOR_MAP,
                                   KILN_C99_METHOD_ITERATOR_INCLUDES);
-}
-
-/* A member the language puts on `Iterator.prototype` that this backend has not built.
- *
- * `chunks`, `windows` and `join` are now answered by bootstrap TypeScript in iterator.ts. */
-static int kiln_c99_iterator_prototype_gap(const char *key, size_t key_len) {
-    (void)key;
-    (void)key_len;
-    return 0;
 }
 
 static int kiln_c99_extension_withheld(uint64_t builtin, const char *key, size_t key_len);
@@ -4416,21 +4377,6 @@ static int kiln_c99_is_string_member(const char *key, size_t key_len) {
     return 0;
 }
 
-/* The fixed-length subset inherited from `%TypedArray%.prototype`.
- *
- * `%TypedArray%.prototype` is deliberately *not* `Array.prototype`: it shares the readers and the
- * two in-place rearrangements, and it has none of the methods that change a length, because a
- * view's length is its buffer's and cannot change. That is why the table is written out here
- * rather than delegating to `kiln_c99_array_method`, which would hand out `push` -- a name node
- * answers `undefined` for and a program feature-detects on. */
-static uint64_t kiln_c99_typed_prototype_method(const char *key, size_t key_len) {
-    /* Most %TypedArray%.prototype methods are answered by typedarray.ts from the
-     * prototype's store. Only raw C ABI primitives (subarray and set) have fallback codes. */
-    if (kiln_c99_same_name(key, key_len, "subarray")) return KILN_C99_METHOD_TYPED_SUBARRAY;
-    if (kiln_c99_same_name(key, key_len, "set")) return KILN_C99_METHOD_TYPED_SET;
-    return 0;
-}
-
 /* Whether a name is a member of `%TypedArray%.prototype` *in the language*, which is a different
  * question from whether this backend implements it -- the same distinction
  * `kiln_c99_is_string_member` draws, and for the same reason.
@@ -4458,12 +4404,10 @@ static int kiln_c99_is_typed_array_member(int byte_view, const char *key, size_t
 /* Whether a name is a member of `ArrayBuffer.prototype` *in the language* that this backend does
  * not answer -- the same question `kiln_c99_is_typed_array_member` asks one type over. */
 static int kiln_c99_is_array_buffer_member(const char *key, size_t key_len) {
-    /* detached is answered by the instance read; transfer and transferToFixedLength by arraybuffer.ts
-     * over __kilnArrayBufferDetach; maxByteLength and resizable are absent (no resizable buffers). */
-    static const char *const members[] = {"immutable",
-                                          "resize",
-                                          "sliceToImmutable",
-                                          "transferToImmutable"};
+    /* detached is answered by the instance read; resize, transfer and transferToFixedLength by
+     * arraybuffer.ts from the prototype's store; maxByteLength and resizable are absent (no
+     * resizable buffers). */
+    static const char *const members[] = {"immutable", "sliceToImmutable", "transferToImmutable"};
     size_t index;
     for (index = 0; index < sizeof members / sizeof *members; ++index) {
         if (kiln_c99_same_name(key, key_len, members[index])) {
@@ -4790,14 +4734,26 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     // The process-shared block (ADR 0071): shared keys and the shape root, one per process.
     // Each unit caches the pointer to it; the block itself is the provider archive's.
     ("kiln_c99_shared_block", C99StateOwner::Process),
-    // How many shapes this prelude has minted, which bounds the tree (see `shapes.c`).
-    ("kiln_c99_shape_total", C99StateOwner::Process),
     ("kiln_c99_speculate_mode", C99StateOwner::Process),
     // ADR 0068: whether this process installs kiln's own members, read from the environment once.
     ("kiln_c99_kiln_extensions_state", C99StateOwner::Process),
     ("kiln_c99_node_stdin_paused", C99StateOwner::Process),
     ("kiln_c99_node_stdin_read_active", C99StateOwner::Process),
     ("kiln_c99_node_stdin_request", C99StateOwner::Process),
+    // Function-scope statics are state too (realms issue 05: nothing process-wide unclassified).
+    // Derived once from constants; a racing second computation writes the same word.
+    ("kiln_c99_method_code_end_cached", C99StateOwner::Constant),
+    // `1n` and 2^64-1 as provider handles, made once; the first published is kept.
+    ("kiln_c99_bigint_one_handle", C99StateOwner::Constant),
+    ("kiln_c99_bigint_u64_mask_handle", C99StateOwner::Constant),
+    // Headers for built-in text, claimed and published once each (`kiln_c99_static_text`).
+    ("kiln_c99_static_texts", C99StateOwner::Constant),
+    // `Symbol()` serials: process-wide so no realm mints one twice.
+    ("kiln_c99_symbol_serial", C99StateOwner::Process),
+    // The `KILN_SPECULATE=exit` test mode's draw, per thread.
+    ("kiln_c99_speculate_rng", C99StateOwner::ThreadCache),
+    // Which later entry of which site answered this thread last (`kiln_c99_site_answered`).
+    ("kiln_c99_streaks", C99StateOwner::ThreadCache),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4812,8 +4768,11 @@ pub(crate) enum C99StateOwner {
     ThreadCache,
     TestFixture,
     /// Derived once from compile-time constants and never changed again, so every realm in the
-    /// process would compute the same bytes. Two threads racing to build it duplicate the work and
-    /// nothing else; a realm neither owns it nor has to reset it.
+    /// process would compute the same bytes. Realms on several threads may ask for it first at
+    /// once: an index sorted in place is built under `kiln_c99_once`, so nobody searches it
+    /// half-sorted; a single word or an entry is published once, by one store or compare-and-swap,
+    /// and a racing second computation of it writes the same bytes or loses. A realm neither owns
+    /// it nor has to reset it.
     Constant,
     /// Belongs to the process and its signal disposition rather than to any realm, and outlives
     /// every realm the process makes. A realm must not reset it: the `SIGUSR1` handler installed

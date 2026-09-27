@@ -74,7 +74,6 @@ pub(super) const fn numeric_arguments(native: Native) -> &'static [usize] {
         | N::StringSubstring
         | N::StringSubstr
         | N::ArrayBufferSlice
-        | N::TypedArraySubarray
         | N::ArrayCopy(ArrayCopy::ToSpliced) => &[0, 1],
         N::ArrayCopyWithin => &[0, 1, 2],
         N::ArrayFill => &[1, 2],
@@ -85,8 +84,7 @@ pub(super) const fn numeric_arguments(native: Native) -> &'static [usize] {
         | N::StringLastIndexOf
         | N::StringIncludes
         | N::StringStartsWith
-        | N::StringEndsWith
-        | N::TypedArraySet => &[1],
+        | N::StringEndsWith => &[1],
         // `split` reads its *limit* before its separator: `ToUint32(limit)` happens first, and a
         // limit of zero answers the empty array without the string ever being cut. Leaving the
         // limit to the pure read meant the separator converted first, which a `toString`
@@ -105,8 +103,6 @@ pub(super) const fn numeric_arguments(native: Native) -> &'static [usize] {
         | N::NumberToExponential
         | N::NumberToPrecision
         | N::NumberToString
-        | N::ArrayBufferResize
-        | N::ArrayBufferGrow
         | N::DataViewGet(_)
         | N::DataViewSet(_)
         | N::DataViewGetBig { .. }
@@ -247,20 +243,6 @@ pub(super) fn map_method_value(method: kiln_builtin_surface::MapMethod, realm: R
             Value::Native(Native::CollectionForEach(true), realm)
         }
         kiln_builtin_surface::MapMethod::Get => Value::Native(Native::MapGet, realm),
-        kiln_builtin_surface::MapMethod::GetOrInsert => Value::Native(
-            Native::CollectionGetOrInsert {
-                weak: false,
-                computed: false,
-            },
-            realm,
-        ),
-        kiln_builtin_surface::MapMethod::GetOrInsertComputed => Value::Native(
-            Native::CollectionGetOrInsert {
-                weak: false,
-                computed: true,
-            },
-            realm,
-        ),
         kiln_builtin_surface::MapMethod::Has => Value::Native(Native::MapHas, realm),
         kiln_builtin_surface::MapMethod::Keys => Value::Native(Native::CollectionKeys(true), realm),
         kiln_builtin_surface::MapMethod::Set => Value::Native(Native::MapSet, realm),
@@ -967,14 +949,6 @@ pub(super) const FUNCTION_IDENTITY: Attributes = Attributes {
 /// arguments to forward, so guessing it wrong is worse than not answering.
 pub(super) fn intrinsic_identity(value: &Value) -> Option<(String, f64)> {
     match value {
-        // A `%TypedArray%.prototype` method is a *distinct function* from the `Array.prototype`
-        // one it shares an implementation with, but it is not a differently named or differently
-        // shaped one: `%TypedArray%.prototype.map.name` is `"map"` and its `length` is 1, the
-        // same two answers the array method gives. Delegating keeps them one fact rather than a
-        // second tabulation that can drift from the first.
-        Value::Native(Native::TypedArrayGeneric(method), _) => {
-            intrinsic_identity(&array_property(method))
-        }
         Value::Native(native, _) => {
             // A namespace is an object, not a function: `Math` has no call behaviour, so it has
             // no arity and no name of its own either. A Node builtin module is a namespace for
@@ -1130,18 +1104,6 @@ pub(super) const fn native_length(native: Native) -> Option<f64> {
         | N::ArrayValues
         | N::ArrayFlat
         | N::ArrayOf
-        // The nine wrappers that take no attribute; the four that do fall to the default of 1.
-        | N::StringHtml(
-            HtmlWrapper::Big
-                | HtmlWrapper::Blink
-                | HtmlWrapper::Bold
-                | HtmlWrapper::Fixed
-                | HtmlWrapper::Italics
-                | HtmlWrapper::Small
-                | HtmlWrapper::Strike
-                | HtmlWrapper::Sub
-                | HtmlWrapper::Sup,
-        )
         | N::StringTrim
         | N::StringTrimStart
         | N::StringTrimEnd
@@ -1169,13 +1131,7 @@ pub(super) const fn native_length(native: Native) -> Option<f64> {
         | N::WeakSetConstructor
         | N::WeakMapConstructor
         | N::SymbolConstructor
-        | N::IteratorDispose
         | N::RegExpStringIteratorNext
-        | N::IteratorConcat
-        | N::IteratorConcatNext
-        | N::IteratorConcatReturn
-        | N::IteratorZipNext
-        | N::IteratorZipReturn
         | N::WeakRefDeref
         | N::DisposableStackConstructor
         | N::DisposableStackMove
@@ -1259,13 +1215,11 @@ pub(super) const fn native_length(native: Native) -> Option<f64> {
         | N::ProxyConstructor
         | N::ProxyRevocable
         | N::ArrayBufferSlice
-        | N::TypedArraySubarray
         | N::DataViewSet(_)
         | N::DataViewSetBig { .. }
         | N::MapSet
         | N::ObjectGroupBy
         | N::MapGroupBy
-        | N::LegacyAccessor { defines: true, .. }
         | N::BigIntAsIntN
         | N::BigIntAsUintN
         | N::FinalizationRegistryRegister
@@ -1889,6 +1843,12 @@ impl Intrinsics {
                             realm,
                         ))
                     }
+                    // The shared bootstrap defines it (ADR 0060 kind 7). The slot is reserved
+                    // here, in the surface's order, so that its definition lands where node
+                    // lists it rather than after everything this table installed.
+                    kiln_builtin_surface::SemanticBinding::Bootstrap => {
+                        Property::Value(Value::Undefined)
+                    }
                 };
                 let attrs = Attributes {
                     writable: member.attributes.writable,
@@ -1947,6 +1907,19 @@ impl Intrinsics {
                     retag_intrinsic_property(property, realm),
                     attributes,
                 );
+            } else if bootstrap_static(target, &key) {
+                // The shared bootstrap defines it (ADR 0060 kind 7). The slot is reserved in the
+                // surface's order, so that the definition lands where node lists the member --
+                // `Array.fromAsync` before `Array.of` -- rather than after everything else.
+                data.install_key(
+                    PropertyKeyRef::Utf8(&key),
+                    Property::Value(Value::Undefined),
+                    Attributes {
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
             }
         }
         data.set_prototype(prototype_of(target));
@@ -1957,6 +1930,21 @@ impl Intrinsics {
             entries.push((identity, data));
         }
     }
+}
+
+/// Whether `key` is a static of `target` that the shared bootstrap owns
+/// (`kiln_builtin_surface::BOOTSTRAP_STATICS`).
+fn bootstrap_static(target: &Value, key: &str) -> bool {
+    let global = match target {
+        Value::Native(Native::ObjectConstructor, _) => "Object",
+        Value::Native(Native::ArrayConstructor, _) => "Array",
+        Value::Native(Native::PromiseConstructor, _) => "Promise",
+        Value::Native(Native::Reflect, _) => "Reflect",
+        Value::Native(Native::RegExpConstructor, _) => "RegExp",
+        Value::Native(Native::IteratorConstructor, _) => "Iterator",
+        _ => return false,
+    };
+    kiln_builtin_surface::is_bootstrap_static(global, key)
 }
 
 /// What a built-in inherits, for a read that has got past its own properties.
@@ -2000,6 +1988,15 @@ pub(super) fn native_inherited_property(
             Value::Undefined => inherited_object_property(intrinsics, name, realm),
             found => found,
         },
+        // The five iterator prototypes and `%GeneratorPrototype%` sit one link below
+        // `%IteratorPrototype%`, and it is one link below `Object.prototype`.
+        Value::Native(
+            Native::PrototypeOf(PrototypeTable::IteratorFor(_) | PrototypeTable::Generator),
+            _,
+        ) => match iterator_prototype_property(intrinsics, name, realm) {
+            Value::Undefined => inherited_object_property(intrinsics, name, realm),
+            found => found,
+        },
         Value::Native(Native::PrototypeOf(_) | Native::Math | Native::Json | Native::Reflect, _)
         // The `Intl` namespace and the six prototypes are ordinary objects, so they inherit
         // from `Object.prototype` rather than from `Function.prototype`. An `Intl` instance
@@ -2035,6 +2032,28 @@ pub(super) fn table_step(
                 in_realm(tabulated, realm)
             }
         })
+}
+
+/// A read that has reached `%IteratorPrototype%`: the realm's store first, then the table.
+///
+/// Every iterator this realm makes -- an array, string, collection or regexp walk, a generator,
+/// a helper -- inherits from it, and the store is where the shared bootstrap
+/// (`kiln-builtins/src/iterator.ts`) puts `chunks`, `windows`, `join` and `@@dispose`, and where
+/// a program's own `Iterator.prototype.x = ...` lands. The per-kind tables step up to the
+/// `%IteratorPrototype%` *table* themselves, which has no store to consult, so a name they do not
+/// answer is carried here by the reads that can.
+pub(super) fn iterator_prototype_property(
+    intrinsics: &Intrinsics,
+    name: &str,
+    realm: RealmId,
+) -> Value {
+    table_step(
+        intrinsics,
+        PrototypeTable::Iterator,
+        name,
+        iterator_method(name),
+        realm,
+    )
 }
 
 /// The names physically owned by each virtual intrinsic prototype table.
@@ -2091,8 +2110,6 @@ pub(super) const ARRAY_MEMBERS: intrinsic_members::NamedMembers =
         "toString",
         "toLocaleString",
         "values",
-        "set",
-        "subarray",
         "with",
         "toReversed",
         "toSorted",
@@ -2167,66 +2184,8 @@ pub(super) const REG_EXP_MEMBERS: intrinsic_members::NamedMembers =
         "toString",
         "test",
     ]);
-pub(super) const DATE_MEMBERS: intrinsic_members::NamedMembers =
-    intrinsic_members::NamedMembers::new(&[
-        "toString",
-        "toDateString",
-        "toTimeString",
-        "toISOString",
-        "toUTCString",
-        "toGMTString",
-        "getDate",
-        "setDate",
-        "getDay",
-        "getFullYear",
-        "setFullYear",
-        "getHours",
-        "setHours",
-        "getMilliseconds",
-        "setMilliseconds",
-        "getMinutes",
-        "setMinutes",
-        "getMonth",
-        "setMonth",
-        "getSeconds",
-        "setSeconds",
-        "getTime",
-        "setTime",
-        "getTimezoneOffset",
-        "getUTCDate",
-        "setUTCDate",
-        "getUTCDay",
-        "getUTCFullYear",
-        "setUTCFullYear",
-        "getUTCHours",
-        "setUTCHours",
-        "getUTCMilliseconds",
-        "setUTCMilliseconds",
-        "getUTCMinutes",
-        "setUTCMinutes",
-        "getUTCMonth",
-        "setUTCMonth",
-        "getUTCSeconds",
-        "setUTCSeconds",
-        "valueOf",
-        "getYear",
-        "setYear",
-        "toJSON",
-        "toLocaleString",
-        "toLocaleDateString",
-        "toLocaleTimeString",
-    ]);
 pub(super) const ARRAY_BUFFER_MEMBERS: intrinsic_members::NamedMembers =
-    intrinsic_members::NamedMembers::new(&[
-        "resize",
-        "slice",
-        "sliceToImmutable",
-        "transfer",
-        "transferToFixedLength",
-        "transferToImmutable",
-    ]);
-pub(super) const SHARED_ARRAY_BUFFER_MEMBERS: intrinsic_members::NamedMembers =
-    intrinsic_members::NamedMembers::new(&["grow", "slice"]);
+    intrinsic_members::NamedMembers::new(&["slice", "sliceToImmutable", "transferToImmutable"]);
 pub(super) const DATA_VIEW_MEMBERS: intrinsic_members::NamedMembers =
     intrinsic_members::NamedMembers::new(&[
         "getInt8",
@@ -2264,7 +2223,7 @@ pub(super) const GENERATOR_MEMBERS: intrinsic_members::NamedMembers =
 pub(super) const ITERATOR_MEMBERS: intrinsic_members::NamedMembers =
     intrinsic_members::NamedMembers::new(&[
         "map", "filter", "take", "drop", "flatMap", "reduce", "toArray", "forEach", "some",
-        "every", "find", "includes", "join", "chunks", "windows",
+        "every", "find", "includes",
     ]);
 pub(super) const WEAK_REF_MEMBERS: intrinsic_members::NamedMembers =
     intrinsic_members::NamedMembers::new(&["deref"]);
@@ -2342,9 +2301,10 @@ pub(super) fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'stati
             TypedKind::Uint8 => UINT8_MEMBERS.names(),
             _ => TYPED_ARRAY_VIEW_MEMBERS.names(),
         },
-        PrototypeTable::Array | PrototypeTable::TypedArray => ARRAY_MEMBERS.names(),
+        PrototypeTable::Array => ARRAY_MEMBERS.names(),
         PrototypeTable::String => STRING_MEMBERS.names(),
-        PrototypeTable::Function
+        PrototypeTable::TypedArray
+        | PrototypeTable::Function
         | PrototypeTable::Object
         | PrototypeTable::Number
         | PrototypeTable::Boolean
@@ -2354,11 +2314,14 @@ pub(super) fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'stati
         | PrototypeTable::Map
         | PrototypeTable::Set
         | PrototypeTable::WeakMap
-        | PrototypeTable::WeakSet => &[],
+        | PrototypeTable::WeakSet
+        | PrototypeTable::SharedArrayBuffer
+        // `getTime` and `setTime` are still answered by the table, for the shared
+        // `Date.prototype` to capture, and listed by the realm's store once it has redefined
+        // them -- in the order it defines every member, which is node's.
+        | PrototypeTable::Date => &[],
         PrototypeTable::RegExp => REG_EXP_MEMBERS.names(),
-        PrototypeTable::Date => DATE_MEMBERS.names(),
         PrototypeTable::ArrayBuffer => ARRAY_BUFFER_MEMBERS.names(),
-        PrototypeTable::SharedArrayBuffer => SHARED_ARRAY_BUFFER_MEMBERS.names(),
         PrototypeTable::DataView => DATA_VIEW_MEMBERS.names(),
         PrototypeTable::Iterator => ITERATOR_MEMBERS.names(),
         PrototypeTable::Generator | PrototypeTable::AsyncGenerator => GENERATOR_MEMBERS.names(),
@@ -2678,6 +2641,8 @@ pub(super) fn own_property_names_units(
     }
 }
 
+/// `[[OwnPropertyKeys]]` as display strings, for the tests that list a built-in.
+#[cfg(test)]
 pub(super) fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
     own_property_keys_units(intrinsics, target)
         .into_iter()

@@ -130,10 +130,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let from_prototype = || match object.prototype() {
                     // The instance's prototype is `%ArrayIteratorPrototype%` or one of its kin,
                     // which are markers rather than objects -- so the store's own chain walk
-                    // stops at them and the tag they publish never arrives.
-                    Some(Value::Native(native, _)) => match native.property(name) {
-                        Some(Value::Undefined) | None => None,
-                        found => found,
+                    // stops at them and the tag they publish never arrives. Read as the marker
+                    // itself is read, so the realm's store is consulted before its table.
+                    Some(prototype @ Value::Native(..)) => match self.property(&prototype, name) {
+                        Value::Undefined => None,
+                        found => Some(found),
                     },
                     _ => None,
                 };
@@ -142,7 +143,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // replacing it, so a name it does not answer still reaches the ordinary
                     // object methods -- which is what stops adding the helpers from taking
                     // `hasOwnProperty` away from every iterator in the realm.
-                    match iterator_method(name) {
+                    match iterator_prototype_property(&self.intrinsics, name, value_realm(target)) {
                         Value::Undefined => {
                             inherited_object_property(&self.intrinsics, name, value_realm(target))
                         }
@@ -518,7 +519,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         &self.intrinsics,
                         PrototypeTable::TypedArray,
                         other,
-                        typed_array_method(other),
+                        Value::Undefined,
                         value_realm(target),
                     ) {
                         Value::Undefined => {
@@ -697,102 +698,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // chain -- and which is the only reason `g().map(f)` is a thing a program can
                 // write.
                 other => match generator_prototype_method(false, other) {
-                    Value::Undefined => iterator_method(other),
+                    Value::Undefined => {
+                        iterator_prototype_property(&self.intrinsics, other, value_realm(target))
+                    }
                     found => found,
                 },
             },
             _ => Value::Undefined,
         }
-    }
-}
-
-impl<H: HostOps + ?Sized> Vm<'_, H> {
-    /// One of Annex B's four accessor helpers on `Object.prototype`.
-    ///
-    /// `__defineGetter__` predates `Object.defineProperty` and is still how a great deal of
-    /// shipped code installs an accessor; `__lookupGetter__` is the only way to ask the
-    /// *prototype chain* for one, which `getOwnPropertyDescriptor` cannot do.
-    pub(super) fn legacy_accessor(
-        &mut self,
-        defines: bool,
-        setter: bool,
-        receiver: &Value,
-        arguments: &[Value],
-        instruction: usize,
-    ) -> Result<Value, ExecutionError> {
-        if !is_reflect_target(receiver) {
-            return Err(ExecutionError::TypeErrorMessage {
-                message: "Cannot convert undefined or null to object".to_owned(),
-            });
-        }
-        // `IsCallable(getter)` is step 2 and `ToPropertyKey(P)` is step 4, in that order: a
-        // non-callable getter is refused *before* the key is converted, so a key whose
-        // `toString` counts its calls is never called at all. This ran the conversion first,
-        // which is one observable call the language says does not happen.
-        let function = if defines {
-            let function = arguments.get(1).cloned().unwrap_or(Value::Undefined);
-            if !is_callable(&function) {
-                return Err(ExecutionError::TypeErrorMessage {
-                    message: "Object.prototype.__defineGetter__: Expecting function".to_owned(),
-                });
-            }
-            function
-        } else {
-            Value::Undefined
-        };
-        let key = self.property_key_of_units(arguments.first(), instruction)?;
-        if defines {
-            // `DefinePropertyOrThrow(O, key, desc)`, spelled by handing the descriptor to
-            // `Object.defineProperty` rather than by installing the property directly. Installing
-            // it was four separate wrong answers: it overwrote a *partial* descriptor, so
-            // defining a getter beside an existing setter silently dropped the setter; it did not
-            // refuse a non-configurable property; it did not refuse a non-extensible object; and
-            // it never reached a proxy's `defineProperty` trap. All four are the ordinary
-            // definition path's job, and this is that path.
-            //
-            // The descriptor names only the half being defined, which is what preserves the
-            // other one, and is enumerable and configurable -- the two flags that make these
-            // different from a bare `Object.defineProperty` definition.
-            let mut described = ObjectData::default();
-            described.set(if setter { "set" } else { "get" }, function);
-            described.set("enumerable", Value::Boolean(true));
-            described.set("configurable", Value::Boolean(true));
-            self.dispatch_native(
-                Native::ObjectDefineProperty,
-                receiver,
-                &[
-                    receiver.clone(),
-                    Value::String(key.clone()),
-                    Value::Object(Rc::new(RefCell::new(described))),
-                ],
-                instruction,
-            )?;
-            return Ok(Value::Undefined);
-        }
-        // The chain, not just the own property: that is the whole reason this exists beside
-        // `Object.getOwnPropertyDescriptor`. Both steps of the walk are trapped operations --
-        // `[[GetOwnProperty]]` and `[[GetPrototypeOf]]` -- so both go through the paths that run
-        // a proxy's handler. Reading the property store directly answered for the proxy's target
-        // instead, which is a different object than the one the program named.
-        let name = Value::String(key);
-        let mut current = receiver.clone();
-        for _ in 0..MAX_PROTOTYPE_DEPTH {
-            if let Some(descriptor) = self.own_descriptor_value(&current, &name, instruction)? {
-                // A data property of the same name ends the walk: it shadows whatever accessor
-                // sits behind it, and answering that accessor would report one the program
-                // cannot reach. Its descriptor simply has no half to read, so this answers
-                // `undefined` without a separate test for it.
-                return self.read_property(
-                    &descriptor,
-                    if setter { "set" } else { "get" },
-                    instruction,
-                );
-            }
-            current = self.proxy_get_prototype_of(&current, instruction)?;
-            if matches!(current, Value::Null) {
-                break;
-            }
-        }
-        Ok(Value::Undefined)
     }
 }

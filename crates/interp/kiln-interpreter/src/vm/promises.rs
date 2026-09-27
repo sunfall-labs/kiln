@@ -11,15 +11,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let unobserved = !state.handled && matches!(outcome, Settled::Rejected(_));
             (std::mem::take(&mut state.reactions), unobserved)
         };
-        // Recorded now and cleared if anything attaches later in the same drain, because a
-        // handler added on a later tick is still a handler -- `p.catch(...)` on the next line is
-        // ordinary code. The `.return()` marker is an internal unwinding sentinel and never a
-        // JavaScript rejection.
+        // HostPromiseRejectionTracker's "reject": queued for the end of this checkpoint, and
+        // dropped there if anything attaches first -- `p.catch(...)` on the next line is ordinary
+        // code. The `.return()` marker is an internal unwinding sentinel and never a JavaScript
+        // rejection.
         if unobserved
             && let Settled::Rejected(reason) = &outcome
             && !matches!(reason, Value::Native(Native::ReturnSignal, _))
         {
-            self.unhandled = Some(reason.clone());
+            promise.state.borrow_mut().rejection = RejectionReport::Waiting;
+            let entry = (Rc::clone(promise), reason.clone());
+            self.with_rejections_mut(|rejections| rejections.rejected.push(entry));
         }
         for reaction in reactions {
             // The reaction's own context, not this one: whatever settled the promise may be an
@@ -97,16 +99,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             passthrough,
             context: Rc::clone(&self.async_context),
         };
-        let settled = {
+        let (settled, handled_late) = {
             let mut state = promise.state.borrow_mut();
-            let first = !state.handled;
             state.handled = true;
-            if first && matches!(state.settled, Some(Settled::Rejected(_))) {
-                // Something is handling it after all.
-                self.unhandled = None;
-            }
-            state.settled.clone()
+            // HostPromiseRejectionTracker's "handle". A rejection still waiting for its
+            // checkpoint is simply no longer reported; one already reported is `rejectionHandled`.
+            let handled_late = std::mem::take(&mut state.rejection) == RejectionReport::Reported;
+            (state.settled.clone(), handled_late)
         };
+        if handled_late {
+            let promise = Rc::clone(promise);
+            self.with_rejections_mut(|rejections| rejections.handled.push(promise));
+        }
         match settled {
             Some(outcome) => {
                 let scheduled = Scheduled {
@@ -130,11 +134,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<(), ExecutionError> {
         // Neither of these carries handlers: the bookkeeping *is* the reaction.
         match &reaction.sink {
-            Sink::FromAsync(state) => {
-                let state = Rc::clone(state);
-                self.async_resume(&state, outcome, self.instruction);
-                return Ok(());
-            }
             Sink::AsyncDisposal(state) => {
                 let state = Rc::clone(state);
                 self.async_disposal_resume(&state, outcome, self.instruction);
@@ -580,7 +579,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let walk = Rc::new(CombinatorWalk {
             native,
             values: RefCell::new(Vec::new()),
-            keys: RefCell::new(Vec::new()),
             remaining: std::cell::Cell::new(1),
             resolve: resolve.clone(),
             reject: reject.clone(),
@@ -620,89 +618,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // The walk itself held one count, so that an input settling before the last one is read
         // cannot resolve the whole combinator early. Releasing it here is what makes an empty
         // input settle immediately, and a fully-settled one settle on the last release instead.
-        walk.remaining.set(walk.remaining.get().saturating_sub(1));
-        if walk.remaining.get() == 0 {
-            self.finish_combinator(&walk, instruction)?;
-        }
-        Ok(())
-    }
-
-    /// `PerformPromiseAllKeyed` and `PerformPromiseAllSettledKeyed`: the same walk, over an
-    /// object's own enumerable keys rather than over an iterable.
-    ///
-    /// The differences from the iterable form are all in what is being walked. The order is the
-    /// object's own-key order and is fixed before anything settles, so a result is keyed the way
-    /// the input was written no matter which input finishes first. A key is included only if it
-    /// has an own descriptor that is enumerable -- and the value is *not* read for one that is
-    /// not, which a getter can see. Every step here is a place a proxy trap or a getter can run
-    /// arbitrary code, so each one propagates, and the caller turns that into a rejection.
-    pub(crate) fn perform_promise_combinator_keyed(
-        &mut self,
-        native: Native,
-        constructor: &Value,
-        source: &Value,
-        resolve: &Value,
-        reject: &Value,
-        instruction: usize,
-    ) -> Result<(), ExecutionError> {
-        // `GetPromiseResolve(C)` before anything else and exactly once, as in the iterable form.
-        let promise_resolve = self.read_property(constructor, "resolve", instruction)?;
-        if !is_callable(&promise_resolve) {
-            return Err(ExecutionError::TypeErrorMessage {
-                message: "Promise resolve is not a function".to_owned(),
-            });
-        }
-        // An iterable combinator asks for `@@iterator`; this one requires an object outright,
-        // because there is nothing to enumerate on a primitive.
-        if !is_an_object(source) {
-            return Err(ExecutionError::TypeErrorMessage {
-                message: format!("{} is not an object", source.to_display_string()),
-            });
-        }
-
-        let walk = Rc::new(CombinatorWalk {
-            native,
-            values: RefCell::new(Vec::new()),
-            keys: RefCell::new(Vec::new()),
-            remaining: std::cell::Cell::new(1),
-            resolve: resolve.clone(),
-            reject: reject.clone(),
-        });
-
-        // `[[OwnPropertyKeys]]` once, up front: the result's key order is this order, and a
-        // trap that answers differently on a second call cannot change it half way through.
-        let mut index = 0usize;
-        for key in self.own_keys_reflected(source, instruction)? {
-            let Some(descriptor) = self.own_descriptor_value(source, &key, instruction)? else {
-                continue;
-            };
-            let enumerable = self.read_property(&descriptor, "enumerable", instruction)?;
-            if !enumerable.is_truthy() {
-                continue;
-            }
-            // Only now is the value read: a non-enumerable key's getter must not run.
-            let item = self.read_computed(source, &key, instruction)?;
-            walk.keys.borrow_mut().push(key);
-            self.subscribe_combinator_input(
-                &walk,
-                constructor,
-                &promise_resolve,
-                item,
-                index,
-                instruction,
-            )?;
-            index += 1;
-            if index > self.limits.max_steps as usize {
-                return Err(ExecutionError::StepLimitExceeded {
-                    steps: index as u64,
-                    limit: self.limits.max_steps,
-                });
-            }
-        }
-
-        // The walk's own count, released here so that an input settling early cannot resolve the
-        // combinator before every key has been read -- and so that an object with no enumerable
-        // keys settles immediately, with an empty result.
         walk.remaining.set(walk.remaining.get().saturating_sub(1));
         if walk.remaining.get() == 0 {
             self.finish_combinator(&walk, instruction)?;
@@ -755,10 +670,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }))
         };
         let (on_fulfilled, on_rejected) = match walk.native {
-            Native::PromiseAll | Native::PromiseAllKeyed => (element(false), walk.reject.clone()),
-            Native::PromiseAllSettled | Native::PromiseAllSettledKeyed => {
-                (element(false), element(true))
-            }
+            Native::PromiseAll => (element(false), walk.reject.clone()),
+            Native::PromiseAllSettled => (element(false), element(true)),
             Native::PromiseAny => (walk.resolve.clone(), element(true)),
             _ => (walk.resolve.clone(), walk.reject.clone()),
         };
@@ -798,21 +711,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // An empty `race` never settles at all -- there is no input to settle it, and the
             // specification says so rather than leaving it undefined.
             Native::PromiseRace => {}
-            // `CreateKeyedPromiseCombinatorResultObject`: an ordinary object with *no*
-            // prototype, carrying one data property per key in the order the keys were read
-            // rather than the order they settled in. The null prototype is what lets a result
-            // be indexed by an arbitrary key without `toString` or `constructor` answering for
-            // a key the input never had.
-            Native::PromiseAllKeyed | Native::PromiseAllSettledKeyed => {
-                let mut data = ObjectData::default();
-                data.set_prototype(Value::Null);
-                for (key, value) in walk.keys.borrow().iter().zip(collected) {
-                    let key = key.property_key_units_checked()?;
-                    data.set_units(&key, value);
-                }
-                let result = Value::Object(Rc::new(RefCell::new(data)));
-                self.call_value(&walk.resolve, Value::Undefined, vec![result], instruction)?;
-            }
             _ => {
                 let values = Value::Array(ArrayData::new(collected));
                 self.call_value(&walk.resolve, Value::Undefined, vec![values], instruction)?;
@@ -830,13 +728,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<Value, ExecutionError> {
         let walk = Rc::clone(&element.walk);
         let collected = match (walk.native, element.rejects) {
-            (Native::PromiseAllSettled | Native::PromiseAllSettledKeyed, false) => {
+            (Native::PromiseAllSettled, false) => {
                 let mut data = ObjectData::default();
                 data.set("status", Value::String("fulfilled".to_owned().into()));
                 data.set("value", argument);
                 Value::Object(Rc::new(RefCell::new(data)))
             }
-            (Native::PromiseAllSettled | Native::PromiseAllSettledKeyed, true) => {
+            (Native::PromiseAllSettled, true) => {
                 let mut data = ObjectData::default();
                 data.set("status", Value::String("rejected".to_owned().into()));
                 data.set("reason", argument);
@@ -1000,10 +898,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<(), ExecutionError> {
         loop {
             self.drain_microtasks(runtime)?;
-            // Checked between turns, not at each settlement: `Promise.reject(x)` followed by a
-            // `.catch` on the next line must not be a failure, and by the time the queue is
-            // empty every handler that was going to attach has.
-            runtime.enter(|| self.check_unhandled_rejection())?;
             // Before asking for a timer, because settling a wait queues reactions and those are
             // microtasks: going straight on to the timer -- or worse, to the return below --
             // would leave a resolved promise with its `then` unrun.
@@ -1042,24 +936,65 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
     }
 
-    /// Report a rejection nothing ever handled.
+    /// Node's `processPromiseRejections`: hand the rejections this checkpoint left unhandled,
+    /// and the reported ones handled since, to the shared tracking
+    /// (`kiln-builtins/src/rejections.ts`). Answers whether it ran, since what it ran may have
+    /// queued ticks and jobs the checkpoint has to drain before asking again.
     ///
-    /// A promise that rejects with nothing attached is a silent failure: the program looks like
-    /// it worked. Node prints a warning and exits non-zero; this fails the run, which is the same
-    /// judgement stated more plainly and matches how an uncaught throw is treated.
-    pub(crate) fn check_unhandled_rejection(&mut self) -> Result<(), ExecutionError> {
-        let Some(reason) = self.unhandled.take() else {
-            return Ok(());
+    /// Asked only once both queues are empty, not at each settlement: `Promise.reject(x)`
+    /// followed by a `.catch` on the next line must not be reported, and by then every handler
+    /// that was going to attach in time has.
+    pub(crate) fn process_rejections(&mut self) -> Result<bool, ExecutionError> {
+        let (rejected, handled, process) = self.with_rejections_mut(|rejections| {
+            (
+                std::mem::take(&mut rejections.rejected),
+                std::mem::take(&mut rejections.handled),
+                rejections.process.clone(),
+            )
+        });
+        let mut reported = Vec::with_capacity(rejected.len() * 2);
+        for (promise, reason) in rejected {
+            let mut state = promise.state.borrow_mut();
+            if state.rejection == RejectionReport::Waiting {
+                state.rejection = RejectionReport::Reported;
+                drop(state);
+                reported.push(Value::Promise(promise));
+                reported.push(reason);
+            }
+        }
+        if reported.is_empty() && handled.is_empty() {
+            return Ok(false);
+        }
+        let Some(process) = process else {
+            // No tracking in this realm: the first rejection fails the run.
+            return match reported.into_iter().nth(1) {
+                Some(reason) => Err(self.unhandled_rejection_error(&reason)),
+                None => Ok(false),
+            };
         };
-        let trace = captured_trace(&reason);
+        let handled = handled.into_iter().map(Value::Promise).collect();
+        let arguments = vec![
+            Value::Array(ArrayData::new(reported)),
+            Value::Array(ArrayData::new(handled)),
+        ];
+        match self.call_catching(&process, Value::Undefined, arguments, self.instruction)? {
+            Ok(_) => Ok(true),
+            Err(thrown) => Err(self.unhandled_rejection_error(&thrown)),
+        }
+    }
+
+    /// A rejection nothing handled, as the uncaught exception it ends the run with. `(in
+    /// promise)` says where it surfaced, which is how a Test262 run tells it from a throw.
+    fn unhandled_rejection_error(&mut self, reason: &Value) -> ExecutionError {
+        let trace = captured_trace(reason);
         let instruction = self.instruction;
-        let described = self.describe_uncaught(&reason, instruction);
-        Err(ExecutionError::Uncaught {
+        let described = self.describe_uncaught(reason, instruction);
+        ExecutionError::Uncaught {
             instruction,
             message: format!("(in promise) {described}"),
-            error_constructor: self.error_constructor(&reason),
+            error_constructor: self.error_constructor(reason),
             trace,
-        })
+        }
     }
 
     /// Run microtasks until none are left, including ones queued by the ones already running.
@@ -1098,7 +1033,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 ran = true;
                 self.run_scheduled_job(scheduled)?;
             }
-            if !ran {
+            // Node's `processTicksAndRejections`: both queues empty, then the rejections, and
+            // around again for whatever reporting them queued.
+            if !ran && !self.process_rejections()? {
                 return Ok(());
             }
         }

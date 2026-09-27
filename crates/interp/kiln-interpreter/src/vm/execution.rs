@@ -389,11 +389,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         });
                     }
                     let args_start = self.stack.len() - argc;
-                    let args = self
-                        .stack
-                        .drain(args_start..)
-                        .map(HostValue::from)
-                        .collect::<Vec<_>>();
+                    let mut args = self.stack.drain(args_start..).collect::<Vec<_>>();
+                    if matches!(op, HostOp::WriteStdout | HostOp::WriteStderr) {
+                        args = self.console_arguments(args, current)?;
+                    }
+                    let args = args.into_iter().map(HostValue::from).collect::<Vec<_>>();
                     let result =
                         self.host
                             .call(*op, &args)

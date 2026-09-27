@@ -1,5 +1,6 @@
 mod arithmetic;
 mod call_method;
+mod callback_loops;
 mod properties;
 
 use super::clones::typed_fail;
@@ -13,7 +14,7 @@ use crate::prelude::lookup_speculation_invariant;
 use crate::tail::{TailContext, emit_tail_instruction};
 use crate::{
     BuiltinLoad, builtin_load, closure_construction, compact_diagnostic_site, diagnostic_source,
-    host_op_code,
+    host_argument_inspection, host_op_code,
 };
 use kiln_ir::Instruction;
 use kiln_ir::Upvalue;
@@ -585,9 +586,10 @@ pub(super) fn emit_graph_op(
                 .unwrap();
             } else if !scalar_proto {
                 let mut init = String::new();
+                let inspect = host_argument_inspection(*op);
                 for (i, op_vid) in operands.iter().enumerate() {
                     init.push_str(&format!(
-                        " kiln_value a{i} = kiln_val_to_boundary(v{}); if (kiln_c99_crosses_boundary(a{i})) a{i} = kiln_c99_inspect(a{i}); host_args[{i}] = a{i};",
+                        " kiln_value a{i} = kiln_val_to_boundary(v{}); if (kiln_c99_crosses_boundary(a{i})) a{i} = {inspect}a{i}); host_args[{i}] = a{i};",
                         op_vid.0
                     ));
                 }
@@ -1210,7 +1212,7 @@ pub(super) fn emit_graph_op(
                     let mask_guard = if all_numbers {
                         String::new()
                     } else {
-                        " && lit_shape->double_slots_mask == mask".to_string()
+                        " && lit->double_slots_mask == mask".to_string()
                     };
                     let mut direct_stores = String::new();
                     for (i, (_, val)) in pairs.iter().enumerate() {
@@ -1225,7 +1227,7 @@ pub(super) fn emit_graph_op(
                     }
                     writeln!(
                         output,
-                        "    {{ static const kiln_shape *lit_shape = NULL; kiln_value built; int status = kiln_c99_new_object(&built); if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; kiln_object *obj = kiln_c99_object_of(built); {mask_expr}if (KILN_LIKELY(lit_shape != NULL{mask_guard})) {{{direct_stores} obj->shape = (kiln_shape *)lit_shape; }} else {{{defines} if (status == KILN_C99_OK && obj->shape != NULL && KILN_C99_SHAPE_IS_PORTABLE(obj->shape) && obj->shape->property_count == {count} && obj->slots == obj->inline_slots && obj->properties == NULL && obj->elements == NULL && obj->prototype.tag == KILN_VALUE_UNDEFINED) {{ lit_shape = obj->shape; }} }} v{v} = kiln_val_from_boundary(built); }}"
+                        "    {{ static const kiln_shape *lit_shape = NULL; kiln_value built; int status = kiln_c99_new_object(&built); if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; kiln_object *obj = kiln_c99_object_of(built); const kiln_shape *lit = kiln_c99_slot_key(&lit_shape); {mask_expr}if (KILN_LIKELY(lit != NULL{mask_guard})) {{{direct_stores} obj->shape = (kiln_shape *)lit; }} else {{{defines} if (status == KILN_C99_OK && obj->shape != NULL && KILN_C99_SHAPE_IS_PORTABLE(obj->shape) && obj->shape->property_count == {count} && obj->slots == obj->inline_slots && obj->properties == NULL && obj->elements == NULL && obj->prototype.tag == KILN_VALUE_UNDEFINED) {{ kiln_c99_slot_publish(&lit_shape, obj->shape); }} }} v{v} = kiln_val_from_boundary(built); }}"
                     ).unwrap();
                     return;
                 }
@@ -1561,23 +1563,27 @@ fn emit_sunk_bridge(
                  if (KILN_UNLIKELY(kiln_sp_src == NULL || kiln_sp_src->shape == NULL || kiln_sp_src->properties != NULL || kiln_sp_src->elements != NULL || kiln_sp_src->accessor_count != 0 || kiln_sp_src->shape->special_mask != 0 || kiln_sp_src->shape->has_symbol_key || kiln_c99_gc_kind_of_ptr(kiln_sp_src) != KILN_GC_OBJECT)) {{ {materialize} goto kiln_generic_resume_{v}; }}"
             )
             .unwrap();
+            // The slots are remembered for the first shared shape the site sees, as a write-once
+            // slot (ADR 0071, issue 04 step 4); any other shape's are worked out here, each time.
             let mut relearn = String::new();
             for (name, &field_idx) in &scalar_obj.fields {
                 relearn.push_str(&format!(
-                    " kiln_sp_slot_{v}[{field_idx}] = kiln_c99_shape_slot_named(kiln_sp_src->shape, {}, {});",
+                    " kiln_sp_at[{field_idx}] = kiln_c99_shape_slot_named(kiln_sp_src->shape, {}, {});",
                     crate::string::c_string(name),
                     name.len()
                 ));
             }
             writeln!(
                 output,
-                "    if (KILN_UNLIKELY(kiln_sp_src->shape != kiln_sp_shape_{v})) {{ kiln_sp_shape_{v} = kiln_sp_src->shape->shared ? kiln_sp_src->shape : NULL;{relearn} }}"
+                "    const uint32_t *kiln_sp_row = kiln_sp_slot_{v}; uint32_t kiln_sp_at[{count}]; \
+                 if (KILN_UNLIKELY(kiln_sp_src->shape != kiln_c99_slot_key(&kiln_sp_shape_{v}))) {{ kiln_sp_row = kiln_sp_at;{relearn} \
+                     if (kiln_sp_src->shape->shared && kiln_c99_slot_claim(&kiln_sp_shape_{v}, 0)) {{ memcpy(kiln_sp_slot_{v}, kiln_sp_at, sizeof kiln_sp_at); kiln_c99_slot_publish(&kiln_sp_shape_{v}, kiln_sp_src->shape); }} }}"
             )
             .unwrap();
             for &field_idx in scalar_obj.fields.values() {
                 writeln!(
                     output,
-                    "    if (kiln_sp_slot_{v}[{field_idx}] != UINT32_MAX) {{ v{alloc}_f_{field_idx} = kiln_sp_src->slots[kiln_sp_slot_{v}[{field_idx}]]; memcpy(&d{alloc}_f_{field_idx}, &v{alloc}_f_{field_idx}, sizeof(double)); i{alloc}_f_{field_idx} = 0; }}"
+                    "    if (kiln_sp_row[{field_idx}] != UINT32_MAX) {{ v{alloc}_f_{field_idx} = kiln_sp_src->slots[kiln_sp_row[{field_idx}]]; memcpy(&d{alloc}_f_{field_idx}, &v{alloc}_f_{field_idx}, sizeof(double)); i{alloc}_f_{field_idx} = 0; }}"
                 )
                 .unwrap();
             }

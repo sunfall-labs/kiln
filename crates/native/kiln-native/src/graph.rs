@@ -2624,9 +2624,10 @@ enum kiln_value_tag {
     output.push_str(kiln_native_runtime::kiln_value_abi_declaration!());
     output.push_str(kiln_native_runtime::kiln_string_abi_declaration!());
     output.push_str(kiln_native_runtime::kiln_cli_host_state_declaration!());
-    output.push_str(r#"/* The prelude owns this realm-local guard. The trusted builtin bootstrap may install methods;
- * the launcher seals those writes before any user module can observe or mutate the realm. */
-extern uint64_t kiln_c99_builtin_store_epoch __attribute__((visibility("hidden")));
+    output.push_str(r#"/* The trusted builtin bootstrap installs methods onto built-ins; once it has run, the realm takes
+ * those writes back out of the prelude's process-wide summary of modified built-ins, before any
+ * user module can observe or mutate the realm (`kiln_c99_builtin_store_epoch`). */
+extern void kiln_c99_builtin_bootstrap_done(void) __attribute__((visibility("hidden")));
 
 static kiln_value kiln_graph_diagnostic(const char *phase, const char *module) {
     kiln_value value = { .tag = KILN_VALUE_STRING, .flags = 0, .len = 0, .bits = 0 };
@@ -2704,7 +2705,7 @@ extern int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
 extern int kiln_cli_write_result(kiln_value value);
 extern void kiln_cli_report_failure_in(int status, kiln_value value, const char *phase);
 extern void kiln_cli_report_failure_with(int status, kiln_value value, const char *phase, const kiln_cli_host_state *host_state);
-extern void kiln_cli_warn(const char *message);
+extern void kiln_cli_warn(const char *message, const kiln_cli_host_state *host_state);
 extern kiln_value kiln_cli_describe_error(kiln_value value);
 extern int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value *out, int depth, kiln_value *thrown);
@@ -2714,6 +2715,9 @@ extern int kiln_realm_set_argv(uint64_t realm, uint64_t argc, const char *const 
 extern int kiln_realm_use_wall_clock(uint64_t realm);
 extern int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
 extern int kiln_realm_destroy(uint64_t realm);
+extern int kiln_realm_run_pinned(uint64_t count, int (*run)(void *context, uint64_t index),
+                                 void *context, int *statuses);
+extern void kiln_c99_realm_capture_output(int fd) __attribute__((visibility("hidden")));
 typedef void (*kiln_gc_roots_fn)(void *heap, void *context, int phase);
 extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
 extern int kiln_realm_gc_unregister_roots(kiln_gc_roots_fn roots, void *context);
@@ -2810,7 +2814,11 @@ extern int kiln_c99_finish_module_checkpoint(kiln_host *, kiln_value *);
     for (index, (node, _)) in modules.iter().enumerate() {
         let export_count = native_graph_export_count(node);
         if export_count != 0 {
-            writeln!(linkage_fields, "    kiln_value exports_{index}[{export_count}];").unwrap();
+            writeln!(
+                linkage_fields,
+                "    kiln_value exports_{index}[{export_count}];"
+            )
+            .unwrap();
             writeln!(
                 linkage_names,
                 "#define kiln_exports_{index} (graph->exports_{index})"
@@ -2831,18 +2839,28 @@ extern int kiln_c99_finish_module_checkpoint(kiln_host *, kiln_value *);
             .unwrap();
         }
     }
-    writeln!(linkage_fields, "    kiln_value namespaces[{}];", modules.len()).unwrap();
+    writeln!(
+        linkage_fields,
+        "    kiln_value namespaces[{}];",
+        modules.len()
+    )
+    .unwrap();
     linkage_names.push_str("#define kiln_namespaces (graph->namespaces)\n");
     if modules
         .iter()
         .any(|(node, _)| node.program.program.has_dynamic_import())
     {
-        linkage_fields.push_str("    kiln_value opentui_namespace;\n    kiln_value node_ffi_namespace;\n");
+        linkage_fields
+            .push_str("    kiln_value opentui_namespace;\n    kiln_value node_ffi_namespace;\n");
         linkage_names.push_str("#define kiln_opentui_namespace (graph->opentui_namespace)\n#define kiln_node_ffi_namespace (graph->node_ffi_namespace)\n");
     }
     for (index, (node, _)) in modules.iter().enumerate() {
         if node.source == ModuleSource::CommonJs {
-            writeln!(linkage_fields, "    kiln_commonjs_context commonjs_{index};").unwrap();
+            writeln!(
+                linkage_fields,
+                "    kiln_commonjs_context commonjs_{index};"
+            )
+            .unwrap();
             writeln!(
                 linkage_names,
                 "#define kiln_commonjs_{index} (graph->commonjs_{index})"
@@ -3304,6 +3322,8 @@ static int kiln_graph_enter(void *opaque) {
         status = kiln_realm_gc_register_roots(kiln_graph_gc_roots, graph, KILN_GC_ROOT_SURVIVES_TEARDOWN);
         if (status != 0) return status;
         graph->roots_registered = 1;
+        /* A realm hosted beside others writes its standard streams where its host said. */
+        if (graph->cli.output != NULL) kiln_c99_realm_capture_output(fileno(graph->cli.output));
         status = kiln_install_native_modules(host);
         if (status != 0) return status;
 "#,
@@ -3311,7 +3331,7 @@ static int kiln_graph_enter(void *opaque) {
     if let Some(bootstrap) = bootstrap {
         writeln!(
             output,
-            "        status = {}(host, result, NULL, 0, NULL, 0);\n        if (status != 0) {{ if (result->tag == 9 /* KILN_VALUE_OBJECT */) *result = kiln_cli_describe_error(*result); if (result->tag != KILN_VALUE_STRING || result->len == 0) *result = kiln_graph_diagnostic(\"builtin-bootstrap\", \"@kiln/runtime-bootstrap\"); return status; }}\n        kiln_c99_builtin_store_epoch = 0;",
+            "        status = {}(host, result, NULL, 0, NULL, 0);\n        if (status != 0) {{ if (result->tag == 9 /* KILN_VALUE_OBJECT */) *result = kiln_cli_describe_error(*result); if (result->tag != KILN_VALUE_STRING || result->len == 0) *result = kiln_graph_diagnostic(\"builtin-bootstrap\", \"@kiln/runtime-bootstrap\"); return status; }}\n        kiln_c99_builtin_bootstrap_done();",
             bootstrap.symbol
         )
         .unwrap();
@@ -3720,8 +3740,10 @@ static int kiln_graph_enter(void *opaque) {
     output.push_str("        default: return KILN_C99_CONTROL_ERROR;\n    }\n}\n");
     output.push_str(
         r#"/* argc/argv reach the realm before it is entered, so the first `process` a module builds
- * already has the command line. The strings are copied on the other side of this call. */
-static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
+ * already has the command line. The strings are copied on the other side of this call. `output`
+ * is where the realm's standard streams go (NULL: the process's). Returns the status the process
+ * exits with for this realm: 0, 1, or node's 13 for a top-level await that never settled. */
+static int kiln_cli_run_realm(int argc, char **argv, int writes_result, FILE *output) {
     /* The realm's graph: its module states and every module's linkage, one per realm run and freed
      * after the realm is destroyed (a result slot is read after teardown). */
     kiln_graph_context *graph = (kiln_graph_context *)calloc(1, sizeof *graph);
@@ -3733,9 +3755,10 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
     int destroy_status;
     int unsettled_entry = 0;
     if (graph == NULL) {
-        kiln_cli_warn("kiln: out of memory for the module graph");
+        kiln_cli_warn("kiln: out of memory for the module graph", NULL);
         return 1;
     }
+    graph->cli.output = output;
     graph->result.tag = KILN_VALUE_UNDEFINED;
     graph->entry_result.tag = KILN_VALUE_UNDEFINED;
     graph->host.call = kiln_graph_host_call;
@@ -3811,7 +3834,7 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
     /* An entry whose top-level await never settled, with the loop out of work: node's answer is a
      * warning and status 13 rather than a refusal, and both engines give that one. */
     unsettled_entry = status == KILN_C99_CONTROL_ERROR && (unsettled_entry || graph->unsettled_entry);
-    if (unsettled_entry) kiln_cli_warn("Warning: Detected unsettled top-level await");
+    if (unsettled_entry) kiln_cli_warn("Warning: Detected unsettled top-level await", &graph->cli);
     else if (status != 0) kiln_cli_report_failure_with(status, graph->result, phase, &graph->cli);
     if (writes_result && status == 0 && kiln_cli_write_result(graph->entry_result) != 0) {
         static const kiln_string refusal_str = { 17, 0, "filesystem access" };
@@ -3820,10 +3843,69 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
     }
     destroy_status = kiln_realm_destroy(realm);
     free(graph);
-    /* `main` folds every failure to 1, the way it does a refusal; this is the one status a
-     * program's caller is told apart by, as `process.exit(code)` is. */
-    if (unsettled_entry) exit(13);
+    /* Every failure folds to 1, the way a refusal does; 13 is the one status a program's caller
+     * is told apart by, as `process.exit(code)` is. */
+    if (unsettled_entry) return 13;
     if (status == 0) status = destroy_status;
+    return status == 0 ? 0 : 1;
+}
+
+/* `KILN_REALMS=N`: run the program as N realms at once in this one process, each pinned to its
+ * own thread of the runtime's worker pool (`kiln_realm_run_pinned`, realms issue 05) -- the
+ * harness that checks realms running side by side each print exactly what the program prints
+ * alone (`scripts/native-realms.sh`). Each realm's standard streams, both into one file as a
+ * shell's `2>&1` would, go to `$KILN_REALMS_OUT/<index>.out`, and its exit status to
+ * `<index>.status`. A realm calling `process.exit` still ends the whole process. */
+typedef struct kiln_cli_realms {
+    int argc;
+    char **argv;
+    const char *directory;
+} kiln_cli_realms;
+
+static int kiln_cli_run_hosted_realm(void *context, uint64_t index) {
+    const kiln_cli_realms *realms = (const kiln_cli_realms *)context;
+    char path[4096];
+    FILE *output, *written;
+    int status;
+    snprintf(path, sizeof path, "%s/%llu.out", realms->directory, (unsigned long long)index);
+    output = fopen(path, "wb");
+    if (output == NULL) return 1;
+    status = kiln_cli_run_realm(realms->argc, realms->argv, 0, output);
+    if (fclose(output) != 0 && status == 0) status = 1;
+    snprintf(path, sizeof path, "%s/%llu.status", realms->directory, (unsigned long long)index);
+    written = fopen(path, "wb");
+    if (written == NULL || fprintf(written, "%d\n", status) < 0 || fclose(written) != 0) return 1;
+    return status;
+}
+
+static long kiln_cli_realm_count(void) {
+    const char *setting = getenv("KILN_REALMS");
+    char *end = NULL;
+    long count;
+    if (setting == NULL || *setting == '\0') return 0;
+    count = strtol(setting, &end, 10);
+    if (end == setting || *end != '\0' || count < 1) return 0;
+    return count > 1024 ? 1024 : count;
+}
+
+static int kiln_cli_run_realms(int argc, char **argv, long count) {
+    kiln_cli_realms realms;
+    int *statuses;
+    int status;
+    long index;
+    realms.argc = argc;
+    realms.argv = argv;
+    realms.directory = getenv("KILN_REALMS_OUT");
+    if (realms.directory == NULL || *realms.directory == '\0') {
+        fputs("kiln: KILN_REALMS needs KILN_REALMS_OUT, a directory for each realm's output\n", stderr);
+        return 1;
+    }
+    statuses = (int *)calloc((size_t)count, sizeof *statuses);
+    if (statuses == NULL) return 1;
+    status = kiln_realm_run_pinned((uint64_t)count, kiln_cli_run_hosted_realm, &realms, statuses);
+    for (index = 0; index < count; ++index)
+        if (statuses[index] != 0) status = 1;
+    free(statuses);
     return status == 0 ? 0 : 1;
 }
 
@@ -4058,7 +4140,7 @@ static void kiln_sup_worker(int argc, char **argv, long index, long workers, pid
     setenv("KILN_WORKER_COUNT", text, 1);
     sigprocmask(SIG_SETMASK, original_mask, NULL);
     /* `exit`, not `_exit`: a worker ends the way a single-realm `main` returning does. */
-    exit(kiln_cli_run_realm(argc, argv, index == 0) == 0 ? 0 : 1);
+    exit(kiln_cli_run_realm(argc, argv, index == 0, NULL));
 }
 
 static void kiln_sup_forward(const pid_t *pids, long workers, int sig) {
@@ -4276,7 +4358,7 @@ static int kiln_sup_run(int argc, char **argv, long workers) {
 #endif
 
 int main(int argc, char **argv) {
-    long workers;
+    long workers, realms;
     if (setlocale(LC_NUMERIC, "C") == NULL) return 1;
     if (kiln_cli_http3_enabled(argc, argv)) {
 #ifndef _WIN32
@@ -4285,12 +4367,14 @@ int main(int argc, char **argv) {
         _putenv("KILN_HTTP3=1");
 #endif
     }
+    realms = kiln_cli_realm_count();
+    if (realms > 0) return kiln_cli_run_realms(argc, argv, realms);
     workers = kiln_cli_worker_count();
 #ifdef _WIN32
     (void)workers;
-    return kiln_cli_run_realm(argc, argv, 1) == 0 ? 0 : 1;
+    return kiln_cli_run_realm(argc, argv, 1, NULL);
 #else
-    if (workers <= 1) return kiln_cli_run_realm(argc, argv, 1) == 0 ? 0 : 1;
+    if (workers <= 1) return kiln_cli_run_realm(argc, argv, 1, NULL);
     return kiln_sup_run(argc, argv, workers);
 #endif
 }

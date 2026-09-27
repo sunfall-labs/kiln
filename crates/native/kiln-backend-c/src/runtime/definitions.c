@@ -788,6 +788,17 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
                                 "built");
             }
         }
+        {
+            /* A member defined on the built-in itself -- the shared bootstrap's (the parallel
+             * family on `Array.prototype`, ADR 0069) or a program's -- is described by the store
+             * that holds it, the same store a read and `getOwnPropertyNames` consult. */
+            kiln_value held;
+            status = kiln_c99_callable_store(target, &held, 0);
+            if (status == KILN_C99_OK && held.tag == KILN_VALUE_OBJECT) {
+                return kiln_c99_describe_property_key(host, held, view, canonical, out, found,
+                                                      depth, thrown);
+            }
+        }
         return KILN_C99_OK;
     }
     if (target.tag != KILN_VALUE_OBJECT && target.tag != KILN_VALUE_ARRAY) {

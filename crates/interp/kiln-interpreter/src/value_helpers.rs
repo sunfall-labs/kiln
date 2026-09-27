@@ -164,8 +164,11 @@ pub(super) fn native_js_name(native: &Native) -> String {
         Native::ArrayBufferResizeRaw => "__kilnArrayBufferResize".to_owned(),
         Native::TypedArrayOutOfBoundsRaw => "__kilnTypedArrayOutOfBounds".to_owned(),
         Native::CloneDataRaw => "__kilnCloneData".to_owned(),
+        Native::TypedArrayCopyRaw => "__kilnTypedArrayCopy".to_owned(),
+        Native::TypedArraySortRaw => "__kilnTypedArraySort".to_owned(),
         Native::JobsPendingRaw => "__kilnJobsPending".to_owned(),
         Native::QueueIoRaw => "__kilnQueueIo".to_owned(),
+        Native::PromiseRejectionsRaw => "__kilnPromiseRejections".to_owned(),
         Native::NodeModuleCreateRequire => "__kilnHostModuleCreateRequire".to_owned(),
         // A symbol-keyed method is named for the symbol in brackets, which is what the
         // specification's `SetFunctionName` does with a symbol key. Derivation would spell it
@@ -201,23 +204,14 @@ pub(super) fn native_js_name(native: &Native) -> String {
         Native::SetOperation(operation) => operation.property_key().to_owned(),
         Native::Uint8Text(conversion) => conversion.key().to_owned(),
         Native::ArrayCopy(method) => method.property_key().to_owned(),
-        Native::StringHtml(wrapper) => wrapper.property_key().to_owned(),
         Native::RegExpSymbol(method) => method.js_name(),
         // The derivation works from the variant's `Debug` spelling, and for these the payload is
         // the whole of the name: `IteratorLazy(Map)` would otherwise be `iteratorLazy`.
         Native::IteratorLazy(kind) => kind.property_key().to_owned(),
         Native::IteratorTerminal(kind) => kind.property_key().to_owned(),
-        Native::IteratorDispose => "[Symbol.dispose]".to_owned(),
         // The derivation has no `Iterator` in its table of type prefixes, so these three would
         // keep it. Only the first is a name a program can read; the other two are the helper's
         // own methods, named for what they are.
-        Native::IteratorConcat => "concat".to_owned(),
-        Native::IteratorConcatNext => "next".to_owned(),
-        Native::IteratorConcatReturn => "return".to_owned(),
-        Native::IteratorZip { keyed: false } => "zip".to_owned(),
-        Native::IteratorZip { keyed: true } => "zipKeyed".to_owned(),
-        Native::IteratorZipNext => "next".to_owned(),
-        Native::IteratorZipReturn => "return".to_owned(),
         // The derivation strips a leading type name, which for these three takes a word that is
         // part of the method rather than part of the type: `WeakRefDeref` lowers to `refDeref`.
         Native::AtomicsOp(op) => op.property_key().to_owned(),
@@ -245,21 +239,12 @@ pub(super) fn native_js_name(native: &Native) -> String {
         // The derivation has no `Iterator` in its table of type prefixes, so it spells this
         // `iteratorFrom` rather than `from`.
         Native::IteratorFrom => "from".to_owned(),
-        // The payload is the whole of the name; the derivation would spell this
-        // `typedArrayGeneric`.
-        Native::TypedArrayGeneric(method) => (*method).to_owned(),
         Native::ShadowRealmConstructor => "ShadowRealm".to_owned(),
         Native::ShadowRealmEvaluate => "evaluate".to_owned(),
         Native::ShadowRealmImportValue => "importValue".to_owned(),
         Native::ThrowTypeError => String::new(),
         Native::ProtoGetter => "get __proto__".to_owned(),
         Native::ProtoSetter => "set __proto__".to_owned(),
-        Native::LegacyAccessor { defines, setter } => match (defines, setter) {
-            (true, false) => "__defineGetter__".to_owned(),
-            (true, true) => "__defineSetter__".to_owned(),
-            (false, false) => "__lookupGetter__".to_owned(),
-            (false, true) => "__lookupSetter__".to_owned(),
-        },
         // The derivation strips the type and lowers what is left, which spells this `utc`. A
         // case distinction the variant does not carry cannot be recovered from it.
         Native::DateUtc => "UTC".to_owned(),
@@ -349,8 +334,8 @@ pub(super) const fn namespace_name(native: &Native) -> Option<&'static str> {
 }
 
 pub(super) fn builtin_js_name(variant: &str) -> String {
-    // A payload is not part of the name: `DateField(Time)` is `getTime`'s implementation, not a
-    // function called `DateField(Time)`.
+    // A payload is not part of the name: `TypedArrayFrom(Uint8)` is `Uint8Array.from`, not a
+    // function called `TypedArrayFrom(Uint8)`.
     let variant = variant.split('(').next().unwrap_or(variant);
     // A constructor is named for its type, not for the word "Constructor".
     if let Some(type_name) = variant.strip_suffix("Constructor")

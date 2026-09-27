@@ -159,6 +159,12 @@ int32_t kiln_temporal_last_error(int32_t *out_kind, unsigned char *buffer, size_
     (void)out_kind; (void)buffer; (void)capacity;
     return -1;
 }
+/* The typed-array default-order sort is the provider's (`kiln_number_core::typed_order`); a
+ * fixture that sorted would see `__kilnTypedArraySort` decline, and the TypeScript sort instead. */
+int32_t kiln_typed_array_sort(uint8_t *data, size_t count, int32_t kind) {
+    (void)data; (void)count; (void)kind;
+    return -1;
+}
 int32_t kiln_intl_segment(const unsigned char *bytes, size_t len, uint32_t granularity,
                           const uint32_t **out_records, size_t *out_count) {
     (void)bytes; (void)len; (void)granularity; (void)out_records; (void)out_count;
@@ -478,6 +484,19 @@ void *kiln_realm_process_shared(uint64_t size) {
     static union { uint64_t align; unsigned char bytes[4096]; } block;
     return size <= sizeof block.bytes ? (void *)block.bytes : NULL;
 }
+/* Reclamation (the provider's `reclaim.rs`). By default the fixture is a process with one thread,
+ * so nothing retired is ever under another thread's reader. A test standing for other threads
+ * running realms sets `kiln_test_other_threads`, and moves `kiln_test_safe_below` past a tag to
+ * say they have all passed a turn boundary since it was taken. */
+static int kiln_test_other_threads;
+static uint64_t kiln_test_epoch = 1;
+static uint64_t kiln_test_safe_below = 1;
+uint64_t kiln_realm_retire_tag(void) {
+    uint64_t tag = kiln_test_epoch++;
+    return kiln_test_other_threads ? tag : 0;
+}
+int kiln_realm_retired_safe(uint64_t tag) { return tag == 0 || tag < kiln_test_safe_below; }
+int kiln_realm_retire(void *record) { free(record); return 0; }
 int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap) {
     /* The fixture has no realm heap: every unit collects nothing and keeps its fallback heap. */
     (void)hooks;

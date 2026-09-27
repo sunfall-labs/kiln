@@ -26,6 +26,17 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         }
     }
 
+    /// The realm session's rejection queue, or this machine's own when it has no session.
+    pub(crate) fn with_rejections_mut<R>(
+        &mut self,
+        operation: impl FnOnce(&mut Rejections) -> R,
+    ) -> R {
+        match &self.module_realm {
+            Some(shared) => operation(&mut shared.borrow_mut().rejections),
+            None => operation(&mut self.rejections),
+        }
+    }
+
     pub(crate) fn push_pending_node(&mut self, pending: PendingNodeRequest) {
         if let Some(realm) = &self.module_realm {
             realm.borrow_mut().pending_node.push(pending);
@@ -3680,7 +3691,6 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         loop {
             self.drain_microtasks(runtime)?;
             self.checkpoint_runtime_http(runtime)?;
-            runtime.enter(|| self.check_unhandled_rejection())?;
             if until_module && self.module_outcome().is_some() {
                 return Ok(());
             }

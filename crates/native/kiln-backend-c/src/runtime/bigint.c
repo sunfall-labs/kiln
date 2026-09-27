@@ -68,14 +68,21 @@ static int kiln_c99_bigint_constant_key(void **cache, const kiln_string *digits,
 
 /* `1n`, built once. Nothing frees a BigInt handle here, so a shared one is safe to keep. */
 static const void *kiln_c99_bigint_one(void) {
-    static void *one = NULL;
-    if (one == NULL) {
+    static void *kiln_c99_bigint_one_handle = NULL;
+    void *made = __atomic_load_n(&kiln_c99_bigint_one_handle, __ATOMIC_ACQUIRE);
+    if (made == NULL) {
         static const unsigned char digit[] = {'1'};
-        if (kiln_bigint_parse(digit, sizeof digit, 10, &one) != 0) {
+        void *expected = NULL;
+        if (kiln_bigint_parse(digit, sizeof digit, 10, &made) != 0) {
             return NULL;
         }
+        /* Two realms' threads may both make it; the first published is kept, the other leaks
+         * one handle, once. */
+        if (!__atomic_compare_exchange_n(&kiln_c99_bigint_one_handle, &expected, made, 0, __ATOMIC_ACQ_REL,
+                                         __ATOMIC_ACQUIRE))
+            made = expected;
     }
-    return one;
+    return made;
 }
 
 /* Wrap a handle the provider just produced. */

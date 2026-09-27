@@ -38,21 +38,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         arguments: Vec<Value>,
         instruction: usize,
     ) -> Result<Option<Value>, ExecutionError> {
-        // `ValidateTypedArray`, ahead of the dispatch rather than inside an arm of it: it is what
-        // the specification does before a `%TypedArray%.prototype` method reads anything, and the
-        // three methods a view owns outright still take the arm they always did afterwards.
-        if let Value::Native(native, _) = &method
-            && let Some((name, brand_only)) = native.typed_array_prototype_method()
-        {
-            self.validate_typed_array(&receiver, name, brand_only)?;
-            if let Native::TypedArrayGeneric(name) = native {
-                let outer = std::mem::replace(&mut self.typed_array_method, true);
-                let dispatched =
-                    self.invoke_dispatch(array_property(name), receiver, arguments, instruction);
-                self.typed_array_method = outer;
-                return dispatched;
-            }
-        }
         match method {
             // The same rule as in `call_value`: a mutating array method given a proxy has to
             // write through it, not into a snapshot.
@@ -85,8 +70,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     &original,
                     produced,
                     native.rearranges_in_place(),
-                    native.returns_a_new_array(),
-                    instruction,
                 )?))
             }
             // `next` on an async generator answers with a promise rather than a result: the
@@ -267,30 +250,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let original = receiver.clone();
                 let receiver = self.as_array_like(&method, receiver, instruction)?;
                 let produced = self.array_sort(&receiver, &arguments, instruction)?;
-                Ok(Some(self.typed_result(
-                    &original,
-                    produced,
-                    true,
-                    false,
-                    instruction,
-                )?))
+                Ok(Some(self.typed_result(&original, produced, true)?))
             }
             Value::Callback(callback, _) => {
                 let original = receiver.clone();
                 let receiver = self.as_array_like(&method, receiver, instruction)?;
                 let produced = self.array_callback(callback, &receiver, &arguments, instruction)?;
-                // `map` and `filter` on a view produce a view of the same kind; the other walks
-                // produce a value that is not an array and pass through untouched.
-                Ok(Some(self.typed_result(
-                    &original,
-                    produced,
-                    false,
-                    matches!(
-                        callback,
-                        CallbackMethod::Map | CallbackMethod::ParallelMap | CallbackMethod::Filter
-                    ),
-                    instruction,
-                )?))
+                Ok(Some(self.typed_result(&original, produced, false)?))
             }
             // A bound function ignores the receiver the call site offers, whichever way it is
             // reached, so both go through one path.

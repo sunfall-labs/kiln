@@ -35,4 +35,6 @@ generic-only, but its qualifying `parallelMap` sites keep their parallel lowerin
 most probes stay under the limit so their bodies are specialized, and `parallel-large-module.js`
 covers the generic case. The development profile emits no parallel code, and `--explain-parallel`
 says `dev-profile` there. `kiln build --profile native-release --explain-parallel <probe>` says
-which sites run in parallel.
+which sites run in parallel. The family (`parallel-filter`, `parallel-flatmap`, `parallel-reduce`,
+`parallel-sort`, `parallel-family-refused`; issue 10) is held to `filter`, `flatMap` and `sort`,
+and `parallelReduce` to its fixed tree written out again in the probe.

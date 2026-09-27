@@ -203,9 +203,6 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 *out = kiln_c99_builtin(KILN_C99_BUILTIN_ITERATOR);
                 return KILN_C99_OK;
             }
-            if (kiln_c99_iterator_prototype_gap(intrinsic_key, intrinsic_len)) {
-                KILN_C99_REFUSE("an Iterator.prototype helper this backend has not implemented");
-            }
         }
         /* The chain ends at `Object.prototype`, whose members every object has -- unless the
          * program asked for a bare dictionary with `Object.create(null)`, which is exactly what
@@ -693,11 +690,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             if (status != KILN_C99_OK || found) return status;
             (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
                                                 &intrinsic_len);
-            uint64_t method = kiln_c99_typed_prototype_method(intrinsic_key, intrinsic_len);
-            if (method != 0) {
-                *out = kiln_c99_method(method);
-                return KILN_C99_OK;
-            }
+            uint64_t method;
             if (kiln_c99_is_typed_array_member(view->kind == KILN_TYPED_UINT8, intrinsic_key, intrinsic_len)) {
                 /* A real member this backend has not grown yet. `undefined` would be a
                  * silent wrong answer -- the program would call it and get a TypeError
@@ -783,6 +776,18 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                                               &found);
                 }
             }
+        }
+        {
+            /* A member defined on `Array.prototype` itself rather than answered by the table:
+             * one the shared bootstrap installs (the parallel family, ADR 0069) or a program's
+             * own polyfill. It lives in the prototype built-in's store, which a read of
+             * `Array.prototype.x` already consults; an instance has to reach it too, or
+             * `[].x()` is "undefined is not a function" about a method `Array.prototype.x`
+             * demonstrably has. */
+            int found;
+            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_ARRAY_PROTOTYPE, key,
+                                                       ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
         }
         if (kiln_c99_same_name_key(key, "toLocaleString")) {
             *out = kiln_c99_method(KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING);
@@ -1323,11 +1328,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                         if (status != KILN_C99_OK || found) return status;
                     }
                 }
-                uint64_t method = kiln_c99_typed_prototype_method(intrinsic_key, intrinsic_len);
-                if (method != 0) {
-                    *out = kiln_c99_method(method);
-                    return KILN_C99_OK;
-                }
+                uint64_t method;
                 if (kiln_c99_is_typed_array_member(concrete && typed_kind == KILN_TYPED_UINT8,
                                                    intrinsic_key, intrinsic_len)) {
                     KILN_C99_REFUSE("a typed-array member this backend has not implemented");
@@ -1892,14 +1893,9 @@ static int kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object,
     if (object->shape != NULL && canonical != NULL) {
         uint32_t slot;
         if (kiln_c99_shape_find_slot(object->shape, canonical, &slot)) {
-            uint32_t p;
-            int found = 0;
             /* An accessor's slot holds its pair, not a value a site may hand back. */
             if (object->shape->accessor_mask & (1u << slot)) return 0;
-            for (p = 0; p < site->pic_count; ++p) {
-                if (site->entries[p].shape == object->shape) found = 1;
-            }
-            if (found || site->pic_count < KILN_C99_PIC_SIZE) {
+            if (kiln_c99_site_may_learn(site, object->shape)) {
                 kiln_c99_site_remember_own(site, object->shape, slot);
             }
             return 1;
@@ -1907,8 +1903,7 @@ static int kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object,
     }
     for (index = 0; index < object->count && object->properties != NULL; ++index) {
         if (kiln_c99_same_key_view(&object->properties[index], key)) {
-            site->own = kiln_c99_site_encode_dictionary_index(index);
-            site->proto = 0;
+            kiln_c99_site_set_dictionary(site, kiln_c99_site_encode_dictionary_index(index), 0);
             return 1;
         }
     }
@@ -1916,8 +1911,7 @@ static int kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object,
         const kiln_object *parent = kiln_c99_object_of(object->prototype);
         for (index = 0; index < parent->count && parent->properties != NULL; ++index) {
             if (kiln_c99_same_key_view(&parent->properties[index], key)) {
-                site->own = 0;
-                site->proto = kiln_c99_site_encode_dictionary_index(index);
+                kiln_c99_site_set_dictionary(site, 0, kiln_c99_site_encode_dictionary_index(index));
                 return 1;
             }
         }
@@ -1943,13 +1937,10 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const kiln_stri
     {
         const kiln_object *object = kiln_c99_object_of(target);
         if (object->shape != NULL) {
-            uint32_t p;
-            for (p = 0; p < site->pic_count; ++p) {
-                if (site->entries[p].shape == object->shape &&
-                    site->entries[p].slot < object->slot_capacity) {
-                    *out = kiln_val_to_boundary(object->slots[site->entries[p].slot]);
-                    return KILN_C99_OK;
-                }
+            const kiln_c99_pic_entry *entry = kiln_c99_site_entry(site, object->shape);
+            if (entry != NULL && entry->slot < object->slot_capacity) {
+                *out = kiln_val_to_boundary(object->slots[entry->slot]);
+                return KILN_C99_OK;
             }
             {
                 uint32_t slot;
@@ -1958,7 +1949,7 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const kiln_stri
                     if (object->shape->accessor_mask & (1u << slot)) goto generic;
                     if (slot < object->slot_capacity) {
                         *out = kiln_val_to_boundary(object->slots[slot]);
-                        if (site->pic_count < KILN_C99_PIC_SIZE) {
+                        if (kiln_c99_site_count(site) < KILN_C99_PIC_SIZE) {
                             kiln_c99_site_remember_own(site, object->shape, slot);
                         }
                         return KILN_C99_OK;
@@ -1993,21 +1984,21 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const kiln_stri
                 }
             }
         }
-        uint32_t own = kiln_c99_site_decode_dictionary_index(site->own);
+        uint32_t own = kiln_c99_site_decode_dictionary_index(kiln_c99_site_own(site));
         if (own < object->count && object->properties != NULL &&
             kiln_c99_same_key_view(&object->properties[own], key)) {
             if (!object->properties[own].accessor) {
                 *out = object->properties[own].value;
                 return KILN_C99_OK;
             }
-        } else if (site->proto != 0 &&
+        } else if (kiln_c99_site_proto(site) != 0 &&
                    object->prototype.tag == KILN_VALUE_OBJECT) {
             size_t index = 0;
             while (index < object->count && object->properties != NULL &&
                    !kiln_c99_same_key_view(&object->properties[index], key)) ++index;
             if (index == object->count) {
                 const kiln_object *parent = kiln_c99_object_of(object->prototype);
-                uint32_t at = kiln_c99_site_decode_dictionary_index(site->proto);
+                uint32_t at = kiln_c99_site_decode_dictionary_index(kiln_c99_site_proto(site));
                 if (parent->properties != NULL && at < parent->count &&
                     kiln_c99_same_key_view(&parent->properties[at], key) &&
                     !parent->properties[at].accessor) {
@@ -2018,9 +2009,9 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const kiln_stri
         }
     generic:
         status = kiln_c99_get_key(host, target, key, canonical, out, depth, thrown);
-        if (status == KILN_C99_OK && site->misses < KILN_C99_SITE_GIVE_UP &&
+        if (status == KILN_C99_OK && kiln_c99_site_misses(site) < KILN_C99_SITE_GIVE_UP &&
             !kiln_c99_site_learn(site, object, key, canonical)) {
-            site->misses += 1;
+            kiln_c99_site_missed(site);
         }
         return status;
     }
