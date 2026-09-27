@@ -2078,3 +2078,26 @@ caught TypeError
 1,m,
 y,2,y 8
 """
+
+[[test]]
+id = "regress/r40-computed-key-to-property-key"
+group = "regress"
+source = "regress/r40-computed-key-to-property-key.js"
+status = "runnable"
+features = ["object-literals", "classes", "computed-keys", "to-primitive", "evaluation-order"]
+catches = """
+A computed key converts with `ToPropertyKey` where it is written, between its key and its value (parallel-builtins issue 24), recorded from node 26.8.1. The native backend keyed the property "[object Object]" and ran no user code; the interpreter converted it when the object was built, after every value. Object literal pairs before and after a spread, methods and accessors, class methods, accessors and static fields, a throwing key, a symbol from `@@toPrimitive`, and function naming after the converted key.\
+"""
+expected_stdout = """
+kk k
+constructor,kk,kkg number 1 k,k,k,k
+a,tp 5 k,k,k,k,string,string,string
+1
+caught RangeError key
+caught RangeError key
+caught RangeError key
+key a,value 1,value 2,key c,value 3,key d,value 4,key e {"a":1,"b":2,"c":3,"d":4,"e":5}
+key m,key s,key g
+9 1
+kk [sym]
+"""

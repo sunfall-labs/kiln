@@ -401,8 +401,12 @@ impl super::Compiler {
                         enumerable: false,
                     });
                 }
+                // The key converts where it is written, before the next element's key is
+                // evaluated; the define that follows converted it too late, and natively not at
+                // all (issue 24). The constructor or prototype is beneath it.
                 ObjectKey::Computed(key) => {
                     self.expression(key);
+                    self.code.push(Instruction::ToPropertyKey);
                     self.code.push(Instruction::MakeFunction(body));
                     if accessor {
                         self.code.push(Instruction::DefineAccessor {
