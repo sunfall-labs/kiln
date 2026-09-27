@@ -54,6 +54,22 @@ use url::Url;
 static WORK_COUNTER: AtomicU64 = AtomicU64::new(0);
 static MATERIALIZE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// A release build that opts in (`release_bootstrap_specialized`) emits the builtin bootstrap
+/// specialized and compiles it at -O2 (issue 17), in translation units of about this many bytes
+/// of generated C, so its one-time compile is parallel units instead of one minute-long one. The
+/// bootstrap is not subject to the user-module specialization budget: it is one module per
+/// toolchain and build configuration, cached by content, and its methods are hot loops.
+const RELEASE_BOOTSTRAP_UNIT_BYTES: usize = 1 << 20;
+
+/// Whether a release build emits the bootstrap specialized: opt-in, `KILN_BOOTSTRAP_SPECIALIZED=1`,
+/// until the specialized emitter's miscompile recorded on issue 17 is fixed. Specialized, the
+/// bootstrap's `headerListRemove` (`Headers.set`/`delete`) loses the `from = end` that follows a
+/// `kept += list.slice(from, at)` in its loop and never terminates -- the same code in any small
+/// user module does the same today; the generic-only bootstrap was hiding it.
+fn release_bootstrap_specialized() -> bool {
+    std::env::var("KILN_BOOTSTRAP_SPECIALIZED").as_deref() == Ok("1")
+}
+
 // Object misses for the same or colliding bucket share one process mutex and one OS lock. The
 // cache key is rechecked after both locks are held, so bucket collisions only serialize work and
 // never authorize reuse of another key's artifact. Lock files are kept outside artifact-kind
@@ -2406,6 +2422,8 @@ impl NativeBuilder {
                 &emission,
                 options.node,
                 group_mask & kiln_graph::method_groups::URL != 0,
+                (options.profile == NativeProfile::Release && release_bootstrap_specialized())
+                    .then_some(RELEASE_BOOTSTRAP_UNIT_BYTES),
             )?;
         if !symbols.insert(bootstrap.symbol.clone()) {
             return Err(NativeError::SymbolCollision {
@@ -2466,7 +2484,24 @@ impl NativeBuilder {
             }
             module_chunk_ranges.push(start..symbol_list.len());
         }
-        symbol_list.push(bootstrap.symbol.clone());
+        // The bootstrap's translation units: its source, or its chunks when a release build split
+        // its specialized C (issue 17), each compiled like an ordinary module's chunk.
+        let bootstrap_units: Vec<(String, &str)> = if bootstrap.chunks.is_empty() {
+            vec![(bootstrap.symbol.clone(), bootstrap.source.as_str())]
+        } else {
+            bootstrap
+                .chunks
+                .iter()
+                .enumerate()
+                .map(|(index, chunk)| {
+                    (
+                        format!("{}_chunk_{index}", bootstrap.symbol),
+                        chunk.as_str(),
+                    )
+                })
+                .collect()
+        };
+        symbol_list.extend(bootstrap_units.iter().map(|(name, _)| name.clone()));
         let paths = GraphBuildPaths::new(workspace.path(), &symbol_list);
         let profile = options.profile;
         let compiler = compiler_identity(&identity);
@@ -2476,15 +2511,17 @@ impl NativeBuilder {
         let (number_provider, number_provider_digest, _, provider_capabilities) =
             self.cached_number_provider_for(&target, required_provider_capabilities)?;
 
-        let bootstrap_source_key = NativeArtifactFamily::ModuleSource.source_key(
-            &target,
-            Digest::hash(b"native-builtin-bootstrap-c11"),
-            [Digest::hash(bootstrap.source.as_bytes())],
-        );
-        let (bootstrap_bytes, bootstrap_digest, _) =
-            self.cached_payload(&bootstrap_source_key, bootstrap.source.as_bytes())?;
-        module_sources.push((bootstrap_bytes, bootstrap_digest, bootstrap_generated_c_hit));
-        module_generic_only.push(bootstrap.generic_only);
+        for (_, unit) in &bootstrap_units {
+            let bootstrap_source_key = NativeArtifactFamily::ModuleSource.source_key(
+                &target,
+                Digest::hash(b"native-builtin-bootstrap-c11"),
+                [Digest::hash(unit.as_bytes())],
+            );
+            let (bootstrap_bytes, bootstrap_digest, _) =
+                self.cached_payload(&bootstrap_source_key, unit.as_bytes())?;
+            module_sources.push((bootstrap_bytes, bootstrap_digest, bootstrap_generated_c_hit));
+            module_generic_only.push(bootstrap.generic_only);
+        }
         let runtime_source_key = NativeArtifactFamily::RuntimeSource.source_key(
             &target,
             Digest::hash(b"portable-runtime-c11"),

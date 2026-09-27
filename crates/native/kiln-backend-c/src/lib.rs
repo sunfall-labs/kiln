@@ -96,6 +96,12 @@ pub struct EmissionPolicy {
     /// generic-only for its size and compiles that unit at `-O2` while the module stays at
     /// `-O0`. A caller that sets it must compile and link the extra unit.
     pub parallel_workers_unit: bool,
+    /// With `compact`: split the module's functions into translation units ([`CModule::chunks`])
+    /// of about this many bytes of C each, in function order, whatever its function count.
+    /// `kiln-native` sets it for the specialized builtin bootstrap of a release build (issue
+    /// 17), whose one-time optimising compile is then parallel units rather than one long one.
+    /// `None` keeps the count rule (a module past 500 functions, 1,000 or 1,500 per unit).
+    pub unit_chunk_bytes: Option<usize>,
     /// Whether speculative versioning is enabled. Native orchestration resolves its process
     /// setting before emission; `None` preserves the direct emitter's default.
     pub speculate: Option<bool>,
@@ -1676,7 +1682,9 @@ fn render_functions(
     // before any body: the definitions follow with the boxed clone that owns them.
     for (index, &columns) in receiver_columns.iter().enumerate() {
         if columns > 0 {
-            let linkage = if should_chunk { "" } else { "static " };
+            // Chunked, the boxed clone that owns them defines them (in whichever chunk it lands);
+            // the unit's own text only declares them.
+            let linkage = if should_chunk { "extern " } else { "static " };
             writeln!(
                 output,
                 "{linkage}const kiln_shape *{symbol}_fn_{index}_recv_shape[4];\n{linkage}uint32_t {symbol}_fn_{index}_recv_slot[4][{columns}];\n{linkage}const kiln_shape *{symbol}_fn_{index}_typed_recv_shape[4];\n{linkage}uint32_t {symbol}_fn_{index}_typed_recv_slot[4][{columns}];"
@@ -4414,7 +4422,8 @@ fn render_module_positioned(
     diagnostic_site: &str,
 ) -> Result<RenderedModule, EmitError> {
     let program = &module.program;
-    let should_chunk = policy.compact && program.functions.len() > 500;
+    let should_chunk =
+        policy.compact && (program.functions.len() > 500 || policy.unit_chunk_bytes.is_some());
     // Compact graph modules are each compiled as their own translation unit. Private identifiers
     // therefore do not need the link-visible content hash; retain it only on exported adapters.
     // Chunked modules must retain the module symbol prefix so their non-static chunk symbols
@@ -4669,8 +4678,36 @@ fn render_module_positioned(
     if should_chunk {
         let function_texts = chunked_bodies.expect("chunked_bodies present when should_chunk");
         let total_funcs = function_texts.len();
-        let chunk_size = if total_funcs > 10_000 { 1500 } else { 1000 };
-        let chunk_0_funcs = chunk_size.min(total_funcs);
+        // Where each unit ends: by function count, or (issue 17) by bytes of C, greedily in
+        // function order. Chunk 0 also holds the module's own text -- its body, key table,
+        // constants and entry -- so it starts that much fuller.
+        let chunk_ends: Vec<usize> = match policy.unit_chunk_bytes {
+            Some(budget) => {
+                let budget = budget.max(1);
+                let mut ends = Vec::new();
+                let mut filled = output.len();
+                for (index, text) in function_texts.iter().enumerate() {
+                    if filled > 0
+                        && filled + text.len() > budget
+                        && index > ends.last().copied().unwrap_or(0)
+                    {
+                        ends.push(index);
+                        filled = 0;
+                    }
+                    filled += text.len();
+                }
+                ends.push(total_funcs);
+                ends
+            }
+            None => {
+                let chunk_size = if total_funcs > 10_000 { 1500 } else { 1000 };
+                (1..)
+                    .map(|k| (k * chunk_size).min(total_funcs))
+                    .take(total_funcs.div_ceil(chunk_size).max(1))
+                    .collect()
+            }
+        };
+        let chunk_0_funcs = chunk_ends[0];
 
         let source = output.replace(
             "/* KILN_CHUNK_0_FUNCTIONS_PLACEHOLDER */\n",
@@ -4747,8 +4784,7 @@ fn render_module_positioned(
         let mut chunks = Vec::new();
         chunks.push(chunk_0);
         let mut start = chunk_0_funcs;
-        while start < total_funcs {
-            let end = (start + chunk_size).min(total_funcs);
+        for &end in &chunk_ends[1..] {
             let referenced =
                 scan_referenced_functions(&function_texts[start..end], unit_symbol, total_funcs);
             let decl_len: usize = (0..total_funcs)

@@ -249,6 +249,7 @@ impl NativeRealmPolicy {
             generic_only: false,
             parallel_in_generic: false,
             parallel_workers_unit: false,
+            unit_chunk_bytes: None,
             speculate: Some(std::env::var("KILN_SPECULATE").as_deref() != Ok("0")),
             type_profile_record: false,
             type_profile: None,

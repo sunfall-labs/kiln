@@ -929,6 +929,7 @@ pub(super) fn native_builtin_bootstrap_module(
     policy: &EmissionPolicy,
     node: bool,
     retain_url: bool,
+    specialized_unit_bytes: Option<usize>,
 ) -> Result<
     (
         kiln_backend_c::CModule,
@@ -958,12 +959,16 @@ pub(super) fn native_builtin_bootstrap_module(
             diagnostics: diagnostics.clone(),
         })
     })?;
-    // The bootstrap is cold code every binary carries -- the console methods, the Set algebra,
-    // the URL class -- and emitted like hot user code, with a fast clone and a typed clone per
-    // function, it put 0.9 MB on a hello world (2.74 MB against 1.83 MB, measured in a clean
-    // cache). The generic path alone is what a program that never calls `console.table` pays for.
+    // The bootstrap is code every binary carries -- the console methods, the Set algebra, the
+    // URL class -- and emitted like hot user code, with a fast clone and a typed clone per
+    // function, it once put 0.9 MB on a hello world; so by default it is emitted generic-only.
+    // `specialized_unit_bytes` (a release build that opted in, issue 17) emits it specialized
+    // instead -- the `%TypedArray%` and `Date` methods are hot loops, 4-12x slower generic at
+    // -O0 -- with its C split into units of about this many bytes, so the one-time -O2 compile
+    // runs as parallel units rather than one minute-long one.
     let mut bootstrap_policy = policy.clone();
-    bootstrap_policy.generic_only = true;
+    bootstrap_policy.generic_only = specialized_unit_bytes.is_none();
+    bootstrap_policy.unit_chunk_bytes = specialized_unit_bytes;
     if !bootstrap_policy.decoupled_prelude {
         let module =
             emit_module_with_logical_path_and_policy(program, LOGICAL_PATH, bootstrap_policy)?;

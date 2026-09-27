@@ -625,9 +625,12 @@ pub fn emit_function_from_graph_with_profile(
         }
         if this_sites > 0 {
             let row = vec!["UINT32_MAX"; this_sites].join(", ");
+            // A chunked unit's callers in other chunks name the shape and slot rows (`lib.rs`
+            // declares them extern there), so here they are the one external definition.
+            let shared = if plan.should_chunk { "" } else { "static " };
             writeln!(
                 declarations,
-                "static const kiln_shape *{symbol}_fn_{index}_recv_shape[4];\nstatic const kiln_shape *{symbol}_fn_{index}_recv_refused[4];\nstatic uint32_t {symbol}_fn_{index}_recv_slot[4][{this_sites}] = {{ {{{row}}}, {{{row}}}, {{{row}}}, {{{row}}} }};\nstatic const kiln_shape *{symbol}_fn_{index}_typed_recv_shape[4];\nstatic const kiln_shape *{symbol}_fn_{index}_typed_recv_refused[4];\nstatic uint32_t {symbol}_fn_{index}_typed_recv_slot[4][{this_sites}] = {{ {{{row}}}, {{{row}}}, {{{row}}}, {{{row}}} }};"
+                "{shared}const kiln_shape *{symbol}_fn_{index}_recv_shape[4];\nstatic const kiln_shape *{symbol}_fn_{index}_recv_refused[4];\n{shared}uint32_t {symbol}_fn_{index}_recv_slot[4][{this_sites}] = {{ {{{row}}}, {{{row}}}, {{{row}}}, {{{row}}} }};\n{shared}const kiln_shape *{symbol}_fn_{index}_typed_recv_shape[4];\nstatic const kiln_shape *{symbol}_fn_{index}_typed_recv_refused[4];\n{shared}uint32_t {symbol}_fn_{index}_typed_recv_slot[4][{this_sites}] = {{ {{{row}}}, {{{row}}}, {{{row}}}, {{{row}}} }};"
             )
             .unwrap();
         }
