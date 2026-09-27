@@ -2339,6 +2339,10 @@
     if (receiver.tag == KILN_VALUE_ARRAY_BUFFER) {
         if (code == KILN_C99_METHOD_SLICE) {
             kiln_typed_buffer *buffer = kiln_c99_typed_buffer_of(receiver);
+            if (buffer->detached) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Cannot perform ArrayBuffer.prototype.slice on a detached ArrayBuffer");
+            }
             size_t start = kiln_c99_relative_index(argc > 0 ? args[0] : kiln_c99_undefined(),
                                                    buffer->byte_length, 0);
             size_t end = kiln_c99_relative_index(argc > 1 ? args[1] : kiln_c99_undefined(),

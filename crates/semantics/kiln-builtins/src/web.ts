@@ -284,6 +284,19 @@ class DOMException extends Error {
     this.name = name;
   }
 
+  // The legacy numeric code of the names that have one, 0 for the rest: a `DataCloneError`
+  // from `structuredClone` or `postMessage` is `code === 25` in node, and code tests for it.
+  get code(): number {
+    const codes: Record<string, number> = {
+      IndexSizeError: 1, HierarchyRequestError: 3, WrongDocumentError: 4, InvalidCharacterError: 5,
+      NoModificationAllowedError: 7, NotFoundError: 8, NotSupportedError: 9, InvalidStateError: 11,
+      SyntaxError: 12, InvalidModificationError: 13, NamespaceError: 14, InvalidAccessError: 15,
+      TypeMismatchError: 17, SecurityError: 18, NetworkError: 19, AbortError: 20, URLMismatchError: 21,
+      QuotaExceededError: 22, TimeoutError: 23, InvalidNodeTypeError: 24, DataCloneError: 25,
+    };
+    return Object.prototype.hasOwnProperty.call(codes, this.name) ? codes[this.name] : 0;
+  }
+
   get [Symbol.toStringTag](): string {
     return "DOMException";
   }

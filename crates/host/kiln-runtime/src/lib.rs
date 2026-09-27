@@ -4091,6 +4091,16 @@ impl<M, T> Realm<M, T> {
         !self.next_ticks.is_empty() || !self.microtasks.is_empty()
     }
 
+    /// Whether a Node next-tick callback is queued.
+    pub fn has_queued_next_ticks(&self) -> bool {
+        !self.next_ticks.is_empty()
+    }
+
+    /// Whether a microtask (a promise job included) is queued.
+    pub fn has_queued_microtasks(&self) -> bool {
+        !self.microtasks.is_empty()
+    }
+
     /// Visits every queued next-tick and microtask, in queue order, without running or
     /// removing it. The native collector enumerates the roots queued work holds this way.
     pub fn for_each_queued(&self, mut visit: impl FnMut(&M)) {

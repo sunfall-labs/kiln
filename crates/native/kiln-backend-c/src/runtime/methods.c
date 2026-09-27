@@ -204,6 +204,9 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_UINT8_TO_HEX_RAW: return "__kilnUint8ToHex";
     case KILN_C99_METHOD_BUFFER_TO_STRING_RAW: return "__kilnBufferToString";
     case KILN_C99_METHOD_URL_PARSE_RAW: return "__kilnUrlParse";
+    case KILN_C99_METHOD_ARRAY_BUFFER_DETACH_RAW: return "__kilnArrayBufferDetach";
+    case KILN_C99_METHOD_CLONE_DATA_RAW: return "__kilnCloneData";
+    case KILN_C99_METHOD_JOBS_PENDING_RAW: return "__kilnJobsPending";
     case KILN_C99_METHOD_URL_SET_RAW: return "__kilnUrlSet";
     case KILN_C99_METHOD_URL_FAST_RAW: return "__kilnUrlFast";
     case KILN_C99_METHOD_URL_ADOPT_RAW: return "__kilnUrlAdopt";

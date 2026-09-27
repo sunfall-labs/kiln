@@ -440,7 +440,7 @@ static int kiln_c99_new_object(kiln_value *out) {
     object->module_namespace = 0;
     object->arguments_brand = 0;
     object->error_brand = 0;
-    object->cache_holder = 0;
+    object->layout_token = 0;
     object->accessor_count = 0;
     object->read_only_seen = 0;
     object->shape = kiln_c99_shape_root();
@@ -500,7 +500,7 @@ static int kiln_c99_new_object_tenured(kiln_value *out) {
     object->module_namespace = 0;
     object->arguments_brand = 0;
     object->error_brand = 0;
-    object->cache_holder = 0;
+    object->layout_token = 0;
     object->accessor_count = 0;
     object->read_only_seen = 0;
     object->shape = kiln_c99_shape_root();

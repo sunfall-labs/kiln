@@ -1427,8 +1427,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let timer = Timer {
                     callback: arguments.first().cloned().unwrap_or(Value::Undefined),
                     // Everything after the delay is handed to the callback, which is how a
-                    // timer carries state without a closure.
-                    arguments: arguments.get(2..).unwrap_or_default().to_vec(),
+                    // timer carries state without a closure. `setImmediate` has no delay, so
+                    // its arguments start one earlier: `setImmediate(fn, x)` calls `fn(x)`.
+                    arguments: arguments
+                        .get(if matches!(native, Native::SetImmediate) {
+                            1..
+                        } else {
+                            2..
+                        })
+                        .unwrap_or_default()
+                        .to_vec(),
                     // Captured where the timer was set, not where it fires.
                     context: Rc::clone(&self.async_context),
                 };
@@ -3155,6 +3163,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
                 Ok(Value::Undefined)
             }
+            Native::JobsPendingRaw => Ok(Value::Number(self.with_realm(|realm| {
+                f64::from(u8::from(realm.has_queued_next_ticks()))
+                    + 2.0 * f64::from(u8::from(realm.has_queued_microtasks()))
+            }))),
             Native::ProcessNextTick => {
                 let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
                 if !is_callable(&callback) {
@@ -3202,11 +3214,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | Native::NodeAsyncLocalStorageExit
             | Native::NodeAsyncLocalStorageDisable => {
                 self.async_local_storage(native, receiver, arguments, instruction)
-            }
-            Native::StructuredClone => {
-                let value = arguments.first().cloned().unwrap_or(Value::Undefined);
-                let mut seen = std::collections::HashMap::new();
-                self.structured_clone_value(&value, &mut seen, instruction)
             }
             _ => call_native(&self.intrinsics, native, receiver, arguments),
         }

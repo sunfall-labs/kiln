@@ -678,20 +678,8 @@ pub(super) fn array_buffer_method(shared: bool, name: &str) -> Value {
         "resize" if !shared => Value::Native(Native::ArrayBufferResize, RealmId::PRIMARY),
         "grow" if shared => Value::Native(Native::ArrayBufferGrow, RealmId::PRIMARY),
         "slice" => Value::Native(Native::ArrayBufferSlice, RealmId::PRIMARY),
-        // Only the unshared type: transferring is *giving the bytes away*, which is precisely
-        // what a shared buffer's other holders have no way to survive.
-        "transfer" if !shared => Value::Native(
-            Native::ArrayBufferTransfer {
-                preserve_resizability: true,
-            },
-            RealmId::PRIMARY,
-        ),
-        "transferToFixedLength" if !shared => Value::Native(
-            Native::ArrayBufferTransfer {
-                preserve_resizability: false,
-            },
-            RealmId::PRIMARY,
-        ),
+        // `transfer` and `transferToFixedLength` are the shared bootstrap's
+        // (`kiln-builtins/src/arraybuffer.ts`), over `__kilnArrayBufferDetach`.
         // Giving the bytes away and freezing them in one step. Only the unshared type again,
         // and for the same reason: a shared buffer's other holders cannot survive the giving.
         "transferToImmutable" if !shared => {

@@ -1,5 +1,107 @@
 use super::*;
 
+/// The plain-data subset of the structured clone, for `__kilnCloneData`: an ordinary object with
+/// the default prototype whose own properties are all enumerable data properties under string
+/// keys, an array with no named properties and no exotic elements, and primitives, which are
+/// shared. `None` for anything else -- including a reserved `@@` key (a symbol or the machine's
+/// own bookkeeping, such as a private field) -- so the caller falls back to the general clone.
+/// Nothing read here can run program code, so giving up half way has no effect to undo.
+pub(super) fn clone_plain_data(
+    value: &Value,
+    seen: &mut std::collections::HashMap<usize, Value>,
+    depth: usize,
+) -> Option<Value> {
+    const MAX_DEPTH: usize = 512;
+    match value {
+        Value::Undefined
+        | Value::Null
+        | Value::Boolean(_)
+        | Value::Number(_)
+        | Value::String(_)
+        | Value::BigInt(_) => Some(value.clone()),
+        Value::Object(object) => {
+            let identity = Rc::as_ptr(object) as *const () as usize;
+            if let Some(copy) = seen.get(&identity) {
+                return Some(copy.clone());
+            }
+            if depth > MAX_DEPTH {
+                return None;
+            }
+            let entries: Vec<(StringUnits, Value)> = {
+                let data = object.borrow();
+                if data.prototype.is_some()
+                    || data.error_brand
+                    || data.arguments_brand
+                    || !data.extensible
+                    || data.frozen
+                    || data.module_namespace
+                    || !data.namespace_cells.is_empty()
+                    || data.primitive.is_some()
+                    || data.node_events.is_some()
+                    || data.node_object.is_some()
+                    || data.buffer_brand
+                    || data.shadow_realm.is_some()
+                {
+                    return None;
+                }
+                let mut entries = Vec::with_capacity(data.properties.len());
+                for slot in &data.properties {
+                    let Property::Value(item) = &slot.property else {
+                        return None;
+                    };
+                    if !slot.attributes.enumerable
+                        || (slot.key.unit_at(0) == Some(b'@' as u16)
+                            && slot.key.unit_at(1) == Some(b'@' as u16))
+                    {
+                        return None;
+                    }
+                    entries.push((slot.key.clone(), item.clone()));
+                }
+                entries
+            };
+            let copy = Rc::new(RefCell::new(ObjectData::default()));
+            seen.insert(identity, Value::Object(Rc::clone(&copy)));
+            for (key, item) in entries {
+                let item = clone_plain_data(&item, seen, depth + 1)?;
+                copy.borrow_mut()
+                    .define_value_units(&key, item, Attributes::DEFAULT);
+            }
+            Some(Value::Object(copy))
+        }
+        Value::Array(array) => {
+            let identity = Rc::as_ptr(array) as *const () as usize;
+            if let Some(copy) = seen.get(&identity) {
+                return Some(copy.clone());
+            }
+            if depth > MAX_DEPTH
+                || !array.properties.borrow().properties.is_empty()
+                || !array.elements.borrow().is_empty()
+                || array.length.get() != array.items.borrow().len()
+            {
+                return None;
+            }
+            let items = array.items.borrow().clone();
+            let copy = ArrayData::new(Vec::new());
+            seen.insert(identity, Value::Array(Rc::clone(&copy)));
+            let mut cloned = Vec::with_capacity(items.len());
+            for item in &items {
+                cloned.push(match item {
+                    Value::Native(Native::Hole, _) => item.clone(),
+                    _ => clone_plain_data(item, seen, depth + 1)?,
+                });
+            }
+            let holes = cloned
+                .iter()
+                .any(|item| matches!(item, Value::Native(Native::Hole, _)));
+            copy.sparse.set(holes);
+            copy.length.set(cloned.len());
+            *copy.items.borrow_mut() = cloned;
+            Some(Value::Array(copy))
+        }
+        _ => None,
+    }
+}
+
 /// Invoke a native built-in.
 ///
 /// Natives take their receiver explicitly rather than through a `this` binding, because there is

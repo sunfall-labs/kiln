@@ -13,6 +13,12 @@
 // `pipeTo`/`pipeThrough`/`tee`, async iteration and `ReadableStream.from`. A `type: "bytes"`
 // source is treated as a default stream whose chunks are the views it enqueues.
 
+// What a microtask checkpoint would run now, as bits: 1 a `process.nextTick` callback, 2 a
+// promise job or `queueMicrotask` callback (ADR 0065, representation: the realm's queues).
+// Captured here, where message delivery is the one user.
+const __kilnJobsPending: () => number = (globalThis as any).__kilnJobsPending;
+delete (globalThis as any).__kilnJobsPending;
+
 (function installWebEventsAndStreams() {
   const G = globalThis as any;
 
@@ -24,8 +30,11 @@
     return error;
   }
 
-  // The `_`-prefixed fields are internal slots: node's objects have no own enumerable
-  // properties, and `Object.keys(new Event("x"))` is `[]` there.
+  // The `_`-prefixed fields of the stream classes below are internal slots: node's objects have
+  // no own enumerable properties, and `Object.keys(new ReadableStream())` is `[]` there. The
+  // event and message classes use private fields instead, which are not properties at all: this
+  // redefinition costs a `defineProperty` per field per object, and on the message path -- an
+  // `Event` and a `MessageEvent` per message -- it was most of the time a message took.
   function hideSlots(target: any): void {
     for (const key of Object.keys(target)) {
       if (key.charCodeAt(0) === 95 /* _ */) {
@@ -43,21 +52,51 @@
     return error;
   }
 
+  function typeError(message: string, code: string): Error {
+    const error: any = new TypeError(message);
+    error.code = code;
+    return error;
+  }
+
+  // Captured once: a program that replaces `setImmediate` or `performance` (a fake-timer
+  // library does) does not change when node delivers a message or stamps an event.
+  const schedule: (fn: (arg: any) => void, arg: any) => void =
+    typeof G.setImmediate === "function" ? G.setImmediate
+      : typeof G.setTimeout === "function" ? (fn, arg) => G.setTimeout(fn, 0, arg)
+        : (fn, arg) => G.queueMicrotask(() => fn(arg));
+  const performanceNow: () => number = typeof G.performance?.now === "function"
+    ? G.performance.now.bind(G.performance) : Date.now;
+  const clone = __kilnStructuredClone;
+
   // ---- Event, CustomEvent, EventTarget ------------------------------------------------------
 
+  interface Listener {
+    callback: any;
+    capture: boolean;
+    once: boolean;
+    passive: boolean;
+    removed: boolean;
+    // An `on<type>` handler attribute: a listener whose callback the attribute replaces in
+    // place, so it keeps the position it was first given, as node's does.
+    attribute: boolean;
+  }
+
+  // The dispatch algorithm and the event internals it writes, defined inside `Event` where the
+  // private fields are reachable, and the listener table, defined inside `EventTarget`.
+  let dispatchTo: (target: any, event: any, list: Listener[] | undefined) => boolean;
+  let listenersOf: (target: any) => Map<string, Listener[]>;
+
+  // Event state is four private fields: the booleans are bits of one number, and the phase and
+  // current target follow from whether a dispatch is running (an event here is only ever at its
+  // target). Every field is a store on every event, and there is an event per message.
+  const BUBBLES = 1, CANCELABLE = 2, COMPOSED = 4, DEFAULT_PREVENTED = 8, STOP = 16,
+    STOP_IMMEDIATE = 32, IN_PASSIVE = 64, DISPATCHING = 128;
+
   class Event {
-    _type: string;
-    _bubbles: boolean;
-    _cancelable: boolean;
-    _composed: boolean;
-    _defaultPrevented = false;
-    _target: any = null;
-    _currentTarget: any = null;
-    _eventPhase = 0;
-    _stop = false;
-    _stopImmediate = false;
-    _timeStamp: number;
-    _dispatching = false;
+    #type: string;
+    #flags: number;
+    #target: any = null;
+    #timeStamp: number;
 
     static NONE = 0;
     static CAPTURING_PHASE = 1;
@@ -65,79 +104,93 @@
     static BUBBLING_PHASE = 3;
 
     constructor(type: any, init?: any) {
-      if (arguments.length === 0) throw new TypeError("The \"type\" argument must be specified");
-      this._type = String(type);
-      const options = init === undefined || init === null ? {} : init;
-      this._bubbles = !!options.bubbles;
-      this._cancelable = !!options.cancelable;
-      this._composed = !!options.composed;
-      this._timeStamp = typeof G.performance?.now === "function" ? G.performance.now() : Date.now();
-      hideSlots(this);
+      if (type === undefined && arguments.length === 0) throw new TypeError("The \"type\" argument must be specified");
+      this.#type = typeof type === "string" ? type : String(type);
+      this.#flags = init === undefined || init === null ? 0
+        : (init.bubbles ? BUBBLES : 0) | (init.cancelable ? CANCELABLE : 0) | (init.composed ? COMPOSED : 0);
+      this.#timeStamp = performanceNow();
     }
 
-    get type(): string { return this._type; }
-    get bubbles(): boolean { return this._bubbles; }
-    get cancelable(): boolean { return this._cancelable; }
-    get composed(): boolean { return this._composed; }
-    get defaultPrevented(): boolean { return this._defaultPrevented; }
-    get target(): any { return this._target; }
-    get srcElement(): any { return this._target; }
-    get currentTarget(): any { return this._currentTarget; }
-    get eventPhase(): number { return this._eventPhase; }
-    get timeStamp(): number { return this._timeStamp; }
+    get type(): string { return this.#type; }
+    get bubbles(): boolean { return (this.#flags & BUBBLES) !== 0; }
+    get cancelable(): boolean { return (this.#flags & CANCELABLE) !== 0; }
+    get composed(): boolean { return (this.#flags & COMPOSED) !== 0; }
+    get defaultPrevented(): boolean { return (this.#flags & DEFAULT_PREVENTED) !== 0; }
+    get target(): any { return this.#target; }
+    get srcElement(): any { return this.#target; }
+    get currentTarget(): any { return (this.#flags & DISPATCHING) !== 0 ? this.#target : null; }
+    get eventPhase(): number { return (this.#flags & DISPATCHING) !== 0 ? 2 : 0; }
+    get timeStamp(): number { return this.#timeStamp; }
     get isTrusted(): boolean { return false; }
-    get returnValue(): boolean { return !this._defaultPrevented; }
+    get returnValue(): boolean { return !this.defaultPrevented; }
     set returnValue(value: boolean) { if (!value) this.preventDefault(); }
-    get cancelBubble(): boolean { return this._stop; }
-    set cancelBubble(value: boolean) { if (value) this._stop = true; }
+    get cancelBubble(): boolean { return (this.#flags & STOP) !== 0; }
+    set cancelBubble(value: boolean) { if (value) this.#flags |= STOP; }
 
     preventDefault(): void {
-      if (this._cancelable) this._defaultPrevented = true;
+      if ((this.#flags & (CANCELABLE | IN_PASSIVE)) === CANCELABLE) this.#flags |= DEFAULT_PREVENTED;
     }
-    stopPropagation(): void { this._stop = true; }
-    stopImmediatePropagation(): void { this._stop = true; this._stopImmediate = true; }
-    composedPath(): any[] { return this._currentTarget ? [this._currentTarget] : []; }
+    stopPropagation(): void { this.#flags |= STOP; }
+    stopImmediatePropagation(): void { this.#flags |= STOP | STOP_IMMEDIATE; }
+    composedPath(): any[] { return (this.#flags & DISPATCHING) !== 0 && this.#target ? [this.#target] : []; }
     initEvent(type: any, bubbles?: any, cancelable?: any): void {
-      if (this._dispatching) return;
-      this._type = String(type);
-      this._bubbles = !!bubbles;
-      this._cancelable = !!cancelable;
+      if ((this.#flags & DISPATCHING) !== 0) return;
+      this.#type = String(type);
+      this.#flags = (this.#flags & ~(BUBBLES | CANCELABLE)) | (bubbles ? BUBBLES : 0) | (cancelable ? CANCELABLE : 0);
     }
     get [Symbol.toStringTag](): string { return "Event"; }
+
+    static {
+      dispatchTo = (target: any, event: Event, list: Listener[] | undefined): boolean => {
+        if ((event.#flags & DISPATCHING) !== 0) throw invalidState("The event is already being dispatched");
+        event.#flags |= DISPATCHING;
+        event.#target = target;
+        if (list !== undefined && list.length !== 0) {
+          // A snapshot: a listener added during dispatch does not run, one removed does not.
+          const snapshot = list.length === 1 ? null : list.slice();
+          const count = snapshot === null ? 1 : snapshot.length;
+          for (let i = 0; i < count; i++) {
+            const listener = snapshot === null ? list[0] : snapshot[i];
+            if (listener.removed) continue;
+            if (listener.once) removeListener(list, listener);
+            const callback = listener.callback;
+            if (listener.passive) event.#flags |= IN_PASSIVE;
+            try {
+              if (typeof callback === "function") callback.call(target, event);
+              else if (callback && typeof callback.handleEvent === "function") callback.handleEvent(event);
+            } catch (error) {
+              // A throwing listener does not stop the others; node reports it as uncaught.
+              reportUncaught(error);
+            }
+            if ((event.#flags & (IN_PASSIVE | STOP_IMMEDIATE)) !== 0) {
+              event.#flags &= ~IN_PASSIVE;
+              if ((event.#flags & STOP_IMMEDIATE) !== 0) break;
+            }
+          }
+        }
+        event.#flags &= ~DISPATCHING;
+        return (event.#flags & DEFAULT_PREVENTED) === 0;
+      };
+    }
   }
   for (const [name, value] of [["NONE", 0], ["CAPTURING_PHASE", 1], ["AT_TARGET", 2], ["BUBBLING_PHASE", 3]] as [string, number][]) {
     Object.defineProperty(Event.prototype, name, { value, writable: false, enumerable: true, configurable: false });
   }
 
   class CustomEvent extends Event {
-    _detail: any;
+    #detail: any;
     constructor(type: any, init?: any) {
       super(type, init);
-      this._detail = init && init.detail !== undefined ? init.detail : null;
-      hideSlots(this);
+      this.#detail = init && init.detail !== undefined ? init.detail : null;
     }
-    get detail(): any { return this._detail; }
+    get detail(): any { return this.#detail; }
     get [Symbol.toStringTag](): string { return "CustomEvent"; }
   }
 
-  interface Listener {
-    callback: any;
-    capture: boolean;
-    once: boolean;
-    passive: boolean;
-    signal: any;
-    removed: boolean;
-  }
-
-  const listenersOf = new WeakMap<object, Map<string, Listener[]>>();
-
-  function listenerTable(target: object): Map<string, Listener[]> {
-    let table = listenersOf.get(target);
-    if (!table) {
-      table = new Map();
-      listenersOf.set(target, table);
-    }
-    return table;
+  function removeListener(list: Listener[], listener: Listener): void {
+    listener.removed = true;
+    const at = list.indexOf(listener);
+    if (at !== -1) list.splice(at, 1);
   }
 
   function optionsOf(options: any): { capture: boolean; once: boolean; passive: boolean; signal: any } {
@@ -146,22 +199,29 @@
     return { capture: !!options.capture, once: !!options.once, passive: !!options.passive, signal: options.signal };
   }
 
+  function captureOf(options: any): boolean {
+    if (typeof options === "boolean") return options;
+    return options !== null && typeof options === "object" && !!options.capture;
+  }
+
   class EventTarget {
+    #listeners: Map<string, Listener[]> = new Map();
+
     addEventListener(type: any, callback: any, options?: any): void {
+      const table = this.#listeners;
       if (callback === null || callback === undefined) return;
       const parsed = optionsOf(options);
       if (parsed.signal !== undefined && parsed.signal !== null && parsed.signal.aborted) return;
       const key = String(type);
-      const table = listenerTable(this);
       let list = table.get(key);
       if (!list) {
         list = [];
         table.set(key, list);
       }
       for (const existing of list) {
-        if (existing.callback === callback && existing.capture === parsed.capture) return;
+        if (!existing.attribute && existing.callback === callback && existing.capture === parsed.capture) return;
       }
-      const listener: Listener = { callback, capture: parsed.capture, once: parsed.once, passive: parsed.passive, signal: parsed.signal, removed: false };
+      const listener: Listener = { callback, capture: parsed.capture, once: parsed.once, passive: parsed.passive, removed: false, attribute: false };
       list.push(listener);
       if (parsed.signal !== undefined && parsed.signal !== null && typeof parsed.signal.addEventListener === "function") {
         parsed.signal.addEventListener("abort", () => this.removeEventListener(key, callback, { capture: parsed.capture }), { once: true });
@@ -169,13 +229,12 @@
     }
 
     removeEventListener(type: any, callback: any, options?: any): void {
-      const parsed = optionsOf(options);
-      const list = listenersOf.get(this)?.get(String(type));
+      const list = this.#listeners.get(String(type));
       if (!list) return;
+      const capture = captureOf(options);
       for (let i = 0; i < list.length; i++) {
-        if (list[i].callback === callback && list[i].capture === parsed.capture) {
-          list[i].removed = true;
-          list.splice(i, 1);
+        if (!list[i].attribute && list[i].callback === callback && list[i].capture === capture) {
+          removeListener(list, list[i]);
           return;
         }
       }
@@ -185,33 +244,38 @@
       if (!(event instanceof Event)) {
         throw new TypeError("The \"event\" argument must be an instance of Event. Received " + typeof event);
       }
-      if (event._dispatching) throw invalidState("The event is already being dispatched");
-      event._dispatching = true;
-      event._target = this;
-      event._currentTarget = this;
-      event._eventPhase = Event.AT_TARGET;
-      const list = listenersOf.get(this)?.get(event._type);
-      if (list) {
-        for (const listener of list.slice()) {
-          if (listener.removed) continue;
-          if (listener.once) this.removeEventListener(event._type, listener.callback, { capture: listener.capture });
-          const callback = listener.callback;
-          try {
-            if (typeof callback === "function") callback.call(this, event);
-            else if (callback && typeof callback.handleEvent === "function") callback.handleEvent(event);
-          } catch (error) {
-            // A throwing listener does not stop the others; node reports it as uncaught.
-            reportUncaught(error);
-          }
-          if (event._stopImmediate) break;
-        }
-      }
-      event._dispatching = false;
-      event._eventPhase = Event.NONE;
-      event._currentTarget = null;
-      return !event._defaultPrevented;
+      return dispatchTo(this, event, this.#listeners.get(event.type));
     }
     get [Symbol.toStringTag](): string { return "EventTarget"; }
+
+    static {
+      listenersOf = (target: any) => target.#listeners;
+    }
+  }
+
+  // The `on<type>` attribute: a function installs or replaces the attribute's listener, anything
+  // else removes it.
+  function setAttributeHandler(target: any, type: string, handler: any, current: Listener | null): Listener | null {
+    const list = listenersOf(target);
+    if (typeof handler !== "function") {
+      if (current !== null) {
+        const entries = list.get(type);
+        if (entries) removeListener(entries, current);
+      }
+      return null;
+    }
+    if (current !== null && !current.removed) {
+      current.callback = handler;
+      return current;
+    }
+    let entries = list.get(type);
+    if (!entries) {
+      entries = [];
+      list.set(type, entries);
+    }
+    const listener: Listener = { callback: handler, capture: false, once: false, passive: false, removed: false, attribute: true };
+    entries.push(listener);
+    return listener;
   }
 
   function reportUncaught(error: any): void {
@@ -227,108 +291,330 @@
     }
   }
 
-  // ---- MessageChannel, MessagePort, BroadcastChannel ---------------------------------------
+  // ---- MessageEvent, MessageChannel, MessagePort, BroadcastChannel ---------------------------
 
-  function deliverLater(fn: () => void): void {
-    if (typeof G.setImmediate === "function") G.setImmediate(fn);
-    else if (typeof G.setTimeout === "function") G.setTimeout(fn, 0);
-    else G.queueMicrotask(fn);
+  let messageEvent: (data: any, ports: any[] | null) => MessageEvent;
+
+  // `origin`, `lastEventId` and `source` are never set on a port's message, so they share one
+  // field that stays null unless a program constructs a MessageEvent with them.
+  class MessageEvent extends Event {
+    #data: any;
+    // Null until read: a port's message rarely carries ports, and the empty list is made on
+    // first read and kept, so `event.ports === event.ports`.
+    #ports: any[] | null;
+    #meta: { origin: string; lastEventId: string; source: any } | null;
+    constructor(type: any, init?: any) {
+      super(type, init);
+      if (init === undefined || init === null) {
+        this.#data = null;
+        this.#ports = null;
+        this.#meta = null;
+      } else {
+        this.#data = init.data === undefined ? null : init.data;
+        this.#ports = init.ports ? Array.from(init.ports) : [];
+        this.#meta = init.origin === undefined && init.lastEventId === undefined && init.source === undefined ? null : {
+          origin: init.origin === undefined ? "" : String(init.origin),
+          lastEventId: init.lastEventId === undefined ? "" : String(init.lastEventId),
+          source: init.source === undefined ? null : init.source,
+        };
+      }
+    }
+    get data(): any { return this.#data; }
+    get origin(): string { return this.#meta === null ? "" : this.#meta.origin; }
+    get lastEventId(): string { return this.#meta === null ? "" : this.#meta.lastEventId; }
+    get source(): any { return this.#meta === null ? null : this.#meta.source; }
+    get ports(): any[] {
+      if (this.#ports === null) this.#ports = [];
+      return this.#ports;
+    }
+    get [Symbol.toStringTag](): string { return "MessageEvent"; }
+
+    static {
+      messageEvent = (data: any, ports: any[] | null) => {
+        const event = new MessageEvent("message", undefined);
+        event.#data = data;
+        event.#ports = ports;
+        return event;
+      };
+    }
   }
 
-  function cloneMessage(message: any): any {
-    return typeof G.structuredClone === "function" ? G.structuredClone(message) : message;
-  }
+  const NO_PORTS: any[] = [];
+  // A queued `close()` of the other end: delivered in order after the messages already queued,
+  // which is why messages posted just before `port1.close()` still reach `port2` in node.
+  const CLOSE_MARK = {};
 
+  let deliverNext: (port: MessagePort) => void;
+  let continueFromTick: (port: MessagePort) => void;
+  let continueFromMicrotask: (port: MessagePort) => void;
+  let transferPort: (port: MessagePort) => MessagePort;
+  let entangle: (a: MessagePort, b: MessagePort) => void;
+
+  // Node delivers a port's messages from one libuv callback, dispatching each as its own
+  // callback with a microtask checkpoint -- `process.nextTick` callbacks, then promise jobs,
+  // until both are empty -- before the next. So a delivery here is one macrotask that dispatches
+  // messages in posting order and, after each, asks what a checkpoint would run. Nothing: the
+  // checkpoint is empty and the next message goes out at once, exactly as in node. Something:
+  // the delivery continues from the back of the checkpoint -- behind the ticks while there are
+  // ticks, behind the promise jobs while there are those, and always from a tick at the last
+  // step, so the next message's own ticks still run before its promise jobs. No other macrotask
+  // gets between two messages of one batch, which is node's order too.
+  //
+  // The queue holds `data, ports` pairs; `NO_PORTS` stands for an empty list until an event
+  // needs one of its own.
+  const DELIVERY_BATCH = 1000;
+  const CONTINUATION_HOPS = 64;
+  const TICKS = 1;
+  const MICROTASKS = 2;
+  const nextTick: ((fn: (arg: any) => void, arg: any) => void) | null =
+    G.process && typeof G.process.nextTick === "function" ? G.process.nextTick : null;
+  const queueMicrotask: (fn: () => void) => void = G.queueMicrotask;
   class MessagePort extends EventTarget {
-    _other: MessagePort | null = null;
-    _started = false;
-    _closed = false;
-    _queue: any[] = [];
-    _onmessage: any = null;
-    _onmessageerror: any = null;
+    #other: MessagePort | null = null;
+    #queue: any[] = [];
+    #head = 0;
+    #started = false;
+    #closed = false;
+    #scheduled = false;
+    #budget = 0;
+    #hops = 0;
+    // The `message` listener list, once there is one: the table keeps one array per type and
+    // edits it in place, so the lookup -- a string-keyed Map read per message -- is made once.
+    #messageListeners: Listener[] | undefined = undefined;
+    #onmessage: Listener | null = null;
+    #onmessageerror: Listener | null = null;
 
-    constructor() {
-      super();
-      hideSlots(this);
-    }
-
-    get onmessage(): any { return this._onmessage; }
+    get onmessage(): any { return this.#onmessage === null ? null : this.#onmessage.callback; }
     set onmessage(handler: any) {
-      this._onmessage = typeof handler === "function" ? handler : null;
-      this.start();
+      this.#onmessage = setAttributeHandler(this, "message", handler, this.#onmessage);
+      if (this.#onmessage !== null) this.start();
     }
-    get onmessageerror(): any { return this._onmessageerror; }
-    set onmessageerror(handler: any) { this._onmessageerror = typeof handler === "function" ? handler : null; }
+    get onmessageerror(): any { return this.#onmessageerror === null ? null : this.#onmessageerror.callback; }
+    set onmessageerror(handler: any) {
+      this.#onmessageerror = setAttributeHandler(this, "messageerror", handler, this.#onmessageerror);
+    }
 
-    postMessage(message: any): void {
-      if (this._closed || !this._other) return;
-      const other = this._other;
-      const data = cloneMessage(message);
-      other._queue.push(data);
-      if (other._started) other._drain();
+    // Node starts a port for a `message` listener as it does for `onmessage`.
+    addEventListener(type: any, callback: any, options?: any): void {
+      super.addEventListener(type, callback, options);
+      if (callback !== null && callback !== undefined && String(type) === "message") this.start();
+    }
+
+    // Answers `true`, as node's does, unless this port is closed; a copy is made -- and a
+    // transfer list detached -- either way.
+    postMessage(message: any, transfer?: any): boolean | undefined {
+      if (message === undefined && arguments.length === 0) {
+        throw typeError("Not enough arguments to MessagePort.postMessage", "ERR_MISSING_ARGS");
+      }
+      let list: any[] | undefined;
+      if (transfer !== undefined && transfer !== null) {
+        if (typeof transfer !== "object") {
+          throw typeError("Optional transferList argument must be an iterable", "ERR_INVALID_ARG_TYPE");
+        }
+        list = typeof transfer[Symbol.iterator] === "function"
+          ? clone.sequence(transfer, "Optional transferList argument must be an iterable")
+          : clone.transferOption(transfer, "postMessage");
+      }
+      let data: any;
+      let ports = NO_PORTS;
+      if (list === undefined || list.length === 0) {
+        data = clone.serialize(message, undefined);
+      } else {
+        const moved: MessagePort[] = [];
+        data = clone.serialize(message, list, (item: any) => {
+          if (!(item instanceof MessagePort)) return undefined;
+          if (item === this) throw clone.dataCloneError("Transfer list contains source port");
+          return () => {
+            const port = transferPort(item);
+            moved.push(port);
+            return port;
+          };
+        });
+        if (moved.length !== 0) ports = moved;
+      }
+      if (this.#closed) return undefined;
+      const other = this.#other;
+      if (other === null) return true;
+      other.#queue.push(data, ports);
+      if (other.#started && !other.#scheduled) {
+        other.#scheduled = true;
+        schedule(deliverNext, other);
+      }
+      return true;
     }
 
     start(): void {
-      if (this._started) return;
-      this._started = true;
-      this._drain();
-    }
-
-    _drain(): void {
-      if (this._queue.length === 0) return;
-      const pending = this._queue;
-      this._queue = [];
-      deliverLater(() => {
-        for (const data of pending) {
-          if (this._closed) return;
-          const event = new MessageEvent("message", { data, ports: [] });
-          if (this._onmessage) this._onmessage.call(this, event);
-          this.dispatchEvent(event);
-        }
-      });
+      if (this.#started) return;
+      this.#started = true;
+      if (this.#head < this.#queue.length && !this.#scheduled) {
+        this.#scheduled = true;
+        schedule(deliverNext, this);
+      }
     }
 
     close(): void {
-      if (this._closed) return;
-      this._closed = true;
-      const other = this._other;
-      this._other = null;
-      if (other && !other._closed) {
-        other._closed = true;
-        other._other = null;
-        deliverLater(() => other.dispatchEvent(new Event("close")));
+      if (this.#closed) return;
+      this.#closed = true;
+      this.#queue = [];
+      this.#head = 0;
+      const other = this.#other;
+      this.#other = null;
+      if (other !== null && !other.#closed) {
+        other.#other = null;
+        other.#queue.push(CLOSE_MARK, NO_PORTS);
+        if (other.#started && !other.#scheduled) {
+          other.#scheduled = true;
+          schedule(deliverNext, other);
+        }
       }
-      deliverLater(() => this.dispatchEvent(new Event("close")));
+      schedule(closed, this);
     }
     ref(): this { return this; }
     unref(): this { return this; }
-    hasRef(): boolean { return this._started && !this._closed; }
+    hasRef(): boolean { return this.#started && !this.#closed; }
     get [Symbol.toStringTag](): string { return "MessagePort"; }
+
+    static {
+      // `receiveMessageOnPort` (node:worker_threads): take the oldest message not yet
+      // dispatched, as a delivery would, without dispatching it. A queued close is not a message.
+      const receive = (port: MessagePort): { message: any } | undefined => {
+        if (port.#closed) return undefined;
+        const queue = port.#queue;
+        const at = port.#head;
+        if (at >= queue.length) return undefined;
+        const data = queue[at];
+        if (data === CLOSE_MARK) return undefined;
+        queue[at] = undefined;
+        queue[at + 1] = undefined;
+        if (at + 2 === queue.length) {
+          queue.length = 0;
+          port.#head = 0;
+        } else {
+          port.#head = at + 2;
+        }
+        return { message: data };
+      };
+      Object.defineProperty(MessagePort, Symbol.for("kiln.messagePort"), {
+        value: { receive },
+        writable: false,
+        enumerable: false,
+        configurable: false,
+      });
+      deliverNext = (port: MessagePort) => {
+        port.#scheduled = false;
+        port.#hops = 0;
+        // Node's own bound: at least the messages that were waiting, and never fewer than a
+        // thousand, so a port that keeps being written to cannot hold the loop forever.
+        let budget = (port.#queue.length - port.#head) / 2;
+        if (budget < DELIVERY_BATCH) budget = DELIVERY_BATCH;
+        deliverSome(port, budget);
+      };
+      // Dispatch until the queue is empty, the budget is spent, or a checkpoint has something
+      // to run; `budget` travels with the continuation so a batch stays one batch.
+      const deliverSome = (port: MessagePort, budget: number) => {
+        while (budget-- > 0) {
+          const queue = port.#queue;
+          const at = port.#head;
+          if (at >= queue.length) return;
+          const data = queue[at];
+          const ports = queue[at + 1];
+          queue[at] = undefined;
+          queue[at + 1] = undefined;
+          if (at + 2 === queue.length) {
+            queue.length = 0;
+            port.#head = 0;
+          } else {
+            port.#head = at + 2;
+          }
+          if (port.#closed) return;
+          if (data === CLOSE_MARK) {
+            port.#closed = true;
+            port.#queue = [];
+            port.#head = 0;
+            closed(port);
+            return;
+          }
+          let list = port.#messageListeners;
+          if (list === undefined) list = port.#messageListeners = listenersOf(port).get("message");
+          dispatchTo(port, messageEvent(data, ports === NO_PORTS ? null : ports), list);
+          if (port.#head >= port.#queue.length) return;
+          const pending = __kilnJobsPending();
+          if (pending !== 0) {
+            if (nextTick === null) break;
+            port.#scheduled = true;
+            port.#budget = budget;
+            if ((pending & TICKS) !== 0) nextTick(continueFromTick, port);
+            else queueMicrotask(() => continueFromMicrotask(port));
+            return;
+          }
+        }
+        if (!port.#scheduled && !port.#closed && port.#head < port.#queue.length) {
+          port.#scheduled = true;
+          schedule(deliverNext, port);
+        }
+      };
+      // Two ports continuing at once each see the other's continuation queued; after a bounded
+      // number of hops a continuation stops waiting for the queue to empty and becomes a
+      // macrotask instead, so neither can hold the other forever.
+      const yielded = (port: MessagePort): boolean => {
+        if (++port.#hops <= CONTINUATION_HOPS) return false;
+        schedule(deliverNext, port);
+        return true;
+      };
+      continueFromTick = (port: MessagePort) => {
+        const pending = __kilnJobsPending();
+        if (pending !== 0 && yielded(port)) return;
+        if ((pending & TICKS) !== 0) {
+          (nextTick as any)(continueFromTick, port);
+          return;
+        }
+        if ((pending & MICROTASKS) !== 0) {
+          queueMicrotask(() => continueFromMicrotask(port));
+          return;
+        }
+        port.#scheduled = false;
+        port.#hops = 0;
+        deliverSome(port, port.#budget);
+      };
+      continueFromMicrotask = (port: MessagePort) => {
+        // The last hop is always a tick, so the next message's ticks run before its promise
+        // jobs as they would after a node callback, rather than after the promise queue.
+        if ((__kilnJobsPending() & MICROTASKS) !== 0) {
+          if (yielded(port)) return;
+          queueMicrotask(() => continueFromMicrotask(port));
+          return;
+        }
+        (nextTick as any)(continueFromTick, port);
+      };
+      // In one realm a transferred port is a new object entangled with the old one's partner;
+      // the old one is closed, and what was queued for it goes with the new one.
+      transferPort = (port: MessagePort) => {
+        const moved = new MessagePort();
+        const other = port.#other;
+        moved.#queue = port.#queue.slice(port.#head);
+        port.#queue = [];
+        port.#head = 0;
+        port.#closed = true;
+        port.#other = null;
+        if (other !== null) {
+          other.#other = moved;
+          moved.#other = other;
+        }
+        return moved;
+      };
+      entangle = (a: MessagePort, b: MessagePort) => {
+        a.#other = b;
+        b.#other = a;
+      };
+    }
   }
 
-  class MessageEvent extends Event {
-    _data: any;
-    _origin: string;
-    _lastEventId: string;
-    _source: any;
-    _ports: any[];
-    constructor(type: any, init?: any) {
-      super(type, init);
-      const options = init || {};
-      this._data = options.data === undefined ? null : options.data;
-      this._origin = options.origin === undefined ? "" : String(options.origin);
-      this._lastEventId = options.lastEventId === undefined ? "" : String(options.lastEventId);
-      this._source = options.source === undefined ? null : options.source;
-      this._ports = options.ports ? Array.from(options.ports) : [];
-      hideSlots(this);
-    }
-    get data(): any { return this._data; }
-    get origin(): string { return this._origin; }
-    get lastEventId(): string { return this._lastEventId; }
-    get source(): any { return this._source; }
-    get ports(): any[] { return this._ports; }
-    get [Symbol.toStringTag](): string { return "MessageEvent"; }
+  function closed(port: any): void {
+    dispatchTo(port, new Event("close"), listenersOf(port).get("close"));
   }
+
+  clone.registerHostKind((value: any) => value instanceof MessagePort
+    ? "Object that needs transfer was found in message but not listed in transferList" : undefined);
 
   class MessageChannel {
     port1: MessagePort;
@@ -336,8 +622,7 @@
     constructor() {
       this.port1 = new MessagePort();
       this.port2 = new MessagePort();
-      this.port1._other = this.port2;
-      this.port2._other = this.port1;
+      entangle(this.port1, this.port2);
     }
     get [Symbol.toStringTag](): string { return "MessageChannel"; }
   }
@@ -345,50 +630,57 @@
   const broadcastChannels = new Map<string, Set<BroadcastChannel>>();
 
   class BroadcastChannel extends EventTarget {
-    _name: string;
-    _closed = false;
-    _onmessage: any = null;
-    _onmessageerror: any = null;
+    #name: string;
+    #closed = false;
+    #onmessage: Listener | null = null;
+    #onmessageerror: Listener | null = null;
     constructor(name: any) {
       super();
-      if (arguments.length === 0) throw new TypeError("The \"name\" argument must be specified");
-      this._name = String(name);
-      let set = broadcastChannels.get(this._name);
+      if (name === undefined && arguments.length === 0) throw new TypeError("The \"name\" argument must be specified");
+      this.#name = String(name);
+      let set = broadcastChannels.get(this.#name);
       if (!set) {
         set = new Set();
-        broadcastChannels.set(this._name, set);
+        broadcastChannels.set(this.#name, set);
       }
       set.add(this);
-      hideSlots(this);
     }
-    get name(): string { return this._name; }
-    get onmessage(): any { return this._onmessage; }
-    set onmessage(handler: any) { this._onmessage = typeof handler === "function" ? handler : null; }
-    get onmessageerror(): any { return this._onmessageerror; }
-    set onmessageerror(handler: any) { this._onmessageerror = typeof handler === "function" ? handler : null; }
+    get name(): string { return this.#name; }
+    get onmessage(): any { return this.#onmessage === null ? null : this.#onmessage.callback; }
+    set onmessage(handler: any) { this.#onmessage = setAttributeHandler(this, "message", handler, this.#onmessage); }
+    get onmessageerror(): any { return this.#onmessageerror === null ? null : this.#onmessageerror.callback; }
+    set onmessageerror(handler: any) { this.#onmessageerror = setAttributeHandler(this, "messageerror", handler, this.#onmessageerror); }
     postMessage(message: any): void {
-      if (this._closed) throw invalidState("BroadcastChannel is closed");
-      const data = cloneMessage(message);
-      const peers = broadcastChannels.get(this._name);
+      if (this.#closed) throw invalidState("BroadcastChannel is closed");
+      // Copied before anything else, so an uncloneable message throws with or without peers.
+      let data = clone.serialize(message, undefined);
+      let first = true;
+      const peers = broadcastChannels.get(this.#name);
       if (!peers) return;
       for (const peer of peers) {
-        if (peer === this || peer._closed) continue;
-        deliverLater(() => {
-          if (peer._closed) return;
-          const event = new MessageEvent("message", { data });
-          if (peer._onmessage) peer._onmessage.call(peer, event);
-          peer.dispatchEvent(event);
-        });
+        if (peer === this || peer.#closed) continue;
+        // Each receiver gets its own copy, as each would across realms.
+        if (!first) data = clone.serialize(message, undefined);
+        first = false;
+        const copy = data;
+        schedule(() => {
+          if (peer.#closed) return;
+          dispatchTo(peer, messageEvent(copy, []), listenersOf(peer).get("message"));
+        }, undefined);
       }
     }
     close(): void {
-      if (this._closed) return;
-      this._closed = true;
-      broadcastChannels.get(this._name)?.delete(this);
+      if (this.#closed) return;
+      this.#closed = true;
+      broadcastChannels.get(this.#name)?.delete(this);
     }
     ref(): this { return this; }
     unref(): this { return this; }
     get [Symbol.toStringTag](): string { return "BroadcastChannel"; }
+  }
+
+  function cloneMessage(message: any): any {
+    return clone.serialize(message, undefined);
   }
 
   // ---- Queuing strategies --------------------------------------------------------------------

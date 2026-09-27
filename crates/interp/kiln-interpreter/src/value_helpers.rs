@@ -160,6 +160,9 @@ pub(super) fn native_js_name(native: &Native) -> String {
         Native::UrlSetRaw => "__kilnUrlSet".to_owned(),
         Native::UrlFastRaw => "__kilnUrlFast".to_owned(),
         Native::UrlAdoptRaw => "__kilnUrlAdopt".to_owned(),
+        Native::ArrayBufferDetachRaw => "__kilnArrayBufferDetach".to_owned(),
+        Native::CloneDataRaw => "__kilnCloneData".to_owned(),
+        Native::JobsPendingRaw => "__kilnJobsPending".to_owned(),
         Native::NodeModuleCreateRequire => "__kilnHostModuleCreateRequire".to_owned(),
         // A symbol-keyed method is named for the symbol in brackets, which is what the
         // specification's `SetFunctionName` does with a symbol key. Derivation would spell it
@@ -316,15 +319,6 @@ pub(super) fn native_js_name(native: &Native) -> String {
         Native::EncodeUriComponent => "encodeURIComponent".to_owned(),
         Native::DecodeUri => "decodeURI".to_owned(),
         Native::DecodeUriComponent => "decodeURIComponent".to_owned(),
-        // The derivation works from the variant's `Debug` spelling, and a variant with a named
-        // field prints the field too -- so these two would be named `transfer { preserve
-        // resizability: true }`. The flag is which method this is, not part of what it is called.
-        Native::ArrayBufferTransfer {
-            preserve_resizability: true,
-        } => "transfer".to_owned(),
-        Native::ArrayBufferTransfer {
-            preserve_resizability: false,
-        } => "transferToFixedLength".to_owned(),
         other => builtin_js_name(&format!("{other:?}")),
     }
 }

@@ -427,6 +427,9 @@ typedef struct kiln_typed_buffer {
     /* A borrowed FFI view points into a loaded native library's memory. Ordinary ArrayBuffers
      * own their allocation; borrowed ones must never feed that pointer to free(). */
     int owns_bytes;
+    /* Set once, by `__kilnArrayBufferDetach`, and never cleared: the bytes went to another
+     * buffer, `bytes` points at a static empty block and `byte_length` is zero. */
+    int detached;
 } kiln_typed_buffer;
 
 /* The scalar-only dynamic-call ABI. Its layout is pinned by the Rust provider's repr(C) type. */
@@ -777,31 +780,43 @@ typedef struct kiln_object {
     kiln_val *elements;
     size_t element_count;
     size_t element_capacity;
-    /* Set the moment an inline cache records a property read through this object -- it is a
-     * holder or a step on a prototype chain some site remembers. A mutation of a flagged object
-     * moves `kiln_c99_proto_epoch`; an object nobody caches through costs nothing to mutate. */
-    uint8_t cache_holder;
+    /* ADR 0071. The layout token of an object in list (dictionary) mode that some inline cache
+     * relies on: such an object has no shape to name its key set by, so the first cache that
+     * walks through it issues it a process-unique number (`kiln_c99_pic_name_level`), and any
+     * mutation of it -- an own property written, defined or deleted, a prototype link changed
+     * (`kiln_c99_prototype_touched`) -- clears it. A cache entry that names the token is valid
+     * while the object still carries it. Tokens are never reused, so an entry can never match
+     * another realm's object, or a later object at a freed one's address. Zero means none; a
+     * shaped object never has one. Occupies what was padding after the last member. */
+    uint32_t layout_token;
 } kiln_object;
 
-/* Moved by every mutation of an object some inline cache reads a property through: an own
- * property written, defined or deleted, a prototype link changed, a conversion to dictionary
- * mode. A site's cached prototype method is valid while the epoch it was learned under holds
- * and the receiver's own prototype link is the one remembered; the objects further up the
- * chain are flagged, so their links are covered by the epoch. */
-/* One per program: the prelude unit defines it and exports it, and the copy of this header a
- * decoupled module unit compiles declares it `extern` instead (`runtime_prelude_header`), since
- * a definition in every unit would give each an epoch of its own that never moves. Hidden in
- * that declaration, so a read is PC-relative rather than a load through the GOT: it sits on
- * every cached method call.
+/* Nonzero once any realm in this process has written an own property onto some built-in's store
+ * (`kiln_c99_callable_store` with `create`). It is only a process-wide summary: which built-ins
+ * a realm has modified is that realm's own record (`kiln_c99_realm_builtin_modified`, on the
+ * heap), and a cache entry never holds a value of it. While it is zero no realm has modified any
+ * built-in, which is what the emitted built-in speculations ask; once it is not, a cached
+ * built-in member asks the current realm's record instead.
  *
- * A build with `KILN_IC_CHECK` in its environment defines the macro of the same name, and then
- * every epoch hit is re-validated the long way and a disagreement traps: the oracle for a
- * mutation path that forgot to move the epoch. The corpora run that way before a change to
- * anything that writes a property lands. */
-static uint64_t kiln_c99_proto_epoch;
+ * One per program: the prelude unit defines it and exports it, and the copy of this header a
+ * decoupled module unit compiles declares it `extern` instead (`runtime_prelude_header`), since
+ * a definition in every unit would give each a copy of its own that never moves. Hidden in that
+ * declaration, so a read is PC-relative rather than a load through the GOT. */
+static uint64_t kiln_c99_builtin_store_epoch;
 
+#ifdef KILN_SEPARATE_PRELUDE
+extern int kiln_c99_realm_builtin_modified(uint32_t builtin);
+#else
+static int kiln_c99_realm_builtin_modified(uint32_t builtin);
+#endif
+
+/* Every mutation of an object some inline cache might read a property through calls this: an own
+ * property written, defined or deleted, a prototype link changed, a conversion to dictionary
+ * mode. A shaped object's key set is its shape, which such a mutation changes when it matters;
+ * a list-mode object's is its layout token, which this clears. An object nobody caches through
+ * costs one compare. */
 static inline void kiln_c99_prototype_touched(const kiln_object *object) {
-    if (KILN_UNLIKELY(object->cache_holder)) kiln_c99_proto_epoch += 1;
+    if (KILN_UNLIKELY(object->layout_token != 0)) ((kiln_object *)object)->layout_token = 0;
 }
 
 /* A prototype chain is built by the program, so its length is the program's business -- but the
@@ -818,35 +833,44 @@ static inline void kiln_c99_prototype_touched(const kiln_object *object) {
  * a block-scope static at each GetProperty, SetProperty, SetPropertyStrict and CallMethod. */
 #define KILN_C99_PIC_SIZE 8
 
+/* One entry of a site's polymorphic cache (ADR 0071): an answer stated in realm-independent
+ * terms -- layouts, paths and slots, never an object -- so one process-wide site serves every
+ * realm, and a new realm starts with the caches earlier ones warmed.
+ *
+ * `shape` is the receiver's. An own data property is its `slot` there (`transition_to` set when
+ * a store moves the receiver to a new shape). Anything else is a *path*: `depth` prototype steps
+ * from the receiver, each level named by its shape or, for a level in list mode, which has none,
+ * by its layout token (`kiln_object.layout_token`) -- or, for the list-mode level holding the
+ * member, by the key its record carries. A hit follows the receiver's live prototype links
+ * `depth` steps, checks each level is the one named, and reads the answer live:
+ *
+ *   - a member found at `depth` (1 or 2) is `proto_slot` there -- a slot of a shaped holder, or the
+ *     index into a list-mode holder's property list, valid while the record there still carries
+ *     `key` (a class prototype keeps its methods in its list, not enumerable). So a
+ *     reassigned method is seen (the value is read, not remembered), a shadowing property added
+ *     on the way changes a shape or clears a token and misses, and a receiver whose prototype was
+ *     swapped reaches a different level and misses.
+ *   - `absent` says the key is on none of the receiver and levels 1..`depth`, and the last one's
+ *     prototype ends the chain (null, or the implicit Object.prototype while this realm has not
+ *     modified it). A read answers undefined; a transitioning store knows nothing intercepts it.
+ *
+ * A shape is a key path and says nothing about the prototype, so two classes with one field
+ * order share a receiver shape; only the live walk tells their methods apart. A member deeper
+ * than two steps is not remembered. The hit-path fields are few and fixed-size, so a later
+ * atomic publication (ADR 0071, issue 04 step 4) can swap an entry whole. */
 typedef struct kiln_c99_pic_entry {
     const kiln_shape *shape;
     const kiln_shape *transition_to;
     uint32_t slot;
-    /* A method found on the prototype chain is remembered by where it lives, never by value: the
-     * object that holds it, that object's shape then, and the slot there, plus the receiver's
-     * immediate prototype and its shape when the holder is one step further. A hit walks that
-     * much of the chain by pointer, checks each shape is still the one remembered, and reads the
-     * slot live -- so a reassigned method is seen, a shadowing property added on the way changes
-     * a shape and misses, and a receiver whose prototype was swapped no longer reaches the
-     * holder. A method deeper than two steps is not remembered.
-     *
-     * A holder with a shape is read at `holder_slot`. One without -- a class prototype, whose
-     * methods are not enumerable and so live in the property list -- is read at that index of
-     * the list, valid while the record there still carries the key the site resolved, which is
-     * the realm's interned pointer for the name and is never freed. */
-    const kiln_object *holder;
-    const kiln_shape *holder_shape;
-    const kiln_string *holder_key;
-    const kiln_object *via;
-    const kiln_shape *via_shape;
-    uint32_t holder_slot;
-    /* What the list record held when remembered, and the same as the boxed value: a hit that
-     * finds the record still holding it answers the boxed value without converting. A record
-     * holding anything else is a reassignment, and the site resolves again. */
-    kiln_value holder_value;
-    kiln_val holder_val;
-    /* The prototype epoch this holder was validated under. */
-    uint64_t epoch;
+    uint32_t proto_slot;
+    uint8_t depth;
+    uint8_t absent;
+    uint32_t level_token[2];
+    const kiln_shape *level_shape[2];
+    /* The canonical key the path was learned for. A list-mode holder is not named by a token:
+     * the record at `proto_slot` must carry this key -- a shared key means the same name in every
+     * realm, so such an entry serves them all. */
+    const kiln_string *key;
 } kiln_c99_pic_entry;
 
 typedef struct kiln_c99_site {
@@ -863,15 +887,15 @@ typedef struct kiln_c99_site {
     kiln_c99_pic_entry entries[KILN_C99_PIC_SIZE];
     uint8_t cached_tag;
     uint8_t has_cached_method;
-    /* Registered with the collector, which clears entries whose holder dies. */
-    uint8_t registered;
     uint64_t cached_method;
-    /* A builtin receiver's method is cached by which builtin it was, stamped with the store epoch
-     * and realm generation it was learned under: an own property written onto any builtin, or a
-     * turn in another realm, sends the site through the name lookup once more. */
+    /* A builtin receiver's method is cached by which builtin it was, and nothing else: it holds
+     * while the current realm has not modified that built-in (`kiln_c99_realm_builtin_modified`),
+     * a record every realm keeps for itself. */
     uint32_t cached_builtin;
-    uint64_t cached_epoch;
-    uint64_t cached_generation;
+    /* The serial of the last heap this site was registered with, because an entry names one of
+     * that heap's realm-local shapes or keys; the heap forgets such entries when it is torn down,
+     * before it frees them (`kiln_c99_gc_forget_realm_local`). Zero: never registered. */
+    uint64_t registered;
 } kiln_c99_site;
 
 typedef struct kiln_c99_private_site {
@@ -881,118 +905,118 @@ typedef struct kiln_c99_private_site {
 } kiln_c99_private_site;
 
 /* The slot a property-read site remembers for `shape`, or UINT32_MAX when it remembers none
- * or remembers a method instead. */
+ * or remembers a path instead. */
 static inline uint32_t kiln_c99_site_slot_for(const kiln_c99_site *site, const kiln_shape *shape) {
     uint32_t p;
     for (p = 0; p < site->pic_count; ++p) {
-        if (site->entries[p].shape == shape && site->entries[p].holder == NULL &&
-            site->entries[p].transition_to == NULL) {
+        if (site->entries[p].shape == shape && site->entries[p].depth == 0 &&
+            !site->entries[p].absent && site->entries[p].transition_to == NULL) {
             return site->entries[p].slot;
         }
     }
     return UINT32_MAX;
 }
 
+/* The level an entry's path ends at, reached from `obj` by its live prototype links, or NULL when
+ * a level on the way is not the one the entry names. `obj` itself when the path is empty. */
+static KILN_ALWAYS_INLINE inline const kiln_object *kiln_c99_pic_path(const kiln_c99_pic_entry *entry,
+                                                   const kiln_object *obj) {
+    const kiln_object *level = obj;
+    uint32_t d;
+    for (d = 0; d < entry->depth; ++d) {
+        const kiln_shape *named = entry->level_shape[d];
+        if (level->prototype.tag != KILN_VALUE_OBJECT) return NULL;
+        level = (const kiln_object *)(uintptr_t)level->prototype.bits;
+        if (level->shape != named) return NULL;
+        /* A list-mode level is named by its token -- except a holder named by its key, whose
+         * token is zero and whose record the caller checks. */
+        if (named == NULL && entry->level_token[d] != 0 &&
+            level->layout_token != entry->level_token[d])
+            return NULL;
+    }
+    return level;
+}
+
+/* Whether the implicit Object.prototype -- where an object whose prototype link is undefined
+ * finds its inherited members -- is still the built-in one in the current realm. */
+static inline int kiln_c99_object_prototype_unmodified(void) {
+    return KILN_LIKELY(kiln_c99_builtin_store_epoch == 0) ||
+           !kiln_c99_realm_builtin_modified(18u /* KILN_C99_BUILTIN_OBJECT_PROTOTYPE */);
+}
+
+#ifdef KILN_IC_CHECK
+/* The oracle for a mutation path that forgot `kiln_c99_prototype_touched`: every list-mode level
+ * a hit trusted by its layout token must still lack the key. A build with `KILN_IC_CHECK` in its
+ * environment checks every such hit the long way and traps on a disagreement. */
+static __attribute__((noinline)) void kiln_c99_pic_oracle(const kiln_c99_pic_entry *entry,
+                                                          const kiln_object *obj) {
+    const kiln_object *level = obj;
+    uint32_t d;
+    for (d = 0; d < entry->depth && entry->key != NULL; ++d) {
+        size_t i;
+        level = (const kiln_object *)(uintptr_t)level->prototype.bits;
+        if (level->shape != NULL || entry->level_token[d] == 0) continue;
+        for (i = 0; i < level->count && level->properties != NULL; ++i) {
+            if (level->properties[i].key == entry->key ||
+                kiln_string_equal(level->properties[i].key, entry->key)) {
+                fputs("kiln: inline-cache oracle: a list-mode level gained a key under an unchanged layout token; a mutation path forgot kiln_c99_prototype_touched\n", stderr);
+                __builtin_trap();
+            }
+        }
+    }
+}
+#endif
+
+/* The answer an entry that is not an own slot gives for `obj`, whose shape it has matched: the
+ * member at the end of its path, read live, or undefined for a key absent along it. 0 when the
+ * entry is an own slot, or the path from `obj` is not the one remembered. */
+static KILN_ALWAYS_INLINE inline int kiln_c99_pic_inherited(const kiln_c99_pic_entry *entry, const kiln_object *obj,
+                                         kiln_val *out) {
+    const kiln_object *level;
+    if (entry->depth == 0 && !entry->absent) return 0;
+    level = kiln_c99_pic_path(entry, obj);
+    if (level == NULL) return 0;
+#ifdef KILN_IC_CHECK
+    kiln_c99_pic_oracle(entry, obj);
+#endif
+    if (entry->absent) {
+        if (level->prototype.tag == KILN_VALUE_NULL ||
+            (level->prototype.tag == KILN_VALUE_UNDEFINED && kiln_c99_object_prototype_unmodified())) {
+            *out = KILN_VAL_UNDEFINED;
+            return 1;
+        }
+        return 0;
+    }
+    if (level->shape != NULL) {
+        *out = level->slots[entry->proto_slot];
+        return 1;
+    }
+    {
+        const kiln_property *record;
+        if (KILN_UNLIKELY(entry->proto_slot >= level->count)) return 0;
+        record = &level->properties[entry->proto_slot];
+        if (KILN_UNLIKELY(record->key != entry->key || record->accessor)) return 0;
+        *out = record->value.tag == KILN_VALUE_FUNCTION
+                   ? KILN_VAL_TAG_PTR(KILN_TAG_CLOSURE_PREFIX, (const void *)(uintptr_t)record->value.bits)
+                   : kiln_val_from_boundary(record->value);
+        return 1;
+    }
+}
+
 /* The callee a method-call site remembers for an object of `obj`'s shape, or 0. One that is the
  * object's own property is remembered by slot and read from *this* object, because two objects
  * of one shape hold their own values -- caching the value for an own property is what called
  * the first subscriber's callback for every later one. One found on the prototype chain is read
- * live from the holder the entry names, after the chain from this object still reaches it and
- * every object on the way still has the shape it had: a shape is a key path and says nothing
- * about the prototype, so two classes with one field order share a shape, and only the chain
- * tells their methods apart. */
-/* The long validation of a holder entry: walk the receiver's chain by pointer, check each shape
- * is the one remembered, and read the method where it was found; 0 when anything differs. */
-static inline int kiln_c99_site_validate_holder_val(const kiln_c99_pic_entry *entry, const kiln_object *obj, kiln_val *out) {
-    if (obj->prototype.tag != KILN_VALUE_OBJECT) {
-        return 0;
-    }
-    const kiln_object *step = (const kiln_object *)(uintptr_t)obj->prototype.bits;
-    if (entry->via != NULL) {
-        if (step != entry->via || step->shape != entry->via_shape ||
-            step->prototype.tag != KILN_VALUE_OBJECT) {
-            return 0;
-        }
-        step = (const kiln_object *)(uintptr_t)step->prototype.bits;
-    }
-    if (step != entry->holder || step->shape != entry->holder_shape) {
-        return 0;
-    }
-    if (entry->holder_shape != NULL) {
-        if (entry->holder_slot >= step->slot_capacity) {
-            return 0;
-        }
-        *out = step->slots[entry->holder_slot];
-        return 1;
-    }
-    if (entry->holder_slot >= step->count) {
-        return 0;
-    }
-    {
-        const kiln_property *record = &step->properties[entry->holder_slot];
-        if (record->key != entry->holder_key ||
-            record->value.tag != entry->holder_value.tag ||
-            record->value.bits != entry->holder_value.bits) {
-            return 0;
-        }
-    }
-    *out = entry->holder_val;
-    return 1;
-}
-
-static inline kiln_val kiln_c99_site_validate_holder(const kiln_c99_pic_entry *entry, const kiln_object *obj) {
-    kiln_val val = 0;
-    if (kiln_c99_site_validate_holder_val(entry, obj, &val)) {
-        return val;
-    }
-    return 0;
-}
-
-/* Whether the entry this site holds for `obj`'s shape reads its method through a prototype:
- * only such a callee is a function of the shape, the link and the epoch. A method held on the
- * instance itself is a different closure on every instance of the shape. */
-static inline int kiln_c99_site_callee_is_inherited(const kiln_c99_site *site, const kiln_object *obj) {
+ * live at the end of the entry's path, after the path from this object is checked level by
+ * level. */
+static KILN_ALWAYS_INLINE inline kiln_val kiln_c99_site_cached_callee(const kiln_c99_site *site, const kiln_object *obj) {
     uint32_t p;
     for (p = 0; p < site->pic_count; ++p) {
-        if (site->entries[p].shape == obj->shape) return site->entries[p].holder != NULL;
-    }
-    return 0;
-}
-
-static inline kiln_val kiln_c99_site_cached_callee(const kiln_c99_site *site, const kiln_object *obj) {
-    uint32_t p;
-    for (p = 0; p < site->pic_count; ++p) {
-        if (site->entries[p].shape == obj->shape) {
-            if (site->entries[p].holder != NULL) {
-                kiln_c99_pic_entry *entry = (kiln_c99_pic_entry *)&site->entries[p];
-                const kiln_object *first = entry->via != NULL ? entry->via : entry->holder;
-                kiln_val slow;
-                /* The epoch hit: nothing any cache reads through has been mutated since this
-                 * holder was validated, and the receiver's own link still leads to it. */
-                if (entry->epoch == kiln_c99_proto_epoch &&
-                    obj->prototype.tag == KILN_VALUE_OBJECT &&
-                    (const kiln_object *)(uintptr_t)obj->prototype.bits == first) {
-                    /* A shaped holder's method is read from its slot: the epoch says the
-                     * shape is the one remembered, so the slot is the one; a list holder's is
-                     * the value remembered with its record. */
-                    kiln_val answer = entry->holder_shape != NULL
-                                          ? entry->holder->slots[entry->holder_slot]
-                                          : entry->holder_val;
-#ifdef KILN_IC_CHECK
-                    if (kiln_c99_site_validate_holder(entry, obj) != answer) {
-                        fputs("kiln: inline-cache oracle: a cached prototype method is stale under an unmoved epoch; a mutation path forgot kiln_c99_prototype_touched\n", stderr);
-                        __builtin_trap();
-                    }
-#endif
-                    return answer;
-                }
-                slow = kiln_c99_site_validate_holder(entry, obj);
-                if (slow != 0) entry->epoch = kiln_c99_proto_epoch;
-                return slow;
-            }
-            if (site->entries[p].slot != UINT32_MAX && site->entries[p].slot < obj->slot_capacity) {
-                return obj->slots[site->entries[p].slot];
-            }
+        const kiln_c99_pic_entry *entry = &site->entries[p];
+        if (entry->shape == obj->shape) {
+            kiln_val answer;
+            if (entry->slot < obj->slot_capacity) return obj->slots[entry->slot];
+            if (kiln_c99_pic_inherited(entry, obj, &answer)) return answer;
             return 0;
         }
     }
@@ -1121,7 +1145,11 @@ static inline const uint32_t *kiln_c99_recv_claim(const kiln_shape **shapes,
                                                   uint32_t double_mask) {
     const kiln_shape *shape = obj->shape;
     size_t j, c;
-    if (shape == NULL) {
+    /* Rows are process-wide statics, so only a shared shape gets one (ADR 0071): a realm-local
+     * shape is freed with its realm, and a later shape at its address must not find its row. It
+     * is not refused either -- the site cache serves it -- because the same claim is tried again
+     * only by an object of the same local shape. */
+    if (shape == NULL || !shape->shared) {
         return NULL;
     }
     for (j = 0; j < 4 && shapes[j] != NULL; ++j) {
@@ -1440,6 +1468,9 @@ typedef struct kiln_next_tick {
     kiln_value callback;
     kiln_value *args;
     size_t argc;
+    /* Still counted in the heap's `next_ticks_queued`: cleared when the tick starts to run (a
+     * running tick is no longer queued), or when it is disposed of unrun. */
+    int counted;
 } kiln_next_tick;
 
 /* One generated callback payload. The Realm Runtime owns its timer identity, deadline, sequence,

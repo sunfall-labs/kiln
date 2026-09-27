@@ -64,3 +64,25 @@ Partial evidence is retained under `target/allocation-investigation/integration-
 
 Main advanced again to `04e460a0` during validation. This gate validates the integration through
 `fa213915`, not those three newer commits; they require a separate integration check.
+
+## Final landing integration
+
+At the user's request to prioritize landing and avoid another broad testing cycle, the branch
+also integrated main through `f93847a0`. Three Luna agents resolved/reviewed the split-module
+conflicts, structured-clone/transfer bootstrap changes, shape-cache changes, and worker-thread
+surface updates. All fourteen changed backend and both added runtime function names retain
+upstream bodies; the twelve changed interpreter names differ only in the order of three
+disjoint native-name match arms. The dispatcher fragments concatenate byte-for-byte to this
+upstream version. Every Rust source remains below 5,000 lines.
+
+The focused landing checks pass: release CLI build, 174 backend unit tests, all 36 emitted-C
+snapshot tests, and 190 interpreter tests (two existing ignored tests across the crate runs).
+Logs are `landing-release.log` and `landing-crate-tests.log` under
+`target/allocation-investigation/`. The full gate above was not repeated for this last merge;
+its evidence remains tied to the earlier integration, not silently relabeled as the latest tree.
+
+The three new native probes (message-port transfer, worker-thread refusals, detached typed-array
+mapping) all match under `KILN_GC_STRESS=1`, including the parallel probe's requested worker
+counts. All 17 regression-corpus tests pass with `--node`. Their logs are `landing-native.log`
+and `landing-regress.log`; the latter also has `landing-regress.json`. No additional full gate
+or whole stress sweep was run for this final integration.
