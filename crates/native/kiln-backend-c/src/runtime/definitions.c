@@ -1231,7 +1231,14 @@ static int kiln_c99_define_private(kiln_value target, const char *key, size_t ke
         KILN_C99_REFUSE("a private definition that left no property slot");
     }
     slot->writable = 0;
-    kiln_c99_object_of(target)->read_only_seen = 1;
+    /* The flag belongs to the object that holds the property: a static private method's is the
+     * class's property store, and a function value is not a `kiln_object` -- written through
+     * `kiln_c99_object_of(target)` it landed in the closure itself. */
+    {
+        kiln_value holder =
+            target.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(target)->properties : target;
+        if (holder.tag == KILN_VALUE_OBJECT) kiln_c99_object_of(holder)->read_only_seen = 1;
+    }
     return KILN_C99_OK;
 }
 
@@ -1259,7 +1266,14 @@ static int kiln_c99_define_private_key(kiln_value target, const kiln_string *key
         KILN_C99_REFUSE("a private definition that left no property slot");
     }
     slot->writable = 0;
-    kiln_c99_object_of(target)->read_only_seen = 1;
+    /* The flag belongs to the object that holds the property: a static private method's is the
+     * class's property store, and a function value is not a `kiln_object` -- written through
+     * `kiln_c99_object_of(target)` it landed in the closure itself. */
+    {
+        kiln_value holder =
+            target.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(target)->properties : target;
+        if (holder.tag == KILN_VALUE_OBJECT) kiln_c99_object_of(holder)->read_only_seen = 1;
+    }
     return KILN_C99_OK;
 }
 

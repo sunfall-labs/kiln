@@ -317,11 +317,16 @@ int main(void) {
         if (kiln_c99_pic_learn_path(&entry, r, m, &holder) != KILN_C99_PATH_FOUND) return 13;
     }
     kiln_c99_site_remember(&site, &entry);
-    memset(&path, 0, sizeof path);
+    {
+        static const kiln_c99_method_path unlearned = KILN_C99_UNLEARNED_METHOD_PATH;
+        path = unlearned;
+    }
+    /* An unlearned path matches no receiver, a dictionary-mode one included. */
+    if (path.recv == NULL || path.recv == r->shape) return 14;
     kiln_c99_method_path_learn(&path, &site, r, body_b, NULL, 0);
-    if (path.recv != NULL) return 14;
+    if (path.recv == r->shape) return 14;
     kiln_c99_method_path_learn(&path, &site, r, body_a, NULL, 1);
-    if (path.recv != NULL) return 15;
+    if (path.recv == r->shape) return 15;
     kiln_c99_method_path_learn(&path, &site, r, body_a, NULL, 0);
     if (path.recv != r->shape || path.proto != pa->shape || path.slot != 0) return 16;
     {

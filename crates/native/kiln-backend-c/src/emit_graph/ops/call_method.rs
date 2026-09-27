@@ -1083,15 +1083,9 @@ pub(super) fn emit_call_method(
                     (front, format!("{} else ", arm(&path_learn, &matched)))
                 })
                 .collect();
-    // A path's receiver shape starts NULL, so the arms run only for a shaped receiver.
-    let typed_front: String = if typed_arms.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "if (obj->shape != NULL) {{ {} }} ",
-            typed_arms.iter().map(|(front, _)| front.as_str()).collect::<String>()
-        )
-    };
+    // A path starts with a receiver shape no object has (`KILN_C99_UNLEARNED_METHOD_PATH`) and
+    // learns only shared shapes, so a dictionary-mode receiver's NULL shape never matches.
+    let typed_front: String = typed_arms.iter().map(|(front, _)| front.as_str()).collect();
     let typed_chain: String = typed_arms.iter().map(|(_, chain)| chain.as_str()).collect();
     // One dispatch guard for every typed arm of the site: the constructor flag and the depth
     // are the same for each, and `depth` is a local only where a typed arm can be entered.

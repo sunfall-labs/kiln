@@ -306,7 +306,7 @@ pub fn emit_function_from_graph_with_profile(
                     )
                     .unwrap();
                 }
-                writeln!(output, "static kiln_c99_method_path {pfx}_path;").unwrap();
+                writeln!(output, "static kiln_c99_method_path {pfx}_path = KILN_C99_UNLEARNED_METHOD_PATH;").unwrap();
             }
         }
     }
@@ -703,7 +703,7 @@ pub fn emit_entry_from_graph_with_profile(
                 )
                 .unwrap();
             }
-            writeln!(output, "    static kiln_c99_method_path {pfx}_path;").unwrap();
+            writeln!(output, "    static kiln_c99_method_path {pfx}_path = KILN_C99_UNLEARNED_METHOD_PATH;").unwrap();
         }
     }
     let entry_start = output.len();
@@ -778,7 +778,7 @@ pub fn emit_async_entry_body(
                 )
                 .unwrap();
             }
-            writeln!(output, "    static kiln_c99_method_path {pfx}_path;").unwrap();
+            writeln!(output, "    static kiln_c99_method_path {pfx}_path = KILN_C99_UNLEARNED_METHOD_PATH;").unwrap();
         }
     }
     writeln!(output, "    kiln_val *locals = {symbol}_globals;").unwrap();

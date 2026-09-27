@@ -1793,7 +1793,7 @@ fn render_functions(
                         )
                         .unwrap();
                     }
-                    writeln!(target_buf, "static kiln_c99_method_path {pfx}_path;").unwrap();
+                    writeln!(target_buf, "static kiln_c99_method_path {pfx}_path = KILN_C99_UNLEARNED_METHOD_PATH;").unwrap();
                 }
             }
         }

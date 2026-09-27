@@ -809,10 +809,6 @@ typedef struct kiln_object {
     kiln_property *properties;
     size_t count;
     size_t capacity;
-    /* The next object a property read falls through to, or undefined for none.  Undefined and
-     * null are different answers here, exactly as they are to `Object.getPrototypeOf`: one means
-     * nothing was recorded and the other means nothing was wanted. */
-    kiln_value prototype;
     /* `Object.freeze`. A frozen object ignores every write rather than refusing one: modules are
      * strict and a real engine would throw, but the interpreter is silent here and the two have
      * to agree before either can change. */
@@ -848,6 +844,14 @@ typedef struct kiln_object {
      * exactly. A level that never held an accessor or a read-only data property has nothing
      * that could intercept a write from a descendant. */
     int read_only_seen;
+    /* The next object a property read falls through to, or undefined for none.  Undefined and
+     * null are different answers here, exactly as they are to `Object.getPrototypeOf`: one means
+     * nothing was recorded and the other means nothing was wanted.
+     *
+     * Placed directly before `shape` (issue 04 step 3c): a method call through the prototype
+     * reads the receiver's shape, its prototype link and then its slots, and with the link here
+     * the three share the receiver's cache lines instead of the link costing one of its own. */
+    kiln_value prototype;
     /* Shape-based layout (ADR 0050). When non-NULL, properties are stored in
      * the slots array indexed by shape->keys. Appended to preserve member offsets. */
     kiln_shape *shape;
@@ -1194,6 +1198,10 @@ typedef struct kiln_c99_method_path {
     const uint32_t *row;
     uint32_t slot;
 } kiln_c99_method_path;
+
+/* A path nothing has taught: its receiver shape is an address no shape has, so a hit needs no
+ * separate test that the receiver is shaped (a dictionary-mode receiver's NULL never matches). */
+#define KILN_C99_UNLEARNED_METHOD_PATH { (const kiln_shape *)(uintptr_t)1, NULL, NULL, 0 }
 
 /* Whether the prototype at the end of `path` for `obj`, whose shape the caller has matched to
  * `path->recv`, has the path's shape; `*level` is that prototype. */
