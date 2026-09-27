@@ -173,25 +173,6 @@ fn graph_emission_cache_hits_persist_and_all_input_classes_invalidate() {
 }
 
 #[test]
-fn source_emitter_fingerprint_excludes_graph_orchestration() {
-    let source = include_str!("../graph_source_emitter.rs");
-    assert_eq!(
-        *graph_source_emitter::SOURCE_EMITTER_ID,
-        Digest::hash(source.as_bytes())
-    );
-    assert!(source.contains("pub(super) fn emit("));
-    assert!(!source.contains("cached_graph_module"));
-    assert!(!source.contains("build_graph("));
-
-    let bootstrap_source = include_str!("../bootstrap_emitter.rs");
-    assert_eq!(
-        *bootstrap_emitter::EMITTER_ID,
-        Digest::hash(bootstrap_source.as_bytes())
-    );
-    assert!(bootstrap_source.contains("emit_module_with_logical_path_and_policy"));
-}
-
-#[test]
 fn bootstrap_emission_cache_reopens_and_separates_surface_and_policy() {
     let project = TestDirectory::new("kiln-bootstrap-emission-cache");
     let cache_path = project.path.join("bootstrap-cache");

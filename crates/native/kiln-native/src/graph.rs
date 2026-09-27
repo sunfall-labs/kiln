@@ -709,7 +709,6 @@ pub(super) fn source_module_input_id(
             "{:?}",
             (
                 &node.program,
-                &node.program.program.source,
                 node.source,
                 logical_path,
                 profile,
