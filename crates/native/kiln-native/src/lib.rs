@@ -31,7 +31,7 @@ use kiln_backend_c::{
 };
 use kiln_host_abi::HOST_ABI_VERSION;
 pub use kiln_host_abi::HostValue;
-use kiln_ir::{ModuleProgram, Program};
+use kiln_ir::Program;
 use kiln_module_graph::{ModuleGraph, ModuleGraphError, ModuleSource, ResolvedExport};
 pub use kiln_native_provider_contract::{
     ProviderCapabilities, ProviderCapability, ProviderVariant,
@@ -51,6 +51,14 @@ use url::Url;
 
 static WORK_COUNTER: AtomicU64 = AtomicU64::new(0);
 static MATERIALIZE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+// Object misses for the same or colliding bucket share one process mutex and one OS lock. The
+// cache key is rechecked after both locks are held, so bucket collisions only serialize work and
+// never authorize reuse of another key's artifact. Lock files are kept outside artifact-kind
+// trees, where cache GC scans records, and are bounded to at most 256 per writable layer.
+const OBJECT_COMPILE_LOCK_BUCKETS: usize = 256;
+static OBJECT_COMPILE_LOCKS: [parking_lot::Mutex<()>; OBJECT_COMPILE_LOCK_BUCKETS] =
+    [const { parking_lot::Mutex::new(()) }; OBJECT_COMPILE_LOCK_BUCKETS];
 
 const RELEASE_PRELUDE_COMPILE_IDENTITY: &[u8] = b"vectorize=off\0slp-vectorize=off";
 
@@ -3011,6 +3019,34 @@ impl NativeBuilder {
         Ok(self.cache.lookup_digest(key)?)
     }
 
+    fn object_compile_lock_file(&self, bucket: usize) -> Result<(fs::File, PathBuf), NativeError> {
+        let layer = self
+            .cache
+            .layers()
+            .iter()
+            .find(|layer| layer.is_writable())
+            .ok_or(CacheError::NoWritableLayer)?;
+        let directory = layer.root().join(".compile-locks/v1");
+        fs::create_dir_all(&directory).map_err(|source| NativeError::Io {
+            operation: "create native object compile lock directory",
+            path: directory.clone(),
+            source,
+        })?;
+        let path = directory.join(format!("{bucket:02x}.lock"));
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|source| NativeError::Io {
+                operation: "open native object compile lock",
+                path: path.clone(),
+                source,
+            })?;
+        Ok((file, path))
+    }
+
     #[cfg(test)]
     fn assert_live_cache_identity(&self, key: &ArtifactKey) {
         let identities = self
@@ -3036,23 +3072,42 @@ impl NativeBuilder {
         match self.lookup(key)? {
             Lookup::Hit(artifact) => Ok((artifact.bytes, artifact.digest, true, Duration::ZERO)),
             Lookup::Miss => {
-                materialize(source_path, source, false)?;
-                let report = self
-                    .toolchain
-                    .compile_c(source_path, object_path, options)?;
-                if std::env::var_os("KILN_NATIVE_TRACE_COMPILE").is_some() {
-                    eprintln!(
-                        "kiln: C compile {}ms {}",
-                        report.elapsed.as_millis(),
-                        source_path
-                            .file_name()
-                            .unwrap_or(source_path.as_os_str())
-                            .to_string_lossy()
-                    );
+                let bucket = usize::from(key.digest().as_bytes()[0]);
+                let _process_lock = OBJECT_COMPILE_LOCKS[bucket].lock();
+                let (lock_file, lock_path) = self.object_compile_lock_file(bucket)?;
+                lock_file.lock().map_err(|source| NativeError::Io {
+                    operation: "lock native object compile bucket",
+                    path: lock_path,
+                    source,
+                })?;
+
+                // A competing process or thread may have published this exact full key while we
+                // waited. Bucket collisions only cause extra waiting; this lookup remains the
+                // authority for reuse and preserves the cache's corruption diagnostics.
+                match self.lookup(key)? {
+                    Lookup::Hit(artifact) => {
+                        Ok((artifact.bytes, artifact.digest, true, Duration::ZERO))
+                    }
+                    Lookup::Miss => {
+                        materialize(source_path, source, false)?;
+                        let report = self
+                            .toolchain
+                            .compile_c(source_path, object_path, options)?;
+                        if std::env::var_os("KILN_NATIVE_TRACE_COMPILE").is_some() {
+                            eprintln!(
+                                "kiln: C compile {}ms {}",
+                                report.elapsed.as_millis(),
+                                source_path
+                                    .file_name()
+                                    .unwrap_or(source_path.as_os_str())
+                                    .to_string_lossy()
+                            );
+                        }
+                        let bytes = read(object_path, "read native object")?;
+                        let stored = self.cache.put(key, &bytes)?;
+                        Ok((bytes, stored.digest, false, report.elapsed))
+                    }
                 }
-                let bytes = read(object_path, "read native object")?;
-                let stored = self.cache.put(key, &bytes)?;
-                Ok((bytes, stored.digest, false, report.elapsed))
             }
         }
     }
@@ -3065,8 +3120,8 @@ mod graph_source_emitter;
 use graph_source_emitter::parallel_in_generic;
 #[cfg(test)]
 use graph_source_emitter::{
-    release_module_uses_generic_bodies, MAX_RELEASE_SPECIALIZED_MODULE_FUNCTIONS,
-    MAX_RELEASE_SPECIALIZED_MODULE_INSTRUCTIONS,
+    MAX_RELEASE_SPECIALIZED_MODULE_FUNCTIONS, MAX_RELEASE_SPECIALIZED_MODULE_INSTRUCTIONS,
+    release_module_uses_generic_bodies,
 };
 mod shared_graph;
 use shared_graph::*;

@@ -1,5 +1,16 @@
 use super::*;
 
+fn object_single_flight_key(builder: &NativeBuilder, source: &[u8]) -> ArtifactKey {
+    let tool = builder.toolchain().identity();
+    NativeArtifactFamily::ModuleObject.key(
+        compiler_identity(tool),
+        &target_identity(tool),
+        NativeProfile::Dev.cache(),
+        Digest::hash(b"native-object-single-flight-test-options"),
+        [Digest::hash(source), prelude_header_digest()],
+    )
+}
+
 #[test]
 fn release_prelude_compile_only_disables_vectorizers() {
     let mut options = CompileOptions::default();
@@ -31,6 +42,150 @@ fn release_prelude_compile_policy_has_a_distinct_object_key() {
     ] {
         assert_eq!(prelude_object_options(base, profile), base);
     }
+}
+
+#[test]
+fn concurrent_misses_for_one_native_object_compile_once_and_share_the_cached_bytes() {
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native object single-flight test: no C compiler found");
+        return;
+    };
+    const CALLERS: usize = 4;
+    let root = TestDirectory::new("kiln-native-object-single-flight");
+    let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+    let source = b"int kiln_single_flight_probe(void) { return 17; }\n";
+    let key = object_single_flight_key(&builder, &source);
+    let barrier = Barrier::new(CALLERS);
+    let root_path = &root.path;
+
+    let results = std::thread::scope(|scope| {
+        let callers = (0..CALLERS)
+            .map(|index| {
+                let builder = &builder;
+                let barrier = &barrier;
+                let key = &key;
+                let source = &source;
+                scope.spawn(move || {
+                    let caller = root_path.join(format!("caller-{index}"));
+                    fs::create_dir_all(&caller).expect("create caller work directory");
+                    let source_path = caller.join("probe.c");
+                    let object_path = caller.join("probe.o");
+                    fs::write(&source_path, source).expect("write identical C source");
+                    barrier.wait();
+                    builder
+                        .object(
+                            key,
+                            source,
+                            &source_path,
+                            &object_path,
+                            &CompileOptions::default(),
+                        )
+                        .expect("compile or reuse the shared object")
+                })
+            })
+            .collect::<Vec<_>>();
+        callers
+            .into_iter()
+            .map(|caller| caller.join().expect("object caller exits"))
+            .collect::<Vec<_>>()
+    });
+
+    assert_eq!(results.iter().filter(|(_, _, hit, _)| !hit).count(), 1);
+    assert_eq!(
+        results.iter().filter(|(_, _, hit, _)| *hit).count(),
+        CALLERS - 1
+    );
+    let first = &results[0].0;
+    assert!(
+        results.iter().all(|(bytes, _, _, _)| bytes == first),
+        "all callers receive the same cached object bytes"
+    );
+    assert!(
+        results
+            .iter()
+            .all(|(bytes, digest, _, _)| Digest::hash(bytes) == *digest)
+    );
+}
+
+#[test]
+fn readonly_native_object_hit_does_not_create_compile_locks() {
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping read-only native object hit test: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-object-readonly-hit");
+    let source = b"int kiln_readonly_probe(void) { return 1; }\n";
+    let key_builder = NativeBuilder::new(
+        ArtifactCache::new(root.path.join("key-cache")),
+        toolchain.clone(),
+    );
+    let key = object_single_flight_key(&key_builder, source);
+    let cache_root = root.path.join("readonly-cache");
+    let writable = ArtifactCache::new(&cache_root);
+    writable
+        .put(&key, b"seeded object payload")
+        .expect("seed cache record");
+    let builder = NativeBuilder::new(
+        ArtifactCache::with_layers([kiln_artifact_cache::CacheLayer::read_only(&cache_root)]),
+        toolchain,
+    );
+
+    let (bytes, digest, hit, _) = builder
+        .object(
+            &key,
+            source,
+            &root.path.join("not-needed.c"),
+            &root.path.join("not-needed.o"),
+            &CompileOptions::default(),
+        )
+        .expect("read-only object hit avoids compiler and writable layer");
+    assert!(hit);
+    assert_eq!(bytes, b"seeded object payload");
+    assert_eq!(digest, Digest::hash(&bytes));
+    assert!(
+        !cache_root.join(".compile-locks").exists(),
+        "warm read-only hits must not touch compile-lock storage"
+    );
+}
+
+#[test]
+fn failed_native_object_compile_releases_its_bucket_for_retry() {
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native object retry test: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-object-lock-retry");
+    let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+    let source = b"int kiln_retry_probe(void) { return 23; }\n";
+    let key = object_single_flight_key(&builder, &source);
+    let source_path = root.path.join("probe.c");
+    fs::write(&source_path, &source).expect("write retry source");
+    let failed_object_path = root.path.join("failed.o");
+    fs::create_dir(&failed_object_path).expect("make the first compiler output path invalid");
+
+    assert!(
+        builder
+            .object(
+                &key,
+                &source,
+                &source_path,
+                &failed_object_path,
+                &CompileOptions::default(),
+            )
+            .is_err()
+    );
+    assert!(matches!(builder.lookup(&key), Ok(Lookup::Miss)));
+
+    let (_, _, hit, _) = builder
+        .object(
+            &key,
+            &source,
+            &source_path,
+            &root.path.join("retry.o"),
+            &CompileOptions::default(),
+        )
+        .expect("retry acquires the released bucket and stores the object");
+    assert!(!hit, "the successful retry is the cache miss producer");
 }
 
 #[test]
