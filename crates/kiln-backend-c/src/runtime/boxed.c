@@ -46,8 +46,6 @@ static kiln_val kiln_c99_string_constant(void **cached, const char *bytes, size_
  * see `kiln_c99_cached_method_matches`. */
 static inline void kiln_c99_site_stamp_builtin(kiln_c99_site *site, uint32_t builtin) {
     site->cached_builtin = builtin;
-    site->cached_epoch = kiln_c99_builtin_store_epoch;
-    site->cached_generation = kiln_c99_realm_generation();
 }
 
 static kiln_value kiln_val_to_boundary(kiln_val v) {
@@ -1039,11 +1037,11 @@ static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln
         return 1;
     } else if (ctag == KILN_VALUE_BUILTIN) {
         /* `Promise.resolve`, `Object.keys`, `Math.max`: the same builtin at the same site answers
-         * the same method until an own property is written onto some builtin or the realm
-         * changes, and either moves a stamp the site compares. */
+         * the same method while the current realm has not modified that built-in (ADR 0071): a
+         * realm's own record, consulted only once some realm has modified some built-in. */
         return KILN_VAL_IS_BUILTIN(target) && KILN_VAL_BUILTIN_ID(target) == site->cached_builtin &&
-               site->cached_epoch == kiln_c99_builtin_store_epoch &&
-               site->cached_generation == kiln_c99_realm_generation();
+               (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0) ||
+                !kiln_c99_realm_builtin_modified(site->cached_builtin));
     } else if (ctag == KILN_VALUE_ARRAY && ((target & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) {
         void *ptr = KILN_VAL_PTR(target);
         if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {
@@ -1073,30 +1071,11 @@ static int kiln_c99_val_read_property_view(kiln_host *host, kiln_val target,
             size_t p;
             for (p = 0; p < site->pic_count; ++p) {
                 if (object->shape == site->entries[p].shape) {
-                    if (site->entries[p].holder != NULL) {
-                        kiln_c99_pic_entry *entry = (kiln_c99_pic_entry *)&site->entries[p];
-                        const kiln_object *first = entry->via != NULL ? entry->via : entry->holder;
-                        if (entry->epoch == kiln_c99_proto_epoch &&
-                            object->prototype.tag == KILN_VALUE_OBJECT &&
-                            (const kiln_object *)(uintptr_t)object->prototype.bits == first) {
-                            *out = entry->holder_shape != NULL
-                                       ? entry->holder->slots[entry->holder_slot]
-                                       : entry->holder_val;
-                            return KILN_C99_OK;
-                        }
-                        kiln_val slow_val;
-                        if (kiln_c99_site_validate_holder_val(entry, object, &slow_val)) {
-                            entry->epoch = kiln_c99_proto_epoch;
-                            *out = slow_val;
-                            return KILN_C99_OK;
-                        }
-                    } else if (site->entries[p].slot < object->slot_capacity) {
+                    if (site->entries[p].slot < object->slot_capacity) {
                         *out = object->slots[site->entries[p].slot];
                         return KILN_C99_OK;
-                    } else if (site->entries[p].slot == UINT32_MAX && site->entries[p].epoch == kiln_c99_proto_epoch) {
-                        *out = KILN_VAL_UNDEFINED;
-                        return KILN_C99_OK;
                     }
+                    if (kiln_c99_pic_inherited(&site->entries[p], object, out)) return KILN_C99_OK;
                 }
             }
         }
@@ -1116,84 +1095,22 @@ static int kiln_c99_val_read_property_view(kiln_host *host, kiln_val target,
                     if (kiln_c99_shape_find_slot(object->shape, stable, &own_slot)) {
                         if (own_slot < object->slot_capacity) {
                             *out = object->slots[own_slot];
-                            if (site != NULL) {
-                                uint32_t p;
-                                int found = 0;
-                                for (p = 0; p < site->pic_count; ++p) {
-                                    if (site->entries[p].shape == object->shape) {
-                                        site->entries[p].transition_to = NULL;
-                                        site->entries[p].slot = own_slot;
-                                        site->entries[p].holder = NULL;
-                                        found = 1;
-                                        break;
-                                    }
-                                }
-                                if (!found) {
-                                    if (site->pic_count < KILN_C99_PIC_SIZE) {
-                                        site->entries[site->pic_count].shape = object->shape;
-                                        site->entries[site->pic_count].transition_to = NULL;
-                                        site->entries[site->pic_count].slot = own_slot;
-                                        site->entries[site->pic_count].holder = NULL;
-                                        site->pic_count += 1;
-                                    } else {
-                                        uint32_t last = KILN_C99_PIC_SIZE - 1;
-                                        site->entries[last].shape = object->shape;
-                                        site->entries[last].transition_to = NULL;
-                                        site->entries[last].slot = own_slot;
-                                        site->entries[last].holder = NULL;
-                                    }
-                                }
-                            }
+                            if (site != NULL) kiln_c99_site_remember_own(site, object->shape, own_slot);
                             return KILN_C99_OK;
                         }
                     }
-                    if (object->properties == NULL) {
-                        const kiln_object *via = NULL;
-                        const kiln_object *step = NULL;
-                        uint32_t proto_slot = UINT32_MAX;
-                        kiln_val proto_val = KILN_VAL_UNDEFINED;
-                        int steps;
-                        kiln_value link = object->prototype;
-                        for (steps = 0; steps < 2 && link.tag == KILN_VALUE_OBJECT; ++steps) {
-                            const kiln_object *candidate = (const kiln_object *)(uintptr_t)link.bits;
-                            if (candidate == NULL || kiln_c99_gc_payload_kind(candidate) != KILN_GC_OBJECT) {
-                                break;
-                            }
-                            if (candidate->shape != NULL) {
-                                if (kiln_c99_shape_find_slot(candidate->shape, stable, &proto_slot)) {
-                                    if (proto_slot < candidate->slot_capacity) {
-                                        step = candidate;
-                                        proto_val = candidate->slots[proto_slot];
-                                    }
-                                    break;
-                                }
-                            } else {
-                                break;
-                            }
-                            via = candidate;
-                            link = candidate->prototype;
-                        }
-                        if (step != NULL) {
-                            *out = proto_val;
-                            if (site != NULL && site->pic_count < KILN_C99_PIC_SIZE) {
-                                kiln_c99_pic_entry remembered;
-                                memset(&remembered, 0, sizeof remembered);
-                                remembered.shape = object->shape;
-                                remembered.slot = UINT32_MAX;
-                                remembered.holder = step;
-                                remembered.holder_shape = step->shape;
-                                remembered.holder_slot = proto_slot;
-                                remembered.holder_val = proto_val;
-                                remembered.epoch = kiln_c99_proto_epoch;
-                                ((kiln_object *)step)->cache_holder = 1;
-                                if (via != NULL) {
-                                    remembered.via = via;
-                                    remembered.via_shape = via->shape;
-                                    ((kiln_object *)via)->cache_holder = 1;
-                                }
-                                site->entries[site->pic_count++] = remembered;
-                                kiln_c99_gc_register_site(site);
-                            }
+                    if (object->properties == NULL && site != NULL) {
+                        /* A member one or two steps up the chain: remembered as the path to it
+                         * (ADR 0071), each level named by shape or layout token, and read live. */
+                        kiln_c99_pic_entry remembered;
+                        const kiln_object *holder = NULL;
+                        memset(&remembered, 0, sizeof remembered);
+                        remembered.shape = object->shape;
+                        remembered.slot = UINT32_MAX;
+                        if (kiln_c99_pic_learn_path(&remembered, object, stable, &holder) ==
+                                KILN_C99_PATH_FOUND &&
+                            kiln_c99_pic_inherited(&remembered, object, out)) {
+                            kiln_c99_site_remember(site, &remembered);
                             return KILN_C99_OK;
                         }
                     }
@@ -1235,43 +1152,22 @@ static int kiln_c99_val_read_property_view(kiln_host *host, kiln_val target,
             if (ptr != NULL && kiln_c99_gc_payload_kind(ptr) == KILN_GC_OBJECT) {
                 const kiln_object *object = (const kiln_object *)ptr;
                 if (object->shape != NULL && object->properties == NULL && object->elements == NULL) {
-                    uint32_t p;
-                    int found = 0;
-                    for (p = 0; p < site->pic_count; ++p) {
-                        if (site->entries[p].shape == object->shape) {
-                            site->entries[p].transition_to = NULL;
-                            site->entries[p].slot = UINT32_MAX;
-                            site->entries[p].holder = NULL;
-                            site->entries[p].epoch = kiln_c99_proto_epoch;
-                            found = 1;
-                            break;
-                        }
-                    }
-                    if (!found) {
-                        if (site->pic_count < KILN_C99_PIC_SIZE) {
-                            site->entries[site->pic_count].shape = object->shape;
-                            site->entries[site->pic_count].transition_to = NULL;
-                            site->entries[site->pic_count].slot = UINT32_MAX;
-                            site->entries[site->pic_count].holder = NULL;
-                            site->entries[site->pic_count].epoch = kiln_c99_proto_epoch;
-                            site->pic_count += 1;
-                        } else {
-                            uint32_t last = KILN_C99_PIC_SIZE - 1;
-                            site->entries[last].shape = object->shape;
-                            site->entries[last].transition_to = NULL;
-                            site->entries[last].slot = UINT32_MAX;
-                            site->entries[last].holder = NULL;
-                            site->entries[last].epoch = kiln_c99_proto_epoch;
-                        }
-                    }
-                    kiln_value cur_proto = object->prototype;
-                    while (cur_proto.tag == KILN_VALUE_OBJECT) {
-                        kiln_object *proto_obj = (kiln_object *)(uintptr_t)cur_proto.bits;
-                        if (proto_obj != NULL && kiln_c99_gc_payload_kind(proto_obj) == KILN_GC_OBJECT) {
-                            proto_obj->cache_holder = 1;
-                            cur_proto = proto_obj->prototype;
-                        } else {
-                            break;
+                    /* Absent everywhere the lookup looked: remembered as the path that proves it
+                     * -- no level up to where the chain ends has the key -- when that is at most
+                     * two steps; an own property holding undefined is remembered by its slot. */
+                    const kiln_string *stable = canonical != NULL ? canonical : kiln_c99_interned_key(key);
+                    uint32_t own_slot = UINT32_MAX;
+                    kiln_c99_pic_entry remembered;
+                    const kiln_object *holder = NULL;
+                    memset(&remembered, 0, sizeof remembered);
+                    remembered.shape = object->shape;
+                    remembered.slot = UINT32_MAX;
+                    if (stable != NULL && !kiln_c99_shape_find_slot(object->shape, stable, &own_slot) &&
+                        kiln_c99_pic_learn_path(&remembered, object, stable, &holder) ==
+                            KILN_C99_PATH_ABSENT) {
+                        kiln_val check;
+                        if (kiln_c99_pic_inherited(&remembered, object, &check)) {
+                            kiln_c99_site_remember(site, &remembered);
                         }
                     }
                 }
@@ -1362,34 +1258,7 @@ static int kiln_c99_val_write_property_view(kiln_host *host, kiln_val target,
                         } else {
                             kiln_c99_prototype_touched(object);
                             object->slots[slot] = value;
-                            if (site != NULL) {
-                                uint32_t p;
-                                int found = 0;
-                                for (p = 0; p < site->pic_count; ++p) {
-                                    if (site->entries[p].shape == object->shape) {
-                                        site->entries[p].transition_to = NULL;
-                                        site->entries[p].slot = slot;
-                                        site->entries[p].holder = NULL;
-                                        found = 1;
-                                        break;
-                                    }
-                                }
-                                if (!found) {
-                                    if (site->pic_count < KILN_C99_PIC_SIZE) {
-                                        site->entries[site->pic_count].shape = object->shape;
-                                        site->entries[site->pic_count].transition_to = NULL;
-                                        site->entries[site->pic_count].slot = slot;
-                                        site->entries[site->pic_count].holder = NULL;
-                                        site->pic_count += 1;
-                                    } else {
-                                        uint32_t last = KILN_C99_PIC_SIZE - 1;
-                                        site->entries[last].shape = object->shape;
-                                        site->entries[last].transition_to = NULL;
-                                        site->entries[last].slot = slot;
-                                        site->entries[last].holder = NULL;
-                                    }
-                                }
-                            }
+                            if (site != NULL) kiln_c99_site_remember_own(site, object->shape, slot);
                             return KILN_C99_OK;
                         }
                     }
@@ -1451,7 +1320,9 @@ static int kiln_c99_val_get_private_fast(kiln_val *out, kiln_val receiver, kiln_
         return 0;
     }
     if (site != NULL) {
-        site->shape = obj->shape;
+        /* Only a shared shape is remembered (ADR 0071): a process-wide site outlives the realm,
+         * and a realm-local shape is freed with it, when a later shape could take its address. */
+        site->shape = obj->shape->shared ? obj->shape : NULL;
         site->brand_slot = bslot;
         site->member_slot = mslot;
     }
@@ -1488,7 +1359,9 @@ static int kiln_c99_val_set_private_fast(kiln_val receiver, kiln_val brand, kiln
         return 0;
     }
     if (site != NULL) {
-        site->shape = obj->shape;
+        /* Only a shared shape is remembered (ADR 0071): a process-wide site outlives the realm,
+         * and a realm-local shape is freed with it, when a later shape could take its address. */
+        site->shape = obj->shape->shared ? obj->shape : NULL;
         site->brand_slot = bslot;
         site->member_slot = mslot;
     }
@@ -2110,97 +1983,30 @@ static int kiln_c99_val_call_method_view(kiln_host *host, kiln_val receiver, con
                    kiln_c99_gc_kind_of_ptr(KILN_VAL_PTR(receiver)) == KILN_GC_OBJECT) {
             const kiln_object *object = (const kiln_object *)KILN_VAL_PTR(receiver);
             if (object->shape != NULL) {
-                /* An own property is remembered by its slot. A prototype's is remembered by
-                 * where it lives, one or two steps up the chain, when the holder is a shaped
-                 * object and the slot there holds exactly the callee just resolved -- a data
-                 * property, not an accessor. Anything else is not remembered, and the site
-                 * resolves it again next time. */
+                /* An own property is remembered by its slot. A prototype's is remembered by the
+                 * path to it (ADR 0071), one or two steps up the chain, when the member there
+                 * holds exactly the callee just resolved -- a data property, not an accessor,
+                 * and in a list-mode holder a record keyed by the canonical pointer the site
+                 * resolved with. Anything else is not remembered, and the site resolves it
+                 * again next time. */
                 uint32_t own_slot = UINT32_MAX;
                 int own = kiln_c99_shape_find_slot(object->shape, key, &own_slot);
                 kiln_c99_pic_entry remembered;
-                size_t p;
-                int found = 0;
                 memset(&remembered, 0, sizeof remembered);
                 remembered.shape = object->shape;
                 remembered.slot = own ? own_slot : UINT32_MAX;
                 if (!own) {
-                    const kiln_object *via = NULL;
-                    const kiln_object *step = NULL;
-                    uint32_t slot = UINT32_MAX;
-                    int steps;
-                    kiln_value link = object->prototype;
-                    const kiln_string *holder_key = NULL;
-                    for (steps = 0; steps < 2 && link.tag == KILN_VALUE_OBJECT; ++steps) {
-                        const kiln_object *candidate = (const kiln_object *)(uintptr_t)link.bits;
-                        if (kiln_c99_gc_kind_of_ptr((void *)candidate) != KILN_GC_OBJECT) {
-                            break;
-                        }
-                        if (candidate->shape != NULL) {
-                            if (kiln_c99_shape_find_slot(candidate->shape, key, &slot)) {
-                                if (slot < candidate->slot_capacity && candidate->slots[slot] == method) {
-                                    step = candidate;
-                                }
-                                break;
-                            }
-                        } else {
-                            /* A list-mode holder: the record is valid while it carries this
-                             * key pointer, so only a record keyed by the interned pointer the
-                             * site resolved with is remembered. An intermediate in list mode
-                             * cannot promise it has not gained the key, so the walk stops. */
-                            size_t i;
-                            int seen = 0;
-                            for (i = 0; i < candidate->count; ++i) {
-                                const kiln_property *property = &candidate->properties[i];
-                                if (property->key == key || kiln_string_equal(property->key, key)) {
-                                    seen = 1;
-                                    if (property->key == key && !property->accessor &&
-                                        !property->refused &&
-                                        kiln_val_from_boundary(property->value) == method) {
-                                        step = candidate;
-                                        slot = (uint32_t)i;
-                                        holder_key = property->key;
-                                        remembered.holder_value = property->value;
-                                        remembered.holder_val = method;
-                                    }
-                                    break;
-                                }
-                            }
-                            (void)seen;
-                            break;
-                        }
-                        via = candidate;
-                        link = candidate->prototype;
-                    }
-                    if (step != NULL) {
-                        remembered.holder = step;
-                        remembered.holder_shape = step->shape;
-                        remembered.holder_key = holder_key;
-                        remembered.holder_slot = slot;
-                        remembered.epoch = kiln_c99_proto_epoch;
-                        ((kiln_object *)step)->cache_holder = 1;
-                        if (via != NULL) {
-                            remembered.via = via;
-                            remembered.via_shape = via->shape;
-                            ((kiln_object *)via)->cache_holder = 1;
-                        }
+                    const kiln_object *holder = NULL;
+                    kiln_val found;
+                    if (kiln_c99_pic_learn_path(&remembered, object, key, &holder) !=
+                            KILN_C99_PATH_FOUND ||
+                        !kiln_c99_pic_inherited(&remembered, object, &found) || found != method) {
+                        memset(&remembered, 0, sizeof remembered);
+                        remembered.shape = object->shape;
+                        remembered.slot = UINT32_MAX;
                     }
                 }
-                for (p = 0; p < site->pic_count; ++p) {
-                    if (site->entries[p].shape == object->shape) {
-                        site->entries[p] = remembered;
-                        found = 1;
-                        break;
-                    }
-                }
-                if (!found) {
-                    if (site->pic_count < KILN_C99_PIC_SIZE) {
-                        site->entries[site->pic_count] = remembered;
-                        site->pic_count += 1;
-                    } else {
-                        site->entries[KILN_C99_PIC_SIZE - 1] = remembered;
-                    }
-                }
-                if (remembered.holder != NULL) kiln_c99_gc_register_site(site);
+                kiln_c99_site_remember(site, &remembered);
             }
         }
     }

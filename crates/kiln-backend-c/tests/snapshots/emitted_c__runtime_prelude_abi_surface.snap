@@ -1,6 +1,5 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 804
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -936,7 +935,12 @@ typedef struct kiln_shape {
 typedef struct kiln_property {
 #define KILN_C99_INLINE_SLOTS 16
 typedef struct kiln_object {
-static uint64_t kiln_c99_proto_epoch;
+static uint64_t kiln_c99_builtin_store_epoch;
+#ifdef KILN_SEPARATE_PRELUDE
+extern int kiln_c99_realm_builtin_modified(uint32_t builtin);
+#else
+static int kiln_c99_realm_builtin_modified(uint32_t builtin);
+#endif
 static inline void kiln_c99_prototype_touched(const kiln_object *object) {
 #define KILN_C99_MAX_PROTOTYPE_DEPTH 10000
 #define KILN_C99_PIC_SIZE 8
@@ -944,12 +948,15 @@ typedef struct kiln_c99_pic_entry {
 typedef struct kiln_c99_site {
 typedef struct kiln_c99_private_site {
 static inline uint32_t kiln_c99_site_slot_for(const kiln_c99_site *site, const kiln_shape *shape) {
-static inline int kiln_c99_site_validate_holder_val(const kiln_c99_pic_entry *entry, const kiln_object *obj, kiln_val *out) {
-static inline kiln_val kiln_c99_site_validate_holder(const kiln_c99_pic_entry *entry, const kiln_object *obj) {
-static inline int kiln_c99_site_callee_is_inherited(const kiln_c99_site *site, const kiln_object *obj) {
-static inline kiln_val kiln_c99_site_cached_callee(const kiln_c99_site *site, const kiln_object *obj) {
+static KILN_ALWAYS_INLINE inline const kiln_object *kiln_c99_pic_path(const kiln_c99_pic_entry *entry,
+static inline int kiln_c99_object_prototype_unmodified(void) {
+#ifdef KILN_IC_CHECK
+static __attribute__((noinline)) void kiln_c99_pic_oracle(const kiln_c99_pic_entry *entry,
+#endif
+static KILN_ALWAYS_INLINE inline int kiln_c99_pic_inherited(const kiln_c99_pic_entry *entry, const kiln_object *obj,
 #ifdef KILN_IC_CHECK
 #endif
+static KILN_ALWAYS_INLINE inline kiln_val kiln_c99_site_cached_callee(const kiln_c99_site *site, const kiln_object *obj) {
 __attribute__((noinline, cold)) static double kiln_c99_int_slow(double value) {
 #define KILN_C99_SITE_NONE 0xFFFFFFFFu
 #define KILN_C99_SITE_GIVE_UP 8u
@@ -1588,6 +1595,7 @@ static const size_t kiln_c99_hot_key_len[KILN_C99_HOT_KEY_COUNT] = {
 typedef struct kiln_nursery_chunk {
 typedef struct kiln_gc_nursery {
 typedef struct kiln_c99_local_edge {
+#define KILN_C99_MODIFIED_BUILTIN_WORDS 2
 typedef struct kiln_gc_heap {
 static const kiln_gc_hooks kiln_c99_gc_hooks;
 static kiln_gc_heap kiln_c99_gc_fallback;
@@ -1687,8 +1695,17 @@ __attribute__((noinline)) static void kiln_c99_gc_scan_from_here(kiln_gc_heap *h
 static void kiln_c99_gc_scan_stack(kiln_gc_heap *heap) {
 #if defined(__GNUC__) || defined(__clang__)
 #endif
+static int kiln_c99_site_pointer_order(const void *left, const void *right) {
 static void kiln_c99_gc_register_site(kiln_c99_site *site) {
-static void kiln_c99_gc_clear_dead_sites(kiln_gc_heap *heap) {
+static int kiln_c99_shape_is_local(const kiln_shape *shape) {
+static int kiln_c99_key_is_shared(const kiln_string *ikey);
+static int kiln_c99_pic_entry_is_local(const kiln_c99_pic_entry *entry) {
+static void kiln_c99_site_learned(kiln_c99_site *site) {
+static void kiln_c99_gc_forget_realm_local(kiln_gc_heap *heap) {
+static void kiln_c99_site_remember(kiln_c99_site *site, const kiln_c99_pic_entry *entry) {
+static void kiln_c99_site_remember_own(kiln_c99_site *site, const kiln_shape *shape,
+static void kiln_c99_site_remember_transition(kiln_c99_site *site, const kiln_shape *from,
+static int kiln_c99_pic_name_level(const kiln_object *level, const kiln_shape **shape,
 static void kiln_c99_gc_collect(void *opaque, int force);
 static void kiln_c99_gc_collect_mid_turn(kiln_gc_heap *heap) {
 static int kiln_c99_nursery_fresh_chunk(kiln_gc_heap *heap) {
@@ -1856,6 +1873,10 @@ static size_t kiln_c99_own_index_key(const kiln_object *object, const kiln_strin
 static size_t kiln_c99_own_index(const kiln_object *object, const kiln_string *ikey,
 static int kiln_c99_has_inherited_setter_or_readonly(kiln_value proto) {
 static int kiln_c99_inherited_write_blocked(kiln_value proto, const kiln_string *ikey,
+#define KILN_C99_PATH_NONE 0
+#define KILN_C99_PATH_FOUND 1
+#define KILN_C99_PATH_ABSENT 2
+static int kiln_c99_pic_learn_path(kiln_c99_pic_entry *entry, const kiln_object *object,
 static __attribute__((noinline)) int kiln_c99_transition_store_clear_slow(
 static inline int kiln_c99_transition_store_clear(kiln_c99_site *site, kiln_c99_pic_entry *entry,
 #ifdef KILN_IC_CHECK
@@ -2232,7 +2253,10 @@ int kiln_c99_get_array_unscopables(kiln_value *out) {
 static int kiln_c99_function_store(kiln_value function, kiln_value *out) {
 static kiln_method_store *kiln_c99_fixture_method_stores;
 static void kiln_c99_drop_callable_store(void *pointer) {
-static uint64_t kiln_c99_builtin_store_epoch;
+typedef char kiln_c99_object_prototype_is_18[KILN_C99_BUILTIN_OBJECT_PROTOTYPE == 18 ? 1 : -1];
+static void kiln_c99_realm_note_builtin_store(uint32_t builtin) {
+static int kiln_c99_realm_marked_builtin(const kiln_gc_heap *heap, uint32_t builtin) {
+static int kiln_c99_realm_builtin_modified(uint32_t builtin) {
 static int kiln_c99_callable_store(kiln_value callable, kiln_value *out, int create) {
 static int kiln_c99_store_get_key(kiln_host *host, kiln_value target,
 static int kiln_c99_proxy_trap(kiln_host *host, kiln_value proxy, const char *name,

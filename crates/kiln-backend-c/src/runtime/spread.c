@@ -86,8 +86,8 @@ static inline void kiln_c99_define_named_teach(kiln_c99_site *site, const kiln_s
     entry->shape = from;
     entry->transition_to = to;
     entry->slot = slot;
-    entry->holder_slot = UINT32_MAX;
     site->pic_count = 1;
+    kiln_c99_site_learned(site);
 }
 
 static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val value, int *status,

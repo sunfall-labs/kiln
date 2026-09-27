@@ -4592,12 +4592,12 @@ pub fn runtime_prelude_header() -> &'static str {
     static FOR_UNITS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     FOR_UNITS.get_or_init(|| {
         let mut text = PRELUDE_HEADER.replace(
-            "static uint64_t kiln_c99_proto_epoch;",
-            "extern uint64_t kiln_c99_proto_epoch __attribute__((visibility(\"hidden\")));",
+            "static uint64_t kiln_c99_builtin_store_epoch;",
+            "extern uint64_t kiln_c99_builtin_store_epoch __attribute__((visibility(\"hidden\")));",
         );
         assert!(
             text != PRELUDE_HEADER,
-            "the prototype epoch's definition moved"
+            "the built-in store summary's definition moved"
         );
         let json_document =
             "static int kiln_c99_json_document(const kiln_string *source, kiln_val *out);";
@@ -4679,7 +4679,6 @@ fn build_runtime_prelude_source(src: &str) -> String {
         "kiln_c99_process",
         "kiln_c99_atomics",
         "kiln_c99_builtin_store_epoch",
-        "kiln_c99_proto_epoch",
     ];
 
     for line in src.lines() {
@@ -4778,9 +4777,10 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ),
     // Per thread, and trusted only under the realm generation it was filled under.
     ("kiln_c99_realm_cached", C99StateOwner::Realm),
-    ("kiln_c99_builtin_store_epoch", C99StateOwner::Realm),
+    // ADR 0071: only whether *some* realm has modified *some* built-in; which ones a realm has
+    // modified is on its heap, and no cache entry holds a value of this.
+    ("kiln_c99_builtin_store_epoch", C99StateOwner::Process),
     ("kiln_c99_bytes_cache", C99StateOwner::Realm),
-    ("kiln_c99_proto_epoch", C99StateOwner::Realm),
     // Per thread, and trusted only for the heap it was built under: the `node:http` layouts.
     ("kiln_c99_node_http_layouts", C99StateOwner::Realm),
     ("kiln_c99_gc_stress_checks", C99StateOwner::Process),

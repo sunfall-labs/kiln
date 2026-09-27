@@ -1225,7 +1225,7 @@ pub(super) fn emit_graph_op(
                     }
                     writeln!(
                         output,
-                        "    {{ static const kiln_shape *lit_shape = NULL; kiln_value built; int status = kiln_c99_new_object(&built); if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; kiln_object *obj = kiln_c99_object_of(built); {mask_expr}if (KILN_LIKELY(lit_shape != NULL{mask_guard})) {{{direct_stores} obj->shape = (kiln_shape *)lit_shape; }} else {{{defines} if (status == KILN_C99_OK && obj->shape != NULL) lit_shape = obj->shape; }} v{v} = kiln_val_from_boundary(built); }}"
+                        "    {{ static const kiln_shape *lit_shape = NULL; kiln_value built; int status = kiln_c99_new_object(&built); if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; kiln_object *obj = kiln_c99_object_of(built); {mask_expr}if (KILN_LIKELY(lit_shape != NULL{mask_guard})) {{{direct_stores} obj->shape = (kiln_shape *)lit_shape; }} else {{{defines} if (status == KILN_C99_OK && obj->shape != NULL && obj->shape->shared) lit_shape = obj->shape; }} v{v} = kiln_val_from_boundary(built); }}"
                     ).unwrap();
                     return;
                 }
@@ -1570,7 +1570,7 @@ fn emit_sunk_bridge(
             }
             writeln!(
                 output,
-                "    if (KILN_UNLIKELY(kiln_sp_src->shape != kiln_sp_shape_{v})) {{ kiln_sp_shape_{v} = kiln_sp_src->shape;{relearn} }}"
+                "    if (KILN_UNLIKELY(kiln_sp_src->shape != kiln_sp_shape_{v})) {{ kiln_sp_shape_{v} = kiln_sp_src->shape->shared ? kiln_sp_src->shape : NULL;{relearn} }}"
             )
             .unwrap();
             for &field_idx in scalar_obj.fields.values() {

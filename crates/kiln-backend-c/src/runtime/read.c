@@ -1885,19 +1885,12 @@ static int kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object,
         uint32_t slot;
         if (kiln_c99_shape_find_slot(object->shape, canonical, &slot)) {
             uint32_t p;
+            int found = 0;
             for (p = 0; p < site->pic_count; ++p) {
-                if (site->entries[p].shape == object->shape) {
-                    site->entries[p].slot = slot;
-                    site->entries[p].transition_to = NULL;
-                    return 1;
-                }
+                if (site->entries[p].shape == object->shape) found = 1;
             }
-            if (site->pic_count < KILN_C99_PIC_SIZE) {
-                site->entries[site->pic_count].shape = object->shape;
-                site->entries[site->pic_count].transition_to = NULL;
-                site->entries[site->pic_count].slot = slot;
-                site->pic_count += 1;
-                return 1;
+            if (found || site->pic_count < KILN_C99_PIC_SIZE) {
+                kiln_c99_site_remember_own(site, object->shape, slot);
             }
             return 1;
         }
@@ -1954,10 +1947,7 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const kiln_stri
                     if (slot < object->slot_capacity) {
                         *out = kiln_val_to_boundary(object->slots[slot]);
                         if (site->pic_count < KILN_C99_PIC_SIZE) {
-                            site->entries[site->pic_count].shape = object->shape;
-                            site->entries[site->pic_count].transition_to = NULL;
-                            site->entries[site->pic_count].slot = slot;
-                            site->pic_count += 1;
+                            kiln_c99_site_remember_own(site, object->shape, slot);
                         }
                         return KILN_C99_OK;
                     }

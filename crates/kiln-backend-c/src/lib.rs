@@ -1755,11 +1755,9 @@ fn render_functions(
                     if typed.typed_needs[i as usize].row {
                         writeln!(
                             target_buf,
-                            "static kiln_val {pfx}_fn = 0;\nstatic const kiln_shape *{pfx}_shape = NULL;\nstatic const uint32_t *{pfx}_row = NULL;\nstatic uint64_t {pfx}_proto = 0;\nstatic uint64_t {pfx}_epoch = UINT64_MAX;\nstatic kiln_val *{pfx}_upvalues = NULL;"
+                            "static const kiln_shape *{pfx}_shape = NULL;\nstatic const uint32_t *{pfx}_row = NULL;"
                         )
                         .unwrap();
-                    } else {
-                        writeln!(target_buf, "static kiln_val {pfx}_fn = 0;").unwrap();
                     }
                 }
             }
@@ -3462,19 +3460,11 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
             kiln_c99_pic_entry tmp = site->entries[0];\n\
             site->entries[0] = site->entries[i];\n\
             site->entries[i] = tmp;\n\
-            if (site->entries[0].holder == NULL) {\n\
+            {\n\
                 uint32_t slot = site->entries[0].slot;\n\
+                kiln_val answer;\n\
                 if (KILN_LIKELY(slot < obj->slot_capacity)) return obj->slots[slot];\n\
-                if (slot == UINT32_MAX && site->entries[0].epoch == kiln_c99_proto_epoch) return KILN_VAL_UNDEFINED;\n\
-            } else {\n\
-                const kiln_object *first = site->entries[0].via != NULL ? site->entries[0].via : site->entries[0].holder;\n\
-                if (KILN_LIKELY(site->entries[0].epoch == kiln_c99_proto_epoch && \
-                                obj->prototype.tag == KILN_VALUE_OBJECT && \
-                                (const kiln_object *)(uintptr_t)obj->prototype.bits == first)) {\n\
-                    return site->entries[0].holder_shape != NULL \
-                               ? site->entries[0].holder->slots[site->entries[0].holder_slot] \
-                               : site->entries[0].holder_val;\n\
-                }\n\
+                if (kiln_c99_pic_inherited(&site->entries[0], obj, &answer)) return answer;\n\
             }\n\
         }\n\
     }\n\
@@ -3486,25 +3476,12 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
     if (KILN_LIKELY(ku_s != NULL && ku_s->entries[0].shape != NULL && KILN_VAL_IS_OBJECT(ku_t))) { \\\n\
         const kiln_object *ku_obj = (const kiln_object *)KILN_VAL_PTR(ku_t); \\\n\
         if (KILN_LIKELY(ku_obj != NULL && ku_obj->shape == ku_s->entries[0].shape)) { \\\n\
-            if (KILN_LIKELY(ku_s->entries[0].holder == NULL)) { \\\n\
-                uint32_t ku_s0 = ku_s->entries[0].slot; \\\n\
-                if (KILN_LIKELY(ku_s0 < ku_obj->slot_capacity)) { \\\n\
-                    (DST) = ku_obj->slots[ku_s0]; \\\n\
-                    break; \\\n\
-                } else if (ku_s0 == UINT32_MAX && ku_s->entries[0].epoch == kiln_c99_proto_epoch) { \\\n\
-                    (DST) = KILN_VAL_UNDEFINED; \\\n\
-                    break; \\\n\
-                } \\\n\
-            } else { \\\n\
-                const kiln_object *ku_first = ku_s->entries[0].via != NULL ? ku_s->entries[0].via : ku_s->entries[0].holder; \\\n\
-                if (KILN_LIKELY(ku_s->entries[0].epoch == kiln_c99_proto_epoch && \\\n\
-                                ku_obj->prototype.tag == KILN_VALUE_OBJECT && \\\n\
-                                (const kiln_object *)(uintptr_t)ku_obj->prototype.bits == ku_first)) { \\\n\
-                    (DST) = ku_s->entries[0].holder_shape != NULL \\\n\
-                                ? ku_s->entries[0].holder->slots[ku_s->entries[0].holder_slot] \\\n\
-                                : ku_s->entries[0].holder_val; \\\n\
-                    break; \\\n\
-                } \\\n\
+            uint32_t ku_s0 = ku_s->entries[0].slot; \\\n\
+            if (KILN_LIKELY(ku_s0 < ku_obj->slot_capacity)) { \\\n\
+                (DST) = ku_obj->slots[ku_s0]; \\\n\
+                break; \\\n\
+            } else if (kiln_c99_pic_inherited(&ku_s->entries[0], ku_obj, &(DST))) { \\\n\
+                break; \\\n\
             } \\\n\
         } else if (ku_obj != NULL && ku_s->pic_count > 1) { \\\n\
             kiln_val ku_pv = ku_pic_poly_read(ku_obj, ku_s); \\\n\
@@ -3684,7 +3661,7 @@ static __attribute__((unused)) inline int ku_new_object_literal_fast(kiln_val *o
     int status = kiln_c99_val_new_object_literal(out, pairs, count);\n\
     if (KILN_LIKELY(status == KILN_C99_OK && count <= KILN_C99_INLINE_SLOTS && KILN_VAL_IS_OBJECT(*out))) {\n\
         kiln_object *obj = (kiln_object *)KILN_VAL_PTR(*out);\n\
-        if (obj->shape != NULL && obj->slots == obj->inline_slots) {\n\
+        if (obj->shape != NULL && obj->shape->shared && obj->slots == obj->inline_slots) {\n\
             *lit_shape = obj->shape;\n\
         }\n\
     }\n\
