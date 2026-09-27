@@ -3970,9 +3970,17 @@ mod http_stubs {
 #[cfg(not(feature = "realm-http"))]
 pub use http_stubs::*;
 
-fn set_timer(
-    repeating: bool,
-    delay_ms: f64,
+/// What [`arm`] schedules, in one of the realm's three macrotask lanes (`kiln_runtime::Realm`).
+#[derive(Clone, Copy)]
+enum Arm {
+    Timeout(f64),
+    Interval(f64),
+    Immediate,
+    Io,
+}
+
+fn arm(
+    arm: Arm,
     run: Option<RunWork>,
     drop: Option<DropWork>,
     work: *mut c_void,
@@ -3988,18 +3996,21 @@ fn set_timer(
         let Ok(mut queue) = realm.work.try_borrow_mut() else {
             return RUNTIME_ERROR;
         };
-        let Some(work) = NativeWork::new(work, run, drop, repeating) else {
+        let Some(work) = NativeWork::new(work, run, drop, matches!(arm, Arm::Interval(_))) else {
             return INVALID_ARGUMENT;
         };
-        let delay = if delay_ms.is_finite() && delay_ms > 0.0 {
-            duration_from_milliseconds(delay_ms)
-        } else {
-            std::time::Duration::ZERO
+        let delay = |delay_ms: f64| {
+            if delay_ms.is_finite() && delay_ms > 0.0 {
+                duration_from_milliseconds(delay_ms)
+            } else {
+                std::time::Duration::ZERO
+            }
         };
-        let id = if repeating {
-            queue.set_interval(delay, work)
-        } else {
-            queue.set_timeout(delay, work)
+        let id = match arm {
+            Arm::Timeout(delay_ms) => queue.set_timeout(delay(delay_ms), work),
+            Arm::Interval(delay_ms) => queue.set_interval(delay(delay_ms), work),
+            Arm::Immediate => queue.set_immediate(work),
+            Arm::Io => queue.queue_io(work),
         };
         std::mem::drop(queue);
         // A timer armed from inside a connection's callback (ADR 0046) changes what the
@@ -4028,7 +4039,7 @@ pub unsafe extern "C" fn kiln_realm_set_timeout(
     work: *mut c_void,
     out_id: *mut u64,
 ) -> i32 {
-    set_timer(false, delay_ms, run, drop, work, out_id)
+    arm(Arm::Timeout(delay_ms), run, drop, work, out_id)
 }
 
 /// Schedules one opaque interval on the active Realm.
@@ -4044,7 +4055,38 @@ pub unsafe extern "C" fn kiln_realm_set_interval(
     work: *mut c_void,
     out_id: *mut u64,
 ) -> i32 {
-    set_timer(true, delay_ms, run, drop, work, out_id)
+    arm(Arm::Interval(delay_ms), run, drop, work, out_id)
+}
+
+/// Queues one opaque `setImmediate` callback on the active Realm: node's check phase.
+///
+/// # Safety
+///
+/// `out_id` must be writable and `work` must satisfy the callback ownership contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_set_immediate(
+    run: Option<RunWork>,
+    drop: Option<DropWork>,
+    work: *mut c_void,
+    out_id: *mut u64,
+) -> i32 {
+    arm(Arm::Immediate, run, drop, work, out_id)
+}
+
+/// Queues one opaque I/O callback on the active Realm: node's poll phase, where a message port
+/// delivers (`__kilnQueueIo`).
+///
+/// # Safety
+///
+/// `out_id` must be writable and `work` must satisfy the callback ownership contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_queue_io(
+    run: Option<RunWork>,
+    drop: Option<DropWork>,
+    work: *mut c_void,
+    out_id: *mut u64,
+) -> i32 {
+    arm(Arm::Io, run, drop, work, out_id)
 }
 
 /// Cancels a timeout or interval on the active Realm. Unknown identities are a no-op.
@@ -4226,6 +4268,9 @@ macro_rules! assert_provider_export {
         };
         (realm, $name:ident, realm_set_timer) => {
             const _: unsafe extern "C" fn(f64, Option<RunWork>, Option<DropWork>, *mut c_void, *mut u64) -> i32 = $name;
+        };
+        (realm, $name:ident, realm_queue_macrotask) => {
+            const _: unsafe extern "C" fn(Option<RunWork>, Option<DropWork>, *mut c_void, *mut u64) -> i32 = $name;
         };
         (realm, kiln_realm_clear_timer, realm_clear_timer) => {
             const _: extern "C" fn(u64) -> i32 = kiln_realm_clear_timer;

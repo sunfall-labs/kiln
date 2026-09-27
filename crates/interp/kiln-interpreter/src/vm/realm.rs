@@ -832,6 +832,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // Whether a microtask checkpoint would run anything now, which message delivery
             // (`kiln-builtins/src/web_events_streams.ts`) asks before its next message.
             ("__kilnJobsPending", Native::JobsPendingRaw),
+            // The poll phase's lane, where message delivery (the same file) is queued.
+            ("__kilnQueueIo", Native::QueueIoRaw),
         ] {
             globals.set_non_enumerable(name, Value::Native(native, realm));
         }

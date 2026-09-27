@@ -567,6 +567,8 @@ static void kiln_c99_drop_timer(void *work);
 static int (*kiln_c99_timer_direct_run(kiln_value callback, void **work))(void *work, void *host,
                                                                          void *thrown);
 static void kiln_c99_drop_timer_value(void *work);
+static int kiln_c99_arm_timer(uint64_t code, double delay, kiln_realm_work_fn run,
+                              kiln_realm_drop_fn drop, void *work, uint64_t *id);
 static int kiln_c99_schedule(kiln_promise *promise, const kiln_reaction *reaction);
 static int kiln_c99_promise_add_reaction(kiln_promise *promise, const kiln_reaction *reaction);
 static int kiln_c99_react(kiln_value promise, kiln_value on_fulfilled, kiln_value on_rejected);

@@ -3011,6 +3011,7 @@ pub(crate) fn call_native(
         | Native::UrlFastRaw
         | Native::UrlAdoptRaw
         | Native::JobsPendingRaw
+        | Native::QueueIoRaw
         | Native::ProcessStdinSetRawMode
         | Native::UrlConstructor
         | Native::UrlSearchParamsGet

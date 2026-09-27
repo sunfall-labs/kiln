@@ -2278,10 +2278,15 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         }
         case KILN_C99_METHOD_SET_TIMEOUT:
         case KILN_C99_METHOD_SET_INTERVAL:
-        case KILN_C99_METHOD_SET_IMMEDIATE: {
+        case KILN_C99_METHOD_SET_IMMEDIATE:
+        case KILN_C99_METHOD_QUEUE_IO_RAW: {
             kiln_timer *entry;
             double delay = 0.0;
-            if (code != KILN_C99_METHOD_SET_IMMEDIATE && argc > 1) {
+            /* An immediate and an I/O callback (`__kilnQueueIo`) have no delay, so their
+             * arguments start one earlier. */
+            int undelayed =
+                code == KILN_C99_METHOD_SET_IMMEDIATE || code == KILN_C99_METHOD_QUEUE_IO_RAW;
+            if (!undelayed && argc > 1) {
                 status = kiln_c99_to_number_checked(host, args[1], &delay, depth, thrown);
                 if (status != KILN_C99_OK) {
                     return status;
@@ -2296,17 +2301,13 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             {
                 /* No arguments past the delay, and a heap function: the function is the work
                  * (see `kiln_c99_timer_direct_run`). */
-                size_t extra = code == KILN_C99_METHOD_SET_IMMEDIATE ? (argc > 1 ? argc - 1 : 0)
-                                                                     : (argc > 2 ? argc - 2 : 0);
+                size_t extra = undelayed ? (argc > 1 ? argc - 1 : 0) : (argc > 2 ? argc - 2 : 0);
                 void *work = NULL;
                 int (*direct)(void *, void *, void *) =
                     extra == 0 && argc > 0 ? kiln_c99_timer_direct_run(args[0], &work) : NULL;
                 if (direct != NULL) {
-                    status = code == KILN_C99_METHOD_SET_INTERVAL
-                                 ? kiln_realm_set_interval(delay, direct, kiln_c99_drop_timer_value,
-                                                           work, &id)
-                                 : kiln_realm_set_timeout(delay, direct, kiln_c99_drop_timer_value,
-                                                          work, &id);
+                    status = kiln_c99_arm_timer(code, delay, direct, kiln_c99_drop_timer_value,
+                                                work, &id);
                     if (status != KILN_C99_OK) return status;
                     *result = kiln_c99_number((double)id);
                     return KILN_C99_OK;
@@ -2319,9 +2320,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             entry->callback = argc > 0 ? args[0] : kiln_c99_undefined();
             /* Everything after the delay is handed to the callback, which is how a timer carries
              * state without a closure. */
-            entry->argc = code == KILN_C99_METHOD_SET_IMMEDIATE
-                              ? (argc > 1 ? argc - 1 : 0)
-                              : (argc > 2 ? argc - 2 : 0);
+            entry->argc = undelayed ? (argc > 1 ? argc - 1 : 0) : (argc > 2 ? argc - 2 : 0);
             entry->args = NULL;
             if (entry->argc != 0) {
                 entry->args = (kiln_value *)malloc(entry->argc * sizeof *entry->args);
@@ -2330,14 +2329,11 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     return KILN_C99_OUT_OF_MEMORY;
                 }
                 memcpy(entry->args,
-                       args + (code == KILN_C99_METHOD_SET_IMMEDIATE ? 1 : 2),
+                       args + (undelayed ? 1 : 2),
                        entry->argc * sizeof *entry->args);
             }
-            status = code == KILN_C99_METHOD_SET_INTERVAL
-                         ? kiln_realm_set_interval(delay, kiln_c99_run_timer,
-                                                   kiln_c99_drop_timer, entry, &id)
-                         : kiln_realm_set_timeout(delay, kiln_c99_run_timer,
-                                                  kiln_c99_drop_timer, entry, &id);
+            status = kiln_c99_arm_timer(code, delay, kiln_c99_run_timer, kiln_c99_drop_timer,
+                                        entry, &id);
             if (status != KILN_C99_OK) {
                 kiln_c99_drop_timer(entry);
                 return status;

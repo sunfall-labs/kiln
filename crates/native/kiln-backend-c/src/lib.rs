@@ -297,6 +297,9 @@ macro_rules! provider_c_declaration {
     ($group:ident, $name:ident, realm_set_timer) => {
         concat!("int ", stringify!($name), "(double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work, uint64_t *out_id);\n")
     };
+    ($group:ident, $name:ident, realm_queue_macrotask) => {
+        concat!("int ", stringify!($name), "(kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work, uint64_t *out_id);\n")
+    };
     ($group:ident, $name:ident, realm_start_active_host_op) => {
         concat!("int ", stringify!($name), "(const kiln_async_host_op *operation, kiln_realm_completion_fn run, kiln_realm_drop_fn drop, void *work, uint64_t *out_request);\n")
     };
@@ -1793,7 +1796,11 @@ fn render_functions(
                         )
                         .unwrap();
                     }
-                    writeln!(target_buf, "static kiln_c99_method_path {pfx}_path = KILN_C99_UNLEARNED_METHOD_PATH;").unwrap();
+                    writeln!(
+                        target_buf,
+                        "static kiln_c99_method_path {pfx}_path = KILN_C99_UNLEARNED_METHOD_PATH;"
+                    )
+                    .unwrap();
                 }
             }
         }

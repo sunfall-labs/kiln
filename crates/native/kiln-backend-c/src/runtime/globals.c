@@ -474,6 +474,7 @@ static int kiln_c99_global_object(kiln_value *out) {
                      {"__kilnCloneData", KILN_C99_METHOD_CLONE_DATA_RAW},
                      /* Message delivery's checkpoint question, captured the same way. */
                      {"__kilnJobsPending", KILN_C99_METHOD_JOBS_PENDING_RAW},
+                     {"__kilnQueueIo", KILN_C99_METHOD_QUEUE_IO_RAW},
                      /* `Buffer.prototype.toString`'s decoder, captured by the shared Buffer
                       * bootstrap (kiln-builtins/src/buffer.ts) without a call: the bootstrap
                       * runs in every Node-mode program, and a call into the Buffer group would
