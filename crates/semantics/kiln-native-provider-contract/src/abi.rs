@@ -118,6 +118,8 @@ macro_rules! provider_abi_registry {
             (realm, kiln_realm_set_promise_lane, realm_set_promise_lane);
             (realm, kiln_realm_set_timeout, realm_set_timer);
             (realm, kiln_realm_set_interval, realm_set_timer);
+            (realm, kiln_realm_set_immediate, realm_queue_macrotask);
+            (realm, kiln_realm_queue_io, realm_queue_macrotask);
             (realm, kiln_realm_clear_timer, realm_clear_timer);
             (realm, kiln_realm_drive, realm_drive);
             (realm, kiln_realm_destroy, realm_destroy);
@@ -205,7 +207,7 @@ macro_rules! provider_export_names {
 }
 
 /// Version of the private provider ABI represented by [`provider_abi_registry!`].
-pub const PROVIDER_ABI_VERSION: u32 = 42;
+pub const PROVIDER_ABI_VERSION: u32 = 43;
 
 /// Canonical ordered export names required in a packaged provider manifest.
 pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_names);
@@ -224,9 +226,11 @@ mod tests {
 
     #[test]
     fn registry_has_the_packaged_contract_shape() {
-        // 42 and 114 exports: `kiln_realm_process_shared` joined when shared keys and shapes
-        // (ADR 0071) moved into one process-wide block every unit reaches through the archive.
-        // Before that, 35 keeps the same export set but adds the distinct boolean scalar kind to node:ffi;
+        // 43 and 116 exports: `kiln_realm_set_immediate` and `kiln_realm_queue_io` joined when
+        // the realm gained node's check and poll lanes beside its timers, so an immediate and a
+        // message port's delivery each run in their own phase of a turn. Before that, 42 and 114:
+        // `kiln_realm_process_shared` joined when shared keys and shapes (ADR 0071) moved into one
+        // process-wide block every unit reaches through the archive. Before that, 35 keeps the same export set but adds the distinct boolean scalar kind to node:ffi;
         // an older provider would interpret that kind as unsupported. Before that, 34 and 97
         // exports added the seven node:ffi provider operations. Before that, 33 and 90 exports:
         // `kiln_realm_set_promise_lane` joined when the promise job queue
@@ -243,8 +247,8 @@ mod tests {
         // one realm the other's cache. A shipped archive built before any of these does not export
         // the newer symbol, and the version is how a resolver knows to rebuild rather than to fail
         // at link time.
-        assert_eq!(PROVIDER_ABI_VERSION, 42);
-        assert_eq!(PROVIDER_EXPORTS.len(), 114);
+        assert_eq!(PROVIDER_ABI_VERSION, 43);
+        assert_eq!(PROVIDER_EXPORTS.len(), 116);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_ffi_last_error"));
     }

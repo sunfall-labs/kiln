@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::error::{Error, Result};
-use kiln_proto::{NativeProfile, StepBudget};
+use kiln_proto::{NativeProfile, RecordedWorkers, StepBudget};
 
 // `--interval` outlived the poll it was written for, but it now names the debounce window
 // rather than a cadence. Dropping it was the alternative, and it was tempting: one fewer
@@ -52,6 +52,10 @@ pub enum Command {
     Check {
         path: PathBuf,
         node: bool,
+        /// `--explain-parallel`: after the check, report every `parallelMap` site of the native
+        /// build at this profile and what it decided, from the build's own emission (stopped
+        /// before the C compiler). `None` without the flag.
+        explain_parallel: Option<NativeProfile>,
     },
     Run {
         path: PathBuf,
@@ -79,6 +83,8 @@ pub enum Command {
         explain: bool,
         /// Build a binary that never installs kiln's own members (ADR 0068).
         no_kiln_extensions: bool,
+        /// The worker count the binary uses when `KILN_WORKERS` is unset: `--workers=<n|auto>`.
+        workers: Option<RecordedWorkers>,
         /// Print only the `parallelMap` section of the explanation: every call site, whether
         /// it runs in parallel, and the rule that kept it sequential when it does not.
         explain_parallel: bool,
@@ -144,7 +150,7 @@ where
     let mut test_output: Option<PathBuf> = None;
     let mut profile: Option<NativeProfile> = None;
     let mut max_steps: Option<u64> = None;
-    let mut workers: Option<usize> = None;
+    let mut workers: Option<String> = None;
     let mut shared = false;
     let mut march_native = false;
     let mut explain = false;
@@ -251,16 +257,8 @@ where
                 max_steps = Some(parse_max_steps(&raw)?);
             }
             "--workers" => {
-                let raw = value_for(&flag, inline, &mut args)?;
-                let count: usize = raw.parse().map_err(|_| {
-                    Error::usage(format!(
-                        "invalid worker count `{raw}`: expected a positive integer"
-                    ))
-                })?;
-                if count == 0 {
-                    return Err(Error::usage("worker count must be at least 1"));
-                }
-                workers = Some(count);
+                // Validated below, once the command says whether `auto` means anything.
+                workers = Some(value_for(&flag, inline, &mut args)?);
             }
             "--explain" => {
                 explain = true;
@@ -344,9 +342,9 @@ where
             "--node cannot be combined with `kiln test --parse-only`",
         ));
     }
-    if profile.is_some() && name != "build" && !native {
+    if profile.is_some() && name != "build" && !native && !(name == "check" && explain_parallel) {
         return Err(Error::usage(
-            "--profile only applies to native `kiln run` or `kiln build`",
+            "--profile only applies to native `kiln run`, `kiln build`, or `kiln check --explain-parallel`",
         ));
     }
     if march_native && name != "build" && !native {
@@ -379,8 +377,15 @@ where
             "--max-steps only applies to interpreted `kiln run`",
         ));
     }
-    if workers.is_some() && name != "run" {
-        return Err(Error::usage("--workers only applies to `kiln run`"));
+    if workers.is_some() && name != "run" && name != "build" {
+        return Err(Error::usage(
+            "--workers only applies to `kiln run` or `kiln build`",
+        ));
+    }
+    if workers.is_some() && shared {
+        return Err(Error::usage(
+            "--workers cannot be combined with `kiln build --shared`: a library has no launcher to record it in",
+        ));
     }
     if explain && name != "build" {
         return Err(Error::usage("--explain only applies to `kiln build`"));
@@ -398,9 +403,9 @@ where
             "--no-kiln-extensions cannot be combined with `kiln build --shared`",
         ));
     }
-    if explain_parallel && name != "build" {
+    if explain_parallel && name != "build" && name != "check" {
         return Err(Error::usage(
-            "--explain-parallel only applies to `kiln build`",
+            "--explain-parallel only applies to `kiln build` or `kiln check`",
         ));
     }
     // The native backend compiles the step counter out entirely, so a budget there would be a
@@ -415,6 +420,8 @@ where
         "check" => Command::Check {
             path: PathBuf::from(one_operand(&name, &mut positional)?),
             node,
+            // The default is `kiln build`'s, so the two explain the same build unless told not to.
+            explain_parallel: explain_parallel.then(|| profile.unwrap_or_default()),
         },
         "run" => {
             let Some(path) = positional.next() else {
@@ -428,7 +435,7 @@ where
                 native,
                 profile: profile.unwrap_or_default(),
                 steps: max_steps.map_or(StepBudget::Unmetered, StepBudget::Limited),
-                workers: workers.unwrap_or(1),
+                workers: workers.as_deref().map_or(Ok(1), parse_worker_count)?,
                 march_native,
                 static_link,
                 pgo_generate,
@@ -444,6 +451,7 @@ where
             march_native,
             explain,
             no_kiln_extensions,
+            workers: workers.as_deref().map(parse_recorded_workers).transpose()?,
             explain_parallel,
             static_link,
             pgo_generate,
@@ -664,6 +672,9 @@ options:
     --shared            with `build`, write a shared library for embedding
     --dry-run          with `cache gc`, report the sweep without deleting anything
     --output <path>    with `build`, write the native executable or shared library here
+    --explain-parallel with `build` or `check`, report every parallelMap call site and whether
+                       it runs in parallel, or the rule that kept it sequential.
+                       `check` answers without compiling; --profile picks the build
     --out <path>       with `test`, write schema-1 conformance results here
     --profile <name>   native-dev, native-check, native-release, native-release-size,
                        or native-profile (native-profile is native-release plus gprof
@@ -688,6 +699,38 @@ exit status:
     1    failure; for `daemon status`, no daemon is running
     2    the command line was wrong
 ";
+
+/// `kiln run --workers <n>`: how many realms the command itself runs.
+fn parse_worker_count(raw: &str) -> Result<usize> {
+    let count: usize = raw.parse().map_err(|_| {
+        Error::usage(format!(
+            "invalid worker count `{raw}`: expected a positive integer"
+        ))
+    })?;
+    if count == 0 {
+        return Err(Error::usage("worker count must be at least 1"));
+    }
+    Ok(count)
+}
+
+/// `kiln build --workers=<n|auto>`: the count recorded in the binary. `auto` is resolved where
+/// the binary runs; a number is taken as written, up to the launcher's own ceiling.
+fn parse_recorded_workers(raw: &str) -> Result<RecordedWorkers> {
+    if raw.eq_ignore_ascii_case("auto") {
+        return Ok(RecordedWorkers::Auto);
+    }
+    let count = parse_worker_count(raw).map_err(|_| {
+        Error::usage(format!(
+            "invalid worker count `{raw}`: expected `auto` or a positive integer"
+        ))
+    })?;
+    match u16::try_from(count) {
+        Ok(count @ 1..=1024) => Ok(RecordedWorkers::Count(count)),
+        _ => Err(Error::usage(format!(
+            "worker count `{raw}` is above the launcher's limit of 1024"
+        ))),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -722,6 +765,7 @@ mod tests {
             Command::Check {
                 path: PathBuf::from("a.js"),
                 node: false,
+                explain_parallel: None,
             }
         );
     }
@@ -747,6 +791,7 @@ mod tests {
                 explain_parallel: false,
                 explain: false,
                 no_kiln_extensions: false,
+                workers: None,
                 static_link: false,
                 pgo_generate: None,
                 pgo_use: None,
@@ -964,6 +1009,45 @@ mod tests {
             usage_error(&["run", "server.mjs", "--workers", "abc"]).contains("positive integer")
         );
         assert!(usage_error(&["check", "server.mjs", "--workers", "4"]).contains("only applies"));
+        assert!(
+            usage_error(&["run", "server.mjs", "--workers", "auto"]).contains("positive integer")
+        );
+    }
+
+    #[test]
+    fn build_workers_records_auto_or_a_count() {
+        assert!(matches!(
+            run(&["build", "server.mjs"]).command,
+            Command::Build { workers: None, .. }
+        ));
+        assert!(matches!(
+            run(&["build", "server.mjs", "--workers=auto"]).command,
+            Command::Build {
+                workers: Some(RecordedWorkers::Auto),
+                ..
+            }
+        ));
+        assert!(matches!(
+            run(&["build", "server.mjs", "--workers", "AUTO"]).command,
+            Command::Build {
+                workers: Some(RecordedWorkers::Auto),
+                ..
+            }
+        ));
+        assert!(matches!(
+            run(&["build", "server.mjs", "--workers=4"]).command,
+            Command::Build {
+                workers: Some(RecordedWorkers::Count(4)),
+                ..
+            }
+        ));
+        assert!(usage_error(&["build", "server.mjs", "--workers=0"]).contains("`auto` or"));
+        assert!(usage_error(&["build", "server.mjs", "--workers=many"]).contains("`auto` or"));
+        assert!(usage_error(&["build", "server.mjs", "--workers=2000"]).contains("1024"));
+        assert!(
+            usage_error(&["build", "lib.mjs", "--shared", "--workers=2"])
+                .contains("cannot be combined")
+        );
     }
 
     #[test]
@@ -1038,6 +1122,7 @@ mod tests {
             Command::Check {
                 path: PathBuf::from("--weird-name.js"),
                 node: false,
+                explain_parallel: None,
             }
         );
     }
@@ -1087,6 +1172,7 @@ mod tests {
                 explain_parallel: false,
                 explain: false,
                 no_kiln_extensions: false,
+                workers: None,
                 static_link: false,
                 pgo_generate: None,
                 pgo_use: None,
@@ -1104,6 +1190,7 @@ mod tests {
                 explain_parallel: false,
                 explain: false,
                 no_kiln_extensions: false,
+                workers: None,
                 static_link: false,
                 pgo_generate: None,
                 pgo_use: None,
@@ -1153,7 +1240,35 @@ mod tests {
     }
 
     #[test]
-    fn explain_parallel_option_parses_for_build_only() {
+    fn explain_parallel_option_parses_for_check_with_builds_profile() {
+        let check = |args: &[&str]| match run(args).command {
+            Command::Check {
+                explain_parallel, ..
+            } => explain_parallel,
+            other => panic!("expected check, got {other:?}"),
+        };
+        assert_eq!(check(&["check", "a.ts"]), None);
+        assert_eq!(
+            check(&["check", "a.ts", "--explain-parallel"]),
+            Some(NativeProfile::default())
+        );
+        assert_eq!(
+            check(&[
+                "check",
+                "a.ts",
+                "--explain-parallel",
+                "--profile",
+                "native-release"
+            ]),
+            Some(NativeProfile::Release)
+        );
+        assert!(
+            usage_error(&["check", "a.ts", "--profile", "native-release"]).contains("--profile")
+        );
+    }
+
+    #[test]
+    fn explain_parallel_option_parses_for_build_and_check() {
         let Command::Build {
             explain,
             explain_parallel,
@@ -1165,7 +1280,7 @@ mod tests {
         assert!(explain_parallel);
         assert!(!explain);
         assert!(usage_error(&["run", "a.js", "--explain-parallel"]).contains("only applies"));
-        assert!(usage_error(&["check", "a.js", "--explain-parallel"]).contains("only applies"));
+        assert!(usage_error(&["test", "dir", "--explain-parallel"]).contains("only applies"));
     }
 
     #[test]
@@ -1182,6 +1297,7 @@ mod tests {
                 explain_parallel: false,
                 explain: true,
                 no_kiln_extensions: false,
+                workers: None,
                 static_link: false,
                 pgo_generate: None,
                 pgo_use: None,
@@ -1204,6 +1320,7 @@ mod tests {
                 explain_parallel: false,
                 explain: false,
                 no_kiln_extensions: false,
+                workers: None,
                 static_link: true,
                 pgo_generate: None,
                 pgo_use: None,
@@ -1251,6 +1368,7 @@ mod tests {
                 explain_parallel: false,
                 explain: false,
                 no_kiln_extensions: false,
+                workers: None,
                 static_link: false,
                 pgo_generate: None,
                 pgo_use: Some(PathBuf::from("/tmp/pgo/profile.profdata")),

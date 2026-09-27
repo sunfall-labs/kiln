@@ -10,8 +10,8 @@ use kiln_module_eval::ModuleGraphExecution;
 use kiln_module_graph::ModuleGraph;
 use kiln_proto::{
     Diagnostic, FileId, ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary,
-    NativeSharedLibrarySummary, PROTOCOL_VERSION, ProjectSummary, Request, ResolutionMap, Response,
-    RunSummary, ScalarValueSummary, SourceView, Stats, StepBudget,
+    NativeSharedLibrarySummary, PROTOCOL_VERSION, ProjectSummary, RecordedWorkers, Request,
+    ResolutionMap, Response, RunSummary, ScalarValueSummary, SourceView, Stats, StepBudget,
 };
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -107,6 +107,7 @@ pub fn dispatch<E: QueryEngine>(engine: &mut E, request: Request) -> (Response, 
             | Request::NativeBuild { .. }
             | Request::NativeBuildAtRevision { .. }
             | Request::NativeSharedBuild { .. }
+            | Request::ExplainParallel { .. }
             | Request::NativeRun { .. }
             | Request::Project { .. }
     ) {
@@ -197,6 +198,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             source_view: _,
             explain,
             no_kiln_extensions,
+            workers,
             static_link,
             pgo_generate,
             pgo_use,
@@ -214,6 +216,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
                         node,
                         explain,
                         no_kiln_extensions,
+                        workers,
                         static_link,
                         pgo_gen,
                         pgo_u,
@@ -227,6 +230,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
                             profile,
                             explain,
                             no_kiln_extensions,
+                            workers,
                             static_link,
                             pgo_gen,
                             pgo_u,
@@ -238,6 +242,27 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
                 Next::Continue,
             )
         }
+        Request::ExplainParallel {
+            path,
+            project_root,
+            node,
+            profile,
+            source_view: _,
+        } => (
+            match native_graph(engine, resolutions, &path, &project_root, node) {
+                Ok(Some(graph)) => {
+                    native_explain_parallel_graph(&graph, &path, &project_root, profile, node)
+                }
+                Ok(None) => match native_program(engine, &path) {
+                    Ok(program) => {
+                        native_explain_parallel_program(&program, &path, &project_root, profile)
+                    }
+                    Err(message) => Response::Error { message },
+                },
+                Err(message) => Response::Error { message },
+            },
+            Next::Continue,
+        ),
         Request::NativeBuildAtRevision { .. } => (
             Response::Error {
                 message: "revision-pinned native builds require daemon snapshot handling".into(),
@@ -1662,10 +1687,20 @@ pub(crate) fn native_build_program(
     profile: NativeProfile,
     explain: bool,
     no_kiln_extensions: bool,
+    workers: Option<RecordedWorkers>,
     static_link: bool,
     pgo_generate: Option<PathBuf>,
     pgo_use: Option<PathBuf>,
 ) -> Response {
+    // The worker supervisor lives in the graph launcher; the single-program launcher runs one
+    // realm and has nowhere to record a count, so the flag is refused rather than dropped.
+    if workers.is_some() {
+        return Response::Error {
+            message: format!(
+                "--workers needs a module-graph build, and {path} did not resolve to a project source file"
+            ),
+        };
+    }
     let project_root = PathBuf::from(project_root);
     let builder = match discover_native_builder(&project_root) {
         Ok(builder) => builder,
@@ -1840,6 +1875,58 @@ fn prepare_native_shared_build(
     ))
 }
 
+/// `kiln check --explain-parallel` for a module graph: the same selection, reduction and
+/// emission `native_build_graph` runs for this profile, stopped before the C compiler, and the
+/// same `parallel:` section `--explain` renders from it.
+pub(crate) fn native_explain_parallel_graph(
+    graph: &ModuleGraph,
+    path: &str,
+    project_root: &str,
+    profile: NativeProfile,
+    node: bool,
+) -> Response {
+    let options = kiln_native::NativeBuildOptions {
+        profile: native_profile(profile),
+        realm: kiln_native::NativeRealmPolicy::host_clock(),
+        node,
+        ..kiln_native::NativeBuildOptions::default()
+    };
+    match discover_native_builder(Path::new(project_root)).and_then(|builder| {
+        builder
+            .parallel_sites_graph(graph, &options)
+            .map_err(|e| e.to_string())
+    }) {
+        Ok(sites) => Response::ParallelExplained {
+            text: kiln_backend_c::parallel::format_explain_section(&sites, path),
+        },
+        Err(message) => Response::Error { message },
+    }
+}
+
+/// [`native_explain_parallel_graph`] for an entry the daemon builds as a single program.
+pub(crate) fn native_explain_parallel_program(
+    program: &kiln_ir::Program,
+    path: &str,
+    project_root: &str,
+    profile: NativeProfile,
+) -> Response {
+    let options = kiln_native::NativeBuildOptions {
+        profile: native_profile(profile),
+        realm: kiln_native::NativeRealmPolicy::host_clock(),
+        ..kiln_native::NativeBuildOptions::default()
+    };
+    match discover_native_builder(Path::new(project_root)).and_then(|builder| {
+        builder
+            .parallel_sites(program, &options)
+            .map_err(|e| e.to_string())
+    }) {
+        Ok(sites) => Response::ParallelExplained {
+            text: kiln_backend_c::parallel::format_explain_section(&sites, path),
+        },
+        Err(message) => Response::Error { message },
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn native_build_graph(
     graph: &ModuleGraph,
@@ -1850,6 +1937,7 @@ pub(crate) fn native_build_graph(
     node: bool,
     explain: bool,
     no_kiln_extensions: bool,
+    workers: Option<RecordedWorkers>,
     static_link: bool,
     pgo_generate: Option<PathBuf>,
     pgo_use: Option<PathBuf>,
@@ -1884,7 +1972,8 @@ pub(crate) fn native_build_graph(
             output,
             profile: native_profile(profile),
             realm: kiln_native::NativeRealmPolicy::host_clock()
-                .without_kiln_extensions(no_kiln_extensions),
+                .without_kiln_extensions(no_kiln_extensions)
+                .with_workers(workers.map(native_workers)),
             march_native: false,
             static_link,
             pgo_generate,
@@ -2054,6 +2143,13 @@ fn native_profile(profile: NativeProfile) -> kiln_native::NativeProfile {
         NativeProfile::Release => kiln_native::NativeProfile::Release,
         NativeProfile::ReleaseSize => kiln_native::NativeProfile::ReleaseSize,
         NativeProfile::Profile => kiln_native::NativeProfile::Profile,
+    }
+}
+
+fn native_workers(workers: RecordedWorkers) -> kiln_native::NativeWorkers {
+    match workers {
+        RecordedWorkers::Auto => kiln_native::NativeWorkers::Auto,
+        RecordedWorkers::Count(count) => kiln_native::NativeWorkers::Count(count),
     }
 }
 

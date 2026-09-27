@@ -33,7 +33,7 @@ pub enum StepBudget {
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 33;
+pub const PROTOCOL_VERSION: u32 = 35;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -525,6 +525,10 @@ pub enum Request {
         /// when false, so a request that does not ask reads exactly as it did before.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         no_kiln_extensions: bool,
+        /// The worker count to record in the binary (`kiln build --workers`). Left off the wire
+        /// when absent; an older daemon would drop it silently, which is why the protocol moved.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workers: Option<RecordedWorkers>,
         #[serde(default)]
         static_link: bool,
         #[serde(default)]
@@ -558,6 +562,19 @@ pub enum Request {
         /// Requested output path. The client supplies the default so daemon and one-shot
         /// invocations produce the same artifact location.
         output: Option<String>,
+        profile: NativeProfile,
+        source_view: SourceView,
+    },
+    /// What every `parallelMap` site in this entry's native build would decide, without
+    /// compiling it: `kiln check --explain-parallel`. The daemon runs the build's own selection
+    /// and emission for `profile` and stops before the C compiler, so the answer is the one
+    /// `kiln build --explain-parallel` gives for the same profile. Answers
+    /// [`Response::ParallelExplained`].
+    ExplainParallel {
+        path: String,
+        project_root: String,
+        /// Enable the typed Node resolver and native runtime-module materializers.
+        node: bool,
         profile: NativeProfile,
         source_view: SourceView,
     },
@@ -640,6 +657,10 @@ pub enum Response {
         current_revision: u64,
     },
     NativeSharedBuilt(NativeSharedLibrarySummary),
+    /// The `parallel:` section of the explanation, rendered as `kiln build --explain` prints it.
+    ParallelExplained {
+        text: String,
+    },
     NativeRan(NativeRunSummary),
     Tested(TestSummary),
     TestInventory(Vec<TestInventoryEntry>),
@@ -687,6 +708,16 @@ pub enum NativeProfile {
     ReleaseSize,
     /// Release, plus profiler instrumentation. A wire-shape change, so PROTOCOL_VERSION moves.
     Profile,
+}
+
+/// A worker count recorded in a native binary by `kiln build --workers=<n|auto>`, used when
+/// `KILN_WORKERS` is unset where the binary runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RecordedWorkers {
+    /// One realm per online core of the machine that runs the binary.
+    Auto,
+    /// A fixed count, 1..=1024.
+    Count(u16),
 }
 
 /// Measurements and cache observability for one native build.
@@ -968,7 +999,7 @@ mod tests {
 
     #[test]
     fn current_protocol_run_step_budget_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 33);
+        assert_eq!(PROTOCOL_VERSION, 35);
 
         let requests = [
             (
@@ -1061,6 +1092,7 @@ mod tests {
                     source_view: SourceView(12),
                     explain: false,
                     no_kiln_extensions: false,
+                    workers: None,
                     static_link: false,
                     pgo_generate: None,
                     pgo_use: None,
@@ -1076,6 +1108,22 @@ mod tests {
                     "static_link": false,
                     "pgo_generate": null,
                     "pgo_use": null
+                }}),
+            ),
+            (
+                Request::ExplainParallel {
+                    path: "report.ts".to_owned(),
+                    project_root: "/project".to_owned(),
+                    node: false,
+                    profile: NativeProfile::Release,
+                    source_view: SourceView(4),
+                },
+                serde_json::json!({"ExplainParallel": {
+                    "path": "report.ts",
+                    "project_root": "/project",
+                    "node": false,
+                    "profile": "Release",
+                    "source_view": 4
                 }}),
             ),
             (

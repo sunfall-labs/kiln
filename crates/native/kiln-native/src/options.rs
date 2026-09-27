@@ -136,6 +136,32 @@ pub struct NativeRealmPolicy {
     /// Never install kiln's own members (ADR 0068), whatever `KILN_EXTENSIONS` says when the
     /// binary runs: `kiln build --no-kiln-extensions`.
     pub no_kiln_extensions: bool,
+    /// The worker count the binary falls back to when `KILN_WORKERS` is unset:
+    /// `kiln build --workers=<n|auto>`. `None` records nothing, so the launcher text -- and with
+    /// it the binary's cache identity -- is exactly what it was before the flag existed.
+    pub workers: Option<NativeWorkers>,
+}
+
+/// A worker count recorded in a binary at build time. `KILN_WORKERS` overrides it at run time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeWorkers {
+    /// One realm per online core of the machine the binary runs on.
+    Auto,
+    /// Exactly this many, whatever machine the binary is copied to. `kiln build` warns about it.
+    Count(u16),
+}
+
+impl NativeWorkers {
+    /// The largest count the launcher accepts; `kiln_cli_worker_count` clamps to the same bound.
+    pub const MAX: u16 = 1024;
+
+    /// The spelling `KILN_WORKERS` takes, which is also what the launcher records.
+    pub fn setting(self) -> String {
+        match self {
+            Self::Auto => "auto".to_owned(),
+            Self::Count(count) => count.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -163,7 +189,14 @@ impl NativeRealmPolicy {
             locale: NativeStringPolicy::Deterministic,
             type_profile_path: None,
             no_kiln_extensions: false,
+            workers: None,
         }
+    }
+
+    /// The same policy with a worker count recorded as the binary's default.
+    pub const fn with_workers(mut self, workers: Option<NativeWorkers>) -> Self {
+        self.workers = workers;
+        self
     }
 
     /// The same policy for a binary that never installs kiln's own members (ADR 0068).

@@ -2611,6 +2611,16 @@ enum kiln_value_tag {
 
 "#,
     );
+    if let Some(workers) = policy.workers {
+        // `kiln build --workers`: the count `kiln_cli_worker_count` falls back to. Emitted only
+        // when recorded, so a binary built without the flag has the same launcher text as before.
+        writeln!(
+            output,
+            "#define KILN_CLI_RECORDED_WORKERS \"{}\"\n",
+            workers.setting()
+        )
+        .unwrap();
+    }
     output.push_str(kiln_native_runtime::kiln_value_abi_declaration!());
     output.push_str(kiln_native_runtime::kiln_string_abi_declaration!());
     output.push_str(kiln_native_runtime::kiln_cli_host_state_declaration!());
@@ -3817,12 +3827,14 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
     return status == 0 ? 0 : 1;
 }
 
-/* How many realms to run, read from the environment rather than fixed at build time.
+/* How many realms to run, read from the environment at startup.
  *
  * A server binds with SO_REUSEPORT, so N of these share a port and the kernel spreads the accepts
  * across them. Reading the count at startup keeps one artifact correct on every machine it is
- * copied to, which is the point of shipping a binary; baking it in at `kiln build` would tie the
- * artifact to the box that built it.
+ * copied to, which is the point of shipping a binary. `kiln build --workers=<n|auto>` records a
+ * default in KILN_CLI_RECORDED_WORKERS, which applies only when KILN_WORKERS is unset or empty;
+ * `auto` is still resolved here, on the machine that runs the binary, and `kiln build` warns when a
+ * number is recorded because that ties the artifact to the box that built it.
  *
  * "auto" (case-insensitive) queries online CPU cores via sysconf(_SC_NPROCESSORS_ONLN).
  * Absent, unparseable or below one means one realm -- exactly the behaviour before this existed. */
@@ -3830,6 +3842,9 @@ static long kiln_cli_worker_count(void) {
     const char *setting = getenv("KILN_WORKERS");
     char *end = NULL;
     long count;
+#ifdef KILN_CLI_RECORDED_WORKERS
+    if (setting == NULL || *setting == '\0') setting = KILN_CLI_RECORDED_WORKERS;
+#endif
     if (setting == NULL || *setting == '\0') return 1;
     if ((setting[0] == 'a' || setting[0] == 'A') &&
         (setting[1] == 'u' || setting[1] == 'U') &&
@@ -3890,10 +3905,27 @@ static int kiln_cli_http3_enabled(int argc, char **argv) {
  *    server would, so it behaves exactly as one does. `docker stop` therefore drains every
  *    worker before PID 1 exits and the namespace is torn down. SIGUSR1 (the introspection dump)
  *    is forwarded without stopping anything.
- *  - restarts a worker that dies of a signal or exits non-zero, with backoff; one that exits 0
- *    is finished and is not restarted. A worker that crashes more than KILN_SUP_MAX_STREAK times in a row,
- *    each within KILN_SUP_STABLE_MS of starting, is a crash loop: the supervisor stops the
- *    others and exits with that worker's status.
+ *  - gives the drain a deadline: a worker still alive KILN_WORKERS_GRACE_MS (default
+ *    KILN_SUP_GRACE_MS) after the stop began gets SIGKILL, sent to its process group so whatever
+ *    it spawned goes with it -- `docker stop`'s own escalation, one level down.
+ *  - tells a crash from an answer. An exit status is the program's answer -- `process.exit(n)`,
+ *    an uncaught error's 1, an unsettled top-level await's 13 -- and restarting cannot change it:
+ *    0 finishes that worker and leaves the others serving; anything else stops every worker and
+ *    becomes the supervisor's own status, the way the same program run alone would have exited.
+ *    A death by a signal the supervisor did not send (a segfault, an abort, the OOM killer, an
+ *    operator's `kill` of one worker) is a crash, and the worker is restarted with backoff. A
+ *    worker that crashes more than KILN_SUP_MAX_STREAK times in a row, each within
+ *    KILN_SUP_STABLE_MS of starting, is a crash loop: the supervisor stops the others and exits
+ *    128+signal. Nothing is restarted once a stop has begun.
+ *  - puts each worker in a process group of its own, so a signal reaches a worker exactly once:
+ *    from the supervisor. Sharing the supervisor's group, Ctrl-C at a terminal signals the whole
+ *    foreground group and the forward then delivered SIGINT a second time; telling the two
+ *    copies apart needs the terminal's foreground group and siginfo codes that differ between
+ *    kernels, and a `kill -INT -<group>` from a process manager is indistinguishable from the
+ *    terminal. With one path there is nothing to tell apart, and the SIGKILL above can take a
+ *    worker's children by naming its group. The cost is job control: a worker is not in the
+ *    terminal's foreground group, so reading the terminal stops it (SIGTTIN) and Ctrl-Z stops
+ *    only the supervisor -- neither is something N realms sharing one terminal could use.
  *  - arranges for workers to die with it: PR_SET_PDEATHSIG on Linux, and elsewhere a pipe whose
  *    far end only the supervisor holds, watched by one thread in each worker.
  *
@@ -3904,12 +3936,13 @@ static int kiln_cli_http3_enabled(int argc, char **argv) {
  * Worker 0 is the one that writes the result file: one path, one writer.
  *
  * Where the count comes from is `kiln_cli_worker_count`'s business alone; a count recorded in
- * the binary at build time would be a default there, and nothing below cares. */
+ * the binary by `kiln build --workers` is a default there, and nothing below cares. */
 #ifndef _WIN32
 #define KILN_SUP_MAX_STREAK 5
 #define KILN_SUP_STABLE_MS 5000LL
 #define KILN_SUP_BACKOFF_MS 100LL
 #define KILN_SUP_BACKOFF_CAP_MS 2000LL
+#define KILN_SUP_GRACE_MS 10000LL
 
 static int kiln_sup_pipe[2] = { -1, -1 };
 static volatile sig_atomic_t kiln_sup_stop_signal = 0;
@@ -3932,6 +3965,23 @@ static void kiln_sup_on_signal(int sig) {
         (void)ignored;
     }
     errno = saved;
+}
+
+/* How long a stopping worker has before SIGKILL. Zero kills with the forwarded signal. */
+static long long kiln_sup_grace_ms(void) {
+    const char *setting = getenv("KILN_WORKERS_GRACE_MS");
+    char *end = NULL;
+    long long grace;
+    if (setting == NULL || *setting == '\0') return KILN_SUP_GRACE_MS;
+    errno = 0;
+    grace = strtoll(setting, &end, 10);
+    if (end == setting || *end != '\0' || errno != 0 || grace < 0) {
+        fprintf(stderr, "kiln: ignoring KILN_WORKERS_GRACE_MS=%s (expected milliseconds); using %lld\n",
+                setting, KILN_SUP_GRACE_MS);
+        return KILN_SUP_GRACE_MS;
+    }
+    /* A day is "never" for a drain, and keeps the deadline arithmetic far from overflow. */
+    return grace > 86400000LL ? 86400000LL : grace;
 }
 
 static long long kiln_sup_now_ms(void) {
@@ -3977,6 +4027,9 @@ static void kiln_sup_worker(int argc, char **argv, long index, long workers, pid
     sigemptyset(&action.sa_mask);
     for (signal_index = 0; signal_index < KILN_SUP_SIGNAL_COUNT; ++signal_index)
         sigaction(kiln_sup_signals[signal_index], &action, NULL);
+    /* Its own process group, before anything can signal it; the supervisor makes the same call
+     * from its side of the fork so neither order leaves a window. */
+    (void)setpgid(0, 0);
     close(kiln_sup_pipe[0]);
     close(kiln_sup_pipe[1]);
     kiln_sup_pipe[0] = kiln_sup_pipe[1] = -1;
@@ -4014,6 +4067,24 @@ static void kiln_sup_forward(const pid_t *pids, long workers, int sig) {
         if (pids[index] > 0) kill(pids[index], sig);
 }
 
+/* Begin (or continue) a stop: forward `sig`, and arm the SIGKILL deadline the first time. A
+ * deadline of -1 is unarmed and -2 already spent. */
+static void kiln_sup_stop(const pid_t *pids, long workers, int sig, long long grace_ms,
+                          long long *kill_at) {
+    kiln_sup_forward(pids, workers, sig);
+    if (*kill_at == -1) *kill_at = kiln_sup_now_ms() + grace_ms;
+}
+
+static void kiln_sup_kill_stragglers(const pid_t *pids, long workers, long long grace_ms) {
+    long index;
+    for (index = 0; index < workers; ++index) {
+        if (pids[index] <= 0) continue;
+        fprintf(stderr, "kiln: worker %ld (pid %ld) did not stop within %lld ms; sending SIGKILL\n",
+                index, (long)pids[index], grace_ms);
+        if (kill(-pids[index], SIGKILL) != 0) kill(pids[index], SIGKILL);
+    }
+}
+
 static int kiln_sup_run(int argc, char **argv, long workers) {
     pid_t *pids = (pid_t *)calloc((size_t)workers, sizeof *pids);
     long long *started = (long long *)calloc((size_t)workers, sizeof *started);
@@ -4026,6 +4097,7 @@ static int kiln_sup_run(int argc, char **argv, long workers) {
     size_t signal_index;
     long index, live = 0;
     int stopping = 0, stop_signal = 0, exit_status = 0;
+    long long grace_ms = kiln_sup_grace_ms(), kill_at = -1;
     if (pids == NULL || started == NULL || restart_at == NULL || streak == NULL) return 1;
     if (pipe(kiln_sup_pipe) != 0) {
         fprintf(stderr, "kiln: cannot start the worker supervisor: %s\n", strerror(errno));
@@ -4072,6 +4144,7 @@ static int kiln_sup_run(int argc, char **argv, long workers) {
                 sigprocmask(SIG_BLOCK, &blocked, NULL);
                 pid = fork();
                 if (pid == 0) kiln_sup_worker(argc, argv, index, workers, self, &original, death_pipe[0]);
+                if (pid > 0) (void)setpgid(pid, pid);
                 sigprocmask(SIG_SETMASK, &original, NULL);
                 if (pid < 0) {
                     long long delay;
@@ -4081,7 +4154,7 @@ static int kiln_sup_run(int argc, char **argv, long workers) {
                         fprintf(stderr, "kiln: cannot fork worker %ld: %s; giving up\n", index, strerror(fork_error));
                         exit_status = 1;
                         stopping = 1;
-                        kiln_sup_forward(pids, workers, SIGTERM);
+                        kiln_sup_stop(pids, workers, SIGTERM, grace_ms, &kill_at);
                         break;
                     }
                     delay = KILN_SUP_BACKOFF_MS << (streak[index] - 1);
@@ -4103,6 +4176,14 @@ static int kiln_sup_run(int argc, char **argv, long workers) {
                     wait_ms = restart_at[index] > now ? restart_at[index] - now : 0;
             }
         }
+        if (stopping && live > 0 && kill_at >= 0) {
+            if (now >= kill_at) {
+                kiln_sup_kill_stragglers(pids, workers, grace_ms);
+                kill_at = -2;
+            } else {
+                wait_ms = kill_at - now;
+            }
+        }
         if (live == 0 && wait_ms < 0) break;
 
         /* A second's cap keeps a lost wakeup (a full pipe) from ever mattering. */
@@ -4121,14 +4202,14 @@ static int kiln_sup_run(int argc, char **argv, long workers) {
                 } else if (kiln_sup_is_stop_signal(sig)) {
                     if (!stopping) stop_signal = sig;
                     stopping = 1;
-                    kiln_sup_forward(pids, workers, sig);
+                    kiln_sup_stop(pids, workers, sig, grace_ms, &kill_at);
                 }
             }
         }
         if (!stopping && kiln_sup_stop_signal != 0) {
             stop_signal = (int)kiln_sup_stop_signal;
             stopping = 1;
-            kiln_sup_forward(pids, workers, stop_signal);
+            kiln_sup_stop(pids, workers, stop_signal, grace_ms, &kill_at);
         }
 
         now = kiln_sup_now_ms();
@@ -4143,34 +4224,32 @@ static int kiln_sup_run(int argc, char **argv, long workers) {
             if (index == workers) continue;
             pids[index] = 0;
             live -= 1;
-            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) continue;
-            if (stopping) {
-                /* A worker that dies of the forwarded signal is the drain succeeding. */
+            /* The drain: whatever a worker dies of now, it was asked to stop. */
+            if (stopping) continue;
+            if (WIFEXITED(status)) {
+                if (WEXITSTATUS(status) == 0) continue;
+                fprintf(stderr, "kiln: worker %ld (pid %ld) exited with status %d; stopping the other workers\n",
+                        index, (long)pid, WEXITSTATUS(status));
+                exit_status = WEXITSTATUS(status);
+                stopping = 1;
+                kiln_sup_stop(pids, workers, SIGTERM, grace_ms, &kill_at);
                 continue;
             }
             lived = now - started[index];
             if (lived >= KILN_SUP_STABLE_MS) streak[index] = 0;
             streak[index] += 1;
             if (streak[index] > KILN_SUP_MAX_STREAK) {
-                if (WIFSIGNALED(status))
-                    fprintf(stderr, "kiln: worker %ld (pid %ld) was killed by signal %d, crash %d in a row within %lld ms of starting; giving up\n",
-                            index, (long)pid, WTERMSIG(status), streak[index], KILN_SUP_STABLE_MS);
-                else
-                    fprintf(stderr, "kiln: worker %ld (pid %ld) exited with status %d, crash %d in a row within %lld ms of starting; giving up\n",
-                            index, (long)pid, WEXITSTATUS(status), streak[index], KILN_SUP_STABLE_MS);
-                exit_status = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+                fprintf(stderr, "kiln: worker %ld (pid %ld) was killed by signal %d, crash %d in a row within %lld ms of starting; giving up\n",
+                        index, (long)pid, WTERMSIG(status), streak[index], KILN_SUP_STABLE_MS);
+                exit_status = 128 + WTERMSIG(status);
                 stopping = 1;
-                kiln_sup_forward(pids, workers, SIGTERM);
+                kiln_sup_stop(pids, workers, SIGTERM, grace_ms, &kill_at);
                 continue;
             }
             delay = KILN_SUP_BACKOFF_MS << (streak[index] - 1);
             if (delay > KILN_SUP_BACKOFF_CAP_MS) delay = KILN_SUP_BACKOFF_CAP_MS;
-            if (WIFSIGNALED(status))
-                fprintf(stderr, "kiln: worker %ld (pid %ld) was killed by signal %d after %lld ms; restarting in %lld ms\n",
-                        index, (long)pid, WTERMSIG(status), lived, delay);
-            else
-                fprintf(stderr, "kiln: worker %ld (pid %ld) exited with status %d after %lld ms; restarting in %lld ms\n",
-                        index, (long)pid, WEXITSTATUS(status), lived, delay);
+            fprintf(stderr, "kiln: worker %ld (pid %ld) was killed by signal %d after %lld ms; restarting in %lld ms\n",
+                    index, (long)pid, WTERMSIG(status), lived, delay);
             restart_at[index] = now + delay;
         }
     }

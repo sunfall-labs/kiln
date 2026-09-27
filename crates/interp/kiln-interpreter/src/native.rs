@@ -760,8 +760,12 @@ pub enum Native {
     /// `__kilnCloneData(value)`: the structured clone's plain-data fast path, which this engine
     /// never takes (it answers `undefined`, "not handled").
     CloneDataRaw,
-    /// `__kilnJobsPending()`: whether a microtask checkpoint would run anything now.
+    /// `__kilnJobsPending()`: whether a microtask checkpoint would run anything now, and whether a
+    /// rejection nothing handled is waiting to be reported.
     JobsPendingRaw,
+    /// `__kilnQueueIo(callback, argument)`: `callback(argument)` as an I/O callback, node's poll
+    /// phase (`kiln_runtime::Realm::queue_io`), which is where a message port delivers.
+    QueueIoRaw,
     ArrayBufferIsView,
     /// `%TypedArray%`: the abstract constructor the nine view constructors inherit from.
     ///

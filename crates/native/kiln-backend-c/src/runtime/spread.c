@@ -322,6 +322,31 @@ static int kiln_c99_clone_table_get(const kiln_c99_clone_table *table, kiln_val 
     return 0;
 }
 
+/* The shape of a copy of the list-mode `source`: the transition walk from `root`, the fresh
+ * copy's empty shape, over the source's keys in order -- the shape an object literal with those
+ * keys has, and shared with every object built that way (ADR 0071). An object is in list mode
+ * for reasons that are its history rather than its keys (a deleted property, an attribute once
+ * redefined), and copying the dictionary made every read of the copy a key comparison, where
+ * node's deserializer builds a fast object. NULL when the tree will not hold the keys -- an
+ * index-like key, which enumerates before the others, or the fast-property limit -- and the copy
+ * stays in list mode like its source. */
+static kiln_shape *kiln_c99_clone_list_shape(const kiln_object *source, kiln_shape *root) {
+    kiln_shape *walk = root;
+    size_t i;
+    for (i = 0; walk != NULL && i < source->count; ++i) {
+        const kiln_property *property = &source->properties[i];
+        const kiln_string *ikey = kiln_c99_intern_key(property->key);
+        kiln_shape *next = NULL;
+        if (ikey == NULL || kiln_c99_key_index_key(ikey) >= 0.0 ||
+            !kiln_c99_shape_transition(walk, ikey, property->value.tag == KILN_VALUE_NUMBER,
+                                       &next)) {
+            return NULL;
+        }
+        walk = next;
+    }
+    return walk;
+}
+
 /* One value: `*out` is its copy, or the status is KILN_C99_CLONE_BAIL. */
 static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, int depth,
                                    kiln_val *out) {
@@ -379,6 +404,7 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
         copy = (kiln_object *)KILN_VAL_PTR(copy_val);
         status = kiln_c99_clone_table_put(table, value, copy_val);
         if (status != KILN_C99_OK) return status;
+        if (shape == NULL) shape = kiln_c99_clone_list_shape(source, copy->shape);
         if (shape != NULL) {
             count = shape->property_count;
             if (count > copy->slot_capacity) {
@@ -386,8 +412,15 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
                 if (status != KILN_C99_OK) return status;
             }
             /* Nothing the program wrote can run while this walks, so the source's shape and
-             * slots now are the ones it has at the end. */
-            if (count > 0) memcpy(copy->slots, source->slots, count * sizeof(kiln_val));
+             * slots now are the ones it has at the end. A list-mode source's values go into the
+             * slots its keys were given, which are in the same order. */
+            if (source->shape != NULL) {
+                if (count > 0) memcpy(copy->slots, source->slots, count * sizeof(kiln_val));
+            } else {
+                for (i = 0; i < count; ++i) {
+                    copy->slots[i] = kiln_val_from_boundary(source->properties[i].value);
+                }
+            }
             copy->shape = shape;
             for (i = 0; i < count; ++i) {
                 kiln_val item = copy->slots[i];

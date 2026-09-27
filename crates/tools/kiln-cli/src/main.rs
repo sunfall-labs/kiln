@@ -354,6 +354,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             march_native: _,
             explain,
             no_kiln_extensions,
+            workers,
             explain_parallel,
             static_link,
             pgo_generate,
@@ -371,6 +372,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                 node,
                 explain || explain_parallel,
                 no_kiln_extensions,
+                workers,
                 static_link,
                 pgo_generate.as_deref(),
                 pgo_use.as_deref(),
@@ -380,10 +382,20 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             }
             report(built)
         }
-        Command::Check { path, node } => {
+        Command::Check {
+            path,
+            node,
+            explain_parallel,
+        } => {
             let node = auto_node(node);
             let mut backend = open(one_shot, &socket)?;
-            report(commands::check(backend.as_mut(), &path, &root, node)?)
+            report(commands::check_explaining(
+                backend.as_mut(),
+                &path,
+                &root,
+                node,
+                explain_parallel,
+            )?)
         }
         Command::Test {
             path,

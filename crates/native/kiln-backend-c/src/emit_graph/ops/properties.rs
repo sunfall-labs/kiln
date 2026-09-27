@@ -190,11 +190,11 @@ pub(super) fn emit_get_property(
         format!(
             "if (KILN_LIKELY((v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) {{ \
                          void *ptr = KILN_VAL_PTR(v{o}); \
-                         if (KILN_LIKELY(site.has_cached_method == 1 || kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY)) {{ \
-                             site.has_cached_method = 1; \
+                         uint32_t kind = kiln_c99_gc_kind_of_ptr(ptr); \
+                         if (KILN_LIKELY(kind == KILN_GC_ARRAY)) {{ \
                              {int_stmt}{double_stmt}{box_stmt} \
                              handled = 1; \
-                         }} else if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY && \
+                         }} else if (kind == KILN_GC_TYPED_ARRAY && \
                                     KILN_LIKELY(!((const kiln_typed_array *)ptr)->buffer->detached)) {{ \
                              const kiln_typed_array *view = (const kiln_typed_array *)ptr; \
                              {ta_int_stmt}{ta_double_stmt}{ta_box_stmt} \
@@ -633,6 +633,12 @@ pub(super) fn emit_set_property(
 }
 
 /// `GraphOp::GetComputed { object, key, .. }`, moved out of `emit_graph_op`'s match verbatim.
+///
+/// An array and a typed array are both buffer-tagged, and the payload's kind tells them apart
+/// on every access. Until 2026-09-27 a site that had once seen an array skipped the question
+/// from then on, so a typed view reaching it later was read as a `kiln_array` -- its buffer
+/// pointer as the elements, its byte offset as the count -- and the element write and `length`
+/// read beside it did the same (`conformance/native/typed-array-after-array-site.js`).
 pub(super) fn emit_get_computed(
     output: &mut String,
     vid: ValueId,
@@ -797,12 +803,12 @@ pub(super) fn emit_get_computed(
         };
         let typed_bound = if key_non_neg {
             format!(
-                "(uint64_t)i{k} < view->length && !view->buffer->detached",
+                "(uint64_t)i{k} < view->length && !view->buffer->detached && view->kind <= KILN_TYPED_FLOAT64",
                 k = key.0
             )
         } else {
             format!(
-                "i{k} >= 0 && (uint64_t)i{k} < view->length && !view->buffer->detached",
+                "i{k} >= 0 && (uint64_t)i{k} < view->length && !view->buffer->detached && view->kind <= KILN_TYPED_FLOAT64",
                 k = key.0
             )
         };
@@ -819,7 +825,7 @@ pub(super) fn emit_get_computed(
                 arr_bound = arr_bound
             ),
             format!(
-                "kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY({typed_bound})) {{ double d = kiln_c99_typed_get(view, (size_t)i{k}); v{v} = kiln_c99_val_from_double(d); handled = 1; }}",
+                "kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY({typed_bound})) {{ v{v} = kiln_c99_val_from_double(kiln_typed_load(view, (size_t)i{k})); handled = 1; }}",
                 k = key.0,
                 v = v
             ),
@@ -838,7 +844,7 @@ pub(super) fn emit_get_computed(
                 v = v
             ),
             format!(
-                "double idx; memcpy(&idx, &{vk}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < view->length && !view->buffer->detached)) {{ double d = kiln_c99_typed_get(view, slot); v{v} = kiln_c99_val_from_double(d); handled = 1; }}",
+                "double idx; memcpy(&idx, &{vk}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < view->length && !view->buffer->detached && view->kind <= KILN_TYPED_FLOAT64)) {{ v{v} = kiln_c99_val_from_double(kiln_typed_load(view, slot)); handled = 1; }}",
                 vk = vk,
                 v = v
             ),
@@ -857,14 +863,13 @@ pub(super) fn emit_get_computed(
     };
     writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{0}}; \
-                int handled = 0; {array_tier}{vk_decl}\
+                "    {{ int handled = 0; {array_tier}{vk_decl}\
                 if (!handled && KILN_LIKELY((v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX{number_guard})) {{ \
                     void *ptr = KILN_VAL_PTR(v{o}); \
-                    if (site.has_cached_method == 1 || kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
-                        site.has_cached_method = 1; \
+                    uint32_t kind = kiln_c99_gc_kind_of_ptr(ptr); \
+                    if (kind == KILN_GC_ARRAY) {{ \
                         {array_body} \
-                    }} else if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY) {{ \
+                    }} else if (kind == KILN_GC_TYPED_ARRAY) {{ \
                         {typed_body} \
                     }} \
                 }} else if (!handled && KILN_VAL_IS_STRING(v{o}){number_guard}) {{ \
@@ -996,12 +1001,12 @@ pub(super) fn emit_set_computed(
         };
         let typed_bound = if key_non_neg {
             format!(
-                "(uint64_t)i{k} < view->length && !view->buffer->detached",
+                "(uint64_t)i{k} < view->length && !view->buffer->detached && view->kind <= KILN_TYPED_FLOAT64",
                 k = key.0
             )
         } else {
             format!(
-                "i{k} >= 0 && (uint64_t)i{k} < view->length && !view->buffer->detached",
+                "i{k} >= 0 && (uint64_t)i{k} < view->length && !view->buffer->detached && view->kind <= KILN_TYPED_FLOAT64",
                 k = key.0
             )
         };
@@ -1073,14 +1078,13 @@ pub(super) fn emit_set_computed(
     };
     writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{0}}; \
-                int handled = 0; {vk_decl}\
+                "    {{ int handled = 0; {vk_decl}\
                 if (KILN_LIKELY((v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX{number_guard})) {{ \
                     void *ptr = KILN_VAL_PTR(v{o}); \
-                    if (site.has_cached_method == 1 || kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
-                        site.has_cached_method = 1; \
+                    uint32_t kind = kiln_c99_gc_kind_of_ptr(ptr); \
+                    if (kind == KILN_GC_ARRAY) {{ \
                         {array_body} \
-                    }} else if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY) {{ \
+                    }} else if (kind == KILN_GC_TYPED_ARRAY) {{ \
                         {typed_body} \
                     }} \
                 }} \

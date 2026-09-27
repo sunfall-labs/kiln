@@ -673,6 +673,19 @@ static kiln_c99_timer_run_fn kiln_c99_timer_direct_run(kiln_value callback, void
     }
 }
 
+/* Arms `work` in the realm lane the scheduling method `code` names: a timeout or an interval
+ * after `delay`, an immediate (node's check phase), or an I/O callback (its poll phase, where
+ * `__kilnQueueIo` puts a message port's delivery). */
+static int kiln_c99_arm_timer(uint64_t code, double delay, kiln_realm_work_fn run,
+                              kiln_realm_drop_fn drop, void *work, uint64_t *id) {
+    switch (code) {
+    case KILN_C99_METHOD_SET_INTERVAL: return kiln_realm_set_interval(delay, run, drop, work, id);
+    case KILN_C99_METHOD_SET_IMMEDIATE: return kiln_realm_set_immediate(run, drop, work, id);
+    case KILN_C99_METHOD_QUEUE_IO_RAW: return kiln_realm_queue_io(run, drop, work, id);
+    default: return kiln_realm_set_timeout(delay, run, drop, work, id);
+    }
+}
+
 /* One step of an async function: resume the body, and decide what to do with where it stopped.
  *
  * It yields when it awaits, so the value it hands back is what it is waiting on. Everything that
