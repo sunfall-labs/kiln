@@ -264,6 +264,9 @@ typedef struct kiln_c99_local_edge {
     kiln_shape *child;
 } kiln_c99_local_edge;
 
+/* Built-in numbers the per-realm modified-built-in bitmap covers, in 64-bit words. */
+#define KILN_C99_MODIFIED_BUILTIN_WORDS 2
+
 typedef struct kiln_gc_heap {
     const kiln_gc_hooks *hooks;
     kiln_gc_block *head; /* large blocks only; slab blocks are found by walking slabs */
@@ -327,12 +330,18 @@ typedef struct kiln_gc_heap {
     int mid_turn;
     size_t stress_every;
     size_t stress_countdown;
-    /* Call-site caches that remember a heap object -- the holder a method lives on -- are
-     * registered on first fill and cleared after any collection that frees what they
-     * remember, so a stale entry can never match an object that later reuses the address. */
+    /* Call-site caches with an entry that names one of this heap's realm-local shapes (ADR
+     * 0071): registered when they learn one, and made to forget every realm-local shape when the
+     * heap is torn down -- before the shapes are freed -- so no entry can match a later shape at a
+     * freed one's address. Nothing in an entry is a heap object, so a collection needs nothing
+     * from this list. */
     kiln_c99_site **sites;
     size_t site_len;
     size_t site_cap;
+    /* ADR 0071: the built-ins this realm has written an own property onto, one bit per built-in
+     * number (`kiln_c99_realm_builtin_modified`), and one flag for any number past the bitmap. */
+    uint64_t modified_builtins[KILN_C99_MODIFIED_BUILTIN_WORDS];
+    uint8_t modified_builtin_beyond;
     /* The promise job lane (Phase 6.3). A promise reaction and an await resumption used to be a
      * GC cell and a call across the private ABI each; they are values in this array now, which
      * the realm drains by calling back into the prelude. It lives in the heap because the heap
@@ -347,6 +356,10 @@ typedef struct kiln_gc_heap {
     size_t job_tail;
     size_t job_capacity;
     size_t job_mask;
+    /* `process.nextTick` callbacks queued and not yet disposed of. The queue itself is the
+     * realm's (Rust); this count is what `__kilnJobsPending` reads to answer "would a checkpoint
+     * run anything now" without a call across the private ABI. */
+    size_t next_ticks_queued;
 } kiln_gc_heap;
 
 static const kiln_gc_hooks kiln_c99_gc_hooks;
@@ -386,6 +399,9 @@ typedef struct kiln_shared_state {
     /* Set once the built-ins' keys are registered, by whichever prelude copy got there first. */
     uint32_t builtins_registered;
     uint64_t next_heap_serial;
+    /* The last layout token issued to a list-mode object an inline cache relies on (see
+     * `kiln_object.layout_token`); tokens are never reused. */
+    uint64_t next_layout_token;
     kiln_shared_key_table *keys;
     /* The empty key, headed like every other so `kiln_c99_key_len` reads zero from it. One for the
      * process rather than one per unit, so "" is one key across units too. */
@@ -1550,48 +1566,158 @@ static void kiln_c99_gc_scan_stack(kiln_gc_heap *heap) {
 
 /* A call site that remembers a holder registers itself once; after a collection the entries
  * whose holder or intermediate died are cleared. */
+static int kiln_c99_site_pointer_order(const void *left, const void *right) {
+    uintptr_t a = (uintptr_t)*(kiln_c99_site *const *)left;
+    uintptr_t b = (uintptr_t)*(kiln_c99_site *const *)right;
+    return a < b ? -1 : a > b;
+}
+
+/* Register `site` with the current heap once an entry names a realm-local shape or key (ADR
+ * 0071): the heap frees them at teardown, and first makes every registered site forget them.
+ * A site holding only shared shapes -- every site of a program whose keys are all constants --
+ * is never registered. `registered` is the serial of the last heap the site joined, so a site
+ * two live realms both teach joins each of them; the list is deduplicated before it grows,
+ * which bounds it by the number of distinct sites. */
 static void kiln_c99_gc_register_site(kiln_c99_site *site) {
     kiln_gc_heap *heap = kiln_c99_gc_heap();
-    if (heap == NULL || site == NULL || site->registered) return;
+    if (heap == NULL || site == NULL || heap->serial == 0 || site->registered == heap->serial) return;
+    if (heap->site_len == heap->site_cap && heap->site_len != 0) {
+        size_t kept = 1, index;
+        qsort(heap->sites, heap->site_len, sizeof *heap->sites, kiln_c99_site_pointer_order);
+        for (index = 1; index < heap->site_len; ++index) {
+            if (heap->sites[index] != heap->sites[kept - 1]) heap->sites[kept++] = heap->sites[index];
+        }
+        heap->site_len = kept;
+    }
     if (heap->site_len == heap->site_cap) {
         size_t wanted = heap->site_cap == 0 ? 64 : heap->site_cap * 2;
         kiln_c99_site **grown = (kiln_c99_site **)realloc(heap->sites, wanted * sizeof *grown);
-        if (grown == NULL) return;
+        if (grown == NULL) {
+            /* Unregistered, an entry naming a local shape could outlive it: forget them now. */
+            uint32_t p;
+            for (p = 0; p < site->pic_count; ++p) memset(&site->entries[p], 0, sizeof site->entries[p]);
+            site->pic_count = 0;
+            return;
+        }
         heap->sites = grown;
         heap->site_cap = wanted;
     }
     heap->sites[heap->site_len++] = site;
-    site->registered = 1;
+    site->registered = heap->serial;
 }
 
-static void kiln_c99_gc_clear_dead_sites(kiln_gc_heap *heap) {
+static int kiln_c99_shape_is_local(const kiln_shape *shape) {
+    return shape != NULL && !shape->shared;
+}
+
+static int kiln_c99_key_is_shared(const kiln_string *ikey);
+
+/* Whether an entry names anything a realm frees at teardown: a realm-local shape, or a realm-local
+ * key checked against a list-mode holder's record. */
+static int kiln_c99_pic_entry_is_local(const kiln_c99_pic_entry *entry) {
+    return kiln_c99_shape_is_local(entry->shape) || kiln_c99_shape_is_local(entry->transition_to) ||
+           kiln_c99_shape_is_local(entry->level_shape[0]) ||
+           kiln_c99_shape_is_local(entry->level_shape[1]) ||
+           (entry->key != NULL && !kiln_c99_key_is_shared(entry->key));
+}
+
+/* Every path that writes a site's entries calls this after: a site that now names a realm-local
+ * shape is registered with the heap that owns it. */
+static void kiln_c99_site_learned(kiln_c99_site *site) {
+    uint32_t p;
+    if (site == NULL) return;
+    for (p = 0; p < site->pic_count; ++p) {
+        if (kiln_c99_pic_entry_is_local(&site->entries[p])) {
+            kiln_c99_gc_register_site(site);
+            return;
+        }
+    }
+}
+
+/* Teardown, before the heap frees anything: every registered site drops each entry that names a
+ * realm-local shape or key. That includes another live realm's, which only costs that realm a
+ * relearn; the entries left name shared shapes and keys, which are never freed. */
+static void kiln_c99_gc_forget_realm_local(kiln_gc_heap *heap) {
     size_t index;
     for (index = 0; index < heap->site_len; ++index) {
         kiln_c99_site *site = heap->sites[index];
-        uint32_t p;
+        uint32_t p, kept = 0;
         for (p = 0; p < site->pic_count; ++p) {
-            kiln_c99_pic_entry *entry = &site->entries[p];
-            if (entry->holder == NULL) {
-                /* A transitioning store remembers the prototype it was cleared against
-                 * (`kiln_c99_transition_store_clear`); forget one that died, so a new object at
-                 * its address is never mistaken for it. */
-                if (entry->via != NULL &&
-                    kiln_c99_gc_lookup_interior(heap, (uintptr_t)entry->via) == NULL)
-                    entry->via = NULL;
-                continue;
-            }
-            if (kiln_c99_gc_lookup_interior(heap, (uintptr_t)entry->holder) == NULL ||
-                (entry->via != NULL && kiln_c99_gc_lookup_interior(heap, (uintptr_t)entry->via) == NULL)) {
-                entry->holder = NULL;
-                entry->holder_shape = NULL;
-                entry->holder_key = NULL;
-                entry->via = NULL;
-                entry->via_shape = NULL;
-                entry->holder_slot = UINT32_MAX;
-                entry->holder_val = 0;
+            if (!kiln_c99_pic_entry_is_local(&site->entries[p])) {
+                if (kept != p) site->entries[kept] = site->entries[p];
+                kept += 1;
             }
         }
+        for (p = kept; p < site->pic_count; ++p) memset(&site->entries[p], 0, sizeof site->entries[p]);
+        site->pic_count = kept;
+        if (site->registered == heap->serial) site->registered = 0;
     }
+    free(heap->sites);
+    heap->sites = NULL;
+    heap->site_len = 0;
+    heap->site_cap = 0;
+}
+
+/* Put `entry` in the site under its receiver shape: over the entry that shape already has, else
+ * in a free place, else over the last. Then register the site if it now names a realm-local
+ * shape (`kiln_c99_site_learned`). */
+static void kiln_c99_site_remember(kiln_c99_site *site, const kiln_c99_pic_entry *entry) {
+    uint32_t p;
+    for (p = 0; p < site->pic_count; ++p) {
+        if (site->entries[p].shape == entry->shape) {
+            site->entries[p] = *entry;
+            kiln_c99_site_learned(site);
+            return;
+        }
+    }
+    if (site->pic_count < KILN_C99_PIC_SIZE) {
+        site->entries[site->pic_count++] = *entry;
+    } else {
+        site->entries[KILN_C99_PIC_SIZE - 1] = *entry;
+    }
+    kiln_c99_site_learned(site);
+}
+
+static void kiln_c99_site_remember_own(kiln_c99_site *site, const kiln_shape *shape,
+                                       uint32_t slot) {
+    kiln_c99_pic_entry entry;
+    memset(&entry, 0, sizeof entry);
+    entry.shape = shape;
+    entry.slot = slot;
+    kiln_c99_site_remember(site, &entry);
+}
+
+/* A store that moves a receiver from `from` to `to`, writing `slot`. */
+static void kiln_c99_site_remember_transition(kiln_c99_site *site, const kiln_shape *from,
+                                              const kiln_shape *to, uint32_t slot) {
+    kiln_c99_pic_entry entry;
+    memset(&entry, 0, sizeof entry);
+    entry.shape = from;
+    entry.transition_to = to;
+    entry.slot = slot;
+    kiln_c99_site_remember(site, &entry);
+}
+
+/* ADR 0071: name a prototype level the way a cache entry states it -- its shape, or for a level
+ * in list mode its layout token, issued now if it has none. 0 when a list-mode level cannot be
+ * named, because the process has issued every token there is; the caller then remembers
+ * nothing. Tokens come from the process block, so no two objects in any realm share one. */
+static int kiln_c99_pic_name_level(const kiln_object *level, const kiln_shape **shape,
+                                   uint32_t *token) {
+    if (level->shape != NULL) {
+        *shape = level->shape;
+        *token = 0;
+        return 1;
+    }
+    if (level->layout_token == 0) {
+        uint64_t issued =
+            __atomic_add_fetch(&kiln_c99_process()->next_layout_token, 1, __ATOMIC_RELAXED);
+        if (issued > UINT32_MAX) return 0;
+        ((kiln_object *)level)->layout_token = (uint32_t)issued;
+    }
+    *shape = NULL;
+    *token = level->layout_token;
+    return 1;
 }
 
 static void kiln_c99_gc_collect(void *opaque, int force);
@@ -3399,7 +3525,6 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
 
         if (tenured_due || (heap->nursery.promoted != NULL)) {
             kiln_c99_gc_sweep(heap, 0);
-            kiln_c99_gc_clear_dead_sites(heap);
             heap->collections += 1;
         }
     }
@@ -3475,6 +3600,8 @@ static void kiln_c99_gc_teardown_begin(void *opaque) {
 static void kiln_c99_gc_teardown_end(void *opaque) {
     kiln_gc_heap *heap = (kiln_gc_heap *)opaque;
     if (heap == NULL || heap->fallback) return;
+    /* First, while this realm's keys and shapes are all still allocated: no site may name one. */
+    kiln_c99_gc_forget_realm_local(heap);
     kiln_c99_gc_drain(heap);
     if (heap->mark_failed) {
         /* Orphan everything rather than free a block a survivor root still names. */

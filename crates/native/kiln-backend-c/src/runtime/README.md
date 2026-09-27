@@ -62,9 +62,6 @@ split.
 | `dispatch_part_a.c` | argument conversion, DataView methods, sort, and `invoke_method_dispatch` through the `Object.assign` case |
 | `dispatch_part_b.c` | remaining `invoke_method_dispatch` cases, beginning at `Date.now`; its function and switch close here |
 
-`dispatch_part_a.c` and `dispatch_part_b.c` are one source split at the `Date.now` case boundary.
-Keep them adjacent and in this order: the dispatch function and switch begin in the first fragment
-and continue into the second.
 | `enumeration.c` | iteration, has, delete, own keys, enumeration, proxy spread |
 | `spread.c` | object spread |
 | `definitions.c` | accessors, descriptors, defineProperty and friends, private names, methods |
@@ -79,6 +76,10 @@ and continue into the second.
 | `calls.c` | construct, super, call, set_prototype, instanceof, typeof |
 | `operators.c` | comparison, unary and binary operators, ToPrimitive, checked conversions |
 | `boxed.c` | the NaN-boxed fast paths the emitted C calls: reads, writes, elements, calls, JSON, sort |
+
+`dispatch_part_a.c` and `dispatch_part_b.c` are one source split at the `Date.now` case boundary.
+Keep them adjacent and in this order: the dispatch function and switch begin in the first fragment
+and continue into the second.
 
 ## The two headers, unchanged
 

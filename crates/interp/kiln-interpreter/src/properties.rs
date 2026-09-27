@@ -107,7 +107,6 @@ pub(super) const fn numeric_arguments(native: Native) -> &'static [usize] {
         | N::NumberToString
         | N::ArrayBufferResize
         | N::ArrayBufferGrow
-        | N::ArrayBufferTransfer { .. }
         | N::DataViewGet(_)
         | N::DataViewSet(_)
         | N::DataViewGetBig { .. }
@@ -1170,7 +1169,6 @@ pub(super) const fn native_length(native: Native) -> Option<f64> {
         | N::WeakSetConstructor
         | N::WeakMapConstructor
         | N::SymbolConstructor
-        | N::ArrayBufferTransfer { .. }
         | N::IteratorDispose
         | N::RegExpStringIteratorNext
         | N::IteratorConcat

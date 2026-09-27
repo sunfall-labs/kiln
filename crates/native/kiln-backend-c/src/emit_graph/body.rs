@@ -286,11 +286,9 @@ pub fn emit_function_from_graph_with_profile(
                 if plan.typed_needs[i as usize].row {
                     writeln!(
                         output,
-                        "static kiln_val {pfx}_fn = 0;\nstatic const kiln_shape *{pfx}_shape = NULL;\nstatic const uint32_t *{pfx}_row = NULL;\nstatic uint64_t {pfx}_proto = 0;\nstatic uint64_t {pfx}_epoch = UINT64_MAX;\nstatic kiln_val *{pfx}_upvalues = NULL;"
+                        "static const kiln_shape *{pfx}_shape = NULL;\nstatic const uint32_t *{pfx}_row = NULL;"
                     )
                     .unwrap();
-                } else {
-                    writeln!(output, "static kiln_val {pfx}_fn = 0;").unwrap();
                 }
             }
         }
@@ -430,26 +428,6 @@ pub fn emit_function_from_graph_with_profile(
     } else {
         String::new()
     };
-    let typed_epoch_check: String = if matches!(
-        kind,
-        EntryKind::Boxed | EntryKind::Fast | EntryKind::Typed { .. }
-    ) {
-        let typed_sites = sites::collect_typed_call_sites(graph, program, plan, &plan.numbers);
-        let mut checks = String::new();
-        for (vid, typed_candidates) in typed_sites {
-            for i in typed_candidates {
-                if plan.typed_needs[i as usize].row {
-                    let pfx = format!("{}_fn_{}_v{}_t_{}", symbol, index, vid.0, i);
-                    checks.push_str(&format!(
-                        "    if (KILN_UNLIKELY({pfx}_epoch != kiln_c99_proto_epoch)) {pfx}_shape = NULL;\n"
-                    ));
-                }
-            }
-        }
-        checks
-    } else {
-        String::new()
-    };
     // `kiln_c99_inheriting_new_target` is set around a constructor invocation and restored
     // after it, so within one activation it is invariant; every call site read it through the
     // GOT, twice per call in a loop. Read once here.
@@ -466,7 +444,6 @@ pub fn emit_function_from_graph_with_profile(
         );
         output.push_str("    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;\n");
         output.push_str(&receiver_cache);
-        output.push_str(&typed_epoch_check);
     } else if scalar_proto {
         output.push_str("    (void)ctx; (void)receiver_ptr; (void)upvalues;\n");
         output.push_str("    const int kiln_inheriting = kiln_c99_inheriting_new_target; (void)kiln_inheriting;\n");
@@ -481,7 +458,6 @@ pub fn emit_function_from_graph_with_profile(
         );
         output.push_str("    (void)receiver_ptr;\n");
         output.push_str(&receiver_cache);
-        output.push_str(&typed_epoch_check);
         // Which of the two `arguments` objects a mention in this body, or in an arrow made
         // here, would build. Only such a body reads the frame global, so only such a body
         // writes it; a plain body leaves its caller's value alone.
@@ -705,16 +681,9 @@ pub fn emit_entry_from_graph_with_profile(
             if plan.typed_needs[i as usize].row {
                 writeln!(
                     output,
-                    "    static kiln_val {pfx}_fn = 0; static const kiln_shape *{pfx}_shape = NULL; static const uint32_t *{pfx}_row = NULL; static uint64_t {pfx}_proto = 0; static uint64_t {pfx}_epoch = UINT64_MAX; static kiln_val *{pfx}_upvalues = NULL;"
+                    "    static const kiln_shape *{pfx}_shape = NULL; static const uint32_t *{pfx}_row = NULL;"
                 )
                 .unwrap();
-                writeln!(
-                    output,
-                    "    if (KILN_UNLIKELY({pfx}_epoch != kiln_c99_proto_epoch)) {pfx}_shape = NULL;"
-                )
-                .unwrap();
-            } else {
-                writeln!(output, "    static kiln_val {pfx}_fn = 0;").unwrap();
             }
         }
     }
@@ -786,16 +755,9 @@ pub fn emit_async_entry_body(
             if plan.typed_needs[i as usize].row {
                 writeln!(
                     output,
-                    "    static kiln_val {pfx}_fn = 0; static const kiln_shape *{pfx}_shape = NULL; static const uint32_t *{pfx}_row = NULL; static uint64_t {pfx}_proto = 0; static uint64_t {pfx}_epoch = UINT64_MAX; static kiln_val *{pfx}_upvalues = NULL;"
+                    "    static const kiln_shape *{pfx}_shape = NULL; static const uint32_t *{pfx}_row = NULL;"
                 )
                 .unwrap();
-                writeln!(
-                    output,
-                    "    if (KILN_UNLIKELY({pfx}_epoch != kiln_c99_proto_epoch)) {pfx}_shape = NULL;"
-                )
-                .unwrap();
-            } else {
-                writeln!(output, "    static kiln_val {pfx}_fn = 0;").unwrap();
             }
         }
     }

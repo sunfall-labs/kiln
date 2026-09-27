@@ -566,7 +566,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             kiln_ir::Builtin::AbortSignal => Value::Native(Native::AbortSignalConstructor, realm),
             kiln_ir::Builtin::TextEncoder => Value::Native(Native::TextEncoderConstructor, realm),
-            kiln_ir::Builtin::StructuredClone => Value::Native(Native::StructuredClone, realm),
+            // Defined on the global object by the shared bootstrap
+            // (`kiln-builtins/src/structured_clone.ts`), and read from there, so a program that
+            // replaces `globalThis.structuredClone` is seen by the bare name too.
+            kiln_ir::Builtin::StructuredClone => match self.global_object_in(realm) {
+                Value::Object(globals) => globals
+                    .borrow()
+                    .get_own("structuredClone")
+                    .cloned()
+                    .unwrap_or(Value::Undefined),
+                _ => Value::Undefined,
+            },
             kiln_ir::Builtin::ArrayBuffer => Value::Native(Native::ArrayBufferConstructor, realm),
             kiln_ir::Builtin::Int8Array => {
                 Value::Native(Native::TypedArrayConstructor(TypedKind::Int8), realm)
@@ -734,17 +744,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             ("__kilnUrlSet", Native::UrlSetRaw),
             ("__kilnUrlFast", Native::UrlFastRaw),
             ("__kilnUrlAdopt", Native::UrlAdoptRaw),
+            // The transfer primitive `arraybuffer.ts` captures and deletes (every realm).
+            ("__kilnArrayBufferDetach", Native::ArrayBufferDetachRaw),
+            // The structured clone's plain-data fast path: measured for the native backend
+            // only, so here it always answers "not handled" and the shared TypeScript clone runs.
+            ("__kilnCloneData", Native::CloneDataRaw),
+            // Whether a microtask checkpoint would run anything now, which message delivery
+            // (`kiln-builtins/src/web_events_streams.ts`) asks before its next message.
+            ("__kilnJobsPending", Native::JobsPendingRaw),
         ] {
             globals.set_non_enumerable(name, Value::Native(native, realm));
         }
-        // Published in every realm, not only a Node one: it is a WHATWG global every host has,
-        // the bare name already resolved everywhere, and the native runtime's bootstrap defines
-        // it unconditionally -- so until 2026-09-19 `"structuredClone" in globalThis` was the one
-        // global the two engines disagreed on outside `--node`.
-        globals.set_non_enumerable(
-            "structuredClone",
-            Value::Native(Native::StructuredClone, realm),
-        );
+        // `structuredClone` is the shared bootstrap's (`kiln-builtins/src/structured_clone.ts`),
+        // defined in every realm, as the native runtime's is.
 
         // The global functions, which a program can also reach by their bare names -- and has to
         // find the *same* value both ways: `globalThis.parseInt === parseInt`.

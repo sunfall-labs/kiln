@@ -860,34 +860,40 @@ pub(crate) fn call_native(
             arguments.first(),
             Some(Value::TypedArray(_) | Value::DataView(_))
         )),
-        // `transfer` *moves* the bytes: the buffer that comes out holds what went in, and the
-        // one it came from holds nothing at all afterwards. The detach is the whole point --
-        // it is what lets a program hand a large buffer across an ownership boundary and know
-        // that nobody on this side can still write through it.
-        Native::ArrayBufferTransfer {
-            preserve_resizability,
-        } => {
-            let Value::ArrayBuffer(buffer) = receiver else {
+        // `__kilnArrayBufferDetach(buffer, length, preserveResizability)`, the one primitive a
+        // transfer needs (ADR 0065, representation): the bytes are *moved*, not copied, into the
+        // buffer that comes out, and the one they came from holds nothing afterwards. Every
+        // check a program can observe -- the receiver, the length, the ceiling -- is made above
+        // it, in `kiln-builtins/src/arraybuffer.ts` and `structured_clone.ts`; what is left here
+        // only keeps a caller that skipped them from corrupting a buffer.
+        // `__kilnCloneData(value)` (ADR 0065, a *measured* primitive): the structured clone of a
+        // value made only of plain data, or `undefined` -- "do it the general way" -- for
+        // anything else, which the shared clone (`kiln-builtins/src/structured_clone.ts`) then
+        // does from the start. The same subset as the native backend's (`runtime/spread.c`).
+        Native::CloneDataRaw => {
+            let mut seen = std::collections::HashMap::new();
+            arguments
+                .first()
+                .and_then(|value| clone_plain_data(value, &mut seen, 0))
+                .unwrap_or(Value::Undefined)
+        }
+        Native::ArrayBufferDetachRaw => {
+            let Some(Value::ArrayBuffer(buffer)) = arguments.first() else {
                 return Err(ExecutionError::NotABuffer);
             };
-            // A shared buffer cannot be transferred at all: its other holders have no way to
-            // learn the bytes went away, which is the same reason it has no `resize`.
+            // A shared buffer cannot be detached at all: its other holders have no way to learn
+            // the bytes went away. Nor can an immutable one: detaching is the largest write.
             if buffer.shared || buffer.detached() {
                 return Err(ExecutionError::BufferDetached);
             }
-            // Nor can an immutable one: detaching is the largest write there is, and a buffer
-            // that promised never to change again cannot be emptied either.
             if buffer.immutable {
                 return Err(ExecutionError::BufferImmutable);
             }
-            let length = match arguments.first() {
-                None | Some(Value::Undefined) => buffer.byte_length(),
-                requested => bounded_buffer(to_index(requested)?, 1)?,
+            let length = match arguments.get(1) {
+                Some(Value::Number(length)) => bounded_buffer(to_index_number(*length)?, 1)?,
+                _ => buffer.byte_length(),
             };
-            // Only `transfer` carries the ceiling across. `transferToFixedLength` exists to
-            // *drop* it, so a program can turn a buffer it may still be resizing into one whose
-            // length nothing can move -- which is the only shape some consumers will accept.
-            let max_byte_length = if preserve_resizability {
+            let max_byte_length = if matches!(arguments.get(2), Some(Value::Boolean(true))) {
                 buffer.max_byte_length
             } else {
                 None
@@ -1293,8 +1299,7 @@ pub(crate) fn call_native(
         | Native::ReflectGetOwnPropertyDescriptor
         | Native::ReflectDeleteProperty
         | Native::ReflectIsExtensible
-        | Native::ReflectPreventExtensions
-        | Native::StructuredClone => {
+        | Native::ReflectPreventExtensions => {
             unreachable!("these built-ins are dispatched by the interpreter")
         }
         Native::DateConstructor | Native::DateNow | Native::PerformanceNow => {
@@ -2980,6 +2985,7 @@ pub(crate) fn call_native(
         | Native::UrlSetRaw
         | Native::UrlFastRaw
         | Native::UrlAdoptRaw
+        | Native::JobsPendingRaw
         | Native::ProcessStdinSetRawMode
         | Native::UrlConstructor
         | Native::UrlSearchParamsGet

@@ -86,8 +86,8 @@ static inline void kiln_c99_define_named_teach(kiln_c99_site *site, const kiln_s
     entry->shape = from;
     entry->transition_to = to;
     entry->slot = slot;
-    entry->holder_slot = UINT32_MAX;
     site->pic_count = 1;
+    kiln_c99_site_learned(site);
 }
 
 static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val value, int *status,
@@ -227,6 +227,268 @@ static int kiln_c99_spread_object_fast(kiln_val target, kiln_val source, int *st
     dest->shape = sshape;
     *status = KILN_C99_OK;
     return 1;
+}
+
+/* `__kilnCloneData(value)`: the structured clone of a value made only of plain data, or
+ * `undefined` for anything else (ADR 0065, a *measured* primitive; ADR 0060 kind 5 beside the
+ * authoritative clone in `kiln-builtins/src/structured_clone.ts`, which calls this first and
+ * takes over whenever it answers `undefined`).
+ *
+ * "Plain data" is exactly the part of the algorithm with no observable step: an ordinary object
+ * with `Object.prototype` as its prototype, in shape mode (so every own property is an
+ * enumerable, writable data property with a string key, and none is an index), and an array with
+ * no named properties; their leaves are primitives, which are immutable and shared. Nothing here
+ * can run program code, so a bail half way through has done nothing a program can see, and the
+ * TypeScript clone that runs next starts from the beginning. Shared references and cycles map
+ * through a table of source to copy, as `seen` does there.
+ *
+ * Measured on `bench/concurrency/js/inrealm.mjs`: a ~1 MB graph (6,000 records sharing 13) took
+ * 35 ms through the TypeScript walk against node's 5 ms; a small record 3.9 us against 1.4 us.
+ *
+ * The copies are reachable from this walk's C frames (the collector scans the machine stack) or
+ * from a copy that is, from the moment they are made until the root is returned. */
+/* A message is usually a handful of objects, so the table starts on the C stack and moves to
+ * the heap only past `KILN_C99_CLONE_INLINE` entries. */
+#define KILN_C99_CLONE_INLINE 32
+
+typedef struct kiln_c99_clone_table {
+    kiln_val *keys;
+    kiln_val *values;
+    size_t capacity;
+    size_t count;
+    kiln_val inline_keys[KILN_C99_CLONE_INLINE];
+    kiln_val inline_values[KILN_C99_CLONE_INLINE];
+} kiln_c99_clone_table;
+
+#define KILN_C99_CLONE_MAX_DEPTH 512
+#define KILN_C99_CLONE_BAIL 1
+
+static size_t kiln_c99_clone_hash(kiln_val key, size_t mask) {
+    uint64_t h = (uint64_t)key * UINT64_C(0x9E3779B97F4A7C15);
+    return (size_t)(h >> 17) & mask;
+}
+
+static int kiln_c99_clone_table_put(kiln_c99_clone_table *table, kiln_val key, kiln_val value) {
+    size_t at;
+    if ((table->count + 1) * 2 > table->capacity) {
+        size_t grown = table->capacity * 2;
+        kiln_val *keys = (kiln_val *)calloc(grown, sizeof *keys);
+        kiln_val *values = (kiln_val *)malloc(grown * sizeof *values);
+        size_t i;
+        if (keys == NULL || values == NULL) {
+            free(keys);
+            free(values);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        for (i = 0; i < table->capacity; ++i) {
+            if (table->keys[i] != 0) {
+                size_t slot = kiln_c99_clone_hash(table->keys[i], grown - 1);
+                while (keys[slot] != 0) slot = (slot + 1) & (grown - 1);
+                keys[slot] = table->keys[i];
+                values[slot] = table->values[i];
+            }
+        }
+        if (table->keys != table->inline_keys) {
+            free(table->keys);
+            free(table->values);
+        }
+        table->keys = keys;
+        table->values = values;
+        table->capacity = grown;
+    }
+    at = kiln_c99_clone_hash(key, table->capacity - 1);
+    while (table->keys[at] != 0) at = (at + 1) & (table->capacity - 1);
+    table->keys[at] = key;
+    table->values[at] = value;
+    table->count += 1;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_clone_table_get(const kiln_c99_clone_table *table, kiln_val key, kiln_val *out) {
+    size_t at;
+    if (table->capacity == 0) return 0;
+    at = kiln_c99_clone_hash(key, table->capacity - 1);
+    while (table->keys[at] != 0) {
+        if (table->keys[at] == key) {
+            *out = table->values[at];
+            return 1;
+        }
+        at = (at + 1) & (table->capacity - 1);
+    }
+    return 0;
+}
+
+/* One value: `*out` is its copy, or the status is KILN_C99_CLONE_BAIL. */
+static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, int depth,
+                                   kiln_val *out) {
+    void *ptr;
+    uint32_t kind;
+    int status;
+    if (KILN_VAL_IS_NUMBER(value) || value == KILN_VAL_UNDEFINED || value == KILN_VAL_NULL ||
+        KILN_VAL_IS_BOOLEAN(value) || KILN_VAL_IS_STRING(value) ||
+        (value & KILN_TAG_MASK) == KILN_TAG_BIGINT_PREFIX) {
+        /* Primitives, and strings and BigInts are immutable: the copy is the value. The BigInt
+         * test is on the whole top half, so a Temporal value (a narrower prefix inside the same
+         * range) is not mistaken for one. */
+        if ((value & KILN_TAG_MASK) == KILN_TAG_BIGINT_PREFIX &&
+            (value & UINT64_C(0xFFFF800000000000)) != KILN_TAG_BIGINT_PREFIX) {
+            return KILN_C99_CLONE_BAIL;
+        }
+        *out = value;
+        return KILN_C99_OK;
+    }
+    if (!KILN_VAL_IS_OBJECT(value) && (value & KILN_TAG_MASK) != KILN_TAG_BUFFER_PREFIX) {
+        return KILN_C99_CLONE_BAIL;
+    }
+    ptr = KILN_VAL_PTR(value);
+    if (ptr == NULL || depth > KILN_C99_CLONE_MAX_DEPTH) return KILN_C99_CLONE_BAIL;
+    if (kiln_c99_clone_table_get(table, value, out)) return KILN_C99_OK;
+    kind = kiln_c99_gc_payload_kind(ptr);
+    if (KILN_VAL_IS_OBJECT(value) && kind == KILN_GC_OBJECT) {
+        kiln_object *source = (kiln_object *)ptr;
+        kiln_shape *shape = source->shape;
+        kiln_value made;
+        kiln_object *copy;
+        kiln_val copy_val;
+        size_t count;
+        size_t i;
+        if (source->elements != NULL || source->accessor_count != 0 ||
+            source->prototype.tag != KILN_VALUE_UNDEFINED || source->arguments_brand ||
+            source->error_brand || source->module_namespace ||
+            (shape != NULL && (source->properties != NULL || shape->has_symbol_key))) {
+            return KILN_C99_CLONE_BAIL;
+        }
+        if (shape == NULL) {
+            /* List mode: every property must be an enumerable data property with a string key
+             * (a symbol key is stored non-enumerable, so this refuses those too). */
+            for (i = 0; i < source->count; ++i) {
+                const kiln_property *property = &source->properties[i];
+                if (!property->enumerable || property->accessor || property->refused) {
+                    return KILN_C99_CLONE_BAIL;
+                }
+            }
+        }
+        status = kiln_c99_new_object(&made);
+        if (status != KILN_C99_OK) return status;
+        copy_val = kiln_val_from_boundary(made);
+        copy = (kiln_object *)KILN_VAL_PTR(copy_val);
+        status = kiln_c99_clone_table_put(table, value, copy_val);
+        if (status != KILN_C99_OK) return status;
+        if (shape != NULL) {
+            count = shape->property_count;
+            if (count > copy->slot_capacity) {
+                status = kiln_c99_grow_slots(copy, count);
+                if (status != KILN_C99_OK) return status;
+            }
+            /* Nothing the program wrote can run while this walks, so the source's shape and
+             * slots now are the ones it has at the end. */
+            if (count > 0) memcpy(copy->slots, source->slots, count * sizeof(kiln_val));
+            copy->shape = shape;
+            for (i = 0; i < count; ++i) {
+                kiln_val item = copy->slots[i];
+                kiln_val cloned;
+                if (KILN_VAL_IS_NUMBER(item) || KILN_VAL_IS_STRING(item) || item == KILN_VAL_UNDEFINED ||
+                    item == KILN_VAL_NULL || KILN_VAL_IS_BOOLEAN(item)) {
+                    continue;
+                }
+                status = kiln_c99_clone_data_val(table, item, depth + 1, &cloned);
+                if (status != KILN_C99_OK) return status;
+                copy->slots[i] = cloned;
+            }
+        } else {
+            count = source->count;
+            if (count > 0) {
+                kiln_property *properties = (kiln_property *)malloc(count * sizeof *properties);
+                if (properties == NULL) return KILN_C99_OUT_OF_MEMORY;
+                memcpy(properties, source->properties, count * sizeof *properties);
+                for (i = 0; i < count; ++i) {
+                    properties[i].writable = 1;
+                    properties[i].configurable = 1;
+                }
+                copy->properties = properties;
+                copy->count = count;
+                copy->capacity = count;
+                copy->shape = NULL;
+            }
+            for (i = 0; i < count; ++i) {
+                kiln_value item = copy->properties[i].value;
+                kiln_val cloned;
+                if (item.tag != KILN_VALUE_OBJECT && item.tag != KILN_VALUE_ARRAY) {
+                    if (item.tag == KILN_VALUE_NUMBER || item.tag == KILN_VALUE_STRING ||
+                        item.tag == KILN_VALUE_BOOLEAN || item.tag == KILN_VALUE_NULL ||
+                        item.tag == KILN_VALUE_UNDEFINED || item.tag == KILN_VALUE_BIGINT) {
+                        continue;
+                    }
+                    return KILN_C99_CLONE_BAIL;
+                }
+                status = kiln_c99_clone_data_val(table, kiln_val_from_boundary(item), depth + 1, &cloned);
+                if (status != KILN_C99_OK) return status;
+                /* Read the array again: the walk allocated, and the object it belongs to is
+                 * the one that owns it, so the pointer is the same, but this keeps the store
+                 * next to the only load that can see it. */
+                copy->properties[i].value = kiln_val_to_boundary(cloned);
+            }
+        }
+        *out = copy_val;
+        return KILN_C99_OK;
+    }
+    if ((value & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && kind == KILN_GC_ARRAY) {
+        kiln_array *source = (kiln_array *)ptr;
+        kiln_value made;
+        kiln_array *copy;
+        kiln_val copy_val;
+        size_t count = source->count;
+        size_t i;
+        if (source->properties.tag != KILN_VALUE_UNDEFINED || source->match_index != -1) {
+            return KILN_C99_CLONE_BAIL;
+        }
+        status = kiln_c99_new_array_with_capacity(&made, count, source->is_numeric);
+        if (status != KILN_C99_OK) return status;
+        copy_val = kiln_val_from_boundary(made);
+        copy = (kiln_array *)KILN_VAL_PTR(copy_val);
+        if (count > 0) memcpy(copy->elements, source->elements, count * sizeof(kiln_val));
+        copy->count = count;
+        status = kiln_c99_clone_table_put(table, value, copy_val);
+        if (status != KILN_C99_OK) return status;
+        if (!copy->is_numeric) {
+            for (i = 0; i < count; ++i) {
+                kiln_val item = copy->elements[i];
+                kiln_val cloned;
+                if (KILN_VAL_IS_NUMBER(item) || KILN_VAL_IS_STRING(item) || item == KILN_VAL_HOLE ||
+                    item == KILN_VAL_UNDEFINED || item == KILN_VAL_NULL || KILN_VAL_IS_BOOLEAN(item)) {
+                    continue;
+                }
+                status = kiln_c99_clone_data_val(table, item, depth + 1, &cloned);
+                if (status != KILN_C99_OK) return status;
+                copy->elements[i] = cloned;
+            }
+        }
+        *out = copy_val;
+        return KILN_C99_OK;
+    }
+    return KILN_C99_CLONE_BAIL;
+}
+
+static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size_t argc) {
+    kiln_c99_clone_table table;
+    kiln_val root = KILN_VAL_UNDEFINED;
+    int status;
+    *out = kiln_c99_undefined();
+    if (argc == 0) return KILN_C99_OK;
+    memset(table.inline_keys, 0, sizeof table.inline_keys);
+    table.keys = table.inline_keys;
+    table.values = table.inline_values;
+    table.capacity = KILN_C99_CLONE_INLINE;
+    table.count = 0;
+    status = kiln_c99_clone_data_val(&table, kiln_val_from_boundary(args[0]), 0, &root);
+    if (table.keys != table.inline_keys) {
+        free(table.keys);
+        free(table.values);
+    }
+    if (status == KILN_C99_CLONE_BAIL) return KILN_C99_OK;
+    if (status != KILN_C99_OK) return status;
+    *out = kiln_val_to_boundary(root);
+    return KILN_C99_OK;
 }
 
 static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value source,

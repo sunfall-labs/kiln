@@ -120,7 +120,6 @@ extern int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val va
                                       kiln_c99_site *site);
 extern int kiln_c99_spread_object_fast(kiln_val target, kiln_val source, int *status);
 extern int kiln_c99_val_promise_resolve(kiln_val value, kiln_val *out);
-extern uint64_t kiln_c99_builtin_store_epoch __attribute__((visibility("hidden")));
 /* Whether this process installs kiln's own members (ADR 0068); `parallelMap`'s lowerings ask. */
 extern int kiln_c99_kiln_extensions_on(void);
 extern int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len, kiln_property **out);
@@ -321,8 +320,8 @@ static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln
         return 1;
     } else if (ctag == KILN_VALUE_BUILTIN) {
         return KILN_VAL_IS_BUILTIN(target) && KILN_VAL_BUILTIN_ID(target) == site->cached_builtin &&
-               site->cached_epoch == kiln_c99_builtin_store_epoch &&
-               site->cached_generation == kiln_c99_realm_generation();
+               (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0) ||
+                !kiln_c99_realm_builtin_modified(site->cached_builtin));
     } else if (ctag == KILN_VALUE_ARRAY && ((target & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) {
         void *ptr = KILN_VAL_PTR(target);
         if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {

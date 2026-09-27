@@ -284,6 +284,8 @@ static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
 static int kiln_c99_new_data_view(kiln_value *out, kiln_value source, size_t byte_offset,
                                   size_t byte_length, int has_length, kiln_value *thrown);
 static int kiln_c99_to_index(kiln_value value, size_t *out, kiln_value *thrown);
+static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size_t argc);
+static int kiln_c99_jobs_pending_raw(kiln_value *out);
 static size_t kiln_c99_typed_width(kiln_typed_kind kind);
 static double kiln_c99_typed_get(kiln_typed_array *view, size_t index);
 static void kiln_c99_typed_set(kiln_typed_array *view, size_t index, double value);
@@ -1744,10 +1746,24 @@ static kiln_typed_buffer *kiln_c99_typed_buffer_of(kiln_value value) {
     return (kiln_typed_buffer *)(uintptr_t)value.bits;
 }
 
+/* A view whose buffer has been detached is empty from then on, as the language says, and it is
+ * made so here, at the one accessor every runtime path reaches a view through: a path that reads
+ * `length` and then the bytes can never walk a buffer that is no longer there. Detachment is
+ * permanent, so settling the view once is enough. */
 static kiln_typed_array *kiln_c99_typed_array_of(kiln_value value) {
-    return (kiln_typed_array *)(uintptr_t)value.bits;
+    kiln_typed_array *view = (kiln_typed_array *)(uintptr_t)value.bits;
+    if (KILN_UNLIKELY(view->buffer != NULL && view->buffer->detached)) {
+        view->length = 0;
+        view->byte_offset = 0;
+    }
+    return view;
 }
 
 static kiln_data_view *kiln_c99_data_view_of(kiln_value value) {
-    return (kiln_data_view *)(uintptr_t)value.bits;
+    kiln_data_view *view = (kiln_data_view *)(uintptr_t)value.bits;
+    if (KILN_UNLIKELY(view->buffer != NULL && view->buffer->detached)) {
+        view->byte_length = 0;
+        view->byte_offset = 0;
+    }
+    return view;
 }

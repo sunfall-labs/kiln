@@ -1453,6 +1453,102 @@ throw-missing-closed: closed=true is-type-error=true
 """
 
 [[test]]
+id = "regress/r17-message-port-delivery-and-transfer"
+requires_host = "node"
+group = "regress"
+source = "regress/r17-message-port-delivery-and-transfer.mjs"
+status = "runnable"
+features = ["message-channel", "message-port", "structured-clone", "transfer-list", "array-buffer-detach", "worker-threads", "promise-jobs", "next-tick"]
+catches = """
+Issue 14 of `.scratch/realms-and-concurrency`. Delivery: node dispatches a port's messages from \
+one callback with a full checkpoint (ticks, then promise jobs, then an async handler's later \
+awaits) between two messages, and each port's queue as one batch, so `B1` comes after all of `A`. \
+Delivering the queue from one `setImmediate` without the checkpoint, or one `setImmediate` per \
+message, interleaves differently. An `onmessage` handler is a listener in the position it was \
+first set in, and sees `target`.
+
+Transfer: `postMessage(msg, [buf])` and `structuredClone(v, { transfer })` detach the sender's \
+buffer (and every view over it) and hand the bytes over; until 2026-09-26 the list was ignored \
+and the "transfer" was a copy, and `ArrayBuffer.prototype.transfer` set an own `detached` \
+property over bytes the views could still read. A clone that fails half way detaches nothing. \
+`markAsUntransferable` is honoured. The DataCloneError messages and codes are node's.
+
+The clone: shared references and cycles survive, holes stay holes, an own `__proto__` key stays \
+an own key, a class instance becomes a plain object, and a function, a symbol or a promise is a \
+DataCloneError. The interpreter's Rust clone answered the same Map it was given.\
+"""
+expected_stdout = """
+returns true
+sender 0 0 0 true undefined
+failed clone throws DataCloneError f() {} could not be cloned. 25
+kept 8 false
+options form 0
+dup throws DataCloneError Transfer list contains duplicate ArrayBuffer 25
+detached in list throws DataCloneError Cannot transfer object of unsupported type. 25
+detached value throws DataCloneError An ArrayBuffer is detached and could not be cloned. 25
+not transferable throws DataCloneError Found invalid value in transferList. 25
+bad list throws TypeError Optional transferList argument must be an iterable ERR_INVALID_ARG_TYPE
+source port throws DataCloneError Transfer list contains source port 25
+port not listed throws DataCloneError Object that needs transfer was found in message but not listed in transferList 25
+transfer(4) 4
+transfer detached throws TypeError Cannot perform ArrayBuffer.prototype.transfer on a detached ArrayBuffer undefined
+view over detached TypeError
+untransferable throws DataCloneError Cannot transfer object of unsupported type. 25
+pinned true 8 8
+graph true true true true true bigint
+own __proto__ true __proto__,y
+instance true
+function throws DataCloneError f() {} could not be cloned. 25
+symbol throws DataCloneError Symbol(q) could not be cloned. 25
+promise throws DataCloneError #<Promise> could not be cloned. 25
+A1
+At1
+Ap1
+Aw1-1
+Aw2-1
+A2
+At2
+Ap2
+Aw1-2
+Aw2-2
+A3
+At3
+Ap3
+Aw1-3
+Aw2-3
+B1
+Bq1
+Bqt1
+B2
+Bq2
+Bqt2
+E1
+E-on2 true 0
+E2
+T 4 3 true 4
+"""
+
+[[test]]
+id = "regress/r18-worker-threads-receive-message"
+requires_host = "node"
+group = "regress"
+source = "regress/r18-worker-threads-receive-message.js"
+status = "runnable"
+features = ["node-worker-threads", "message-channel", "structured-clone"]
+catches = """
+`receiveMessageOnPort` answered `undefined` for every port, whatever it held, so a program polling \
+a port saw an empty queue forever and nothing said why. It takes the oldest queued message, \
+wrapped in `{ message }`, leaves the rest, and receives a copy rather than the sent object.\
+"""
+expected_stdout = """
+first {"message":{"n":1}}
+second {"message":"two"}
+empty undefined
+copied {"list":[1,2]}
+not a port ERR_INVALID_ARG_TYPE The "port" argument must be a MessagePort instance
+"""
+
+[[test]]
 id = "server/s08-binary-http-chunks"
 requires_host = "node"
 group = "server"
