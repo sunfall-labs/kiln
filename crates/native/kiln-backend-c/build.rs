@@ -1,6 +1,9 @@
 use std::path::Path;
 
-fn fingerprint(path: &Path, bytes: &mut Vec<u8>) {
+fn fingerprint(path: &Path, bytes: &mut Vec<u8>, excluded: Option<&Path>) {
+    if excluded.is_some_and(|excluded| path == excluded) {
+        return;
+    }
     // These modules are declared #[cfg(test)] by the backend and IR crates. Editing a fixture
     // cannot change production emission, and must not invalidate every native artifact.
     if path
@@ -21,7 +24,7 @@ fn fingerprint(path: &Path, bytes: &mut Vec<u8>) {
             .collect::<Vec<_>>();
         entries.sort();
         for entry in entries {
-            fingerprint(&entry, bytes);
+            fingerprint(&entry, bytes, excluded);
         }
     } else {
         println!("cargo:rerun-if-changed={}", path.display());
@@ -152,21 +155,53 @@ fn write_prelude_literal_keys() {
 fn main() {
     write_prelude_literal_keys();
     let mut bytes = Vec::new();
-    fingerprint(Path::new("src"), &mut bytes);
+    fingerprint(Path::new("src"), &mut bytes, None);
+    let mut module_emitter_bytes = Vec::new();
+    // Runtime C implements helpers declared by the prelude header. It is compiled and linked
+    // separately from graph module C and cannot affect the bytes emitted for a ModuleProgram.
+    // Keep it in the complete backend identity while excluding it from the module-source cache
+    // identity; the prelude/header digest still invalidates dependent object files.
+    fingerprint(
+        Path::new("src"),
+        &mut module_emitter_bytes,
+        Some(Path::new("src/runtime")),
+    );
     // Emission reads kiln-ir directly -- proto accessors like `effective_name_units`
     // decide emitted bytes without changing the program digest -- so its sources
     // join the fingerprint. Without them an IR-side change reused stale modules:
     // same bytecode in, previous C out.
-    fingerprint(Path::new("../../compile/kiln-ir/src"), &mut bytes);
-    fingerprint(Path::new("../../compile/kiln-graph/src"), &mut bytes);
+    fingerprint(Path::new("../../compile/kiln-ir/src"), &mut bytes, None);
+    fingerprint(
+        Path::new("../../compile/kiln-ir/src"),
+        &mut module_emitter_bytes,
+        None,
+    );
+    fingerprint(Path::new("../../compile/kiln-graph/src"), &mut bytes, None);
+    fingerprint(
+        Path::new("../../compile/kiln-graph/src"),
+        &mut module_emitter_bytes,
+        None,
+    );
     fingerprint(
         Path::new("../../compile/kiln-db/src/summary.rs"),
         &mut bytes,
+        None,
     );
-    fingerprint(Path::new("Cargo.toml"), &mut bytes);
-    fingerprint(Path::new("build.rs"), &mut bytes);
+    fingerprint(
+        Path::new("../../compile/kiln-db/src/summary.rs"),
+        &mut module_emitter_bytes,
+        None,
+    );
+    fingerprint(Path::new("Cargo.toml"), &mut bytes, None);
+    fingerprint(Path::new("Cargo.toml"), &mut module_emitter_bytes, None);
+    fingerprint(Path::new("build.rs"), &mut bytes, None);
+    fingerprint(Path::new("build.rs"), &mut module_emitter_bytes, None);
     println!(
         "cargo:rustc-env=KILN_C_EMITTER_BUILD_ID={}",
         kiln_digest::Digest::hash(&bytes).to_hex()
+    );
+    println!(
+        "cargo:rustc-env=KILN_C_MODULE_EMITTER_BUILD_ID={}",
+        kiln_digest::Digest::hash(&module_emitter_bytes).to_hex()
     );
 }

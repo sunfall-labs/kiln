@@ -46,6 +46,10 @@ pub const C_GENERATOR_VERSION: u32 = 48;
 /// caches must not trust a manually advanced generator epoch alone across active worktrees.
 pub const C_EMITTER_BUILD_ID: &str = env!("KILN_C_EMITTER_BUILD_ID");
 
+/// Identity of code that can change generated module C, excluding separately linked runtime C.
+/// Runtime and prelude bytes remain inputs to the compiled-object cache keys in `kiln-native`.
+pub const C_MODULE_EMITTER_BUILD_ID: &str = env!("KILN_C_MODULE_EMITTER_BUILD_ID");
+
 /// Stable basename used by decoupled translation units for the shared runtime declarations.
 ///
 /// The native pipeline materializes this header once beside every set of generated module files.

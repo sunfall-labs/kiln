@@ -304,9 +304,11 @@ by name" is a state to leave, in the order the thirdparty corpus and the invento
 ## Editing the C prelude and native caches
 
 Native generated-C, object, runtime and link keys include the content digests of the prelude
-source or header they consume. The backend emitter build fingerprint also participates in the
-generated-module key. Editing `crates/native/kiln-backend-c/src/runtime/` therefore creates cache misses
-for the affected layers; an ordinary build does not require manual cache deletion.
+source or header they consume. The generated-module key uses a backend module-emitter fingerprint
+that excludes separately compiled runtime C: runtime-C-only edits do not invalidate graph
+generated-C records, while exact runtime source and prelude-header digests still invalidate
+dependent objects and links. Editing `crates/native/kiln-backend-c/src/runtime/` therefore creates
+cache misses for the affected layers; an ordinary build does not require manual cache deletion.
 Concurrent native object misses coordinate through bounded process mutexes and advisory files in
 `<first-writable-cache-layer>/.compile-locks/v1/` (at most 256 files). After waiting, each caller
 rechecks the full artifact key; only a still-missing object compiles. Warm hits do no lock I/O.

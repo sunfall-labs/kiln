@@ -202,7 +202,7 @@ background_step "crate tests" env KILN_JOBS="$TEST_JOBS" RAYON_NUM_THREADS="$TES
 	test_status="$GATE_CACHE_TEST_STATUS"
 	raw_log="${GATE_STEP_LOG}.raw"
 	cat "$GATE_CACHE_TEST_LOG" >"$raw_log"
-	mbx test --workspace --exclude kiln-artifact-cache --locked --jobs="$KILN_TEST_THREADS" -- --test-threads="$KILN_TEST_THREADS" >>"$raw_log" 2>&1 || test_status=$?
+	mbx test --workspace --exclude kiln-artifact-cache --locked --jobs="$KILN_TEST_THREADS" -- --test-threads="$KILN_TEST_THREADS" --report-time >>"$raw_log" 2>&1 || test_status=$?
 	output="$(cat "$raw_log")"
 	# The failing *names* as well as the summary: a count says the suite is red and nothing
 	# about which part, and this step is the one that reports breakage in any other crate.

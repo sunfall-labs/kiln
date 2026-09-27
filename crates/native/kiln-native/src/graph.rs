@@ -745,11 +745,11 @@ fn cached_emitted_module(
 ) -> Result<(kiln_backend_c::CModule, bool), NativeError> {
     let cache_key = NativeArtifactFamily::ModuleSource.source_key(
         target,
-        Digest::hash(b"native-graph-emission-input-v5"),
+        Digest::hash(b"native-graph-emission-input-v6"),
         [
             input,
             prelude_header_digest(),
-            Digest::hash(kiln_backend_c::C_EMITTER_BUILD_ID.as_bytes()),
+            Digest::hash(kiln_backend_c::C_MODULE_EMITTER_BUILD_ID.as_bytes()),
             emitter_id,
         ],
     );
