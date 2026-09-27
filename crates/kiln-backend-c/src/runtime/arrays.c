@@ -301,6 +301,78 @@ static int kiln_c99_new_typed_buffer(kiln_value *out, size_t byte_length) {
     return kiln_c99_new_typed_buffer_ex(out, byte_length, 1);
 }
 
+/* Where a detached buffer points: never NULL, so a `memcpy` of its zero bytes is defined, and
+ * never owned, so the finalizer frees nothing. Read-only: its length is zero, so nothing may write
+ * through it, and a bug that did would fault here rather than corrupt a neighbour. */
+static const uint8_t kiln_c99_detached_bytes[1] = {0};
+
+/* `__kilnArrayBufferDetach(buffer, length, preserveResizability)`: the one primitive a transfer
+ * needs (ADR 0065, representation; ADR 0070 primitive C). The backing store *moves* to a new
+ * ArrayBuffer -- the same block, realloc'd only when the length changes -- and the source is left
+ * detached: zero bytes, and every view over it empty from its next use
+ * (`kiln_c99_typed_array_of`). Every check a program can observe is made above this, in
+ * `kiln-builtins/src/arraybuffer.ts` and `structured_clone.ts`; the two here keep a caller that
+ * skipped them from corrupting a buffer. This backend has no resizable buffer, so the third
+ * argument has nothing to preserve. Called by the bootstrap only: captured and deleted before
+ * user code. */
+static int kiln_c99_array_buffer_detach_raw(kiln_value *out, const kiln_value *args, size_t argc,
+                                            kiln_value *thrown) {
+    kiln_typed_buffer *source;
+    kiln_typed_buffer *moved;
+    size_t length;
+    int status;
+    if (argc == 0 || args[0].tag != KILN_VALUE_ARRAY_BUFFER) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "__kilnArrayBufferDetach: not an ArrayBuffer");
+    }
+    if (kiln_c99_typed_buffer_of(args[0])->detached) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Cannot perform ArrayBuffer transfer on a detached ArrayBuffer");
+    }
+    length = kiln_c99_typed_buffer_of(args[0])->byte_length;
+    if (argc > 1 && args[1].tag == KILN_VALUE_NUMBER) {
+        status = kiln_c99_to_index(args[1], &length, thrown);
+        if (status != KILN_C99_OK) return status;
+    }
+    /* Allocated before the source is read again: the allocation may collect, and the source is
+     * reachable only through `args`, which the caller roots. */
+    moved = (kiln_typed_buffer *)kiln_c99_gc_alloc(KILN_GC_TYPED_BUFFER, sizeof *moved);
+    if (moved == NULL) return KILN_C99_OUT_OF_MEMORY;
+    source = kiln_c99_typed_buffer_of(args[0]);
+    moved->bytes = source->bytes;
+    moved->byte_length = source->byte_length;
+    moved->owns_bytes = source->owns_bytes;
+    if (length != source->byte_length || !source->owns_bytes) {
+        /* A new length, or bytes this runtime does not own (a borrowed FFI view): the result
+         * needs its own block. Growth is zero-filled, as `transfer(n)` specifies. */
+        uint8_t *bytes;
+        size_t kept = length < source->byte_length ? length : source->byte_length;
+        if (source->owns_bytes) {
+            bytes = (uint8_t *)realloc(source->bytes, length == 0 ? 1 : length);
+        } else {
+            bytes = (uint8_t *)malloc(length == 0 ? 1 : length);
+            if (bytes != NULL && kept != 0) memcpy(bytes, source->bytes, kept);
+        }
+        if (bytes == NULL) {
+            moved->bytes = (uint8_t *)kiln_c99_detached_bytes;
+            moved->byte_length = 0;
+            moved->owns_bytes = 0;
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        if (length > kept) memset(bytes + kept, 0, length - kept);
+        if (length > source->byte_length) kiln_c99_gc_note_external(length - source->byte_length);
+        moved->bytes = bytes;
+        moved->byte_length = length;
+        moved->owns_bytes = 1;
+    }
+    source->bytes = (uint8_t *)kiln_c99_detached_bytes;
+    source->byte_length = 0;
+    source->owns_bytes = 0;
+    source->detached = 1;
+    *out = kiln_c99_value(KILN_VALUE_ARRAY_BUFFER, (uint64_t)(uintptr_t)moved, NULL, 0);
+    return KILN_C99_OK;
+}
+
 /* ECMAScript's ToIndex: missing/undefined/NaN become zero, but negative, infinite and unsafe
  * integer values are RangeErrors.  The size_t bound is separate because a 32-bit C target is
  * narrower than JavaScript's maximum safe integer.  Checking both before the cast keeps the
@@ -477,6 +549,10 @@ static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
     int status;
     if (source.tag == KILN_VALUE_ARRAY_BUFFER) {
         kiln_typed_buffer *buffer = kiln_c99_typed_buffer_of(source);
+        if (buffer->detached) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Cannot perform Construct on a detached ArrayBuffer");
+        }
         if (byte_offset % width != 0 || byte_offset > buffer->byte_length ||
             (!has_length && (buffer->byte_length - byte_offset) % width != 0) ||
             (has_length && (length > (buffer->byte_length - byte_offset) / width))) {
@@ -588,6 +664,10 @@ static int kiln_c99_new_data_view(kiln_value *out, kiln_value source, size_t byt
                                     "Method called on an incompatible receiver");
     }
     buffer = kiln_c99_typed_buffer_of(source);
+    if (buffer->detached) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Cannot perform DataView constructor on a detached ArrayBuffer");
+    }
     if (byte_offset > buffer->byte_length) {
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
                                     "Offset is outside the bounds of the DataView");

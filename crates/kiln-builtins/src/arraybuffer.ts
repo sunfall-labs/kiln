@@ -3,6 +3,15 @@
 //
 // Shared by both interpreter and native execution.
 
+// The one primitive a transfer needs (ADR 0065, representation): detach `buffer` and answer a new
+// ArrayBuffer of `length` bytes that owns the old backing store -- moved, not copied, grown with
+// zeros or cut short -- resizable up to the old ceiling when `preserveResizability` is set. Each
+// engine implements only that move; `transfer`, `transferToFixedLength` and every transfer list
+// (`structured_clone.ts`) call it after making their own checks.
+const __kilnDetachBuffer: (buffer: ArrayBuffer, length: number, preserveResizability: boolean) => ArrayBuffer =
+  (globalThis as any).__kilnArrayBufferDetach;
+delete (globalThis as any).__kilnArrayBufferDetach;
+
 (function installArrayBufferExtensions() {
   if (typeof ArrayBuffer === "undefined" || !ArrayBuffer.prototype) {
     return;
@@ -22,81 +31,55 @@
   const Proto = ArrayBuffer.prototype as any;
 
   function isDetachedBuffer(buf: any): boolean {
-    try {
-      const desc = Object.getOwnPropertyDescriptor(buf, "detached");
-      if (desc && desc.value !== undefined) return Boolean(desc.value);
-    } catch (_) {}
-    return Boolean((buf as any).detached);
+    return buf.detached === true;
   }
 
-  function doTransfer(thisArg: any, newByteLength: any, fixedLength: boolean, methodName: string): ArrayBuffer {
+  function receiverName(value: any): string {
+    if (value === null) return "null";
+    if (typeof value !== "object" && typeof value !== "function") return String(value);
+    const ctor = value.constructor;
+    return "#<" + (ctor && typeof ctor.name === "string" && ctor.name !== "" ? ctor.name : "Object") + ">";
+  }
+
+  // `ArrayBufferCopyAndDetach`: every check a caller could observe is made here, above the
+  // primitive, and the primitive only moves the backing store. So the bytes are handed over,
+  // never copied -- a transfer of 16 MB costs what a transfer of 1 KB does -- and every view
+  // over the source sees it empty.
+  function doTransfer(thisArg: any, newByteLength: any, preserveResizability: boolean, methodName: string): ArrayBuffer {
     if (!(thisArg instanceof ArrayBuffer)) {
-      throw new TypeError(`Method ArrayBuffer.prototype.${methodName} called on incompatible receiver`);
+      throw new TypeError(`Method ArrayBuffer.prototype.${methodName} called on incompatible receiver ${receiverName(thisArg)}`);
     }
-    if (isDetachedBuffer(thisArg) || (thisArg as any).detached) {
-      throw new TypeError("Cannot transfer detached ArrayBuffer");
-    }
-    const oldLen = thisArg.byteLength;
-    const rawLen = newByteLength === undefined ? oldLen : Math.trunc(Number(newByteLength));
-    if (rawLen < 0) {
-      throw new RangeError("Invalid length");
-    }
-    const newLen = Number.isNaN(rawLen) ? 0 : rawLen;
-
-    let newBuffer: ArrayBuffer;
-    if (!fixedLength && (thisArg as any).resizable && (thisArg as any).maxByteLength !== undefined) {
-      if (newLen > (thisArg as any).maxByteLength) {
-        throw new RangeError("Invalid length");
-      }
-      try {
-        newBuffer = new (ArrayBuffer as any)(newLen, { maxByteLength: (thisArg as any).maxByteLength });
-        (newBuffer as any).resizable = true;
-        (newBuffer as any).maxByteLength = (thisArg as any).maxByteLength;
-      } catch {
-        newBuffer = new ArrayBuffer(newLen);
-      }
+    let newLen: number;
+    if (newByteLength === undefined) {
+      newLen = thisArg.byteLength;
     } else {
-      newBuffer = new ArrayBuffer(newLen);
+      const number = Math.trunc(Number(newByteLength));
+      newLen = Number.isNaN(number) ? 0 : number;
+      if (newLen < 0 || newLen > 9007199254740991) throw new RangeError("Invalid array buffer length");
     }
-
-    const copyLen = Math.min(oldLen, newLen);
-    if (copyLen > 0) {
-      const src = new Uint8Array(thisArg, 0, copyLen);
-      const dst = new Uint8Array(newBuffer, 0, copyLen);
-      dst.set(src);
+    if (isDetachedBuffer(thisArg)) {
+      throw new TypeError(`Cannot perform ArrayBuffer.prototype.${methodName} on a detached ArrayBuffer`);
     }
-
-    (thisArg as any).detached = true;
-    try {
-      Object.defineProperty(thisArg, "detached", {
-        value: true,
-        writable: true,
-        configurable: true,
-      });
-    } catch (_) {}
-    try {
-      Object.defineProperty(thisArg, "byteLength", {
-        value: 0,
-        configurable: true,
-      });
-    } catch (_) {}
-
-    return newBuffer;
+    const keepCeiling = preserveResizability && (thisArg as any).resizable === true;
+    if (keepCeiling && newLen > (thisArg as any).maxByteLength) {
+      throw new RangeError("Invalid array buffer length");
+    }
+    return __kilnDetachBuffer(thisArg, newLen, keepCeiling);
   }
 
   function transfer(this: any, newByteLength?: number): ArrayBuffer {
-    return doTransfer(this, newByteLength, false, "transfer");
+    return doTransfer(this, newByteLength, true, "transfer");
   }
 
   function transferToFixedLength(this: any, newByteLength?: number): ArrayBuffer {
-    return doTransfer(this, newByteLength, true, "transferToFixedLength");
+    return doTransfer(this, newByteLength, false, "transferToFixedLength");
   }
 
   function resize(this: any, newByteLength: number): void {
     if (!(this instanceof ArrayBuffer)) {
       throw new TypeError("Method ArrayBuffer.prototype.resize called on incompatible receiver");
     }
-    if (isDetachedBuffer(this) || (this as any).detached) {
+    if (isDetachedBuffer(this)) {
       throw new TypeError("Cannot resize detached ArrayBuffer");
     }
     if (!(this as any).resizable) {

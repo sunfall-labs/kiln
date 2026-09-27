@@ -347,6 +347,10 @@ typedef struct kiln_gc_heap {
     size_t job_tail;
     size_t job_capacity;
     size_t job_mask;
+    /* `process.nextTick` callbacks queued and not yet disposed of. The queue itself is the
+     * realm's (Rust); this count is what `__kilnJobsPending` reads to answer "would a checkpoint
+     * run anything now" without a call across the private ABI. */
+    size_t next_ticks_queued;
 } kiln_gc_heap;
 
 static const kiln_gc_hooks kiln_c99_gc_hooks;

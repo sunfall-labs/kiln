@@ -46,7 +46,17 @@ export function setEnvironmentData(key: any, value: any): void {
   envData.set(key, value);
 }
 
-export function markAsUntransferable(_obj: any): void {}
+// The structured clone's own marks (crates/kiln-builtins/src/structured_clone.ts), reached through
+// the symbol the bootstrap hangs them on: this module is not part of that script.
+const cloneInternals: any = (globalThis as any).structuredClone?.[Symbol.for("kiln.structuredClone")];
+
+/// A marked object in a transfer list is a DataCloneError; cloned, it is still copied.
+export function markAsUntransferable(obj: any): void {
+  if (cloneInternals) cloneInternals.markAsUntransferable(obj);
+}
+export function isMarkedAsUntransferable(obj: any): boolean {
+  return cloneInternals ? cloneInternals.isMarkedAsUntransferable(obj) : false;
+}
 export function markAsUncloneable(_obj: any): void {}
 export function moveMessagePortToContext(_port: any, _context: any): any {
   return _port;
@@ -66,6 +76,7 @@ const workerThreadsModule = {
   isMainThread,
   markAsUncloneable,
   markAsUntransferable,
+  isMarkedAsUntransferable,
   moveMessagePortToContext,
   parentPort,
   receiveMessageOnPort,

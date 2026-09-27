@@ -1105,6 +1105,15 @@ method_ids! {
     (KILN_C99_METHOD_URL_SET_RAW, 525, Direct; 0, 0),
     (KILN_C99_METHOD_URL_FAST_RAW, 526, Direct; 0, 0),
     (KILN_C99_METHOD_URL_ADOPT_RAW, 527, Direct; 0, 0),
+    // The transfer primitive (ADR 0065, representation; ADR 0070 primitive C), captured and
+    // deleted by `kiln-builtins/src/arraybuffer.ts`.
+    (KILN_C99_METHOD_ARRAY_BUFFER_DETACH_RAW, 532, Direct; 0, 0),
+    // The plain-data fast path of the structured clone (ADR 0065, measured), captured and
+    // deleted by `kiln-builtins/src/structured_clone.ts`.
+    (KILN_C99_METHOD_CLONE_DATA_RAW, 533, Direct; 0, 0),
+    // Whether a microtask checkpoint would run anything now, for message delivery; captured and
+    // deleted by `kiln-builtins/src/web_events_streams.ts`.
+    (KILN_C99_METHOD_JOBS_PENDING_RAW, 534, Direct; 0, 0),
     (KILN_C99_METHOD_PROCESS_EXIT, 513, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC, 514, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC, 515, Direct; 0, 0),
@@ -3701,6 +3710,9 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_URL_SET_RAW),
     emit_method_define!(KILN_C99_METHOD_URL_FAST_RAW),
     emit_method_define!(KILN_C99_METHOD_URL_ADOPT_RAW),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_BUFFER_DETACH_RAW),
+    emit_method_define!(KILN_C99_METHOD_CLONE_DATA_RAW),
+    emit_method_define!(KILN_C99_METHOD_JOBS_PENDING_RAW),
     emit_method_define!(KILN_C99_METHOD_PROCESS_EXIT),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC),
@@ -4414,7 +4426,8 @@ static int kiln_c99_is_typed_array_member(int byte_view, const char *key, size_t
 /* Whether a name is a member of `ArrayBuffer.prototype` *in the language* that this backend does
  * not answer -- the same question `kiln_c99_is_typed_array_member` asks one type over. */
 static int kiln_c99_is_array_buffer_member(const char *key, size_t key_len) {
-    /* detached, maxByteLength, resizable, transfer, and transferToFixedLength are answered by arraybuffer.ts. */
+    /* detached is answered by the instance read; transfer and transferToFixedLength by arraybuffer.ts
+     * over __kilnArrayBufferDetach; maxByteLength and resizable are absent (no resizable buffers). */
     static const char *const members[] = {"immutable",
                                           "resize",
                                           "sliceToImmutable",

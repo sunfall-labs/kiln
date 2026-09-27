@@ -90,6 +90,12 @@ static int kiln_c99_enqueue_next_tick(kiln_value callback, const kiln_value *arg
         }
         memcpy(task->args, args, argc * sizeof *task->args);
     }
+    /* Counted before the hand-off: a refused hand-off disposes of the task, which uncounts it. */
+    task->counted = 0;
+    if (kiln_c99_gc_heap() != NULL) {
+        kiln_c99_gc_heap()->next_ticks_queued += 1;
+        task->counted = 1;
+    }
     status = kiln_realm_queue_next_tick(kiln_c99_run_next_tick, kiln_c99_drop_next_tick, task);
     if (status != KILN_C99_OK) {
         kiln_c99_drop_next_tick(task);
@@ -426,6 +432,22 @@ static int kiln_c99_run_job(kiln_microtask *task, kiln_host *host, kiln_value *t
     return KILN_C99_OK;
 }
 
+/* `__kilnJobsPending()`: what a microtask checkpoint would run now, as bits -- 1 for a
+ * `process.nextTick` callback, 2 for a promise job or `queueMicrotask` callback (ADR 0065,
+ * representation: it reads the realm's queues). A message port delivers its next message in the
+ * same macrotask when this is 0, because a checkpoint between the two would run nothing, and
+ * otherwise waits at the back of the checkpoint (`web_events_streams.ts`). */
+static int kiln_c99_jobs_pending_raw(kiln_value *out) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    int bits = 0;
+    if (heap != NULL) {
+        if (heap->next_ticks_queued != 0) bits |= 1;
+        if (heap->job_head < heap->job_tail) bits |= 2;
+    }
+    *out = kiln_c99_number((double)bits);
+    return KILN_C99_OK;
+}
+
 /* Does the lane hold a job the realm has not run yet? */
 static int kiln_c99_promise_jobs_pending(void *context) {
     kiln_gc_heap *heap = (kiln_gc_heap *)context;
@@ -471,7 +493,16 @@ int kiln_c99_finish_module_checkpoint(kiln_host *host, kiln_value *thrown) {
 }
 
 /* The finaliser frees `args`, so the release below must not free it a second time. */
+static void kiln_c99_uncount_next_tick(kiln_next_tick *task) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    if (task == NULL || !task->counted) return;
+    task->counted = 0;
+    if (heap != NULL && heap->next_ticks_queued != 0) heap->next_ticks_queued -= 1;
+}
+
+/* Called exactly once per queued tick -- after it ran, or when it is discarded unrun. */
 static void kiln_c99_drop_next_tick(void *work) {
+    kiln_c99_uncount_next_tick((kiln_next_tick *)work);
     kiln_c99_gc_release(work);
 }
 
@@ -482,6 +513,7 @@ static int kiln_c99_run_next_tick(void *work, void *host_pointer, void *thrown_p
     kiln_value produced = kiln_c99_undefined();
     int status;
     if (task == NULL || thrown == NULL) return KILN_C99_INVALID_ARGUMENT;
+    kiln_c99_uncount_next_tick(task);
     status = kiln_c99_call(host, &produced, task->callback, kiln_c99_undefined(),
                            task->argc == 0 ? NULL : task->args, task->argc, 0, thrown);
     kiln_c99_publish_turn_refusal(status, produced, thrown);

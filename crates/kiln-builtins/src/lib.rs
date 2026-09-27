@@ -455,6 +455,7 @@ declare_ts_builtins! {
             "default",
             "getEnvironmentData",
             "isMainThread",
+            "isMarkedAsUntransferable",
             "markAsUncloneable",
             "markAsUntransferable",
             "moveMessagePortToContext",
@@ -1277,6 +1278,11 @@ pub const REGEXP_BOOTSTRAP_SOURCE: &str = include_str!("regexp.ts");
 /// `ArrayBuffer.prototype` and `SharedArrayBuffer.prototype` extensions.
 pub const ARRAYBUFFER_BOOTSTRAP_SOURCE: &str = include_str!("arraybuffer.ts");
 
+/// `structuredClone` and the structured clone with transfer every message port uses (ADR 0060
+/// kind 7): one implementation for both engines, over the detach primitive `arraybuffer.ts`
+/// captures. Follows `arraybuffer.ts` in the common bootstrap for that reason.
+pub const STRUCTURED_CLONE_BOOTSTRAP_SOURCE: &str = include_str!("structured_clone.ts");
+
 /// `Map.prototype.getOrInsert` and `Map.prototype.getOrInsertComputed` (TC39 Stage 3).
 pub const MAPUPSERT_BOOTSTRAP_SOURCE: &str = include_str!("mapupsert.ts");
 
@@ -1291,10 +1297,10 @@ pub const OBJECT_REFLECT_BOOTSTRAP_SOURCE: &str = include_str!("object_reflect.t
 
 /// Part of every realm's bootstrap, in both interpreter and native execution.
 /// Includes Date.prototype, %TypedArray%.prototype, Error subclasses, Annex B, DisposableStack,
-/// RegExp.prototype, ArrayBuffer/SharedArrayBuffer, Map.upsert, Promise extensions, Iterator extensions, and Object/Reflect extensions.
+/// RegExp.prototype, ArrayBuffer/SharedArrayBuffer, structuredClone, Map.upsert, Promise extensions, Iterator extensions, and Object/Reflect extensions.
 pub fn common_bootstrap_source() -> String {
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         EXTENSIONS_BOOTSTRAP_SOURCE,
         DATE_BOOTSTRAP_SOURCE,
         TYPEDARRAY_BOOTSTRAP_SOURCE,
@@ -1303,6 +1309,7 @@ pub fn common_bootstrap_source() -> String {
         DISPOSABLE_BOOTSTRAP_SOURCE,
         REGEXP_BOOTSTRAP_SOURCE,
         ARRAYBUFFER_BOOTSTRAP_SOURCE,
+        STRUCTURED_CLONE_BOOTSTRAP_SOURCE,
         MAPUPSERT_BOOTSTRAP_SOURCE,
         PROMISE_BOOTSTRAP_SOURCE,
         ITERATOR_BOOTSTRAP_SOURCE,
