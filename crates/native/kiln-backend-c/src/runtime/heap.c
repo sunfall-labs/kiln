@@ -1664,19 +1664,22 @@ static void kiln_c99_gc_forget_realm_local(kiln_gc_heap *heap) {
 /* Put `entry` in the site under its receiver shape: over the entry that shape already has, else
  * in a free place, else over the last. Then register the site if it now names a realm-local
  * shape (`kiln_c99_site_learned`). */
-static void kiln_c99_site_remember(kiln_c99_site *site, const kiln_c99_pic_entry *entry) {
+static void kiln_c99_site_remember(kiln_c99_site *site, const kiln_c99_pic_entry *given) {
     uint32_t p;
+    kiln_c99_pic_entry entry = *given;
+    entry.one_step = entry.depth == 1 && !entry.absent && entry.transition_to == NULL &&
+                     entry.slot == UINT32_MAX && entry.level_shape[0] != NULL;
     for (p = 0; p < site->pic_count; ++p) {
-        if (site->entries[p].shape == entry->shape) {
-            site->entries[p] = *entry;
+        if (site->entries[p].shape == entry.shape) {
+            site->entries[p] = entry;
             kiln_c99_site_learned(site);
             return;
         }
     }
     if (site->pic_count < KILN_C99_PIC_SIZE) {
-        site->entries[site->pic_count++] = *entry;
+        site->entries[site->pic_count++] = entry;
     } else {
-        site->entries[KILN_C99_PIC_SIZE - 1] = *entry;
+        site->entries[KILN_C99_PIC_SIZE - 1] = entry;
     }
     kiln_c99_site_learned(site);
 }

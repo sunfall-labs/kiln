@@ -54,7 +54,8 @@ static int kiln_c99_put_site_key(kiln_host *host, kiln_value target, const kiln_
             }
             {
                 uint32_t slot;
-                if (kiln_c99_shape_find_slot(object->shape, stable, &slot)) {
+                if (kiln_c99_shape_find_slot(object->shape, stable, &slot) &&
+                    (object->shape->store_mask & (1u << slot)) == 0) {
                     if (slot < object->slot_capacity) {
                         object->slots[slot] = kiln_val_from_boundary(value);
                         if (site->pic_count < KILN_C99_PIC_SIZE) {
@@ -83,6 +84,10 @@ static int kiln_c99_put_site_key(kiln_host *host, kiln_value target, const kiln_
                     if (orig_shape != NULL && object->shape != orig_shape) {
                         uint32_t p;
                         int found = 0;
+                        /* Only the one edge this write took: a setter that ran instead may have
+                         * moved the object along some other key. */
+                        if (object->shape->parent != orig_shape || object->shape->ikey != stable)
+                            return status;
                         for (p = 0; p < site->pic_count; ++p) {
                             if (site->entries[p].shape == orig_shape) found = 1;
                         }
@@ -98,7 +103,9 @@ static int kiln_c99_put_site_key(kiln_host *host, kiln_value target, const kiln_
                             for (p = 0; p < site->pic_count; ++p) {
                                 if (site->entries[p].shape == object->shape) found = 1;
                             }
-                            if (found || site->pic_count < KILN_C99_PIC_SIZE) {
+                            /* A read-only slot or an accessor's pair is never stored into. */
+                            if ((found || site->pic_count < KILN_C99_PIC_SIZE) &&
+                                (object->shape->store_mask & (1u << slot)) == 0) {
                                 kiln_c99_site_remember_own(site, object->shape, slot);
                             }
                         } else if (!kiln_c99_site_learn(site, object, key, stable)) {
@@ -638,6 +645,8 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
             kiln_shape *next_shape;
             if (ikey == NULL) return KILN_C99_OUT_OF_MEMORY;
             if (kiln_c99_shape_find_slot(object->shape, ikey, &slot_idx)) {
+                /* Redefining an accessor or an attribute-bearing property is the list's job. */
+                if (object->shape->special_mask & (1u << slot_idx)) goto fallback_dict;
                 if (slot_idx < object->slot_capacity) {
                     if ((object->shape->double_slots_mask & (1u << slot_idx)) &&
                         value.tag != KILN_VALUE_NUMBER) {

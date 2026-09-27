@@ -1117,6 +1117,8 @@ static int kiln_c99_val_read_property_view(kiln_host *host, kiln_val target,
                 if (stable != NULL) {
                     uint32_t own_slot = UINT32_MAX;
                     if (kiln_c99_shape_find_slot(object->shape, stable, &own_slot)) {
+                        /* An own accessor: the generic read below calls it. */
+                        if (object->shape->accessor_mask & (1u << own_slot)) goto generic_read;
                         if (own_slot < object->slot_capacity) {
                             *out = object->slots[own_slot];
                             if (site != NULL) kiln_c99_site_remember_own(site, object->shape, own_slot);
@@ -1165,6 +1167,7 @@ static int kiln_c99_val_read_property_view(kiln_host *host, kiln_val target,
             }
         }
     }
+generic_read:;
     kiln_value t = kiln_val_to_boundary(target);
     kiln_value o = kiln_c99_undefined();
     int status = kiln_c99_get_site(host, t, key, canonical, &o, depth, thrown, site);
@@ -1275,7 +1278,8 @@ static int kiln_c99_val_write_property_view(kiln_host *host, kiln_val target,
             const kiln_string *stable = canonical != NULL ? canonical : kiln_c99_interned_key(key);
             if (stable != NULL) {
                 uint32_t slot = UINT32_MAX;
-                if (kiln_c99_shape_find_slot(object->shape, stable, &slot)) {
+                if (kiln_c99_shape_find_slot(object->shape, stable, &slot) &&
+                    (object->shape->store_mask & (1u << slot)) == 0) {
                     if (slot < object->slot_capacity && !object->frozen) {
                         if ((object->shape->double_slots_mask & (1u << slot)) && !KILN_VAL_IS_NUMBER(value)) {
                             kiln_c99_ensure_dictionary(object);
@@ -1380,6 +1384,10 @@ static int kiln_c99_val_set_private_fast(kiln_val receiver, kiln_val brand, kiln
         return 0;
     }
     if ((obj->shape->double_slots_mask & (1u << mslot)) != 0 && !KILN_VAL_IS_NUMBER(member)) {
+        return 0;
+    }
+    /* A private method is read-only: the slow path refuses the write. */
+    if ((obj->shape->store_mask & (1u << mslot)) != 0) {
         return 0;
     }
     if (site != NULL) {
@@ -2018,7 +2026,11 @@ static int kiln_c99_val_call_method_view(kiln_host *host, kiln_val receiver, con
                 kiln_c99_pic_entry remembered;
                 memset(&remembered, 0, sizeof remembered);
                 remembered.shape = object->shape;
-                remembered.slot = own ? own_slot : UINT32_MAX;
+                /* An own accessor's slot holds its pair: remembered as nothing, so the site
+                 * resolves it again. */
+                remembered.slot = own && (object->shape->accessor_mask & (1u << own_slot)) == 0
+                                      ? own_slot
+                                      : UINT32_MAX;
                 if (!own) {
                     const kiln_object *holder = NULL;
                     kiln_val found;

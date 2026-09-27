@@ -196,6 +196,44 @@ static int kiln_c99_has_inherited_setter_or_readonly(kiln_value proto) {
  * The coarse test answers for the whole prototype, which made every instance of a class with a
  * single getter (`Request`, `Response`, `Headers`, every class with `get [Symbol.toStringTag]`)
  * a dictionary object from its first field on. */
+#define KILN_C99_LEVEL_NONE 0
+#define KILN_C99_LEVEL_DATA 1
+#define KILN_C99_LEVEL_READONLY 2
+#define KILN_C99_LEVEL_ACCESSOR 3
+
+/* What one level of a prototype chain holds under `key`, for a write that did not find it on the
+ * receiver: nothing, a writable data property, a read-only one, or an accessor (whose setter is
+ * `*setter`). A shaped level answers from its shape's attributes and stays shaped -- a class
+ * prototype with a getter is walked by every first write of every instance's fields. */
+static int kiln_c99_level_write_answer(kiln_object *walked, const kiln_string *ikey,
+                                       const kiln_string *key, kiln_value *setter) {
+    if (walked->shape != NULL) {
+        const kiln_string *canonical =
+            ikey != NULL ? ikey : kiln_c99_interned_key_in(kiln_c99_gc_heap(), key);
+        uint32_t slot;
+        uint32_t attrs;
+        if (canonical == NULL || !kiln_c99_shape_find_slot(walked->shape, canonical, &slot))
+            return KILN_C99_LEVEL_NONE;
+        attrs = walked->shape->attrs[slot];
+        if (attrs & KILN_C99_ATTR_ACCESSOR) {
+            *setter = slot < walked->slot_capacity
+                          ? kiln_c99_accessor_pair_half(walked->slots[slot], 1)
+                          : kiln_c99_undefined();
+            return KILN_C99_LEVEL_ACCESSOR;
+        }
+        return (attrs & KILN_C99_ATTR_READONLY) ? KILN_C99_LEVEL_READONLY : KILN_C99_LEVEL_DATA;
+    }
+    {
+        size_t index = kiln_c99_own_index_key(walked, ikey, key);
+        if (index == walked->count) return KILN_C99_LEVEL_NONE;
+        if (walked->properties[index].accessor) {
+            *setter = walked->properties[index].setter;
+            return KILN_C99_LEVEL_ACCESSOR;
+        }
+        return walked->properties[index].writable ? KILN_C99_LEVEL_DATA : KILN_C99_LEVEL_READONLY;
+    }
+}
+
 static int kiln_c99_inherited_write_blocked(kiln_value proto, const kiln_string *ikey,
                                             const kiln_string *key) {
     kiln_value current = proto;
@@ -205,13 +243,9 @@ static int kiln_c99_inherited_write_blocked(kiln_value proto, const kiln_string 
         if (current.tag != KILN_VALUE_OBJECT) return 0;
         walked = kiln_c99_object_of(current);
         if (walked->accessor_count != 0 || walked->read_only_seen) {
-            size_t index = kiln_c99_own_index_key(walked, ikey, key);
-            if (index != walked->count) {
-                if (!walked->properties[index].accessor) {
-                    return !walked->properties[index].writable;
-                }
-                return 1;
-            }
+            kiln_value setter;
+            int answer = kiln_c99_level_write_answer(walked, ikey, key, &setter);
+            if (answer != KILN_C99_LEVEL_NONE) return answer != KILN_C99_LEVEL_DATA;
         }
         current = walked->prototype;
     }
@@ -251,7 +285,10 @@ static int kiln_c99_pic_learn_path(kiln_c99_pic_entry *entry, const kiln_object 
             entry->level_shape[d] = candidate->shape;
             entry->level_token[d] = 0;
             if (kiln_c99_shape_find_slot(candidate->shape, key, &slot)) {
-                if (slot >= candidate->slot_capacity) return KILN_C99_PATH_NONE;
+                /* An accessor's slot holds its pair: reading it is a call, never a cached read. */
+                if (slot >= candidate->slot_capacity ||
+                    (candidate->shape->accessor_mask & (1u << slot)) != 0)
+                    return KILN_C99_PATH_NONE;
                 entry->proto_slot = slot;
                 *holder = candidate;
                 return KILN_C99_PATH_FOUND;
@@ -562,6 +599,23 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
         }
         uint32_t slot;
         if (kiln_c99_shape_find_slot(object->shape, ikey, &slot)) {
+            if (KILN_UNLIKELY(object->shape->store_mask & (1u << slot))) {
+                /* An own read-only property refuses the write; an own accessor takes it -- as
+                 * the list-mode records below would, without leaving shape mode. */
+                kiln_value setter;
+                if ((object->shape->accessor_mask & (1u << slot)) == 0 ||
+                    slot >= object->slot_capacity) {
+                    return strict ? kiln_c99_throw_read_only_key(thrown, key) : KILN_C99_OK;
+                }
+                setter = kiln_c99_accessor_pair_half(object->slots[slot], 1);
+                if (setter.tag == KILN_VALUE_UNDEFINED) {
+                    return strict ? kiln_c99_throw_read_only_key(thrown, key) : KILN_C99_OK;
+                }
+                {
+                    kiln_value ignored;
+                    return kiln_c99_call(host, &ignored, setter, target, &value, 1, depth, thrown);
+                }
+            }
             if (slot < object->slot_capacity) {
                 if ((object->shape->double_slots_mask & (1u << slot)) &&
                     value.tag != KILN_VALUE_NUMBER) {
@@ -674,18 +728,19 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
             }
             walked = kiln_c99_object_of(current);
             if (walked->accessor_count != 0 || walked->read_only_seen) {
-                index = kiln_c99_own_index_key(walked, ikey, key);
-                if (index != walked->count) {
-                    if (!walked->properties[index].accessor) {
-                        if (!walked->properties[index].writable) {
-                            return strict ? kiln_c99_throw_read_only_key(thrown, key)
-                                           : KILN_C99_OK;
-                        }
+                kiln_value setter;
+                int answer = kiln_c99_level_write_answer(walked, ikey, key, &setter);
+                if (answer != KILN_C99_LEVEL_NONE) {
+                    if (answer == KILN_C99_LEVEL_READONLY) {
+                        return strict ? kiln_c99_throw_read_only_key(thrown, key)
+                                       : KILN_C99_OK;
+                    }
+                    if (answer == KILN_C99_LEVEL_DATA) {
                         /* A writable data property up the chain: nothing intercepts, and the
                          * write shadows it with an own property below. */
                         break;
                     }
-                    if (walked->properties[index].setter.tag == KILN_VALUE_UNDEFINED) {
+                    if (setter.tag == KILN_VALUE_UNDEFINED) {
                         if (strict) {
                             return kiln_c99_throw_read_only_key(thrown, key);
                         }
@@ -693,8 +748,8 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
                     }
                     {
                         kiln_value ignored;
-                        return kiln_c99_call(host, &ignored, walked->properties[index].setter,
-                                             target, &value, 1, depth, thrown);
+                        return kiln_c99_call(host, &ignored, setter, target, &value, 1, depth,
+                                             thrown);
                     }
                 }
             }
