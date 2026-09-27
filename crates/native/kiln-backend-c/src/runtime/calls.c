@@ -270,6 +270,16 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_OBJECT) {
         return kiln_c99_object_constructor(result, args, argc);
     }
+    /* `new SharedArrayBuffer(length, options)`: the shared bootstrap's constructor
+     * (`arraybuffer.ts`), which makes every check and asks `__kilnSharedBuffer` for the store. */
+    if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER) {
+        kiln_value *slot;
+        status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_SHARED_ARRAY_BUFFER, &slot);
+        if (status != KILN_C99_OK) return status;
+        if (!kiln_c99_is_callable(*slot))
+            KILN_C99_REFUSE("SharedArrayBuffer before the runtime bootstrap defined it");
+        return kiln_c99_call(host, result, *slot, kiln_c99_undefined(), args, argc, depth, thrown);
+    }
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_ARRAY_BUFFER) {
         size_t length;
         status = kiln_c99_to_index(argc > 0 ? args[0] : kiln_c99_undefined(), &length, thrown);
@@ -815,7 +825,12 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
         case KILN_C99_BUILTIN_REGEXP: *answer = value.tag == KILN_VALUE_REGEXP; return KILN_C99_OK;
         case KILN_C99_BUILTIN_ARRAY: *answer = value.tag == KILN_VALUE_ARRAY; return KILN_C99_OK;
         case KILN_C99_BUILTIN_ARRAY_BUFFER:
-            *answer = value.tag == KILN_VALUE_ARRAY_BUFFER;
+            *answer = value.tag == KILN_VALUE_ARRAY_BUFFER &&
+                      kiln_c99_typed_buffer_of(value)->shared == NULL;
+            return KILN_C99_OK;
+        case KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER:
+            *answer = value.tag == KILN_VALUE_ARRAY_BUFFER &&
+                      kiln_c99_typed_buffer_of(value)->shared != NULL;
             return KILN_C99_OK;
         case KILN_C99_BUILTIN_DATA_VIEW:
             *answer = value.tag == KILN_VALUE_DATA_VIEW;

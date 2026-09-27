@@ -173,6 +173,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if view.out_of_bounds() || index >= view.len() {
             return Err(ExecutionError::BufferDetached);
         }
+        // Over shared bytes another realm's thread may be in the middle of its own atomic
+        // operation, and the element read and write below are two accesses: every atomic
+        // operation on a `SharedArrayBuffer` holds one lock across both, so each is indivisible
+        // with respect to every other (`node:worker_threads`, realms issue 06).
+        let _indivisible = view.buffer.shared.then(|| {
+            static ATOMICS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            ATOMICS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        });
         let old = view.get(index).unwrap_or(Value::Undefined);
         match op {
             AtomicsOp::Load => Ok(old),
@@ -236,7 +244,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if op == AtomicsOp::Wait {
             let settled = match answer {
                 Some(answer) => answer.to_owned(),
-                None => self.atomics_block(&view, index, timeout)?,
+                None => self.atomics_block(&view, index, timeout, &expected)?,
             };
             return Ok(Value::String(settled.into()));
         }
@@ -304,8 +312,35 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         view: &Rc<TypedArrayData>,
         index: usize,
         timeout: f64,
+        expected: &Value,
     ) -> Result<String, ExecutionError> {
         let store = view.buffer.bytes.store().map(Arc::clone);
+        // With workers, another realm's thread can notify: the wait is the runtime's, and the
+        // value is compared again under its lock so a store and notify made since cannot be
+        // missed (realms issue 06). Without any, nothing could, and the old answer stands.
+        if self.agents.as_ref().is_none_or(|group| !group.scheduled())
+            && let Some(store) = &store
+            && (self.in_worker || kiln_runtime::workers::running() > 0)
+        {
+            let key = agent::address(store, view.offset + index * view.kind.width());
+            let expected = narrow_element(view.kind, expected);
+            let limit = timeout
+                .is_finite()
+                .then(|| duration_from_milliseconds(timeout));
+            let outcome = kiln_runtime::workers::wait(
+                key,
+                || same_value_zero(&view.get(index).unwrap_or(Value::Undefined), &expected),
+                limit,
+            );
+            return match outcome {
+                kiln_runtime::workers::WaitOutcome::NotEqual => Ok("not-equal".to_owned()),
+                kiln_runtime::workers::WaitOutcome::Ok => Ok("ok".to_owned()),
+                kiln_runtime::workers::WaitOutcome::TimedOut => Ok("timed-out".to_owned()),
+                kiln_runtime::workers::WaitOutcome::Interrupted => {
+                    Err(ExecutionError::ProcessExited(1))
+                }
+            };
+        }
         let (Some(group), Some(store)) = (self.agents.clone(), store) else {
             Self::atomics_sleep(timeout);
             return Ok("timed-out".to_owned());
@@ -400,14 +435,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return Ok(Value::Number(0.0));
         }
         let store = view.buffer.bytes.store().map(Arc::clone);
-        let (Some(group), Some(store)) = (self.agents.clone(), store) else {
-            return Ok(Value::Number(0.0));
-        };
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let wanted = if count.is_finite() {
             count.min(usize::MAX as f64) as usize
         } else {
             usize::MAX
+        };
+        // Waiters in other realms' threads are on the runtime's list (realms issue 06).
+        if self.agents.as_ref().is_none_or(|group| !group.scheduled())
+            && let Some(store) = &store
+        {
+            let key = agent::address(store, view.offset + index * view.kind.width());
+            #[allow(clippy::cast_precision_loss)]
+            return Ok(Value::Number(
+                kiln_runtime::workers::notify(key, wanted) as f64,
+            ));
+        }
+        let (Some(group), Some(store)) = (self.agents.clone(), store) else {
+            return Ok(Value::Number(0.0));
         };
         let address = agent::address(&store, view.offset + index * view.kind.width());
         let woken = group.notify(address, wanted);

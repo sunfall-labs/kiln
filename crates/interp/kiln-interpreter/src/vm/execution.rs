@@ -13,6 +13,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 limit: self.limits.max_steps,
             });
         }
+        // A worker whose parent called `terminate()` stops here, wherever it was: node stops a
+        // worker in the middle of a loop, not only once it is idle.
+        if self.in_worker && kiln_runtime::workers::terminate_requested() {
+            return Err(ExecutionError::ProcessExited(1));
+        }
         // A quantum, then. Hand the baton on and take it back before the next instruction runs:
         // this agent's Rust stack, frames and operand stack all stay exactly where they are,
         // which is the whole reason an agent is a thread rather than a continuation.
@@ -37,6 +42,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Some(group) if group.scheduled() => self
                 .steps
                 .saturating_add(agent::QUANTUM_STEPS)
+                .min(self.limits.max_steps),
+            _ if self.in_worker => self
+                .steps
+                .saturating_add(crate::vm::WORKER_QUANTUM)
                 .min(self.limits.max_steps),
             _ => self.limits.max_steps,
         }

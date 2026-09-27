@@ -1509,6 +1509,19 @@ pub struct ExecutionCapabilities {
     /// would put a made-up executable path in front of a program that asked where it came from.
     /// A host that has one states it, which is the same bargain as every other entry here.
     argv: Vec<String>,
+    /// How this execution starts a `node:worker_threads` worker's realm, when it can.
+    worker_host: Option<Arc<dyn WorkerHost>>,
+}
+
+/// What starts a worker's realm (`node:worker_threads`, realms issue 06): the host that has the
+/// program's module graph. The interpreter owns no linker (see [`PlannedModule`]), so it cannot
+/// run a module it was not handed; the host can, on the worker's own thread.
+pub trait WorkerHost: Send + Sync {
+    /// Whether `path` is a module of this program a worker can run.
+    fn has_module(&self, path: &str) -> bool;
+    /// Run the worker's program to its end on the calling thread, which is the worker's; the
+    /// exit code its parent's `exit` event reports.
+    fn run(&self, worker: Arc<kiln_runtime::workers::WorkerContext>) -> i32;
 }
 
 impl ExecutionCapabilities {
@@ -1590,6 +1603,16 @@ impl ExecutionCapabilities {
 
     pub fn argv(&self) -> &[String] {
         &self.argv
+    }
+
+    /// Let this execution start workers, through `host`.
+    pub fn with_worker_host(mut self, host: Arc<dyn WorkerHost>) -> Self {
+        self.worker_host = Some(host);
+        self
+    }
+
+    pub fn worker_host(&self) -> Option<Arc<dyn WorkerHost>> {
+        self.worker_host.clone()
     }
 }
 
@@ -1883,7 +1906,7 @@ pub use execution_api::{
     execute_node_module_in_session_with_loader, execute_node_with_strictness, execute_reclaiming,
     execute_reclaiming_in_runtime_with_strictness, execute_reclaiming_with_strictness,
     execute_with_strictness, namespace_entries, namespace_object, ordinary_object,
-    own_data_property, parse_json_module, read_through_cell,
+    own_data_property, parse_json_module, read_through_cell, worker_error_tokens,
 };
 #[path = "vm/state.rs"]
 mod vm_state;

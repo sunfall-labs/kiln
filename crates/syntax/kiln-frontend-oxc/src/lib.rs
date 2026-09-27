@@ -479,11 +479,199 @@ fn discover_node_runtime_requests_from_semantic(
             continue;
         }
     }
+    // A `node:worker_threads` worker runs another module of the program as its entry, so the
+    // module a `new Worker(...)` names is a lazy edge like a `createRequire` target: in the graph
+    // and live, evaluated only when the worker starts. The spellings that name a module
+    // independently of the working directory are recognised -- `new URL("./w.js",
+    // import.meta.url)`, `path.join(__dirname, "w.js")`, `fileURLToPath(...)` of either -- and a
+    // literal path, which node resolves against the working directory and the graph against
+    // the module's (the two agree when a program is run from its own directory).
+    for node in semantic.nodes() {
+        let AstKind::NewExpression(new) = node.kind() else {
+            continue;
+        };
+        let names_worker = match &new.callee {
+            Expression::Identifier(identifier) => identifier.name == "Worker",
+            Expression::StaticMemberExpression(member) => member.property.name == "Worker",
+            _ => false,
+        };
+        if !names_worker {
+            continue;
+        }
+        let evaluates_source = new
+            .arguments
+            .get(1)
+            .and_then(Argument::as_expression)
+            .is_some_and(|options| match options {
+                Expression::ObjectExpression(object) => object.properties.iter().any(|property| {
+                    matches!(property, ObjectPropertyKind::ObjectProperty(property)
+                        if property.key.static_name().is_some_and(|name| name == "eval")
+                            && !matches!(property.value, Expression::BooleanLiteral(ref flag) if !flag.value))
+                }),
+                _ => false,
+            });
+        if evaluates_source {
+            continue;
+        }
+        let Some(argument) = new.arguments.first().and_then(Argument::as_expression) else {
+            continue;
+        };
+        let mut specifiers = Vec::new();
+        worker_script_specifiers(argument, semantic, 0, &mut specifiers);
+        for specifier in specifiers {
+            requests.push(NodeRuntimeRequest {
+                specifier,
+                importer: path.to_owned(),
+            });
+        }
+    }
     requests.sort_by(|left, right| left.specifier.cmp(&right.specifier));
     requests.dedup_by(|left, right| {
         left.specifier == right.specifier && left.importer == right.importer
     });
     requests
+}
+
+/// Every module a `new Worker(argument)` can name: through a `const` binding (`const script =
+/// join(__dirname, "w.js"); new Worker(script)`) and through each side of a `||`, `??` or
+/// conditional (`override || join(__dirname, "lib", "worker.js")`, as thread-stream writes it).
+fn worker_script_specifiers(
+    argument: &Expression<'_>,
+    semantic: &oxc_semantic::Semantic<'_>,
+    depth: usize,
+    out: &mut Vec<String>,
+) {
+    if depth > 8 {
+        return;
+    }
+    match argument {
+        Expression::ParenthesizedExpression(inner) => {
+            worker_script_specifiers(&inner.expression, semantic, depth + 1, out)
+        }
+        Expression::LogicalExpression(logical) => {
+            worker_script_specifiers(&logical.left, semantic, depth + 1, out);
+            worker_script_specifiers(&logical.right, semantic, depth + 1, out);
+        }
+        Expression::ConditionalExpression(conditional) => {
+            worker_script_specifiers(&conditional.consequent, semantic, depth + 1, out);
+            worker_script_specifiers(&conditional.alternate, semantic, depth + 1, out);
+        }
+        Expression::Identifier(identifier) => {
+            let scoping = semantic.scoping();
+            let Some(symbol) = identifier
+                .reference_id
+                .get()
+                .and_then(|reference| scoping.get_reference(reference).symbol_id())
+            else {
+                return;
+            };
+            if scoping.symbol_is_mutated(symbol) {
+                return;
+            }
+            let declaration = semantic.nodes().get_node(scoping.symbol_declaration(symbol));
+            if let AstKind::VariableDeclarator(declarator) = declaration.kind()
+                && let Some(init) = &declarator.init
+            {
+                worker_script_specifiers(init, semantic, depth + 1, out);
+            }
+        }
+        other => {
+            if let Some(specifier) = worker_script_specifier(other, semantic.scoping()) {
+                out.push(specifier);
+            }
+        }
+    }
+}
+
+/// The module a `new Worker(argument)` names, as a specifier relative to the module that says
+/// it, when the argument spells one without depending on run-time values.
+fn worker_script_specifier(
+    argument: &Expression<'_>,
+    scoping: &oxc_semantic::Scoping,
+) -> Option<String> {
+    fn text(expression: &Expression<'_>) -> Option<String> {
+        match expression {
+            Expression::StringLiteral(literal) => Some(literal.value.to_string()),
+            Expression::TemplateLiteral(template) if template.expressions.is_empty() => template
+                .quasis
+                .first()
+                .and_then(|quasi| quasi.value.cooked.as_ref())
+                .map(|cooked| cooked.to_string()),
+            _ => None,
+        }
+    }
+    fn is_import_meta_url(expression: &Expression<'_>) -> bool {
+        matches!(expression, Expression::StaticMemberExpression(member)
+            if member.property.name == "url" && matches!(member.object, Expression::ImportMeta(_)))
+    }
+    match argument {
+        Expression::StringLiteral(_) | Expression::TemplateLiteral(_) => {
+            let path = text(argument)?;
+            (path.starts_with("./") || path.starts_with("../") || path.starts_with('/'))
+                .then_some(path)
+        }
+        Expression::NewExpression(url) => {
+            let Expression::Identifier(callee) = &url.callee else {
+                return None;
+            };
+            if callee.name != "URL" {
+                return None;
+            }
+            let relative = text(url.arguments.first()?.as_expression()?)?;
+            if !is_import_meta_url(url.arguments.get(1)?.as_expression()?) {
+                return None;
+            }
+            Some(
+                if relative.starts_with("./") || relative.starts_with("../") {
+                    relative
+                } else {
+                    format!("./{relative}")
+                },
+            )
+        }
+        Expression::CallExpression(call) => {
+            // A compiler's `(0, path_1.resolve)(...)` calls the member without a receiver.
+            let mut callee = &call.callee;
+            loop {
+                callee = match callee {
+                    Expression::SequenceExpression(sequence) => sequence.expressions.last()?,
+                    Expression::ParenthesizedExpression(inner) => &inner.expression,
+                    _ => break,
+                };
+            }
+            let callee = match callee {
+                Expression::Identifier(identifier) => identifier.name.as_str(),
+                Expression::StaticMemberExpression(member) => member.property.name.as_str(),
+                _ => return None,
+            };
+            match callee {
+                "fileURLToPath" => {
+                    worker_script_specifier(call.arguments.first()?.as_expression()?, scoping)
+                }
+                "join" | "resolve" => {
+                    let mut arguments = call.arguments.iter();
+                    let Expression::Identifier(base) = arguments.next()?.as_expression()? else {
+                        return None;
+                    };
+                    if base.name != "__dirname" || !base.is_global_reference(scoping) {
+                        return None;
+                    }
+                    let mut parts = Vec::new();
+                    for argument in arguments {
+                        parts.push(text(argument.as_expression()?)?);
+                    }
+                    let joined = parts.join("/");
+                    Some(if joined.starts_with("./") || joined.starts_with("../") {
+                        joined
+                    } else {
+                        format!("./{joined}")
+                    })
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 fn strip_jsonc_comments(input: &str) -> String {

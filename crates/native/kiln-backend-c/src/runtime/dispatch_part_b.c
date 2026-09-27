@@ -807,7 +807,9 @@
             case KILN_VALUE_GENERATOR: tag = "Generator"; break;
             case KILN_VALUE_SYMBOL: tag = "Symbol"; break;
             case KILN_VALUE_BIGINT: tag = "BigInt"; break;
-            case KILN_VALUE_ARRAY_BUFFER: tag = "ArrayBuffer"; break;
+            case KILN_VALUE_ARRAY_BUFFER:
+                tag = kiln_c99_typed_buffer_of(receiver)->shared != NULL ? "SharedArrayBuffer" : "ArrayBuffer";
+                break;
             case KILN_VALUE_DATA_VIEW: tag = "DataView"; break;
             case KILN_VALUE_TYPED_ARRAY:
                 tag = kiln_c99_typed_name(kiln_c99_typed_array_of(receiver)->kind);
@@ -1353,7 +1355,9 @@
                 return KILN_C99_OK;
             }
             if (subject.tag == KILN_VALUE_ARRAY_BUFFER) {
-                *result = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE);
+                *result = kiln_c99_builtin(kiln_c99_typed_buffer_of(subject)->shared != NULL
+                                               ? KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER_PROTOTYPE
+                                               : KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE);
                 return KILN_C99_OK;
             }
             if (subject.tag == KILN_VALUE_FUNCTION || subject.tag == KILN_VALUE_METHOD ||

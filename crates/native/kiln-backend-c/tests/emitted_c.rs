@@ -1031,8 +1031,11 @@ fn runtime_prelude_size() {
     // protocol every shared cache is published and replaced by, site entry scans and promotion
     // through it, once-built indexes, and the comments saying what each shared word's
     // publication is and why (about half of it comments).
+    // Widened on 2026-09-27 for realms issue 06 (+~600 lines): message tokens to and from a
+    // realm's values, the worker operations and the port wait, `SharedArrayBuffer` stores and
+    // the `Atomics` element primitive with its wait and notify, and a shared buffer's members.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 53_500;
+    const CEILING_LINES: usize = 54_600;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

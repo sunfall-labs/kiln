@@ -2580,6 +2580,10 @@ pub(super) fn graph_launcher_source_with_imports(
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L
 #endif
+/* A worker's standard streams are `fopencookie` streams (`node:worker_threads`), a GNU call. */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 #include <locale.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -2718,6 +2722,23 @@ extern int kiln_realm_destroy(uint64_t realm);
 extern int kiln_realm_run_pinned(uint64_t count, int (*run)(void *context, uint64_t index),
                                  void *context, int *statuses);
 extern void kiln_c99_realm_capture_output(int fd) __attribute__((visibility("hidden")));
+/* `node:worker_threads` (realms issue 06): the runtime starts a worker's thread and calls the
+ * launcher back there to run one module of this program as the worker's realm. */
+typedef int (*kiln_worker_runner_fn)(const uint8_t *entry, uint64_t entry_len, int32_t eval,
+                                     uint64_t argc, const char *const *argv);
+extern int kiln_worker_set_runner(kiln_worker_runner_fn runner);
+extern int kiln_worker_exit_code(int32_t *out);
+extern int kiln_worker_stdio(uint32_t stream, const uint8_t *bytes, uint64_t len);
+typedef struct kiln_worker_token {
+    uint32_t kind;
+    uint32_t flag;
+    double number;
+    const void *data;
+    uint64_t len;
+    void *handle;
+} kiln_worker_token;
+extern int kiln_worker_post(uint32_t op, uint64_t port, uint32_t kind, kiln_worker_token *tokens, uint64_t count);
+extern int kiln_c99_worker_report_error(kiln_value error) __attribute__((visibility("hidden")));
 typedef void (*kiln_gc_roots_fn)(void *heap, void *context, int phase);
 extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
 extern int kiln_realm_gc_unregister_roots(kiln_gc_roots_fn roots, void *context);
@@ -2945,7 +2966,7 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
         "typedef struct kiln_graph_context kiln_graph_context;\n\
          typedef struct kiln_graph_require_context {{\n    kiln_graph_context *graph;\n    size_t base_index;\n}} kiln_graph_require_context;\n\
          /* One realm's graph, allocated by `kiln_cli_run_realm` for its realm and freed after it. */\n\
-         struct kiln_graph_context {{\n    kiln_host host;\n    /* The CLI host's state for this realm: its last refusal. */\n    kiln_cli_host_state cli;\n    kiln_value result;\n    kiln_value entry_result;\n    kiln_graph_module_state module_states[{}];\n    size_t current_module;\n    int roots_registered;\n    /* The entry's top-level await never settled with the loop out of work (node: warn, exit 13). */\n    int unsettled_entry;\n    struct kiln_graph_require_context require_contexts[{}];\n{linkage_fields}}};\n{linkage_names}",
+         struct kiln_graph_context {{\n    kiln_host host;\n    /* The CLI host's state for this realm: its last refusal. */\n    kiln_cli_host_state cli;\n    kiln_value result;\n    kiln_value entry_result;\n    kiln_graph_module_state module_states[{}];\n    size_t current_module;\n    int roots_registered;\n    /* The entry's top-level await never settled with the loop out of work (node: warn, exit 13). */\n    int unsettled_entry;\n    /* In a worker's realm (`node:worker_threads`), one plus the index of the module it runs as its entry; 0 in the program's own. */\n    size_t worker_entry;\n    struct kiln_graph_require_context require_contexts[{}];\n{linkage_fields}}};\n{linkage_names}",
         modules.len(),
         runtime_importers.len().max(1),
     );
@@ -3139,6 +3160,36 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
     output.push_str(
         "    return kiln_c99_commonjs_require_value(result, kiln_graph_require_builtin, graph);\n}\n\nstatic int kiln_graph_host_call(void *context, uint16_t operation, uint16_t argc, const kiln_value *arguments, kiln_value *result) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    if (operation == KILN_C99_HOST_MODULE_CREATE_REQUIRE) return kiln_graph_create_require(graph, argc, arguments, result);\n    return kiln_cli_host_call(graph != NULL ? &graph->cli : NULL, operation, argc, arguments, result);\n}\n",
     );
+    // The module a worker names by its path (`new Worker(path)`, realms issue 06), or -1: every
+    // module of the program a realm can run as its entry. Matched by its project-relative path at
+    // the end of the one asked for -- the longest that matches -- so the launcher names no
+    // absolute path and a sibling checkout reuses it, as it does the rest of the launcher.
+    output.push_str("static long kiln_graph_module_index(const uint8_t *path, uint64_t len) {\n    long best = -1;\n    uint64_t best_len = 0;\n");
+    for (index, (node, _)) in modules.iter().enumerate() {
+        if !matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs) {
+            continue;
+        }
+        match logical_module_path(graph.project_root(), &node.path) {
+            Ok(logical) => writeln!(
+                output,
+                "    if (len > (uint64_t){n} && best_len < (uint64_t){n} && path[len - {n} - 1] == '/' && memcmp(path + len - {n}, {text}, (size_t){n}) == 0) {{ best = {index}; best_len = (uint64_t){n}; }}",
+                n = logical.len(),
+                text = native_c_string(&logical),
+            )
+            .unwrap(),
+            Err(_) => {
+                let absolute = node.path.to_string_lossy();
+                writeln!(
+                    output,
+                    "    if (len == (uint64_t){n} && memcmp(path, {text}, (size_t){n}) == 0) return {index};",
+                    n = absolute.len(),
+                    text = native_c_string(absolute.as_ref()),
+                )
+                .unwrap();
+            }
+        }
+    }
+    output.push_str("    return best;\n}\n");
     output.push_str("static const size_t kiln_graph_startup_indices[] = {");
     for (position, index) in startup_indices.iter().enumerate() {
         if position != 0 {
@@ -3350,6 +3401,14 @@ static int kiln_graph_enter(void *opaque) {
         }
     }
     output.push_str("    }\n");
+    // A worker's realm (`node:worker_threads`, realms issue 06) runs one module of the program as
+    // its entry -- with what that module imports, first -- rather than the program's startup list.
+    writeln!(
+        evaluation,
+        "    if (graph->worker_entry != 0) {{\n        size_t index = graph->worker_entry - 1;\n        graph->current_module = (size_t){};\n        status = kiln_graph_ensure_module(graph, index);\n        graph->result = graph->module_states[index].result;\n        return status;\n    }}",
+        startup_indices.len()
+    )
+    .unwrap();
     writeln!(
         evaluation,
         "    while (graph->current_module < (size_t){}) {{\n        switch (graph->current_module) {{",
@@ -3743,7 +3802,29 @@ static int kiln_graph_enter(void *opaque) {
  * already has the command line. The strings are copied on the other side of this call. `output`
  * is where the realm's standard streams go (NULL: the process's). Returns the status the process
  * exits with for this realm: 0, 1, or node's 13 for a top-level await that never settled. */
+static int kiln_cli_run_realm_as(int argc, char **argv, int writes_result, FILE *output,
+                                 FILE *error_output, size_t worker_entry);
 static int kiln_cli_run_realm(int argc, char **argv, int writes_result, FILE *output) {
+    return kiln_cli_run_realm_as(argc, argv, writes_result, output, NULL, 0);
+}
+
+/* A worker's realm is over: its code is the one its end decided, whatever teardown says. */
+static int kiln_cli_end_worker_realm(uint64_t worker_realm, kiln_graph_context *graph, int code) {
+    (void)kiln_realm_destroy(worker_realm);
+    free(graph);
+    return code;
+}
+
+/* In a worker's realm, report the exception that ended it to the parent's `error` event. */
+static int kiln_cli_report_worker_error(void *opaque) {
+    kiln_graph_context *graph = (kiln_graph_context *)opaque;
+    return kiln_c99_worker_report_error(graph->result);
+}
+
+/* `worker_entry` is one plus the index of the module a worker's realm runs (0 for the program's
+ * own realm); a worker's standard streams are `output` and `error_output`. */
+static int kiln_cli_run_realm_as(int argc, char **argv, int writes_result, FILE *output,
+                                 FILE *error_output, size_t worker_entry) {
     /* The realm's graph: its module states and every module's linkage, one per realm run and freed
      * after the realm is destroyed (a result slot is read after teardown). */
     kiln_graph_context *graph = (kiln_graph_context *)calloc(1, sizeof *graph);
@@ -3759,6 +3840,8 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result, FILE *ou
         return 1;
     }
     graph->cli.output = output;
+    graph->cli.error_output = error_output;
+    graph->worker_entry = worker_entry;
     graph->result.tag = KILN_VALUE_UNDEFINED;
     graph->entry_result.tag = KILN_VALUE_UNDEFINED;
     graph->host.call = kiln_graph_host_call;
@@ -3812,6 +3895,25 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result, FILE *ou
             }
         }
     }
+    /* A worker's realm ends the way node ends a worker: an exit it asked for (`process.exit`,
+     * its parent's `terminate`) is its code with nothing reported, and an exception nothing
+     * caught goes to the parent's `error` event -- a copy made inside the realm, before the value
+     * is turned into the text a main realm prints -- with 1 for its code. */
+    if (worker_entry != 0) {
+        int32_t requested = 0;
+        int code = 0;
+        if (kiln_worker_exit_code(&requested) == 1) {
+            code = requested;
+        } else if (status == KILN_C99_THROWN) {
+            (void)kiln_realm_enter(realm, kiln_cli_report_worker_error, graph);
+            code = 1;
+        } else if (status != 0) {
+            if (graph->result.tag != KILN_VALUE_STRING) graph->result = kiln_c99_text(graph->result);
+            (void)kiln_realm_enter(realm, kiln_cli_report_worker_error, graph);
+            code = 1;
+        }
+        return kiln_cli_end_worker_realm(realm, graph, code);
+    }
     /* Graph module entries carry the original thrown value across the module ABI so dynamic
      * import and catch preserve language identity. Only now, after the graph and its turn loop
      * have established that the value is uncaught, attach the native refusal provenance. A
@@ -3848,6 +3950,87 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result, FILE *ou
     if (unsettled_entry) return 13;
     if (status == 0) status = destroy_status;
     return status == 0 ? 0 : 1;
+}
+
+/* A worker's standard streams (`node:worker_threads`): each write goes to the parent as a message,
+ * which the parent's `Worker` writes to its own stream, as node pipes a worker's. */
+#if defined(__APPLE__)
+static int kiln_cli_worker_write(void *cookie, const char *bytes, int length) {
+    (void)kiln_worker_stdio((uint32_t)(uintptr_t)cookie, (const uint8_t *)bytes, (uint64_t)length);
+    return length;
+}
+static FILE *kiln_cli_worker_stream(uint32_t stream) {
+    FILE *file = funopen((void *)(uintptr_t)stream, NULL, kiln_cli_worker_write, NULL, NULL);
+    if (file != NULL) setvbuf(file, NULL, _IONBF, 0);
+    return file;
+}
+#elif !defined(_WIN32)
+static ssize_t kiln_cli_worker_write(void *cookie, const char *bytes, size_t length) {
+    (void)kiln_worker_stdio((uint32_t)(uintptr_t)cookie, (const uint8_t *)bytes, (uint64_t)length);
+    return (ssize_t)length;
+}
+static FILE *kiln_cli_worker_stream(uint32_t stream) {
+    cookie_io_functions_t functions = {NULL, kiln_cli_worker_write, NULL, NULL};
+    FILE *file = fopencookie((void *)(uintptr_t)stream, "w", functions);
+    if (file != NULL) setvbuf(file, NULL, _IONBF, 0);
+    return file;
+}
+#else
+static FILE *kiln_cli_worker_stream(uint32_t stream) {
+    (void)stream;
+    return NULL;
+}
+#endif
+
+/* The runtime, on a worker's own thread: run the module at `entry` as the worker's realm, with
+ * `argv` as its `process.argv`, and answer its exit code. A worker made from source text needs
+ * a compiler at run time, which a native program does not carry. */
+static int kiln_cli_run_worker(const uint8_t *entry, uint64_t entry_len, int32_t eval,
+                               uint64_t argc, const char *const *argv) {
+    long index = eval ? -1 : kiln_graph_module_index(entry, entry_len);
+    FILE *out, *err;
+    int status;
+    if (index < 0) {
+        /* No realm to throw in: the parent's `error` event gets an `Error` built from tokens
+         * here, in the layout the shared TypeScript reads (no ports, then the error). */
+        static const char no_eval[] = "kiln: a worker made from source text ({ eval: true }) needs a compiler at run time, which a natively built program does not have: put the worker's code in a module of the program";
+        static const char missing[] = "Cannot find module: the worker's script is not a module of this program";
+        static const char error_name[] = "Error";
+        const char *text = eval ? no_eval : missing;
+        size_t length = eval ? sizeof no_eval - 1 : sizeof missing - 1;
+        kiln_worker_token tokens[6];
+        memset(tokens, 0, sizeof tokens);
+        tokens[0].kind = 3; tokens[0].number = 0;
+        tokens[1].kind = 3; tokens[1].number = 19;
+        tokens[2].kind = 4; tokens[2].data = error_name; tokens[2].len = sizeof error_name - 1;
+        tokens[3].kind = 4; tokens[3].data = text; tokens[3].len = (uint64_t)length;
+        tokens[4].kind = 3; tokens[4].number = 0;
+        tokens[5].kind = 3; tokens[5].number = 0;
+        (void)kiln_worker_post(15, 0, 3, tokens, 6);
+        return 1;
+    }
+    /* The worker's `process.argv` as node spells it names its script second; a native realm's
+     * names the executable in both leading slots (the single-executable convention), so the
+     * script's slot is left out and the realm fills it the way it fills a main realm's. */
+    if (argc >= 2) {
+        const char **realm_argv = (const char **)calloc((size_t)argc, sizeof *realm_argv);
+        uint64_t at;
+        if (realm_argv == NULL) return 1;
+        realm_argv[0] = argv[0];
+        for (at = 2; at < argc; ++at) realm_argv[at - 1] = argv[at];
+        out = kiln_cli_worker_stream(1);
+        err = kiln_cli_worker_stream(2);
+        status = kiln_cli_run_realm_as((int)(argc - 1), (char **)(uintptr_t)realm_argv, 0, out, err,
+                                       (size_t)index + 1);
+        free(realm_argv);
+    } else {
+        out = kiln_cli_worker_stream(1);
+        err = kiln_cli_worker_stream(2);
+        status = kiln_cli_run_realm_as((int)argc, (char **)(uintptr_t)argv, 0, out, err, (size_t)index + 1);
+    }
+    if (out != NULL) fclose(out);
+    if (err != NULL) fclose(err);
+    return status;
 }
 
 /* `KILN_REALMS=N`: run the program as N realms at once in this one process, each pinned to its
@@ -4367,6 +4550,7 @@ int main(int argc, char **argv) {
         _putenv("KILN_HTTP3=1");
 #endif
     }
+    (void)kiln_worker_set_runner(kiln_cli_run_worker);
     realms = kiln_cli_realm_count();
     if (realms > 0) return kiln_cli_run_realms(argc, argv, realms);
     workers = kiln_cli_worker_count();

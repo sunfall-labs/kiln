@@ -52,7 +52,11 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             global_base: 0,
             instruction: 0,
             steps: 0,
-            checkpoint: limits.max_steps,
+            checkpoint: if kiln_runtime::workers::current().is_some() {
+                crate::vm::WORKER_QUANTUM.min(limits.max_steps)
+            } else {
+                limits.max_steps
+            },
             agent_owner: agents.clone().map(AgentOwner),
             agents,
             agent_id: 0,
@@ -65,6 +69,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             source_compiler: execution.source_compiler(),
             realm_bootstrap: execution.realm_bootstrap(),
             module_loader: execution.module_loader(),
+            worker_host: execution.worker_host(),
+            in_worker: kiln_runtime::workers::current().is_some(),
             module_path: None,
             host_realms: execution.host_realms(),
             host_agents: execution.host_agents(),

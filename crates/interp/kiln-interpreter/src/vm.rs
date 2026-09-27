@@ -23,6 +23,13 @@ mod promises;
 mod prototypes;
 #[path = "vm/realm.rs"]
 mod realm;
+#[path = "vm/workers.rs"]
+mod workers;
+
+/// Instructions a worker's machine runs between checks of its terminate flag: few enough that
+/// `worker.terminate()` stops a busy loop within a fraction of a millisecond, many enough that the
+/// check costs nothing measurable.
+pub(crate) const WORKER_QUANTUM: u64 = 100_000;
 
 pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// The program the *running* frame belongs to, swapped on every call and restored on return.
@@ -141,6 +148,10 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// execution's host granted agents at all. `None` disables `$262AgentStart` and its siblings.
     pub(super) host_agents: Option<&'static str>,
     pub(super) module_loader: Option<Arc<dyn ModuleLoaderService + Send + Sync>>,
+    /// How this execution starts a worker, if it can (`node:worker_threads`).
+    pub(super) worker_host: Option<Arc<dyn crate::WorkerHost>>,
+    /// Whether this machine runs in a worker, whose parent may stop it at any checkpoint.
+    pub(super) in_worker: bool,
     pub(super) module_path: Option<Rc<str>>,
     /// The command line `process.argv` reports, as the host stated it. Empty when no host did.
     pub(super) argv: Vec<String>,

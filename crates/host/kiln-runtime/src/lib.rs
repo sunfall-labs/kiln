@@ -53,6 +53,7 @@ pub use scripted_transport::{ScriptedTransport, ScriptedTransportLog};
 #[cfg(target_os = "linux")]
 pub mod uring;
 pub mod worker_pool;
+pub mod workers;
 #[cfg(target_os = "linux")]
 pub use uring::IoPreference;
 
@@ -2528,6 +2529,27 @@ impl TokioHost {
                 });
                 return request;
             }
+            AsyncHostOp::PortWait { port } => {
+                // A cross-realm port (`workers`): done once something is queued for it or its
+                // peer has closed. The notifier keeps a permit when nothing is waiting, so a
+                // message posted between the check and the wait is not lost.
+                let Some(notify) = workers::notifier(port) else {
+                    self.insert_immediate(request, sequence, referenced, Ok(AsyncHostValue::Undefined));
+                    return request;
+                };
+                self.spawn_task(request, sequence, referenced, async move {
+                    while !workers::readable(port) {
+                        notify.notified().await;
+                    }
+                    HostCompletion {
+                        request,
+                        sequence,
+                        lifecycle: None,
+                        result: Ok(HostCompletionValue::Public(AsyncHostValue::Undefined)),
+                    }
+                });
+                return request;
+            }
             AsyncHostOp::CloseResource { resource } => {
                 let result = self.close_resource(resource);
                 self.insert_immediate(request, sequence, referenced, result);
@@ -3788,8 +3810,8 @@ async fn execute_async_host_op(operation: AsyncHostOp) -> Result<AsyncHostValue,
             bytes.truncate(length);
             Ok(AsyncHostValue::Bytes(bytes))
         }
-        AsyncHostOp::ProcessRun { .. } => {
-            unreachable!("process operations are handled by start_on")
+        AsyncHostOp::ProcessRun { .. } | AsyncHostOp::PortWait { .. } => {
+            unreachable!("process and port operations are handled by start_on")
         }
         AsyncHostOp::CloseResource { .. }
         | AsyncHostOp::SetResourceReferenced { .. }

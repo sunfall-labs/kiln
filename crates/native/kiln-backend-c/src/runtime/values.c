@@ -673,6 +673,10 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                         "ArrayBuffer constructor requires 'new'");
         }
+        case KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER: {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Constructor SharedArrayBuffer requires 'new'");
+        }
         case KILN_C99_BUILTIN_DATA_VIEW: {
             /* The interpreter's wording, word for word, which is not the wording of the
              * `ArrayBuffer` arm above. `error.message` is program-visible, so the two engines

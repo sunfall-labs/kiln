@@ -23,6 +23,15 @@ const __kilnJobsPending: () => number = (globalThis as any).__kilnJobsPending;
 const __kilnQueueIo: (fn: (arg: any) => void, arg: any) => void = (globalThis as any).__kilnQueueIo;
 delete (globalThis as any).__kilnJobsPending;
 delete (globalThis as any).__kilnQueueIo;
+// The runtime's cross-realm ports and workers (`kiln_runtime::workers`, realms issue 06):
+// `__kilnWorkerOp(op, ...)` is every synchronous operation on them, numbered below, and
+// `__kilnPortWait(endpoint, referenced)` the one that waits -- a host operation, answered
+// `{ requestId, promise }`, done once the endpoint has something queued or its peer has closed.
+const __kilnWorkerOp: (op: number, ...args: any[]) => any = (globalThis as any).__kilnWorkerOp;
+const __kilnPortWait: (endpoint: number, referenced: boolean) => { requestId: number; promise: Promise<any> } =
+  (globalThis as any).__kilnPortWait;
+delete (globalThis as any).__kilnWorkerOp;
+delete (globalThis as any).__kilnPortWait;
 
 (function installWebEventsAndStreams() {
   const G = globalThis as any;
@@ -418,11 +427,341 @@ delete (globalThis as any).__kilnQueueIo;
   // which is why messages posted just before `port1.close()` still reach `port2` in node.
   const CLOSE_MARK = {};
 
+  // ---- Messages between realms (ADR 0070 primitive A; realms issue 06) ------------------------
+  //
+  // A port whose other end lives in another realm -- a worker's `parentPort`, a port transferred
+  // to or from a worker, a `BroadcastChannel` -- is bound to an endpoint of the runtime's
+  // (`kiln_runtime::workers`). A message crosses as the structured clone above, flattened into a
+  // list of tokens the runtime can carry: numbers, strings, `undefined`/`null`/booleans, and
+  // buffers. The flattening is a wire format over a value the clone has already made, not a
+  // second clone: every object in it is a fresh copy the sender holds no reference to, which is
+  // exactly the proof ADR 0070 asks before a graph's storage moves -- so an `ArrayBuffer` in it
+  // hands its backing store to the runtime (and on to the receiving realm) instead of copying it.
+  //
+  // Each token list is a tag followed by what the tag needs. An object is numbered when it is
+  // first written, and written again as a reference to that number, which keeps shared
+  // references and cycles.
+  const T_UNDEFINED = 0, T_NULL = 1, T_FALSE = 2, T_TRUE = 3, T_NUMBER = 4, T_STRING = 5, T_BIGINT = 6;
+  const T_REF = 7, T_OBJECT = 8, T_ARRAY = 9, T_HOLE = 10, T_DATE = 11, T_REGEXP = 12, T_MAP = 13;
+  const T_SET = 14, T_BUFFER = 15, T_VIEW = 16, T_DATA_VIEW = 17, T_SHARED = 18, T_ERROR = 19;
+  const T_BOXED = 20, T_PORT = 21;
+
+  // The runtime's operations (`__kilnWorkerOp`); the numbers are the engines' too.
+  const OP_CHANNEL = 1, OP_POST = 2, OP_TAKE = 3, OP_CLOSE = 4, OP_STATE = 5, OP_ENQUEUE = 6;
+  const OP_BROADCAST_JOIN = 7, OP_BROADCAST_POST = 8, OP_SPAWN = 9, OP_TERMINATE = 10, OP_SELF = 11;
+  const OP_CANCEL_WAIT = 12, OP_REAP = 13, OP_STDIO = 14;
+  // `kiln_runtime::workers::kind` and `STATE_*`.
+  const KIND_USER = 0, KIND_TERMINATE = 7;
+  const STATE_PEER_CLOSED = 2, STATE_GONE = 4;
+
+  const objectTag = Object.prototype.toString;
+  const isArrayValue = Array.isArray;
+  const objectKeys = Object.keys;
+
+  // A port that was transferred: its endpoint, standing where the port was in the copy.
+  class PortHandle {
+    endpoint: number;
+    constructor(endpoint: number) {
+      this.endpoint = endpoint;
+    }
+  }
+
+  function encodeInto(value: any, out: any[], seen: Map<any, number>): void {
+    switch (typeof value) {
+      case "undefined": out.push(T_UNDEFINED); return;
+      case "boolean": out.push(value ? T_TRUE : T_FALSE); return;
+      case "number": out.push(T_NUMBER, value); return;
+      case "string": out.push(T_STRING, value); return;
+      case "bigint": out.push(T_BIGINT, value.toString()); return;
+    }
+    if (value === null) {
+      out.push(T_NULL);
+      return;
+    }
+    const known = seen.get(value);
+    if (known !== undefined) {
+      out.push(T_REF, known);
+      return;
+    }
+    seen.set(value, seen.size);
+    if (isArrayValue(value)) {
+      const length = value.length;
+      out.push(T_ARRAY, length);
+      for (let i = 0; i < length; i++) {
+        if (i in value) encodeInto(value[i], out, seen);
+        else out.push(T_HOLE);
+      }
+      return;
+    }
+    if (value instanceof PortHandle) {
+      out.push(T_PORT, value.endpoint);
+      return;
+    }
+    const tag = objectTag.call(value);
+    switch (tag) {
+      case "[object Object]": break;
+      case "[object ArrayBuffer]": out.push(T_BUFFER, value); return;
+      case "[object SharedArrayBuffer]": out.push(T_SHARED, value); return;
+      case "[object DataView]":
+        out.push(T_DATA_VIEW, value.byteOffset, value.byteLength);
+        encodeInto(value.buffer, out, seen);
+        return;
+      case "[object Date]": out.push(T_DATE, value.getTime()); return;
+      case "[object RegExp]": out.push(T_REGEXP, value.source, value.flags); return;
+      case "[object Map]": {
+        out.push(T_MAP, value.size);
+        for (const [k, v] of value) {
+          encodeInto(k, out, seen);
+          encodeInto(v, out, seen);
+        }
+        return;
+      }
+      case "[object Set]": {
+        out.push(T_SET, value.size);
+        for (const v of value) encodeInto(v, out, seen);
+        return;
+      }
+      case "[object Error]": {
+        out.push(T_ERROR, String(value.name), String(value.message));
+        encodeInto("stack" in value ? value.stack : undefined, out, seen);
+        const hasCause = "cause" in value;
+        out.push(hasCause ? 1 : 0);
+        if (hasCause) encodeInto(value.cause, out, seen);
+        return;
+      }
+      case "[object Boolean]": out.push(T_BOXED, T_TRUE); encodeInto(value.valueOf(), out, seen); return;
+      case "[object Number]": out.push(T_BOXED, T_NUMBER); encodeInto(value.valueOf(), out, seen); return;
+      case "[object String]": out.push(T_BOXED, T_STRING); encodeInto(value.valueOf(), out, seen); return;
+      case "[object BigInt]": out.push(T_BOXED, T_BIGINT); encodeInto(value.valueOf(), out, seen); return;
+      default:
+        if (ArrayBuffer.isView(value)) {
+          out.push(T_VIEW, tag.slice(8, -1), value.byteOffset, value.length);
+          encodeInto(value.buffer, out, seen);
+          return;
+        }
+    }
+    // What the clone made of any other object: an ordinary one, its own enumerable properties.
+    const keys = objectKeys(value);
+    out.push(T_OBJECT, keys.length);
+    for (let i = 0; i < keys.length; i++) {
+      out.push(keys[i]);
+      encodeInto(value[keys[i]], out, seen);
+    }
+  }
+
+  const errorConstructors: Record<string, any> = {
+    Error, EvalError, RangeError, ReferenceError, SyntaxError, TypeError, URIError,
+  };
+
+  interface DecodeState {
+    tokens: any[];
+    at: number;
+    objects: any[];
+    ports: Map<number, MessagePort>;
+  }
+
+  function decodeValue(state: DecodeState): any {
+    const tokens = state.tokens;
+    const tag = tokens[state.at++];
+    switch (tag) {
+      case T_UNDEFINED: return undefined;
+      case T_NULL: return null;
+      case T_FALSE: return false;
+      case T_TRUE: return true;
+      case T_NUMBER:
+      case T_STRING: return tokens[state.at++];
+      case T_BIGINT: return BigInt(tokens[state.at++]);
+      case T_REF: return state.objects[tokens[state.at++]];
+      case T_ARRAY: {
+        const length = tokens[state.at++];
+        const out = new Array(length);
+        state.objects.push(out);
+        for (let i = 0; i < length; i++) {
+          if (tokens[state.at] === T_HOLE) {
+            state.at++;
+            continue;
+          }
+          out[i] = decodeValue(state);
+        }
+        return out;
+      }
+      case T_OBJECT: {
+        const count = tokens[state.at++];
+        const out: any = {};
+        state.objects.push(out);
+        for (let i = 0; i < count; i++) {
+          const key = tokens[state.at++];
+          const item = decodeValue(state);
+          if (key === "__proto__") {
+            Object.defineProperty(out, key, { value: item, writable: true, enumerable: true, configurable: true });
+          } else {
+            out[key] = item;
+          }
+        }
+        return out;
+      }
+      case T_BUFFER:
+      case T_SHARED: {
+        const buffer = tokens[state.at++];
+        state.objects.push(buffer);
+        return buffer;
+      }
+      case T_VIEW: {
+        const name = tokens[state.at++];
+        const offset = tokens[state.at++];
+        const length = tokens[state.at++];
+        const slot = state.objects.length;
+        state.objects.push(undefined);
+        const buffer = decodeValue(state);
+        const Ctor = G[name];
+        const view = new Ctor(buffer, offset, length);
+        state.objects[slot] = view;
+        return view;
+      }
+      case T_DATA_VIEW: {
+        const offset = tokens[state.at++];
+        const length = tokens[state.at++];
+        const slot = state.objects.length;
+        state.objects.push(undefined);
+        const view = new DataView(decodeValue(state), offset, length);
+        state.objects[slot] = view;
+        return view;
+      }
+      case T_DATE: {
+        const out = new Date(tokens[state.at++]);
+        state.objects.push(out);
+        return out;
+      }
+      case T_REGEXP: {
+        const source = tokens[state.at++];
+        const out = new RegExp(source, tokens[state.at++]);
+        state.objects.push(out);
+        return out;
+      }
+      case T_MAP: {
+        const count = tokens[state.at++];
+        const out = new Map();
+        state.objects.push(out);
+        for (let i = 0; i < count; i++) {
+          const key = decodeValue(state);
+          out.set(key, decodeValue(state));
+        }
+        return out;
+      }
+      case T_SET: {
+        const count = tokens[state.at++];
+        const out = new Set();
+        state.objects.push(out);
+        for (let i = 0; i < count; i++) out.add(decodeValue(state));
+        return out;
+      }
+      case T_ERROR: {
+        const name = tokens[state.at++];
+        const message = tokens[state.at++];
+        const Ctor = errorConstructors[name] || Error;
+        const out: any = new Ctor(message);
+        state.objects.push(out);
+        if (Ctor === Error && name !== "Error") {
+          Object.defineProperty(out, "name", { value: name, writable: true, enumerable: false, configurable: true });
+        }
+        const stack = decodeValue(state);
+        if (stack !== undefined) {
+          Object.defineProperty(out, "stack", { value: stack, writable: true, enumerable: false, configurable: true });
+        }
+        if (tokens[state.at++] === 1) {
+          Object.defineProperty(out, "cause", { value: decodeValue(state), writable: true, enumerable: false, configurable: true });
+        }
+        return out;
+      }
+      case T_BOXED: {
+        tokens[state.at++];
+        const slot = state.objects.length;
+        state.objects.push(undefined);
+        const out = Object(decodeValue(state));
+        state.objects[slot] = out;
+        return out;
+      }
+      case T_PORT: {
+        const endpoint = tokens[state.at++];
+        let port = state.ports.get(endpoint);
+        if (port === undefined) {
+          port = remotePort(endpoint);
+          state.ports.set(endpoint, port);
+        }
+        state.objects.push(port);
+        return port;
+      }
+    }
+    throw clone.dataCloneError("Unable to deserialize cloned data.");
+  }
+
+  // A message on the wire: the transferred ports' endpoints (the event's `ports`), then the
+  // value. `source` is the port posting it, which may not transfer itself.
+  function encodeMessage(message: any, list: any[] | undefined, source: any): any[] {
+    let copy: any;
+    const handles: PortHandle[] = [];
+    if (list === undefined || list.length === 0) {
+      if (typeof message !== "object" || message === null) {
+        if (typeof message === "function" || typeof message === "symbol") return encodeUncloneable(message);
+        const out: any[] = [0];
+        encodeInto(message, out, new Map());
+        return out;
+      }
+      copy = clone.serialize(message, undefined);
+    } else {
+      copy = clone.serialize(message, list, (item: any) => {
+        if (!(item instanceof MessagePort)) return undefined;
+        if (item === source) throw clone.dataCloneError("Transfer list contains source port");
+        return () => {
+          const handle = new PortHandle(detachPort(item));
+          handles.push(handle);
+          return handle;
+        };
+      });
+    }
+    const out: any[] = [handles.length];
+    for (let i = 0; i < handles.length; i++) out.push(handles[i].endpoint);
+    encodeInto(copy, out, new Map());
+    return out;
+  }
+
+  // A function or symbol at the top of a message throws the clone's own error.
+  function encodeUncloneable(message: any): never {
+    clone.serialize(message, undefined);
+    throw clone.dataCloneError("could not be cloned.");
+  }
+
+  // `[value, ports]` back from a message's tokens.
+  function decodeMessage(tokens: any[]): [any, any[]] {
+    const count = tokens[0];
+    const state: DecodeState = { tokens, at: 1 + count, objects: [], ports: new Map() };
+    const ports: any[] = count === 0 ? NO_PORTS : [];
+    for (let i = 0; i < count; i++) {
+      const endpoint = tokens[1 + i];
+      const port = remotePort(endpoint);
+      state.ports.set(endpoint, port);
+      ports.push(port);
+    }
+    return [decodeValue(state), ports];
+  }
+
   let deliverNext: (port: MessagePort) => void;
   let continueFromTick: (port: MessagePort) => void;
   let continueFromMicrotask: (port: MessagePort) => void;
   let transferPort: (port: MessagePort) => MessagePort;
+  let detachPort: (port: MessagePort) => number;
+  let remotePort: (endpoint: number) => MessagePort;
+  let listen: (port: MessagePort) => void;
+  let stopWaiting: (port: MessagePort) => void;
   let entangle: (a: MessagePort, b: MessagePort) => void;
+  // A port the runtime-side protocol reads: a worker's own channel, its control endpoint, a
+  // broadcast group. `kinds` takes every message, the protocol's and the program's.
+  let internalPort: (endpoint: number, kinds: (kind: number, value: any, ports: any[]) => void,
+    target: any, broadcast: boolean) => MessagePort;
+  let portEndpoint: (port: MessagePort) => number;
+  // Deliver what the runtime holds for `port` from this turn's I/O callbacks, without waiting
+  // for its wait to come back: a post that the sender knows reached a port of its own realm.
+  let kick: (port: MessagePort) => void;
 
   // Node delivers a port's messages from one libuv callback, dispatching each as its own
   // callback with a microtask checkpoint -- `process.nextTick` callbacks, then promise jobs,
@@ -435,7 +774,8 @@ delete (globalThis as any).__kilnQueueIo;
   // gets between two messages of one batch, which is node's order too.
   //
   // The queue holds `data, ports` pairs; `NO_PORTS` stands for an empty list until an event
-  // needs one of its own.
+  // needs one of its own. A port bound to another realm takes its messages from the runtime as
+  // it dispatches them, after anything still in its own queue.
   const DELIVERY_BATCH = 1000;
   const CONTINUATION_HOPS = 64;
   const TICKS = 1;
@@ -453,6 +793,15 @@ delete (globalThis as any).__kilnQueueIo;
     #scheduled = false;
     #budget = 0;
     #hops = 0;
+    // The runtime endpoint when the other end is in another realm, 0 otherwise; the pending
+    // wait on it; whether that wait keeps the realm alive.
+    #remote = 0;
+    #wait: any = null;
+    #unref = false;
+    #broadcast = false;
+    // The protocol reader of an internal port, and where its events go (a BroadcastChannel).
+    #kinds: ((kind: number, value: any, ports: any[]) => void) | null = null;
+    #target: any = null;
     // The `message` listener list, once there is one: the table keeps one array per type and
     // edits it in place, so the lookup -- a string-keyed Map read per message -- is made once.
     #messageListeners: Listener[] | undefined = undefined;
@@ -462,6 +811,7 @@ delete (globalThis as any).__kilnQueueIo;
     get onmessage(): any { return this.#onmessage === null ? null : this.#onmessage.callback; }
     set onmessage(handler: any) {
       this.#onmessage = setAttributeHandler(this, "message", handler, this.#onmessage);
+      this.#autoRef();
       if (this.#onmessage !== null) this.start();
     }
     get onmessageerror(): any { return this.#onmessageerror === null ? null : this.#onmessageerror.callback; }
@@ -469,10 +819,25 @@ delete (globalThis as any).__kilnQueueIo;
       this.#onmessageerror = setAttributeHandler(this, "messageerror", handler, this.#onmessageerror);
     }
 
-    // Node starts a port for a `message` listener as it does for `onmessage`.
+    // Node starts a port for a `message` listener as it does for `onmessage`, and a port with
+    // one keeps its realm alive until the last is removed: a worker whose `parentPort` listener
+    // was a `once` ends after that message.
     addEventListener(type: any, callback: any, options?: any): void {
       super.addEventListener(type, callback, options);
-      if (callback !== null && callback !== undefined && String(type) === "message") this.start();
+      if (callback !== null && callback !== undefined && String(type) === "message") {
+        this.#autoRef();
+        this.start();
+      }
+    }
+    removeEventListener(type: any, callback: any, options?: any): void {
+      super.removeEventListener(type, callback, options);
+      if (String(type) === "message") this.#autoRef();
+    }
+    #autoRef(): void {
+      if (this.#kinds !== null || this.#target !== null) return;
+      const list = listenersOf(this).get("message");
+      if (list !== undefined && list.length !== 0) this.ref();
+      else this.unref();
     }
 
     // Answers `true`, as node's does, unless this port is closed; a copy is made -- and a
@@ -489,6 +854,13 @@ delete (globalThis as any).__kilnQueueIo;
         list = typeof transfer[Symbol.iterator] === "function"
           ? clone.sequence(transfer, "Optional transferList argument must be an iterable")
           : clone.transferOption(transfer, "postMessage");
+      }
+      if (this.#remote !== 0) {
+        const tokens = encodeMessage(message, list, this);
+        if (this.#closed) return undefined;
+        if (this.#broadcast) __kilnWorkerOp(OP_BROADCAST_POST, this.#remote, tokens);
+        else __kilnWorkerOp(OP_POST, this.#remote, KIND_USER, tokens);
+        return true;
       }
       let data: any;
       let ports = NO_PORTS;
@@ -524,6 +896,8 @@ delete (globalThis as any).__kilnQueueIo;
       if (this.#head < this.#queue.length && !this.#scheduled) {
         this.#scheduled = true;
         deliverLater(deliverNext, this);
+      } else if (this.#remote !== 0) {
+        listen(this);
       }
     }
 
@@ -532,6 +906,12 @@ delete (globalThis as any).__kilnQueueIo;
       this.#closed = true;
       this.#queue = [];
       this.#head = 0;
+      if (this.#remote !== 0) {
+        const remote = this.#remote;
+        this.#remote = 0;
+        stopWaiting(this);
+        __kilnWorkerOp(OP_CLOSE, remote);
+      }
       const other = this.#other;
       this.#other = null;
       if (other !== null && !other.#closed) {
@@ -544,10 +924,96 @@ delete (globalThis as any).__kilnQueueIo;
       }
       schedule(closed, this);
     }
-    ref(): this { return this; }
-    unref(): this { return this; }
-    hasRef(): boolean { return this.#started && !this.#closed; }
+    // A port bound to another realm keeps this one alive while it is listening, as node's does;
+    // one in this realm has nothing another realm could send it.
+    ref(): this {
+      if (this.#unref) {
+        this.#unref = false;
+        if (this.#wait !== null) {
+          stopWaiting(this);
+          listen(this);
+        }
+      }
+      return this;
+    }
+    unref(): this {
+      if (!this.#unref) {
+        this.#unref = true;
+        if (this.#wait !== null) {
+          stopWaiting(this);
+          listen(this);
+        }
+      }
+      return this;
+    }
+    hasRef(): boolean { return this.#started && !this.#closed && !this.#unref; }
     get [Symbol.toStringTag](): string { return "MessagePort"; }
+
+    // Node's `NodeEventTarget` surface, which its `MessagePort` has and a worker's `parentPort`
+    // is mostly used through: a listener added with `on` is called with a message's data rather
+    // than the event, and with nothing for any other event.
+    #nodeStyle: { type: string; listener: any; wrapper: any }[] = [];
+    #addNodeStyle(type: any, listener: any, once: boolean): this {
+      if (typeof listener !== "function") {
+        throw typeError(`The "listener" argument must be of type function. Received ${listener === null ? "null" : typeof listener}`, "ERR_INVALID_ARG_TYPE");
+      }
+      const key = String(type);
+      const entries = this.#nodeStyle;
+      const wrapper = function (this: any, event: any) {
+        if (once) {
+          const at = entries.findIndex((entry) => entry.wrapper === wrapper);
+          if (at >= 0) entries.splice(at, 1);
+        }
+        return key === "message" || key === "messageerror" ? listener.call(this, event.data) : listener.call(this);
+      };
+      entries.push({ type: key, listener, wrapper });
+      this.addEventListener(key, wrapper, once ? { once: true } : undefined);
+      return this;
+    }
+    on(type: any, listener: any): this { return this.#addNodeStyle(type, listener, false); }
+    addListener(type: any, listener: any): this { return this.#addNodeStyle(type, listener, false); }
+    once(type: any, listener: any): this { return this.#addNodeStyle(type, listener, true); }
+    off(type: any, listener: any): this { return this.removeListener(type, listener); }
+    removeListener(type: any, listener: any): this {
+      const key = String(type);
+      const entries = this.#nodeStyle;
+      for (let i = entries.length - 1; i >= 0; i--) {
+        if (entries[i].type === key && entries[i].listener === listener) {
+          this.removeEventListener(key, entries[i].wrapper);
+          entries.splice(i, 1);
+          break;
+        }
+      }
+      return this;
+    }
+    removeAllListeners(type?: any): this {
+      const entries = this.#nodeStyle;
+      for (let i = entries.length - 1; i >= 0; i--) {
+        if (type === undefined || entries[i].type === String(type)) {
+          this.removeEventListener(entries[i].type, entries[i].wrapper);
+          entries.splice(i, 1);
+        }
+      }
+      return this;
+    }
+    emit(type: any, arg?: any): boolean {
+      const key = String(type);
+      const list = listenersOf(this).get(key);
+      const had = list !== undefined && list.some((entry) => !entry.removed);
+      dispatchTo(this, key === "message" || key === "messageerror" ? new MessageEvent(key, { data: arg }) : new Event(key), list);
+      return had;
+    }
+    listenerCount(type: any): number {
+      const list = listenersOf(this).get(String(type));
+      return list === undefined ? 0 : list.filter((entry) => !entry.removed).length;
+    }
+    eventNames(): string[] {
+      const names: string[] = [];
+      for (const [name, list] of listenersOf(this)) if (list.some((entry) => !entry.removed)) names.push(name);
+      return names;
+    }
+    setMaxListeners(_n: number): this { return this; }
+    getMaxListeners(): number { return 10; }
 
     static {
       // `receiveMessageOnPort` (node:worker_threads): take the oldest message not yet
@@ -556,7 +1022,12 @@ delete (globalThis as any).__kilnQueueIo;
         if (port.#closed) return undefined;
         const queue = port.#queue;
         const at = port.#head;
-        if (at >= queue.length) return undefined;
+        if (at >= queue.length) {
+          if (port.#remote === 0) return undefined;
+          const got = __kilnWorkerOp(OP_TAKE, port.#remote);
+          if (got === undefined) return undefined;
+          return { message: decodeMessage(got[1])[0] };
+        }
         const data = queue[at];
         if (data === CLOSE_MARK) return undefined;
         queue[at] = undefined;
@@ -570,7 +1041,16 @@ delete (globalThis as any).__kilnQueueIo;
         return { message: data };
       };
       Object.defineProperty(MessagePort, Symbol.for("kiln.messagePort"), {
-        value: { receive },
+        value: {
+          receive,
+          workerOp: __kilnWorkerOp,
+          encodeMessage,
+          decodeMessage,
+          internalPort: (endpoint: number, kinds: any, target: any, broadcast: boolean) =>
+            internalPort(endpoint, kinds, target, broadcast),
+          portEndpoint: (port: MessagePort) => portEndpoint(port),
+          worker: () => workerState,
+        },
         writable: false,
         enumerable: false,
         configurable: false,
@@ -584,35 +1064,80 @@ delete (globalThis as any).__kilnQueueIo;
         if (budget < DELIVERY_BATCH) budget = DELIVERY_BATCH;
         deliverSome(port, budget);
       };
+      // The next message for `port` from the runtime, dispatched; false when there is none.
+      const deliverRemote = (port: MessagePort): boolean => {
+        const remote = port.#remote;
+        const got = __kilnWorkerOp(OP_TAKE, remote);
+        if (got === undefined) {
+          if ((__kilnWorkerOp(OP_STATE, remote) & (STATE_PEER_CLOSED | STATE_GONE)) !== 0) {
+            // The other end has gone and everything it sent has been delivered: this end is
+            // closed too, as node closes a port whose partner closed.
+            port.#closed = true;
+            port.#remote = 0;
+            stopWaiting(port);
+            __kilnWorkerOp(OP_CLOSE, remote);
+            closed(port);
+          }
+          return false;
+        }
+        let value: any;
+        let ports: any[];
+        try {
+          [value, ports] = decodeMessage(got[1]);
+        } catch (error) {
+          const target = port.#target === null ? port : port.#target;
+          if (port.#kinds !== null) port.#kinds(-1, error, NO_PORTS);
+          else dispatchTo(target, new MessageEvent("messageerror", { data: error }), listenersOf(target).get("messageerror"));
+          return true;
+        }
+        if (port.#kinds !== null) {
+          port.#kinds(got[0], value, ports);
+          return true;
+        }
+        const target = port.#target === null ? port : port.#target;
+        let list = port.#messageListeners;
+        if (list === undefined) list = port.#messageListeners = listenersOf(target).get("message");
+        dispatchTo(target, messageEvent(value, ports === NO_PORTS ? null : ports), list);
+        if (list === undefined || list.length === 0) port.#autoRef();
+        return true;
+      };
       // Dispatch until the queue is empty, the budget is spent, or a checkpoint has something
       // to run; `budget` travels with the continuation so a batch stays one batch.
       const deliverSome = (port: MessagePort, budget: number) => {
         while (budget-- > 0) {
           const queue = port.#queue;
           const at = port.#head;
-          if (at >= queue.length) return;
-          const data = queue[at];
-          const ports = queue[at + 1];
-          queue[at] = undefined;
-          queue[at + 1] = undefined;
-          if (at + 2 === queue.length) {
-            queue.length = 0;
-            port.#head = 0;
+          if (at >= queue.length) {
+            if (port.#remote === 0 || port.#closed) return;
+            if (!deliverRemote(port)) {
+              if (!port.#closed) listen(port);
+              return;
+            }
           } else {
-            port.#head = at + 2;
+            const data = queue[at];
+            const ports = queue[at + 1];
+            queue[at] = undefined;
+            queue[at + 1] = undefined;
+            if (at + 2 === queue.length) {
+              queue.length = 0;
+              port.#head = 0;
+            } else {
+              port.#head = at + 2;
+            }
+            if (port.#closed) return;
+            if (data === CLOSE_MARK) {
+              port.#closed = true;
+              port.#queue = [];
+              port.#head = 0;
+              closed(port);
+              return;
+            }
+            let list = port.#messageListeners;
+            if (list === undefined) list = port.#messageListeners = listenersOf(port).get("message");
+            dispatchTo(port, messageEvent(data, ports === NO_PORTS ? null : ports), list);
           }
           if (port.#closed) return;
-          if (data === CLOSE_MARK) {
-            port.#closed = true;
-            port.#queue = [];
-            port.#head = 0;
-            closed(port);
-            return;
-          }
-          let list = port.#messageListeners;
-          if (list === undefined) list = port.#messageListeners = listenersOf(port).get("message");
-          dispatchTo(port, messageEvent(data, ports === NO_PORTS ? null : ports), list);
-          if (port.#head >= port.#queue.length) return;
+          if (port.#head >= port.#queue.length && port.#remote === 0) return;
           const pending = __kilnJobsPending();
           if (pending !== 0) {
             if (nextTick === null) break;
@@ -622,7 +1147,7 @@ delete (globalThis as any).__kilnQueueIo;
             return;
           }
         }
-        if (!port.#scheduled && !port.#closed && port.#head < port.#queue.length) {
+        if (!port.#scheduled && !port.#closed && (port.#head < port.#queue.length || port.#remote !== 0)) {
           port.#scheduled = true;
           deliverLater(deliverNext, port);
         }
@@ -664,21 +1189,94 @@ delete (globalThis as any).__kilnQueueIo;
         }
         (nextTick as any)(continueFromTick, port);
       };
+      // Wait for the runtime to have something for a started port bound to another realm. The
+      // wait is the realm's reason to stay alive while the port is referenced.
+      listen = (port: MessagePort) => {
+        if (port.#closed || port.#remote === 0 || port.#wait !== null || !port.#started) return;
+        const pending = __kilnPortWait(port.#remote, !port.#unref);
+        port.#wait = pending;
+        pending.promise.then(() => {
+          if (port.#wait !== pending) return;
+          port.#wait = null;
+          if (port.#closed || port.#scheduled) return;
+          port.#scheduled = true;
+          deliverLater(deliverNext, port);
+        });
+      };
+      stopWaiting = (port: MessagePort) => {
+        const pending = port.#wait;
+        if (pending === null) return;
+        port.#wait = null;
+        __kilnWorkerOp(OP_CANCEL_WAIT, pending.requestId);
+      };
       // In one realm a transferred port is a new object entangled with the old one's partner;
       // the old one is closed, and what was queued for it goes with the new one.
       transferPort = (port: MessagePort) => {
         const moved = new MessagePort();
         const other = port.#other;
         moved.#queue = port.#queue.slice(port.#head);
+        moved.#remote = port.#remote;
+        moved.#unref = port.#unref;
         port.#queue = [];
         port.#head = 0;
         port.#closed = true;
         port.#other = null;
+        port.#remote = 0;
+        stopWaiting(port);
         if (other !== null) {
           other.#other = moved;
           moved.#other = other;
         }
         return moved;
+      };
+      // A port leaving for another realm: the endpoint the other realm will bind. The port here
+      // is closed without closing its channel; a partner still in this realm is bound to the
+      // other end of a new channel, and what was queued here goes with the port.
+      detachPort = (port: MessagePort): number => {
+        let endpoint = port.#remote;
+        if (endpoint === 0) {
+          const pair = __kilnWorkerOp(OP_CHANNEL);
+          endpoint = pair[1];
+          const other = port.#other;
+          if (other !== null && !other.#closed) {
+            other.#other = null;
+            other.#remote = pair[0];
+            if (other.#started) listen(other);
+          } else {
+            __kilnWorkerOp(OP_CLOSE, pair[0]);
+          }
+          const queue = port.#queue;
+          for (let at = port.#head; at < queue.length; at += 2) {
+            if (queue[at] === CLOSE_MARK) break;
+            __kilnWorkerOp(OP_ENQUEUE, endpoint, KIND_USER, encodeMessage(queue[at], queue[at + 1], null));
+          }
+        }
+        port.#queue = [];
+        port.#head = 0;
+        port.#closed = true;
+        port.#other = null;
+        port.#remote = 0;
+        stopWaiting(port);
+        return endpoint;
+      };
+      remotePort = (endpoint: number): MessagePort => {
+        const port = new MessagePort();
+        port.#remote = endpoint;
+        return port;
+      };
+      internalPort = (endpoint: number, kinds: any, target: any, broadcast: boolean): MessagePort => {
+        const port = new MessagePort();
+        port.#remote = endpoint;
+        port.#kinds = kinds;
+        port.#target = target;
+        port.#broadcast = broadcast;
+        return port;
+      };
+      portEndpoint = (port: MessagePort): number => port.#remote;
+      kick = (port: MessagePort) => {
+        if (port.#closed || port.#scheduled || port.#remote === 0 || !port.#started) return;
+        port.#scheduled = true;
+        deliverLater(deliverNext, port);
       };
       entangle = (a: MessagePort, b: MessagePort) => {
         a.#other = b;
@@ -705,23 +1303,28 @@ delete (globalThis as any).__kilnQueueIo;
     get [Symbol.toStringTag](): string { return "MessageChannel"; }
   }
 
-  const broadcastChannels = new Map<string, Set<BroadcastChannel>>();
+  // A named group in the runtime, which every realm's channels of that name join: a post is
+  // copied to each other member, in this realm or another, and delivered like a port's message.
+  // An open channel keeps its realm alive, as node's does, until it is closed or unreferenced.
+  // The channels of each name in this realm: a post reaches them through the runtime like any
+  // other, and is delivered in the same turn's I/O callbacks, as node delivers it.
+  const localChannels = new Map<string, Set<any>>();
 
   class BroadcastChannel extends EventTarget {
     #name: string;
     #closed = false;
+    #port: MessagePort;
     #onmessage: Listener | null = null;
     #onmessageerror: Listener | null = null;
     constructor(name: any) {
       super();
       if (name === undefined && arguments.length === 0) throw new TypeError("The \"name\" argument must be specified");
       this.#name = String(name);
-      let set = broadcastChannels.get(this.#name);
-      if (!set) {
-        set = new Set();
-        broadcastChannels.set(this.#name, set);
-      }
-      set.add(this);
+      this.#port = internalPort(__kilnWorkerOp(OP_BROADCAST_JOIN, this.#name), null, this, true);
+      this.#port.start();
+      let local = localChannels.get(this.#name);
+      if (local === undefined) localChannels.set(this.#name, local = new Set());
+      local.add(this);
     }
     get name(): string { return this.#name; }
     get onmessage(): any { return this.#onmessage === null ? null : this.#onmessage.callback; }
@@ -730,32 +1333,102 @@ delete (globalThis as any).__kilnQueueIo;
     set onmessageerror(handler: any) { this.#onmessageerror = setAttributeHandler(this, "messageerror", handler, this.#onmessageerror); }
     postMessage(message: any): void {
       if (this.#closed) throw invalidState("BroadcastChannel is closed");
-      // Copied before anything else, so an uncloneable message throws with or without peers.
-      let data = clone.serialize(message, undefined);
-      let first = true;
-      const peers = broadcastChannels.get(this.#name);
-      if (!peers) return;
-      for (const peer of peers) {
-        if (peer === this || peer.#closed) continue;
-        // Each receiver gets its own copy, as each would across realms.
-        if (!first) data = clone.serialize(message, undefined);
-        first = false;
-        const copy = data;
-        deliverLater(() => {
-          if (peer.#closed) return;
-          dispatchTo(peer, messageEvent(copy, []), listenersOf(peer).get("message"));
-        }, undefined);
+      if (message === undefined && arguments.length === 0) {
+        throw typeError("The \"message\" argument must be specified", "ERR_MISSING_ARGS");
       }
+      // Copied before anything else, so an uncloneable message throws with or without peers.
+      this.#port.postMessage(message);
+      const local = localChannels.get(this.#name);
+      if (local !== undefined) for (const peer of local) if (peer !== this) kick(peer.#port);
     }
     close(): void {
       if (this.#closed) return;
       this.#closed = true;
-      broadcastChannels.get(this.#name)?.delete(this);
+      localChannels.get(this.#name)?.delete(this);
+      const port = this.#port;
+      // Closed quietly: the channel has no `close` event of its own.
+      port.onmessage = null;
+      port.close();
     }
-    ref(): this { return this; }
-    unref(): this { return this; }
+    ref(): this { this.#port.ref(); return this; }
+    unref(): this { this.#port.unref(); return this; }
     get [Symbol.toStringTag](): string { return "BroadcastChannel"; }
   }
+
+  // ---- This realm as a worker (node:worker_threads) ----------------------------------------
+  //
+  // A worker's realm learns what it is from the runtime before any of its program runs: its
+  // thread id, its end of the channel to its parent (`parentPort`), the endpoint `terminate()`
+  // reaches it through, and what its parent sent it to start from. `node:worker_threads`
+  // reads this; `process.env` is set here, before the program can read it.
+  let workerState: any = undefined;
+  (function adoptWorker() {
+    const self = typeof __kilnWorkerOp === "function" ? __kilnWorkerOp(OP_SELF) : undefined;
+    if (self === undefined) return;
+    const [threadId, endpoint, control, info] = self;
+    const parentPort = remotePort(endpoint);
+    let workerData: any = null;
+    let environmentData: any[] = [];
+    const init = __kilnWorkerOp(OP_TAKE, endpoint);
+    if (init !== undefined) {
+      const [start] = decodeMessage(init[1]);
+      workerData = start[0];
+      environmentData = start[2];
+      const env = start[1];
+      const proc = G.process;
+      if (env !== null && env !== undefined && proc && proc.env && typeof proc.env === "object") {
+        for (const key of Object.keys(proc.env)) if (!(key in env)) delete proc.env[key];
+        for (const key of Object.keys(env)) proc.env[key] = env[key];
+      }
+    }
+    // Stopping, when the parent asks: the runtime has raised the flag the engine checks, and
+    // this ends the realm from wherever it was idle. Unreferenced: a worker with nothing else
+    // to do ends on its own.
+    const controlPort = internalPort(control, (kind: number) => {
+      if (kind === KIND_TERMINATE && G.process && typeof G.process.exit === "function") G.process.exit(1);
+    }, null, false);
+    controlPort.unref();
+    controlPort.start();
+    // What a worker's `process` cannot do, since it would change the whole process: node refuses
+    // each by name.
+    if (G.process) {
+      for (const name of ["chdir", "abort", "setuid", "setgid", "seteuid", "setegid", "setgroups", "initgroups"]) {
+        Object.defineProperty(G.process, name, {
+          value: function () {
+            const error: any = new TypeError(`process.${name}() is not supported in workers`);
+            error.code = "ERR_WORKER_UNSUPPORTED_OPERATION";
+            throw error;
+          },
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        });
+      }
+    }
+    // What the program writes to `process.stdout` and `process.stderr` goes to its parent, which
+    // writes it to its own, as node pipes a worker's streams (`console.log` takes the engine's
+    // own route there).
+    const proc = G.process;
+    if (proc) {
+      for (const [name, stream] of [["stdout", 1], ["stderr", 2]] as [string, number][]) {
+        const target = proc[name];
+        if (target === null || typeof target !== "object") continue;
+        target._write = (chunk: any, _encoding: any, callback: any) => {
+          const text = typeof chunk === "string" ? chunk
+            : typeof G.TextDecoder === "function" ? new G.TextDecoder().decode(chunk) : String(chunk);
+          __kilnWorkerOp(OP_STDIO, stream, text);
+          if (typeof callback === "function") callback();
+        };
+      }
+    }
+    workerState = {
+      threadId,
+      info: JSON.parse(info),
+      parentPort,
+      workerData,
+      environmentData,
+    };
+  })();
 
   function cloneMessage(message: any): any {
     return clone.serialize(message, undefined);

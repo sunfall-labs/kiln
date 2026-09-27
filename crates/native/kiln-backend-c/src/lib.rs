@@ -348,6 +348,49 @@ macro_rules! provider_c_declaration {
     ($group:ident, $name:ident, node_fs_rmdir_sync) => {
         concat!("int ", stringify!($name), "(const uint8_t *path, uint64_t path_len, int32_t *out_err);\n")
     };
+    // Cross-realm ports, workers and shared memory (realms issue 06).
+    ($group:ident, $name:ident, worker_post) => {
+        concat!("int ", stringify!($name), "(uint32_t op, uint64_t port, uint32_t kind, kiln_worker_token *tokens, uint64_t count);\n")
+    };
+    ($group:ident, $name:ident, worker_take) => {
+        concat!("int ", stringify!($name), "(uint64_t port, uint32_t *out_kind, kiln_worker_token **out_tokens, uint64_t *out_count, void **out_message);\n")
+    };
+    ($group:ident, $name:ident, worker_message_free) => {
+        concat!("void ", stringify!($name), "(void *message);\n")
+    };
+    ($group:ident, $name:ident, worker_op) => {
+        concat!("int ", stringify!($name), "(uint32_t op, uint64_t a, uint64_t *out);\n")
+    };
+    ($group:ident, $name:ident, worker_broadcast_join) => {
+        concat!("int ", stringify!($name), "(const kiln_string *name, uint64_t *out);\n")
+    };
+    ($group:ident, $name:ident, worker_spawn) => {
+        concat!("int ", stringify!($name), "(const kiln_string *entry, int32_t eval, const kiln_string *argv, uint64_t argc, uint64_t port, uint64_t control, const kiln_string *info, uint64_t *out_key, uint64_t *out_thread);\n")
+    };
+    ($group:ident, $name:ident, worker_self) => {
+        concat!("int ", stringify!($name), "(uint64_t *out_thread, uint64_t *out_port, uint64_t *out_control, const uint8_t **out_info, uint64_t *out_info_len);\n")
+    };
+    ($group:ident, $name:ident, worker_stdio) => {
+        concat!("int ", stringify!($name), "(uint32_t stream, const uint8_t *bytes, uint64_t len);\n")
+    };
+    ($group:ident, $name:ident, worker_exit) => {
+        concat!("int ", stringify!($name), "(int32_t code);\n")
+    };
+    ($group:ident, $name:ident, shared_create) => {
+        concat!("int ", stringify!($name), "(uint64_t length, uint64_t capacity, uint8_t **out_bytes, void **out_handle);\n")
+    };
+    ($group:ident, $name:ident, shared_release) => {
+        concat!("void ", stringify!($name), "(void *handle);\n")
+    };
+    ($group:ident, $name:ident, shared_grow) => {
+        concat!("int ", stringify!($name), "(void *handle, uint64_t length, uint64_t *out);\n")
+    };
+    ($group:ident, $name:ident, atomics_wait) => {
+        concat!("int ", stringify!($name), "(void *handle, uint64_t offset, uint32_t width, int64_t expected, double timeout);\n")
+    };
+    ($group:ident, $name:ident, atomics_notify) => {
+        concat!("uint64_t ", stringify!($name), "(void *handle, uint64_t offset, uint64_t count);\n")
+    };
     // A provider entry point the generated C never calls needs no declaration.
     ($group:ident, $name:ident, $signature:ident) => { "" };
 }

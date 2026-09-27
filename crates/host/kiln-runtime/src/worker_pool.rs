@@ -470,6 +470,18 @@ impl<H: RealmHostProvider + 'static> WorkerPool<H> {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
+        self.spawn_thread_with_stack(None, body)
+    }
+
+    fn spawn_thread_with_stack<F, T>(
+        &self,
+        stack: Option<usize>,
+        body: F,
+    ) -> Result<(u64, std::thread::JoinHandle<T>), WorkerError>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
         let current = self.active_count.fetch_add(1, Ordering::SeqCst);
         if current >= self.capacity {
             self.active_count.fetch_sub(1, Ordering::SeqCst);
@@ -479,8 +491,11 @@ impl<H: RealmHostProvider + 'static> WorkerPool<H> {
         let guard = WorkerDropGuard {
             active_count: Arc::clone(&self.active_count),
         };
-        std::thread::Builder::new()
-            .name(format!("kiln-worker-{worker_id}"))
+        let mut builder = std::thread::Builder::new().name(format!("kiln-worker-{worker_id}"));
+        if let Some(stack) = stack {
+            builder = builder.stack_size(stack);
+        }
+        builder
             .spawn(move || {
                 let _guard = guard;
                 body()
@@ -498,6 +513,21 @@ impl<H: RealmHostProvider + 'static> WorkerPool<H> {
         T: Send + 'static,
     {
         let (id, thread) = self.spawn_thread(realm)?;
+        Ok(PinnedRealm { id, thread })
+    }
+
+    /// [`Self::spawn_pinned`] on a thread with a `stack`-byte stack: a `node:worker_threads`
+    /// realm (`crate::workers`), which recurses as deeply as a main thread's program may.
+    pub fn spawn_pinned_with_stack<F, T>(
+        &self,
+        stack: usize,
+        realm: F,
+    ) -> Result<PinnedRealm<T>, WorkerError>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let (id, thread) = self.spawn_thread_with_stack(Some(stack), realm)?;
         Ok(PinnedRealm { id, thread })
     }
 

@@ -16,6 +16,7 @@ http = ["dep:hyper", "dep:hyper-util", "dep:http-body-util"]
 kiln-artifact-cache = { workspace = true }
 kiln-host-abi = { workspace = true }
 kiln-number-core = { workspace = true }
+kiln-string = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tokio-metrics = { workspace = true }

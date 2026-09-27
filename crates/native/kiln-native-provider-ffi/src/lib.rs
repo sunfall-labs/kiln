@@ -147,6 +147,11 @@ mod ffi;
 #[path = "provider/realm.rs"]
 mod realm;
 
+/// Cross-realm ports, `node:worker_threads` and shared memory for native realms (realms issue 06).
+#[cfg(feature = "realm")]
+#[path = "provider/workers.rs"]
+mod workers;
+
 /// The allocator the regexp engine runs on.
 ///
 /// `malloc` and `free`, because the generated artifact this is linked into already has them and a

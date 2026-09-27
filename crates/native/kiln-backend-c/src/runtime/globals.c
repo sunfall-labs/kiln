@@ -486,6 +486,12 @@ static int kiln_c99_global_object(kiln_value *out) {
                      /* Message delivery's checkpoint question, captured the same way. */
                      {"__kilnJobsPending", KILN_C99_METHOD_JOBS_PENDING_RAW},
                      {"__kilnQueueIo", KILN_C99_METHOD_QUEUE_IO_RAW},
+                     /* The runtime's cross-realm ports and workers, captured the same way. */
+                     {"__kilnWorkerOp", KILN_C99_METHOD_WORKER_OP_RAW},
+                     {"__kilnPortWait", KILN_C99_METHOD_PORT_WAIT_RAW},
+                     /* `SharedArrayBuffer` stores and `Atomics`, captured the same way. */
+                     {"__kilnSharedBuffer", KILN_C99_METHOD_SHARED_BUFFER_RAW},
+                     {"__kilnAtomics", KILN_C99_METHOD_ATOMICS_RAW},
                      /* Node's unhandled-rejection tracking registers itself through this. */
                      {"__kilnPromiseRejections", KILN_C99_METHOD_PROMISE_REJECTIONS_RAW},
                      /* `Buffer.prototype.toString`'s decoder, captured by the shared Buffer

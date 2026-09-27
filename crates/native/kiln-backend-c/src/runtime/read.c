@@ -534,6 +534,38 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
     }
     case KILN_VALUE_ARRAY_BUFFER:
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
+        /* A `SharedArrayBuffer` (realms issue 06): its own accessors, then what the shared
+         * bootstrap defined on its prototype (`arraybuffer.ts`). */
+        if (kiln_c99_typed_buffer_of(target)->shared != NULL) {
+            kiln_typed_buffer *shared = kiln_c99_typed_buffer_of(target);
+            if (kiln_c99_same_name_key(key, "byteLength")) {
+                *out = kiln_c99_number((double)kiln_c99_shared_length(shared));
+                return KILN_C99_OK;
+            }
+            if (kiln_c99_same_name_key(key, "growable")) {
+                *out = kiln_c99_boolean(shared->shared_growable != 0);
+                return KILN_C99_OK;
+            }
+            if (kiln_c99_same_name_key(key, "maxByteLength")) {
+                *out = kiln_c99_number((double)(shared->shared_growable ? shared->shared_capacity
+                                                                         : kiln_c99_shared_length(shared)));
+                return KILN_C99_OK;
+            }
+            if (kiln_c99_same_name_key(key, "constructor")) {
+                *out = kiln_c99_builtin(KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER);
+                return KILN_C99_OK;
+            }
+            if (kiln_c99_same_name_key(key, "@@toStringTag")) {
+                *out = kiln_c99_copy_text("SharedArrayBuffer", 17);
+                return KILN_C99_OK;
+            }
+            {
+                int found;
+                int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER_PROTOTYPE,
+                                                           key, ikey, out, depth, thrown, &found);
+                if (status != KILN_C99_OK || found) return status;
+            }
+        }
         if (kiln_c99_same_name_key(key, "byteLength")) {
             *out = kiln_c99_number((double)kiln_c99_typed_buffer_of(target)->byte_length);
             return KILN_C99_OK;

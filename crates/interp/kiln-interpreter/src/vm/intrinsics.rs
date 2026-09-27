@@ -276,6 +276,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if let Native::Intl(op) = native {
             return self.intl_dispatch(op, receiver, arguments, instruction);
         }
+        if matches!(native, Native::WorkerOpRaw | Native::PortWaitRaw) {
+            return self.worker_native(native, arguments, instruction);
+        }
         if matches!(
             native,
             Native::ProcessStartRaw

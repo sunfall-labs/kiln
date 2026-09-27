@@ -572,15 +572,60 @@ impl ModuleGraph {
     pub fn build_node<L, F, R>(
         entry: impl AsRef<Path>,
         resolver: R,
-        mut loader: L,
-        mut frontend: F,
+        loader: L,
+        frontend: F,
     ) -> Result<Self, ModuleGraphError>
     where
         L: SourceLoader,
         F: Frontend,
         R: ResolutionPolicy,
     {
-        Self::build_with_typed_policy(entry, resolver, move |path, source_kind| {
+        Self::build_with_typed_policy(entry, resolver, Self::node_provider(loader, frontend))
+    }
+
+    /// [`Self::build_node`] for an entry that is not a file: `source` is its text, and `entry`
+    /// the path it stands at (its directory is where its relative requests resolve, its
+    /// extension its module format). What a `node:worker_threads` worker made from source
+    /// text runs (`{ eval: true }`); every other module is loaded as usual.
+    pub fn build_node_virtual<L, F, R>(
+        entry: impl AsRef<Path>,
+        source: String,
+        resolver: R,
+        mut loader: L,
+        frontend: F,
+    ) -> Result<Self, ModuleGraphError>
+    where
+        L: SourceLoader,
+        F: Frontend,
+        R: ResolutionPolicy,
+    {
+        let entry = entry.as_ref().to_path_buf();
+        let virtual_path = entry.clone();
+        let loader = move |path: &Path| -> Result<String, String> {
+            if path == virtual_path {
+                Ok(source.clone())
+            } else {
+                loader.load(path).map_err(|error| error.to_string())
+            }
+        };
+        Self::build_with_policy_provider_entry(
+            entry,
+            resolver,
+            Self::node_provider(loader, frontend),
+            true,
+            true,
+        )
+    }
+
+    fn node_provider<L, F>(
+        mut loader: L,
+        mut frontend: F,
+    ) -> impl FnMut(&Path, ModuleSource) -> Result<ModulePayload, ModuleGraphError>
+    where
+        L: SourceLoader,
+        F: Frontend,
+    {
+        move |path: &Path, source_kind: ModuleSource| {
             if source_kind == ModuleSource::Asset
                 || path
                     .extension()
@@ -635,7 +680,7 @@ impl ModuleGraph {
                 program.dependencies = commonjs.expect("CommonJS parse exists").static_requires;
             }
             Ok(ModulePayload::Program(program))
-        })
+        }
     }
 
     fn build_with_provider<P>(
@@ -695,18 +740,37 @@ impl ModuleGraph {
         P: FnMut(&Path, ModuleSource) -> Result<ModulePayload, ModuleGraphError>,
         R: ResolutionPolicy,
     {
+        Self::build_with_policy_provider_entry(entry, resolver, provider, typed_sources, false)
+    }
+
+    fn build_with_policy_provider_entry<P, R>(
+        entry: impl AsRef<Path>,
+        resolver: R,
+        provider: P,
+        typed_sources: bool,
+        virtual_entry: bool,
+    ) -> Result<Self, ModuleGraphError>
+    where
+        P: FnMut(&Path, ModuleSource) -> Result<ModulePayload, ModuleGraphError>,
+        R: ResolutionPolicy,
+    {
         if !entry.as_ref().is_absolute() {
             return Err(ModuleGraphError::NonAbsoluteEntry {
                 path: entry.as_ref().to_path_buf(),
             });
         }
-        let entry_path =
+        let entry_path = if virtual_entry {
+            entry.as_ref().to_path_buf()
+        } else {
             fs::canonicalize(entry.as_ref()).map_err(|error| ModuleGraphError::Entry {
                 path: entry.as_ref().to_path_buf(),
                 kind: error.kind(),
-            })?;
+            })?
+        };
         let root = resolver.project_root().to_path_buf();
-        if !entry_path.starts_with(&root) {
+        if virtual_entry {
+            // Nothing on disk to check: the text was handed over with the path.
+        } else if !entry_path.starts_with(&root) {
             return Err(ModuleGraphError::Resolve {
                 importer: entry_path,
                 specifier: String::new(),
@@ -716,7 +780,7 @@ impl ModuleGraph {
                 },
             });
         }
-        if !entry_path.is_file() {
+        if !virtual_entry && !entry_path.is_file() {
             return Err(ModuleGraphError::Resolve {
                 importer: entry_path.clone(),
                 specifier: String::new(),
@@ -771,6 +835,22 @@ impl ModuleGraph {
 
     pub fn entry(&self) -> &Path {
         &self.entry
+    }
+
+    /// This graph with one of its modules as the entry: what a `node:worker_threads` worker
+    /// running that module evaluates. `None` when `path` is not a module of the graph.
+    pub fn with_entry(&self, path: impl AsRef<Path>) -> Option<Self> {
+        let path = path.as_ref();
+        let entry = if self.module_node(path).is_some() {
+            path.to_path_buf()
+        } else {
+            let canonical = fs::canonicalize(path).ok()?;
+            self.module_node(&canonical)?;
+            canonical
+        };
+        let mut graph = self.clone();
+        graph.entry = entry;
+        Some(graph)
     }
 
     pub fn project_root(&self) -> &Path {

@@ -474,6 +474,13 @@ typedef struct kiln_typed_buffer {
     /* Set once, by `__kilnArrayBufferDetach`, and never cleared: the bytes went to another
      * buffer, `bytes` points at a static empty block and `byte_length` is zero. */
     int detached;
+    /* A `SharedArrayBuffer`'s store (`kiln_shared_create`), shared with every realm that was
+     * sent the buffer; NULL for an `ArrayBuffer`. The buffer holds one strong reference, which
+     * its finalizer releases; `bytes` points into the store and is never freed here. */
+    void *shared;
+    /* A `SharedArrayBuffer`'s ceiling (`maxByteLength`), and whether it can grow to it. */
+    size_t shared_capacity;
+    int shared_growable;
 } kiln_typed_buffer;
 
 /* The scalar-only dynamic-call ABI. Its layout is pinned by the Rust provider's repr(C) type. */
@@ -2516,8 +2523,31 @@ typedef int (*kiln_realm_entry_fn)(void *context);
 #define KILN_REALM_OP_STDIN_READ 13
 #define KILN_REALM_OP_MKDIR 14
 #define KILN_REALM_OP_PROCESS_RUN 15
+/* Done once a cross-realm port (`resource`) has something for this realm (realms issue 06). */
+#define KILN_REALM_OP_PORT_WAIT 16
 #define KILN_REALM_HTTP_CLOSE_GRACEFUL 0
 #define KILN_REALM_HTTP_CLOSE_ABORT 1
+/* One element of a message between realms, as the runtime's ports carry it
+ * (`kiln_runtime::workers`, realms issue 06): the shared TypeScript flattens a structured clone
+ * into these, and the provider turns them into its tokens and back. A moved block is `malloc`
+ * memory a detached `ArrayBuffer` gave up; a shared store is a `SharedArrayBuffer`'s. Whoever
+ * adopts a `handle` clears it in the token. */
+typedef struct kiln_worker_token {
+    uint32_t kind;
+    uint32_t flag;
+    double number;
+    const void *data;
+    uint64_t len;
+    void *handle;
+} kiln_worker_token;
+#define KILN_WORKER_TOKEN_UNDEFINED 0u
+#define KILN_WORKER_TOKEN_NULL 1u
+#define KILN_WORKER_TOKEN_BOOL 2u
+#define KILN_WORKER_TOKEN_NUMBER 3u
+#define KILN_WORKER_TOKEN_STRING 4u
+#define KILN_WORKER_TOKEN_MOVED 5u
+#define KILN_WORKER_TOKEN_BYTES 6u
+#define KILN_WORKER_TOKEN_SHARED 7u
 typedef struct kiln_async_host_op {
     uint32_t operation;
     uint32_t flags;

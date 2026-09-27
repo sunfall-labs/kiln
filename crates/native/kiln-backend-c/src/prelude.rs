@@ -1103,6 +1103,14 @@ method_ids! {
     // copy, and the default-order sort through the provider's `kiln_typed_array_sort`.
     (KILN_C99_METHOD_TYPED_ARRAY_COPY_RAW, 537, Direct; 0, 0),
     (KILN_C99_METHOD_TYPED_ARRAY_SORT_RAW, 538, Direct; 0, 0),
+    // The runtime's cross-realm ports and workers (realms issue 06), captured and deleted by
+    // `kiln-builtins/src/web_events_streams.ts`: every synchronous operation, and the wait.
+    (KILN_C99_METHOD_WORKER_OP_RAW, 539, Direct; 0, 0),
+    (KILN_C99_METHOD_PORT_WAIT_RAW, 540, Direct; 0, 0),
+    // `SharedArrayBuffer` stores and `Atomics` on their elements (realms issue 06), captured and
+    // deleted by `kiln-builtins/src/arraybuffer.ts` and `atomics.ts`.
+    (KILN_C99_METHOD_SHARED_BUFFER_RAW, 541, Direct; 0, 0),
+    (KILN_C99_METHOD_ATOMICS_RAW, 542, Direct; 0, 0),
     (KILN_C99_METHOD_PROCESS_EXIT, 513, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC, 514, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC, 515, Direct; 0, 0),
@@ -3722,6 +3730,10 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_PROMISE_REJECTIONS_RAW),
     emit_method_define!(KILN_C99_METHOD_TYPED_ARRAY_COPY_RAW),
     emit_method_define!(KILN_C99_METHOD_TYPED_ARRAY_SORT_RAW),
+    emit_method_define!(KILN_C99_METHOD_WORKER_OP_RAW),
+    emit_method_define!(KILN_C99_METHOD_PORT_WAIT_RAW),
+    emit_method_define!(KILN_C99_METHOD_SHARED_BUFFER_RAW),
+    emit_method_define!(KILN_C99_METHOD_ATOMICS_RAW),
     emit_method_define!(KILN_C99_METHOD_PROCESS_EXIT),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC),

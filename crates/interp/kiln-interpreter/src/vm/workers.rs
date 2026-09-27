@@ -1,0 +1,338 @@
+//! The interpreter's side of cross-realm ports and `node:worker_threads` (realms issue 06).
+//!
+//! Two primitives, both captured and deleted by the realm bootstrap
+//! (`kiln-builtins/src/web_events_streams.ts`), which owns every rule about what a message is:
+//! `__kilnWorkerOp(op, ...)`, the runtime's synchronous operations
+//! (`kiln_runtime::workers`), and `__kilnPortWait(endpoint, referenced)`, a host operation done
+//! when an endpoint has something for this realm. What is engine-specific is only the
+//! translation between this engine's values and message tokens -- and the one place that is
+//! more than a translation, a transferred `ArrayBuffer`, whose bytes move with the message.
+
+use super::*;
+use kiln_runtime::workers::{self, Message, Token, WorkerEntry, WorkerSpec};
+
+const OP_CHANNEL: u32 = 1;
+const OP_POST: u32 = 2;
+const OP_TAKE: u32 = 3;
+const OP_CLOSE: u32 = 4;
+const OP_STATE: u32 = 5;
+const OP_ENQUEUE: u32 = 6;
+const OP_BROADCAST_JOIN: u32 = 7;
+const OP_BROADCAST_POST: u32 = 8;
+const OP_SPAWN: u32 = 9;
+const OP_TERMINATE: u32 = 10;
+const OP_SELF: u32 = 11;
+const OP_CANCEL_WAIT: u32 = 12;
+const OP_REAP: u32 = 13;
+const OP_STDIO: u32 = 14;
+
+/// A moved `ArrayBuffer`'s store, as this engine boxes it into a [`Token::Moved`].
+struct MovedBytes(Vec<u8>);
+
+/// A `SharedArrayBuffer`'s store and ceiling, as this engine shares it in a [`Token::Shared`].
+struct SharedBytes {
+    store: crate::agent::SharedStore,
+    max_byte_length: Option<usize>,
+}
+
+fn endpoint_of(value: Option<&Value>) -> u64 {
+    match value {
+        Some(Value::Number(number)) if *number >= 0.0 && number.is_finite() => *number as u64,
+        _ => 0,
+    }
+}
+
+impl<H: HostOps + ?Sized> Vm<'_, H> {
+    pub(super) fn worker_native(
+        &mut self,
+        native: Native,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        if native == Native::PortWaitRaw {
+            return self.port_wait(arguments, instruction);
+        }
+        let op = arguments.first().map_or(0.0, Value::as_number) as u32;
+        let first = arguments.get(1);
+        Ok(match op {
+            OP_CHANNEL => {
+                let (a, b) = workers::channel();
+                Value::Array(ArrayData::new(vec![
+                    Value::Number(a as f64),
+                    Value::Number(b as f64),
+                ]))
+            }
+            OP_POST | OP_ENQUEUE => {
+                let kind = arguments.get(2).map_or(0.0, Value::as_number) as u32;
+                let tokens = self.message_tokens(arguments.get(3), false)?;
+                let message = Message::new(kind, tokens);
+                let endpoint = endpoint_of(first);
+                Value::Boolean(if op == OP_POST {
+                    workers::post(endpoint, message)
+                } else {
+                    workers::enqueue(endpoint, message)
+                })
+            }
+            OP_TAKE => match workers::take(endpoint_of(first)) {
+                Some(message) => {
+                    let tokens = message.tokens.into_iter().map(token_value).collect();
+                    Value::Array(ArrayData::new(vec![
+                        Value::Number(f64::from(message.kind)),
+                        Value::Array(ArrayData::new(tokens)),
+                    ]))
+                }
+                None => Value::Undefined,
+            },
+            OP_CLOSE => {
+                workers::close(endpoint_of(first));
+                Value::Undefined
+            }
+            OP_STATE => Value::Number(f64::from(workers::state(endpoint_of(first)))),
+            OP_BROADCAST_JOIN => {
+                let name = match first {
+                    Some(Value::String(name)) => name.to_lossy_string(),
+                    _ => String::new(),
+                };
+                Value::Number(workers::broadcast_join(&name) as f64)
+            }
+            OP_BROADCAST_POST => {
+                let tokens = self.message_tokens(arguments.get(2), true)?;
+                let delivered =
+                    workers::broadcast_post(endpoint_of(first), Message::new(0, tokens));
+                Value::Number(delivered as f64)
+            }
+            OP_SPAWN => self.spawn_worker(arguments, instruction)?,
+            OP_TERMINATE => Value::Boolean(workers::terminate(endpoint_of(first))),
+            OP_SELF => match workers::current() {
+                Some(worker) => Value::Array(ArrayData::new(vec![
+                    Value::Number(worker.thread_id as f64),
+                    Value::Number(worker.spec.port as f64),
+                    Value::Number(worker.spec.control as f64),
+                    Value::String(worker.spec.info.clone().into()),
+                ])),
+                None => Value::Undefined,
+            },
+            OP_CANCEL_WAIT => {
+                let request = endpoint_of(first);
+                match self.async_host {
+                    Some(node) => Value::Boolean(unsafe {
+                        ActiveAsyncHostOps::cancel(&mut *node, RequestId::new(request))
+                    }),
+                    None => Value::Boolean(false),
+                }
+            }
+            OP_REAP => {
+                workers::reap(endpoint_of(first));
+                Value::Undefined
+            }
+            OP_STDIO => {
+                if let (Some(worker), Some(Value::String(text))) =
+                    (workers::current(), arguments.get(2))
+                {
+                    worker.write_stdio(endpoint_of(first) == 2, text.clone());
+                }
+                Value::Undefined
+            }
+            _ => {
+                return Err(ExecutionError::Host {
+                    instruction,
+                    message: format!("kiln: unknown worker operation {op}"),
+                });
+            }
+        })
+    }
+
+    /// `__kilnPortWait(endpoint, referenced)`: `{ requestId, promise }`, the promise fulfilled
+    /// once the endpoint has a message or its peer has closed.
+    fn port_wait(
+        &mut self,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let endpoint = endpoint_of(arguments.first());
+        let referenced = arguments.get(1).is_some_and(Value::is_truthy);
+        let node = self.async_host.ok_or_else(|| ExecutionError::Host {
+            instruction,
+            message: "cross-realm message ports require the Node execution Adapter".into(),
+        })?;
+        let promise = PromiseState::pending();
+        let id = unsafe {
+            ActiveAsyncHostOps::start(
+                &mut *node,
+                AsyncHostOp::PortWait { port: endpoint },
+                referenced,
+            )
+        };
+        self.push_pending_host(PendingHostRequest {
+            request: id,
+            promise: Rc::clone(&promise),
+            conversion: HostResultConversion::Direct,
+        });
+        let mut result = ObjectData::default();
+        result.set("requestId", Value::Number(id.get() as f64));
+        result.set("promise", Value::Promise(promise));
+        Ok(Value::Object(Rc::new(RefCell::new(result))))
+    }
+
+    /// The tokens of a message the bootstrap flattened. A buffer in it is one the structured
+    /// clone just made, which nothing else references: its bytes move into the message
+    /// (`copy` false), or are copied for a broadcast's several receivers.
+    fn message_tokens(
+        &mut self,
+        tokens: Option<&Value>,
+        copy: bool,
+    ) -> Result<Vec<Token>, ExecutionError> {
+        let Some(Value::Array(items)) = tokens else {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "kiln: a message's tokens must be an array".to_owned(),
+            });
+        };
+        let items = items.borrow().clone();
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            out.push(match item {
+                Value::Undefined => Token::Undefined,
+                Value::Null => Token::Null,
+                Value::Boolean(value) => Token::Bool(value),
+                Value::Number(value) => Token::Number(value),
+                Value::String(text) => Token::String(text),
+                Value::ArrayBuffer(buffer) if buffer.shared => match buffer.bytes.store() {
+                    Some(store) => Token::Shared(Arc::new(SharedBytes {
+                        store: Arc::clone(store),
+                        max_byte_length: buffer.max_byte_length,
+                    })),
+                    None => return Err(ExecutionError::BufferDetached),
+                },
+                Value::ArrayBuffer(buffer) => {
+                    if buffer.detached() {
+                        return Err(ExecutionError::BufferDetached);
+                    }
+                    if copy {
+                        Token::Bytes(Arc::from(&buffer.bytes.borrow()[..]))
+                    } else {
+                        Token::Moved(Box::new(MovedBytes(buffer.detach())))
+                    }
+                }
+                other => {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: format!(
+                            "kiln: a message token cannot be a {}",
+                            other.type_name()
+                        ),
+                    });
+                }
+            });
+        }
+        Ok(out)
+    }
+
+    /// `__kilnWorkerOp(OP_SPAWN, entry, isEval, argv, port, control, info)`: the worker's
+    /// `threadId`, once its thread has started.
+    fn spawn_worker(
+        &mut self,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let Some(host) = self.worker_host.clone() else {
+            return Err(ExecutionError::Host {
+                instruction,
+                message: "kiln: this execution cannot start workers (node:worker_threads needs a \
+                          program run by `kiln run` or `kiln test`)"
+                    .to_owned(),
+            });
+        };
+        let text = match arguments.get(1) {
+            Some(Value::String(text)) => text.to_lossy_string(),
+            _ => String::new(),
+        };
+        let is_eval = arguments.get(2).is_some_and(Value::is_truthy);
+        let argv = match arguments.get(3) {
+            Some(Value::Array(items)) => items
+                .borrow()
+                .iter()
+                .map(|item| match item {
+                    Value::String(text) => text.to_lossy_string(),
+                    other => other.to_display_string(),
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let port = endpoint_of(arguments.get(4));
+        let control = endpoint_of(arguments.get(5));
+        let info = match arguments.get(6) {
+            Some(Value::String(text)) => text.to_lossy_string(),
+            _ => "{}".to_owned(),
+        };
+        let entry = if is_eval {
+            WorkerEntry::Eval(text)
+        } else {
+            if !host.has_module(&text) {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: format!(
+                        "kiln: the worker script {text} is not part of this program. A worker runs a \
+                         module the compiler found: name it with a string literal \
+                         (`new Worker(\"./w.js\")`), `new URL(\"./w.js\", import.meta.url)`, \
+                         `path.join(__dirname, \"w.js\")` or `__filename`"
+                    ),
+                });
+            }
+            WorkerEntry::File(text)
+        };
+        let spec = WorkerSpec {
+            entry,
+            argv,
+            info,
+            port,
+            control,
+            pipe_stdio: true,
+        };
+        match workers::spawn(spec, move |worker| host.run(worker)) {
+            Ok((key, thread_id)) => Ok(Value::Array(ArrayData::new(vec![
+                Value::Number(key as f64),
+                Value::Number(thread_id as f64),
+            ]))),
+            Err(message) => Err(ExecutionError::Host {
+                instruction,
+                message: format!("kiln: could not start a worker: {message}"),
+            }),
+        }
+    }
+}
+
+/// This engine's value for one token of a message it received.
+fn token_value(token: Token) -> Value {
+    match token {
+        Token::Undefined => Value::Undefined,
+        Token::Null => Value::Null,
+        Token::Bool(value) => Value::Boolean(value),
+        Token::Number(value) => Value::Number(value),
+        Token::String(text) => Value::String(text),
+        Token::Moved(store) => {
+            let bytes = store
+                .downcast::<MovedBytes>()
+                .map(|moved| moved.0)
+                .unwrap_or_default();
+            buffer_value(Bytes::new(false, bytes), None, false)
+        }
+        Token::Bytes(bytes) => buffer_value(Bytes::new(false, bytes.to_vec()), None, false),
+        Token::Shared(shared) => match shared.downcast::<SharedBytes>() {
+            Ok(shared) => buffer_value(
+                Bytes::from_store(&shared.store),
+                shared.max_byte_length,
+                true,
+            ),
+            Err(_) => Value::Undefined,
+        },
+    }
+}
+
+fn buffer_value(bytes: Bytes, max_byte_length: Option<usize>, shared: bool) -> Value {
+    Value::ArrayBuffer(Rc::new(BufferData {
+        bytes,
+        max_byte_length,
+        shared,
+        detached: std::cell::Cell::new(false),
+        immutable: false,
+        properties: RefCell::new(ObjectData::default()),
+    }))
+}

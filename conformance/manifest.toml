@@ -1783,6 +1783,183 @@ beside custom
 """
 
 [[test]]
+id = "regress/r27-worker-round-trip"
+requires_host = "node"
+group = "regress"
+source = "regress/r27-worker-round-trip.js"
+status = "runnable"
+features = ["node-worker-threads", "workers", "message-port", "structured-clone"]
+catches = """
+`new Worker` threw in both engines until 2026-09-27 (realms issue 06). A worker running this same file is a realm of its own on a thread of its own; messages between the two are structured-clone copies that arrive in order, `online` comes before the worker's first message and `exit` after its last, and `threadId` is 1 in the worker and -1 once it has exited.\
+"""
+expected_stdout = """
+main thread 0 worker thread 1
+online
+message {"n":1,"from":1}
+message {"n":2,"echoed":[1],"from":1}
+message {"n":3,"echoed":[2],"from":1}
+exit 0
+threadId after exit -1
+"""
+
+[[test]]
+id = "regress/r28-worker-data"
+requires_host = "node"
+group = "regress"
+source = "regress/r28-worker-data.js"
+status = "runnable"
+features = ["node-worker-threads", "workers", "structured-clone", "process-env"]
+catches = """
+What a worker starts from (realms issue 06): `workerData` is a structured clone made when the worker is -- a Map, a Date, a shared reference and a cycle arrive as such, and a later change in the parent is not seen -- `argv` is appended to its `process.argv`, `env` replaces its `process.env`, `name` is its `threadName`, `resourceLimits` are reported with node's defaults for the ones not given (and -1 for them on the parent's side), and environment data set before the worker starts is a copy it can read.\
+"""
+expected_stdout = """
+parent limits {"maxYoungGenerationSizeMb":-1,"maxOldGenerationSizeMb":64,"codeRangeSizeMb":-1,"stackSizeMb":4}
+main true 0 "" {} symbol
+isMainThread false
+threadId 1
+threadName reporter
+map true 1
+date true 0
+list [1,"two",null]
+shared true shared
+cycle true
+argv ["first","2"]
+env {"ONLY":"this"}
+limits {"maxYoungGenerationSizeMb":96,"maxOldGenerationSizeMb":64,"codeRangeSizeMb":0,"stackSizeMb":4}
+environmentData {"mode":"test"}
+exit 0
+"""
+
+[[test]]
+id = "regress/r29-worker-transfer-list"
+requires_host = "node"
+group = "regress"
+source = "regress/r29-worker-transfer-list.js"
+status = "runnable"
+features = ["node-worker-threads", "workers", "transfer-list", "array-buffer", "message-channel", "receive-message-on-port"]
+catches = """
+Transfer lists between realms (realms issue 06; ADR 0070 primitive C): a transferred `ArrayBuffer` is detached in the sender and its bytes arrive intact, a view over it arrives as a view, one given in `workerData` with `transferList` moves the same way, a transferred `MessagePort` lets the two realms talk over it, `receiveMessageOnPort` takes from it synchronously across realms, and an uncloneable message throws before anything is detached.\
+"""
+expected_stdout = """
+workerData buffer detached true 0
+uncloneable DataCloneError 8
+sender 0 true 0 3
+initial 9,8,7,6
+over the transferred port {"from":"worker","lines":["view Uint16Array 2 513,1027 of 8","copied 1,2,3"]}
+worker says second then {"message":"third"} then undefined
+exit 0
+"""
+
+[[test]]
+id = "regress/r30-worker-terminate"
+requires_host = "node"
+group = "regress"
+source = "regress/r30-worker-terminate.js"
+status = "runnable"
+features = ["node-worker-threads", "workers", "worker-terminate"]
+catches = """
+`worker.terminate()` (realms issue 06) stops a worker in the middle of a loop that never yields, or idle with a listener that would keep it alive for ever; its promise settles with 1 after the `exit` event reports the same, terminating a worker that has already stopped answers `undefined`, and its `threadId` is -1 from then on.\
+"""
+expected_stdout = """
+busy exit event 1
+busy terminated 1
+again undefined -1
+idle terminated 1
+finished then terminated undefined
+"""
+
+[[test]]
+id = "regress/r31-worker-error"
+requires_host = "node"
+group = "regress"
+source = "regress/r31-worker-error.js"
+status = "runnable"
+features = ["node-worker-threads", "workers", "worker-error", "unhandled-rejections"]
+catches = """
+An exception nothing in a worker catches ends the worker (realms issue 06): the parent's `error` event gets a copy of it -- the same kind of error, its message, or the thrown value itself -- and then `exit` reports 1, while the parent carries on. That holds for a throw from the module body, from a timer the worker's loop runs later, and for a rejection nothing handled.\
+"""
+expected_stdout = """
+body message before the throw
+body error TypeError TypeError "thrown from the body" true
+body exit 1
+timer error RangeError RangeError "thrown from a timer" false
+timer exit 1
+rejection error SyntaxError SyntaxError "rejected and never handled" false
+rejection exit 1
+value error value number 42
+value exit 1
+parent still running
+"""
+
+[[test]]
+id = "regress/r32-worker-process-exit"
+requires_host = "node"
+group = "regress"
+source = "regress/r32-worker-process-exit.js"
+status = "runnable"
+features = ["node-worker-threads", "workers", "process-exit"]
+catches = """
+`process.exit()` in a worker ends that worker and not the process (realms issue 06): the parent's `exit` event reports the code and the parent keeps running; nothing after the call runs in the worker, while what it posted before the call is still delivered, ahead of the exit.\
+"""
+expected_stdout = """
+body message posted before exit
+body exit 3
+handler message got please exit
+handler exit 7
+parent still running
+"""
+
+[[test]]
+id = "regress/r33-worker-atomics"
+requires_host = "node"
+group = "regress"
+source = "regress/r33-worker-atomics.js"
+status = "runnable"
+features = ["node-worker-threads", "workers", "shared-array-buffer", "atomics"]
+catches = """
+A `SharedArrayBuffer` is the same memory in every realm it is sent to (realms issue 06): four workers adding to one counter with `Atomics.add` leave exactly their total -- the interpreter's read and write of an element were two locks until 2026-09-27, and lost updates -- and `Atomics.wait` in a worker sleeps until the parent's `Atomics.notify` on the same cell, where it had answered "timed-out" at once.\
+"""
+expected_stdout = """
+counter 8000 expected 8000
+woken 1
+first wait ok, second wait not-equal
+shared bytes seen by the parent 1,2,3,4
+"""
+
+[[test]]
+id = "regress/r34-worker-eval"
+requires_host = "node"
+group = "regress"
+source = "regress/r34-worker-eval.js"
+status = "runnable"
+features = ["node-worker-threads", "workers", "worker-eval"]
+catches = """
+`new Worker(code, { eval: true })` runs source text as the worker's program (realms issue 06): CommonJS with `require`, `workerData` and messages as for a file worker, and an error in the text reported to the parent's `error` event. The interpreter compiles the text when the worker starts; a natively built program has no compiler to do that, and says so through the same event.\
+"""
+expected_stdout = """
+eval worker says {"square":49,"base":10,"isMainThread":false}
+eval worker exit 0
+error ReferenceError undefinedFunction is not defined
+failing exit 1
+"""
+
+[[test]]
+id = "regress/r35-worker-broadcast-channel"
+requires_host = "node"
+group = "regress"
+source = "regress/r35-worker-broadcast-channel.js"
+status = "runnable"
+features = ["node-worker-threads", "workers", "broadcast-channel"]
+catches = """
+A `BroadcastChannel` reaches every other channel of its name in the process, in this realm and in every worker's (realms issue 06): each receiver gets its own copy and the sender none. Until 2026-09-27 a channel reached only channels in its own realm.\
+"""
+expected_stdout = """
+local heard {"headline":"hello","items":[1,2]}
+worker 1 heard {"headline":"hello","items":[1,2]}
+worker 2 heard {"headline":"hello","items":[1,2]}
+"""
+
+[[test]]
 id = "server/s08-binary-http-chunks"
 requires_host = "node"
 group = "server"

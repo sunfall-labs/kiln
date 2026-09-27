@@ -454,16 +454,19 @@ declare_ts_builtins! {
             "Worker",
             "default",
             "getEnvironmentData",
+            "isInternalThread",
             "isMainThread",
             "isMarkedAsUntransferable",
             "markAsUncloneable",
             "markAsUntransferable",
             "moveMessagePortToContext",
             "parentPort",
+            "postMessageToThread",
             "receiveMessageOnPort",
             "resourceLimits",
             "setEnvironmentData",
             "threadId",
+            "threadName",
             "workerData",
         ],
     },
@@ -1281,6 +1284,10 @@ pub const REGEXP_BOOTSTRAP_SOURCE: &str = include_str!("regexp.ts");
 /// `ArrayBuffer.prototype` and `SharedArrayBuffer.prototype` extensions.
 pub const ARRAYBUFFER_BOOTSTRAP_SOURCE: &str = include_str!("arraybuffer.ts");
 
+/// `Atomics` over the native backend's element primitive and the runtime's waiter list (realms
+/// issue 06); installs nothing in the interpreter, whose `Atomics` is its own.
+pub const ATOMICS_BOOTSTRAP_SOURCE: &str = include_str!("atomics.ts");
+
 /// `structuredClone` and the structured clone with transfer every message port uses (ADR 0060
 /// kind 7): one implementation for both engines, over the detach primitive `arraybuffer.ts`
 /// captures. Follows `arraybuffer.ts` in the common bootstrap for that reason.
@@ -1317,6 +1324,7 @@ pub fn common_bootstrap_source() -> String {
         DISPOSABLE_BOOTSTRAP_SOURCE,
         REGEXP_BOOTSTRAP_SOURCE,
         ARRAYBUFFER_BOOTSTRAP_SOURCE,
+        ATOMICS_BOOTSTRAP_SOURCE,
         STRUCTURED_CLONE_BOOTSTRAP_SOURCE,
         MAPUPSERT_BOOTSTRAP_SOURCE,
         PROMISE_BOOTSTRAP_SOURCE,

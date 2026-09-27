@@ -1352,6 +1352,14 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         return kiln_c99_typed_array_sort_raw(result, args, argc);
     if (code == KILN_C99_METHOD_JOBS_PENDING_RAW)
         return kiln_c99_jobs_pending_raw(result);
+    if (code == KILN_C99_METHOD_WORKER_OP_RAW)
+        return kiln_c99_worker_op_raw(result, args, argc, thrown);
+    if (code == KILN_C99_METHOD_PORT_WAIT_RAW)
+        return kiln_c99_port_wait_raw(result, args, argc);
+    if (code == KILN_C99_METHOD_SHARED_BUFFER_RAW)
+        return kiln_c99_shared_buffer_raw(result, args, argc, thrown);
+    if (code == KILN_C99_METHOD_ATOMICS_RAW)
+        return kiln_c99_atomics_raw(result, args, argc, thrown);
     if (code == KILN_C99_METHOD_PROMISE_REJECTIONS_RAW)
         return kiln_c99_promise_rejections_raw(result, args, argc);
     if ((code & KILN_C99_FFI_DYNAMIC_BASE) != 0 ||
@@ -1601,6 +1609,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         if (argc > 0 && args[0].tag == KILN_VALUE_NUMBER) {
             exit_code = (int)kiln_c99_as_number(args[0]);
         }
+        /* In a worker (`node:worker_threads`) the call ends that worker's realm, not the
+         * process: the runtime records the code, and the host-error status -- which no `catch`
+         * takes -- unwinds to the launcher that ends the realm with it. */
+        if (kiln_worker_exit(exit_code) == 0) return KILN_C99_HOST_ERROR;
         fflush(NULL);
         exit(exit_code);
     }

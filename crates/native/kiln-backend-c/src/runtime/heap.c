@@ -3611,6 +3611,10 @@ static void kiln_c99_gc_finalize(kiln_gc_block *block) {
             kiln_c99_bytes_retire(((kiln_typed_buffer *)payload)->bytes,
                                   ((kiln_typed_buffer *)payload)->byte_length);
         }
+        /* A `SharedArrayBuffer`'s store outlives this realm's buffer while another realm holds
+         * it; this buffer's reference is handed back. */
+        if (((kiln_typed_buffer *)payload)->shared != NULL)
+            kiln_shared_release(((kiln_typed_buffer *)payload)->shared);
         break;
     case KILN_GC_REGEXP:
         /* The compiled pattern is the provider's, and this is the only place it is handed back. */

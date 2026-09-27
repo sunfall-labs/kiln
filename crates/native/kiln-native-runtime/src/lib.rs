@@ -9,7 +9,7 @@
 use std::sync::OnceLock;
 
 /// Version of the generated native runtime source and its C ABI.
-pub const NATIVE_RUNTIME_VERSION: u32 = 13;
+pub const NATIVE_RUNTIME_VERSION: u32 = 14;
 
 /// Environment variable that enables private scalar-result sidecar emission by the CLI launcher.
 pub const NATIVE_RESULT_PATH_ENV: &str = "KILN_NATIVE_RESULT_PATH_V1";
@@ -244,6 +244,9 @@ macro_rules! kiln_cli_host_state_declaration {
     kiln_value last_error;
     kiln_string error_text;
     FILE *output;
+    /* Where the realm's standard error goes when it is not `output`: a worker's
+     * (`node:worker_threads`) goes to its parent as messages, one stream apart from the other. */
+    FILE *error_output;
 } kiln_cli_host_state;
 "#
     };
@@ -506,7 +509,7 @@ const EMBEDDING_HEADER: &str = concat!(
 #include <stdio.h>
 #include <string.h>
 
-#define KILN_NATIVE_RUNTIME_VERSION 13
+#define KILN_NATIVE_RUNTIME_VERSION 14
 #define KILN_C_ABI_VERSION 1
 #define KILN_HOST_ABI_VERSION 4
 #define KILN_MODULE_API_VERSION 2
@@ -975,6 +978,7 @@ kiln_value kiln_cli_describe_error(kiln_value value) {
 
 /* Where a realm's `standard` stream goes: its host's output when it was given one. */
 static FILE *kiln_cli_sink(const kiln_cli_host_state *state, FILE *standard) {
+    if (state != NULL && standard == stderr && state->error_output != NULL) return state->error_output;
     return state != NULL && state->output != NULL ? state->output : standard;
 }
 
@@ -1278,7 +1282,7 @@ int main(int argc, char **argv) {
     kiln_cli_entry_context context;
     /* This realm's host state and the header its launcher messages are read through: the
      * realm's, not the process's (ADR 0070). */
-    kiln_cli_host_state host_state = { { .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }, { 0, 0, NULL }, NULL };
+    kiln_cli_host_state host_state = { { .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }, { 0, 0, NULL }, NULL, NULL };
     kiln_string message = { 0, 0, NULL };
     uint64_t realm = 0;
     const char *phase;
@@ -1384,7 +1388,7 @@ mod tests {
 
     #[test]
     fn runtime_identity_tracks_native_launcher_changes() {
-        assert_eq!(NATIVE_RUNTIME_VERSION, 13);
+        assert_eq!(NATIVE_RUNTIME_VERSION, 14);
         assert!(embedding_header().contains(&format!(
             "#define KILN_NATIVE_RUNTIME_VERSION {NATIVE_RUNTIME_VERSION}"
         )));

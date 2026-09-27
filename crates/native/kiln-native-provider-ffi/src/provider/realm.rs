@@ -186,6 +186,13 @@ const OP_TCP_SHUTDOWN: u32 = 12;
 const OP_STDIN_READ: u32 = 13;
 const OP_MKDIR: u32 = 14;
 const OP_PROCESS_RUN: u32 = 15;
+/// Wait until a cross-realm port has something for this realm (`kiln_runtime::workers`).
+const OP_PORT_WAIT: u32 = 16;
+
+/// What a drive answers when the worker it runs has been asked to end (`process.exit`,
+/// `terminate`): the C runtime's host-error status, which no `catch` takes, so the realm unwinds
+/// to the launcher, which reads the exit code the worker asked for.
+const WORKER_EXIT: i32 = -3;
 
 const VALUE_UNDEFINED: u32 = 0;
 const VALUE_BYTES: u32 = 1;
@@ -1327,6 +1334,9 @@ unsafe fn host_operation(view: &HostOpView) -> Option<AsyncHostOp> {
             path: text,
             recursive: view.argument != 0,
         },
+        OP_PORT_WAIT => AsyncHostOp::PortWait {
+            port: view.resource,
+        },
         _ => return None,
     })
 }
@@ -1393,6 +1403,12 @@ async fn drive_async(realm: &NativeRealm) -> i32 {
     loop {
         // A turn boundary: no generated frame is on this thread's stack.
         reclaim::quiescent();
+        // A worker whose parent called `terminate()` ends here (realms issue 06); the launcher
+        // reads the exit it asked for.
+        if kiln_runtime::workers::terminate_requested() {
+            kiln_runtime::workers::request_exit(1);
+            return WORKER_EXIT;
+        }
         tick_clock(realm);
         collect_if_due(realm);
         introspect_if_requested(realm);

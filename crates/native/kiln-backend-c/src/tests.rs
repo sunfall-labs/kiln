@@ -165,6 +165,57 @@ int32_t kiln_typed_array_sort(uint8_t *data, size_t count, int32_t kind) {
     (void)data; (void)count; (void)kind;
     return -1;
 }
+/* Cross-realm ports and workers are the provider's (`kiln_runtime::workers`); a fixture has none,
+ * so every port is empty and no worker starts. */
+int kiln_worker_post(uint32_t op, uint64_t port, uint32_t kind, kiln_worker_token *tokens, uint64_t count) {
+    (void)op; (void)port; (void)kind; (void)tokens; (void)count;
+    return 0;
+}
+int kiln_worker_take(uint64_t port, uint32_t *out_kind, kiln_worker_token **out_tokens, uint64_t *out_count, void **out_message) {
+    (void)port; (void)out_kind; (void)out_tokens; (void)out_count; (void)out_message;
+    return 0;
+}
+void kiln_worker_message_free(void *message) { (void)message; }
+int kiln_worker_op(uint32_t op, uint64_t a, uint64_t *out) {
+    (void)op; (void)a;
+    if (out != NULL) { out[0] = 0; out[1] = 0; }
+    return 0;
+}
+int kiln_worker_broadcast_join(const kiln_string *name, uint64_t *out) {
+    (void)name;
+    if (out != NULL) *out = 0;
+    return 0;
+}
+int kiln_worker_spawn(const kiln_string *entry, int32_t eval, const kiln_string *argv, uint64_t argc, uint64_t port, uint64_t control, const kiln_string *info, uint64_t *out_key, uint64_t *out_thread) {
+    (void)entry; (void)eval; (void)argv; (void)argc; (void)port; (void)control; (void)info; (void)out_key; (void)out_thread;
+    return -2;
+}
+int kiln_worker_self(uint64_t *out_thread, uint64_t *out_port, uint64_t *out_control, const uint8_t **out_info, uint64_t *out_info_len) {
+    (void)out_thread; (void)out_port; (void)out_control; (void)out_info; (void)out_info_len;
+    return 0;
+}
+int kiln_worker_stdio(uint32_t stream, const uint8_t *bytes, uint64_t len) {
+    (void)stream; (void)bytes; (void)len;
+    return 0;
+}
+int kiln_worker_exit(int32_t code) { (void)code; return 1; }
+int kiln_shared_create(uint64_t length, uint64_t capacity, uint8_t **out_bytes, void **out_handle) {
+    (void)length; (void)capacity; (void)out_bytes; (void)out_handle;
+    return -1;
+}
+void kiln_shared_release(void *handle) { (void)handle; }
+int kiln_shared_grow(void *handle, uint64_t length, uint64_t *out) {
+    (void)handle; (void)length; (void)out;
+    return -1;
+}
+int kiln_atomics_wait(void *handle, uint64_t offset, uint32_t width, int64_t expected, double timeout) {
+    (void)handle; (void)offset; (void)width; (void)expected; (void)timeout;
+    return 2;
+}
+uint64_t kiln_atomics_notify(void *handle, uint64_t offset, uint64_t count) {
+    (void)handle; (void)offset; (void)count;
+    return 0;
+}
 int32_t kiln_intl_segment(const unsigned char *bytes, size_t len, uint32_t granularity,
                           const uint32_t **out_records, size_t *out_count) {
     (void)bytes; (void)len; (void)granularity; (void)out_records; (void)out_count;
