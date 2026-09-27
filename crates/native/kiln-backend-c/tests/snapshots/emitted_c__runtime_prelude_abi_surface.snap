@@ -1443,7 +1443,11 @@ static int kiln_c99_run_next_tick(void *work, void *host, void *thrown);
 static void kiln_c99_drop_next_tick(void *work);
 static int kiln_c99_run_timer(void *work, void *host, void *thrown);
 static void kiln_c99_drop_timer(void *work);
+static int (*kiln_c99_timer_direct_run(kiln_value callback, void **work))(void *work, void *host,
+static void kiln_c99_drop_timer_value(void *work);
 static int kiln_c99_schedule(kiln_promise *promise, const kiln_reaction *reaction);
+static int kiln_c99_promise_add_reaction(kiln_promise *promise, const kiln_reaction *reaction);
+static int kiln_c99_react(kiln_value promise, kiln_value on_fulfilled, kiln_value on_rejected);
 static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value sent,
 static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, kiln_value sent,
 static int kiln_c99_async_generator_settle(kiln_host *host, kiln_value step, kiln_value value,
@@ -1593,6 +1597,10 @@ static kiln_data_view *kiln_c99_data_view_of(kiln_value value) {
 #define KILN_GC_FLAG_NURSERY ((uint32_t)0x20000000u)
 #define KILN_GC_FLAG_DEAD ((uint32_t)0x10000000u)
 #define KILN_GC_FLAG_LARGE ((uint32_t)0x08000000u)
+#define KILN_GC_FINALIZED_KINDS                                                                    \
+static inline int kiln_c99_gc_kind_finalized(uint32_t kind) {
+#define KILN_GC_FINALIZED_AT_ALLOC                                                                 \
+static inline int kiln_c99_gc_kind_finalized_at_alloc(uint32_t kind) {
 typedef struct kiln_gc_block {
 #define KILN_GC_SLAB_SIZE ((size_t)64 * 1024)
 #define KILN_GC_SLAB_CLASS_MIN ((size_t)48) /* smallest total slot (header + 1 byte payload) */
@@ -1623,6 +1631,7 @@ typedef struct kiln_nursery_chunk {
 typedef struct kiln_gc_nursery {
 typedef struct kiln_c99_local_edge {
 #define KILN_C99_MODIFIED_BUILTIN_WORDS 2
+#define KILN_GC_PENDING_EDGES 16u
 typedef struct kiln_gc_heap {
 static const kiln_gc_hooks kiln_c99_gc_hooks;
 static kiln_gc_heap kiln_c99_gc_fallback;
@@ -1698,7 +1707,10 @@ static kiln_gc_slab *kiln_c99_gc_slab_new(kiln_gc_heap *heap, int class_index) {
 static kiln_gc_block *kiln_c99_gc_lookup_slab(const kiln_gc_heap *heap, const void *payload,
 static int kiln_c99_nursery_locate(const kiln_gc_heap *heap, const char *ptr, char **base,
 static kiln_gc_block *kiln_c99_nursery_block_at(const char *base, const char *limit,
-static void kiln_c99_nursery_clear_bit(kiln_gc_heap *heap, const kiln_gc_block *block) {
+static inline kiln_nursery_chunk *kiln_c99_nursery_chunk_of(const kiln_gc_heap *heap,
+static inline void kiln_c99_nursery_note_mark(const kiln_gc_heap *heap, const kiln_gc_block *block) {
+static void kiln_c99_nursery_note_release(kiln_gc_heap *heap, const kiln_gc_block *block) {
+static void kiln_c99_gc_note_finalizable(const void *payload) {
 static kiln_gc_block *kiln_c99_gc_lookup_nursery(const kiln_gc_heap *heap, const void *payload) {
 static kiln_gc_block *kiln_c99_gc_lookup(const kiln_gc_heap *heap, const void *payload) {
 static inline void kiln_c99_gc_keep_alive(const void *payload) {
@@ -1793,7 +1805,9 @@ static void *__kiln_transfer_region(void *ptr) {
 static inline kiln_val kiln_c99_transfer_val_destructive(kiln_val *slot, kiln_gc_heap *target_heap) {
 static void kiln_c99_gc_release(void *payload) {
 static void kiln_c99_gc_mark_found(kiln_gc_heap *heap, kiln_gc_block *block) {
+static void kiln_c99_gc_mark_now(kiln_gc_heap *heap, const void *payload);
 static void kiln_c99_gc_mark_block(kiln_gc_heap *heap, const void *payload) {
+static void kiln_c99_gc_mark_now(kiln_gc_heap *heap, const void *payload) {
 static void kiln_c99_gc_mark_value(kiln_gc_heap *heap, const kiln_value *value) {
 static void kiln_c99_gc_mark_values(kiln_gc_heap *heap, const kiln_value *values,
 static void kiln_c99_gc_mark_val(kiln_gc_heap *heap, kiln_val v) {
@@ -1801,11 +1815,15 @@ static void kiln_c99_gc_mark_vals(kiln_gc_heap *heap, const kiln_val *values,
 static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
 static void kiln_c99_gc_finalize(kiln_gc_block *block) {
 static void kiln_c99_gc_drain(kiln_gc_heap *heap) {
+static inline size_t kiln_c99_nursery_used_words(const kiln_nursery_chunk *chunk, const char *limit) {
+static void kiln_c99_nursery_clear_marks(kiln_nursery_chunk *chunk, const char *limit) {
 static void kiln_c99_gc_begin(kiln_gc_heap *heap) {
 #define KILN_GC_SLAB_CLASSES \
 static void kiln_c99_gc_retain_survivor(kiln_gc_block *block);
+static void kiln_c99_nursery_spare(kiln_gc_heap *heap, kiln_nursery_chunk *chunk);
+static size_t kiln_c99_nursery_settle(kiln_gc_heap *heap, kiln_nursery_chunk *chunk, int orphan);
 static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
-static size_t kiln_c99_nursery_settle(kiln_gc_heap *heap, char *base, char *limit,
+static size_t kiln_c99_nursery_settle(kiln_gc_heap *heap, kiln_nursery_chunk *chunk, int orphan) {
 static void kiln_c99_nursery_spare(kiln_gc_heap *heap, kiln_nursery_chunk *chunk) {
 static void kiln_c99_gc_mark_promise_jobs(kiln_gc_heap *heap) {
 static void kiln_c99_gc_collect(void *opaque, int force) {
@@ -2738,10 +2756,12 @@ static kiln_promise *kiln_c99_promise_of(kiln_value value) {
 static int kiln_c99_bind_with(kiln_value *out, kiln_value target, kiln_value receiver,
 static int kiln_c99_bind(kiln_value *out, kiln_value target, kiln_value receiver) {
 static int kiln_c99_settle(kiln_value promise, kiln_value value, int rejected);
+static int kiln_c99_promise_add_reaction(kiln_promise *promise, const kiln_reaction *reaction) {
 static int kiln_c99_schedule(kiln_promise *promise, const kiln_reaction *reaction) {
 static int kiln_c99_settle(kiln_value promise, kiln_value value, int rejected) {
 static int kiln_c99_new_settler(kiln_value *out, kiln_value promise, int rejects) {
 static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value on_rejected,
+static int kiln_c99_react(kiln_value promise, kiln_value on_fulfilled, kiln_value on_rejected) {
 static int kiln_c99_then_continue_mode(kiln_value promise, kiln_value generator, int mode) {
 static int kiln_c99_then_continue(kiln_value promise, kiln_value generator) {
 static int kiln_c99_await_suspend(kiln_host *host, kiln_value generator, kiln_value produced,
@@ -2756,6 +2776,14 @@ static void kiln_c99_drop_next_tick(void *work) {
 static int kiln_c99_run_next_tick(void *work, void *host_pointer, void *thrown_pointer) {
 static void kiln_c99_drop_timer(void *work) {
 static int kiln_c99_run_timer(void *work, void *host_pointer, void *thrown_pointer) {
+static int kiln_c99_run_timer_value(kiln_value callback, void *host_pointer,
+static int kiln_c99_run_timer_function(void *work, void *host, void *thrown) {
+static int kiln_c99_run_timer_resolve(void *work, void *host, void *thrown) {
+static int kiln_c99_run_timer_reject(void *work, void *host, void *thrown) {
+static int kiln_c99_run_timer_bound(void *work, void *host, void *thrown) {
+static void kiln_c99_drop_timer_value(void *work) {
+typedef int (*kiln_c99_timer_run_fn)(void *work, void *host, void *thrown);
+static kiln_c99_timer_run_fn kiln_c99_timer_direct_run(kiln_value callback, void **work) {
 static int kiln_c99_async_generator_settle(kiln_host *host, kiln_value step, kiln_value value,
 static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, kiln_value sent,
 static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value sent,

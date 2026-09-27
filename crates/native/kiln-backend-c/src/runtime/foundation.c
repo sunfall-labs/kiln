@@ -564,7 +564,12 @@ static int kiln_c99_run_next_tick(void *work, void *host, void *thrown);
 static void kiln_c99_drop_next_tick(void *work);
 static int kiln_c99_run_timer(void *work, void *host, void *thrown);
 static void kiln_c99_drop_timer(void *work);
+static int (*kiln_c99_timer_direct_run(kiln_value callback, void **work))(void *work, void *host,
+                                                                         void *thrown);
+static void kiln_c99_drop_timer_value(void *work);
 static int kiln_c99_schedule(kiln_promise *promise, const kiln_reaction *reaction);
+static int kiln_c99_promise_add_reaction(kiln_promise *promise, const kiln_reaction *reaction);
+static int kiln_c99_react(kiln_value promise, kiln_value on_fulfilled, kiln_value on_rejected);
 static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value sent,
                                int rejected, int depth, kiln_value *thrown,
                                const kiln_val *args, size_t argc);

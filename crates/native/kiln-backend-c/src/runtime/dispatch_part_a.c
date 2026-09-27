@@ -2293,6 +2293,25 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (!(isfinite(delay) && delay > 0.0)) {
                 delay = 0.0;
             }
+            {
+                /* No arguments past the delay, and a heap function: the function is the work
+                 * (see `kiln_c99_timer_direct_run`). */
+                size_t extra = code == KILN_C99_METHOD_SET_IMMEDIATE ? (argc > 1 ? argc - 1 : 0)
+                                                                     : (argc > 2 ? argc - 2 : 0);
+                void *work = NULL;
+                int (*direct)(void *, void *, void *) =
+                    extra == 0 && argc > 0 ? kiln_c99_timer_direct_run(args[0], &work) : NULL;
+                if (direct != NULL) {
+                    status = code == KILN_C99_METHOD_SET_INTERVAL
+                                 ? kiln_realm_set_interval(delay, direct, kiln_c99_drop_timer_value,
+                                                           work, &id)
+                                 : kiln_realm_set_timeout(delay, direct, kiln_c99_drop_timer_value,
+                                                          work, &id);
+                    if (status != KILN_C99_OK) return status;
+                    *result = kiln_c99_number((double)id);
+                    return KILN_C99_OK;
+                }
+            }
             entry = (kiln_timer *)kiln_c99_gc_alloc(KILN_GC_TIMER, sizeof *entry);
             if (entry == NULL) {
                 return KILN_C99_OUT_OF_MEMORY;

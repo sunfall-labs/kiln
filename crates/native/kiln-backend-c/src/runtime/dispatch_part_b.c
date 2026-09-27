@@ -291,6 +291,7 @@
                  * so the pair is an object the step reads itself out of. */
                 kiln_value state;
                 kiln_value results;
+                kiln_value shared_rejecter = kiln_c99_undefined();
                 size_t index;
                 status = kiln_c99_new_object(&state);
                 if (status == KILN_C99_OK) {
@@ -315,21 +316,14 @@
                 }
                 for (index = 0; index < given->count && status == KILN_C99_OK; ++index) {
                     kiln_value element;
-                    kiln_value slot;
+                    kiln_value position = kiln_c99_number((double)index);
                     kiln_value step;
                     kiln_value rejecter;
-                    kiln_value ignored;
-                    status = kiln_c99_new_object(&slot);
-                    if (status == KILN_C99_OK) {
-                        status = kiln_c99_put(NULL, slot, "@@state", 7, state, 0, NULL);
-                    }
-                    if (status == KILN_C99_OK) {
-                        status = kiln_c99_put(NULL, slot, "@@index", 7,
-                                              kiln_c99_number((double)index), 0, NULL);
-                    }
-                    if (status != KILN_C99_OK) {
-                        break;
-                    }
+                    /* Each element's step is the shared state bound as the receiver with its own
+                     * index bound as the first argument, so the step is called as
+                     * `(index, arrived)` on the state. A slot object carrying the pair cost an
+                     * object and a dictionary per element -- about 500 bytes for each of the
+                     * hundred thousand tasks a `Promise.all` over a fan-out waits on. */
                     element = kiln_val_to_boundary(given->elements[index]);
                     if (element.tag != KILN_VALUE_PROMISE) {
                         kiln_value immediate;
@@ -340,21 +334,29 @@
                         element = immediate;
                     }
                     if (status == KILN_C99_OK) {
-                        status = kiln_c99_bind(&step, kiln_c99_method(KILN_C99_METHOD_ALL_STEP),
-                                               slot);
+                        status = kiln_c99_bind_with(&step,
+                                                    kiln_c99_method(KILN_C99_METHOD_ALL_STEP),
+                                                    state, &position, 1);
                     }
                     if (status == KILN_C99_OK) {
                         /* For `all` and `race` a rejection settles the whole thing, whichever
                          * element it came from, and a settler is exactly that. The other two have
                          * something to record instead, so they get a step of their own. */
                         status = mode == 2.0 || mode == 3.0
-                                     ? kiln_c99_bind(&rejecter,
-                                                     kiln_c99_method(KILN_C99_METHOD_REJECT_STEP),
-                                                     slot)
-                                     : kiln_c99_new_settler(&rejecter, derived, 1);
+                                     ? kiln_c99_bind_with(&rejecter,
+                                                          kiln_c99_method(KILN_C99_METHOD_REJECT_STEP),
+                                                          state, &position, 1)
+                                     : shared_rejecter.tag != KILN_VALUE_UNDEFINED
+                                           ? (rejecter = shared_rejecter, KILN_C99_OK)
+                                           : kiln_c99_new_settler(&rejecter, derived, 1);
+                        /* The rejecting side of `all` and `race` is the same settler for every
+                         * element -- it rejects the one derived promise -- so it is made once. */
+                        if (status == KILN_C99_OK && !(mode == 2.0 || mode == 3.0)) {
+                            shared_rejecter = rejecter;
+                        }
                     }
                     if (status == KILN_C99_OK) {
-                        status = kiln_c99_then(element, step, rejecter, &ignored);
+                        status = kiln_c99_react(element, step, rejecter);
                     }
                 }
                 if (status != KILN_C99_OK) {
@@ -430,14 +432,7 @@
                 if (inner->state != KILN_C99_PENDING) {
                     return kiln_c99_schedule(inner, &adopt);
                 }
-                status = kiln_c99_reserve((void **)&inner->reactions, &inner->capacity,
-                                          inner->count + 1, sizeof *inner->reactions);
-                if (status != KILN_C99_OK) {
-                    return status;
-                }
-                inner->reactions[inner->count] = adopt;
-                inner->count += 1;
-                return KILN_C99_OK;
+                return kiln_c99_promise_add_reaction(inner, &adopt);
             }
             /* argc >= 2: thenable adoption: args[0] is `then`, args[1] is `thenable`. */
             kiln_value resolve, reject;
@@ -477,22 +472,20 @@
             kiln_value remaining;
             kiln_value derived;
             kiln_value mode;
-            kiln_value arrived = argc > 0 ? args[0] : kiln_c99_undefined();
+            /* Bound by `Promise.all` and its siblings: the receiver is the shared state and the
+             * first argument this element's index, ahead of the value that arrived. */
+            kiln_value arrived = argc > 1 ? args[1] : kiln_c99_undefined();
             int rejected = code == KILN_C99_METHOD_REJECT_STEP;
-            if (receiver.tag != KILN_VALUE_OBJECT) {
-                /* Another microtask with no instruction of its own to blame. The slot object is
-                 * built by `Promise.all` and its siblings, so a receiver that is not one means a
+            if (receiver.tag != KILN_VALUE_OBJECT || argc == 0 || args[0].tag != KILN_VALUE_NUMBER) {
+                /* Another microtask with no instruction of its own to blame. The state and the
+                 * index are bound by `Promise.all` and its siblings, so anything else means a
                  * combinator's bookkeeping went missing rather than a program did anything. */
-                KILN_C99_REFUSE("a promise combinator's per-element slot was not the object it "
-                                "builds");
+                KILN_C99_REFUSE("a promise combinator's per-element step was not bound to the "
+                                "state and index it builds");
             }
-            status = kiln_c99_get(host, receiver, "@@state", 7, &state, depth, thrown);
-            if (status == KILN_C99_OK) {
-                status = kiln_c99_get(host, receiver, "@@index", 7, &at, depth, thrown);
-            }
-            if (status == KILN_C99_OK) {
-                status = kiln_c99_get(host, state, "@@results", 9, &results, depth, thrown);
-            }
+            state = receiver;
+            at = args[0];
+            status = kiln_c99_get(host, state, "@@results", 9, &results, depth, thrown);
             if (status == KILN_C99_OK) {
                 status = kiln_c99_get(host, state, "@@remaining", 11, &remaining, depth, thrown);
             }
@@ -1169,6 +1162,8 @@
                         frame->queue_promises = (kiln_value *)realloc(frame->queue_promises, new_cap * sizeof(kiln_value));
                         frame->queue_sent = (kiln_value *)realloc(frame->queue_sent, new_cap * sizeof(kiln_value));
                         frame->queue_capacity = new_cap;
+                        /* The frame owns memory outside its block now (`KILN_GC_FINALIZED_AT_ALLOC`). */
+                        kiln_c99_gc_note_finalizable(frame);
                     }
                     frame->queue_promises[frame->queue_count] = step_promise;
                     frame->queue_sent[frame->queue_count] = sent_val;

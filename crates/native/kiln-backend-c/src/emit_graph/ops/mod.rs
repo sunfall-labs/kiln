@@ -1315,6 +1315,7 @@ pub(super) fn emit_graph_op(
                     defining_receiver,
                     captured,
                     captures.len(),
+                    plan.publishes_frame[*index as usize],
                 );
                 let publish = if plan.publishes_frame[*index as usize] {
                     ""

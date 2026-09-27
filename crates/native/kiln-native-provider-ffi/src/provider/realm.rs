@@ -225,8 +225,25 @@ impl Drop for WorkOwner {
     }
 }
 
-#[derive(Clone)]
-struct NativeWork(Rc<WorkOwner>);
+/// A timer's work. A timeout runs once and is consumed by its run, so its owner lives inline
+/// in the timer entry; only an interval, re-armed with a copy of itself before each run,
+/// shares one owner through an `Rc`. With a hundred thousand timeouts pending, the `Rc` was
+/// an allocation and a free per timer and one more cold line to read before the run.
+enum NativeWork {
+    Once(WorkOwner),
+    Shared(Rc<WorkOwner>),
+}
+
+impl Clone for NativeWork {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Shared(owner) => Self::Shared(Rc::clone(owner)),
+            // `Realm::run_next_timer` clones a timer's work only to re-arm an interval, and
+            // `set_timer` makes every interval `Shared`; a timeout is never re-armed.
+            Self::Once(_) => unreachable!("a one-shot timer's work is never cloned"),
+        }
+    }
+}
 
 /// The promise job queue the prelude owns, registered once per realm heap.
 ///
@@ -304,15 +321,11 @@ impl NativeMicrotask {
 }
 
 impl NativeWork {
-    fn new(pointer: *mut c_void, run: Option<RunWork>, drop: Option<DropWork>) -> Option<Self> {
-        Self::with_roots(pointer, run, drop, WorkRoots::Block)
-    }
-
-    fn with_roots(
+    fn new(
         pointer: *mut c_void,
         run: Option<RunWork>,
         drop: Option<DropWork>,
-        roots: WorkRoots,
+        repeating: bool,
     ) -> Option<Self> {
         let (Some(run), Some(drop)) = (run, drop) else {
             return None;
@@ -320,21 +333,34 @@ impl NativeWork {
         if pointer.is_null() {
             return None;
         }
-        Some(Self(Rc::new(WorkOwner {
+        let owner = WorkOwner {
             pointer,
             run,
             drop,
-            roots,
-        })))
+            roots: WorkRoots::Block,
+        };
+        Some(if repeating {
+            Self::Shared(Rc::new(owner))
+        } else {
+            Self::Once(owner)
+        })
+    }
+
+    fn owner(&self) -> &WorkOwner {
+        match self {
+            Self::Once(owner) => owner,
+            Self::Shared(owner) => owner,
+        }
     }
 
     fn mark_roots(&self, marker: &GcMarker) {
-        match self.0.roots {
-            WorkRoots::Block => marker.block(self.0.pointer),
+        let owner = self.owner();
+        match owner.roots {
+            WorkRoots::Block => marker.block(owner.pointer),
             WorkRoots::Completion => {
                 // SAFETY: a Completion work item is always the boxed CompletionWork that
                 // `drive` queued, and it stays boxed until its drop callback runs.
-                let work = unsafe { &*self.0.pointer.cast::<CompletionWork>() };
+                let work = unsafe { &*owner.pointer.cast::<CompletionWork>() };
                 if let Some(continuation) = &work.continuation {
                     marker.block(continuation.pointer);
                 }
@@ -343,10 +369,42 @@ impl NativeWork {
     }
 
     fn run(&self, host: *mut c_void, thrown: *mut c_void) -> i32 {
+        let owner = self.owner();
         // SAFETY: the C Adapter supplied this callback with the allocation, and the caller of
         // `kiln_realm_drive` keeps `host` and `thrown` live for the complete drive.
-        unsafe { (self.0.run)(self.0.pointer, host, thrown) }
+        unsafe { (owner.run)(owner.pointer, host, thrown) }
     }
+
+    /// Starts bringing this work's payload into the cache: a timer about to run touches the
+    /// object its callback settles or calls, which nothing has touched since it was armed.
+    fn prefetch(&self) {
+        prefetch_read(self.owner().pointer.cast_const());
+    }
+}
+
+/// A cache hint for the line at `pointer` and the one after it. It reads nothing and cannot
+/// fault, whatever `pointer` is.
+#[inline(always)]
+fn prefetch_read(pointer: *const c_void) {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: a prefetch never dereferences its operand architecturally.
+    unsafe {
+        use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
+        _mm_prefetch::<_MM_HINT_T0>(pointer.cast::<i8>());
+        _mm_prefetch::<_MM_HINT_T0>(pointer.cast::<i8>().wrapping_add(64));
+    }
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: as above; `prfm` is a hint and takes no fault.
+    unsafe {
+        std::arch::asm!(
+            "prfm pldl1keep, [{0}]",
+            "prfm pldl1keep, [{0}, #64]",
+            in(reg) pointer,
+            options(nostack, readonly, preserves_flags)
+        );
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let _ = pointer;
 }
 
 struct AsyncContinuation {
@@ -1377,7 +1435,7 @@ async fn drive_async(realm: &NativeRealm) -> i32 {
         if let Some(due) = deadline
             && due <= now
         {
-            let timer = realm.work.borrow_mut().run_next_timer();
+            let timer = take_next_timer(realm);
             if let Some(WorkItem::Timer { work, .. }) = timer {
                 let (host, thrown) = realm.drive_context.get();
                 let status = work.run(host, thrown);
@@ -1405,7 +1463,7 @@ async fn drive_async(realm: &NativeRealm) -> i32 {
                 kiln_runtime::wait_for_turn(signal, delay).await;
                 continue;
             }
-            let timer = realm.work.borrow_mut().run_next_timer();
+            let timer = take_next_timer(realm);
             if let Some(WorkItem::Timer { work, .. }) = timer {
                 let (host, thrown) = realm.drive_context.get();
                 let status = work.run(host, thrown);
@@ -1429,7 +1487,7 @@ async fn drive_async(realm: &NativeRealm) -> i32 {
         if kiln_runtime::wait_for_turn(signal, delay).await == kiln_runtime::DriveWake::Timer
             && matches!(realm.clock.get(), NativeClock::Virtual)
         {
-            let timer = realm.work.borrow_mut().run_next_timer();
+            let timer = take_next_timer(realm);
             if let Some(WorkItem::Timer { work, .. }) = timer {
                 let (host, thrown) = realm.drive_context.get();
                 let status = work.run(host, thrown);
@@ -1439,6 +1497,22 @@ async fn drive_async(realm: &NativeRealm) -> i32 {
             }
         }
     }
+}
+
+/// How many timers ahead of the one about to run the drive starts bringing a timer's payload
+/// into the cache. A hundred thousand pending tasks each wake a promise, and through it a
+/// suspended frame, that were last touched a whole wave of timers ago; a hint four runs
+/// early lets the miss overlap the runs in between.
+const TIMER_PREFETCH_AHEAD: usize = 4;
+
+/// Takes the next timer to run, and hints the one `TIMER_PREFETCH_AHEAD` behind it.
+fn take_next_timer(realm: &NativeRealm) -> Option<WorkItem<NativeMicrotask, NativeWork>> {
+    let mut work = realm.work.borrow_mut();
+    let timer = work.run_next_timer();
+    if let Some(upcoming) = work.upcoming_timer_work(TIMER_PREFETCH_AHEAD) {
+        upcoming.prefetch();
+    }
+    timer
 }
 
 /// The longest a wall-clock realm parks while a `SIGUSR1` handler is armed.
@@ -3896,7 +3970,7 @@ fn set_timer(
         let Ok(mut queue) = realm.work.try_borrow_mut() else {
             return RUNTIME_ERROR;
         };
-        let Some(work) = NativeWork::new(work, run, drop) else {
+        let Some(work) = NativeWork::new(work, run, drop, repeating) else {
             return INVALID_ARGUMENT;
         };
         let delay = if delay_ms.is_finite() && delay_ms > 0.0 {

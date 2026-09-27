@@ -1522,10 +1522,16 @@ typedef struct kiln_reaction {
 typedef struct kiln_promise {
     int state;
     kiln_value value;
+    /* `inline_reaction` while at most one reaction waits -- the case for nearly every promise,
+     * which one `await` or one `then` watches -- and a malloc'd array only past that. A pending
+     * promise used to cost a 224-byte array the moment anything waited on it; a hundred thousand
+     * sleeping tasks each held one. `kiln_c99_promise_add_reaction` is the one place that grows
+     * it, and only a pointer other than `inline_reaction` is ever freed. */
     kiln_reaction *reactions;
     size_t count;
     size_t capacity;
     kiln_value properties;
+    kiln_reaction inline_reaction;
 } kiln_promise;
 
 #define KILN_C99_PENDING 0

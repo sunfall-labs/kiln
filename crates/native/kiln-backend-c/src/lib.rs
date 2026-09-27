@@ -1038,6 +1038,7 @@ pub(crate) fn closure_construction(
     defining_receiver: &str,
     captured: &str,
     capture_count: usize,
+    publishes_frame: bool,
 ) -> String {
     let target = &functions[proto as usize];
     let name = target.effective_name_units().map_or_else(
@@ -1056,7 +1057,14 @@ pub(crate) fn closure_construction(
         };
     let generator = i32::from(target.generator || target.asynchronous);
     let asynchronous = i32::from(target.asynchronous);
-    let arrow = i32::from(target.arrow);
+    // An arrow is `1` when it reads the enclosing frame (its own `arguments`/`new.target`, or a
+    // nested arrow's) and `2` when it provably never does: `kiln_c99_make_closure` then skips
+    // materialising the enclosing call's `arguments` object for it.
+    let arrow = match (target.arrow, publishes_frame) {
+        (false, _) => 0,
+        (true, true) => 1,
+        (true, false) => 2,
+    };
     let async_generator = i32::from(target.async_generator);
     let is_method = i32::from(target.is_method);
     let strict = i32::from(
@@ -1713,7 +1721,7 @@ fn render_functions(
              (m->flags & 2) != 0,\n\
              (m->flags & 4) != 0,\n\
              (m->flags & 8) != 0,\n\
-             (m->flags & 16) != 0,\n\
+             (m->flags & 16) != 0 ? ((m->flags & 64) != 0 ? 1 : 2) : 0,\n\
              (m->flags & 32) != 0,\n\
              receiver,\n\
              kiln_val_from_boundary(kiln_c99_new_target),\n\
