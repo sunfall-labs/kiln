@@ -47,18 +47,7 @@ pub(crate) fn call_native(
                 message: "Temporal reached the machine-free dispatch path".to_owned(),
             });
         }
-        // Unwrapped to the `Array.prototype` method it shares the moment `ValidateTypedArray`
-        // has run, by both of the paths that can call one. Arriving here would mean a third
-        // path had been added that skipped the check, so it says so rather than quietly
-        // answering `undefined`.
-        Native::TypedArrayGeneric(method) => {
-            return Err(ExecutionError::TypeErrorMessage {
-                message: format!(
-                    "%TypedArray%.prototype.{method} was dispatched without being validated"
-                ),
-            });
-        }
-        // Routed the same way and unreachable for the same reason: `of` builds through its `this`
+        // Unreachable: `of` builds through its `this`        // Routed the same way and unreachable for the same reason: `of` builds through its `this`
         // and so needs the machine that can run a constructor.
         Native::TypedArrayOf(_) => {
             return Err(ExecutionError::TypeErrorMessage {
@@ -834,24 +823,6 @@ pub(crate) fn call_native(
                 value: "abstract iterator intrinsic".into(),
             });
         }
-        // `rab.resize(n)` moves the length; a buffer with no ceiling has no length to move.
-        Native::ArrayBufferResize => {
-            let Value::ArrayBuffer(buffer) = receiver else {
-                return Err(ExecutionError::NotABuffer);
-            };
-            let length = to_index(arguments.first())?;
-            buffer.resize(bounded_buffer(length, 1)?)?;
-            Value::Undefined
-        }
-        // `sab.grow(n)` moves the length up; a buffer with no ceiling has no room to move into.
-        Native::ArrayBufferGrow => {
-            let Value::ArrayBuffer(buffer) = receiver else {
-                return Err(ExecutionError::NotABuffer);
-            };
-            let length = to_index(arguments.first())?;
-            buffer.grow(bounded_buffer(length, 1)?)?;
-            Value::Undefined
-        }
         // `slice` *copies*: the result is a fixed-length buffer of its own, so a later resize of
         // the original -- or a write through a view onto it -- is not visible through the copy.
         // A *view*, not a buffer: `isView` asks whether the value reads bytes through one, which
@@ -1032,67 +1003,6 @@ pub(crate) fn call_native(
         }
         // `of` takes its elements as arguments where the constructor takes one list, which is
         // the whole difference: `Uint8Array.of(3)` is one element, `new Uint8Array(3)` is three.
-        // `view.set(source, offset?)` copies elements in, converting each as an assignment does.
-        Native::TypedArraySet => {
-            let Value::TypedArray(view) = receiver else {
-                return Ok(Value::Undefined);
-            };
-            if view.buffer.detached() {
-                return Err(ExecutionError::BufferDetached);
-            }
-            let offset = bounded_buffer(to_index(arguments.get(1))?, 1)?;
-            let items = typed_source(arguments.first());
-            if offset > view.len() || items.len() > view.len() - offset {
-                return Err(ExecutionError::InvalidArrayLength);
-            }
-            same_content_type(view.kind, arguments.first())?;
-            for (index, item) in items.into_iter().enumerate() {
-                view.set(offset + index, &item)?;
-            }
-            Value::Undefined
-        }
-        // `subarray` shares the buffer; `slice` copies it. That difference is the whole reason
-        // both exist, and getting it backwards would make a write visible where it should not be.
-        Native::TypedArraySubarray => {
-            let Value::TypedArray(view) = receiver else {
-                return Ok(Value::Undefined);
-            };
-            // Not a check `subarray` performs itself -- it is the *constructor* it delegates to
-            // that refuses, because a view onto a buffer with no bytes is not a short view but
-            // an impossible one. The observable answer is the same TypeError either way.
-            if view.buffer.detached() {
-                return Err(ExecutionError::BufferDetached);
-            }
-            let (start, end) = slice_bounds(arguments, view.len());
-            // A slice of a length-tracking view is itself length-tracking when no end was
-            // named: "from here to wherever the buffer ends" survives a resize, where the
-            // element count computed from today's length would freeze at it.
-            let tracking = view.length.is_none()
-                && matches!(arguments.get(1), None | Some(Value::Undefined));
-            Value::TypedArray(Rc::new(TypedArrayData {
-                kind: view.kind,
-                buffer: Rc::clone(&view.buffer),
-                offset: view.offset + start * view.kind.width(),
-                length: (!tracking).then(|| end.saturating_sub(start)),
-                properties: RefCell::new(ObjectData::default()),
-            }))
-        }
-        Native::TypedArrayFill => {
-            let Value::TypedArray(view) = receiver else {
-                return Ok(Value::Undefined);
-            };
-            if view.buffer.detached() {
-                return Err(ExecutionError::BufferDetached);
-            }
-            // Converted once, and before the range is worked out, so `fill` refuses a Number
-            // on a BigInt array whether or not there is a slot for it to land in.
-            let filler = coerce_element(view.kind, arguments.first().unwrap_or(&Value::Undefined))?;
-            let (start, end) = slice_bounds(arguments.get(1..).unwrap_or_default(), view.len());
-            for index in start..end {
-                view.set(index, &filler)?;
-            }
-            receiver.clone()
-        }
         // `escape` and `unescape` are the pre-Unicode pair the specification keeps in Annex B
         // and marks as deprecated. They are here because real code still reaches for them: the
         // `unescape(encodeURIComponent(s))` idiom is how a library gets a string's UTF-8 bytes

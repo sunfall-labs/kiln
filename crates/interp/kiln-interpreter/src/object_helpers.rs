@@ -848,7 +848,6 @@ pub(super) fn has_property_ascii(intrinsics: &Intrinsics, target: &Value, name: 
                     &name,
                 )
                 .is_some()
-                || !matches!(typed_array_method(&name), Value::Undefined)
                 || own_attributes(
                     intrinsics,
                     &Value::Native(Native::PrototypeOf(PrototypeTable::TypedArray), RealmId::PRIMARY),

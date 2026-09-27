@@ -161,30 +161,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<Value, ExecutionError> {
         match callee {
             Value::Native(native, _) => {
-                // The head of every `%TypedArray%.prototype` method, run before anything else
-                // here can look at the receiver or the arguments. A branded one then hands the
-                // call on to the `Array.prototype` method it shares, so the work below is done
-                // once whichever table the program reached it through.
-                if let Some((method, brand_only)) = native.typed_array_prototype_method() {
-                    self.validate_typed_array(&this_value, method, brand_only)?;
-                    if let Native::TypedArrayGeneric(method) = native {
-                        // The flag is what tells the shared implementation which of the two
-                        // tables the program reached it through, and it is set here as well as
-                        // in `invoke_dispatch` because a method reached by `call`, `apply`,
-                        // `bind` or `Reflect.apply` arrives on this path instead. Without it,
-                        // `%TypedArray%.prototype.map.call(view, f)` built its result the way
-                        // `Array.prototype.map` does and answered an ordinary array.
-                        let outer = std::mem::replace(&mut self.typed_array_method, true);
-                        let dispatched = self.call_value_inner(
-                            &array_property(method),
-                            this_value,
-                            arguments,
-                            instruction,
-                        );
-                        self.typed_array_method = outer;
-                        return dispatched;
-                    }
-                }
                 // A method that changes its array, given a proxy, has to change what is behind
                 // the proxy: the snapshot it would otherwise work on is thrown away, and the
                 // program's `push` would silently do nothing.
@@ -196,23 +172,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         instruction,
                     );
                 }
-                // The same tail `invoke_dispatch` gives a native: a view that reached a copying
-                // method gets a view of its own kind back, and one that reached an in-place
-                // method gets its own elements rearranged rather than a snapshot's. Both paths
-                // reach one `%TypedArray%.prototype` implementation, so both owe it the same
-                // ending; this one used to drop the receiver's kind on the floor, which is why
-                // `%TypedArray%.prototype.slice.call(view)` answered an ordinary array.
+                // The same tail `invoke_dispatch` gives a native: a view that reached an
+                // in-place method gets its own elements rearranged rather than a snapshot's.
                 let original = this_value.clone();
                 let this_value = self.as_array_like(callee, this_value, instruction)?;
                 let produced =
                     self.dispatch_native(*native, &this_value, &arguments, instruction)?;
-                self.typed_result(
-                    &original,
-                    produced,
-                    native.rearranges_in_place(),
-                    native.returns_a_new_array(),
-                    instruction,
-                )
+                self.typed_result(&original, produced, native.rearranges_in_place())
             }
             // `resolve` and `reject` from a promise executor. Calling one settles its promise
             // and evaluates to undefined, however many times the program calls it.

@@ -2958,60 +2958,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 ));
                 Ok(Value::Array(ArrayData::new(parts)))
             }
-            // `%TypedArray%.prototype.fill` converts all three of its arguments, and the
-            // machine-free implementation converted none of them: `view.fill({ valueOf: () => 5
-            // })` filled with zeroes and `view.fill(7, { valueOf: () => 1 })` filled nothing.
-            //
-            // The order is observable and is value, then start, then end -- a probe with three
-            // logging objects sees `v,s,e` in node. The value becomes a *primitive* rather than a
-            // number, so that a `BigInt64Array` still gets a BigInt and the existing per-element
-            // conversion keeps deciding what is allowed.
-            Native::TypedArrayFill
-                if matches!(receiver, Value::TypedArray(_))
-                    && arguments
-                        .iter()
-                        .take(3)
-                        .any(|argument| is_an_object(argument) && !is_callable(argument)) =>
-            {
-                let mut converted = arguments.to_vec();
-                for index in 0..converted.len().min(3) {
-                    if !is_an_object(&converted[index]) || is_callable(&converted[index]) {
-                        continue;
-                    }
-                    converted[index] = if index == 0 {
-                        self.as_primitive(
-                            &converted[index].clone(),
-                            PrimitiveHint::Number,
-                            instruction,
-                        )?
-                    } else {
-                        Value::Number(
-                            self.as_number_argument(Some(&converted[index].clone()), instruction)?,
-                        )
-                    };
-                }
-                self.dispatch_native(native, receiver, &converted, instruction)
-            }
-            Native::TypedArraySet
-                if arguments.first().is_some_and(|source| {
-                    !matches!(source, Value::Array(_) | Value::TypedArray(_))
-                        && (is_an_object(source) || matches!(source, Value::String(_)))
-                }) =>
-            {
-                let source = arguments.first().cloned().unwrap_or(Value::Undefined);
-                let length = self.array_like_length(&source, instruction)?;
-                let mut collected = Vec::with_capacity(length.min(1 << 20) as usize);
-                for index in 0..length {
-                    collected.push(self.read_property(&source, &index.to_string(), instruction)?);
-                }
-                let mut converted = arguments.to_vec();
-                converted[0] = Value::Array(ArrayData::new(collected));
-                self.dispatch_native(native, receiver, &converted, instruction)
-            }
-            // `subarray` builds a second view over the same bytes, and it is specified over
-            // `TypedArraySpeciesCreate` like `slice` and `map` -- so a subclass gets its own type
-            // back and `@@species` is read. The machine-free implementation stamped out an
-            // intrinsic of the receiver's kind and read neither.
             // `ArrayBuffer.prototype.slice` builds its result with `SpeciesConstructor`, which
             // is why it is here and not in the machine-free table: reading `constructor` and
             // `@@species` runs the program's own getters, and validating what they answered is
@@ -3076,29 +3022,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     destination[..length].copy_from_slice(&source[start..end]);
                 }
                 Ok(out)
-            }
-            Native::TypedArraySubarray => {
-                let Value::TypedArray(view) = receiver else {
-                    return Ok(Value::Undefined);
-                };
-                let view = Rc::clone(view);
-                if view.buffer.detached() {
-                    return Err(ExecutionError::BufferDetached);
-                }
-                let (start, end) = slice_bounds(arguments, view.len());
-                // A slice of a length-tracking view is itself length-tracking when no end was
-                // given, so the length is left off the argument list entirely rather than frozen
-                // at what today's length happens to be.
-                let tracking = view.length.is_none()
-                    && matches!(arguments.get(1), None | Some(Value::Undefined));
-                let mut built = vec![
-                    Value::ArrayBuffer(Rc::clone(&view.buffer)),
-                    Value::Number((view.offset + start * view.kind.width()) as f64),
-                ];
-                if !tracking {
-                    built.push(Value::Number(end.saturating_sub(start) as f64));
-                }
-                self.typed_array_species_over(receiver, view.kind, &built, instruction)
             }
             Native::StringSearch => {
                 let Value::String(text) = receiver else {

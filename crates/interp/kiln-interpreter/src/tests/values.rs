@@ -219,8 +219,17 @@ fn date_methods_stay_on_the_machine_dispatch_path() {
     let date = new_date(0.0);
 
     assert_eq!(
-        vm.dispatch_native(Native::Date(DateMethod::ToIsoString), &date, &[], 0),
-        Ok(Value::String("1970-01-01T00:00:00.000Z".to_owned().into()))
+        vm.dispatch_native(
+            Native::Date(DateMethod::SetTime),
+            &date,
+            &[Value::Number(86_400_000.5)],
+            0
+        ),
+        Ok(Value::Number(86_400_000.0))
+    );
+    assert_eq!(
+        vm.dispatch_native(Native::Date(DateMethod::GetTime), &date, &[], 0),
+        Ok(Value::Number(86_400_000.0))
     );
 }
 

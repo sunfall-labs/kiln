@@ -81,7 +81,6 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             caught: None,
             fd_table: fs::VirtualFdTable::new(),
             uncaught_value: None,
-            typed_array_method: false,
             unhandled: None,
             module_suspension: None,
             module_completion: None,

@@ -168,23 +168,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(answer)
     }
 
-    /// Put the result of a generic array method back into the shape a typed array expects.
+    /// Put the result of a generic array method, borrowed onto a typed array, back through it.
     ///
-    /// A method that builds a *new* array builds a typed one of the same kind; one that
-    /// rearranges in place writes back through the view and answers with it. Everything else --
-    /// `join`, `indexOf`, `reduce` -- produces something that is not an array and passes through.
+    /// One that rearranges in place writes back through the view and answers with it --
+    /// `Array.prototype.reverse.call(view)` reverses the view. Everything else passes through:
+    /// a borrowed `map` or `slice` answers an ordinary array, as `ArraySpeciesCreate` says it
+    /// must for a receiver that is not an array.
     pub(crate) fn typed_result(
         &mut self,
         original: &Value,
         produced: Value,
         in_place: bool,
-        new_array: bool,
-        instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let Value::TypedArray(view) = original else {
             return Ok(produced);
         };
-        let kind = view.kind;
         let Value::Array(items) = &produced else {
             return Ok(produced);
         };
@@ -194,90 +192,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             return Ok(original.clone());
         }
-        // Only for a method reached *as* a `%TypedArray%.prototype` one, the same distinction
-        // `array_like_length` draws. `%TypedArray%.prototype.map` builds its result with
-        // `TypedArraySpeciesCreate`, so a view of the receiver's kind; `Array.prototype.map`
-        // builds its result with `ArraySpeciesCreate`, which answers a plain array for any
-        // receiver that is not one -- and a view is not one. Borrowing the generic method onto a
-        // view (`Array.prototype.map.call(view, f)`) therefore answers an ordinary array, which
-        // is what node answers and what the native backend already answered.
-        if new_array && self.typed_array_method {
-            let elements = dense_items(&items.borrow());
-            return self.typed_array_species_create(original, kind, elements, instruction);
-        }
         Ok(produced)
-    }
-
-    /// `TypedArraySpeciesCreate(exemplar, «count»)`, then fill.
-    ///
-    /// The result of `slice`, `map` or `filter` on a view is built *through* the exemplar's
-    /// species, not stamped out of its kind. Every step is observable and every step is taken:
-    /// `constructor` off the exemplar, `@@species` off that, and the construction itself -- so a
-    /// subclass gets its own type back, which is the whole point of declaring one.
-    ///
-    /// Building an intrinsic of the exemplar's kind instead was not a smaller answer, it was a
-    /// different one: a subclass received the base type, `@@species` was never read, and a
-    /// species that answers something which is not a typed array -- which the specification makes
-    /// a `TypeError` -- was accepted and quietly ignored.
-    pub(crate) fn typed_array_species_create(
-        &mut self,
-        exemplar: &Value,
-        kind: TypedKind,
-        elements: Vec<Value>,
-        instruction: usize,
-    ) -> Result<Value, ExecutionError> {
-        let count = elements.len();
-        let Some(species) = self.typed_array_species(exemplar, instruction)? else {
-            return construct_typed_array(kind, &[Value::Array(ArrayData::new(elements))]);
-        };
-        let out = self.construct_value(
-            species.clone(),
-            vec![Value::Number(count as f64)],
-            species,
-            instruction,
-        )?;
-        // `ValidateTypedArray` on what it handed back: a species that answers an ordinary array,
-        // or a view too short to hold the result, is a `TypeError`.
-        let Value::TypedArray(target) = &out else {
-            return Err(ExecutionError::TypeErrorMessage {
-                message: "a typed array species must answer a typed array".to_owned(),
-            });
-        };
-        if target.len() < count {
-            return Err(ExecutionError::TypeErrorMessage {
-                message: "a typed array species answered a view that is too short".to_owned(),
-            });
-        }
-        for (index, item) in elements.iter().enumerate() {
-            target.set(index, item)?;
-        }
-        Ok(out)
-    }
-
-    /// `TypedArraySpeciesCreate` over an argument list, for a view that shares its buffer.
-    ///
-    /// `subarray` is the one of these that does not copy: it builds a second view onto the same
-    /// bytes, so the species is constructed with `«buffer, byteOffset[, length]»` and nothing is
-    /// filled afterwards. Everything else about the walk is the same, which is why the species
-    /// itself is resolved in one place for both.
-    pub(crate) fn typed_array_species_over(
-        &mut self,
-        exemplar: &Value,
-        kind: TypedKind,
-        arguments: &[Value],
-        instruction: usize,
-    ) -> Result<Value, ExecutionError> {
-        let Some(species) = self.typed_array_species(exemplar, instruction)? else {
-            return construct_typed_array(kind, arguments);
-        };
-        let out =
-            self.construct_value(species.clone(), arguments.to_vec(), species, instruction)?;
-        if !matches!(out, Value::TypedArray(_)) {
-            return Err(ExecutionError::TypeErrorMessage {
-                message: "a typed array species must answer a typed array".to_owned(),
-            });
-        }
-        Ok(out)
     }
 
     /// `TypedArrayCreateFromConstructor(C, «count»)`, then fill.

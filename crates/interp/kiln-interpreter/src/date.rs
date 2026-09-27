@@ -38,198 +38,34 @@ pub(super) fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + day_of_era - 719_468
 }
 
-/// Which part of an instant a reader returns.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DateField {
-    Time,
-    FullYear,
-    Month,
-    Day,
-    Weekday,
-    Hours,
-    Minutes,
-    Seconds,
-    Milliseconds,
-    /// Always zero: the realm has no zone but UTC, so there is nothing to offset by.
-    TimezoneOffset,
-}
-
-/// One function on `Date.prototype`.
+/// One of the two functions on `Date.prototype` this engine still implements.
 ///
-/// One variant per method rather than one per field read, because the specification gives each
-/// its own function object. `getMonth` and `getUTCMonth` answer the same number in a realm whose
-/// only zone is UTC (ADR 0015) and are still two functions, with two names and two arities that
-/// a program can read; a single variant behind both names could report only one of each.
+/// Everything else on `Date.prototype` -- every field reader and writer, the formatters,
+/// `toJSON` and `@@toPrimitive` -- is the shared bootstrap's (`kiln-builtins/src/date.ts`, ADR
+/// 0060), which captures these two at realm start and builds the whole prototype on them. They
+/// are the representation operations: the only way TypeScript can read or replace the instant a
+/// date holds (ADR 0065).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DateMethod {
-    ValueOf,
     GetTime,
-    GetFullYear,
-    GetUtcFullYear,
-    GetMonth,
-    GetUtcMonth,
-    GetDate,
-    GetUtcDate,
-    GetDay,
-    GetUtcDay,
-    GetHours,
-    GetUtcHours,
-    GetMinutes,
-    GetUtcMinutes,
-    GetSeconds,
-    GetUtcSeconds,
-    GetMilliseconds,
-    GetUtcMilliseconds,
-    GetTimezoneOffset,
-    /// Annex B: the year less 1900, which is the shape the language shipped with.
-    GetYear,
     SetTime,
-    SetFullYear,
-    SetUtcFullYear,
-    SetMonth,
-    SetUtcMonth,
-    SetDate,
-    SetUtcDate,
-    SetHours,
-    SetUtcHours,
-    SetMinutes,
-    SetUtcMinutes,
-    SetSeconds,
-    SetUtcSeconds,
-    SetMilliseconds,
-    SetUtcMilliseconds,
-    /// Annex B, and not `setFullYear` under another name: a year in 0..99 means 19xx here, the
-    /// same legacy rule the two-argument constructor keeps.
-    SetYear,
-    ToIsoString,
-    ToJson,
-    ToString,
-    ToDateString,
-    ToTimeString,
-    ToUtcString,
-    ToLocaleString,
-    ToLocaleDateString,
-    ToLocaleTimeString,
-    /// `Date.prototype[Symbol.toPrimitive]`, the one method here published under a symbol.
-    ToPrimitive,
 }
 
 impl DateMethod {
     /// The name the language spells this method.
-    ///
-    /// Tabulated rather than derived from the variant, which the general derivation cannot
-    /// reach: the language writes `UTC`, `ISO` and `JSON` where Rust spells them `Utc`, `Iso`
-    /// and `Json`, and a case distinction the input does not carry cannot be recovered.
     pub(super) const fn js_name(self) -> &'static str {
         match self {
-            Self::ValueOf => "valueOf",
             Self::GetTime => "getTime",
-            Self::GetFullYear => "getFullYear",
-            Self::GetUtcFullYear => "getUTCFullYear",
-            Self::GetMonth => "getMonth",
-            Self::GetUtcMonth => "getUTCMonth",
-            Self::GetDate => "getDate",
-            Self::GetUtcDate => "getUTCDate",
-            Self::GetDay => "getDay",
-            Self::GetUtcDay => "getUTCDay",
-            Self::GetHours => "getHours",
-            Self::GetUtcHours => "getUTCHours",
-            Self::GetMinutes => "getMinutes",
-            Self::GetUtcMinutes => "getUTCMinutes",
-            Self::GetSeconds => "getSeconds",
-            Self::GetUtcSeconds => "getUTCSeconds",
-            Self::GetMilliseconds => "getMilliseconds",
-            Self::GetUtcMilliseconds => "getUTCMilliseconds",
-            Self::GetTimezoneOffset => "getTimezoneOffset",
-            Self::GetYear => "getYear",
             Self::SetTime => "setTime",
-            Self::SetFullYear => "setFullYear",
-            Self::SetUtcFullYear => "setUTCFullYear",
-            Self::SetMonth => "setMonth",
-            Self::SetUtcMonth => "setUTCMonth",
-            Self::SetDate => "setDate",
-            Self::SetUtcDate => "setUTCDate",
-            Self::SetHours => "setHours",
-            Self::SetUtcHours => "setUTCHours",
-            Self::SetMinutes => "setMinutes",
-            Self::SetUtcMinutes => "setUTCMinutes",
-            Self::SetSeconds => "setSeconds",
-            Self::SetUtcSeconds => "setUTCSeconds",
-            Self::SetMilliseconds => "setMilliseconds",
-            Self::SetUtcMilliseconds => "setUTCMilliseconds",
-            Self::SetYear => "setYear",
-            Self::ToIsoString => "toISOString",
-            Self::ToJson => "toJSON",
-            Self::ToString => "toString",
-            Self::ToDateString => "toDateString",
-            Self::ToTimeString => "toTimeString",
-            Self::ToUtcString => "toUTCString",
-            Self::ToLocaleString => "toLocaleString",
-            Self::ToLocaleDateString => "toLocaleDateString",
-            Self::ToLocaleTimeString => "toLocaleTimeString",
-            // A symbol-keyed method is named for the key it is published under, in brackets --
-            // which is what a stack trace through one has to print.
-            Self::ToPrimitive => "[Symbol.toPrimitive]",
         }
     }
 
     /// The declared parameter count.
-    ///
-    /// A setter declares the field it names and every finer one it will also accept, which is
-    /// what makes `setHours(h, m, s, ms)` a single call rather than four -- and the count a
-    /// caller reads to decide how many arguments to forward.
     pub(super) const fn length(self) -> f64 {
         match self {
-            Self::SetHours | Self::SetUtcHours => 4.0,
-            Self::SetFullYear | Self::SetUtcFullYear | Self::SetMinutes | Self::SetUtcMinutes => {
-                3.0
-            }
-            Self::SetMonth | Self::SetUtcMonth | Self::SetSeconds | Self::SetUtcSeconds => 2.0,
-            Self::SetTime
-            | Self::SetDate
-            | Self::SetUtcDate
-            | Self::SetMilliseconds
-            | Self::SetUtcMilliseconds
-            | Self::SetYear
-            | Self::ToJson
-            | Self::ToPrimitive => 1.0,
-            _ => 0.0,
+            Self::GetTime => 0.0,
+            Self::SetTime => 1.0,
         }
-    }
-
-    /// The part of the instant a reader answers with, or `None` for anything that is not one.
-    ///
-    /// The local readers answer the UTC field because the realm's local zone *is* UTC -- ADR
-    /// 0015 -- not because the two are being conflated.
-    pub(super) const fn reads(self) -> Option<DateField> {
-        Some(match self {
-            Self::ValueOf | Self::GetTime => DateField::Time,
-            Self::GetFullYear | Self::GetUtcFullYear => DateField::FullYear,
-            Self::GetMonth | Self::GetUtcMonth => DateField::Month,
-            Self::GetDate | Self::GetUtcDate => DateField::Day,
-            Self::GetDay | Self::GetUtcDay => DateField::Weekday,
-            Self::GetHours | Self::GetUtcHours => DateField::Hours,
-            Self::GetMinutes | Self::GetUtcMinutes => DateField::Minutes,
-            Self::GetSeconds | Self::GetUtcSeconds => DateField::Seconds,
-            Self::GetMilliseconds | Self::GetUtcMilliseconds => DateField::Milliseconds,
-            Self::GetTimezoneOffset => DateField::TimezoneOffset,
-            _ => return None,
-        })
-    }
-
-    /// The coarsest field a writer replaces, or `None` for anything that is not one.
-    pub(super) const fn writes(self) -> Option<DateField> {
-        Some(match self {
-            Self::SetTime => DateField::Time,
-            Self::SetFullYear | Self::SetUtcFullYear | Self::SetYear => DateField::FullYear,
-            Self::SetMonth | Self::SetUtcMonth => DateField::Month,
-            Self::SetDate | Self::SetUtcDate => DateField::Day,
-            Self::SetHours | Self::SetUtcHours => DateField::Hours,
-            Self::SetMinutes | Self::SetUtcMinutes => DateField::Minutes,
-            Self::SetSeconds | Self::SetUtcSeconds => DateField::Seconds,
-            Self::SetMilliseconds | Self::SetUtcMilliseconds => DateField::Milliseconds,
-            _ => return None,
-        })
     }
 }
 
@@ -244,90 +80,6 @@ pub(super) fn time_clip(time: f64) -> f64 {
         return f64::NAN;
     }
     time.trunc() + 0.0
-}
-
-/// The number one reader takes out of an instant.
-pub(super) fn date_read(field: DateField, time: f64) -> f64 {
-    match field {
-        DateField::Time => return time,
-        // The realm has one zone and it is UTC, which this reports honestly rather than leaving
-        // to be discovered. An invalid date still has no offset to report.
-        DateField::TimezoneOffset => return if time.is_nan() { f64::NAN } else { 0.0 },
-        _ => {}
-    }
-    let Some(parts) = date_parts(time) else {
-        // Every reader on an invalid date is NaN, which is what makes one propagate.
-        return f64::NAN;
-    };
-    match field {
-        // `getMonth` is zero-based and `getDate` is one-based, which is the language's oldest
-        // wart and is not this compiler's to fix.
-        DateField::FullYear => parts.year as f64,
-        DateField::Month => f64::from(parts.month) - 1.0,
-        DateField::Day => f64::from(parts.day),
-        DateField::Weekday => f64::from(parts.weekday),
-        DateField::Hours => f64::from(parts.hour),
-        DateField::Minutes => f64::from(parts.minute),
-        DateField::Seconds => f64::from(parts.second),
-        DateField::Milliseconds => f64::from(parts.millisecond),
-        DateField::Time | DateField::TimezoneOffset => unreachable!("handled above"),
-    }
-}
-
-/// The instant a writer produces, or `None` for a write the specification does not perform.
-///
-/// The distinction is observable and there is a test for it: a setter that finds an invalid date
-/// answers NaN *without storing anything*, so a `valueOf` on one of its arguments that moved this
-/// same date keeps its effect. Storing the NaN would quietly undo it.
-pub(super) fn date_written(
-    method: DateMethod,
-    field: DateField,
-    time: f64,
-    supplied: &[f64],
-) -> Option<f64> {
-    if matches!(field, DateField::Time) {
-        return Some(time_clip(supplied.first().copied().unwrap_or(f64::NAN)));
-    }
-    // The year setters are the ones that *revive* an invalid date: the specification starts them
-    // from the epoch rather than propagating the NaN, which is what makes
-    // `new Date(NaN).setFullYear(2000)` a real date. Every other setter leaves it invalid.
-    let revives = matches!(
-        method,
-        DateMethod::SetFullYear | DateMethod::SetUtcFullYear | DateMethod::SetYear
-    );
-    let parts = date_parts(if time.is_nan() && revives { 0.0 } else { time })?;
-    // The order the fields appear in, so "this one and the ones after it" is a slice.
-    let mut values = [
-        parts.year as f64,
-        f64::from(parts.month) - 1.0,
-        f64::from(parts.day),
-        f64::from(parts.hour),
-        f64::from(parts.minute),
-        f64::from(parts.second),
-        f64::from(parts.millisecond),
-    ];
-    let first = match field {
-        DateField::FullYear => 0,
-        DateField::Month => 1,
-        DateField::Day => 2,
-        DateField::Hours => 3,
-        DateField::Minutes => 4,
-        DateField::Seconds => 5,
-        DateField::Milliseconds => 6,
-        DateField::Time | DateField::Weekday | DateField::TimezoneOffset => return Some(time),
-    };
-    for (offset, value) in supplied.iter().enumerate() {
-        let Some(slot) = values.get_mut(first + offset) else {
-            break;
-        };
-        *slot = *value;
-    }
-    // Annex B's `setYear` keeps the two-digit rule the constructor keeps: a year in 0..99 is
-    // 19xx. `setFullYear` deliberately does not, which is the whole reason both exist.
-    if matches!(method, DateMethod::SetYear) && (0.0..=99.0).contains(&values[0].trunc()) {
-        values[0] = values[0].trunc() + 1900.0;
-    }
-    Some(time_clip(parts_to_instant(values)))
 }
 
 /// A year as a date string writes it: four digits at least, and a sign for a year before 1 CE.
@@ -362,28 +114,6 @@ pub(super) fn time_only_string(time: f64) -> String {
     format!(
         "{:02}:{:02}:{:02} GMT+0000 (Coordinated Universal Time)",
         parts.hour, parts.minute, parts.second
-    )
-}
-
-/// `toUTCString`: `Thu, 01 Jan 1970 00:00:00 GMT`, the form an HTTP date is written in.
-///
-/// A different shape from `toString`, not a different zone: the comma, the day before the month
-/// and the bare `GMT` are what a header parser expects, and getting them wrong is the sort of
-/// difference that only shows up on the wire.
-pub(super) fn utc_string(time: f64) -> String {
-    const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    let Some(parts) = date_parts(time) else {
-        return "Invalid Date".to_owned();
-    };
-    format!(
-        "{}, {:02} {} {} {:02}:{:02}:{:02} GMT",
-        WEEKDAYS[parts.weekday as usize],
-        parts.day,
-        MONTH_NAMES[(parts.month - 1) as usize],
-        year_string(parts.year),
-        parts.hour,
-        parts.minute,
-        parts.second
     )
 }
 

@@ -733,16 +733,15 @@ pub enum Native {
     ProxyConstructor,
     /// `ArrayBuffer`, and one constructor per view kind.
     ArrayBufferConstructor,
-    ArrayBufferResize,
-    /// `SharedArrayBuffer`, and the one method that is its own rather than `ArrayBuffer`'s.
+    /// `SharedArrayBuffer`.
     ///
     /// A separate constructor rather than a flag on the one above, because a program tells the
-    /// two apart by identity: `sab instanceof ArrayBuffer` is false, the prototypes are
-    /// different objects, and `ArrayBuffer.prototype.resize` called on a shared buffer is a
-    /// `TypeError`. One constructor answering both would make every one of those agree when the
+    /// two apart by identity: `sab instanceof ArrayBuffer` is false and the prototypes are
+    /// different objects. One constructor answering both would make those agree when the
     /// language says they disagree.
     SharedArrayBufferConstructor,
-    ArrayBufferGrow,
+    /// `ArrayBuffer.prototype.slice`. `SharedArrayBuffer.prototype.slice`, `resize` and `grow`
+    /// are the shared bootstrap's (`kiln-builtins/src/arraybuffer.ts`).
     ArrayBufferSlice,
     /// `__kilnArrayBufferDetach(buffer, length, preserveResizability)`: move the bytes into a new
     /// buffer and detach this one -- the primitive under `transfer`, `transferToFixedLength` and
@@ -772,23 +771,6 @@ pub enum Native {
     TypedArrayConstructor(TypedKind),
     TypedArrayOf(TypedKind),
     TypedArrayFrom(TypedKind),
-    TypedArraySet,
-    TypedArraySubarray,
-    TypedArrayFill,
-    /// A method on `%TypedArray%.prototype` that shares an `Array.prototype` implementation,
-    /// named by the payload.
-    ///
-    /// The two tables ran the same implementations and so held the same *values*: reading `map`
-    /// off `%TypedArray%.prototype` and off `Array.prototype` answered one marker, which made
-    /// them the same function object -- and left the brand check every one of these performs
-    /// with nothing to hang itself on, because by the time a call was dispatched there was no
-    /// longer any record of which table it had been reached through. The payload is that record.
-    /// It is unwrapped to the `Array.prototype` method the moment `ValidateTypedArray` has run,
-    /// so exactly one implementation still carries out the work.
-    ///
-    /// `toString` is deliberately not one of these: the specification says it *is*
-    /// `Array.prototype.toString`, and a distinct marker would be a wrong answer the other way.
-    TypedArrayGeneric(&'static str),
     /// `DataView`, and the accessors that read and write one element through it.
     ///
     /// The element type rides in the variant rather than on the receiver because a `DataView`
@@ -1031,24 +1013,6 @@ impl Native {
         )
     }
 
-    /// The `%TypedArray%.prototype` method this is, and whether it checks only the brand.
-    ///
-    /// Every method on that table checks its receiver before it does anything else -- before it
-    /// even coerces its arguments -- and naming them here is what lets the two call paths run
-    /// that check once rather than each method growing a guard it can be written without. The
-    /// distinction the flag draws is the specification's own: `set` and `subarray` perform
-    /// `RequireInternalSlot` alone, which is why `new Uint8Array(detached).subarray(0)` answers
-    /// an empty view where `.slice(0)` throws.
-    pub(crate) fn typed_array_prototype_method(self) -> Option<(&'static str, BrandOnly)> {
-        match self {
-            Self::TypedArrayGeneric(name) => Some((name, BrandOnly(false))),
-            Self::TypedArrayFill => Some(("fill", BrandOnly(false))),
-            Self::TypedArraySet => Some(("set", BrandOnly(true))),
-            Self::TypedArraySubarray => Some(("subarray", BrandOnly(true))),
-            _ => None,
-        }
-    }
-
     /// Whether this built-in changes how many elements its array has.
     ///
     /// A typed array's length is fixed, so these are the ones it does not have. The other
@@ -1141,22 +1105,6 @@ impl Native {
             Self::DateConstructor => Some(PrimitiveHint::Number),
             _ => None,
         }
-    }
-
-    /// Whether this built-in hands back a *new* array rather than a value out of the old one.
-    ///
-    /// Called on a typed array, such a method returns a typed array of the same kind. That is
-    /// the difference a console shows, and the reason this classification exists.
-    pub(crate) fn returns_a_new_array(self) -> bool {
-        // The three copying methods a view has answer a view of the same kind -- which is the
-        // one thing that separates them from the array methods they otherwise share.
-        matches!(
-            self,
-            Self::ArraySlice
-                | Self::ArrayConcat
-                | Self::ArrayFlat
-                | Self::ArrayCopy(ArrayCopy::With | ArrayCopy::ToReversed | ArrayCopy::ToSorted)
-        )
     }
 
     /// Whether this built-in rearranges its array in place, keeping the length.
@@ -1296,7 +1244,9 @@ impl Native {
             PrototypeTable::Date => date_method(name),
             PrototypeTable::ArrayBuffer => array_buffer_method(false, name),
             PrototypeTable::SharedArrayBuffer => array_buffer_method(true, name),
-            PrototypeTable::TypedArray => typed_array_method(name),
+            // Every method on `%TypedArray%.prototype` is the shared bootstrap's
+            // (`kiln-builtins/src/typedarray.ts`), in the realm's store.
+            PrototypeTable::TypedArray => Value::Undefined,
             // The per-view table carries only what differs between the views; everything
             // else is inherited from `%TypedArray%.prototype` one link up the chain, which
             // is why reading it here rather than there would be the wrong shape.

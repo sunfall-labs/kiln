@@ -235,15 +235,6 @@ impl ErrorKind {
     }
 }
 
-/// Whether a `%TypedArray%.prototype` method checks only that its receiver is a view, or the
-/// whole of `ValidateTypedArray`.
-///
-/// A named type rather than a bare `bool` because the two calls that pass it are three
-/// arguments apart from the name they qualify, and a flag read the wrong way round is a check
-/// that silently does nothing -- which is how it first went in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct BrandOnly(bool);
-
 mod native;
 pub use native::*;
 
@@ -2466,8 +2457,8 @@ mod intrinsic_helpers;
 use intrinsic_helpers::*;
 pub use intrinsic_helpers::{ArrayCopy, CallbackMethod, HtmlWrapper, RegExpSymbol, SetOperation};
 mod date;
+pub use date::DateMethod;
 use date::*;
-pub use date::{DateField, DateMethod};
 mod builtin_members;
 pub use builtin_members::BuiltinAccessor;
 use builtin_members::*;

@@ -74,7 +74,6 @@ pub(super) const fn numeric_arguments(native: Native) -> &'static [usize] {
         | N::StringSubstring
         | N::StringSubstr
         | N::ArrayBufferSlice
-        | N::TypedArraySubarray
         | N::ArrayCopy(ArrayCopy::ToSpliced) => &[0, 1],
         N::ArrayCopyWithin => &[0, 1, 2],
         N::ArrayFill => &[1, 2],
@@ -85,8 +84,7 @@ pub(super) const fn numeric_arguments(native: Native) -> &'static [usize] {
         | N::StringLastIndexOf
         | N::StringIncludes
         | N::StringStartsWith
-        | N::StringEndsWith
-        | N::TypedArraySet => &[1],
+        | N::StringEndsWith => &[1],
         // `split` reads its *limit* before its separator: `ToUint32(limit)` happens first, and a
         // limit of zero answers the empty array without the string ever being cut. Leaving the
         // limit to the pure read meant the separator converted first, which a `toString`
@@ -105,8 +103,6 @@ pub(super) const fn numeric_arguments(native: Native) -> &'static [usize] {
         | N::NumberToExponential
         | N::NumberToPrecision
         | N::NumberToString
-        | N::ArrayBufferResize
-        | N::ArrayBufferGrow
         | N::DataViewGet(_)
         | N::DataViewSet(_)
         | N::DataViewGetBig { .. }
@@ -967,14 +963,6 @@ pub(super) const FUNCTION_IDENTITY: Attributes = Attributes {
 /// arguments to forward, so guessing it wrong is worse than not answering.
 pub(super) fn intrinsic_identity(value: &Value) -> Option<(String, f64)> {
     match value {
-        // A `%TypedArray%.prototype` method is a *distinct function* from the `Array.prototype`
-        // one it shares an implementation with, but it is not a differently named or differently
-        // shaped one: `%TypedArray%.prototype.map.name` is `"map"` and its `length` is 1, the
-        // same two answers the array method gives. Delegating keeps them one fact rather than a
-        // second tabulation that can drift from the first.
-        Value::Native(Native::TypedArrayGeneric(method), _) => {
-            intrinsic_identity(&array_property(method))
-        }
         Value::Native(native, _) => {
             // A namespace is an object, not a function: `Math` has no call behaviour, so it has
             // no arity and no name of its own either. A Node builtin module is a namespace for
@@ -1259,7 +1247,6 @@ pub(super) const fn native_length(native: Native) -> Option<f64> {
         | N::ProxyConstructor
         | N::ProxyRevocable
         | N::ArrayBufferSlice
-        | N::TypedArraySubarray
         | N::DataViewSet(_)
         | N::DataViewSetBig { .. }
         | N::MapSet
@@ -2066,8 +2053,6 @@ pub(super) const ARRAY_MEMBERS: intrinsic_members::NamedMembers =
         "toString",
         "toLocaleString",
         "values",
-        "set",
-        "subarray",
         "with",
         "toReversed",
         "toSorted",
@@ -2143,65 +2128,9 @@ pub(super) const REG_EXP_MEMBERS: intrinsic_members::NamedMembers =
         "test",
     ]);
 pub(super) const DATE_MEMBERS: intrinsic_members::NamedMembers =
-    intrinsic_members::NamedMembers::new(&[
-        "toString",
-        "toDateString",
-        "toTimeString",
-        "toISOString",
-        "toUTCString",
-        "toGMTString",
-        "getDate",
-        "setDate",
-        "getDay",
-        "getFullYear",
-        "setFullYear",
-        "getHours",
-        "setHours",
-        "getMilliseconds",
-        "setMilliseconds",
-        "getMinutes",
-        "setMinutes",
-        "getMonth",
-        "setMonth",
-        "getSeconds",
-        "setSeconds",
-        "getTime",
-        "setTime",
-        "getTimezoneOffset",
-        "getUTCDate",
-        "setUTCDate",
-        "getUTCDay",
-        "getUTCFullYear",
-        "setUTCFullYear",
-        "getUTCHours",
-        "setUTCHours",
-        "getUTCMilliseconds",
-        "setUTCMilliseconds",
-        "getUTCMinutes",
-        "setUTCMinutes",
-        "getUTCMonth",
-        "setUTCMonth",
-        "getUTCSeconds",
-        "setUTCSeconds",
-        "valueOf",
-        "getYear",
-        "setYear",
-        "toJSON",
-        "toLocaleString",
-        "toLocaleDateString",
-        "toLocaleTimeString",
-    ]);
+    intrinsic_members::NamedMembers::new(&["getTime", "setTime"]);
 pub(super) const ARRAY_BUFFER_MEMBERS: intrinsic_members::NamedMembers =
-    intrinsic_members::NamedMembers::new(&[
-        "resize",
-        "slice",
-        "sliceToImmutable",
-        "transfer",
-        "transferToFixedLength",
-        "transferToImmutable",
-    ]);
-pub(super) const SHARED_ARRAY_BUFFER_MEMBERS: intrinsic_members::NamedMembers =
-    intrinsic_members::NamedMembers::new(&["grow", "slice"]);
+    intrinsic_members::NamedMembers::new(&["slice", "sliceToImmutable", "transferToImmutable"]);
 pub(super) const DATA_VIEW_MEMBERS: intrinsic_members::NamedMembers =
     intrinsic_members::NamedMembers::new(&[
         "getInt8",
@@ -2317,9 +2246,10 @@ pub(super) fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'stati
             TypedKind::Uint8 => UINT8_MEMBERS.names(),
             _ => TYPED_ARRAY_VIEW_MEMBERS.names(),
         },
-        PrototypeTable::Array | PrototypeTable::TypedArray => ARRAY_MEMBERS.names(),
+        PrototypeTable::Array => ARRAY_MEMBERS.names(),
         PrototypeTable::String => STRING_MEMBERS.names(),
-        PrototypeTable::Function
+        PrototypeTable::TypedArray
+        | PrototypeTable::Function
         | PrototypeTable::Object
         | PrototypeTable::Number
         | PrototypeTable::Boolean
@@ -2329,11 +2259,11 @@ pub(super) fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'stati
         | PrototypeTable::Map
         | PrototypeTable::Set
         | PrototypeTable::WeakMap
-        | PrototypeTable::WeakSet => &[],
+        | PrototypeTable::WeakSet
+        | PrototypeTable::SharedArrayBuffer => &[],
         PrototypeTable::RegExp => REG_EXP_MEMBERS.names(),
         PrototypeTable::Date => DATE_MEMBERS.names(),
         PrototypeTable::ArrayBuffer => ARRAY_BUFFER_MEMBERS.names(),
-        PrototypeTable::SharedArrayBuffer => SHARED_ARRAY_BUFFER_MEMBERS.names(),
         PrototypeTable::DataView => DATA_VIEW_MEMBERS.names(),
         PrototypeTable::Iterator => ITERATOR_MEMBERS.names(),
         PrototypeTable::Generator | PrototypeTable::AsyncGenerator => GENERATOR_MEMBERS.names(),

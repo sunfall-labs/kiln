@@ -518,7 +518,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         &self.intrinsics,
                         PrototypeTable::TypedArray,
                         other,
-                        typed_array_method(other),
+                        Value::Undefined,
                         value_realm(target),
                     ) {
                         Value::Undefined => {

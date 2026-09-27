@@ -244,9 +244,6 @@ pub(super) fn native_js_name(native: &Native) -> String {
         // The derivation has no `Iterator` in its table of type prefixes, so it spells this
         // `iteratorFrom` rather than `from`.
         Native::IteratorFrom => "from".to_owned(),
-        // The payload is the whole of the name; the derivation would spell this
-        // `typedArrayGeneric`.
-        Native::TypedArrayGeneric(method) => (*method).to_owned(),
         Native::ShadowRealmConstructor => "ShadowRealm".to_owned(),
         Native::ShadowRealmEvaluate => "evaluate".to_owned(),
         Native::ShadowRealmImportValue => "importValue".to_owned(),
@@ -348,8 +345,8 @@ pub(super) const fn namespace_name(native: &Native) -> Option<&'static str> {
 }
 
 pub(super) fn builtin_js_name(variant: &str) -> String {
-    // A payload is not part of the name: `DateField(Time)` is `getTime`'s implementation, not a
-    // function called `DateField(Time)`.
+    // A payload is not part of the name: `TypedArrayFrom(Uint8)` is `Uint8Array.from`, not a
+    // function called `TypedArrayFrom(Uint8)`.
     let variant = variant.split('(').next().unwrap_or(variant);
     // A constructor is named for its type, not for the word "Constructor".
     if let Some(type_name) = variant.strip_suffix("Constructor")

@@ -492,194 +492,30 @@ pub(super) fn regexp_method(name: &str) -> Value {
     }
 }
 
-/// The methods on `Date.prototype`, for the same reason.
-///
-/// Every name resolves to its own marker even where two of them do the same arithmetic: a realm
-/// whose only zone is UTC (ADR 0015) makes `getMonth` and `getUTCMonth` answer the same number,
-/// and they are still two functions a program can hold apart, rename, or delete one of.
+/// What `Date.prototype` publishes before the realm bootstrap runs: the two representation
+/// operations the shared `Date.prototype` (`kiln-builtins/src/date.ts`) captures and builds
+/// every other member on. It then redefines both, so a program never reads these markers
+/// off the prototype.
 pub(super) fn date_method(name: &str) -> Value {
     let method = match name {
-        "valueOf" => DateMethod::ValueOf,
         "getTime" => DateMethod::GetTime,
-        "getFullYear" => DateMethod::GetFullYear,
-        "getUTCFullYear" => DateMethod::GetUtcFullYear,
-        "getMonth" => DateMethod::GetMonth,
-        "getUTCMonth" => DateMethod::GetUtcMonth,
-        "getDate" => DateMethod::GetDate,
-        "getUTCDate" => DateMethod::GetUtcDate,
-        "getDay" => DateMethod::GetDay,
-        "getUTCDay" => DateMethod::GetUtcDay,
-        "getHours" => DateMethod::GetHours,
-        "getUTCHours" => DateMethod::GetUtcHours,
-        "getMinutes" => DateMethod::GetMinutes,
-        "getUTCMinutes" => DateMethod::GetUtcMinutes,
-        "getSeconds" => DateMethod::GetSeconds,
-        "getUTCSeconds" => DateMethod::GetUtcSeconds,
-        "getMilliseconds" => DateMethod::GetMilliseconds,
-        "getUTCMilliseconds" => DateMethod::GetUtcMilliseconds,
-        "getTimezoneOffset" => DateMethod::GetTimezoneOffset,
-        "getYear" => DateMethod::GetYear,
         "setTime" => DateMethod::SetTime,
-        "setFullYear" => DateMethod::SetFullYear,
-        "setUTCFullYear" => DateMethod::SetUtcFullYear,
-        "setMonth" => DateMethod::SetMonth,
-        "setUTCMonth" => DateMethod::SetUtcMonth,
-        "setDate" => DateMethod::SetDate,
-        "setUTCDate" => DateMethod::SetUtcDate,
-        "setHours" => DateMethod::SetHours,
-        "setUTCHours" => DateMethod::SetUtcHours,
-        "setMinutes" => DateMethod::SetMinutes,
-        "setUTCMinutes" => DateMethod::SetUtcMinutes,
-        "setSeconds" => DateMethod::SetSeconds,
-        "setUTCSeconds" => DateMethod::SetUtcSeconds,
-        "setMilliseconds" => DateMethod::SetMilliseconds,
-        "setUTCMilliseconds" => DateMethod::SetUtcMilliseconds,
-        "setYear" => DateMethod::SetYear,
-        "toISOString" => DateMethod::ToIsoString,
-        // Not the same function as `toISOString`, and the difference is exactly the case JSON
-        // cares about: an instant with no ISO spelling makes `toISOString` throw, where `toJSON`
-        // answers null so the enclosing document still serialises.
-        "toJSON" => DateMethod::ToJson,
-        "toString" => DateMethod::ToString,
-        "toDateString" => DateMethod::ToDateString,
-        "toTimeString" => DateMethod::ToTimeString,
-        // Annex B publishes `toUTCString` a second time under the name the language shipped
-        // with, and as the *same* function object -- `Date.prototype.toGMTString ===
-        // Date.prototype.toUTCString` is true, and a second marker would make it false.
-        "toUTCString" | "toGMTString" => DateMethod::ToUtcString,
-        // The realm has one locale and one zone, so these three answer what their non-locale
-        // counterparts answer. The specification leaves the form implementation-defined; what it
-        // does not leave open is that they are three separate functions, which they are here.
-        // ECMA-402 replaces these three with `Intl.DateTimeFormat`, each with its own
-        // required/defaults pair, so they leave the `Date` dispatch table entirely.
-        "toLocaleString" => {
-            return Value::Native(
-                Native::Intl(intl::Op::Adapter(intl::Adapter::DateToLocaleString)),
-                RealmId::PRIMARY,
-            );
-        }
-        "toLocaleDateString" => {
-            return Value::Native(
-                Native::Intl(intl::Op::Adapter(intl::Adapter::DateToLocaleDateString)),
-                RealmId::PRIMARY,
-            );
-        }
-        "toLocaleTimeString" => {
-            return Value::Native(
-                Native::Intl(intl::Op::Adapter(intl::Adapter::DateToLocaleTimeString)),
-                RealmId::PRIMARY,
-            );
-        }
-        key if key == WellKnown::ToPrimitive.property_key() => DateMethod::ToPrimitive,
         _ => return Value::Undefined,
     };
     Value::Native(Native::Date(method), RealmId::PRIMARY)
 }
 
-/// The methods on `%TypedArray%.prototype`.
-///
-/// Everything a view answers to that is not per-instance data, so the table and an instance
-/// cannot disagree about which method a name resolves to. Most of them are the ordinary array
-/// methods -- the specification defines its own copies, but they read `length` and indices and
-/// so behave identically here -- with the ones that *change* a length left out, because a view's
-/// length is not something a method may change: `push` on a typed array is a TypeError, and
-/// answering with the array one would silently push into a copy.
-pub(super) fn typed_array_method(name: &str) -> Value {
-    match name {
-        "set" => Value::Native(Native::TypedArraySet, RealmId::PRIMARY),
-        "subarray" => Value::Native(Native::TypedArraySubarray, RealmId::PRIMARY),
-        "fill" => Value::Native(Native::TypedArrayFill, RealmId::PRIMARY),
-        // The one member of the table the specification says *is* the `Array.prototype`
-        // function rather than a distinct one: "the initial value of the
-        // %TypedArray%.prototype.toString data property is the same built-in function object as
-        // the Array.prototype.toString method". Branding it would fail the identity that
-        // sentence describes; the detached check it needs it already gets, because the value it
-        // hands out is `ArrayJoinDefault` and that is named in the validation list below.
-        "toString" => array_property("toString"),
-        // `%TypedArray%.prototype[@@iterator]` is not merely *like* `values`; it is the same
-        // function object, so it resolves to the same marker rather than to one of its own.
-        key if key == WellKnown::Iterator.property_key() => {
-            Value::Native(Native::TypedArrayGeneric("values"), RealmId::PRIMARY)
-        }
-        other => match typed_array_generic(other) {
-            Some(method) => Value::Native(Native::TypedArrayGeneric(method), RealmId::PRIMARY),
-            None => Value::Undefined,
-        },
-    }
-}
-
-/// The `%TypedArray%.prototype` methods that share an `Array.prototype` implementation, spelled
-/// out rather than filtered out of `Array.prototype`.
-///
-/// Filtering was how this table used to be built -- everything an array answers to, less the
-/// methods that change a length -- and it let three names through that a view does not have:
-/// `concat`, `flat` and `flatMap` are `Array.prototype`'s alone, and node answers `undefined`
-/// for each of them on a view. A program feature-detects on exactly that, so answering with a
-/// working function was a wrong answer rather than a bonus. The C backend already listed its
-/// members outright and so already agreed with node; this is the interpreter catching up.
-pub(super) const TYPED_ARRAY_GENERIC_METHODS: [&str; 28] = [
-    "at",
-    "copyWithin",
-    "entries",
-    "every",
-    "filter",
-    "find",
-    "findIndex",
-    "findLast",
-    "findLastIndex",
-    "forEach",
-    "includes",
-    "indexOf",
-    "join",
-    "keys",
-    "lastIndexOf",
-    "map",
-    "parallelMap",
-    "reduce",
-    "reduceRight",
-    "reverse",
-    "slice",
-    "some",
-    "sort",
-    "toLocaleString",
-    "toReversed",
-    "toSorted",
-    "values",
-    "with",
-    // `toString` is answered above, as `Array.prototype.toString` itself.
-];
-
-/// The static spelling of one of those names, which is what a marker can carry.
-///
-/// Extensions are omitted when this process withholds them, so the marker's surface matches the
-/// installed prototype.
-pub(super) fn typed_array_generic(name: &str) -> Option<&'static str> {
-    TYPED_ARRAY_GENERIC_METHODS
-        .into_iter()
-        .find(|method| *method == name)
-        .filter(|method| {
-            !kiln_builtin_surface::is_withheld_extension("%TypedArray%.prototype", method)
-        })
-}
-
-/// The methods on `ArrayBuffer.prototype`, for the same reason.
+/// The methods on `ArrayBuffer.prototype` and `SharedArrayBuffer.prototype` this engine still
+/// implements.
 ///
 /// `byteLength`, `resizable` and `maxByteLength` are deliberately not here: each is an accessor
-/// that reads a *buffer*, and the method table is not one. A program feature-detects resizable
-/// buffers by reading `ArrayBuffer.prototype.resize` off this table -- Test262's own harness
-/// does exactly that before it builds a single resizable-buffer test -- so the table answering
-/// `undefined` for everything is what made that whole area unreachable.
+/// that reads a *buffer*, and the method table is not one.
 pub(super) fn array_buffer_method(shared: bool, name: &str) -> Value {
     match name {
-        // The one method each type has that the other does not, and the reason they cannot
-        // share a table: a program feature-detects a growable shared buffer by reading
-        // `SharedArrayBuffer.prototype.grow`, and finding `resize` there instead would tell it
-        // the buffer shrinks.
-        "resize" if !shared => Value::Native(Native::ArrayBufferResize, RealmId::PRIMARY),
-        "grow" if shared => Value::Native(Native::ArrayBufferGrow, RealmId::PRIMARY),
-        "slice" => Value::Native(Native::ArrayBufferSlice, RealmId::PRIMARY),
-        // `transfer` and `transferToFixedLength` are the shared bootstrap's
-        // (`kiln-builtins/src/arraybuffer.ts`), over `__kilnArrayBufferDetach`.
+        // `resize`, `transfer` and `transferToFixedLength`, and the shared type's `grow` and
+        // `slice`, are the shared bootstrap's (`kiln-builtins/src/arraybuffer.ts`), over
+        // `__kilnArrayBufferResize` and `__kilnArrayBufferDetach`.
+        "slice" if !shared => Value::Native(Native::ArrayBufferSlice, RealmId::PRIMARY),
         // Giving the bytes away and freezing them in one step. Only the unshared type again,
         // and for the same reason: a shared buffer's other holders cannot survive the giving.
         "transferToImmutable" if !shared => {
