@@ -90,6 +90,12 @@ pub struct EmissionPolicy {
     /// generic-only for its size, which says nothing about its sites. The development profile
     /// does not: its sites say `dev-profile`.
     pub parallel_in_generic: bool,
+    /// With `generic_only` and a decoupled prelude: emit the parallel clones and chunk workers
+    /// of the qualifying sites into [`CModule::parallel_workers`], a unit of their own, instead
+    /// of into the module (issue 14). `kiln-native` sets it for a release module that went
+    /// generic-only for its size and compiles that unit at `-O2` while the module stays at
+    /// `-O0`. A caller that sets it must compile and link the extra unit.
+    pub parallel_workers_unit: bool,
     /// Whether speculative versioning is enabled. Native orchestration resolves its process
     /// setting before emission; `None` preserves the direct emitter's default.
     pub speculate: Option<bool>,
@@ -369,6 +375,11 @@ pub struct CModule {
     pub generic_only: bool,
     /// If non-empty, contains multi-chunk C99 sources for parallel compilation.
     pub chunks: Vec<String>,
+    /// With [`EmissionPolicy::parallel_workers_unit`], and only when the module has a
+    /// qualifying `parallelMap` site: one more translation unit holding the sites' parallel
+    /// clones and chunk workers, which [`Self::source`] (or a chunk) declares and calls. It is
+    /// to be compiled at the profile's optimising level and linked with the module.
+    pub parallel_workers: Option<String>,
 }
 
 /// Backwards-compatible descriptive alias for callers that call an emitted unit a module.
@@ -420,6 +431,7 @@ pub fn emit_with_policy(program: &Program, policy: EmissionPolicy) -> Result<CMo
         program_hash,
         generic_only: policy.generic_only,
         chunks: Vec::new(),
+        parallel_workers: None,
     })
 }
 
@@ -460,6 +472,7 @@ pub fn emit_module_with_policy(
         program_hash,
         generic_only: policy.generic_only,
         chunks: rendered.chunks,
+        parallel_workers: rendered.parallel_workers,
     })
 }
 
@@ -492,6 +505,7 @@ pub fn emit_module_with_logical_path_and_policy(
         program_hash,
         generic_only: policy.generic_only,
         chunks: rendered.chunks,
+        parallel_workers: rendered.parallel_workers,
     })
 }
 
@@ -543,6 +557,7 @@ pub fn emit_commonjs_module_with_logical_path_and_policy(
         program_hash,
         generic_only: policy.generic_only,
         chunks: rendered.chunks,
+        parallel_workers: rendered.parallel_workers,
     })
 }
 
@@ -589,6 +604,7 @@ pub fn emit_runtime_module_with_logical_path_and_policy(
         program_hash,
         generic_only: policy.generic_only,
         chunks: Vec::new(),
+        parallel_workers: None,
     })
 }
 
@@ -1152,6 +1168,7 @@ struct RenderedFunctions {
 struct RenderedModule {
     source: String,
     chunks: Vec<String>,
+    parallel_workers: Option<String>,
 }
 
 fn has_closure_instruction(program: &Program) -> bool {
@@ -1180,6 +1197,7 @@ fn render_functions(
     reachable: Option<&HashSet<usize>>,
     should_chunk: bool,
     mut chunked_bodies: Option<&mut Vec<String>>,
+    mut workers: Option<(&str, &mut String)>,
 ) -> RenderedFunctions {
     let mut fn_declarations: Vec<String> = vec![String::new(); program.functions.len()];
     if policy.type_profile_record {
@@ -1524,38 +1542,35 @@ fn render_functions(
                 .unwrap();
             }
             if direct.parallel_chunk(index as u32) {
-                let pmap_link = if should_chunk { "" } else { "static " };
-                writeln!(
-                    output,
-                    "{pmap_link}void {symbol}_pmap_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                     {pmap_link}void {symbol}_pmap_f64_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                     {pmap_link}void {symbol}_pmap_f32_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                     {pmap_link}void {symbol}_pmap_i32_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                     {pmap_link}void {symbol}_pmap_u32_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                     {pmap_link}void {symbol}_pmap_i16_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                     {pmap_link}void {symbol}_pmap_u16_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                     {pmap_link}void {symbol}_pmap_i8_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                     {pmap_link}void {symbol}_pmap_u8_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                     {pmap_link}void {symbol}_pmap_u8c_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                     {pmap_link}void {symbol}_pmap_typed_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);"
-                )
-                .unwrap();
-                if should_chunk {
+                // Issue 14: with a worker unit, the chunk workers are defined there, under the
+                // module's link-visible symbol, and this unit only declares them. A compact
+                // unit names its own functions `ku_*`; a define keeps the call site's spelling.
+                let worker_symbol = workers.as_ref().map_or(symbol, |(link, _)| *link);
+                let pmap_link = if should_chunk || workers.is_some() {
+                    ""
+                } else {
+                    "static "
+                };
+                for kind in emit_graph::PARALLEL_CHUNK_KINDS {
                     writeln!(
-                        fn_declarations[index],
-                        "void {symbol}_pmap_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                         void {symbol}_pmap_f64_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                         void {symbol}_pmap_f32_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                         void {symbol}_pmap_i32_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                         void {symbol}_pmap_u32_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                         void {symbol}_pmap_i16_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                         void {symbol}_pmap_u16_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                         void {symbol}_pmap_i8_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                         void {symbol}_pmap_u8_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                         void {symbol}_pmap_u8c_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);\n\
-                         void {symbol}_pmap_typed_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);"
+                        output,
+                        "{pmap_link}void {worker_symbol}_pmap{kind}_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);"
                     )
                     .unwrap();
+                    if worker_symbol != symbol {
+                        writeln!(
+                            output,
+                            "#define {symbol}_pmap{kind}_{index} {worker_symbol}_pmap{kind}_{index}"
+                        )
+                        .unwrap();
+                    }
+                    if should_chunk {
+                        writeln!(
+                            fn_declarations[index],
+                            "void {worker_symbol}_pmap{kind}_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);"
+                        )
+                        .unwrap();
+                    }
                 }
             }
         }
@@ -1790,15 +1805,33 @@ fn render_functions(
         if let Some(typed) = &direct.typed[index] {
             emit_typed(target_buf, index, typed, true);
             if let Some(clone) = &parallel_clones[index] {
-                target_buf.push_str(clone);
-                emit_graph::emit_parallel_chunk(
-                    target_buf,
-                    symbol,
-                    index,
-                    proto.parameter_count,
-                    &emit_graph::parallel_captures(&direct.entry, index),
-                    should_chunk,
-                );
+                let captures = emit_graph::parallel_captures(&direct.entry, index);
+                if let Some((link, unit)) = workers.as_mut() {
+                    // Issue 14: the clone and its chunk workers go to the worker unit, which
+                    // is compiled optimised; the workers are link-visible under the module's
+                    // own symbol, the clone stays private to that unit.
+                    unit.push_str(clone);
+                    emit_graph::emit_parallel_chunk(
+                        unit,
+                        link,
+                        symbol,
+                        index,
+                        proto.parameter_count,
+                        &captures,
+                        true,
+                    );
+                } else {
+                    target_buf.push_str(clone);
+                    emit_graph::emit_parallel_chunk(
+                        target_buf,
+                        symbol,
+                        symbol,
+                        index,
+                        proto.parameter_count,
+                        &captures,
+                        should_chunk,
+                    );
+                }
             }
         }
         // Emitted again now that every plan knows the fast set: a fast clone calls other fast
@@ -3889,6 +3922,7 @@ fn render_positioned(
         None,
         false,
         None,
+        None,
     );
     let func_sites = rendered_funcs.sites;
     let entry_sites = render_entry(
@@ -4207,6 +4241,14 @@ fn render_module_positioned(
     } else {
         None
     };
+    // Issue 14: a generic-only unit is compiled for build speed, so the parallel clones and
+    // chunk workers of its qualifying sites -- the only code in it that runs per element on a
+    // pool thread -- go to a unit of their own that the orchestrator compiles optimised. It
+    // holds nothing else: a worker reaches no heap, realm or module state (`lib.rs` scans
+    // every clone for that before admitting it), so the prelude's declarations are all it needs.
+    let split_workers =
+        policy.generic_only && policy.parallel_workers_unit && policy.decoupled_prelude;
+    let mut workers_unit = String::new();
     let rendered_funcs = render_functions(
         &mut output,
         emitted_program,
@@ -4220,7 +4262,20 @@ fn render_module_positioned(
         reachable,
         should_chunk,
         chunked_bodies.as_mut(),
+        split_workers.then_some((symbol, &mut workers_unit)),
     );
+    let parallel_workers = (!workers_unit.is_empty()).then(|| {
+        let mut unit = String::with_capacity(workers_unit.len() + 256);
+        render_emission_policy(&mut unit, policy);
+        writeln!(unit, "#include \"{RUNTIME_PRELUDE_HEADER_NAME}\"").unwrap();
+        writeln!(
+            unit,
+            "/* Parallel workers of {symbol} (module hash {program_hash:016x}), compiled apart from its generic bodies. */"
+        )
+        .unwrap();
+        unit.push_str(&workers_unit);
+        unit
+    });
     let func_sites = rendered_funcs.sites;
     let entry_sites = render_entry(
         &mut output,
@@ -4365,7 +4420,11 @@ fn render_module_positioned(
             chunks.push(chunk_k);
             start = end;
         }
-        Ok(RenderedModule { source, chunks })
+        Ok(RenderedModule {
+            source,
+            chunks,
+            parallel_workers,
+        })
     } else {
         if policy.compact {
             prune_unused_compact_globals(
@@ -4379,6 +4438,7 @@ fn render_module_positioned(
         Ok(RenderedModule {
             source: output,
             chunks: Vec::new(),
+            parallel_workers,
         })
     }
 }
