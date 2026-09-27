@@ -117,10 +117,12 @@ pub struct EmissionPolicy {
     /// Build a binary that never installs kiln's own members (ADR 0068), whatever its
     /// `KILN_EXTENSIONS` says at run time: `kiln build --no-kiln-extensions`.
     pub no_kiln_extensions: bool,
-    /// Make each closure the module's top level makes once per realm, capturing nothing, once
-    /// per process in the shared immutable region, and hand every realm that one (ADR 0070
-    /// primitive B; realms issue 08; `emit_graph::region_closure_sites`). `kiln-native` sets it
-    /// for the runtime bootstrap, whose top level is the built-ins it writes in TypeScript. The
+    /// Make each closure the module makes once per realm -- at its top level, or in a function
+    /// the top level calls once -- once per process in the shared immutable region, and hand
+    /// every realm that one (ADR 0070 primitive B; realms issue 08). Such a closure reads the
+    /// bindings it would have captured through the realm's unit block instead (`module_cells`).
+    /// `kiln-native` sets it for the runtime bootstrap, whose top level is the built-ins it
+    /// writes in TypeScript. The
     /// closure's identity is shared -- no realm can hold another's to compare -- and its
     /// prototype and property store are each realm's own.
     pub shared_region: bool,
@@ -557,7 +559,26 @@ pub fn emit_module_with_logical_path_and_policy(
 ) -> Result<CModule, EmitError> {
     let (symbol, program_hash, _) =
         module_identity_with_logical_path_and_policy(module, logical_path, &policy)?;
-    let rendered = render_module(module, program_hash, &symbol, &policy, false, logical_path)?;
+    // The runtime bootstrap reads its captured bindings from the realm's unit block, so that its
+    // closures capture nothing and live in the shared immutable region (realms issue 08).
+    let region = policy
+        .shared_region
+        .then(|| module_cells::plan(&module.program))
+        .flatten();
+    let rewritten;
+    let (module, region) = match region {
+        Some((program, plan)) => {
+            rewritten = ModuleProgram {
+                program,
+                ..module.clone()
+            };
+            (&rewritten, Some(std::rc::Rc::new(plan)))
+        }
+        None => (module, None),
+    };
+    let rendered = module_cells::with_plan(region, || {
+        render_module(module, program_hash, &symbol, &policy, false, logical_path)
+    })?;
     Ok(CModule {
         symbol,
         source: rendered.source,
@@ -708,6 +729,7 @@ mod direct;
 pub mod emit_graph;
 pub mod facts;
 pub mod graph;
+mod module_cells;
 pub mod parallel;
 pub mod parallel_heap;
 pub mod regex;
@@ -1219,7 +1241,7 @@ pub(crate) fn closure_construction(
 }
 
 /// The call that makes a closure at a region site (realms issue 08;
-/// [`emit_graph::region_closure_sites`]): the same fields as [`closure_construction`], and the
+/// `module_cells`): the same fields as [`closure_construction`], and the
 /// site's process-wide slot `{symbol}_region_sites[site]`. The closure captures nothing, so there
 /// is no upvalue array; whether it publishes its frame is passed in, since a region closure is
 /// never written after it is made.
@@ -2060,6 +2082,23 @@ fn render_functions(
              }}\n"
         )
         .unwrap();
+        // A closure-making site in the shared immutable region (realms issue 08): the same
+        // metadata, and the site's process-wide slot.
+        if module_cells::region_site_count() > 0 {
+            writeln!(
+                output,
+                "{closure_linkage}__attribute__((unused)) int {closure_fn_name}_region(kiln_val *dst, uint32_t proto, kiln_val receiver, kiln_closure **site) {{\n\
+                 const ku_proto_meta *m = &ku_protos[proto];\n\
+                 kiln_value b;\n\
+                 const char *src = m->span_len ? ({source_expr} + m->span_start) : NULL;\n\
+                 int status = kiln_c99_region_closure(&b, site, m->body, m->name, src, (size_t)m->span_len, ku_site, proto, (uint32_t)m->arity, (m->flags & 1) != 0, (m->flags & 2) != 0, (m->flags & 4) != 0, (m->flags & 8) != 0, (m->flags & 16) != 0 ? ((m->flags & 64) != 0 ? 1 : 2) : 0, (m->flags & 32) != 0, receiver, (uint32_t)m->locals, (uint32_t)m->stack, (uint32_t)m->handlers, (uint32_t)m->resume, (m->flags & 64) != 0);\n\
+                 if (KILN_UNLIKELY(status != KILN_C99_OK)) return status;\n\
+                 *dst = kiln_val_from_boundary(b);\n\
+                 return KILN_C99_OK;\n\
+                 }}\n"
+            )
+            .unwrap();
+        }
     }
     if should_chunk {
         output.push_str("/* KILN_CHUNK_0_FUNCTIONS_PLACEHOLDER */\n");
@@ -2778,43 +2817,25 @@ fn render_entry(
             }
         }
     }
-    // The runtime bootstrap's top-level closures live in the shared immutable region (ADR 0070
-    // primitive B; realms issue 08): one per process instead of one per realm.
-    let region_sites = if policy.shared_region {
-        emit_graph::region_closure_sites(graph, &program.functions, &calls.publishes_frame)
-    } else {
-        std::collections::HashMap::new()
-    };
-    let region_site_count = region_sites.len();
-    let shared_sites = emit_graph::with_region_sites(graph, region_sites, || {
-        emit_graph::emit_entry_from_graph_with_profile(
-            output,
-            graph,
-            body,
-            program,
-            unit_symbol,
-            !callables,
-            diagnostic_site,
-            &plan.functions,
-            strict_functions,
-            &array_slots,
-            exports,
-            commonjs,
-            calls,
-            policy.type_profile_record,
-            site_offset,
-        )
-    });
+    let shared_sites = emit_graph::emit_entry_from_graph_with_profile(
+        output,
+        graph,
+        body,
+        program,
+        unit_symbol,
+        !callables,
+        diagnostic_site,
+        &plan.functions,
+        strict_functions,
+        &array_slots,
+        exports,
+        commonjs,
+        calls,
+        policy.type_profile_record,
+        site_offset,
+    );
     output.push_str("}\n");
     emit_graph::retain_used_entry_context(output, context_start..context_end);
-    if region_site_count > 0 {
-        // Written once, by the realm that builds the region, before it publishes the region
-        // sealed; read by every realm after (`kiln_c99_region_closure`).
-        output.insert_str(
-            entry_start,
-            &format!("static kiln_closure *{unit_symbol}_region_sites[{region_site_count}];\n"),
-        );
-    }
     if policy.compact && shared_sites > 0 {
         output.insert_str(
             entry_start,
@@ -4255,6 +4276,9 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
     }
     if has_closure {
         output.push_str(&format!("#define KU_CLOSURE(DST, PROTO, RECV, CAP, CAP_CNT) do {{ int status = {closure_fn}(&(DST), (PROTO), (RECV), (CAP), (CAP_CNT)); if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; }} while (0)\n"));
+        if module_cells::region_site_count() > 0 {
+            output.push_str(&format!("#define KU_REGION_CLOSURE(DST, PROTO, RECV, SITE) do {{ int status = {closure_fn}_region(&(DST), (PROTO), (RECV), (SITE)); if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; }} while (0)\n"));
+        }
     }
     if has_new_object {
         output.push_str("static __attribute__((unused)) inline uint32_t ku_compute_literal_mask(const kiln_val *pairs, size_t count) {\n\
@@ -4651,6 +4675,18 @@ fn render_module_positioned(
     );
     render_template_sites(&mut output, program, unit_symbol, should_chunk);
     render_unit_roots(&mut output, unit_symbol, !keys.is_empty());
+    let region_sites = module_cells::region_site_count();
+    if region_sites > 0 {
+        // Each region site's closure (realms issue 08): written once, by the realm that builds
+        // the region, before it publishes the region sealed; read by every realm after
+        // (`kiln_c99_region_closure`).
+        let linkage = if should_chunk { "" } else { "static " };
+        writeln!(
+            output,
+            "{linkage}kiln_closure *{unit_symbol}_region_sites[{region_sites}];"
+        )
+        .unwrap();
+    }
     if policy.compact {
         output.push_str("/* KILN_C99_SITES_PLACEHOLDER */\n");
     }
@@ -4897,6 +4933,13 @@ fn render_module_positioned(
         if total_sites > 0 {
             writeln!(chunk_header, "extern kiln_c99_site {unit_symbol}_sites[];").unwrap();
         }
+        if region_sites > 0 {
+            writeln!(
+                chunk_header,
+                "extern kiln_closure *{unit_symbol}_region_sites[];"
+            )
+            .unwrap();
+        }
         let has_closure = has_closure_instruction(emitted_program);
         if has_closure && !emitted_program.functions.is_empty() {
             writeln!(
@@ -4904,6 +4947,13 @@ fn render_module_positioned(
                 "extern int {closure_fn}(kiln_val *dst, uint32_t proto, kiln_val receiver, const kiln_val *captured, uint32_t count);"
             )
             .unwrap();
+            if region_sites > 0 {
+                writeln!(
+                    chunk_header,
+                    "extern int {closure_fn}_region(kiln_val *dst, uint32_t proto, kiln_val receiver, kiln_closure **site);"
+                )
+                .unwrap();
+            }
         }
         if !emitted_program.template_sites.is_empty() {
             writeln!(

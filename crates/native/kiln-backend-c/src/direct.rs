@@ -1575,6 +1575,19 @@ fn known_callees(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGr
             .collect()
     };
     let cells: HashMap<Owner, HashSet<u32>> = owners.iter().map(|&o| (o, cell_slots(o))).collect();
+    // A block slot is the top level's binding, unless a function the runtime bootstrap calls once
+    // published its own cell there (`module_cells`): then it is that function's binding, as the
+    // upvalue it replaced resolved to.
+    let global_binding = |slot: u32| match crate::module_cells::published_origin(slot) {
+        Some((function, local)) => Binding {
+            owner: Owner::Function(function),
+            slot: local,
+        },
+        None => Binding {
+            owner: Owner::Entry,
+            slot,
+        },
+    };
     let defines = |owner: Owner, value: ValueId| -> Stored {
         for block in &graph_of(owner).blocks {
             for (vid, op) in &block.operations {
@@ -1608,25 +1621,15 @@ fn known_callees(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGr
                     GraphOp::StoreLocal { slot, value } if !cells[&owner].contains(slot) => {
                         (Some(Binding { owner, slot: *slot }), Some(*value))
                     }
-                    GraphOp::StoreGlobal { slot, value } => (
-                        Some(Binding {
-                            owner: Owner::Entry,
-                            slot: *slot,
-                        }),
-                        Some(*value),
-                    ),
+                    GraphOp::StoreGlobal { slot, value } => {
+                        (Some(global_binding(*slot)), Some(*value))
+                    }
                     GraphOp::StoreUpvalue { index, value } => match owner {
                         Owner::Function(f) => (resolve(program, &parent, f, *index), Some(*value)),
                         Owner::Entry => (None, Some(*value)),
                     },
                     GraphOp::LoadCell(slot) => (Some(Binding { owner, slot: *slot }), None),
-                    GraphOp::LoadGlobal(slot) => (
-                        Some(Binding {
-                            owner: Owner::Entry,
-                            slot: *slot,
-                        }),
-                        None,
-                    ),
+                    GraphOp::LoadGlobal(slot) => (Some(global_binding(*slot)), None),
                     GraphOp::LoadUpvalue(index) => match owner {
                         Owner::Function(f) => (resolve(program, &parent, f, *index), None),
                         Owner::Entry => (None, None),
@@ -1662,15 +1665,17 @@ fn known_callees(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGr
     for (binding, binding_stores) in &stores {
         // A global slot read as a cell is a box, not a value; leave it alone.
         if binding.owner == Owner::Entry && cells[&Owner::Entry].contains(&binding.slot) {
-            let read_raw = reads.get(binding).is_some_and(|rs| {
-                rs.iter().any(|(owner, vid)| {
-                    graph_of(*owner)
-                        .blocks
-                        .iter()
-                        .flat_map(|b| b.operations.iter())
-                        .any(|(v, op)| v == vid && matches!(op, GraphOp::LoadGlobal(_)))
-                })
-            });
+            // (The runtime bootstrap's cell globals are read through the cell: `module_cells`.)
+            let read_raw = !crate::module_cells::is_cell_global(binding.slot)
+                && reads.get(binding).is_some_and(|rs| {
+                    rs.iter().any(|(owner, vid)| {
+                        graph_of(*owner)
+                            .blocks
+                            .iter()
+                            .flat_map(|b| b.operations.iter())
+                            .any(|(v, op)| v == vid && matches!(op, GraphOp::LoadGlobal(_)))
+                    })
+                });
             if read_raw {
                 continue;
             }
