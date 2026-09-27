@@ -984,8 +984,9 @@ static KILN_ALWAYS_INLINE inline int kiln_c99_pic_inherited(const kiln_c99_pic_e
 #ifdef KILN_IC_CHECK
 #endif
 static KILN_ALWAYS_INLINE inline kiln_val kiln_c99_site_cached_callee(const kiln_c99_site *site, const kiln_object *obj) {
+static inline kiln_body_fn kiln_c99_shape_slot_code(const kiln_shape *shape, uint32_t slot) {
 typedef struct kiln_c99_method_path {
-static KILN_ALWAYS_INLINE inline kiln_val kiln_c99_method_path_callee(const kiln_c99_method_path *path,
+static KILN_ALWAYS_INLINE inline int kiln_c99_method_path_hit(const kiln_c99_method_path *path,
 static inline void kiln_c99_method_path_learn(kiln_c99_method_path *path, const kiln_c99_site *site,
 __attribute__((noinline, cold)) static double kiln_c99_int_slow(double value) {
 #define KILN_C99_SITE_NONE 0xFFFFFFFFu
@@ -1880,9 +1881,13 @@ static int kiln_c99_shape_index_edge(kiln_shape *shape, uint32_t count, kiln_sha
 static kiln_shape *kiln_c99_shape_child(kiln_shape *current, const kiln_string *ikey,
 static int kiln_c99_shape_link(kiln_shape *current, const kiln_string *ikey, kiln_shape *next) {
 static int kiln_c99_shape_add(kiln_shape *current, const kiln_string *ikey, int is_double,
+static int kiln_c99_shape_transition_code(kiln_shape *current, const kiln_string *ikey,
 static int kiln_c99_shape_transition_ex(kiln_shape *current, const kiln_string *ikey,
 static int kiln_c99_shape_transition(kiln_shape *current, const kiln_string *ikey, int is_double,
 static int kiln_c99_shape_define_new(kiln_object *object, const kiln_string *ikey, kiln_val held,
+static inline kiln_body_fn kiln_c99_val_code(kiln_val value) {
+static int kiln_c99_ensure_dictionary(kiln_object *object);
+static int kiln_c99_shape_store_recorded(kiln_object *object, uint32_t slot, kiln_val value) {
 static int kiln_c99_ensure_dictionary(kiln_object *object) {
 static int kiln_c99_new_object(kiln_value *out) {
 static int kiln_c99_new_object_with_capacity(kiln_value *out, size_t capacity) {

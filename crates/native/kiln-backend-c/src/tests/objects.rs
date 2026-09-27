@@ -230,6 +230,149 @@ int main(void) {
     );
 }
 
+/// Issue 04 step 3c: a method definition records the method's code in the shape it takes, the
+/// code is part of the edge, and a store that would make the record false moves the object to
+/// the shape without it -- so a shape's record holds for every object that has it, and a method
+/// path is only learned from a prototype shape that records the candidate's code.
+#[test]
+fn method_definitions_record_their_code_and_stores_keep_it_true() {
+    let generated = emit(&program(
+        vec![Constant::String("m".into())],
+        vec![
+            Instruction::LoadBuiltin(Builtin::Math),
+            Instruction::GetProperty(0),
+            Instruction::Return,
+        ],
+        0,
+    ))
+    .expect("a unit naming one key emits");
+    let wrapper = r#"
+static int body_a(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
+                  const kiln_val *receiver, const kiln_val *args, size_t argc) {
+    (void)ctx; (void)upvalues; (void)receiver; (void)args; (void)argc;
+    *result = KILN_VAL_UNDEFINED; return KILN_C99_OK;
+}
+static int body_b(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
+                  const kiln_val *receiver, const kiln_val *args, size_t argc) {
+    (void)ctx; (void)upvalues; (void)receiver; (void)args; (void)argc;
+    *result = KILN_VAL_NULL; return KILN_C99_OK;
+}
+static const kiln_string fn_name = { 1, KILN_STRING_LATIN1, "m" };
+static int closure(kiln_value *out, kiln_body_fn body) {
+    return kiln_c99_make_closure(out, body, &fn_name, NULL, 0, "<test>", 0, 0, 0, 0, 0, 1, 0, 1,
+                                 KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED, 0, 1, 0, 0, NULL, 0);
+}
+int main(void) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)malloc(sizeof *heap);
+    kiln_value a1, a2, b1, protoA, protoA2, protoB, receiver, ctor;
+    kiln_object *pa, *pa2, *pb, *r;
+    const kiln_shape *recorded, *twin;
+    const kiln_string *m;
+    kiln_c99_site site;
+    kiln_c99_pic_entry entry;
+    kiln_c99_method_path path;
+    if (heap == NULL) return 1;
+    kiln_c99_gc_heap_init(heap);
+    heap->enabled = 0;
+    kiln_c99_gc_heap_register(heap);
+    kiln_test_heap = heap;
+    kiln_test_generation += 1;
+    m = kiln_c99_intern_static("m", 1);
+    if (closure(&a1, body_a) || closure(&a2, body_a) || closure(&b1, body_b)) return 2;
+
+    /* Two closures of one code define one shape; another code is another shape. */
+    if (kiln_c99_new_object(&protoA) || kiln_c99_new_object(&protoA2) ||
+        kiln_c99_new_object(&protoB)) return 3;
+    pa = kiln_c99_object_of(protoA);
+    pa2 = kiln_c99_object_of(protoA2);
+    pb = kiln_c99_object_of(protoB);
+    if (kiln_c99_define_method(protoA, "m", 1, a1) || kiln_c99_define_method(protoA2, "m", 1, a2) ||
+        kiln_c99_define_method(protoB, "m", 1, b1)) return 4;
+    if (pa->shape == NULL || pa->shape != pa2->shape || pb->shape == NULL ||
+        pb->shape == pa->shape || pb->shape->parent != pa->shape->parent) return 5;
+    if (pa->shape->code_mask != 1u || (pa->shape->store_mask & 1u) == 0 ||
+        kiln_c99_shape_slot_code(pa->shape, 0) != body_a ||
+        kiln_c99_shape_slot_code(pb->shape, 0) != body_b) return 6;
+    /* A number is not a closure: no record, the step 3b shape. */
+    if (kiln_c99_new_object(&receiver)) return 7;
+    if (kiln_c99_define_method(receiver, "m", 1, kiln_c99_number(1.0))) return 8;
+    if (kiln_c99_object_of(receiver)->shape->code_mask != 0u ||
+        kiln_c99_object_of(receiver)->shape->parent != pa->shape->parent) return 9;
+    /* No record for a prototype's `constructor`. */
+    if (kiln_c99_new_object(&ctor) || kiln_c99_define_method(ctor, "constructor", 11, a1)) return 10;
+    if (kiln_c99_object_of(ctor)->shape == NULL || kiln_c99_object_of(ctor)->shape->code_mask != 0u)
+        return 11;
+
+    /* A method path is learned only from a prototype shape recording the candidate's code. */
+    if (kiln_c99_new_object(&receiver)) return 12;
+    r = kiln_c99_object_of(receiver);
+    r->prototype = protoA;
+    memset(&site, 0, sizeof site);
+    memset(&entry, 0, sizeof entry);
+    entry.shape = r->shape;
+    entry.slot = UINT32_MAX;
+    entry.key = m;
+    {
+        const kiln_object *holder = NULL;
+        if (kiln_c99_pic_learn_path(&entry, r, m, &holder) != KILN_C99_PATH_FOUND) return 13;
+    }
+    kiln_c99_site_remember(&site, &entry);
+    memset(&path, 0, sizeof path);
+    kiln_c99_method_path_learn(&path, &site, r, body_b, NULL, 0);
+    if (path.recv != NULL) return 14;
+    kiln_c99_method_path_learn(&path, &site, r, body_a, NULL, 1);
+    if (path.recv != NULL) return 15;
+    kiln_c99_method_path_learn(&path, &site, r, body_a, NULL, 0);
+    if (path.recv != r->shape || path.proto != pa->shape || path.slot != 0) return 16;
+    {
+        const kiln_object *level = NULL;
+        if (!kiln_c99_method_path_hit(&path, r, &level) || level != pa) return 17;
+        /* The other prototype of the same shape hits too: the code is the same. */
+        r->prototype = protoA2;
+        if (!kiln_c99_method_path_hit(&path, r, &level) || level != pa2) return 18;
+        r->prototype = protoB;
+        if (kiln_c99_method_path_hit(&path, r, &level)) return 19;
+        r->prototype = protoA;
+    }
+
+    /* Storing a closure of the same code keeps the record and the shape. */
+    recorded = pa->shape;
+    if (kiln_c99_put(NULL, protoA, "m", 1, a2, 0, NULL) != KILN_C99_OK) return 20;
+    if (pa->shape != recorded || pa->slots[0] != kiln_val_from_boundary(a2)) return 21;
+    /* Another code: the object moves to the shape without the record, same layout. */
+    if (kiln_c99_put(NULL, protoA, "m", 1, b1, 0, NULL) != KILN_C99_OK) return 22;
+    if (pa->shape == NULL || pa->shape == recorded || pa->shape->code_mask != 0u ||
+        pa->shape->attrs[0] != KILN_C99_ATTR_ENUM_FLIP || pa->shape->store_mask != 0u ||
+        pa->slots[0] != kiln_val_from_boundary(b1)) return 23;
+    /* ...a sibling of the recorded one, and the path no longer hits. */
+    if (pa->shape->parent != recorded->parent) return 24;
+    {
+        const kiln_object *level = NULL;
+        if (kiln_c99_method_path_hit(&path, r, &level)) return 25;
+    }
+    /* The twin prototype keeps its record. */
+    if (pa2->shape != recorded) return 26;
+    /* A non-function store drops it too; a later slot keeps its own record. */
+    if (kiln_c99_define_method(protoA2, "n", 1, b1)) return 27;
+    twin = pa2->shape;
+    if (twin->code_mask != 3u) return 28;
+    if (kiln_c99_put(NULL, protoA2, "m", 1, kiln_c99_number(4.0), 0, NULL) != KILN_C99_OK) return 29;
+    if (pa2->shape == twin || pa2->shape->code_mask != 2u || pa2->shape->property_count != 2 ||
+        kiln_c99_shape_slot_code(pa2->shape, 1) != body_b ||
+        pa2->slots[0] != kiln_val_from_boundary(kiln_c99_number(4.0)) ||
+        pa2->slots[1] != kiln_val_from_boundary(b1)) return 30;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "shape-method-code");
+    assert!(
+        run.status.success(),
+        "method code records disagree ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
 /// ADR 0071, keys and shapes: grow the shape tree from two heaps in turn on one thread, the way
 /// a thread hosting several realms does, and check that constant keys and the shapes built from
 /// them are the same pointers in both, that each realm's run-time keys stay its own, that no edge
@@ -364,7 +507,7 @@ int main(void) {
     if (kiln_test_shared_edge_names(a1, xray2) || kiln_test_shared_edge_names(a1, epsilon2)) return 24;
     /* The first realm's edge is invisible here: its key is not ours, and asking by our own key
      * made our own shape. */
-    if (kiln_c99_local_edge_row(second, a1, xray1, 1u << 1, 0, 0) != NULL) return 25;
+    if (kiln_c99_local_edge_row(second, a1, xray1, 1u << 1, 0, 0, NULL) != NULL) return 25;
 
     /* Back to the first: its own edges, and the shared ones, unchanged. */
     kiln_test_enter(first);

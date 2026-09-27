@@ -719,6 +719,19 @@ typedef struct kiln_shape {
     uint32_t special_mask;
     uint32_t accessor_mask;
     uint32_t store_mask;
+    /* Issue 04 step 3c, constant-method tracking. `code_mask` is the slots whose value this
+     * shape states: each holds, in every object of this shape, a closure whose code (its
+     * `body`) is recorded by the shape that added the slot -- `code`, NULL when that slot has no
+     * record. A record is code, never a closure, so it means the same in every realm; it is
+     * made only by a method *definition* (`kiln_c99_define_shaped`), and the code is part of the
+     * transition's key with the attributes, so two definitions of one name with different code
+     * are two shapes. A slot with a record is also in `store_mask`: an assignment never simply
+     * overwrites it, and one that stores anything but a closure of the same code moves the
+     * object to the shape without the record (`kiln_c99_shape_store_recorded`). So a shape's
+     * record is true of every object that has the shape, and a call site that has matched the
+     * shape may call the code without loading the closure. */
+    uint32_t code_mask;
+    kiln_body_fn code;
     uint8_t attrs[KILN_SHAPE_MAX_FAST_PROPERTIES];
 } kiln_shape;
 
@@ -1155,42 +1168,61 @@ static KILN_ALWAYS_INLINE inline kiln_val kiln_c99_site_cached_callee(const kiln
     }
     return 0;
 }
-/* A typed method-call site's memory of one candidate's path (ADR 0071, issue 04 step 3b): the
- * receiver's shape, its prototype's shape, and the slot there that held a closure with the
- * candidate's code. Layouts only, and both shapes shared -- never freed, the same in every realm
- * -- so the static serves every realm. A hit is the receiver's shape, the prototype's shape and
- * one slot load; the caller checks the loaded closure's code. The receiver's shape is the proof
- * the name is not an own property, and the prototype's shape, which carries its slots'
- * attributes, that the slot holds a data property. */
+/* Issue 04 step 3c. The code `shape` records for `slot`, or NULL: the record lives on the shape
+ * that added the slot, so this walks up to it. Not a hot path -- call sites learn from it once. */
+static inline kiln_body_fn kiln_c99_shape_slot_code(const kiln_shape *shape, uint32_t slot) {
+    if (shape == NULL || slot >= shape->property_count || (shape->code_mask & (1u << slot)) == 0)
+        return NULL;
+    while (shape->property_count > slot + 1) shape = shape->parent;
+    return shape->code;
+}
+
+/* A typed method-call site's memory of one candidate's path (ADR 0071, issue 04 steps 3b and
+ * 3c): the receiver's shape, its prototype's shape, and the slot there whose code the
+ * prototype's shape records as the candidate's. Layouts only, and both shapes shared -- never
+ * freed, the same in every realm -- so the static serves every realm. A hit is the receiver's
+ * shape and the prototype's shape, and then the candidate's code is called with no closure
+ * loaded: the receiver's shape is the proof the name is not an own property, and the
+ * prototype's shape that the slot holds a closure of exactly that code (a shape's code record
+ * is true of every object that has it; see `kiln_shape.code_mask`). The slot is read only for
+ * what the call takes from the closure itself, its upvalues. `row` is the candidate's receiver
+ * row for `recv` (`kiln_c99_recv_row`), learned with it, for a candidate that takes one; a path
+ * is only learned once the row is known, so a hit passes it without another shape check. */
 typedef struct kiln_c99_method_path {
     const kiln_shape *recv;
     const kiln_shape *proto;
+    const uint32_t *row;
     uint32_t slot;
 } kiln_c99_method_path;
 
-/* The value at the end of `path` for `obj`, whose shape the caller has matched to `path->recv`,
- * or 0. */
-static KILN_ALWAYS_INLINE inline kiln_val kiln_c99_method_path_callee(const kiln_c99_method_path *path,
-                                                                     const kiln_object *obj) {
-    const kiln_object *level;
+/* Whether the prototype at the end of `path` for `obj`, whose shape the caller has matched to
+ * `path->recv`, has the path's shape; `*level` is that prototype. */
+static KILN_ALWAYS_INLINE inline int kiln_c99_method_path_hit(const kiln_c99_method_path *path,
+                                                             const kiln_object *obj,
+                                                             const kiln_object **level) {
     if (KILN_UNLIKELY(obj->prototype.tag != KILN_VALUE_OBJECT)) return 0;
-    level = (const kiln_object *)(uintptr_t)obj->prototype.bits;
-    return KILN_LIKELY(level->shape == path->proto) ? level->slots[path->slot] : 0;
+    *level = (const kiln_object *)(uintptr_t)obj->prototype.bits;
+    return KILN_LIKELY((*level)->shape == path->proto);
 }
 
-/* Teach `path` from the site entry that just answered for `obj`: only an entry that is a shaped
- * prototype one step up, and only shared shapes, since the path is a process-wide static. */
+/* Teach `path` from the site entry that just answered for `obj` with a closure of `code`: only
+ * an entry that is a shaped prototype one step up, only shared shapes, since the path is a
+ * process-wide static, and only a prototype shape that records `code` for the slot. A candidate
+ * that takes a receiver row (`need_row`) learns only with `row`, the row for `obj`'s shape. */
 static inline void kiln_c99_method_path_learn(kiln_c99_method_path *path, const kiln_c99_site *site,
-                                              const kiln_object *obj) {
+                                              const kiln_object *obj, kiln_body_fn code,
+                                              const uint32_t *row, int need_row) {
     const kiln_shape *shape = obj->shape;
     uint32_t p;
-    if (shape == NULL || !shape->shared) return;
+    if (shape == NULL || !shape->shared || (need_row && row == NULL)) return;
     for (p = 0; p < site->pic_count; ++p) {
         const kiln_c99_pic_entry *entry = &site->entries[p];
         if (entry->shape != shape) continue;
-        if (entry->one_step && entry->level_shape[0]->shared) {
+        if (entry->one_step && entry->level_shape[0]->shared &&
+            kiln_c99_shape_slot_code(entry->level_shape[0], entry->proto_slot) == code) {
             path->proto = entry->level_shape[0];
             path->slot = entry->proto_slot;
+            path->row = row;
             path->recv = shape;
         }
         return;

@@ -108,21 +108,27 @@ static void kiln_c99_pin_interned_key(const kiln_string *ikey) {
 /* Whether `child`, an edge of a shape with `count` properties, is the transition wanted: the
  * double bit and the attributes of the slot it adds are part of the edge's key, as the key is. */
 static inline int kiln_c99_shape_edge_is(const kiln_shape *child, uint32_t count, uint32_t bit,
-                                         uint32_t expected_bit, uint32_t attrs) {
+                                         uint32_t expected_bit, uint32_t attrs,
+                                         kiln_body_fn code) {
     /* A slot's special bit is set exactly when its attributes are not zero, which answers the
-     * common case -- an assignment's edge -- from the word beside the double mask. */
+     * common case -- an assignment's edge -- from the word beside the double mask. Only an
+     * attribute-bearing slot carries a code record (step 3c), and the child's `code` is the
+     * record of the slot it adds. */
     return (child->double_slots_mask & bit) == expected_bit &&
-           (attrs == 0 ? (child->special_mask & bit) == 0 : child->attrs[count] == attrs);
+           (attrs == 0 ? (child->special_mask & bit) == 0
+                       : child->attrs[count] == attrs && child->code == code);
 }
 
 static kiln_shape *kiln_c99_shape_inline_edge(const kiln_shape *current, uint32_t count,
                                               const kiln_string *ikey, uint32_t bit,
-                                              uint32_t expected_bit, uint32_t attrs) {
+                                              uint32_t expected_bit, uint32_t attrs,
+                                              kiln_body_fn code) {
     uint32_t i;
     for (i = 0; i < 2 && i < count; ++i) {
         if (current->inline_trans_ikey[i] == ikey) {
             kiln_shape *cand = current->inline_trans_next[i];
-            if (kiln_c99_shape_edge_is(cand, current->property_count, bit, expected_bit, attrs))
+            if (kiln_c99_shape_edge_is(cand, current->property_count, bit, expected_bit, attrs,
+                                       code))
                 return cand;
         }
     }
@@ -130,13 +136,15 @@ static kiln_shape *kiln_c99_shape_inline_edge(const kiln_shape *current, uint32_
 }
 
 static kiln_shape *kiln_c99_shape_list_edge(const kiln_shape *current, const kiln_string *ikey,
-                                            uint32_t bit, uint32_t expected_bit, uint32_t attrs) {
+                                            uint32_t bit, uint32_t expected_bit, uint32_t attrs,
+                                            kiln_body_fn code) {
     const kiln_shape_transition *tr;
     for (tr = __atomic_load_n(&current->transitions, __ATOMIC_ACQUIRE); tr != NULL;
          tr = tr->next_transition) {
         if (tr->ikey == ikey) {
             kiln_shape *cand = tr->next;
-            if (kiln_c99_shape_edge_is(cand, current->property_count, bit, expected_bit, attrs))
+            if (kiln_c99_shape_edge_is(cand, current->property_count, bit, expected_bit, attrs,
+                                       code))
                 return cand;
         }
     }
@@ -156,7 +164,8 @@ static size_t kiln_c99_local_edge_home(const kiln_shape *parent, const kiln_stri
 static kiln_c99_local_edge *kiln_c99_local_edge_row(const kiln_gc_heap *heap,
                                                     const kiln_shape *parent,
                                                     const kiln_string *key, uint32_t bit,
-                                                    uint32_t expected_bit, uint32_t attrs) {
+                                                    uint32_t expected_bit, uint32_t attrs,
+                                                    kiln_body_fn code) {
     size_t mask;
     size_t at;
     if (heap->local_edge_count == 0) return NULL;
@@ -167,7 +176,7 @@ static kiln_c99_local_edge *kiln_c99_local_edge_row(const kiln_gc_heap *heap,
         if (row->parent == NULL) return NULL;
         if (row->parent == parent && row->key == key &&
             (key == NULL || kiln_c99_shape_edge_is(row->child, parent->property_count, bit,
-                                                   expected_bit, attrs)))
+                                                   expected_bit, attrs, code)))
             return row;
         at = (at + 1) & mask;
     }
@@ -200,7 +209,7 @@ static int kiln_c99_local_edge_reserve(kiln_gc_heap *heap) {
 
 /* How many realm-local edges `parent` has in this heap. */
 static uint32_t kiln_c99_local_edge_count(const kiln_gc_heap *heap, const kiln_shape *parent) {
-    const kiln_c99_local_edge *row = kiln_c99_local_edge_row(heap, parent, NULL, 0, 0, 0);
+    const kiln_c99_local_edge *row = kiln_c99_local_edge_row(heap, parent, NULL, 0, 0, 0, NULL);
     return row == NULL ? 0 : (uint32_t)(uintptr_t)row->child;
 }
 
@@ -219,7 +228,7 @@ static int kiln_c99_local_edge_insert(kiln_gc_heap *heap, const kiln_shape *pare
     row.key = key;
     row.child = child;
     kiln_c99_local_edge_place(heap->local_edges, heap->local_edge_capacity, row);
-    count_row = kiln_c99_local_edge_row(heap, parent, NULL, 0, 0, 0);
+    count_row = kiln_c99_local_edge_row(heap, parent, NULL, 0, 0, 0, NULL);
     if (count_row != NULL) {
         count_row->child = (kiln_shape *)(uintptr_t)((uintptr_t)count_row->child + 1);
     } else {
@@ -282,12 +291,14 @@ static void kiln_c99_shape_edge_claim(kiln_shape_edge_table *table, kiln_shape *
  * edges is separate and already hashed. */
 static kiln_shape *kiln_c99_shape_table_edge(const kiln_shape_edge_table *table,
                                              const kiln_string *ikey, uint32_t bit,
-                                             uint32_t expected_bit, uint32_t attrs) {
+                                             uint32_t expected_bit, uint32_t attrs,
+                                             kiln_body_fn code) {
     uint32_t at = kiln_c99_shape_edge_hash(ikey) & table->mask;
     kiln_shape *seen;
     while ((seen = __atomic_load_n(&table->edges[at], __ATOMIC_ACQUIRE)) != NULL) {
         /* The slot a child adds is its parent's count, which is `bit`'s index. */
-        if (seen->ikey == ikey && kiln_c99_shape_edge_is(seen, seen->slot_index, bit, expected_bit, attrs))
+        if (seen->ikey == ikey && kiln_c99_shape_edge_is(seen, seen->slot_index, bit, expected_bit, attrs,
+                                                               code))
             return seen;
         at = (at + 1) & table->mask;
     }
@@ -331,7 +342,7 @@ static int kiln_c99_shape_index_edge(kiln_shape *shape, uint32_t count, kiln_sha
 }
 
 static kiln_shape *kiln_c99_shape_child(kiln_shape *current, const kiln_string *ikey,
-                                        uint32_t expected_bit, uint32_t attrs) {
+                                        uint32_t expected_bit, uint32_t attrs, kiln_body_fn code) {
     uint32_t bit = 1u << current->property_count;
     kiln_shape *next_shape = (kiln_shape *)calloc(1, sizeof(kiln_shape));
     if (next_shape == NULL) return NULL;
@@ -355,7 +366,9 @@ static kiln_shape *kiln_c99_shape_child(kiln_shape *current, const kiln_string *
         current->accessor_mask | ((attrs & KILN_C99_ATTR_ACCESSOR) != 0 ? bit : 0);
     next_shape->store_mask =
         current->store_mask |
-        ((attrs & (KILN_C99_ATTR_READONLY | KILN_C99_ATTR_ACCESSOR)) != 0 ? bit : 0);
+        ((attrs & (KILN_C99_ATTR_READONLY | KILN_C99_ATTR_ACCESSOR)) != 0 || code != NULL ? bit : 0);
+    next_shape->code = code;
+    next_shape->code_mask = current->code_mask | (code != NULL ? bit : 0);
     return next_shape;
 }
 
@@ -382,7 +395,8 @@ static int kiln_c99_shape_link(kiln_shape *current, const kiln_string *ikey, kil
 }
 
 static int kiln_c99_shape_add(kiln_shape *current, const kiln_string *ikey, int is_double,
-                              uint32_t attrs, int unbounded, kiln_shape **out_shape) {
+                              uint32_t attrs, kiln_body_fn code, int unbounded,
+                              kiln_shape **out_shape) {
     uint32_t bit = 1u << current->property_count;
     uint32_t expected_bit = is_double ? bit : 0;
     int key_shared = kiln_c99_key_is_shared(ikey);
@@ -394,14 +408,14 @@ static int kiln_c99_shape_add(kiln_shape *current, const kiln_string *ikey, int 
         kiln_c99_process_lock(process);
         /* Another thread may have added it since the unlocked look. */
         next_shape = kiln_c99_shape_inline_edge(current, current->num_transitions, ikey, bit,
-                                                expected_bit, attrs);
+                                                expected_bit, attrs, code);
         if (next_shape == NULL)
-            next_shape = kiln_c99_shape_list_edge(current, ikey, bit, expected_bit, attrs);
+            next_shape = kiln_c99_shape_list_edge(current, ikey, bit, expected_bit, attrs, code);
         if (next_shape == NULL) {
             edges = current->num_transitions +
                     (heap != NULL ? kiln_c99_local_edge_count(heap, current) : 0);
             if (kiln_c99_shape_edge_room(edges, ikey, unbounded) &&
-                (next_shape = kiln_c99_shape_child(current, ikey, expected_bit, attrs)) != NULL) {
+                (next_shape = kiln_c99_shape_child(current, ikey, expected_bit, attrs, code)) != NULL) {
                 next_shape->shared = 1;
                 if (!kiln_c99_shape_link(current, ikey, next_shape)) {
                     free(next_shape);
@@ -418,7 +432,7 @@ static int kiln_c99_shape_add(kiln_shape *current, const kiln_string *ikey, int 
     edges = __atomic_load_n(&current->num_transitions, __ATOMIC_ACQUIRE);
     if (current->shared) edges += kiln_c99_local_edge_count(heap, current);
     if (!kiln_c99_shape_edge_room(edges, ikey, unbounded)) return 0;
-    next_shape = kiln_c99_shape_child(current, ikey, expected_bit, attrs);
+    next_shape = kiln_c99_shape_child(current, ikey, expected_bit, attrs, code);
     if (next_shape == NULL) return 0;
     if (current->shared ? !kiln_c99_local_edge_insert(heap, current, ikey, next_shape)
                         : !kiln_c99_shape_link(current, ikey, next_shape)) {
@@ -434,9 +448,9 @@ static int kiln_c99_shape_add(kiln_shape *current, const kiln_string *ikey, int 
     return 1;
 }
 
-static int kiln_c99_shape_transition_ex(kiln_shape *current, const kiln_string *ikey,
-                                        int is_double, uint32_t attrs, int unbounded,
-                                        kiln_shape **out_shape) {
+static int kiln_c99_shape_transition_code(kiln_shape *current, const kiln_string *ikey,
+                                          int is_double, uint32_t attrs, kiln_body_fn code,
+                                          int unbounded, kiln_shape **out_shape) {
     uint32_t bit;
     uint32_t expected_bit;
     kiln_shape *next_shape;
@@ -450,7 +464,7 @@ static int kiln_c99_shape_transition_ex(kiln_shape *current, const kiln_string *
         if (table != NULL) {
             /* The index covers every own edge it was published with; one it has not seen yet is
              * found again by `kiln_c99_shape_add`'s rescan under the lock. */
-            next_shape = kiln_c99_shape_table_edge(table, ikey, bit, expected_bit, attrs);
+            next_shape = kiln_c99_shape_table_edge(table, ikey, bit, expected_bit, attrs, code);
             if (next_shape != NULL) {
                 *out_shape = next_shape;
                 return 1;
@@ -458,24 +472,31 @@ static int kiln_c99_shape_transition_ex(kiln_shape *current, const kiln_string *
         } else {
             next_shape = kiln_c99_shape_inline_edge(
                 current, __atomic_load_n(&current->num_transitions, __ATOMIC_ACQUIRE), ikey, bit,
-                expected_bit, attrs);
+                expected_bit, attrs, code);
         }
     }
     if (next_shape == NULL && current->shared) {
         const kiln_gc_heap *heap = kiln_c99_gc_heap();
         if (heap != NULL && heap->local_edge_count != 0) {
             const kiln_c99_local_edge *row =
-                kiln_c99_local_edge_row(heap, current, ikey, bit, expected_bit, attrs);
+                kiln_c99_local_edge_row(heap, current, ikey, bit, expected_bit, attrs, code);
             if (row != NULL) next_shape = row->child;
         }
     }
     if (next_shape == NULL && current->edge_table == NULL)
-        next_shape = kiln_c99_shape_list_edge(current, ikey, bit, expected_bit, attrs);
+        next_shape = kiln_c99_shape_list_edge(current, ikey, bit, expected_bit, attrs, code);
     if (next_shape != NULL) {
         *out_shape = next_shape;
         return 1;
     }
-    return kiln_c99_shape_add(current, ikey, is_double, attrs, unbounded, out_shape);
+    return kiln_c99_shape_add(current, ikey, is_double, attrs, code, unbounded, out_shape);
+}
+
+static int kiln_c99_shape_transition_ex(kiln_shape *current, const kiln_string *ikey,
+                                        int is_double, uint32_t attrs, int unbounded,
+                                        kiln_shape **out_shape) {
+    return kiln_c99_shape_transition_code(current, ikey, is_double, attrs, NULL, unbounded,
+                                          out_shape);
 }
 
 static int kiln_c99_shape_transition(kiln_shape *current, const kiln_string *ikey, int is_double,
@@ -494,15 +515,22 @@ static int kiln_c99_shape_transition(kiln_shape *current, const kiln_string *ike
  * full -- and the caller's list-mode path, unchanged, must do the definition. The counters
  * `kiln_c99_put_mode_key`'s chain walk skips by are kept as the list would keep them. */
 static int kiln_c99_shape_define_new(kiln_object *object, const kiln_string *ikey, kiln_val held,
-                                     uint32_t attrs, int *status) {
+                                     uint32_t attrs, kiln_body_fn code, int *status) {
     kiln_shape *next;
     uint32_t slot;
     if (object->shape == NULL || object->properties != NULL || ikey == NULL ||
         kiln_c99_key_index_key(ikey) >= 0.0) {
         return 0;
     }
-    if (!kiln_c99_shape_transition_ex(object->shape, ikey,
-                                      attrs == 0 && KILN_VAL_IS_NUMBER(held), attrs, 0, &next)) {
+    /* A record rides only on an attribute-bearing slot (see `kiln_c99_shape_edge_is`). A branch
+     * that has no room for the recorded edge may still have the unrecorded one: the record is an
+     * optimisation, the shape is not. */
+    if (attrs == 0) code = NULL;
+    if (!kiln_c99_shape_transition_code(object->shape, ikey,
+                                        attrs == 0 && KILN_VAL_IS_NUMBER(held), attrs, code, 0,
+                                        &next) &&
+        (code == NULL ||
+         !kiln_c99_shape_transition_code(object->shape, ikey, 0, attrs, NULL, 0, &next))) {
         return 0;
     }
     slot = next->slot_index;
@@ -538,6 +566,61 @@ static int kiln_c99_shape_define_new(kiln_object *object, const kiln_string *ike
         object->read_only_seen = 1;
     }
     *status = KILN_C99_OK;
+    return 1;
+}
+
+/* The code of `value` when it is a closure, else NULL: what a record compares against. */
+static inline kiln_body_fn kiln_c99_val_code(kiln_val value) {
+    return KILN_VAL_IS_CLOSURE(value) ? ((const kiln_closure *)KILN_VAL_PTR(value))->body : NULL;
+}
+
+static int kiln_c99_ensure_dictionary(kiln_object *object);
+
+/* Store `value` into `object`'s slot `slot`, which its shape records code for (`code_mask`), as
+ * an assignment would: in place when `value` is a closure with exactly that code, so the record
+ * stays true; otherwise the object first moves to the shape that is its own with this slot's
+ * record dropped -- the same keys, attributes, double bits and every other record, rebuilt from
+ * the slot's parent by ordinary transitions -- so no object of a recording shape ever holds
+ * anything else there. When that shape cannot be had (a full branch) the object leaves shape
+ * mode instead and 0 is returned: the caller redoes the store on the list. 1 when stored. */
+static int kiln_c99_shape_store_recorded(kiln_object *object, uint32_t slot, kiln_val value) {
+    kiln_shape *shape = object->shape;
+    const kiln_shape *chain[KILN_SHAPE_MAX_FAST_PROPERTIES];
+    uint32_t depth = 0;
+    const kiln_shape *walk;
+    kiln_shape *rebuilt;
+    if (slot >= object->slot_capacity) {
+        kiln_c99_ensure_dictionary(object);
+        return 0;
+    }
+    if (kiln_c99_val_code(value) == kiln_c99_shape_slot_code(shape, slot)) {
+        kiln_c99_prototype_touched(object);
+        object->slots[slot] = value;
+        return 1;
+    }
+    /* The shapes from the one that added `slot` down to `shape`, deepest last. */
+    for (walk = shape; walk != NULL && walk->property_count > slot; walk = walk->parent)
+        chain[depth++] = walk;
+    rebuilt = walk != NULL ? (kiln_shape *)walk : NULL;
+    while (rebuilt != NULL && depth > 0) {
+        const kiln_shape *step = chain[--depth];
+        uint32_t at = step->slot_index;
+        kiln_shape *next;
+        if (!kiln_c99_shape_transition_code(rebuilt, step->ikey,
+                                            (step->double_slots_mask >> at) & 1u, step->attrs[at],
+                                            at == slot ? NULL : step->code, 0, &next)) {
+            rebuilt = NULL;
+            break;
+        }
+        rebuilt = next;
+    }
+    if (rebuilt == NULL) {
+        kiln_c99_ensure_dictionary(object);
+        return 0;
+    }
+    kiln_c99_prototype_touched(object);
+    object->shape = rebuilt;
+    object->slots[slot] = value;
     return 1;
 }
 
