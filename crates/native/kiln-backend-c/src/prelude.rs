@@ -4762,6 +4762,8 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_static_texts", C99StateOwner::Constant),
     // `Symbol()` serials: process-wide so no realm mints one twice.
     ("kiln_c99_symbol_serial", C99StateOwner::Process),
+    // Each well-known symbol's shared canonical key, published once (`kiln_c99_symbol_ikey`).
+    ("kiln_c99_well_known_ikeys", C99StateOwner::Constant),
     // The `KILN_SPECULATE=exit` test mode's draw, per thread.
     ("kiln_c99_speculate_rng", C99StateOwner::ThreadCache),
     // Which later entry of which site answered this thread last (`kiln_c99_site_answered`).

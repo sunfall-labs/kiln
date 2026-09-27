@@ -244,6 +244,7 @@ pub fn emit_restartable(
         "kiln_c99_invoke",
         "kiln_c99_val_read_property(",
         "kiln_c99_val_read_element(",
+        "kiln_c99_val_read_symbol(",
         "kiln_c99_val_binary(",
         "kiln_c99_val_unary(",
         "thrown",

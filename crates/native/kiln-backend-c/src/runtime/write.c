@@ -193,7 +193,8 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
                     !kiln_c99_same_name_key(name_key, "@@unscopables")) {
                     KILN_C99_ABSENT("a reserved slot nobody set on this object", out);
                 }
-                return kiln_c99_get_key(host, target, name_key, NULL, out, depth, thrown);
+                return kiln_c99_get_key(host, target, name_key, kiln_c99_property_ikey(key), out,
+                                        depth, thrown);
             }
             /* Reserved protocol slots are reached through Symbols. An ordinary string that only
              * happens to have the same spelling remains an ordinary named property. */
@@ -289,8 +290,8 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
             KILN_C99_REFUSE("a computed property key that is neither a string nor a named symbol "
                             "slot");
         }
-        return kiln_c99_get_key(host, target, (const kiln_string *)text.ptr, NULL, out, depth,
-                                thrown);
+        return kiln_c99_get_key(host, target, (const kiln_string *)text.ptr,
+                                kiln_c99_property_ikey(key), out, depth, thrown);
     }
 }
 
@@ -399,8 +400,8 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
             KILN_C99_REFUSE("a computed property key that is neither a string nor a named symbol "
                             "slot");
         }
-        return kiln_c99_put_mode_key(host, target, (const kiln_string *)text.ptr, NULL, value,
-                                     strict, depth, thrown);
+        return kiln_c99_put_mode_key(host, target, (const kiln_string *)text.ptr,
+                                     kiln_c99_property_ikey(key), value, strict, depth, thrown);
     }
 }
 
@@ -628,7 +629,9 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
             }
             return KILN_C99_OK;
         } else {
-            const kiln_string *ikey = kiln_c99_intern_key((const kiln_string *)text.ptr);
+            const kiln_string *ikey = key.tag == KILN_VALUE_SYMBOL
+                                          ? kiln_c99_property_ikey(key)
+                                          : kiln_c99_intern_key((const kiln_string *)text.ptr);
             uint32_t slot_idx;
             kiln_shape *next_shape;
             if (ikey == NULL) return KILN_C99_OUT_OF_MEMORY;

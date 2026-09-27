@@ -57,11 +57,13 @@ static int kiln_c99_shape_find_slot(const kiln_shape *shape, const kiln_string *
     return 0;
 }
 
-/* Whether the property in `slot` is enumerable, exactly as the list-mode record
- * `kiln_c99_ensure_dictionary` would build for it says. */
+/* Whether the property in `slot` is enumerable as the walks over own *string* keys see it --
+ * the stored bit of the list-mode record `kiln_c99_ensure_dictionary` would build for it, which
+ * is 0 for every reserved (`@@`) key. A symbol key's program-visible answer is `ENUM_FLIP`'s
+ * absence (`KILN_C99_ATTR_ENUM_FLIP`). */
 static inline int kiln_c99_shape_slot_enumerable(const kiln_shape *shape, uint32_t slot) {
-    return !kiln_c99_key_is_reserved(shape->keys[slot]) ^
-           ((shape->attrs[slot] & KILN_C99_ATTR_ENUM_FLIP) != 0);
+    return !kiln_c99_key_is_reserved(shape->keys[slot]) &&
+           (shape->attrs[slot] & KILN_C99_ATTR_ENUM_FLIP) == 0;
 }
 
 /* The slot of the key spelt `bytes` in `shape`, or UINT32_MAX when the shape has no such key. A
@@ -691,13 +693,18 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
          * `KILN_C99_ATTR_*`, which are its differences from an assignment's record. */
         object->properties[pos].key = key;
         object->properties[pos].key_len = key_len;
-        object->properties[pos].enumerable =
-            !(key_len >= 2 && kiln_string_unit_at(key, 0) == '@' &&
-              kiln_string_unit_at(key, 1) == '@') ^
-            ((attrs & KILN_C99_ATTR_ENUM_FLIP) != 0);
+        {
+            /* A reserved key is stored non-enumerable and its flip is the hidden bit a symbol's
+             * record carries (`kiln_property.symbol_hidden`); any other key's flip is the
+             * stored bit's. */
+            int reserved = key_len >= 2 && kiln_string_unit_at(key, 0) == '@' &&
+                           kiln_string_unit_at(key, 1) == '@';
+            int flip = (attrs & KILN_C99_ATTR_ENUM_FLIP) != 0;
+            object->properties[pos].enumerable = !reserved && !flip;
+            object->properties[pos].symbol_hidden = reserved && flip;
+        }
         object->properties[pos].writable = (attrs & KILN_C99_ATTR_READONLY) == 0;
         object->properties[pos].configurable = (attrs & KILN_C99_ATTR_FIXED) == 0;
-        object->properties[pos].symbol_hidden = 0;
         object->properties[pos].accessor = (attrs & KILN_C99_ATTR_ACCESSOR) != 0;
         object->properties[pos].refused = 0;
         if (attrs & KILN_C99_ATTR_ACCESSOR) {

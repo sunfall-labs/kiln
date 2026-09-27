@@ -831,6 +831,7 @@ static inline int kiln_c99_typed_failed(double d) {
 #define KILN_VAL_IS_STRING(v)    (((v) & KILN_TAG_MASK) == KILN_TAG_STRING_PREFIX)
 #define KILN_VAL_IS_OBJECT(v)    (((v) & KILN_TAG_MASK) == KILN_TAG_OBJECT_PREFIX)
 #define KILN_VAL_IS_CLOSURE(v)   (((v) & KILN_TAG_MASK) == KILN_TAG_CLOSURE_PREFIX)
+#define KILN_VAL_IS_SYMBOL(v)    (((v) & KILN_TAG_MASK) == KILN_TAG_SYMBOL_PREFIX)
 #define KILN_VAL_PTR(v)          ((void *)((uint64_t)(v) & KILN_PAYLOAD_MASK))
 #define KILN_VAL_TAG_PTR(pfx, p) ((kiln_val)((pfx) | ((uint64_t)(uintptr_t)(p) & KILN_PAYLOAD_MASK)))
 #define KILN_VAL_IS_DOUBLE(v)    KILN_VAL_IS_NUMBER(v)
@@ -932,7 +933,7 @@ struct kiln_shape;
 typedef struct kiln_shape_transition {
 typedef struct kiln_shape {
 typedef struct kiln_shape_edge_table {
-#define KILN_C99_ATTR_ENUM_FLIP 1u   /* enumerable is the opposite of an assignment's */
+#define KILN_C99_ATTR_ENUM_FLIP 1u
 #define KILN_C99_ATTR_READONLY 2u    /* not writable (an accessor always carries it) */
 #define KILN_C99_ATTR_FIXED 4u       /* not configurable */
 #define KILN_C99_ATTR_ACCESSOR 8u    /* the slot holds an accessor pair */
@@ -995,6 +996,7 @@ typedef struct kiln_c99_pic_entry {
 typedef struct kiln_c99_site {
 static KILN_ALWAYS_INLINE inline uint32_t kiln_c99_site_count(const kiln_c99_site *site) {
 static KILN_ALWAYS_INLINE inline const kiln_c99_pic_entry *kiln_c99_site_entry(
+static KILN_ALWAYS_INLINE inline const kiln_c99_pic_entry *kiln_c99_site_entry_keyed(
 static inline int kiln_c99_site_may_learn(const kiln_c99_site *site, const kiln_shape *shape) {
 static inline uint32_t kiln_c99_site_own(const kiln_c99_site *site) {
 static inline uint32_t kiln_c99_site_proto(const kiln_c99_site *site) {
@@ -1016,8 +1018,8 @@ static _Thread_local kiln_site_streak kiln_c99_streaks[64];
 static inline void kiln_c99_site_answered(kiln_c99_site *site, uint32_t hot) {
 static inline void kiln_c99_site_missed(kiln_c99_site *site) {
 static inline uint32_t kiln_c99_site_misses(const kiln_c99_site *site) {
+typedef kiln_c99_site *kiln_c99_symbol_cell;
 typedef struct kiln_c99_private_site {
-static inline void kiln_c99_private_site_learn(kiln_c99_private_site *site, const kiln_shape *shape,
 #define KILN_C99_SHAPE_IS_PORTABLE(shape) ((shape)->shared != 0)
 static inline uint32_t kiln_c99_site_slot_for(const kiln_c99_site *site, const kiln_shape *shape) {
 static KILN_ALWAYS_INLINE inline const kiln_object *kiln_c99_pic_path(const kiln_c99_pic_entry *entry,
@@ -1866,6 +1868,7 @@ static int kiln_c99_pic_entry_is_local(const kiln_c99_pic_entry *entry, const ki
 static void kiln_c99_site_forget_local(kiln_c99_site *site) {
 static void kiln_c99_gc_register_site(kiln_c99_site *site) {
 static void kiln_c99_site_learned(kiln_c99_site *site) {
+static void kiln_c99_gc_register_private_site(kiln_c99_private_site *site) {
 static void kiln_c99_gc_forget_realm_local(kiln_gc_heap *heap) {
 static int kiln_c99_site_claim_fresh(kiln_c99_site *site) {
 static void kiln_c99_site_remember(kiln_c99_site *site, const kiln_c99_pic_entry *given) {
@@ -1894,6 +1897,7 @@ static kiln_string *kiln_c99_gc_alloc_key_copy(const kiln_string *view);
 static const kiln_string *kiln_c99_intern_key(const kiln_string *string);
 static const kiln_string *kiln_c99_intern_static_key(const kiln_string *string);
 static const kiln_string *kiln_c99_intern_pinned_key(const kiln_string *string);
+static const kiln_string *kiln_c99_intern_shared_key(const kiln_string *string);
 static int kiln_c99_register_static_keys(const kiln_string *const *keys, const kiln_string **out,
 static int kiln_c99_keys_check_mode = -1;
 static int kiln_c99_keys_checked(void) {
@@ -1916,6 +1920,7 @@ static const kiln_string *kiln_c99_interned(const char *bytes, size_t len) {
 static const kiln_string *kiln_c99_intern_static(const char *bytes, size_t len) {
 const kiln_string *kiln_c99_intern_key(const kiln_string *string) {
 const kiln_string *kiln_c99_intern_pinned_key(const kiln_string *string) {
+const kiln_string *kiln_c99_intern_shared_key(const kiln_string *string) {
 const kiln_string *kiln_c99_intern_static_key(const kiln_string *string) {
 static int kiln_c99_register_static_keys_locked(kiln_shared_state *process,
 int kiln_c99_register_static_keys(const kiln_string *const *keys, const kiln_string **out,
@@ -2103,6 +2108,7 @@ static int kiln_c99_inherited_write_blocked(kiln_value proto, const kiln_string 
 #define KILN_C99_PATH_NONE 0
 #define KILN_C99_PATH_FOUND 1
 #define KILN_C99_PATH_ABSENT 2
+static int kiln_c99_pic_learn_path_as(kiln_c99_pic_entry *entry, const kiln_object *object,
 static int kiln_c99_pic_learn_path(kiln_c99_pic_entry *entry, const kiln_object *object,
 static __attribute__((noinline)) int kiln_c99_transition_store_clear_slow(
 static inline int kiln_c99_transition_store_clear(kiln_c99_site *site,
@@ -2307,6 +2313,10 @@ static int kiln_c99_symbol_of_key_view(const kiln_string *key, kiln_value *out) 
 static int kiln_c99_symbol_of_key(const char *key, size_t key_len, kiln_value *out) {
 static int kiln_c99_property_is_enumerable(const kiln_property *property) {
 static kiln_value kiln_c99_property_key(kiln_value key) {
+static const kiln_string *kiln_c99_well_known_ikeys[sizeof kiln_c99_well_known /
+static __attribute__((noinline)) const kiln_string *kiln_c99_well_known_ikey(
+static inline __attribute__((always_inline)) const kiln_string *kiln_c99_symbol_ikey(const kiln_symbol *symbol) {
+static const kiln_string *kiln_c99_property_ikey(kiln_value key) {
 static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
 static kiln_value kiln_c99_copy_symbol_key(const kiln_string *source) {
 static int kiln_c99_symbol_for(kiln_value *out, kiln_value key) {
@@ -2832,6 +2842,7 @@ static kiln_shape *kiln_c99_clone_list_shape(const kiln_object *source, kiln_sha
 static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, int depth,
 static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size_t argc) {
 static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value source,
+static void kiln_c99_hide_symbol_property(kiln_property *property) {
 static int kiln_c99_define_shaped(kiln_value target, const kiln_string *key, kiln_val held,
 static int kiln_c99_define_accessor_shaped(kiln_value target, const kiln_string *key,
 static int kiln_c99_define_accessor_key(kiln_value target, const kiln_string *key,
@@ -3124,6 +3135,8 @@ static int kiln_c99_val_read_property(kiln_host *host, kiln_val target,
 static int kiln_c99_val_write_property_view(kiln_host *host, kiln_val target,
 static int kiln_c99_val_write_property_key(kiln_host *host, kiln_val target,
 static int kiln_c99_val_write_property(kiln_host *host, kiln_val target,
+static void kiln_c99_gc_register_private_site(kiln_c99_private_site *site);
+static void kiln_c99_private_site_learn(kiln_c99_private_site *site, const kiln_shape *shape,
 static int kiln_c99_val_get_private_fast(kiln_val *out, kiln_val receiver, kiln_val brand,
 static int kiln_c99_val_set_private_fast(kiln_val receiver, kiln_val brand, kiln_val member,
 static void kiln_c99_note_get_property_refusal(kiln_value target) {
@@ -3132,6 +3145,13 @@ static int kiln_c99_read_element(kiln_host *host, kiln_value target, kiln_value 
 static int kiln_c99_write_element(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val key,
 static int kiln_c99_val_write_element(kiln_host *host, kiln_val target, kiln_val key,
+static __attribute__((noinline)) kiln_c99_site *kiln_c99_symbol_site(kiln_c99_symbol_cell *cell) {
+static void kiln_c99_symbol_site_remember(kiln_c99_symbol_cell *cell, kiln_c99_pic_entry *given,
+static inline __attribute__((always_inline)) kiln_object *kiln_c99_symbol_receiver(kiln_val target) {
+static __attribute__((noinline)) int kiln_c99_val_read_symbol_miss(kiln_host *host, kiln_val target,
+static __attribute__((noinline)) int kiln_c99_val_write_symbol_miss(kiln_host *host,
+static int kiln_c99_val_read_symbol(kiln_host *host, kiln_val target, kiln_val key, int depth,
+static int kiln_c99_val_write_symbol(kiln_host *host, kiln_val target, kiln_val key,
 static int kiln_c99_val_invoke_cached_method(kiln_host *host, uint64_t method_code, kiln_val receiver,
 static int kiln_c99_val_call_method_view(kiln_host *host, kiln_val receiver, const kiln_val *args,
 done:

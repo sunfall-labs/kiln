@@ -1034,8 +1034,11 @@ fn runtime_prelude_size() {
     // Widened on 2026-09-27 for realms issue 06 (+~600 lines): message tokens to and from a
     // realm's values, the worker operations and the port wait, `SharedArrayBuffer` stores and
     // the `Atomics` element primitive with its wait and notify, and a shared buffer's members.
+    // Widened on 2026-09-27 for realms issue 17 (+~390 lines): symbol-keyed reads and writes
+    // through keyed site entries, private-field sites that learn realm-local shapes and forget
+    // them at teardown, shared keys for registered and well-known symbols, and the comments.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 54_600;
+    const CEILING_LINES: usize = 55_100;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

@@ -3474,13 +3474,26 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                         kiln_c99_ensure_dictionary(source);
                     }
                     for (index = 0; index < source->count; ++index) {
-                        if (!source->properties[index].enumerable) {
+                        kiln_value copied;
+                        /* What the program sees as enumerable: a symbol key is stored
+                         * non-enumerable and carries its answer in `symbol_hidden`, and an
+                         * accessor is read through its getter -- as the shaped walk above and
+                         * object spread do. */
+                        if (!kiln_c99_property_is_enumerable(&source->properties[index])) {
                             continue;
+                        }
+                        if (source->properties[index].accessor) {
+                            status = kiln_c99_get_key(host, src_val, source->properties[index].key,
+                                                      source->properties[index].key, &copied,
+                                                      depth, thrown);
+                            if (status != KILN_C99_OK) return status;
+                            if (index >= source->count) break;
+                        } else {
+                            copied = source->properties[index].value;
                         }
                         status = kiln_c99_put_mode_key(host, target, source->properties[index].key,
                                                        source->properties[index].key,
-                                                       source->properties[index].value, 0, depth,
-                                                       thrown);
+                                                       copied, 0, depth, thrown);
                         if (status != KILN_C99_OK) {
                             return status;
                         }

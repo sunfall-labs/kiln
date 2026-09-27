@@ -9,6 +9,15 @@
  * Only what the list path would do without asking anyone is done here: a new key on an ordinary,
  * extensible, unfrozen object whose prototype chain would not intercept the assignment the list
  * path starts with, or an existing slot that already carries exactly these attributes. */
+/* A definition that is not enumerable, on a list-mode record: a symbol key's program-visible
+ * answer is `symbol_hidden`, its stored `enumerable` being 0 already (see `kiln_property`). */
+static void kiln_c99_hide_symbol_property(kiln_property *property) {
+    kiln_value symbol;
+    if (kiln_c99_key_is_reserved(property->key) &&
+        kiln_c99_symbol_of_key_view(property->key, &symbol))
+        property->symbol_hidden = 1;
+}
+
 static int kiln_c99_define_shaped(kiln_value target, const kiln_string *key, kiln_val held,
                                   int kind, int *status) {
     kiln_object *object = kiln_c99_object_of(target);
@@ -23,10 +32,11 @@ static int kiln_c99_define_shaped(kiln_value target, const kiln_string *key, kil
     }
     ikey = kiln_c99_intern_key(key);
     if (ikey == NULL) return 0;
-    /* The list path's record: `own_slot` makes it enumerable unless the key is reserved, then
-     * the method definition clears `enumerable` (and a private one clears `writable`). */
-    attrs = kiln_c99_key_is_reserved(ikey) ? 0u : KILN_C99_ATTR_ENUM_FLIP;
-    if (kind == 3) attrs |= KILN_C99_ATTR_READONLY;
+    /* A method is not enumerable, whatever its key: `ENUM_FLIP` says so for a string key and
+     * hides a symbol key (`KILN_C99_ATTR_ENUM_FLIP`), the one shaped route symbol-keyed and named
+     * methods share (realms issue 17: `[Symbol.iterator]() {}` listed as enumerable). A private
+     * method is read-only instead: its `@@private:` key is no symbol and no walk lists it. */
+    attrs = kind == 3 ? KILN_C99_ATTR_READONLY : KILN_C99_ATTR_ENUM_FLIP;
     if (kiln_c99_shape_find_slot(object->shape, ikey, &slot)) {
         /* Only a slot the list path would leave with these attributes: its assignment writes a
          * writable data property in place and the definition changes nothing else. */
@@ -84,7 +94,7 @@ static int kiln_c99_define_accessor_shaped(kiln_value target, const kiln_string 
         kiln_value boxed;
         kiln_array *halves;
         uint32_t had = object->shape->attrs[slot];
-        int was_enumerable = kiln_c99_shape_slot_enumerable(object->shape, slot);
+        int was_enumerable = (had & KILN_C99_ATTR_ENUM_FLIP) == 0;
         /* The merge only ever clears `enumerable`; one that would is a change of attributes. */
         if ((had & KILN_C99_ATTR_ACCESSOR) == 0 || slot >= object->slot_capacity ||
             (was_enumerable && !enumerable)) {
@@ -101,7 +111,7 @@ static int kiln_c99_define_accessor_shaped(kiln_value target, const kiln_string 
         return 1;
     }
     attrs = KILN_C99_ATTR_ACCESSOR | KILN_C99_ATTR_READONLY;
-    if ((enumerable != 0) != !kiln_c99_key_is_reserved(ikey)) attrs |= KILN_C99_ATTR_ENUM_FLIP;
+    if (!enumerable) attrs |= KILN_C99_ATTR_ENUM_FLIP;
     *status = kiln_c99_accessor_pair_new(getter, setter, &pair);
     if (*status != KILN_C99_OK) return 1;
     return kiln_c99_shape_define_new(object, ikey, pair, attrs, NULL, status);
@@ -158,6 +168,7 @@ static int kiln_c99_define_accessor_key(kiln_value target, const kiln_string *ke
         }
         if (!enumerable) {
             object->properties[index].enumerable = 0;
+            kiln_c99_hide_symbol_property(&object->properties[index]);
         }
         return KILN_C99_OK;
     }
@@ -175,7 +186,14 @@ static int kiln_c99_define_accessor_key(kiln_value target, const kiln_string *ke
     property->getter = getter;
     property->setter = setter;
     property->writable = 0;
-    property->enumerable = enumerable;
+    /* A symbol key stays stored non-enumerable (see `kiln_property.symbol_hidden`); the program's
+     * answer for it is the hidden bit. */
+    if (kiln_c99_key_is_reserved(property->key)) {
+        property->enumerable = 0;
+        if (!enumerable) kiln_c99_hide_symbol_property(property);
+    } else {
+        property->enumerable = enumerable;
+    }
     property->configurable = 1;
     return KILN_C99_OK;
 }
@@ -1323,6 +1341,7 @@ static int kiln_c99_define_method_key(kiln_value target, const kiln_string *key,
     for (index = 0; index < object->count; ++index) {
         if (kiln_c99_same_key_view(&object->properties[index], key)) {
             object->properties[index].enumerable = 0;
+            kiln_c99_hide_symbol_property(&object->properties[index]);
             return KILN_C99_OK;
         }
     }

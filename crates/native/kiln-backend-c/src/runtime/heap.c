@@ -412,6 +412,11 @@ typedef struct kiln_gc_heap {
     kiln_c99_site **sites;
     size_t site_len;
     size_t site_cap;
+    /* The same for private-field sites (`kiln_c99_private_site`), whose one entry may name a
+     * realm-local shape: an object with a `Symbol()` key and private fields. */
+    kiln_c99_private_site **private_sites;
+    size_t private_site_len;
+    size_t private_site_cap;
     /* ADR 0071: the built-ins this realm has written an own property onto, one bit per built-in
      * number (`kiln_c99_realm_builtin_modified`), and one flag for any number past the bitmap. */
     uint64_t modified_builtins[KILN_C99_MODIFIED_BUILTIN_WORDS];
@@ -1947,6 +1952,38 @@ static void kiln_c99_site_learned(kiln_c99_site *site) {
     }
 }
 
+/* Register a private-field site that is about to learn a realm-local shape with the current heap
+ * (see `kiln_c99_gc_register_site`). `registered` is left zero when the heap cannot take it, and
+ * the caller then does not learn. */
+static void kiln_c99_gc_register_private_site(kiln_c99_private_site *site) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    if (heap == NULL || site == NULL || heap->serial == 0) return;
+    if (__atomic_load_n(&site->registered, __ATOMIC_RELAXED) == heap->serial) return;
+    if (heap->private_site_len == heap->private_site_cap && heap->private_site_len != 0) {
+        size_t kept = 1, index;
+        qsort(heap->private_sites, heap->private_site_len, sizeof *heap->private_sites,
+              kiln_c99_site_pointer_order);
+        for (index = 1; index < heap->private_site_len; ++index) {
+            if (heap->private_sites[index] != heap->private_sites[kept - 1])
+                heap->private_sites[kept++] = heap->private_sites[index];
+        }
+        heap->private_site_len = kept;
+    }
+    if (heap->private_site_len == heap->private_site_cap) {
+        size_t wanted = heap->private_site_cap == 0 ? 64 : heap->private_site_cap * 2;
+        kiln_c99_private_site **grown = (kiln_c99_private_site **)realloc(
+            heap->private_sites, wanted * sizeof *grown);
+        if (grown == NULL) {
+            __atomic_store_n(&site->registered, 0, __ATOMIC_RELAXED);
+            return;
+        }
+        heap->private_sites = grown;
+        heap->private_site_cap = wanted;
+    }
+    heap->private_sites[heap->private_site_len++] = site;
+    __atomic_store_n(&site->registered, heap->serial, __ATOMIC_RELAXED);
+}
+
 /* Teardown, before the heap frees anything: every registered site forgets the entries that name
  * a realm-local shape or key. */
 static void kiln_c99_gc_forget_realm_local(kiln_gc_heap *heap) {
@@ -1961,6 +1998,17 @@ static void kiln_c99_gc_forget_realm_local(kiln_gc_heap *heap) {
     heap->sites = NULL;
     heap->site_len = 0;
     heap->site_cap = 0;
+    for (index = 0; index < heap->private_site_len; ++index) {
+        kiln_c99_private_site *site = heap->private_sites[index];
+        const kiln_shape *key = kiln_c99_slot_key(&site->shape);
+        if (KILN_C99_SLOT_IS_ANSWER(key) && !key->shared) kiln_c99_slot_retire(&site->shape, key);
+        (void)__atomic_compare_exchange_n(&site->registered, &(uint64_t){heap->serial}, 0, 0,
+                                          __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+    }
+    free(heap->private_sites);
+    heap->private_sites = NULL;
+    heap->private_site_len = 0;
+    heap->private_site_cap = 0;
 }
 
 /* Claim an entry of `site` no answer has used yet, raising the count over it; -1 when all are. */
@@ -1994,12 +2042,20 @@ static void kiln_c99_site_remember(kiln_c99_site *site, const kiln_c99_pic_entry
     /* An entry is compared against a receiver's shape but its `transition_to` is *given* to the
      * receiver. From a shared shape by a realm-local key the child is the learning realm's own:
      * another realm running now would move its object into that realm's shape (and key). Such a
-     * store stays uncached; from a realm-local shape only its own realm can arrive. */
-    if (entry.transition_to != NULL && !entry.transition_to->shared && entry.shape->shared) return;
+     * store stays uncached; from a realm-local shape only its own realm can arrive.
+     *
+     * A keyed entry whose key is realm-local is the exception, because every hit compares the key:
+     * that key is the learning realm's own pointer, which no other realm holds while it is alive
+     * (another realm's `Symbol()` is another key), and the entry is forgotten before the realm's
+     * teardown frees it (`kiln_c99_pic_entry_is_local`). So only the learning realm can arrive. */
+    if (entry.transition_to != NULL && !entry.transition_to->shared && entry.shape->shared &&
+        !(entry.keyed && entry.key != NULL && !kiln_c99_key_is_shared(entry.key)))
+        return;
     entry.one_step = entry.depth == 1 && !entry.absent && entry.transition_to == NULL &&
                      entry.slot == UINT32_MAX && entry.level_shape[0] != NULL;
     for (p = 0; p < count; ++p) {
-        if (kiln_c99_slot_key(&site->entries[p].shape) == entry.shape) {
+        if (kiln_c99_slot_key(&site->entries[p].shape) == entry.shape &&
+            (!entry.keyed || site->entries[p].key == entry.key)) {
             if (kiln_c99_slot_claim(&site->entries[p].shape, 1)) at = (int)p;
             break;
         }
@@ -2438,6 +2494,7 @@ static kiln_string *kiln_c99_gc_alloc_key_copy(const kiln_string *view);
 static const kiln_string *kiln_c99_intern_key(const kiln_string *string);
 static const kiln_string *kiln_c99_intern_static_key(const kiln_string *string);
 static const kiln_string *kiln_c99_intern_pinned_key(const kiln_string *string);
+static const kiln_string *kiln_c99_intern_shared_key(const kiln_string *string);
 static int kiln_c99_register_static_keys(const kiln_string *const *keys, const kiln_string **out,
                                          size_t count);
 
@@ -2755,6 +2812,35 @@ const kiln_string *kiln_c99_intern_pinned_key(const kiln_string *string) {
     copy = kiln_c99_gc_alloc_key_copy(string);
     if (copy == NULL) return NULL;
     return kiln_c99_key_insert(&heap->keys, copy, hash, 1);
+}
+
+/* A key that means the same in every realm although no unit names it: a registered symbol's
+ * (`Symbol.for`, spelt `@@symbol-for:` and the registry key). It joins the shared table whatever
+ * other realms are alive, which is sound where `kiln_c99_intern_static_key` below is not because
+ * no realm makes this spelling any other way: only `Symbol.for` spells a `@@symbol-for:` key, and
+ * it spells it here. The calling realm's own table is still consulted first, so a realm that holds
+ * the spelling already (a program string that happened to spell one) keeps its own pointer. The
+ * table only grows, like the registries it mirrors, which live as long as their realms. */
+const kiln_string *kiln_c99_intern_shared_key(const kiln_string *string) {
+    kiln_gc_heap *heap;
+    uint64_t hash;
+    const kiln_string *shared;
+    kiln_shared_state *process;
+    if (string == NULL || string->unit_len == 0) return kiln_c99_key_empty;
+    hash = kiln_c99_key_hash(string);
+    shared = kiln_c99_shared_key_probe(string, hash);
+    if (shared != NULL) return shared;
+    heap = kiln_c99_gc_heap();
+    if (heap == NULL) return NULL;
+    if (kiln_c99_key_probe(&heap->keys, string, hash) == NULL) {
+        process = kiln_c99_process();
+        kiln_c99_process_lock(process);
+        shared = kiln_c99_shared_key_probe(string, hash);
+        if (shared == NULL) shared = kiln_c99_shared_key_insert(process, string, hash);
+        kiln_c99_process_unlock(process);
+        if (shared != NULL) return shared;
+    }
+    return kiln_c99_intern_pinned_key(string);
 }
 
 /* A constant of the program: a unit's constant-table key, a prelude literal. These are what the

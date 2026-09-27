@@ -418,6 +418,12 @@ static void kiln_c99_register_builtin_keys(void) {
     KILN_C99_OBJECT_BUILDING_KEYS(KILN_C99_REGISTER_OBJECT_BUILDING_KEY)
 #undef KILN_C99_REGISTER_OBJECT_BUILDING_KEY
     if (registered) registered = kiln_c99_node_register_keys(process);
+    /* The well-known symbols' keys (`@@iterator`, ...): the same symbol in every realm, so a
+     * shared key, and a class prototype's `[Symbol.iterator]` a shared shape (realms issue 17). */
+    for (index = 0; registered && index < sizeof kiln_c99_well_known / sizeof *kiln_c99_well_known;
+         ++index)
+        registered = kiln_c99_register_static_keys_locked(process, &kiln_c99_well_known[index].key,
+                                                          NULL, 1);
     /* Out of memory leaves the rest to the run-time path; a later copy need not try again. */
     process->builtins_registered = 1;
     kiln_c99_process_unlock(process);

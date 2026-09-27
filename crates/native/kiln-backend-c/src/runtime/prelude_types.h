@@ -100,6 +100,7 @@ static inline int kiln_c99_typed_failed(double d) {
 #define KILN_VAL_IS_STRING(v)    (((v) & KILN_TAG_MASK) == KILN_TAG_STRING_PREFIX)
 #define KILN_VAL_IS_OBJECT(v)    (((v) & KILN_TAG_MASK) == KILN_TAG_OBJECT_PREFIX)
 #define KILN_VAL_IS_CLOSURE(v)   (((v) & KILN_TAG_MASK) == KILN_TAG_CLOSURE_PREFIX)
+#define KILN_VAL_IS_SYMBOL(v)    (((v) & KILN_TAG_MASK) == KILN_TAG_SYMBOL_PREFIX)
 #define KILN_VAL_PTR(v)          ((void *)((uint64_t)(v) & KILN_PAYLOAD_MASK))
 #define KILN_VAL_TAG_PTR(pfx, p) ((kiln_val)((pfx) | ((uint64_t)(uintptr_t)(p) & KILN_PAYLOAD_MASK)))
 #define KILN_VAL_IS_DOUBLE(v)    KILN_VAL_IS_NUMBER(v)
@@ -837,7 +838,10 @@ typedef struct kiln_shape_edge_table {
     struct kiln_shape *edges[];
 } kiln_shape_edge_table;
 /* A slot's attributes, as differences from what an assignment creates. */
-#define KILN_C99_ATTR_ENUM_FLIP 1u   /* enumerable is the opposite of an assignment's */
+/* enumerable is the opposite of an assignment's; for a reserved (`@@`) key, which walks over
+ * string keys never list, it is the program's own answer instead: the symbol is hidden
+ * (`kiln_property.symbol_hidden`) */
+#define KILN_C99_ATTR_ENUM_FLIP 1u
 #define KILN_C99_ATTR_READONLY 2u    /* not writable (an accessor always carries it) */
 #define KILN_C99_ATTR_FIXED 4u       /* not configurable */
 #define KILN_C99_ATTR_ACCESSOR 8u    /* the slot holds an accessor pair */
@@ -1237,6 +1241,12 @@ typedef struct kiln_c99_pic_entry {
      * shapes carry attributes). The hit is then the prototype's shape check and one slot load,
      * with no walk. Derived from the fields above, never learned on its own. */
     uint8_t one_step;
+    /* Set on an entry a computed site learned for one key of many (a symbol-keyed access,
+     * `kiln_c99_val_read_symbol`): it answers only for a receiver of `shape` read under `key`,
+     * which every hit compares. Such a site is found by (shape, key), so one receiver shape read
+     * under two symbols -- or under each realm's own `Symbol()` -- keeps two entries. A named
+     * site's key is its constant and it never sets this. */
+    uint8_t keyed;
     uint32_t level_token[2];
     const kiln_shape *level_shape[2];
     /* The canonical key the path was learned for. A list-mode holder is not named by a token:
@@ -1289,6 +1299,19 @@ static KILN_ALWAYS_INLINE inline const kiln_c99_pic_entry *kiln_c99_site_entry(
     uint32_t p, count = kiln_c99_site_count(site);
     for (p = 0; p < count; ++p) {
         if (kiln_c99_slot_key(&site->entries[p].shape) == shape) return &site->entries[p];
+    }
+    return NULL;
+}
+
+/* The published entry of a keyed site (`kiln_c99_pic_entry.keyed`) that answers for `shape` read
+ * under `key`, or NULL. The key is compared only after the key word matched, when the entry's
+ * other words are complete. */
+static KILN_ALWAYS_INLINE inline const kiln_c99_pic_entry *kiln_c99_site_entry_keyed(
+    const kiln_c99_site *site, const kiln_shape *shape, const kiln_string *key) {
+    uint32_t p, count = kiln_c99_site_count(site);
+    for (p = 0; p < count; ++p) {
+        if (kiln_c99_slot_key(&site->entries[p].shape) == shape && site->entries[p].key == key)
+            return &site->entries[p];
     }
     return NULL;
 }
@@ -1416,24 +1439,21 @@ static inline uint32_t kiln_c99_site_misses(const kiln_c99_site *site) {
     return KILN_C99_LOAD_ONCE(&site->misses);
 }
 
-/* A private-field site: one slot (`KILN_C99_SLOT_*`) keyed by the receiver's shape, which is
- * only ever a shared one -- a process-wide site outlives the realm, and a realm-local shape is
- * freed with it, when a later shape could take its address (ADR 0071). */
+/* A computed site's symbol-keyed cache (`kiln_c99_val_read_symbol`): a pointer to a site
+ * allocated the first time the site learns about a symbol, zero until then. */
+typedef kiln_c99_site *kiln_c99_symbol_cell;
+
+/* A private-field site: one slot (`KILN_C99_SLOT_*`) keyed by the receiver's shape. A realm-local
+ * shape -- an object that also carries a `Symbol()` key, as every `Event` does (realms issue 17) --
+ * is learned like a shared one, and the site then registers with its realm's heap, which retires
+ * the entry before it frees the shape at teardown (`kiln_c99_gc_register_private_site`), as a
+ * property site's are. `registered` is that heap's serial, a hint against registering twice. */
 typedef struct kiln_c99_private_site {
     const struct kiln_shape *shape;
     uint32_t brand_slot;
     uint32_t member_slot;
+    uint64_t registered;
 } kiln_c99_private_site;
-
-static inline void kiln_c99_private_site_learn(kiln_c99_private_site *site, const kiln_shape *shape,
-                                               uint32_t brand_slot, uint32_t member_slot) {
-    if (!shape->shared || kiln_c99_slot_key(&site->shape) == shape ||
-        !kiln_c99_slot_claim(&site->shape, 1))
-        return;
-    site->brand_slot = brand_slot;
-    site->member_slot = member_slot;
-    kiln_c99_slot_publish(&site->shape, shape);
-}
 
 /* Whether a literal site may remember `shape` and hand it to objects of any realm without the
  * transitions that would have produced it (ADR 0071). Only a *shared* shape qualifies: it is a

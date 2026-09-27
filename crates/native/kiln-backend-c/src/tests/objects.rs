@@ -192,6 +192,148 @@ int main(void) {
     );
 }
 
+/// Realms issue 17: a symbol-keyed site answers per (shape, key); an entry keyed by a realm-local
+/// symbol may hand a receiver the realm-local shape a store moves it to even from a shared shape
+/// (no other realm holds that key), and is forgotten with the realm; a shared symbol key's entry
+/// stays. A private-field site learns a realm-local shape and forgets it the same way.
+#[test]
+fn symbol_keyed_and_private_sites_learn_realm_local_shapes_and_forget_them() {
+    let generated = emit(&program(
+        vec![Constant::String("gamma".into())],
+        vec![
+            Instruction::LoadBuiltin(Builtin::Math),
+            Instruction::GetProperty(0),
+            Instruction::Return,
+        ],
+        0,
+    ))
+    .expect("a unit naming one key emits");
+    let wrapper = r#"
+static kiln_gc_heap *kiln_test_new_heap(void) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)malloc(sizeof *heap);
+    if (heap == NULL) return NULL;
+    kiln_c99_gc_heap_init(heap);
+    heap->enabled = 0;
+    kiln_c99_gc_heap_register(heap);
+    return heap;
+}
+static void kiln_test_enter(kiln_gc_heap *heap) {
+    kiln_test_heap = heap;
+    kiln_test_generation += 1;
+}
+static kiln_c99_symbol_cell kiln_test_cell;
+static kiln_c99_private_site kiln_test_private;
+int main(void) {
+    kiln_gc_heap *first;
+    kiln_gc_heap *second;
+    kiln_shape *root = kiln_c99_shape_root();
+    const kiln_string *ka, *kb, *iter, *alpha;
+    kiln_shape *sa, *sab, *salpha, *siter;
+    kiln_c99_pic_entry entry;
+    const kiln_c99_pic_entry *found;
+    kiln_c99_site plain;
+    kiln_c99_site *site;
+
+    first = kiln_test_new_heap();
+    if (first == NULL) return 1;
+    kiln_test_enter(first);
+    /* Two `Symbol()` keys (realm-local), a well-known one and a constant (shared). */
+    ka = kiln_c99_intern_pinned_key(&(kiln_string){11, KILN_STRING_LATIN1, "@@symbol:91"});
+    kb = kiln_c99_intern_pinned_key(&(kiln_string){11, KILN_STRING_LATIN1, "@@symbol:92"});
+    iter = kiln_c99_intern_static("@@iterator", 10);
+    alpha = kiln_c99_intern_static("alpha", 5);
+    if (kiln_c99_key_is_shared(ka) || kiln_c99_key_is_shared(kb)) return 2;
+    if (!kiln_c99_key_is_shared(iter) || !kiln_c99_key_is_shared(alpha)) return 3;
+    if (!kiln_c99_shape_transition(root, ka, 0, &sa) || !kiln_c99_shape_transition(sa, kb, 0, &sab) ||
+        !kiln_c99_shape_transition(root, alpha, 0, &salpha) ||
+        !kiln_c99_shape_transition(salpha, iter, 0, &siter))
+        return 4;
+    if (sa->shared || sab->shared || !salpha->shared || !siter->shared) return 5;
+
+    /* A store from the shared root to the realm-local child: refused unkeyed, taken keyed. */
+    memset(&plain, 0, sizeof plain);
+    memset(&entry, 0, sizeof entry);
+    entry.shape = root;
+    entry.transition_to = sa;
+    entry.slot = 0;
+    entry.key = ka;
+    kiln_c99_site_remember(&plain, &entry);
+    if (plain.pic_count != 0) return 6;
+    kiln_c99_symbol_site_remember(&kiln_test_cell, &entry, ka);
+    site = kiln_test_cell;
+    if (site == NULL || kiln_c99_site_entry_keyed(site, root, ka) == NULL) return 7;
+    if (site->registered != first->serial) return 8;
+
+    /* One shape read under two keys keeps two entries; each answers only for its own key. */
+    memset(&entry, 0, sizeof entry);
+    entry.shape = sab;
+    entry.slot = 0;
+    kiln_c99_symbol_site_remember(&kiln_test_cell, &entry, ka);
+    memset(&entry, 0, sizeof entry);
+    entry.shape = sab;
+    entry.slot = 1;
+    kiln_c99_symbol_site_remember(&kiln_test_cell, &entry, kb);
+    found = kiln_c99_site_entry_keyed(site, sab, ka);
+    if (found == NULL || found->slot != 0) return 9;
+    found = kiln_c99_site_entry_keyed(site, sab, kb);
+    if (found == NULL || found->slot != 1) return 10;
+    if (kiln_c99_site_entry_keyed(site, sab, iter) != NULL) return 11;
+    /* Relearning one key's answer replaces that entry, not the other key's. */
+    memset(&entry, 0, sizeof entry);
+    entry.shape = sab;
+    entry.slot = 0;
+    kiln_c99_symbol_site_remember(&kiln_test_cell, &entry, ka);
+    if (site->pic_count != 3) return 12;
+
+    /* A shared shape read under a shared symbol key: kept across realms. */
+    memset(&entry, 0, sizeof entry);
+    entry.shape = siter;
+    entry.slot = 1;
+    kiln_c99_symbol_site_remember(&kiln_test_cell, &entry, iter);
+    if (site->pic_count != 4) return 13;
+
+    /* A private site learns a realm-local shape, registering with the realm first. */
+    kiln_c99_private_site_learn(&kiln_test_private, sab, UINT32_MAX, 1);
+    if (kiln_c99_slot_key(&kiln_test_private.shape) != sab ||
+        kiln_test_private.registered != first->serial)
+        return 14;
+
+    second = kiln_test_new_heap();
+    if (second == NULL) return 15;
+    kiln_test_enter(second);
+    /* Another realm's `Symbol()` of the same description is another key: no answer. */
+    if (kiln_c99_site_entry_keyed(site, root,
+                                  kiln_c99_intern_pinned_key(
+                                      &(kiln_string){11, KILN_STRING_LATIN1, "@@symbol:93"})) != NULL)
+        return 16;
+    if (kiln_c99_site_entry_keyed(site, siter, iter) == NULL) return 17;
+
+    /* The first realm goes: every entry naming its keys or shapes is retired, the shared one
+     * stays, and so does nothing in the private site. */
+    kiln_c99_gc_teardown_begin(first);
+    kiln_c99_gc_teardown_end(first);
+    if (kiln_c99_site_entry_keyed(site, root, ka) != NULL ||
+        kiln_c99_site_entry_keyed(site, sab, ka) != NULL ||
+        kiln_c99_site_entry_keyed(site, sab, kb) != NULL)
+        return 18;
+    found = kiln_c99_site_entry_keyed(site, siter, iter);
+    if (found == NULL || found->slot != 1) return 19;
+    if (!KILN_C99_SLOT_IS_RETIRED(kiln_test_private.shape) || kiln_test_private.registered != 0)
+        return 20;
+    kiln_c99_gc_teardown_begin(second);
+    kiln_c99_gc_teardown_end(second);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "symbol-sites-forget-local");
+    assert!(
+        run.status.success(),
+        "a symbol-keyed or private site and a torn-down realm's keys and shapes ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
 /// Issue 04 step 3b: definitions keep an object shaped, with the attributes the list-mode record
 /// would carry recorded in its shape; a transition is keyed by (key, attributes); dictionary mode
 /// materializes the same records; a method cache names a shaped prototype one step up.

@@ -143,6 +143,47 @@ static kiln_value kiln_c99_property_key(kiln_value key) {
     return kiln_c99_text(key);
 }
 
+/* The canonical key (ADR 0047) a symbol names a property under, or NULL when the key table cannot
+ * grow. A symbol the program made carries its canonical key already -- `Symbol()` pins a
+ * realm-local one, `Symbol.for` a shared one -- so the property paths skip the hash and probe
+ * `kiln_c99_intern_key` would spend finding the pointer they were handed (realms issue 17). A
+ * well-known symbol's key is a static header the prelude spelt; its canonical pointer is the
+ * shared key `kiln_c99_register_builtin_keys` made of that spelling before the first realm, looked
+ * up once per process and kept beside the table. Well-known symbols are the ones with a byte
+ * description; a program's keep theirs as a value. */
+static const kiln_string *kiln_c99_well_known_ikeys[sizeof kiln_c99_well_known /
+                                                    sizeof *kiln_c99_well_known];
+
+static __attribute__((noinline)) const kiln_string *kiln_c99_well_known_ikey(
+    const kiln_symbol *symbol) {
+    size_t known = sizeof kiln_c99_well_known / sizeof *kiln_c99_well_known;
+    uintptr_t first = (uintptr_t)&kiln_c99_well_known[0];
+    uintptr_t at = (uintptr_t)symbol;
+    const kiln_string *ikey;
+    if (at >= first && at < (uintptr_t)&kiln_c99_well_known[known]) {
+        size_t index = (at - first) / sizeof *kiln_c99_well_known;
+        ikey = __atomic_load_n(&kiln_c99_well_known_ikeys[index], __ATOMIC_ACQUIRE);
+        if (ikey != NULL) return ikey;
+        ikey = kiln_c99_intern_key(symbol->key);
+        /* One word, the same in every realm: only a shared key may be kept process-wide. */
+        if (ikey != NULL && kiln_c99_key_is_shared(ikey))
+            __atomic_store_n(&kiln_c99_well_known_ikeys[index], ikey, __ATOMIC_RELEASE);
+        return ikey;
+    }
+    return kiln_c99_intern_key(symbol->key);
+}
+
+static inline __attribute__((always_inline)) const kiln_string *kiln_c99_symbol_ikey(const kiln_symbol *symbol) {
+    if (KILN_LIKELY(symbol->description == NULL)) return symbol->key;
+    return kiln_c99_well_known_ikey(symbol);
+}
+
+/* A computed key's canonical pointer when it is a symbol, else NULL: the `ikey` argument of the
+ * headed property paths, which intern the spelling themselves when handed NULL. */
+static const kiln_string *kiln_c99_property_ikey(kiln_value key) {
+    return key.tag == KILN_VALUE_SYMBOL ? kiln_c99_symbol_ikey(kiln_c99_symbol_of(key)) : NULL;
+}
+
 /* `Symbol(description)`. Two calls make two different symbols even given the same description,
  * so the identity is the allocation's and the reserved key carries a serial. */
 static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
@@ -243,11 +284,13 @@ static int kiln_c99_symbol_for(kiln_value *out, kiln_value key) {
     kiln_string registered_key = {0, KILN_STRING_LATIN1, NULL};
     kiln_value description;
     kiln_symbol *symbol;
-    char *property_key;
+    uint16_t *property_units;
     kiln_string property_view;
     static const char property_prefix[] = "@@symbol-for:";
+    size_t prefix_len = sizeof property_prefix - 1;
     uint64_t id;
-    size_t property_len = (sizeof property_prefix - 1) + sizeof id;
+    size_t property_len;
+    size_t index;
     if (text.tag != KILN_VALUE_STRING || text.ptr == NULL) return KILN_C99_OUT_OF_MEMORY;
     text_key = (const kiln_string *)text.ptr;
     if (kiln_realm_symbol_for(text_key, &id) != KILN_C99_OK) {
@@ -260,25 +303,46 @@ static int kiln_c99_symbol_for(kiln_value *out, kiln_value key) {
     /* Copy the provider answer before any later allocation can change the active realm scratch. */
     description = kiln_c99_copy_symbol_key(&registered_key);
     if (description.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+    /* The property key is spelt by the registry key itself, not by the realm's registry id: the
+     * registry is one per realm and so are its ids, but `Symbol.for(k)` is the same symbol in
+     * every realm, and a key spelt the same in every realm is a shared key (ADR 0071) -- its
+     * shapes and the caches naming them serve every realm, as a constant name's do. */
+    if (registered_key.unit_len > UINT32_MAX - prefix_len) return KILN_C99_OUT_OF_MEMORY;
+    property_len = prefix_len + registered_key.unit_len;
+    property_units = (uint16_t *)malloc(property_len * sizeof *property_units);
+    if (property_units == NULL) return KILN_C99_OUT_OF_MEMORY;
+    for (index = 0; index < prefix_len; ++index)
+        property_units[index] = (unsigned char)property_prefix[index];
+    {
+        /* `description` is the registered key's copy; the provider's header may not outlive the
+         * allocations below. */
+        const kiln_string *copied = (const kiln_string *)description.ptr;
+        for (index = 0; index < copied->unit_len; ++index)
+            property_units[prefix_len + index] = (uint16_t)kiln_string_unit_at(copied, index);
+        property_len = prefix_len + copied->unit_len;
+    }
+    {
+        int wide = 0;
+        for (index = prefix_len; index < property_len; ++index) wide |= property_units[index] > 0xFF;
+        if (wide) {
+            property_view.flags = KILN_STRING_UTF16;
+            property_view.data = property_units;
+        } else {
+            /* Narrowed in place: a Latin-1 spelling is the canonical form of a narrow key. */
+            unsigned char *narrow = (unsigned char *)property_units;
+            for (index = 0; index < property_len; ++index) narrow[index] = (unsigned char)property_units[index];
+            property_view.flags = KILN_STRING_LATIN1;
+            property_view.data = narrow;
+        }
+        property_view.unit_len = (uint32_t)property_len;
+    }
     symbol = (kiln_symbol *)kiln_c99_gc_alloc(KILN_GC_SYMBOL, sizeof *symbol);
-    if (symbol == NULL) return KILN_C99_OUT_OF_MEMORY;
-    property_key = (char *)malloc(property_len);
-    if (property_key == NULL) {
-        kiln_c99_gc_release(symbol);
+    if (symbol == NULL) {
+        free(property_units);
         return KILN_C99_OUT_OF_MEMORY;
     }
-    memcpy(property_key, property_prefix, sizeof property_prefix - 1);
-    memcpy(property_key + sizeof property_prefix - 1, &id, sizeof id);
-    if (property_len > UINT32_MAX) {
-        free(property_key);
-        kiln_c99_gc_release(symbol);
-        return KILN_C99_OUT_OF_MEMORY;
-    }
-    property_view.unit_len = (uint32_t)property_len;
-    property_view.flags = KILN_STRING_LATIN1;
-    property_view.data = property_key;
-    symbol->key = kiln_c99_intern_pinned_key(&property_view);
-    free(property_key);
+    symbol->key = kiln_c99_intern_shared_key(&property_view);
+    free(property_units);
     if (symbol->key == NULL) {
         kiln_c99_gc_release(symbol);
         return KILN_C99_OUT_OF_MEMORY;

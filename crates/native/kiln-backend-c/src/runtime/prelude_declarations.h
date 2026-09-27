@@ -411,6 +411,8 @@ extern int kiln_c99_val_set_private_fast(kiln_val receiver, kiln_val brand, kiln
                                          kiln_c99_private_site *site);
 extern int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val key, int depth, kiln_value *thrown, kiln_val *out);
 extern int kiln_c99_val_write_element(kiln_host *host, kiln_val target, kiln_val key, kiln_val value, int strict, int depth, kiln_value *thrown);
+extern int kiln_c99_val_read_symbol(kiln_host *host, kiln_val target, kiln_val key, int depth, kiln_value *thrown, kiln_c99_symbol_cell *cell, kiln_val *out);
+extern int kiln_c99_val_write_symbol(kiln_host *host, kiln_val target, kiln_val key, kiln_val value, int strict, int depth, kiln_value *thrown, kiln_c99_symbol_cell *cell);
 extern int kiln_c99_val_call_method(kiln_host *host, kiln_val receiver, const kiln_val *args, size_t argc, const char *key, size_t key_len, int depth, kiln_value *thrown, kiln_c99_site *site, const char *inst_site, size_t inst_idx, const char *inst_op, kiln_val *out);
 extern int kiln_c99_val_call_method_key(kiln_host *host, kiln_val receiver, const kiln_val *args, size_t argc, const kiln_string *key, int depth, kiln_value *thrown, kiln_c99_site *site, const char *inst_site, size_t inst_idx, const char *inst_op, kiln_val *out);
 extern int kiln_c99_val_invoke_cached_method(kiln_host *host, uint64_t method_code, kiln_val receiver, const kiln_val *args, size_t argc, int depth, kiln_value *thrown, kiln_val *out);
