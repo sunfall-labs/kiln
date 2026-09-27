@@ -664,6 +664,41 @@ fn a_compound_member_assignment_evaluates_its_receiver_once() {
     assert!(program.code.contains(&Instruction::Dup));
 }
 
+#[test]
+fn constant_interning_preserves_first_use_order_and_number_bits() {
+    let bits = [
+        0.0f64.to_bits(),
+        (-0.0f64).to_bits(),
+        0x7ff8_0000_0000_0001,
+        0x7ff8_0000_0000_0002,
+        f64::INFINITY.to_bits(),
+    ];
+    let body = bits
+        .iter()
+        .chain(bits.iter().rev())
+        .map(|&bits| statement(StatementKind::Expression(number(f64::from_bits(bits)))))
+        .collect();
+    let input = module(body);
+    let first = compile(&input).expect("compiles");
+    let second = compile(&input).expect("compiles again");
+    let numbers: Vec<_> = first
+        .constants
+        .iter()
+        .filter_map(|constant| match constant {
+            Constant::Number(bits) => Some(*bits),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        numbers, bits,
+        "signed zeros and distinct NaN payloads stay distinct"
+    );
+    assert_eq!(
+        first, second,
+        "lookup hashing must not change bytecode order"
+    );
+}
+
 /// Property names repeat across a program, so they are interned rather than carried inline.
 #[test]
 fn repeated_property_names_share_one_constant() {
