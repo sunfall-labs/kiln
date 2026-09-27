@@ -1020,6 +1020,9 @@ fn runtime_prelude_size() {
     // the nursery's mark and finaliser bitmaps and bitmap settle, the prefetching mark queue,
     // inline promise reactions, direct timer callbacks and `Promise.all`'s bound steps (+394,
     // about half of it comments). One delta over one base, so nothing is emitted twice.
+    // Step 5 adds its own (measured at 51,760 lines over step 3b, about 52,100 with issue 15): the realm context struct,
+    // the diagnostic fields behind their names, the unit-block API and its marking and freeing
+    // (+~140, most of it the comments saying what is per realm, per thread and per process).
     const FLOOR_LINES: usize = 27_100;
     const CEILING_LINES: usize = 52_300;
 

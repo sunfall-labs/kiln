@@ -125,19 +125,21 @@ static inline int kiln_string_equal(const kiln_string *left, const kiln_string *
 static inline int kiln_string_compare_units(const kiln_string *left, const kiln_string *right) {
 static inline size_t kiln_string_unit_width(const kiln_string *string) {
 static inline int kiln_string_storage_size(uint32_t unit_len, uint32_t flags, size_t *out) {
-static const char *kiln_c99_diagnostic_site = NULL;
-static const char *kiln_c99_diagnostic_operation = NULL;
-static size_t kiln_c99_diagnostic_instruction = 0;
-static size_t kiln_c99_diagnostic_depth = 0;
-static uint64_t kiln_c99_diagnostic_method = 0;
-static uint64_t kiln_c99_diagnostic_receiver_tag = 0;
-static int kiln_c99_diagnostic_has_method = 0;
-static const char *kiln_c99_diagnostic_detail = NULL;
-static const char *kiln_c99_diagnostic_function = NULL;
-static size_t kiln_c99_diagnostic_function_len = 0;
-static const kiln_string *kiln_c99_diagnostic_function_key = NULL;
-static char kiln_c99_diagnostic_compose[128];
-static int kiln_c99_diagnostic_active_depth = 0;
+typedef struct kiln_refusal_diagnostic {
+#define kiln_c99_diagnostic_site (kiln_c99_diagnostic.site)
+#define kiln_c99_diagnostic_operation (kiln_c99_diagnostic.operation)
+#define kiln_c99_diagnostic_instruction (kiln_c99_diagnostic.instruction)
+#define kiln_c99_diagnostic_depth (kiln_c99_diagnostic.depth)
+#define kiln_c99_diagnostic_method (kiln_c99_diagnostic.method)
+#define kiln_c99_diagnostic_receiver_tag (kiln_c99_diagnostic.receiver_tag)
+#define kiln_c99_diagnostic_has_method (kiln_c99_diagnostic.has_method)
+#define kiln_c99_diagnostic_detail (kiln_c99_diagnostic.detail)
+#define kiln_c99_diagnostic_function (kiln_c99_diagnostic.function)
+#define kiln_c99_diagnostic_function_len (kiln_c99_diagnostic.function_len)
+#define kiln_c99_diagnostic_function_key (kiln_c99_diagnostic.function_key)
+#define kiln_c99_diagnostic_compose (kiln_c99_diagnostic.compose)
+static _Thread_local kiln_refusal_diagnostic kiln_c99_diagnostic;
+static _Thread_local int kiln_c99_diagnostic_active_depth = 0;
 static KILN_COLD int kiln_c99_refuse(const char *lacked) {
 static KILN_COLD int kiln_c99_refuse_named(const char *lacked, const char *subject, size_t subject_len) {
 static KILN_COLD void kiln_c99_note_refusal(const char *site, size_t instruction,
@@ -929,7 +931,9 @@ typedef struct kiln_closure {
 typedef struct kiln_method_store {
 typedef enum kiln_native_prototype_surface {
 typedef struct kiln_native_constructor {
-static kiln_native_constructor kiln_c99_native_constructors[] = {
+static const kiln_native_constructor kiln_c99_native_constructors[] = {
+typedef struct kiln_c99_unit {
+typedef struct kiln_c99_unit_cache {
 #define KILN_SHAPE_MAX_FAST_PROPERTIES 32
 struct kiln_shape;
 typedef struct kiln_shape_transition {
@@ -1533,16 +1537,18 @@ static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t co
 #define KILN_C99_FFI_F64 10u
 #define KILN_C99_FFI_POINTER 11u
 #define KILN_C99_FFI_BOOL 12u
+struct kiln_ffi_function_meta;
+struct kiln_ffi_callback_meta;
+typedef struct kiln_c99_unit_block {
+typedef struct kiln_c99_realm_state {
+static kiln_c99_realm_state *kiln_c99_realm(void);
 typedef struct kiln_ffi_function_meta {
 typedef struct kiln_ffi_callback_meta {
-static kiln_ffi_function_meta *kiln_c99_ffi_functions;
-static kiln_ffi_callback_meta *kiln_c99_ffi_callbacks;
-static uint32_t kiln_c99_ffi_next_root = UINT32_C(0x80000000);
-static int kiln_c99_ffi_callback_status;
-static kiln_host *kiln_c99_ffi_callback_host;
-static kiln_value *kiln_c99_ffi_callback_thrown;
-static int kiln_c99_ffi_callback_depth;
-static uint32_t kiln_c99_ffi_callback_active;
+static _Thread_local int kiln_c99_ffi_callback_status;
+static _Thread_local kiln_host *kiln_c99_ffi_callback_host;
+static _Thread_local kiln_value *kiln_c99_ffi_callback_thrown;
+static _Thread_local int kiln_c99_ffi_callback_depth;
+static _Thread_local uint32_t kiln_c99_ffi_callback_active;
 static int kiln_c99_intl_segment_raw(kiln_value *out, const kiln_value *args, size_t argc,
 static int kiln_c99_uint8_to_hex_raw(kiln_value *out, const kiln_value *args, size_t argc,
 static inline char kiln_c99_base64_char(uint8_t value, int url) {
@@ -1684,6 +1690,12 @@ static kiln_gc_heap *kiln_c99_gc_heap_uncached(void);
 static int kiln_c99_run_promise_jobs(void *context, void *host, void *thrown);
 static int kiln_c99_promise_jobs_pending(void *context);
 static kiln_gc_heap *kiln_c99_gc_heap(void) {
+static kiln_c99_realm_state *kiln_c99_realm(void) {
+static kiln_val *kiln_c99_unit_vals_slow(kiln_c99_unit *unit, kiln_c99_unit_cache *cache) {
+#ifndef KILN_C99_UNIT_VALS_DEFINED
+#define KILN_C99_UNIT_VALS_DEFINED
+static inline kiln_val *kiln_c99_unit_vals(kiln_c99_unit *unit, kiln_c99_unit_cache *cache) {
+#endif
 #ifndef KILN_C99_REALM_GENERATION_DEFINED
 #define KILN_C99_REALM_GENERATION_DEFINED
 static inline uint64_t kiln_c99_realm_generation(void) {
@@ -1825,6 +1837,8 @@ static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
 static size_t kiln_c99_nursery_settle(kiln_gc_heap *heap, kiln_nursery_chunk *chunk, int orphan) {
 static void kiln_c99_nursery_spare(kiln_gc_heap *heap, kiln_nursery_chunk *chunk) {
 static void kiln_c99_gc_mark_promise_jobs(kiln_gc_heap *heap) {
+static void kiln_c99_gc_mark_realm(kiln_gc_heap *heap) {
+static void kiln_c99_realm_free(kiln_c99_realm_state *realm) {
 static void kiln_c99_gc_collect(void *opaque, int force) {
 static void kiln_c99_shape_retain(kiln_shape *shape) {
 static void kiln_c99_gc_retain_survivor(kiln_gc_block *block) {
@@ -1898,7 +1912,7 @@ static int kiln_c99_typed_prototype_kind(uint64_t builtin, kiln_typed_kind *kind
 #define KILN_C99_BYTES_CACHE 8
 #define KILN_C99_BYTES_CACHE_MIN ((size_t)64 * 1024)
 typedef struct kiln_bytes_entry {
-static kiln_bytes_entry kiln_c99_bytes_cache[KILN_C99_BYTES_CACHE];
+static _Thread_local kiln_bytes_entry kiln_c99_bytes_cache[KILN_C99_BYTES_CACHE];
 static void kiln_c99_bytes_retire(uint8_t *bytes, size_t size) {
 static int kiln_c99_new_typed_buffer_ex(kiln_value *out, size_t byte_length, int zeroed) {
 static int kiln_c99_new_typed_buffer(kiln_value *out, size_t byte_length) {
@@ -1983,7 +1997,7 @@ static int kiln_c99_random(kiln_host *host, double *out) {
 static int kiln_c99_hex_digit(char character) {
 static int kiln_c99_append_hex(kiln_text *text, unsigned value, int width) {
 static int kiln_c99_valid_utf8(const char *bytes, size_t len) {
-static kiln_node_response *kiln_c99_active_http_response = NULL;
+static _Thread_local kiln_node_response *kiln_c99_active_http_response = NULL;
 #define KILN_C99_REALM_SLOT_URL_PROTOTYPE UINT32_C(6)
 #define KILN_C99_REALM_SLOT_URL_SEARCH_PARAMS_PROTOTYPE UINT32_C(7)
 #define KILN_C99_REALM_SLOT_URL_CLASS UINT32_C(8)
@@ -2021,18 +2035,18 @@ static int kiln_c99_number_in_radix(kiln_value *out, double value, int radix) {
 static const char *kiln_c99_builtin_name(uint64_t builtin) {
 static int kiln_c99_builtin_length(uint64_t builtin, double *out) {
 static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
-static kiln_value kiln_c99_new_target;
-static int kiln_c99_inheriting_new_target;
-static int kiln_c99_typed_status;
-static kiln_value kiln_c99_typed_thrown;
-static kiln_value kiln_c99_adopted_this;
-static const kiln_val *kiln_c99_frame_args;
-static size_t kiln_c99_frame_argc;
-static kiln_value kiln_c99_captured_arguments;
-static int kiln_c99_frame_is_arrow;
-static kiln_value kiln_c99_frame_arguments_object;
-static int kiln_c99_frame_mapped_arguments;
-static kiln_value kiln_c99_frame_callee;
+static _Thread_local kiln_value kiln_c99_new_target;
+static _Thread_local int kiln_c99_inheriting_new_target;
+static _Thread_local int kiln_c99_typed_status;
+static _Thread_local kiln_value kiln_c99_typed_thrown;
+static _Thread_local kiln_value kiln_c99_adopted_this;
+static _Thread_local const kiln_val *kiln_c99_frame_args;
+static _Thread_local size_t kiln_c99_frame_argc;
+static _Thread_local kiln_value kiln_c99_captured_arguments;
+static _Thread_local int kiln_c99_frame_is_arrow;
+static _Thread_local kiln_value kiln_c99_frame_arguments_object;
+static _Thread_local int kiln_c99_frame_mapped_arguments;
+static _Thread_local kiln_value kiln_c99_frame_callee;
 static int kiln_c99_build_arguments_object(kiln_value *out) {
 static int kiln_c99_visible_arguments(kiln_value *out) {
 #define KILN_C99_REALM_SLOT_GLOBALS UINT32_C(1)
@@ -2134,9 +2148,6 @@ KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_async_dispose, "@@asyncDispose");
 #define KILN_C99_WELL_KNOWN(key, description, description_len) \
 static const kiln_symbol kiln_c99_well_known[] = {
 #undef KILN_C99_WELL_KNOWN
-static kiln_value *kiln_c99_symbols;
-static size_t kiln_c99_symbol_count;
-static size_t kiln_c99_symbol_capacity;
 static int kiln_c99_remember_symbol(kiln_value symbol) {
 static int kiln_c99_symbol_of_key_view(const kiln_string *key, kiln_value *out) {
 static int kiln_c99_symbol_of_key(const char *key, size_t key_len, kiln_value *out) {
@@ -2309,7 +2320,6 @@ static size_t kiln_c99_string_length(kiln_value value) {
 static double kiln_c99_array_index(kiln_value key) {
 static int kiln_c99_prototype_object(kiln_value function, kiln_value *out) {
 static int kiln_c99_callable_prototype(kiln_value callable, kiln_value *out) {
-static kiln_value kiln_c99_array_unscopables;
 int kiln_c99_get_array_unscopables(kiln_value *out) {
 static int kiln_c99_function_store(kiln_value function, kiln_value *out) {
 static kiln_method_store *kiln_c99_fixture_method_stores;

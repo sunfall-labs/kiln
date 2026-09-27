@@ -1334,3 +1334,108 @@ fn executable_cached_shape_object_literal_executes_correctly() {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+/// Realms issue 04 step 5: a unit's module globals are the realm's. Two heaps on one thread, the
+/// way a thread hosting several realms has them, each run the same unit's body: each gets its own
+/// block, allocated on its first entry (a realm that never ran the body sees nothing), and a
+/// closure the first realm made still reads the first realm's global after the second realm ran
+/// the body and stored its own. Before step 5 both read one static array, so the closure saw the
+/// second realm's object -- which that realm's teardown would then free under it.
+#[test]
+fn two_realms_running_one_unit_keep_their_own_module_globals() {
+    let mut top = program(
+        Vec::new(),
+        vec![
+            Instruction::NewObject { count: 0 },
+            Instruction::StoreGlobal(0),
+            Instruction::MakeFunction(0),
+            Instruction::StoreGlobal(1),
+            Instruction::LoadGlobal(1),
+            Instruction::Return,
+        ],
+        2,
+    );
+    let mut read = function(vec![Instruction::LoadGlobal(0), Instruction::Return]);
+    read.name = Some("read".to_owned());
+    top.functions = vec![read];
+    let generated = emit(&top).expect("a unit with a module global emits");
+    let symbol = &generated.symbol;
+    assert!(
+        generated.source.contains(&format!("#define {symbol}_globals ({symbol}_unit_vals())")),
+        "module globals are reached through the realm's block"
+    );
+    assert!(
+        generated.source.contains("kiln_val *const kiln_mg = "),
+        "a function reading its module's globals asks for the block once, at entry"
+    );
+    let wrapper = format!(
+        r#"
+static kiln_gc_heap *kiln_test_new_heap(void) {{
+    kiln_gc_heap *heap = (kiln_gc_heap *)malloc(sizeof *heap);
+    if (heap == NULL) return NULL;
+    kiln_c99_gc_heap_init(heap);
+    heap->enabled = 0;
+    kiln_c99_gc_heap_register(heap);
+    return heap;
+}}
+static void kiln_test_enter(kiln_gc_heap *heap) {{
+    kiln_test_heap = heap;
+    kiln_test_generation += 1;
+}}
+int main(void) {{
+    kiln_gc_heap *first;
+    kiln_gc_heap *second;
+    kiln_value closure_one, closure_two, read_one, read_two, thrown = kiln_c99_undefined();
+    kiln_val global_one, global_two;
+    first = kiln_test_new_heap();
+    second = kiln_test_new_heap();
+    if (first == NULL || second == NULL) return 1;
+
+    kiln_test_enter(first);
+    if ({symbol}_body(NULL, &closure_one) != KILN_C99_OK) return 2;
+    if ({symbol}_globals[1] == 0) return 20;
+    global_one = {symbol}_globals[0];
+    if (!KILN_VAL_IS_OBJECT(global_one)) return 3;
+    if ({symbol}_unit.id == 0 || first->realm.units == NULL ||
+        first->realm.units[{symbol}_unit.id] == NULL) return 4;
+
+    /* A realm that has not run the body has an empty block of its own. */
+    kiln_test_enter(second);
+    if ({symbol}_globals[0] != 0) return 5;
+    if ({symbol}_body(NULL, &closure_two) != KILN_C99_OK) return 6;
+    global_two = {symbol}_globals[0];
+    if (!KILN_VAL_IS_OBJECT(global_two) || global_two == global_one) return 7;
+
+    /* Back in the first realm: its global, through its own closure and directly. */
+    kiln_test_enter(first);
+    if ({symbol}_globals[0] != global_one) return 8;
+    closure_one = kiln_val_to_boundary({symbol}_globals[1]);
+    if (kiln_c99_call(NULL, &read_one, closure_one, kiln_c99_undefined(), NULL, 0, 0, &thrown) !=
+        KILN_C99_OK) return 9;
+    if (read_one.bits != kiln_val_to_boundary(global_one).bits) return 10;
+    kiln_test_enter(second);
+    closure_two = kiln_val_to_boundary({symbol}_globals[1]);
+    if (kiln_c99_call(NULL, &read_two, closure_two, kiln_c99_undefined(), NULL, 0, 0, &thrown) !=
+        KILN_C99_OK) return 11;
+    if (read_two.bits != kiln_val_to_boundary(global_two).bits) return 12;
+
+    /* The block is the heap's: marked with it, freed with it. */
+    if (first->realm.units[{symbol}_unit.id]->val_count != 2) return 13;
+    kiln_c99_gc_teardown_begin(first);
+    kiln_c99_gc_teardown_end(first);
+    kiln_test_enter(second);
+    if ({symbol}_globals[0] != global_two) return 14;
+    kiln_c99_gc_teardown_begin(second);
+    kiln_c99_gc_teardown_end(second);
+    return 0;
+}}
+"#
+    );
+    let run = run_with_main(&generated, &wrapper, "two-realms-module-globals");
+    assert!(
+        run.status.success(),
+        "two realms shared a unit's module globals ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}

@@ -435,6 +435,9 @@ typedef struct kiln_gc_heap {
      * realm's (Rust); this count is what `__kilnJobsPending` reads to answer "would a checkpoint
      * run anything now" without a call across the private ABI. */
     size_t next_ticks_queued;
+    /* The realm context (ADR 0070, realms issue 04 step 5; `foundation.c`): the runtime's realm
+     * state and every unit's module block, owned, marked and freed by this heap. */
+    kiln_c99_realm_state realm;
 } kiln_gc_heap;
 
 static const kiln_gc_hooks kiln_c99_gc_hooks;
@@ -477,6 +480,9 @@ typedef struct kiln_shared_state {
     /* The last layout token issued to a list-mode object an inline cache relies on (see
      * `kiln_object.layout_token`); tokens are never reused. */
     uint64_t next_layout_token;
+    /* The last id handed to a compiled unit (`kiln_c99_unit`): the unit's row in every realm's
+     * table of module blocks. Never reused. */
+    uint32_t next_unit_id;
     kiln_shared_key_table *keys;
     /* The empty key, headed like every other so `kiln_c99_key_len` reads zero from it. One for the
      * process rather than one per unit, so "" is one key across units too. */
@@ -740,6 +746,8 @@ static void kiln_c99_gc_heap_init(kiln_gc_heap *heap) {
     }
     kiln_c99_nursery_init(&heap->nursery);
     if (heap->nursery.active) kiln_c99_gc_bound(heap, heap->nursery.region, heap->nursery.capacity);
+    /* `node:ffi` callback roots take value-slot keys above the realm's singleton slots. */
+    heap->realm.ffi_next_root = UINT32_C(0x80000000);
 }
 
 /* Diagnostics stay off the locale-sensitive printf family (decision recorded beside
@@ -973,6 +981,80 @@ static kiln_gc_heap *kiln_c99_gc_heap(void) {
     cache->generation = generation;
     return heap;
 }
+
+/* The realm context of the realm this thread is in (see `kiln_c99_realm_state`). Outside any
+ * realm -- the prelude's own tests -- it is the fallback heap's, as the statics it replaces were
+ * one per process; and when no heap could be made at all, the fallback's too, rather than NULL. */
+static kiln_c99_realm_state *kiln_c99_realm(void) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    return KILN_LIKELY(heap != NULL) ? &heap->realm : &kiln_c99_gc_fallback.realm;
+}
+
+/* A compiled unit's block in this thread's realm, made on the realm's first entry into the unit
+ * (see `kiln_c99_unit`). The slow half of `kiln_c99_unit_vals`: taken once per realm switch on
+ * this thread, then the cache answers until the generation moves. */
+static kiln_val *kiln_c99_unit_vals_slow(kiln_c99_unit *unit, kiln_c99_unit_cache *cache) {
+    kiln_gc_heap *heap;
+    kiln_c99_realm_state *realm;
+    kiln_c99_unit_block *block;
+    uint32_t id = __atomic_load_n(&unit->id, __ATOMIC_ACQUIRE);
+    if (id == 0) {
+        uint32_t fresh =
+            __atomic_add_fetch(&kiln_c99_process()->next_unit_id, 1u, __ATOMIC_RELAXED);
+        uint32_t expected = 0;
+        id = __atomic_compare_exchange_n(&unit->id, &expected, fresh, 0, __ATOMIC_ACQ_REL,
+                                         __ATOMIC_ACQUIRE)
+                 ? fresh
+                 : expected;
+    }
+    if (cache->generation_slot == NULL) cache->generation_slot = kiln_realm_generation_slot();
+    /* Asked before the generation is read: attaching the realm's heap moves it. */
+    heap = kiln_c99_gc_heap();
+    realm = heap != NULL ? &heap->realm : NULL;
+    if (realm != NULL && id >= realm->unit_capacity) {
+        size_t capacity = realm->unit_capacity < 16 ? 16 : realm->unit_capacity;
+        kiln_c99_unit_block **grown;
+        while (capacity <= id) capacity *= 2;
+        grown = (kiln_c99_unit_block **)realloc(realm->units, capacity * sizeof *grown);
+        if (grown == NULL) {
+            realm = NULL;
+        } else {
+            memset(grown + realm->unit_capacity, 0,
+                   (capacity - realm->unit_capacity) * sizeof *grown);
+            realm->units = grown;
+            realm->unit_capacity = capacity;
+        }
+    }
+    block = realm != NULL ? realm->units[id] : NULL;
+    if (realm != NULL && block == NULL) {
+        block = (kiln_c99_unit_block *)calloc(
+            1, sizeof *block + (size_t)unit->val_count * sizeof(kiln_val));
+        if (block != NULL) {
+            block->val_count = unit->val_count;
+            realm->units[id] = block;
+        }
+    }
+    if (block == NULL) {
+        /* A unit's module state was a static array that could not fail to exist; the block that
+         * replaces it has nowhere to fail to. */
+        fputs("kiln: out of memory for a module's realm state\n", stderr);
+        abort();
+    }
+    if (cache->generation_slot != NULL) {
+        cache->generation = *cache->generation_slot;
+        cache->vals = block->vals;
+    }
+    return block->vals;
+}
+
+#ifndef KILN_C99_UNIT_VALS_DEFINED
+#define KILN_C99_UNIT_VALS_DEFINED
+static inline kiln_val *kiln_c99_unit_vals(kiln_c99_unit *unit, kiln_c99_unit_cache *cache) {
+    const uint64_t *slot = cache->generation_slot;
+    if (KILN_LIKELY(slot != NULL && *slot == cache->generation)) return cache->vals;
+    return kiln_c99_unit_vals_slow(unit, cache);
+}
+#endif
 
 /* The generation of the realm this thread is in: the word `kiln_c99_gc_heap` trusts its heap
  * pointer under, for any other cache in compiled C that must not outlive the realm it learned
@@ -3659,6 +3741,45 @@ static void kiln_c99_gc_mark_promise_jobs(kiln_gc_heap *heap) {
     }
 }
 
+/* The realm context's roots: its symbols, its built-in objects, and every unit's module block.
+ * Not marked at teardown: nothing here outlives the realm. */
+static void kiln_c99_gc_mark_realm(kiln_gc_heap *heap) {
+    kiln_c99_realm_state *realm = &heap->realm;
+    size_t index;
+    kiln_c99_gc_mark_values(heap, realm->symbols, realm->symbol_count);
+    kiln_c99_gc_mark_value(heap, &realm->array_unscopables);
+    kiln_c99_gc_mark_values(heap, realm->native_prototypes,
+                            sizeof realm->native_prototypes / sizeof *realm->native_prototypes);
+    for (index = 0; index < realm->unit_capacity; ++index) {
+        const kiln_c99_unit_block *block = realm->units[index];
+        if (block != NULL) kiln_c99_gc_mark_vals(heap, block->vals, block->val_count);
+    }
+}
+
+/* Free what the realm context owns outside the collector, with the heap (teardown). */
+static void kiln_c99_realm_free(kiln_c99_realm_state *realm) {
+    size_t index;
+    free(realm->symbols);
+    realm->symbols = NULL;
+    realm->symbol_count = realm->symbol_capacity = 0;
+    while (realm->ffi_functions != NULL) {
+        kiln_ffi_function_meta *next = realm->ffi_functions->next;
+        free(realm->ffi_functions->arguments);
+        free(realm->ffi_functions);
+        realm->ffi_functions = next;
+    }
+    /* The provider released the closures and their roots before the heap was torn down. */
+    while (realm->ffi_callbacks != NULL) {
+        kiln_ffi_callback_meta *next = realm->ffi_callbacks->next;
+        free(realm->ffi_callbacks);
+        realm->ffi_callbacks = next;
+    }
+    for (index = 0; index < realm->unit_capacity; ++index) free(realm->units[index]);
+    free(realm->units);
+    realm->units = NULL;
+    realm->unit_capacity = 0;
+}
+
 static void kiln_c99_gc_collect(void *opaque, int force) {
     kiln_gc_heap *heap = (kiln_gc_heap *)opaque;
     size_t threshold;
@@ -3689,6 +3810,7 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
     before_bytes = heap->freed_bytes;
     kiln_c99_gc_begin(heap);
     (void)kiln_realm_gc_mark_roots(heap);
+    kiln_c99_gc_mark_realm(heap);
     kiln_c99_key_mark_pinned(heap);
     kiln_c99_gc_mark_promise_jobs(heap);
     if (heap->mid_turn) kiln_c99_gc_scan_stack(heap);
@@ -3913,6 +4035,7 @@ static void kiln_c99_gc_teardown_end(void *opaque) {
     /* Teardown does not run what is left in the lane: a realm being destroyed has no turn to run
      * a job in, and the values are about to be freed with the rest of the heap. */
     free(heap->jobs);
+    kiln_c99_realm_free(&heap->realm);
     free(heap);
 }
 

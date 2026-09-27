@@ -1926,7 +1926,9 @@ extern int kiln_c99_finish_module_checkpoint(kiln_host *, kiln_value *);
 #define KILN_C99_METHOD_THEN 107
 extern int kiln_c99_validate_dynamic_import_options(kiln_host *, kiln_value, int, kiln_value *, int *);
 int kiln_graph_dynamic_import(kiln_host *host, const char *importer, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {
-    if (promise == NULL) return KILN_C99_CONTROL_ERROR;
+    /* The graph whose host this is: its namespaces are the realm's. */
+    kiln_graph_context *graph = host != NULL ? (kiln_graph_context *)host->context : NULL;
+    if (promise == NULL || graph == NULL) return KILN_C99_CONTROL_ERROR;
     if (specifier.tag != KILN_VALUE_STRING) {
         kiln_value primitive = kiln_c99_undefined();
         int specifier_status = kiln_c99_to_primitive(host, specifier, KILN_C99_HINT_STRING, &primitive, depth, thrown);
@@ -2298,7 +2300,7 @@ pub(super) fn write_graph_commonjs_realm_setup(
 ) {
     writeln!(
         output,
-        "    status = {module_symbol}_commonjs_wrapper(kiln_imports_{index}, (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, NULL);\n    if (status != 0) {{ *result = kiln_graph_diagnostic(\"commonjs-wrapper\", {}); return status; }}\n    kiln_exports_{index}[0] = kiln_imports_{index}[0];\n    kiln_commonjs_{index}.module = {module_symbol};\n    kiln_commonjs_{index}.host = host;\n    kiln_commonjs_{index}.imports = kiln_imports_{index};\n    kiln_commonjs_{index}.import_count = (size_t)5;\n    kiln_commonjs_{index}.exports = kiln_exports_{index};\n    kiln_commonjs_{index}.state = 0;",
+        "    status = {module_symbol}_commonjs_wrapper(kiln_imports_{index}, (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, graph);\n    if (status != 0) {{ *result = kiln_graph_diagnostic(\"commonjs-wrapper\", {}); return status; }}\n    kiln_exports_{index}[0] = kiln_imports_{index}[0];\n    kiln_commonjs_{index}.module = {module_symbol};\n    kiln_commonjs_{index}.host = host;\n    kiln_commonjs_{index}.imports = kiln_imports_{index};\n    kiln_commonjs_{index}.import_count = (size_t)5;\n    kiln_commonjs_{index}.exports = kiln_exports_{index};\n    kiln_commonjs_{index}.state = 0;",
         native_c_string(filename.as_str()),
         filename.as_str().len(),
         native_c_string(dirname.as_str()),
@@ -2388,7 +2390,7 @@ pub(super) fn render_graph_roots(
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
 ) {
     output.push_str(
-        "static void kiln_graph_gc_roots(void *heap, void *context, int phase) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    size_t index;\n    if (phase == KILN_GC_PHASE_RESET) return;\n",
+        "static void kiln_graph_gc_roots(void *heap, void *context, int phase) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    size_t index;\n    if (phase == KILN_GC_PHASE_RESET || graph == NULL) return;\n",
     );
     for (index, (node, _)) in modules.iter().enumerate() {
         let export_count = native_graph_export_count(node);
@@ -2423,7 +2425,7 @@ pub(super) fn render_graph_roots(
     }
     writeln!(
         output,
-        "    if (graph != NULL) {{\n        (void)kiln_realm_gc_mark_value(heap, &graph->result);\n        (void)kiln_realm_gc_mark_value(heap, &graph->entry_result);\n        for (index = 0; index < (size_t){}; ++index) {{\n            (void)kiln_realm_gc_mark_value(heap, &graph->module_states[index].result);\n            (void)kiln_realm_gc_mark_value(heap, &graph->module_states[index].active_promise);\n            (void)kiln_realm_gc_mark_value(heap, &graph->module_states[index].completion_promise);\n            (void)kiln_realm_gc_mark_value(heap, &graph->module_states[index].completion_resolve);\n            (void)kiln_realm_gc_mark_value(heap, &graph->module_states[index].completion_reject);\n        }}\n    }}\n}}\n",
+        "    {{\n        (void)kiln_realm_gc_mark_value(heap, &graph->result);\n        (void)kiln_realm_gc_mark_value(heap, &graph->entry_result);\n        for (index = 0; index < (size_t){}; ++index) {{\n            (void)kiln_realm_gc_mark_value(heap, &graph->module_states[index].result);\n            (void)kiln_realm_gc_mark_value(heap, &graph->module_states[index].active_promise);\n            (void)kiln_realm_gc_mark_value(heap, &graph->module_states[index].completion_promise);\n            (void)kiln_realm_gc_mark_value(heap, &graph->module_states[index].completion_resolve);\n            (void)kiln_realm_gc_mark_value(heap, &graph->module_states[index].completion_reject);\n        }}\n    }}\n}}\n",
         modules.len()
     )
     .unwrap();
@@ -2550,14 +2552,16 @@ enum kiln_value_tag {
     );
     output.push_str(kiln_native_runtime::kiln_value_abi_declaration!());
     output.push_str(kiln_native_runtime::kiln_string_abi_declaration!());
+    output.push_str(kiln_native_runtime::kiln_cli_host_state_declaration!());
     output.push_str(r#"/* The prelude owns this realm-local guard. The trusted builtin bootstrap may install methods;
  * the launcher seals those writes before any user module can observe or mutate the realm. */
 extern uint64_t kiln_c99_builtin_store_epoch __attribute__((visibility("hidden")));
 
 static kiln_value kiln_graph_diagnostic(const char *phase, const char *module) {
     kiln_value value = { .tag = KILN_VALUE_STRING, .flags = 0, .len = 0, .bits = 0 };
-    static char text[2048];
-    static kiln_string string = {0, KILN_STRING_LATIN1, text};
+    /* Scratch per thread: the value is reported by this thread before it runs another realm. */
+    static _Thread_local char text[2048];
+    static _Thread_local kiln_string string = {0, KILN_STRING_LATIN1, NULL};
     size_t phase_len = strlen(phase);
     size_t module_len = strlen(module);
     const char prefix[] = "phase=";
@@ -2628,8 +2632,8 @@ extern int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
                               const kiln_value *arguments, kiln_value *result);
 extern int kiln_cli_write_result(kiln_value value);
 extern void kiln_cli_report_failure_in(int status, kiln_value value, const char *phase);
+extern void kiln_cli_report_failure_with(int status, kiln_value value, const char *phase, const kiln_cli_host_state *host_state);
 extern void kiln_cli_warn(const char *message);
-extern kiln_value kiln_cli_last_host_error;
 extern kiln_value kiln_cli_describe_error(kiln_value value);
 extern int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value *out, int depth, kiln_value *thrown);
@@ -2726,37 +2730,54 @@ extern int kiln_c99_finish_module_checkpoint(kiln_host *, kiln_value *);
             .unwrap();
         }
     }
+    // The graph's linkage -- every module's export and import arrays, the namespaces, the
+    // CommonJS contexts -- is the realm's (ADR 0070, realms issue 04 step 5): fields of the
+    // `kiln_graph_context` that `kiln_cli_run_realm` allocates for its one realm, spelled by the
+    // names the rest of this launcher always used, through macros that read the `graph` in scope.
+    let mut linkage_fields = String::new();
+    let mut linkage_names = String::new();
     for (index, (node, _)) in modules.iter().enumerate() {
         let export_count = native_graph_export_count(node);
         if export_count != 0 {
+            writeln!(linkage_fields, "    kiln_value exports_{index}[{export_count}];").unwrap();
             writeln!(
-                output,
-                "static kiln_value kiln_exports_{index}[{}];",
-                export_count
+                linkage_names,
+                "#define kiln_exports_{index} (graph->exports_{index})"
             )
             .unwrap();
         }
         if !node.program.imports.is_empty() {
             writeln!(
-                output,
-                "static kiln_value kiln_imports_{index}[{}];",
+                linkage_fields,
+                "    kiln_value imports_{index}[{}];",
                 node.program.imports.len()
+            )
+            .unwrap();
+            writeln!(
+                linkage_names,
+                "#define kiln_imports_{index} (graph->imports_{index})"
             )
             .unwrap();
         }
     }
-    writeln!(
-        output,
-        "static kiln_value kiln_namespaces[{}];",
-        modules.len()
-    )
-    .unwrap();
+    writeln!(linkage_fields, "    kiln_value namespaces[{}];", modules.len()).unwrap();
+    linkage_names.push_str("#define kiln_namespaces (graph->namespaces)\n");
     if modules
         .iter()
         .any(|(node, _)| node.program.program.has_dynamic_import())
     {
-        output.push_str("static kiln_value kiln_opentui_namespace;\n");
-        output.push_str("static kiln_value kiln_node_ffi_namespace;\n");
+        linkage_fields.push_str("    kiln_value opentui_namespace;\n    kiln_value node_ffi_namespace;\n");
+        linkage_names.push_str("#define kiln_opentui_namespace (graph->opentui_namespace)\n#define kiln_node_ffi_namespace (graph->node_ffi_namespace)\n");
+    }
+    for (index, (node, _)) in modules.iter().enumerate() {
+        if node.source == ModuleSource::CommonJs {
+            writeln!(linkage_fields, "    kiln_commonjs_context commonjs_{index};").unwrap();
+            writeln!(
+                linkage_names,
+                "#define kiln_commonjs_{index} (graph->commonjs_{index})"
+            )
+            .unwrap();
+        }
     }
     output.push_str(
         r#"
@@ -2770,15 +2791,6 @@ typedef struct kiln_commonjs_context {
 } kiln_commonjs_context;
 "#,
     );
-    for (index, (node, _)) in modules.iter().enumerate() {
-        if node.source == ModuleSource::CommonJs {
-            writeln!(
-                output,
-                "static kiln_commonjs_context kiln_commonjs_{index};"
-            )
-            .unwrap();
-        }
-    }
     for (index, (node, _)) in modules.iter().enumerate() {
         if node.source == ModuleSource::CommonJs {
             writeln!(
@@ -2816,6 +2828,7 @@ typedef struct kiln_graph_module_state {
 enum { KILN_MODULE_UNINITIALIZED = 0, KILN_MODULE_EVALUATING = 1,
        KILN_MODULE_EVALUATED = 2, KILN_MODULE_FAILED = 3 };
 
+/* KILN_GRAPH_CONTEXT */
 static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *result,
                                     kiln_value *thrown) {
     int status;
@@ -2839,10 +2852,19 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
 
 "#,
     );
+    let context = format!(
+        "typedef struct kiln_graph_context kiln_graph_context;\n\
+         typedef struct kiln_graph_require_context {{\n    kiln_graph_context *graph;\n    size_t base_index;\n}} kiln_graph_require_context;\n\
+         /* One realm's graph, allocated by `kiln_cli_run_realm` for its realm and freed after it. */\n\
+         struct kiln_graph_context {{\n    kiln_host host;\n    /* The CLI host's state for this realm: its last refusal. */\n    kiln_cli_host_state cli;\n    kiln_value result;\n    kiln_value entry_result;\n    kiln_graph_module_state module_states[{}];\n    size_t current_module;\n    int roots_registered;\n    /* The entry's top-level await never settled with the loop out of work (node: warn, exit 13). */\n    int unsettled_entry;\n    struct kiln_graph_require_context require_contexts[{}];\n{linkage_fields}}};\n{linkage_names}",
+        modules.len(),
+        runtime_importers.len().max(1),
+    );
+    output = output.replace("/* KILN_GRAPH_CONTEXT */\n", &context);
     for (index, (node, _)) in modules.iter().enumerate() {
         writeln!(
             output,
-            "\nstatic int kiln_commonjs_require_{index}(void *opaque, kiln_host *host, kiln_value specifier, kiln_value *result, kiln_value *thrown) {{\n    (void)opaque;\n    (void)host;\n    if (result == NULL || specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) return -1;"
+            "\nstatic int kiln_commonjs_require_{index}(void *opaque, kiln_host *host, kiln_value specifier, kiln_value *result, kiln_value *thrown) {{\n    kiln_graph_context *graph = (kiln_graph_context *)opaque;\n    (void)graph;\n    (void)host;\n    if (result == NULL || specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) return -1;"
         )
         .unwrap();
         for dependency in &node.dependencies {
@@ -2892,22 +2914,6 @@ typedef struct kiln_launcher_promise_view {
     kiln_value value;
 } kiln_launcher_promise_view;
 
-typedef struct kiln_graph_context kiln_graph_context;
-typedef struct kiln_graph_require_context {
-    kiln_graph_context *graph;
-    size_t base_index;
-} kiln_graph_require_context;
-struct kiln_graph_context {
-    kiln_host host;
-    kiln_value result;
-    kiln_value entry_result;
-    kiln_graph_module_state module_states[MODULE_COUNT];
-    size_t current_module;
-    int roots_registered;
-    /* The entry's top-level await never settled with the loop out of work (node: warn, exit 13). */
-    int unsettled_entry;
-    struct kiln_graph_require_context require_contexts[{runtime_context_count}];
-};
 
 static kiln_value *kiln_graph_module_result(kiln_graph_context *graph, size_t index) {
     return &graph->module_states[index].result;
@@ -3042,7 +3048,7 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
         ).unwrap();
     }
     output.push_str(
-        "    return kiln_c99_commonjs_require_value(result, kiln_graph_require_builtin, graph);\n}\n\nstatic int kiln_graph_host_call(void *context, uint16_t operation, uint16_t argc, const kiln_value *arguments, kiln_value *result) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    if (operation == KILN_C99_HOST_MODULE_CREATE_REQUIRE) return kiln_graph_create_require(graph, argc, arguments, result);\n    return kiln_cli_host_call(context, operation, argc, arguments, result);\n}\n",
+        "    return kiln_c99_commonjs_require_value(result, kiln_graph_require_builtin, graph);\n}\n\nstatic int kiln_graph_host_call(void *context, uint16_t operation, uint16_t argc, const kiln_value *arguments, kiln_value *result) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    if (operation == KILN_C99_HOST_MODULE_CREATE_REQUIRE) return kiln_graph_create_require(graph, argc, arguments, result);\n    return kiln_cli_host_call(graph != NULL ? &graph->cli : NULL, operation, argc, arguments, result);\n}\n",
     );
     output.push_str("static const size_t kiln_graph_startup_indices[] = {");
     for (position, index) in startup_indices.iter().enumerate() {
@@ -3289,7 +3295,7 @@ static int kiln_graph_enter(void *opaque) {
         if node.source == ModuleSource::CommonJs {
             writeln!(
                 evaluation,
-                "            status = kiln_graph_load_commonjs(&kiln_commonjs_{index}, result, result);\n            if (status != 0) {{ if (status != KILN_C99_THROWN && result->tag == KILN_VALUE_UNDEFINED) {{ if (status == KILN_C99_HOST_ERROR && kiln_cli_last_host_error.tag == KILN_VALUE_STRING && kiln_cli_last_host_error.len != 0) *result = kiln_cli_last_host_error; else *result = kiln_graph_diagnostic(\"commonjs-evaluate\", {}); }} return status; }}",
+                "            status = kiln_graph_load_commonjs(&kiln_commonjs_{index}, result, result);\n            if (status != 0) {{ if (status != KILN_C99_THROWN && result->tag == KILN_VALUE_UNDEFINED) {{ if (status == KILN_C99_HOST_ERROR && graph->cli.last_error.tag == KILN_VALUE_STRING && graph->cli.last_error.len != 0) *result = graph->cli.last_error; else *result = kiln_graph_diagnostic(\"commonjs-evaluate\", {}); }} return status; }}",
                 native_c_string(&logical_paths[index])
             )
             .unwrap();
@@ -3480,7 +3486,7 @@ static int kiln_graph_enter(void *opaque) {
         }
         writeln!(
             evaluation,
-            "            if (status != 0) {{ if (status != KILN_C99_THROWN && result->tag == KILN_VALUE_UNDEFINED) {{ if (status == KILN_C99_HOST_ERROR && kiln_cli_last_host_error.tag == KILN_VALUE_STRING && kiln_cli_last_host_error.len != 0) *result = kiln_cli_last_host_error; else *result = kiln_graph_diagnostic(\"module-enter\", {}); }} return status; }}",
+            "            if (status != 0) {{ if (status != KILN_C99_THROWN && result->tag == KILN_VALUE_UNDEFINED) {{ if (status == KILN_C99_HOST_ERROR && graph->cli.last_error.tag == KILN_VALUE_STRING && graph->cli.last_error.len != 0) *result = graph->cli.last_error; else *result = kiln_graph_diagnostic(\"module-enter\", {}); }} return status; }}",
             native_c_string(&logical_paths[index])
         )
         .unwrap();
@@ -3645,7 +3651,9 @@ static int kiln_graph_enter(void *opaque) {
         r#"/* argc/argv reach the realm before it is entered, so the first `process` a module builds
  * already has the command line. The strings are copied on the other side of this call. */
 static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
-    kiln_graph_context graph = {0};
+    /* The realm's graph: its module states and every module's linkage, one per realm run and freed
+     * after the realm is destroyed (a result slot is read after teardown). */
+    kiln_graph_context *graph = (kiln_graph_context *)calloc(1, sizeof *graph);
     uint64_t realm = 0;
     /* A refusal that reaches here has no diagnostic of its own -- the realm stopped before it
      * could leave one -- so the launcher says which of the three phases was running. */
@@ -3653,10 +3661,14 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
     int status;
     int destroy_status;
     int unsettled_entry = 0;
-    graph.result.tag = KILN_VALUE_UNDEFINED;
-    graph.entry_result.tag = KILN_VALUE_UNDEFINED;
-    graph.host.call = kiln_graph_host_call;
-    graph.host.context = &graph;
+    if (graph == NULL) {
+        kiln_cli_warn("kiln: out of memory for the module graph");
+        return 1;
+    }
+    graph->result.tag = KILN_VALUE_UNDEFINED;
+    graph->entry_result.tag = KILN_VALUE_UNDEFINED;
+    graph->host.call = kiln_graph_host_call;
+    graph->host.context = graph;
     status = kiln_realm_create(&realm);
     if (status == 0 && argc > 0)
         status = kiln_realm_set_argv(realm, (uint64_t)argc, (const char *const *)argv);
@@ -3669,40 +3681,40 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
     }
     writeln!(
         output,
-        r#"    while (status == 0 && (graph.current_module < (size_t){} || !graph.roots_registered)) {{
-        if (graph.current_module < (size_t){} && graph.module_states[kiln_graph_startup_indices[graph.current_module]].module_settling) {{
+        r#"    while (status == 0 && (graph->current_module < (size_t){} || !graph->roots_registered)) {{
+        if (graph->current_module < (size_t){} && graph->module_states[kiln_graph_startup_indices[graph->current_module]].module_settling) {{
             phase = "the turn loop";
-            status = kiln_realm_drive(realm, &graph.host, &graph.result);
+            status = kiln_realm_drive(realm, &graph->host, &graph->result);
             if (status != 0) break;
         }}
         phase = "module body";
-        status = kiln_realm_enter(realm, kiln_graph_enter, &graph);
+        status = kiln_realm_enter(realm, kiln_graph_enter, graph);
     }}
-        if (status == 0) {{ phase = "the turn loop"; status = kiln_realm_drive(realm, &graph.host, &graph.result); }}"#,
+        if (status == 0) {{ phase = "the turn loop"; status = kiln_realm_drive(realm, &graph->host, &graph->result); }}"#,
         startup_indices.len(),
         startup_indices.len()
     )
     .unwrap();
     output.push_str(
         r##"
-    if (status == 0 && graph.entry_result.tag == 16 /* KILN_VALUE_PROMISE */) {
+    if (status == 0 && graph->entry_result.tag == 16 /* KILN_VALUE_PROMISE */) {
         typedef struct kiln_launcher_promise_view {
             int state;
             kiln_value value;
         } kiln_launcher_promise_view;
-        kiln_launcher_promise_view *promise = (kiln_launcher_promise_view *)(uintptr_t)graph.entry_result.bits;
+        kiln_launcher_promise_view *promise = (kiln_launcher_promise_view *)(uintptr_t)graph->entry_result.bits;
         if (promise != NULL) {
             if (promise->state == 2 /* KILN_C99_REJECTED */) {
                 status = KILN_C99_THROWN;
                 phase = "module body";
-                graph.result = kiln_cli_describe_error(promise->value);
+                graph->result = kiln_cli_describe_error(promise->value);
             } else if (promise->state == 0 /* KILN_C99_PENDING */) {
                 status = KILN_C99_CONTROL_ERROR;
                 phase = "the turn loop";
                 unsettled_entry = 1;
-                graph.result = kiln_graph_diagnostic("top-level await", "unsettled");
+                graph->result = kiln_graph_diagnostic("top-level await", "unsettled");
             } else if (promise->state == 1 /* KILN_C99_FULFILLED */) {
-                graph.entry_result = promise->value;
+                graph->entry_result = promise->value;
             }
         }
     }
@@ -3712,7 +3724,7 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
      * handled throw resets the realm diagnostic bridge, so this cannot leak an earlier refusal
      * into a later ordinary error. */
     if (status == KILN_C99_THROWN) {
-        kiln_value message = kiln_cli_describe_error(graph.result);
+        kiln_value message = kiln_cli_describe_error(graph->result);
         if (message.tag != KILN_VALUE_STRING) {
             message = kiln_c99_text(message);
         }
@@ -3720,22 +3732,23 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
         if (kiln_c99_diagnostic_available() && message.tag == KILN_VALUE_STRING &&
             site.tag == KILN_VALUE_STRING && site.len != 0) {
             kiln_value separator = kiln_c99_copy_text(" at ", 4);
-            graph.result = kiln_c99_concat(kiln_c99_concat(message, separator), site);
+            graph->result = kiln_c99_concat(kiln_c99_concat(message, separator), site);
         } else {
-            graph.result = message;
+            graph->result = message;
         }
     }
     /* An entry whose top-level await never settled, with the loop out of work: node's answer is a
      * warning and status 13 rather than a refusal, and both engines give that one. */
-    unsettled_entry = status == KILN_C99_CONTROL_ERROR && (unsettled_entry || graph.unsettled_entry);
+    unsettled_entry = status == KILN_C99_CONTROL_ERROR && (unsettled_entry || graph->unsettled_entry);
     if (unsettled_entry) kiln_cli_warn("Warning: Detected unsettled top-level await");
-    else if (status != 0) kiln_cli_report_failure_in(status, graph.result, phase);
-    if (writes_result && status == 0 && kiln_cli_write_result(graph.entry_result) != 0) {
+    else if (status != 0) kiln_cli_report_failure_with(status, graph->result, phase, &graph->cli);
+    if (writes_result && status == 0 && kiln_cli_write_result(graph->entry_result) != 0) {
         static const kiln_string refusal_str = { 17, 0, "filesystem access" };
-        kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 17, .ptr = (const char *)&refusal_str }, "result write");
+        kiln_cli_report_failure_with(KILN_C99_HOST_ERROR, (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 17, .ptr = (const char *)&refusal_str }, "result write", &graph->cli);
         status = 1;
     }
     destroy_status = kiln_realm_destroy(realm);
+    free(graph);
     /* `main` folds every failure to 1, the way it does a refusal; this is the one status a
      * program's caller is told apart by, as `process.exit(code)` is. */
     if (unsettled_entry) exit(13);
@@ -3791,11 +3804,13 @@ static int kiln_cli_http3_enabled(int argc, char **argv) {
     return 0;
 }
 
-/* Extra realms are separate *processes*, not threads, and that is a constraint rather than a
- * preference. A module's namespaces live in `kiln_namespaces`, which is process-global, while the
- * values inside it belong to the realm that made them (ADR 0038). Two realms in one address space
- * therefore write one array and then read each other's values, which presents as
- * `undefined is not a function` at the first import -- measured, before this used fork.
+/* Extra realms are separate *processes*, not threads. That was a constraint: a module's
+ * namespaces lived in a process-global `kiln_namespaces` while the values inside it belong to the
+ * realm that made them (ADR 0038), so two realms in one address space wrote one array and read
+ * each other's values -- `undefined is not a function` at the first import, measured before this
+ * used fork. Since realms issue 04 step 5 the namespaces, module globals and the rest of a realm's
+ * state are the realm's own (`kiln_graph_context`, the units' realm blocks), and realms in threads
+ * are issue 05's to build; until then this stays a process per realm.
  *
  * A process per realm is also what `node`'s cluster does, for the same reason, and the text
  * segment is shared copy-on-write so the cost is the heaps, which were never shareable anyway.

@@ -149,6 +149,22 @@ pub fn retain_used_entry_context(output: &mut String, context: std::ops::Range<u
     output.replace_range(context, &retained);
 }
 
+/// Module globals live in the realm's block for this unit (ADR 0070, realms issue 04 step 5), and
+/// `{symbol}_globals` finds it through a generation-checked per-thread cache. A body that reads or
+/// writes them asks once, at entry, and indexes the pointer it got: within one activation the
+/// realm cannot change, and a call between two reads would otherwise make the compiler ask again.
+/// A resumed generator or async body re-enters from the top, so it asks again on every resumption.
+fn cache_module_globals(output: &mut String, context_start: usize, symbol: &str) {
+    let needle = format!("{symbol}_globals[");
+    if !output[context_start..].contains(&needle) {
+        return;
+    }
+    let body = output[context_start..].replace(&needle, "kiln_mg[");
+    output.truncate(context_start);
+    writeln!(output, "    kiln_val *const kiln_mg = {symbol}_globals;").unwrap();
+    output.push_str(&body);
+}
+
 pub(crate) fn body_can_refuse(body: &str, compact: bool) -> bool {
     body.contains("goto kiln_refusal;")
         || (compact
@@ -586,6 +602,7 @@ pub fn emit_function_from_graph_with_profile(
     if plan.compact && kind == EntryKind::Boxed {
         retain_used_context(output, context_start..context_end);
     }
+    cache_module_globals(output, context_start, symbol);
     // The boxed clone, emitted first, declares the sites every clone of this function uses,
     // and the receiver-shape cache: four rows of shapes, a slot per read of `this` in each.
     if kind == EntryKind::Boxed && (shared_sites > 0 || this_sites > 0) {

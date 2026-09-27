@@ -761,6 +761,10 @@ struct NativeRealm {
     /// A wall-clock realm bounds its park when this is set, so an idle server answers a
     /// signal promptly instead of at its next request.
     introspect_armed: Cell<bool>,
+    /// The realm's `node:ffi` libraries, prepared functions and callback closures (ADR 0070):
+    /// released at teardown before the heap their callbacks name is torn down.
+    #[cfg(feature = "ffi")]
+    ffi: RefCell<crate::ffi::State>,
     /// Declared last so it is dropped last: `Drop for NativeRealm` tears the heap down only
     /// after every field above has released what it held.
     gc: RefCell<GcState>,
@@ -1025,6 +1029,10 @@ impl Drop for NativeRealm {
         self.http_connections.borrow_mut().clear();
         self.callable_stores.borrow_mut().clear();
         self.value_slots.borrow_mut().clear();
+        // Close the realm's libraries and free its callback closures while the heap their
+        // userdata points into still exists; nothing can call one after this.
+        #[cfg(feature = "ffi")]
+        drop(std::mem::take(&mut *self.ffi.borrow_mut()));
         let gc = std::mem::take(&mut *self.gc.borrow_mut());
         let Some(hooks) = gc.hooks else {
             return;
@@ -1093,6 +1101,8 @@ impl NativeRealm {
             clock: Cell::new(NativeClock::Virtual),
             promise_lane: Cell::new(None),
             introspect_armed: Cell::new(false),
+            #[cfg(feature = "ffi")]
+            ffi: RefCell::new(crate::ffi::State::default()),
             gc: RefCell::new(GcState::default()),
         })
     }
@@ -1210,6 +1220,14 @@ fn realm(handle: u64) -> Option<Rc<NativeRealm>> {
 
 fn active_realm() -> Option<Rc<NativeRealm>> {
     ACTIVE_REALM_RC.with(|slot| slot.borrow().clone())
+}
+
+/// The active realm's `node:ffi` state, for `ffi.rs`; `None` outside a realm.
+#[cfg(feature = "ffi")]
+pub(crate) fn with_active_ffi_state<R>(
+    operation: impl FnOnce(&RefCell<crate::ffi::State>) -> R,
+) -> Option<R> {
+    active_realm().map(|realm| operation(&realm.ffi))
 }
 
 fn active_handle(handle: u64) -> Option<Rc<NativeRealm>> {

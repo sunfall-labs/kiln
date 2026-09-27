@@ -230,6 +230,21 @@ _Static_assert(sizeof(kiln_value) == 16, "kiln_value fits the AAPCS64 register t
     };
 }
 
+/// The CLI host's per-realm state (ADR 0070, realms issue 04 step 5): the last host refusal and
+/// the string header its text is read through. A launcher owns one per realm and passes it as the
+/// context of `kiln_cli_host_call`; a static would be one refusal that every realm in the process
+/// overwrites and every launcher then reports. Requires the value and string declarations.
+#[macro_export]
+macro_rules! kiln_cli_host_state_declaration {
+    () => {
+        r#"typedef struct kiln_cli_host_state {
+    kiln_value last_error;
+    kiln_string error_text;
+} kiln_cli_host_state;
+"#
+    };
+}
+
 /// The canonical immutable JavaScript string header shared by generated C and runtime code.
 #[macro_export]
 macro_rules! kiln_string_abi_declaration {
@@ -584,8 +599,10 @@ _Static_assert(offsetof(kiln_module_api_v2, dispose)
                "kiln_module_api_v2.dispose ABI offset");
 #endif
 
-extern kiln_value kiln_cli_last_host_error;
 
+"#,
+    kiln_cli_host_state_declaration!(),
+    r#"
 #endif /* KILN_NATIVE_EMBEDDING_H */"#,
 );
 
@@ -733,15 +750,30 @@ static int kiln_cli_write_string(FILE *sink, const kiln_string *string) {
     return KILN_C99_OK;
 }
 
-static kiln_value kiln_cli_ascii_value(const char *text, size_t length) {
-    static kiln_string header;
+/* A string value over static text, read through `header`, which the caller keeps alive as long
+ * as the value: the refusing realm's host state. */
+static kiln_value kiln_cli_ascii_value(kiln_string *header, const char *text, size_t length) {
     kiln_value value = { .tag = KILN_VALUE_STRING, .flags = 0, .len = 0, .bits = 0 };
-    header.unit_len = length > UINT32_MAX ? 0 : (uint32_t)length;
-    header.flags = KILN_STRING_LATIN1;
-    header.data = text;
-    value.ptr = (const char *)&header;
-    value.len = header.unit_len;
+    header->unit_len = length > UINT32_MAX ? 0 : (uint32_t)length;
+    header->flags = KILN_STRING_LATIN1;
+    header->data = text;
+    value.ptr = (const char *)header;
+    value.len = header->unit_len;
     return value;
+}
+
+/* The host state of a caller that passed none: this thread's, for an embedder calling
+ * `kiln_cli_host_call` directly. Every launcher passes its realm's own. */
+static _Thread_local kiln_cli_host_state kiln_cli_thread_host_state;
+
+static kiln_cli_host_state *kiln_cli_state_of(void *context) {
+    return context != NULL ? (kiln_cli_host_state *)context : &kiln_cli_thread_host_state;
+}
+
+/* Record a host refusal in the realm's state and answer with it. */
+static kiln_value kiln_cli_refused(kiln_cli_host_state *state, const char *text, size_t length) {
+    state->last_error = kiln_cli_ascii_value(&state->error_text, text, length);
+    return state->last_error;
 }
 
 /* Private KILNRES2 scalar-result writer. The explicit-path form is used by focused C tests;
@@ -935,7 +967,6 @@ kiln_value kiln_cli_describe_error(kiln_value value) {
     return value;
 }
 
-kiln_value kiln_cli_last_host_error = { .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };
 
 /* A line on stderr from the launcher, which has no stdio of its own. */
 void kiln_cli_warn(const char *message) {
@@ -943,7 +974,12 @@ void kiln_cli_warn(const char *message) {
     fputc('\n', stderr);
 }
 
-void kiln_cli_report_failure_in(int status, kiln_value value, const char *phase) {
+/* `host_state` is the failing realm's (`kiln_cli_host_state`), whose last refusal names a host
+ * error the value does not; NULL reads this thread's. */
+void kiln_cli_report_failure_with(int status, kiln_value value, const char *phase,
+                                  const kiln_cli_host_state *host_state) {
+    kiln_value last_host_error =
+        (host_state != NULL ? host_state : &kiln_cli_thread_host_state)->last_error;
     value = kiln_cli_describe_error(value);
     value.flags = 0;
     fputs("kiln: ", stderr);
@@ -990,9 +1026,9 @@ void kiln_cli_report_failure_in(int status, kiln_value value, const char *phase)
         if (value.tag == KILN_VALUE_STRING && value.len != 0 && value.ptr != NULL) {
             fputs(": ", stderr);
             kiln_cli_write_string(stderr, (const kiln_string *)value.ptr);
-        } else if (kiln_cli_last_host_error.tag == KILN_VALUE_STRING && kiln_cli_last_host_error.len != 0 && kiln_cli_last_host_error.ptr != NULL) {
+        } else if (last_host_error.tag == KILN_VALUE_STRING && last_host_error.len != 0 && last_host_error.ptr != NULL) {
             fputs(": ", stderr);
-            kiln_cli_write_string(stderr, (const kiln_string *)kiln_cli_last_host_error.ptr);
+            kiln_cli_write_string(stderr, (const kiln_string *)last_host_error.ptr);
         } else if (phase != NULL) {
             fputs(" in ", stderr);
             fputs(phase, stderr);
@@ -1006,6 +1042,10 @@ void kiln_cli_report_failure_in(int status, kiln_value value, const char *phase)
         fprintf(stderr, "the program stopped with status %d\n", status);
         return;
     }
+}
+
+void kiln_cli_report_failure_in(int status, kiln_value value, const char *phase) {
+    kiln_cli_report_failure_with(status, value, phase, NULL);
 }
 
 static int kiln_cli_write_value_to(FILE *sink, kiln_value value) {
@@ -1112,43 +1152,38 @@ int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
                        const kiln_value *arguments, kiln_value *result) {
     uint16_t index;
     FILE *sink;
-    (void)context;
+    kiln_cli_host_state *state = kiln_cli_state_of(context);
     if (result == NULL || (argc != 0 && arguments == NULL)) {
-        kiln_cli_last_host_error = kiln_cli_ascii_value("host capability", 15);
-        if (result != NULL) {
-            *result = kiln_cli_last_host_error;
+        {
+            kiln_value refused = kiln_cli_refused(state, "host capability", 15);
+            if (result != NULL) *result = refused;
         }
         return KILN_C99_HOST_ERROR;
     }
     if (operation == KILN_HOST_OP_CLOCK_NOW) {
         if (argc != 0) {
-            kiln_cli_last_host_error = kiln_cli_ascii_value("clock time", 10);
-            *result = kiln_cli_last_host_error;
+            *result = kiln_cli_refused(state, "clock time", 10);
             return KILN_C99_HOST_ERROR;
         }
         int status = kiln_cli_clock_now(result);
         if (status != KILN_C99_OK) {
-            kiln_cli_last_host_error = kiln_cli_ascii_value("clock time", 10);
-            *result = kiln_cli_last_host_error;
+            *result = kiln_cli_refused(state, "clock time", 10);
         }
         return status;
     }
     if (operation == KILN_HOST_OP_ENTROPY_U64) {
         if (argc != 0) {
-            kiln_cli_last_host_error = kiln_cli_ascii_value("entropy", 7);
-            *result = kiln_cli_last_host_error;
+            *result = kiln_cli_refused(state, "entropy", 7);
             return KILN_C99_HOST_ERROR;
         }
         int status = kiln_cli_entropy_u64(result);
         if (status != KILN_C99_OK) {
-            kiln_cli_last_host_error = kiln_cli_ascii_value("entropy", 7);
-            *result = kiln_cli_last_host_error;
+            *result = kiln_cli_refused(state, "entropy", 7);
         }
         return status;
     }
     if (operation != KILN_HOST_OP_WRITE_STDOUT && operation != KILN_HOST_OP_WRITE_STDERR) {
-        kiln_cli_last_host_error = kiln_cli_ascii_value("host capability", 15);
-        *result = kiln_cli_last_host_error;
+        *result = kiln_cli_refused(state, "host capability", 15);
         return KILN_C99_HOST_ERROR;
     }
     /* Which stream a line went to is observable -- a caller that redirects one and not the other
@@ -1157,19 +1192,16 @@ int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
     sink = operation == KILN_HOST_OP_WRITE_STDERR ? stderr : stdout;
     for (index = 0; index < argc; ++index) {
         if (index != 0 && fputc(' ', sink) == EOF) {
-            kiln_cli_last_host_error = kiln_cli_ascii_value("terminal I/O", 12);
-            *result = kiln_cli_last_host_error;
+            *result = kiln_cli_refused(state, "terminal I/O", 12);
             return KILN_C99_HOST_ERROR;
         }
         if (kiln_cli_write_value_to(sink, arguments[index]) != KILN_C99_OK) {
-            kiln_cli_last_host_error = kiln_cli_ascii_value("terminal I/O", 12);
-            *result = kiln_cli_last_host_error;
+            *result = kiln_cli_refused(state, "terminal I/O", 12);
             return KILN_C99_HOST_ERROR;
         }
     }
     if (fputc('\n', sink) == EOF || fflush(sink) != 0) {
-        kiln_cli_last_host_error = kiln_cli_ascii_value("terminal I/O", 12);
-        *result = kiln_cli_last_host_error;
+        *result = kiln_cli_refused(state, "terminal I/O", 12);
         return KILN_C99_HOST_ERROR;
     }
     *result = kiln_cli_undefined();
@@ -1186,7 +1218,8 @@ const LAUNCHER_DECL_PREFIX: &str = r#"
 extern int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
                               const kiln_value *arguments, kiln_value *result);
 extern int kiln_cli_write_result(kiln_value value);
-extern void kiln_cli_report_failure_in(int status, kiln_value value, const char *phase);
+extern void kiln_cli_report_failure_with(int status, kiln_value value, const char *phase,
+                                         const kiln_cli_host_state *host_state);
 extern kiln_value kiln_cli_describe_error(kiln_value value);
 typedef int (*kiln_realm_entry_fn)(void *context);
 extern int kiln_realm_create(uint64_t *out_realm);
@@ -1194,14 +1227,14 @@ extern int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *con
 extern int kiln_realm_set_argv(uint64_t realm, uint64_t argc, const char *const *argv);
 extern int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
 extern int kiln_realm_destroy(uint64_t realm);
-static kiln_value kiln_cli_launcher_ascii(const char *text, size_t length) {
-    static kiln_string header;
+/* A string value over static text, read through `header`, which lives as long as the realm run. */
+static kiln_value kiln_cli_launcher_ascii(kiln_string *header, const char *text, size_t length) {
     kiln_value value = { .tag = KILN_VALUE_STRING, .flags = 0, .len = 0, .bits = 0 };
-    header.unit_len = length > UINT32_MAX ? 0 : (uint32_t)length;
-    header.flags = KILN_STRING_LATIN1;
-    header.data = text;
-    value.ptr = (const char *)&header;
-    value.len = header.unit_len;
+    header->unit_len = length > UINT32_MAX ? 0 : (uint32_t)length;
+    header->flags = KILN_STRING_LATIN1;
+    header->data = text;
+    value.ptr = (const char *)header;
+    value.len = header->unit_len;
     return value;
 }
 extern int 
@@ -1229,6 +1262,10 @@ int main(int argc, char **argv) {
     kiln_host host;
     kiln_value result;
     kiln_cli_entry_context context;
+    /* This realm's host state and the header its launcher messages are read through: the
+     * realm's, not the process's (ADR 0070). */
+    kiln_cli_host_state host_state = { { .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }, { 0, 0, NULL } };
+    kiln_string message = { 0, 0, NULL };
     uint64_t realm = 0;
     const char *phase;
     int status;
@@ -1237,7 +1274,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     host.call = kiln_cli_host_call;
-    host.context = NULL;
+    host.context = &host_state;
     result = (kiln_value){ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };
     context.host = &host;
     context.result = &result;
@@ -1276,7 +1313,7 @@ int main(int argc, char **argv) {
             } else if (promise->state == 0 /* KILN_C99_PENDING */) {
                 status = KILN_C99_CONTROL_ERROR;
                 phase = "the turn loop";
-                result = kiln_cli_launcher_ascii("top-level await never settled", 29);
+                result = kiln_cli_launcher_ascii(&message, "top-level await never settled", 29);
             } else if (promise->state == 1 /* KILN_C99_FULFILLED */) {
                 result = promise->value;
             }
@@ -1290,11 +1327,11 @@ int main(int argc, char **argv) {
         }
     }
     if (status != 0) {
-        kiln_cli_report_failure_in(status, result, phase);
+        kiln_cli_report_failure_with(status, result, phase, &host_state);
         return 1;
     }
     if (kiln_cli_write_result(result) != KILN_C99_OK) {
-        kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, kiln_cli_launcher_ascii("filesystem access", 17), "result write");
+        kiln_cli_report_failure_with(KILN_C99_HOST_ERROR, kiln_cli_launcher_ascii(&message, "filesystem access", 17), "result write", &host_state);
         return 1;
     }
     return 0;

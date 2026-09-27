@@ -633,16 +633,32 @@ typedef enum kiln_native_prototype_surface {
     KILN_C99_NATIVE_SERVER_RESPONSE
 } kiln_native_prototype_surface;
 
-/* Generated from the checked Rust constructor graph. The prototype value is the only mutable
- * field: constructor identity, parentage, and surface cannot drift from the compiler registry. */
+/* Generated from the checked Rust constructor graph: constructor identity, parentage, and surface
+ * cannot drift from the compiler registry. The table is constant; each prototype is the realm's,
+ * at the same index in `kiln_c99_realm_state.native_prototypes`. */
 typedef struct kiln_native_constructor {
     uint64_t method;
     uint64_t parent;
     kiln_native_prototype_surface surface;
-    kiln_value prototype;
 } kiln_native_constructor;
 
 /* KILN_NATIVE_CONSTRUCTOR_TABLE */
+
+/* A compiled unit's realm state (ADR 0070, realms issue 04 step 5): its module globals, then its
+ * template sites, as one array of machine values each realm allocates the first time it enters
+ * the unit and marks, and frees with its heap. `id` names the unit's row in every realm's table;
+ * it is assigned once per process, the first time any realm asks. The cache is per thread and
+ * trusted only under the realm generation it was filled in, exactly like `kiln_c99_gc_heap`'s. */
+typedef struct kiln_c99_unit {
+    uint32_t id;
+    uint32_t val_count;
+} kiln_c99_unit;
+
+typedef struct kiln_c99_unit_cache {
+    const uint64_t *generation_slot;
+    uint64_t generation;
+    kiln_val *vals;
+} kiln_c99_unit_cache;
 
 /* A shape describes the layout of an object's own properties (ADR 0050):
  * an ordered list of interned keys and slot indices. Objects with the same

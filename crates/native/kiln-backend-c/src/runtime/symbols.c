@@ -56,25 +56,23 @@ static const kiln_symbol kiln_c99_well_known[] = {
  * `kiln_symbol *` inside it, because `Symbol.for` and `Symbol()` fill `bits` differently and
  * equality reads what was stored.
  *
- * Held for the life of the process, because the last reference to a symbol can legitimately be
+ * Held for the life of the realm, because the last reference to a symbol can legitimately be
  * the property key it is stored under: `o[Symbol("k")] = 1` keeps nothing else, and the key must
- * still name a symbol afterwards. */
-static kiln_value *kiln_c99_symbols;
-static size_t kiln_c99_symbol_count;
-static size_t kiln_c99_symbol_capacity;
-
+ * still name a symbol afterwards. The registry is the realm's (`kiln_c99_realm_state.symbols`):
+ * marked by its heap and freed with it. */
 static int kiln_c99_remember_symbol(kiln_value symbol) {
-    if (kiln_c99_symbol_count == kiln_c99_symbol_capacity) {
-        size_t wanted = kiln_c99_symbol_capacity == 0 ? 8 : kiln_c99_symbol_capacity * 2;
+    kiln_c99_realm_state *realm = kiln_c99_realm();
+    if (realm->symbol_count == realm->symbol_capacity) {
+        size_t wanted = realm->symbol_capacity == 0 ? 8 : realm->symbol_capacity * 2;
         kiln_value *grown =
-            (kiln_value *)realloc(kiln_c99_symbols, wanted * sizeof *kiln_c99_symbols);
+            (kiln_value *)realloc(realm->symbols, wanted * sizeof *realm->symbols);
         if (grown == NULL) {
             return KILN_C99_OUT_OF_MEMORY;
         }
-        kiln_c99_symbols = grown;
-        kiln_c99_symbol_capacity = wanted;
+        realm->symbols = grown;
+        realm->symbol_capacity = wanted;
     }
-    kiln_c99_symbols[kiln_c99_symbol_count++] = symbol;
+    realm->symbols[realm->symbol_count++] = symbol;
     return KILN_C99_OK;
 }
 
@@ -96,11 +94,14 @@ static int kiln_c99_symbol_of_key_view(const kiln_string *key, kiln_value *out) 
             return 1;
         }
     }
-    for (index = 0; index < kiln_c99_symbol_count; ++index) {
-        const kiln_symbol *symbol = kiln_c99_symbol_of(kiln_c99_symbols[index]);
-        if (kiln_string_equal(symbol->key, key)) {
-            *out = kiln_c99_symbols[index];
-            return 1;
+    {
+        const kiln_c99_realm_state *realm = kiln_c99_realm();
+        for (index = 0; index < realm->symbol_count; ++index) {
+            const kiln_symbol *symbol = kiln_c99_symbol_of(realm->symbols[index]);
+            if (kiln_string_equal(symbol->key, key)) {
+                *out = realm->symbols[index];
+                return 1;
+            }
         }
     }
     return 0;
@@ -165,7 +166,7 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
         return KILN_C99_OUT_OF_MEMORY;
     }
     /* The reserved key stays malloc-backed and is never released: a symbol lives as long as the
-     * realm does (`kiln_c99_symbols` roots every one of them), and the key bytes are borrowed by
+     * realm does (the realm's symbol registry roots every one of them), and the key bytes are borrowed by
      * every property stored under this symbol. The tracer still marks both `key` and
      * `description` as candidate blocks, so a description that came from a collected string --
      * `Symbol(String(x))` -- is kept alive by the symbol that carries it. */
