@@ -2640,6 +2640,7 @@ typedef struct kiln_c99_clone_table {
 static size_t kiln_c99_clone_hash(kiln_val key, size_t mask) {
 static int kiln_c99_clone_table_put(kiln_c99_clone_table *table, kiln_val key, kiln_val value) {
 static int kiln_c99_clone_table_get(const kiln_c99_clone_table *table, kiln_val key, kiln_val *out) {
+static kiln_shape *kiln_c99_clone_list_shape(const kiln_object *source, kiln_shape *root) {
 static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, int depth,
 static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size_t argc) {
 static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value source,
