@@ -126,6 +126,11 @@ headers affect the key), relinks against the current host libraries, and execute
 The key includes compiler identity, flags and preprocessed content. Test-only modules do not
 participate in the production C emitter fingerprint; editing a fixture does not invalidate all
 native artifacts. These are compilation caches, not cached test verdicts.
+Four CLI HTTP execution/build fixtures likewise reuse artifacts under
+`target/kiln-cli-native-semantic-cache`, while keeping fresh project directories and executing the
+programs on every run. Explicit cache miss/hit tests retain private caches. Source-read and native
+emission pools respect positive `KILN_JOBS` and `RAYON_NUM_THREADS` limits in addition to their
+own caps; those are per-pool bounds, not a global limit on concurrent processes.
 The test profile optimizes IR, graph and C emission passes at level 1 while retaining debug
 assertions and overflow checks; ordinary dev builds keep their existing settings.
 The cache suite keeps its full stress repetition and contributes to the same workspace totals;
