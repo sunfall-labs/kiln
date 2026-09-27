@@ -78,6 +78,7 @@ fi
 
 matched=0
 diverged=0
+stress_skipped=0
 declare -a REFUSALS=()
 declare -a DIVERGENCES=()
 
@@ -145,6 +146,15 @@ run_probe() {
 	fi
 	if [[ $native_directive =~ parallelism=([0-9a-z,]+) ]]; then
 		parallelism="${BASH_REMATCH[1]//,/ }"
+		# Under collector stress every allocation collects, and these probes map large arrays at
+		# several thread counts: tens of minutes each, which made `native-stress` impractical.
+		# Their pooled workers never allocate, and the part of the path that does (the result
+		# array) is the ordinary `map` path the other probes stress, so they are skipped here and
+		# counted as skipped, never as matched.
+		if [[ -n $STRESS ]]; then
+			touch "$WORK_DIR/$name.stress-skipped"
+			return 0
+		fi
 	fi
 
 	local native native_status=0 threads
@@ -242,6 +252,8 @@ for probe in "$PROBES"/*.ts "$PROBES"/*.js "$PROBES"/*.cjs "$PROBES"/*.mjs; do
 		kiln_say "FAILED: the native build of $name did not complete, so there is nothing to compare:"
 		kiln_say "$(<"$WORK_DIR/$name.broken")"
 		exit 1
+	elif [[ -f "$WORK_DIR/$name.stress-skipped" ]]; then
+		stress_skipped=$((stress_skipped + 1))
 	elif [[ -f "$WORK_DIR/$name.matched" ]]; then
 		matched=$((matched + 1))
 	elif [[ -f "$WORK_DIR/$name.refused" ]]; then
@@ -255,7 +267,7 @@ for probe in "$PROBES"/*.ts "$PROBES"/*.js "$PROBES"/*.cjs "$PROBES"/*.mjs; do
 	fi
 done
 
-kiln_say "native: $matched matched, ${#REFUSALS[@]} refused, $diverged diverged${STRESS:+ (KILN_GC_STRESS=$STRESS)}"
+kiln_say "native: $matched matched, ${#REFUSALS[@]} refused, $diverged diverged${STRESS:+ (KILN_GC_STRESS=$STRESS; $stress_skipped parallelism probes skipped)}"
 
 if ((${#REFUSALS[@]} > 0)); then
 	kiln_say ""
