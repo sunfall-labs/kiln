@@ -46,17 +46,15 @@ WORKLOADS = [
     ("enrich-records", "tier 3: `records.map(r => ({ ...r, total: r.price * r.qty }))`", None),
     ("flatmap-records", "tier 3: `records.flatMap(r => r.qty > 4 ? [r.price, r.qty] : [])`", None),
     ("format-csv", "tier 3: `records.map(r => `${r.id},${r.qty},${r.price}`)`", None),
+    ("parse-csv", "tier 4: `lines.map(l => l.trim().split(\",\").map(Number))`", None),
 ]
 
-# Tier-3 workloads have no `worker_threads` pool or Go twin yet: their pool and Go cells are `--`.
-KILN_NODE_ONLY = {"enrich-records", "flatmap-records", "format-csv"}
+# Tier-3 and tier-4 workloads have no `worker_threads` pool or Go twin yet: their pool and Go cells are `--`.
+KILN_NODE_ONLY = {"enrich-records", "flatmap-records", "format-csv", "parse-csv"}
 
 # Workloads a realistic program needs that no kiln parallel lowering can take yet. Not measured:
 # the row is kept so the table grows into it as each tier lands (PRD tiers 2-4).
-WAITING = [
-    ("parse and normalise a large CSV's lines", "tier 2+ (4)",
-     "reads strings (tier 2), allocates strings (tier 3), calls `split`/`trim`/`Number` (tier 4)"),
-]
+WAITING = []
 
 
 def config(quick):
@@ -339,16 +337,17 @@ def render(table, diverged, failures, sites, machine, cfg, loads, started, finis
     if noisy:
         w(f"{noisy} cell(s) marked `~` spread by more than {int(NOISY * 100)}% across rounds.")
         w("")
-    w("### Waiting on tiers 2-4 (not measured yet)")
-    w("")
-    w("Realistic workloads no kiln parallel lowering can take today. Each row becomes a measured row, with every "
-      "column above, when its tier lands; until then kiln runs the sequential method for them.")
-    w("")
-    w("| workload | kiln `parallel*` | why |")
-    w("|---|---|---|")
-    for desc, tier, why in WAITING:
-        w(f"| {desc} | {tier} | {why} |")
-    w("")
+    if WAITING:
+        w("### Waiting on a later tier (not measured yet)")
+        w("")
+        w("Realistic workloads no kiln parallel lowering can take today. Each row becomes a measured row, with "
+          "every column above, when its tier lands; until then kiln runs the sequential method for them.")
+        w("")
+        w("| workload | kiln `parallel*` | why |")
+        w("|---|---|---|")
+        for desc, tier, why in WAITING:
+            w(f"| {desc} | {tier} | {why} |")
+        w("")
     w("## What ran in parallel (`kiln build --explain-parallel`)")
     w("")
     w("```")

@@ -98,8 +98,9 @@ All over 1,000,000 elements. The callbacks are written inline, identically, in e
 | `enrich-records` | `records.map(r => ({ ...r, total: r.price * r.qty }))` over 1M `{ price, qty, rating }` | parallel (tier 3: the new objects are built in worker arenas) |
 | `flatmap-records` | `records.flatMap(r => r.qty > 4 ? [r.price, r.qty] : [])` | parallel (tier 3: the arrays are built in arenas, flattened on the realm thread) |
 | `format-csv` | `records.map(r => `${r.id},${r.qty},${r.price}`)`: CSV lines | parallel (tier 3: number formatting and concatenation in arenas) |
+| `parse-csv` | `lines.map(l => l.trim().split(",").map(Number))`: parse CSV lines | parallel (tier 4: pure calls -- `trim`, `split`, `Number` on the workers) |
 
-The three tier-3 rows have no `worker_threads` pool or Go twin yet (their cells read `--`): the
+The tier-3 and tier-4 rows have no `worker_threads` pool or Go twin yet (their cells read `--`): the
 comparison that matters for them is kiln's parallel method against its own and node's `map`.
 
 The results file prints `kiln build --explain-parallel` for every program, so a reader sees which
@@ -117,8 +118,9 @@ realistic shape from "sequential" to "parallel":
   the `sort-records` row.
 - **Tier 3, allocate in worker arenas** (08; landed): callbacks that return new objects, arrays
   and strings -- the `enrich-records`, `flatmap-records` and `format-csv` rows.
-- **Tier 4, pure calls** (09): callbacks that call the program's own pure functions and pure
-  built-ins (`split`, `trim`, `Number`), which text processing needs.
+- **Tier 4, pure calls** (09; landed): callbacks that call the program's own pure functions and
+  the built-ins marked pure (`split`, `trim`, `Number`, `toFixed`, `JSON.stringify`, ...), which
+  text processing needs -- the `parse-csv` row.
 
 The results file's "Waiting on tiers 2-4" table lists the realistic workloads that need them;
 each becomes a measured row, with every column, when its tier lands.
