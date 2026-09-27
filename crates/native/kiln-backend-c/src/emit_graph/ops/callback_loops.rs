@@ -14,7 +14,7 @@
 //!
 //! The equivalence invariant the guards name: the receiver is a view of a Number element type that
 //! is not a Node `Buffer`, and no built-in has been written since the bootstrap
-//! (`kiln_c99_builtin_store_epoch == 0`). A native view has neither own properties nor a
+//! (`kiln_c99_builtins_unmodified()`). A native view has neither own properties nor a
 //! prototype of its own choosing (both refuse), so with the built-ins untouched the method is the
 //! bootstrap's, `ValidateTypedArray` passes exactly when the buffer is attached, and the species
 //! constructor is the intrinsic one -- a plain allocation of the same kind. Each loop then takes
@@ -95,7 +95,7 @@ fn typed_array_guard(site: &LoopSite, body: &str) -> String {
              if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY) {{ \
                  kiln_typed_array *view = (kiln_typed_array *)ptr; \
                  kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                 if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && !view->is_buffer && !view->buffer->detached && view->kind <= KILN_TYPED_FLOAT64 && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
+                 if (KILN_LIKELY(kiln_c99_builtins_unmodified() && !view->is_buffer && !view->buffer->detached && view->kind <= KILN_TYPED_FLOAT64 && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
                      {recv} \
                      {body} \
                  }} \
@@ -490,7 +490,7 @@ pub(super) fn reduce_tree(
         None => generic,
     };
     format!(
-        "if (!handled && kiln_c99_kiln_extensions_on() && kiln_c99_builtin_store_epoch == 0 && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0}) && KILN_VAL_IS_CLOSURE(v{combine}) && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+        "if (!handled && kiln_c99_kiln_extensions_on() && kiln_c99_builtins_unmodified() && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0}) && KILN_VAL_IS_CLOSURE(v{combine}) && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
              void *ptr = KILN_VAL_PTR(v{o}); \
              kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
              kiln_closure *pcomb = (kiln_closure *)KILN_VAL_PTR(v{combine}); \

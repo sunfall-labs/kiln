@@ -299,13 +299,6 @@ pub fn emit_function_from_graph_with_profile(
         for (vid, typed_candidates) in typed_sites {
             for i in typed_candidates {
                 let pfx = format!("{}_fn_{}_v{}_t_{}", symbol, index, vid.0, i);
-                if plan.typed_needs[i as usize].row {
-                    writeln!(
-                        output,
-                        "static const kiln_shape *{pfx}_shape = NULL;\nstatic const uint32_t *{pfx}_row = NULL;"
-                    )
-                    .unwrap();
-                }
                 writeln!(
                     output,
                     "static kiln_c99_method_path {pfx}_path = KILN_C99_UNLEARNED_METHOD_PATH;"
@@ -497,7 +490,7 @@ pub fn emit_function_from_graph_with_profile(
         if type_profile_record && proto.parameter_count > 0 {
             writeln!(
                 output,
-                "    for (size_t _pi = 0; _pi < argc && _pi < {}; ++_pi) {{ {symbol}_fn_{index}_param_tags[_pi] |= kiln_profile_tag_of(args[_pi]); }}",
+                "    for (size_t _pi = 0; _pi < argc && _pi < {}; ++_pi) {{ __atomic_fetch_or(&{symbol}_fn_{index}_param_tags[_pi], kiln_profile_tag_of(args[_pi]), __ATOMIC_RELAXED); }}",
                 proto.parameter_count
             )
             .unwrap();
@@ -507,7 +500,11 @@ pub fn emit_function_from_graph_with_profile(
         && proto.parameter_count > 0
     {
         for p in 0..proto.parameter_count {
-            writeln!(output, "    {symbol}_fn_{index}_param_tags[{p}] |= 1;").unwrap();
+            writeln!(
+                output,
+                "    __atomic_fetch_or(&{symbol}_fn_{index}_param_tags[{p}], 1u, __ATOMIC_RELAXED);"
+            )
+            .unwrap();
         }
     }
 
@@ -700,13 +697,6 @@ pub fn emit_entry_from_graph_with_profile(
     for (vid, typed_candidates) in &typed_sites {
         for &i in typed_candidates {
             let pfx = format!("{}_fn_entry_v{}_t_{}", symbol, vid.0, i);
-            if plan.typed_needs[i as usize].row {
-                writeln!(
-                    output,
-                    "    static const kiln_shape *{pfx}_shape = NULL; static const uint32_t *{pfx}_row = NULL;"
-                )
-                .unwrap();
-            }
             writeln!(
                 output,
                 "    static kiln_c99_method_path {pfx}_path = KILN_C99_UNLEARNED_METHOD_PATH;"
@@ -779,13 +769,6 @@ pub fn emit_async_entry_body(
     {
         for i in typed_candidates {
             let pfx = format!("{}_fn_entry_v{}_t_{}", symbol, vid.0, i);
-            if plan.typed_needs[i as usize].row {
-                writeln!(
-                    output,
-                    "    static const kiln_shape *{pfx}_shape = NULL; static const uint32_t *{pfx}_row = NULL;"
-                )
-                .unwrap();
-            }
             writeln!(
                 output,
                 "    static kiln_c99_method_path {pfx}_path = KILN_C99_UNLEARNED_METHOD_PATH;"
@@ -3062,7 +3045,7 @@ fn emit_terminator(
                 ) =>
             {
                 if type_profile_record {
-                    writeln!(output, "    {symbol}_fn_{index}_return_tag |= 1;").unwrap();
+                    writeln!(output, "    __atomic_fetch_or(&{symbol}_fn_{index}_return_tag, 1u, __ATOMIC_RELAXED);").unwrap();
                 }
                 match value {
                     Some(val) if numbers.contains(val) => {
@@ -3093,7 +3076,7 @@ fn emit_terminator(
                     if type_profile_record {
                         writeln!(
                             output,
-                            "    {symbol}_fn_{index}_return_tag |= kiln_profile_tag_of(v{});",
+                            "    __atomic_fetch_or(&{symbol}_fn_{index}_return_tag, kiln_profile_tag_of(v{}), __ATOMIC_RELAXED);",
                             val.0
                         )
                         .unwrap();
@@ -3104,7 +3087,7 @@ fn emit_terminator(
                     if type_profile_record {
                         writeln!(
                             output,
-                            "    {symbol}_fn_{index}_return_tag |= kiln_profile_tag_of(KILN_VAL_UNDEFINED);"
+                            "    __atomic_fetch_or(&{symbol}_fn_{index}_return_tag, kiln_profile_tag_of(KILN_VAL_UNDEFINED), __ATOMIC_RELAXED);"
                         )
                         .unwrap();
                     }

@@ -60,9 +60,9 @@ static int kiln_c99_grow_slots(kiln_object *dest, size_t needed) {
 static inline int kiln_c99_define_named_cached(kiln_object *object, kiln_val value,
                                                const kiln_c99_site *site) {
     const kiln_c99_pic_entry *entry;
-    if (site == NULL || site->pic_count == 0) return 0;
-    entry = &site->entries[0];
-    if (object->shape != entry->shape) return 0;
+    if (site == NULL || object->shape == NULL) return 0;
+    entry = kiln_c99_site_entry(site, object->shape);
+    if (entry == NULL) return 0;
     if (entry->transition_to == NULL) {
         if (entry->slot >= object->slot_capacity) return 0;
         object->slots[entry->slot] = value;
@@ -79,15 +79,8 @@ static inline int kiln_c99_define_named_cached(kiln_object *object, kiln_val val
 
 static inline void kiln_c99_define_named_teach(kiln_c99_site *site, const kiln_shape *from,
                                                const kiln_shape *to, uint32_t slot) {
-    kiln_c99_pic_entry *entry;
     if (site == NULL) return;
-    entry = &site->entries[0];
-    memset(entry, 0, sizeof *entry);
-    entry->shape = from;
-    entry->transition_to = to;
-    entry->slot = slot;
-    site->pic_count = 1;
-    kiln_c99_site_learned(site);
+    kiln_c99_site_remember_transition(site, from, to, slot);
 }
 
 static int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val value, int *status,

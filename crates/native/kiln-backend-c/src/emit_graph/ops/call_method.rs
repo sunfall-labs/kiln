@@ -292,7 +292,7 @@ fn parallel_env(
 /// leaving `handled` clear -- for the sequential lowering or the generic call after it --
 /// whenever it does not answer. Shared by the specialized emission and the generic-only one
 /// (issue 13). Every form stands down when the realm withholds kiln's extensions (ADR 0068) or
-/// some built-in has been written since the bootstrap (`kiln_c99_builtin_store_epoch`), which
+/// the current realm has written some built-in since its bootstrap (`kiln_c99_builtins_unmodified`), which
 /// covers a program that replaced the method itself.
 fn parallel_lowering(
     plan: &crate::direct::CallPlan,
@@ -354,7 +354,7 @@ fn parallel_pool_lowering(
             "else if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY) {{ \
                      kiln_typed_array *view = (kiln_typed_array *)ptr; \
                      kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                     if (kiln_c99_builtin_store_epoch == 0 && !kiln_c99_inheriting_new_target && !view->buffer->detached && depth < KILN_C99_MAX_CALL_DEPTH && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
+                     if (kiln_c99_builtins_unmodified() && !kiln_c99_inheriting_new_target && !view->buffer->detached && depth < KILN_C99_MAX_CALL_DEPTH && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
                          {env_decl} \
                          if ({env_ok}) {{ \
                          size_t count0 = view->length; \
@@ -400,7 +400,7 @@ fn parallel_pool_lowering(
                  if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                      kiln_array *arr = (kiln_array *)ptr; \
                      kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                     if (arr->is_numeric && kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
+                     if (arr->is_numeric && kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
                          {env_decl} \
                          if ({env_ok}) {{ \
                          size_t count0 = arr->count; \
@@ -439,7 +439,7 @@ fn parallel_filter_lowering(
 ) -> String {
     let (env_decl, env_ptr, env_failed, env_ok) = parallel_env(plan, target, "plain", "pflt");
     format!(
-        "if (!handled && kiln_c99_kiln_extensions_on() && kiln_c99_builtin_store_epoch == 0 && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
+        "if (!handled && kiln_c99_kiln_extensions_on() && kiln_c99_builtins_unmodified() && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0})) {{ \
                  void *ptr = KILN_VAL_PTR(v{o}); \
                  kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
                  if (plain->body == (kiln_body_fn){symbol}_fn_{target} && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
@@ -522,7 +522,7 @@ fn parallel_reduce_lowering(
         parallel_env(plan, combine, "pcomb_closure", "pcomb");
     let leaf = crate::parallel::REDUCE_LEAF;
     format!(
-        "if (!handled && kiln_c99_kiln_extensions_on() && kiln_c99_builtin_store_epoch == 0 && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0}) && KILN_VAL_IS_CLOSURE(v{a1}) && KILN_VAL_IS_NUMBER(v{a2})) {{ \
+        "if (!handled && kiln_c99_kiln_extensions_on() && kiln_c99_builtins_unmodified() && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_CLOSURE(v{a0}) && KILN_VAL_IS_CLOSURE(v{a1}) && KILN_VAL_IS_NUMBER(v{a2})) {{ \
                  void *ptr = KILN_VAL_PTR(v{o}); \
                  kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
                  kiln_closure *pcomb_closure = (kiln_closure *)KILN_VAL_PTR(v{a1}); \
@@ -616,7 +616,7 @@ fn parallel_sort_lowering(
         String::new()
     };
     format!(
-        "if (!handled && kiln_c99_kiln_extensions_on() && kiln_c99_builtin_store_epoch == 0 && (v{object} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX{guard}{identity}) {{ \
+        "if (!handled && kiln_c99_kiln_extensions_on() && kiln_c99_builtins_unmodified() && (v{object} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX{guard}{identity}) {{ \
              void *ptr = KILN_VAL_PTR(v{object}); \
              if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY) {{ \
                  kiln_typed_array *view = (kiln_typed_array *)ptr; \
@@ -768,7 +768,7 @@ fn emit_map_typed(
     };
     format!(
         "{header} \
-             if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
+             if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
                  kiln_val vrecv = plain->arrow ? plain->captured_this : {this_arg}; \
                  if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
                  if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
@@ -891,7 +891,7 @@ fn emit_filter_typed(
     };
     format!(
         "{header} \
-             if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
+             if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
                  kiln_val vrecv = plain->arrow ? plain->captured_this : {this_arg}; \
                  if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
                  if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
@@ -984,7 +984,7 @@ fn emit_reduce_typed(
     };
     format!(
         "{header} \
-             if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
+             if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
                  kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
                  if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
                  if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
@@ -1125,7 +1125,7 @@ pub(super) fn emit_call_method(
     // In the parallel clone (ADR 0058, application 2) a `Math.<name>` call on the builtin
     // itself, with every argument proven a number, is the bare libm call and nothing else: no
     // generic fallback, because the clone runs on a thread with no realm to fall back to. The
-    // site that enters the clone has already checked `kiln_c99_builtin_store_epoch == 0` on the
+    // site that enters the clone has already checked `kiln_c99_builtins_unmodified()` on the
     // realm thread, so `Math.<name>` is the table's. `parallel::parallel_safe` admits only these
     // calls into a clone, so any other `CallMethod` here would be a bug in that predicate; the
     // generic lowering below then mentions `host`, and the clone is rejected by the scan.
@@ -1374,8 +1374,6 @@ pub(super) fn emit_call_method(
                 .iter()
                 .map(|&i| {
                     let pfx = format!("{symbol}_fn_{fn_id}_v{v}_t_{i}");
-                    let shape_var = format!("{pfx}_shape");
-                    let row_var = format!("{pfx}_row");
 
                     let needs = plan.typed_needs[i as usize];
                     let mut call_args = String::from("depth + 1");
@@ -1385,21 +1383,17 @@ pub(super) fn emit_call_method(
                     if needs.receiver {
                         call_args.push_str(&format!(", v{}", object.0));
                     }
-                    // The callee's row for this receiver's shape, remembered here from the
-                    // callee's own table after the first call, so the callee does no lookup.
-                    let (row_arg, row_learn) = if needs.row {
+                    // The callee's row for this receiver's shape, looked up here in the callee's
+                    // own table (write-once rows, ADR 0071), so the callee does no lookup.
+                    let row_lookup = if needs.row {
                         let columns = plan.receiver_columns.get(i as usize).copied().unwrap_or(0);
                         call_args.push_str(", {ROW}");
-                        (
-                            String::new(),
-                            format!(
-                                " if (obj->shape != {shape_var}) {{ const uint32_t *__r = kiln_c99_recv_row({symbol}_fn_{i}_typed_recv_shape, &{symbol}_fn_{i}_typed_recv_slot[0][0], {columns}, obj->shape); if (__r != NULL) {{ {shape_var} = obj->shape; {row_var} = __r; }} }}"
-                            ),
+                        format!(
+                            "const uint32_t *__row = kiln_c99_recv_row({symbol}_fn_{i}_typed_recv_shape, &{symbol}_fn_{i}_typed_recv_slot[0][0], {columns}, obj->shape); "
                         )
                     } else {
-                        (String::new(), String::new())
+                        String::new()
                     };
-                    let _ = row_arg;
                     if needs.runtime {
                         call_args.push_str(", host, thrown");
                     }
@@ -1445,7 +1439,7 @@ pub(super) fn emit_call_method(
                     // for the slot is learned.
                     let path_learn = if needs.row {
                         format!(
-                            " kiln_c99_method_path_learn(&{pfx}_path, &site, obj, (kiln_body_fn){symbol}_fn_{i}, obj->shape == {shape_var} ? {row_var} : NULL, 1);"
+                            " kiln_c99_method_path_learn(&{pfx}_path, &site, obj, (kiln_body_fn){symbol}_fn_{i}, __row, 1);"
                         )
                     } else {
                         format!(
@@ -1454,12 +1448,12 @@ pub(super) fn emit_call_method(
                     };
                     let arm = |learn_path: &str, matched: &str| -> String {
                         if needs.row {
-                            // The receiver's shape is the one whose row this site remembered: the
-                            // row goes in known, so the callee's own lookup folds away.
+                            // A receiver whose shape has a row: the row goes in known, so the
+                            // callee's own lookup folds away. Otherwise the callee claims one.
                             let known = invoke("__row", learn_path);
-                            let learning = invoke("NULL", &format!("{row_learn}{learn_path}"));
+                            let learning = invoke("NULL", "");
                             format!(
-                                "if ({matched}) {{ if (obj->shape != NULL && obj->shape == {shape_var}) {{ const uint32_t *__row = {row_var}; if (__row == NULL) __builtin_unreachable(); {known} }} else {{ {learning} }} handled = 1; }}"
+                                "if ({matched}) {{ {row_lookup}if (__row != NULL) {{ {known} }} else {{ {learning} }} handled = 1; }}"
                             )
                         } else {
                             let plain_call = invoke("", learn_path);
@@ -1487,7 +1481,7 @@ pub(super) fn emit_call_method(
                         invoke("", "")
                     };
                     let front = format!(
-                        "if (!handled && obj->shape == {pfx}_path.recv) {{ const kiln_object *kiln_path_level; if (kiln_c99_method_path_hit(&{pfx}_path, obj, &kiln_path_level) && kiln_typed_ok) {{ {front_closure}{front_call} handled = 1; }} }} "
+                        "if (!handled && obj->shape == kiln_c99_slot_key(&{pfx}_path.recv)) {{ const kiln_object *kiln_path_level; if (kiln_c99_method_path_hit(&{pfx}_path, obj, &kiln_path_level) && kiln_typed_ok) {{ {front_closure}{front_call} handled = 1; }} }} "
                     );
                     (front, format!("{} else ", arm(&path_learn, &matched)))
                 })
@@ -1549,7 +1543,7 @@ pub(super) fn emit_call_method(
         && argc == 1
     {
         Some(format!(
-            "if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_PROMISE && KILN_VAL_IS_NUMBER(v{a0}))) {{ v{v} = v{a0}; handled = 1; }}",
+            "if (KILN_LIKELY(kiln_c99_builtins_unmodified() && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_PROMISE && KILN_VAL_IS_NUMBER(v{a0}))) {{ v{v} = v{a0}; handled = 1; }}",
             o = object.0,
             a0 = args[0].0,
             v = v,
@@ -1870,7 +1864,7 @@ pub(super) fn emit_call_method(
     // written onto any builtin: `Math.max = f` and `Promise.resolve = f` move the store epoch,
     // and every intrinsic above then takes the general call, which finds the override.
     let math_intrinsic = math_intrinsic
-        .map(|text| format!("if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0)) {{ {text} }}"));
+        .map(|text| format!("if (KILN_LIKELY(kiln_c99_builtins_unmodified())) {{ {text} }}"));
 
     // 1b. Array.isArray static predicate
     let array_is_array_intrinsic = if key_str == "isArray" {
@@ -1893,7 +1887,7 @@ pub(super) fn emit_call_method(
             }
         };
         Some(format!(
-            "if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_ARRAY)) {{ \
+            "if (KILN_LIKELY(kiln_c99_builtins_unmodified() && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_ARRAY)) {{ \
                  {arg_check} \
              }}",
             o = object.0,
@@ -1906,7 +1900,7 @@ pub(super) fn emit_call_method(
     // 1c. Number.* static predicates (isFinite, isNaN, isInteger, isSafeInteger)
     let number_predicate_intrinsic = match (key_str.as_str(), argc) {
         ("isFinite" | "isNaN" | "isInteger" | "isSafeInteger", 0) => Some(format!(
-            "if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
+            "if (KILN_LIKELY(kiln_c99_builtins_unmodified() && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
                  v{v} = KILN_VAL_FALSE; \
                  handled = 1; \
              }}",
@@ -1930,7 +1924,7 @@ pub(super) fn emit_call_method(
                 )
             };
             Some(format!(
-                "if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
+                "if (KILN_LIKELY(kiln_c99_builtins_unmodified() && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
                      {check} \
                  }}",
                 o = object.0,
@@ -1954,7 +1948,7 @@ pub(super) fn emit_call_method(
                 )
             };
             Some(format!(
-                "if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
+                "if (KILN_LIKELY(kiln_c99_builtins_unmodified() && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
                      {check} \
                  }}",
                 o = object.0,
@@ -1980,7 +1974,7 @@ pub(super) fn emit_call_method(
                 )
             };
             Some(format!(
-                "if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
+                "if (KILN_LIKELY(kiln_c99_builtins_unmodified() && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
                      {check} \
                  }}",
                 o = object.0,
@@ -2006,7 +2000,7 @@ pub(super) fn emit_call_method(
                 )
             };
             Some(format!(
-                "if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
+                "if (KILN_LIKELY(kiln_c99_builtins_unmodified() && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
                      {check} \
                  }}",
                 o = object.0,
@@ -2148,7 +2142,7 @@ pub(super) fn emit_call_method(
     // lowering and behind `kiln_c99_kiln_extensions_on()` (a realm without kiln's members has no
     // `parallelMap` to call), so a call the pool declines at run time runs `map`'s own fastest
     // path here, never the generic call into the TypeScript definition (parallel issue 15). With
-    // the built-ins untouched (`kiln_c99_builtin_store_epoch == 0`, which the guard checks for the
+    // the built-ins untouched (`kiln_c99_builtins_unmodified()`, which the guard checks for the
     // `sort` loop, the one loop that does not check it itself) the member is the bootstrap's,
     // which calls that method. `parallelReduce` has no sequential method; its tree is
     // `callback_loops::reduce_tree`. `parallelFlatMap` has no lowering of its own: `flatMap` has
@@ -2163,7 +2157,7 @@ pub(super) fn emit_call_method(
     let family_guard = |text: String| {
         if family.is_some() {
             format!(
-                "if (kiln_c99_kiln_extensions_on() && kiln_c99_builtin_store_epoch == 0) {{ {text} }}"
+                "if (kiln_c99_kiln_extensions_on() && kiln_c99_builtins_unmodified()) {{ {text} }}"
             )
         } else {
             text
@@ -2271,7 +2265,7 @@ pub(super) fn emit_call_method(
                 let (header, footer) = array_header(args[0].0);
                 format!(
                     "{header} \
-                         if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
+                         if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
                              /* `map`, element for element: the length read once, each element \
                               * read when it is visited (a callback may grow, shrink or \
                               * reallocate the array), and the result's length kept current so \
@@ -2324,7 +2318,7 @@ pub(super) fn emit_call_method(
     // lowerings (issue 10): the callback is this site's known proto, its body passes
     // `parallel::parallel_safe`, its typed entry returns a double, and its parallel clone (`_p`)
     // was emitted and scanned clean (`lib.rs`), so it can run on a provider pool thread that owns
-    // no realm. `kiln_c99_builtin_store_epoch == 0` is checked on the realm thread, because the
+    // no realm. `kiln_c99_builtins_unmodified()` is checked on the realm thread, because the
     // clone calls `Math.<name>` as bare libm. Tried before the sequential lowering and only when
     // the receiver qualifies; a typed entry that bails out, or a provider that could not run the
     // pool, leaves `handled` clear and the sequential lowering answers -- the same answer,
@@ -2356,7 +2350,7 @@ pub(super) fn emit_call_method(
                 let (header, footer) = array_header(args[0].0);
                 format!(
                     "{header} \
-                         if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
+                         if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
                              kiln_value built_val; \
                              int status = kiln_c99_new_array_with_capacity(&built_val, arr->count, 1); \
                              if (status != KILN_C99_OK) return status; \
@@ -2420,7 +2414,7 @@ pub(super) fn emit_call_method(
                 let (header, footer) = array_header(args[0].0);
                 format!(
                     "{header} \
-                         if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
+                         if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
                              kiln_val vacc = v{a1}; \
                              kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
                              if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
@@ -2557,7 +2551,7 @@ pub(super) fn emit_call_method(
             Some(format!(
                 "if (!handled{guard}) {{ \
                      kiln_array *arr = (kiln_array *)KILN_VAL_PTR(v{o}); \
-                     if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED)) {{ \
+                     if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED)) {{ \
                          {array_body} \
                      }} \
                  }}",
@@ -2568,7 +2562,7 @@ pub(super) fn emit_call_method(
         } else if known_str {
             Some(format!(
                 "if (!handled{guard}) {{ \
-                     if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0)) {{ \
+                     if (KILN_LIKELY(kiln_c99_builtins_unmodified())) {{ \
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                          if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
                              {string_body} \
@@ -2585,12 +2579,12 @@ pub(super) fn emit_call_method(
                      void *ptr = KILN_VAL_PTR(v{o}); \
                      if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                          kiln_array *arr = (kiln_array *)ptr; \
-                         if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED)) {{ \
+                         if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED)) {{ \
                              {array_body} \
                          }} \
                      }} \
                  }} else if (!handled && KILN_VAL_IS_STRING(v{o}){guard}) {{ \
-                     if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0)) {{ \
+                     if (KILN_LIKELY(kiln_c99_builtins_unmodified())) {{ \
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                          if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
                              {string_body} \
@@ -2633,7 +2627,7 @@ pub(super) fn emit_call_method(
         };
         Some(format!(
             "{header} \
-                 if (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0 && arr->properties.tag == KILN_VALUE_UNDEFINED)) {{ \
+                 if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED)) {{ \
                      const kiln_string *sep = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
                      size_t total_bytes = 0; \
                      int can_fast = (sep != NULL && !kiln_string_is_utf16(sep)); \
@@ -2685,7 +2679,7 @@ pub(super) fn emit_call_method(
             format!("KILN_VAL_IS_STRING(v{o}) && ", o = object.0)
         };
         Some(format!(
-            "if (!handled && KILN_LIKELY(kiln_c99_builtin_store_epoch == 0) && {str_check}KILN_VAL_IS_STRING(v{a0})) {{ \
+            "if (!handled && KILN_LIKELY(kiln_c99_builtins_unmodified()) && {str_check}KILN_VAL_IS_STRING(v{a0})) {{ \
                          const kiln_string *src = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                          const kiln_string *sep = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
                          if (src != NULL && sep != NULL && !kiln_string_is_utf16(src) && !kiln_string_is_utf16(sep) && sep->unit_len == 1) {{ \
@@ -2743,7 +2737,7 @@ pub(super) fn emit_call_method(
             format!("KILN_VAL_IS_STRING(v{o}) && ", o = object.0)
         };
         Some(format!(
-            "if (!handled && KILN_LIKELY(kiln_c99_builtin_store_epoch == 0) && {str_check}KILN_VAL_IS_STRING(v{a0})) {{ \
+            "if (!handled && KILN_LIKELY(kiln_c99_builtins_unmodified()) && {str_check}KILN_VAL_IS_STRING(v{a0})) {{ \
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                          const kiln_string *s_ndl = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
                          if (s_recv != NULL && s_ndl != NULL && !kiln_string_is_utf16(s_recv) && !kiln_string_is_utf16(s_ndl)) {{ \
@@ -2806,7 +2800,7 @@ pub(super) fn emit_call_method(
             format!(" && KILN_VAL_IS_STRING(v{o})", o = object.0)
         };
         Some(format!(
-            "if (!handled && KILN_LIKELY(kiln_c99_builtin_store_epoch == 0){str_check}{guard}) {{ \
+            "if (!handled && KILN_LIKELY(kiln_c99_builtins_unmodified()){str_check}{guard}) {{ \
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                          if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
                              {check_and_extract} \
@@ -3588,7 +3582,7 @@ pub(super) fn emit_call_method(
                 if (!handled && KILN_VAL_IS_OBJECT(v{o})) {{ \
                     const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); if (obj == NULL) __builtin_unreachable(); \
                     {typed_front}\
-                    if (!handled && site.pic_count > 0) {{ \
+                    if (!handled && kiln_c99_site_count(&site) > 0) {{ \
                         kiln_val cached_fn = kiln_c99_site_cached_callee(&site, obj); \
                         if (cached_fn != 0 && KILN_VAL_IS_CLOSURE(cached_fn)) {{ \
                             kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(cached_fn); \

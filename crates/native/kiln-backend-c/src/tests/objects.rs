@@ -4,6 +4,80 @@ use super::*;
 /// forgets, when a realm is torn down, everything that realm is about to free -- its realm-local
 /// shapes, and a realm-local key a list-mode holder was checked by. Which built-ins are modified
 /// is each realm's own record, and a list-mode object's layout token is never reused.
+/// Realms issue 04 step 4: shared cache state is published so a reader on another thread never
+/// pairs one answer's key with another's words. A replaced answer is rewritten in place only while
+/// no other thread runs a realm; otherwise it is retired, left untouched, and reused only once every
+/// other thread has passed a turn boundary. The fixture stands for those threads
+/// (`kiln_test_other_threads`, `kiln_test_safe_below`).
+#[test]
+fn a_replaced_answer_is_retired_until_every_reader_has_passed_a_boundary() {
+    let generated =
+        emit(&program(vec![], vec![Instruction::Return], 0)).expect("a minimal unit emits");
+    let wrapper = r#"
+static kiln_c99_site kiln_test_site;
+static kiln_c99_method_path kiln_test_path = KILN_C99_UNLEARNED_METHOD_PATH;
+int main(void) {
+    kiln_shape *root = kiln_c99_shape_root();
+    kiln_shape *shapes[9];
+    char name[3] = { 'k', '0', 0 };
+    uint32_t i;
+    for (i = 0; i < 9; ++i) {
+        name[1] = (char)('0' + i);
+        if (!kiln_c99_shape_transition(root, kiln_c99_intern_static(name, 2), 0, &shapes[i]) ||
+            !shapes[i]->shared)
+            return 1;
+    }
+    /* Alone, a replacement is the in-place overwrite it always was. */
+    kiln_c99_site_remember_own(&kiln_test_site, shapes[0], 0);
+    kiln_c99_site_remember_own(&kiln_test_site, shapes[0], 1);
+    if (kiln_test_site.pic_count != 1 || kiln_c99_site_slot_for(&kiln_test_site, shapes[0]) != 1)
+        return 2;
+    /* With other threads running realms, the old answer is retired and left whole, and the new
+     * one goes in a fresh entry. */
+    kiln_test_other_threads = 1;
+    kiln_c99_site_remember_own(&kiln_test_site, shapes[0], 2);
+    if (!KILN_C99_SLOT_IS_RETIRED(kiln_test_site.entries[0].shape) ||
+        kiln_test_site.entries[0].slot != 1)
+        return 3;
+    if (kiln_test_site.pic_count != 2 || kiln_c99_site_slot_for(&kiln_test_site, shapes[0]) != 2)
+        return 4;
+    for (i = 1; i < 7; ++i) kiln_c99_site_remember_own(&kiln_test_site, shapes[i], i);
+    if (kiln_test_site.pic_count != KILN_C99_PIC_SIZE) return 5;
+    /* Full, and the retired entry not yet safe: evicting the last only retires it. */
+    kiln_c99_site_remember_own(&kiln_test_site, shapes[8], 8);
+    if (kiln_c99_site_slot_for(&kiln_test_site, shapes[8]) != UINT32_MAX) return 6;
+    if (!KILN_C99_SLOT_IS_RETIRED(kiln_test_site.entries[KILN_C99_PIC_SIZE - 1].shape)) return 7;
+    /* Every other thread has passed a boundary: a retired entry is written again. */
+    kiln_test_safe_below = kiln_test_epoch;
+    kiln_c99_site_remember_own(&kiln_test_site, shapes[8], 8);
+    if (kiln_c99_site_slot_for(&kiln_test_site, shapes[8]) != 8) return 8;
+    for (i = 1; i < 6; ++i)
+        if (kiln_c99_site_slot_for(&kiln_test_site, shapes[i]) != i) return 9;
+    if (kiln_c99_site_slot_for(&kiln_test_site, shapes[6]) != UINT32_MAX) return 9;
+
+    /* A method path is one slot: relearning it for another receiver retires it first. */
+    kiln_test_path.proto = shapes[1];
+    kiln_test_path.slot = 3;
+    kiln_c99_slot_publish(&kiln_test_path.recv, shapes[0]);
+    if (kiln_c99_slot_claim(&kiln_test_path.recv, 1)) return 10;
+    if (!KILN_C99_SLOT_IS_RETIRED(kiln_test_path.recv) || kiln_test_path.slot != 3) return 11;
+    if (kiln_c99_slot_claim(&kiln_test_path.recv, 0)) return 12;
+    kiln_test_safe_below = kiln_test_epoch;
+    if (!kiln_c99_slot_claim(&kiln_test_path.recv, 0)) return 13;
+    if (kiln_test_path.recv != KILN_C99_SLOT_CLAIMED || kiln_c99_slot_claim(&kiln_test_path.recv, 1))
+        return 14;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "slot-protocol");
+    assert!(
+        run.status.success(),
+        "a replaced answer rewritten under another thread's reader ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
 #[test]
 fn a_site_forgets_a_torn_down_realms_local_shapes_and_keys() {
     let generated = emit(&program(
@@ -94,12 +168,16 @@ int main(void) {
     if (kiln_c99_realm_builtin_modified(KILN_C99_BUILTIN_MATH)) return 17;
     if (kiln_c99_site_slot_for(&kiln_test_site, a) != 0) return 18;
 
-    /* The first realm goes: the site forgets its shape and its key, and keeps the shared one. */
+    /* The first realm goes: the site forgets its shape and its key -- the entries are retired in
+     * place, never moved under a reader -- and keeps the shared one. */
     kiln_c99_gc_teardown_begin(first);
     kiln_c99_gc_teardown_end(first);
-    if (kiln_test_site.pic_count != 1 || kiln_c99_site_slot_for(&kiln_test_site, a) != 0) return 19;
+    if (kiln_test_site.pic_count != 3 || kiln_c99_site_slot_for(&kiln_test_site, a) != 0) return 19;
     if (kiln_test_site.registered != 0) return 20;
-    if (kiln_test_site.entries[1].shape != NULL || kiln_test_site.entries[2].key != NULL) return 21;
+    if (!KILN_C99_SLOT_IS_RETIRED(kiln_test_site.entries[1].shape) ||
+        !KILN_C99_SLOT_IS_RETIRED(kiln_test_site.entries[2].shape) ||
+        kiln_test_site_names(root, xray))
+        return 21;
     kiln_c99_gc_teardown_begin(second);
     kiln_c99_gc_teardown_end(second);
     return 0;
@@ -447,7 +525,7 @@ int main(void) {
     const kiln_string *late_source = &late_view;
     /* Before any heap: the unit's constructor registered its key and filled its static from the
      * shared table, and the prelude's registered the built-ins'. */
-    if (!UNIT_KEYS_SHARED || !UNIT_KEYS_READY || UNIT_KEY == NULL) return 40;
+    if (!UNIT_KEYS_SHARED || UNIT_KEY == NULL) return 40;
     if (!kiln_c99_key_is_shared(UNIT_KEY)) return 41;
     if (kiln_c99_process()->live_heaps != 0) return 42;
     first = kiln_test_new_heap();
@@ -544,7 +622,6 @@ int main(void) {
 "#;
     let wrapper = wrapper
         .replace("UNIT_KEYS_SHARED", &format!("{symbol}_keys_shared"))
-        .replace("UNIT_KEYS_READY", &format!("{symbol}_keys_ready"))
         .replace("UNIT_KEY", &unit_key);
     let run = run_with_main(&generated, &wrapper, "two-heap-shapes");
     assert!(
@@ -1509,7 +1586,9 @@ fn two_realms_running_one_unit_keep_their_own_module_globals() {
     let generated = emit(&top).expect("a unit with a module global emits");
     let symbol = &generated.symbol;
     assert!(
-        generated.source.contains(&format!("#define {symbol}_globals ({symbol}_unit_vals())")),
+        generated
+            .source
+            .contains(&format!("#define {symbol}_globals ({symbol}_unit_vals())")),
         "module globals are reached through the realm's block"
     );
     assert!(

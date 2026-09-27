@@ -927,14 +927,20 @@ static size_t kiln_c99_uint64_digits(uint64_t value, char *out) {
  * Nothing frees a BigInt handle here, so a shared one is safe to keep -- the same bargain
  * `kiln_c99_bigint_one` makes for `1n`. */
 static const void *kiln_c99_bigint_uint64_mask(void) {
-    static void *mask = NULL;
-    if (mask == NULL) {
+    static void *kiln_c99_bigint_u64_mask_handle = NULL;
+    void *made = __atomic_load_n(&kiln_c99_bigint_u64_mask_handle, __ATOMIC_ACQUIRE);
+    if (made == NULL) {
         static const unsigned char digits[] = "18446744073709551615";
-        if (kiln_bigint_parse(digits, sizeof digits - 1, 10, &mask) != 0) {
+        void *expected = NULL;
+        if (kiln_bigint_parse(digits, sizeof digits - 1, 10, &made) != 0) {
             return NULL;
         }
+        /* As `kiln_c99_bigint_one`: the first published is kept. */
+        if (!__atomic_compare_exchange_n(&kiln_c99_bigint_u64_mask_handle, &expected, made, 0, __ATOMIC_ACQ_REL,
+                                         __ATOMIC_ACQUIRE))
+            made = expected;
     }
-    return mask;
+    return made;
 }
 
 /* The order `%TypedArray%.prototype.sort` uses with no comparator: ascending *numeric*.

@@ -4074,12 +4074,16 @@ typedef struct kiln_method_entry {
 static kiln_method_entry kiln_c99_method_index[sizeof kiln_c99_method_codes / sizeof *kiln_c99_method_codes];
 
 static uint64_t kiln_c99_method_code_end(void) {
-    static uint64_t end = 0;
+    /* One word, the same from every thread that computes it: a racing second computation only
+     * repeats the first. */
+    static uint64_t kiln_c99_method_code_end_cached = 0;
+    uint64_t end = __atomic_load_n(&kiln_c99_method_code_end_cached, __ATOMIC_RELAXED);
     size_t index;
     if (end != 0) return end;
     for (index = 0; index < sizeof kiln_c99_method_codes / sizeof *kiln_c99_method_codes; ++index) {
         if ((uint64_t)kiln_c99_method_codes[index] >= end) end = (uint64_t)kiln_c99_method_codes[index] + 1;
     }
+    __atomic_store_n(&kiln_c99_method_code_end_cached, end, __ATOMIC_RELAXED);
     return end;
 }
 static size_t kiln_c99_method_index_len;
@@ -4123,7 +4127,6 @@ static void kiln_c99_method_index_build(void) {
         kiln_c99_method_index[behind] = pending;
     }
     kiln_c99_method_index_len = count;
-    kiln_c99_method_index_ready = 1;
 }
 
 static uint64_t kiln_c99_lookup_method_group(const char *key, size_t key_len, uint32_t group) {
@@ -4131,7 +4134,7 @@ static uint64_t kiln_c99_lookup_method_group(const char *key, size_t key_len, ui
     size_t high;
     size_t at;
     if (key == NULL || key_len == 0) return 0;
-    if (!kiln_c99_method_index_ready) kiln_c99_method_index_build();
+    kiln_c99_once(&kiln_c99_method_index_ready, kiln_c99_method_index_build);
     high = kiln_c99_method_index_len;
     while (low < high) {
         size_t middle = low + (high - low) / 2;
@@ -4176,7 +4179,7 @@ static uint64_t kiln_c99_lookup_method(const char *key, size_t key_len, uint64_t
     size_t high;
     size_t at;
     if (key == NULL || key_len == 0) return 0;
-    if (!kiln_c99_method_index_ready) kiln_c99_method_index_build();
+    kiln_c99_once(&kiln_c99_method_index_ready, kiln_c99_method_index_build);
     high = kiln_c99_method_index_len;
     while (low < high) {
         size_t middle = low + (high - low) / 2;
@@ -4731,14 +4734,26 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     // The process-shared block (ADR 0071): shared keys and the shape root, one per process.
     // Each unit caches the pointer to it; the block itself is the provider archive's.
     ("kiln_c99_shared_block", C99StateOwner::Process),
-    // How many shapes this prelude has minted, which bounds the tree (see `shapes.c`).
-    ("kiln_c99_shape_total", C99StateOwner::Process),
     ("kiln_c99_speculate_mode", C99StateOwner::Process),
     // ADR 0068: whether this process installs kiln's own members, read from the environment once.
     ("kiln_c99_kiln_extensions_state", C99StateOwner::Process),
     ("kiln_c99_node_stdin_paused", C99StateOwner::Process),
     ("kiln_c99_node_stdin_read_active", C99StateOwner::Process),
     ("kiln_c99_node_stdin_request", C99StateOwner::Process),
+    // Function-scope statics are state too (realms issue 05: nothing process-wide unclassified).
+    // Derived once from constants; a racing second computation writes the same word.
+    ("kiln_c99_method_code_end_cached", C99StateOwner::Constant),
+    // `1n` and 2^64-1 as provider handles, made once; the first published is kept.
+    ("kiln_c99_bigint_one_handle", C99StateOwner::Constant),
+    ("kiln_c99_bigint_u64_mask_handle", C99StateOwner::Constant),
+    // Headers for built-in text, claimed and published once each (`kiln_c99_static_text`).
+    ("kiln_c99_static_texts", C99StateOwner::Constant),
+    // `Symbol()` serials: process-wide so no realm mints one twice.
+    ("kiln_c99_symbol_serial", C99StateOwner::Process),
+    // The `KILN_SPECULATE=exit` test mode's draw, per thread.
+    ("kiln_c99_speculate_rng", C99StateOwner::ThreadCache),
+    // Which later entry of which site answered this thread last (`kiln_c99_site_answered`).
+    ("kiln_c99_streaks", C99StateOwner::ThreadCache),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4753,8 +4768,11 @@ pub(crate) enum C99StateOwner {
     ThreadCache,
     TestFixture,
     /// Derived once from compile-time constants and never changed again, so every realm in the
-    /// process would compute the same bytes. Two threads racing to build it duplicate the work and
-    /// nothing else; a realm neither owns it nor has to reset it.
+    /// process would compute the same bytes. Realms on several threads may ask for it first at
+    /// once: an index sorted in place is built under `kiln_c99_once`, so nobody searches it
+    /// half-sorted; a single word or an entry is published once, by one store or compare-and-swap,
+    /// and a racing second computation of it writes the same bytes or loses. A realm neither owns
+    /// it nor has to reset it.
     Constant,
     /// Belongs to the process and its signal disposition rather than to any realm, and outlives
     /// every realm the process makes. A realm must not reset it: the `SIGUSR1` handler installed

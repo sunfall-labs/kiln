@@ -241,8 +241,8 @@ static int kiln_c99_local_edge_insert(kiln_gc_heap *heap, const kiln_shape *pare
 }
 
 /* How many branches one shape may grow -- its shared edges plus this realm's local ones -- before an
- * object that would take a new one goes to dictionary mode instead, and how many shapes this
- * prelude may mint in all. With the edge index below, a branch costs the same to find among a
+ * object that would take a new one goes to dictionary mode instead, and how many shapes may be
+ * minted in all: shared ones by the process, and each realm's own by that realm. With the edge index below, a branch costs the same to find among a
  * thousand as among eight, so these bound memory rather than lookup time: a program that keys
  * objects by unbounded data (`{[id]: x}` per request) stops minting shapes here.
  *
@@ -257,11 +257,9 @@ static int kiln_c99_local_edge_insert(kiln_gc_heap *heap, const kiln_shape *pare
 /* Past this many own edges a shape indexes them by key pointer (`edge_table`). */
 #define KILN_SHAPE_TABLE_FROM 8u
 
-static int kiln_c99_shape_edge_room(uint32_t edges, const kiln_string *ikey, int unbounded) {
-    (void)ikey;
+static int kiln_c99_shape_edge_room(uint32_t edges, uint32_t total, int unbounded) {
     if (unbounded) return 1;
-    return edges < KILN_SHAPE_MAX_BRANCHES &&
-           __atomic_load_n(&kiln_c99_shape_total, __ATOMIC_RELAXED) < KILN_SHAPE_MAX_TOTAL;
+    return edges < KILN_SHAPE_MAX_BRANCHES && total < KILN_SHAPE_MAX_TOTAL;
 }
 
 static inline uint32_t kiln_c99_shape_edge_hash(const kiln_string *ikey) {
@@ -310,11 +308,11 @@ static kiln_shape *kiln_c99_shape_table_edge(const kiln_shape_edge_table *table,
  * thread for a local one), before the count store that publishes the edge. Returns 0 only when a
  * table could not be allocated, and the caller then refuses the link, so index and list agree.
  *
- * ADR 0071's publishing rule: a grown table is built completely and published with one release
- * store; a slot of a live table is claimed with a compare-and-swap. A shared shape's replaced table
- * is never freed (a reader on another thread may still be probing it; each is at most half the
- * next, so what is kept is bounded by the live one) -- reclaiming it at a turn boundary is step 4's.
- * A realm-local shape's is freed at once: only its realm's thread reads it. */
+ * ADR 0071's publishing rule: a grown table is built completely and published with one store; a
+ * slot of a live table is claimed with a compare-and-swap. A shared shape's replaced table is
+ * retired (`kiln_realm_retire`): a reader on another thread may still be probing it, and it is
+ * freed once every such thread has passed a turn boundary. A realm-local shape's is freed at once:
+ * only its realm's thread reads it. */
 static int kiln_c99_shape_index_edge(kiln_shape *shape, uint32_t count, kiln_shape *next) {
     uint32_t need = count + 1;
     kiln_shape_edge_table *table;
@@ -333,8 +331,10 @@ static int kiln_c99_shape_index_edge(kiln_shape *shape, uint32_t count, kiln_sha
         for (tr = shape->transitions; tr != NULL; tr = tr->next_transition)
             kiln_c99_shape_edge_claim(grown, tr->next);
         kiln_c99_shape_edge_claim(grown, next);
-        __atomic_store_n(&shape->edge_table, grown, __ATOMIC_RELEASE);
+        /* Sequentially consistent, as every unpublish is (see `kiln_c99_slot_claim`). */
+        __atomic_store_n(&shape->edge_table, grown, __ATOMIC_SEQ_CST);
         if (!shape->shared) free(table);
+        else if (table != NULL) (void)kiln_realm_retire(table);
         return 1;
     }
     kiln_c99_shape_edge_claim(table, next);
@@ -346,7 +346,6 @@ static kiln_shape *kiln_c99_shape_child(kiln_shape *current, const kiln_string *
     uint32_t bit = 1u << current->property_count;
     kiln_shape *next_shape = (kiln_shape *)calloc(1, sizeof(kiln_shape));
     if (next_shape == NULL) return NULL;
-    __atomic_fetch_add(&kiln_c99_shape_total, 1u, __ATOMIC_RELAXED);
     next_shape->parent = current;
     next_shape->ikey = ikey;
     next_shape->has_symbol_key = current->has_symbol_key ||
@@ -414,12 +413,14 @@ static int kiln_c99_shape_add(kiln_shape *current, const kiln_string *ikey, int 
         if (next_shape == NULL) {
             edges = current->num_transitions +
                     (heap != NULL ? kiln_c99_local_edge_count(heap, current) : 0);
-            if (kiln_c99_shape_edge_room(edges, ikey, unbounded) &&
+            if (kiln_c99_shape_edge_room(edges, process->shared_shapes, unbounded) &&
                 (next_shape = kiln_c99_shape_child(current, ikey, expected_bit, attrs, code)) != NULL) {
                 next_shape->shared = 1;
                 if (!kiln_c99_shape_link(current, ikey, next_shape)) {
                     free(next_shape);
                     next_shape = NULL;
+                } else {
+                    process->shared_shapes += 1;
                 }
             }
         }
@@ -431,7 +432,7 @@ static int kiln_c99_shape_add(kiln_shape *current, const kiln_string *ikey, int 
     if (heap == NULL) return 0;
     edges = __atomic_load_n(&current->num_transitions, __ATOMIC_ACQUIRE);
     if (current->shared) edges += kiln_c99_local_edge_count(heap, current);
-    if (!kiln_c99_shape_edge_room(edges, ikey, unbounded)) return 0;
+    if (!kiln_c99_shape_edge_room(edges, heap->local_shape_count, unbounded)) return 0;
     next_shape = kiln_c99_shape_child(current, ikey, expected_bit, attrs, code);
     if (next_shape == NULL) return 0;
     if (current->shared ? !kiln_c99_local_edge_insert(heap, current, ikey, next_shape)
@@ -444,6 +445,7 @@ static int kiln_c99_shape_add(kiln_shape *current, const kiln_string *ikey, int 
     if (!key_shared) kiln_c99_pin_interned_key(ikey);
     next_shape->owned_next = heap->local_shapes;
     heap->local_shapes = next_shape;
+    heap->local_shape_count += 1;
     *out_shape = next_shape;
     return 1;
 }

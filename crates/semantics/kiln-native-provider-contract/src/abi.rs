@@ -103,6 +103,10 @@ macro_rules! provider_abi_registry {
             (realm, kiln_realm_gc_current_heap, realm_gc_current_heap);
             (realm, kiln_realm_generation_slot, realm_generation_slot);
             (realm, kiln_realm_process_shared, realm_process_shared);
+            (realm, kiln_realm_retire_tag, realm_retire_tag);
+            (realm, kiln_realm_retired_safe, realm_retired_safe);
+            (realm, kiln_realm_retire, realm_retire);
+            (realm, kiln_realm_run_pinned, realm_run_pinned);
             (realm, kiln_realm_gc_attach, realm_gc_attach);
             (realm, kiln_realm_gc_register_roots, realm_gc_register_roots);
             (realm, kiln_realm_gc_unregister_roots, realm_gc_unregister_roots);
@@ -209,7 +213,7 @@ macro_rules! provider_export_names {
 }
 
 /// Version of the private provider ABI represented by [`provider_abi_registry!`].
-pub const PROVIDER_ABI_VERSION: u32 = 45;
+pub const PROVIDER_ABI_VERSION: u32 = 46;
 
 /// Canonical ordered export names required in a packaged provider manifest.
 pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_names);
@@ -228,7 +232,12 @@ mod tests {
 
     #[test]
     fn registry_has_the_packaged_contract_shape() {
-        // 45 and 118 exports: `kiln_typed_array_sort` joined for the sequential
+        // 46 and 122 exports: `kiln_realm_retire_tag`, `kiln_realm_retired_safe` and
+        // `kiln_realm_retire` joined when shared cache state became safe to write from realms on
+        // several threads at once (ADR 0071, quiescent-state reclamation at turn boundaries), and
+        // `kiln_realm_run_pinned` when a launcher could run several realms in one process, each
+        // pinned to a thread of the runtime's `WorkerPool` (realms issue 05).
+        // Before that, 45 and 118 exports: `kiln_typed_array_sort` joined for the sequential
         // `%TypedArray%.prototype.sort` default order (parallel issue 16): one sort per call, on
         // the calling thread, over the order `kiln_number_core::typed_order` owns for both
         // engines. Before that, 44 and 117 exports: `kiln_parallel_sort` joined for `parallelSort` (ADR 0069, parallel
@@ -255,8 +264,8 @@ mod tests {
         // one realm the other's cache. A shipped archive built before any of these does not export
         // the newer symbol, and the version is how a resolver knows to rebuild rather than to fail
         // at link time.
-        assert_eq!(PROVIDER_ABI_VERSION, 45);
-        assert_eq!(PROVIDER_EXPORTS.len(), 118);
+        assert_eq!(PROVIDER_ABI_VERSION, 46);
+        assert_eq!(PROVIDER_EXPORTS.len(), 122);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_ffi_last_error"));
     }

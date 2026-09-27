@@ -1,8 +1,15 @@
 //! In-process multi-realm worker pool and actor hosting.
 //!
 //! Under ADR 0028, each JavaScript realm is owned by exactly one current-thread Tokio runtime on
-//! an OS thread. To achieve multicore scaling without shared-mutable heaps (ADR 0057), [`WorkerPool`]
-//! hosts independent background worker threads, each running an isolated [`RealmRuntime`].
+//! an OS thread. [`WorkerPool`] is where the process gets those threads: every realm it hosts is
+//! pinned to one of them (ADR 0070's 1:1 model, which stays as pinning once a scheduler exists),
+//! and the pool counts them against its capacity.
+//!
+//! It hosts two kinds of realm. A [`RealmRuntime`] served from a mailbox
+//! ([`WorkerPool::spawn_realm_with_factory`]), which the interpreter's actors use; and a realm
+//! that owns its own executor and runs to completion on the thread it was made on
+//! ([`WorkerPool::spawn_pinned`]) -- a native realm, which the provider archive creates, enters
+//! and drives itself, several of them at once in one process (realms issue 05).
 //!
 //! Cross-realm communication is mediated by asynchronous mailboxes (`tokio::sync::mpsc`) and
 //! boundary-safe types ([`HostValue`], [`HostError`]).
@@ -329,6 +336,26 @@ impl<H: RealmHostProvider + 'static> WorkerRealmHandle<H> {
     }
 }
 
+/// A realm running on its own thread of a [`WorkerPool`] ([`WorkerPool::spawn_pinned`]).
+pub struct PinnedRealm<T> {
+    id: u64,
+    thread: std::thread::JoinHandle<T>,
+}
+
+impl<T> PinnedRealm<T> {
+    /// The worker's identity, as its thread's name spells it.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Waits for the realm to finish and returns what it returned.
+    pub fn join(self) -> Result<T, WorkerError> {
+        self.thread
+            .join()
+            .map_err(|payload| WorkerError::Panicked(downcast_panic(payload)))
+    }
+}
+
 struct WorkerDropGuard {
     active_count: Arc<AtomicUsize>,
 }
@@ -436,6 +463,44 @@ impl<H: RealmHostProvider + 'static> WorkerPool<H> {
         self.spawn_realm_with_factory(move || host, capabilities)
     }
 
+    /// The one way the pool starts a thread: counted against its capacity until `body` returns,
+    /// and named after the worker it is.
+    fn spawn_thread<F, T>(&self, body: F) -> Result<(u64, std::thread::JoinHandle<T>), WorkerError>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let current = self.active_count.fetch_add(1, Ordering::SeqCst);
+        if current >= self.capacity {
+            self.active_count.fetch_sub(1, Ordering::SeqCst);
+            return Err(WorkerError::CapacityExceeded);
+        }
+        let worker_id = self.next_worker_id.fetch_add(1, Ordering::Relaxed);
+        let guard = WorkerDropGuard {
+            active_count: Arc::clone(&self.active_count),
+        };
+        std::thread::Builder::new()
+            .name(format!("kiln-worker-{worker_id}"))
+            .spawn(move || {
+                let _guard = guard;
+                body()
+            })
+            .map(|handle| (worker_id, handle))
+            .map_err(|err| WorkerError::SpawnFailed(err.to_string()))
+    }
+
+    /// Runs `realm` on a thread of its own, counted against the pool's capacity: a realm pinned
+    /// to that thread for its whole life (ADR 0070), which makes, enters, drives and destroys
+    /// itself there -- a native realm owns its executor and never waits on a mailbox.
+    pub fn spawn_pinned<F, T>(&self, realm: F) -> Result<PinnedRealm<T>, WorkerError>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let (id, thread) = self.spawn_thread(realm)?;
+        Ok(PinnedRealm { id, thread })
+    }
+
     /// Spawns a new worker realm running on an independent OS thread with a host factory closure.
     pub fn spawn_realm_with_factory<F>(
         &self,
@@ -445,88 +510,71 @@ impl<H: RealmHostProvider + 'static> WorkerPool<H> {
     where
         F: FnOnce() -> H + Send + 'static,
     {
-        let current = self.active_count.fetch_add(1, Ordering::SeqCst);
-        if current >= self.capacity {
-            self.active_count.fetch_sub(1, Ordering::SeqCst);
-            return Err(WorkerError::CapacityExceeded);
-        }
-
-        let worker_id = self.next_worker_id.fetch_add(1, Ordering::Relaxed);
         let (sender, mut receiver) = tokio::sync::mpsc::channel(self.mailbox_capacity);
         let (init_tx, init_rx) = std::sync::mpsc::sync_channel(1);
 
-        let active_count_clone = Arc::clone(&self.active_count);
-        let thread_name = format!("kiln-worker-{worker_id}");
+        let spawn_result = self.spawn_thread(move || {
+            let host = host_factory();
+            let runtime_result = RealmRuntime::with_host_and_capabilities(host, capabilities);
+            let mut runtime = match runtime_result {
+                Ok(rt) => {
+                    let _ = init_tx.send(Ok(()));
+                    rt
+                }
+                Err(err) => {
+                    let _ = init_tx.send(Err(WorkerError::SpawnFailed(err.to_string())));
+                    return;
+                }
+            };
 
-        let spawn_result = std::thread::Builder::new()
-            .name(thread_name)
-            .spawn(move || {
-                let _guard = WorkerDropGuard {
-                    active_count: active_count_clone,
-                };
+            let executor = std::rc::Rc::clone(runtime.executor());
+            let mut registry = ActorRegistry::<H>::default();
 
-                let host = host_factory();
-                let runtime_result = RealmRuntime::with_host_and_capabilities(host, capabilities);
-                let mut runtime = match runtime_result {
-                    Ok(rt) => {
-                        let _ = init_tx.send(Ok(()));
-                        rt
-                    }
-                    Err(err) => {
-                        let _ = init_tx.send(Err(WorkerError::SpawnFailed(err.to_string())));
-                        return;
-                    }
-                };
-
-                let executor = std::rc::Rc::clone(runtime.executor());
-                let mut registry = ActorRegistry::<H>::default();
-
-                executor.block_on(async {
-                    while let Some(envelope) = receiver.recv().await {
-                        match envelope {
-                            WorkerEnvelope::Task(task) => {
-                                task(&mut runtime);
-                            }
-                            WorkerEnvelope::CallActor {
-                                target,
-                                method,
-                                args,
-                                reply,
-                            } => {
-                                let res = match registry.actors.get_mut(&target) {
-                                    Some(actor) => match actor.handle(&mut runtime, &method, &args)
-                                    {
-                                        Ok(val) => Ok(val),
-                                        Err(err) => Err(WorkerError::ActorError(err)),
-                                    },
-                                    None => Err(WorkerError::ActorNotFound(target)),
-                                };
-                                let _ = reply.send(res);
-                            }
-                            WorkerEnvelope::RegisterActor { actor, reply } => {
-                                let id = ActorId::new(registry.next_id);
-                                registry.next_id = registry.next_id.wrapping_add(1).max(1);
-                                registry.actors.insert(id, actor);
-                                let _ = reply.send(id);
-                            }
-                            WorkerEnvelope::UnregisterActor { target, reply } => {
-                                let removed = registry.actors.remove(&target).is_some();
-                                let _ = reply.send(removed);
-                            }
-                            WorkerEnvelope::Shutdown => {
-                                break;
-                            }
+            executor.block_on(async {
+                while let Some(envelope) = receiver.recv().await {
+                    match envelope {
+                        WorkerEnvelope::Task(task) => {
+                            task(&mut runtime);
+                        }
+                        WorkerEnvelope::CallActor {
+                            target,
+                            method,
+                            args,
+                            reply,
+                        } => {
+                            let res = match registry.actors.get_mut(&target) {
+                                Some(actor) => match actor.handle(&mut runtime, &method, &args) {
+                                    Ok(val) => Ok(val),
+                                    Err(err) => Err(WorkerError::ActorError(err)),
+                                },
+                                None => Err(WorkerError::ActorNotFound(target)),
+                            };
+                            let _ = reply.send(res);
+                        }
+                        WorkerEnvelope::RegisterActor { actor, reply } => {
+                            let id = ActorId::new(registry.next_id);
+                            registry.next_id = registry.next_id.wrapping_add(1).max(1);
+                            registry.actors.insert(id, actor);
+                            let _ = reply.send(id);
+                        }
+                        WorkerEnvelope::UnregisterActor { target, reply } => {
+                            let removed = registry.actors.remove(&target).is_some();
+                            let _ = reply.send(removed);
+                        }
+                        WorkerEnvelope::Shutdown => {
+                            break;
                         }
                     }
+                }
 
-                    runtime.shutdown();
-                });
+                runtime.shutdown();
             });
+        });
 
-        if let Err(err) = spawn_result {
-            self.active_count.fetch_sub(1, Ordering::SeqCst);
-            return Err(WorkerError::SpawnFailed(err.to_string()));
-        }
+        let worker_id = match spawn_result {
+            Ok((worker_id, _detached)) => worker_id,
+            Err(err) => return Err(err),
+        };
 
         match init_rx.recv() {
             Ok(Ok(())) => {
@@ -738,6 +786,36 @@ mod tests {
         assert_eq!(ok, "alive");
 
         realm.shutdown_blocking().unwrap();
+    }
+
+    #[test]
+    fn pinned_realms_run_at_once_each_on_its_own_counted_thread() {
+        let pool = WorkerPool::<TokioHost>::new(3);
+        // The three realms and this thread: none of them returns until all four are here.
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+        let realms: Vec<_> = (0..3)
+            .map(|index| {
+                let barrier = Arc::clone(&barrier);
+                pool.spawn_pinned(move || {
+                    barrier.wait();
+                    (index, std::thread::current().name().map(str::to_owned))
+                })
+                .expect("a pinned realm starts")
+            })
+            .collect();
+        assert_eq!(
+            pool.spawn_pinned(|| ()).map(|_| ()).unwrap_err(),
+            WorkerError::CapacityExceeded
+        );
+        barrier.wait();
+        for (expected, realm) in realms.into_iter().enumerate() {
+            let id = realm.id();
+            let (index, name) = realm.join().expect("the realm finishes");
+            assert_eq!(index, expected);
+            assert_eq!(name, Some(format!("kiln-worker-{id}")));
+        }
+        let failing = pool.spawn_pinned(|| panic!("deliberate")).expect("starts");
+        assert!(matches!(failing.join(), Err(WorkerError::Panicked(_))));
     }
 
     #[test]

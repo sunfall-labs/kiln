@@ -56,11 +56,14 @@ static int kiln_c99_kiln_extensions_on(void) {
 #if defined(KILN_REALM_NO_EXTENSIONS)
     return 0;
 #else
-    if (kiln_c99_kiln_extensions_state == 0) {
+    /* One word, the same from every thread that reads the environment. */
+    int state = __atomic_load_n(&kiln_c99_kiln_extensions_state, __ATOMIC_RELAXED);
+    if (state == 0) {
         const char *value = getenv("KILN_EXTENSIONS");
-        kiln_c99_kiln_extensions_state = value != NULL && strcmp(value, "0") == 0 ? 2 : 1;
+        state = value != NULL && strcmp(value, "0") == 0 ? 2 : 1;
+        __atomic_store_n(&kiln_c99_kiln_extensions_state, state, __ATOMIC_RELAXED);
     }
-    return kiln_c99_kiln_extensions_state == 1;
+    return state == 1;
 #endif
 }
 
@@ -165,7 +168,6 @@ static void kiln_c99_builtin_member_index_build(void) {
         kiln_c99_builtin_member_index[behind] = pending;
     }
     kiln_c99_builtin_member_index_len = len;
-    kiln_c99_builtin_member_index_ready = 1;
 }
 
 /* The first index entry at or after (builtin, key): the lower bound. */
@@ -194,7 +196,7 @@ static const kiln_builtin_member *kiln_c99_builtin_member(uint64_t builtin, cons
     size_t at;
     *owned = 0;
     if (builtin > 0xFFFFu) return NULL;
-    if (!kiln_c99_builtin_member_index_ready) kiln_c99_builtin_member_index_build();
+    kiln_c99_once(&kiln_c99_builtin_member_index_ready, kiln_c99_builtin_member_index_build);
     /* Owned: any row with this built-in, which is the lower bound of (builtin, "") landing on one. */
     at = kiln_c99_builtin_member_lower_bound(builtin, "", 0);
     if (at >= kiln_c99_builtin_member_index_len || kiln_c99_builtin_member_index[at].builtin != builtin) {

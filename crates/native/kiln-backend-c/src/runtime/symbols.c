@@ -146,7 +146,9 @@ static kiln_value kiln_c99_property_key(kiln_value key) {
 /* `Symbol(description)`. Two calls make two different symbols even given the same description,
  * so the identity is the allocation's and the reserved key carries a serial. */
 static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
-    static uint64_t next_serial;
+    /* Process-wide, so two realms never mint one serial twice into either's keys. */
+    static uint64_t kiln_c99_symbol_serial;
+    uint64_t serial;
     kiln_symbol *symbol = (kiln_symbol *)kiln_c99_gc_alloc(KILN_GC_SYMBOL, sizeof *symbol);
     kiln_text key = {NULL, 0, 0};
     char digits[32];
@@ -157,8 +159,8 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
     symbol->description = NULL;
     symbol->description_len = 0;
     symbol->description_value = kiln_c99_undefined();
-    next_serial += 1;
-    written = kiln_c99_double_to_js((double)next_serial, digits);
+    serial = __atomic_add_fetch(&kiln_c99_symbol_serial, 1u, __ATOMIC_RELAXED);
+    written = kiln_c99_double_to_js((double)serial, digits);
     if (kiln_c99_text_append_c(&key, "@@symbol:") != KILN_C99_OK ||
         kiln_c99_text_append(&key, digits, written) != KILN_C99_OK) {
         free(key.bytes);

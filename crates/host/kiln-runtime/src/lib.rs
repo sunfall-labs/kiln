@@ -68,7 +68,8 @@ pub(crate) fn http_trace_line(line: std::fmt::Arguments<'_>) {
     }
 }
 pub use worker_pool::{
-    ActorHandler, ActorId, DEFAULT_MAILBOX_CAPACITY, WorkerError, WorkerPool, WorkerRealmHandle,
+    ActorHandler, ActorId, DEFAULT_MAILBOX_CAPACITY, PinnedRealm, WorkerError, WorkerPool,
+    WorkerRealmHandle,
 };
 
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};

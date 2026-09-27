@@ -220,6 +220,31 @@ static void kiln_c99_realm_note_builtin_store(uint32_t builtin) {
     }
 }
 
+/* A store onto a built-in's own-property store: the process-wide summary moves, and the realm
+ * remembers its share of it. */
+static void kiln_c99_realm_note_store(void) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    __atomic_add_fetch(&kiln_c99_builtin_store_epoch, 1u, __ATOMIC_RELAXED);
+    if (heap != NULL) heap->builtin_stores += 1;
+}
+
+/* The launcher, once the realm's bootstrap has run: what the bootstrap stored is the built-ins'
+ * definition, so the realm takes its share of the summary back. A realm that finishes its
+ * bootstrap never undoes what another realm -- or its own program -- stores later. */
+static void kiln_c99_builtin_bootstrap_done(void) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    if (heap == NULL) return;
+    __atomic_sub_fetch(&kiln_c99_builtin_store_epoch, heap->builtin_stores, __ATOMIC_RELAXED);
+    heap->builtin_stores = 0;
+}
+
+/* The slow half of `kiln_c99_builtins_unmodified`, asked once some realm has stored onto a
+ * built-in: whether the current realm has not, outside its bootstrap. No heap answers no. */
+static __attribute__((noinline, pure)) KILN_C99_RARE_CALL int kiln_c99_realm_builtins_unmodified(void) {
+    const kiln_gc_heap *heap = kiln_c99_gc_heap();
+    return heap != NULL && heap->builtin_stores == 0;
+}
+
 static int kiln_c99_realm_marked_builtin(const kiln_gc_heap *heap, uint32_t builtin) {
     if (builtin >= 64u * KILN_C99_MODIFIED_BUILTIN_WORDS) return heap->modified_builtin_beyond;
     return (heap->modified_builtins[builtin >> 6] >> (builtin & 63u)) & 1u;
@@ -283,7 +308,7 @@ static int kiln_c99_callable_store_lookup(kiln_value callable, kiln_value *out, 
         callable.tag != KILN_VALUE_SETTLER)
         KILN_C99_REFUSE("own properties are not modelled on this callable");
     if (create) {
-        kiln_c99_builtin_store_epoch += 1;
+        kiln_c99_realm_note_store();
         if (callable.tag == KILN_VALUE_BUILTIN) kiln_c99_realm_note_builtin_store((uint32_t)callable.bits);
     }
     /* Direct C embedding fixtures exercise helpers without entering a realm. Keep that legacy

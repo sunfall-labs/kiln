@@ -329,10 +329,11 @@ static int kiln_c99_pic_learn_path(kiln_c99_pic_entry *entry, const kiln_object 
  * layout token and checked live from the receiver. `key` NULL means the caller has no canonical
  * key at hand and takes the coarse answer. */
 static __attribute__((noinline)) int kiln_c99_transition_store_clear_slow(
-    kiln_c99_site *site, kiln_c99_pic_entry *entry, const kiln_object *object,
+    kiln_c99_site *site, const kiln_c99_pic_entry *entry, const kiln_object *object,
     const kiln_string *ikey, const kiln_string *key);
 
-static inline int kiln_c99_transition_store_clear(kiln_c99_site *site, kiln_c99_pic_entry *entry,
+static inline int kiln_c99_transition_store_clear(kiln_c99_site *site,
+                                                  const kiln_c99_pic_entry *entry,
                                                   const kiln_object *object,
                                                   const kiln_string *ikey,
                                                   const kiln_string *key) {
@@ -355,24 +356,21 @@ static inline int kiln_c99_transition_store_clear(kiln_c99_site *site, kiln_c99_
 }
 
 static __attribute__((noinline)) int kiln_c99_transition_store_clear_slow(
-    kiln_c99_site *site, kiln_c99_pic_entry *entry, const kiln_object *object,
+    kiln_c99_site *site, const kiln_c99_pic_entry *entry, const kiln_object *object,
     const kiln_string *ikey, const kiln_string *key) {
     kiln_c99_pic_entry path;
     const kiln_object *holder = NULL;
     if (key == NULL) return 0;
     if (kiln_c99_inherited_write_blocked(object->prototype, ikey, key)) return 0;
-    /* Clear. Remember why when the key is absent along a path of at most two levels. */
+    /* Clear. Remember why when the key is absent along a path of at most two levels: the same
+     * transition, restated with the path, replaces the entry (a published entry never changes). */
     memset(&path, 0, sizeof path);
     if (ikey != NULL &&
         kiln_c99_pic_learn_path(&path, object, ikey, &holder) == KILN_C99_PATH_ABSENT) {
-        entry->depth = path.depth;
-        entry->level_shape[0] = path.level_shape[0];
-        entry->level_shape[1] = path.level_shape[1];
-        entry->level_token[0] = path.level_token[0];
-        entry->level_token[1] = path.level_token[1];
-        entry->key = path.key;
-        entry->absent = 1;
-        kiln_c99_site_learned(site);
+        path.shape = object->shape;
+        path.transition_to = entry->transition_to;
+        path.slot = entry->slot;
+        kiln_c99_site_remember(site, &path);
     }
     return 1;
 }

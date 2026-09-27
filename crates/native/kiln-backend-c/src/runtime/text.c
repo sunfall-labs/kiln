@@ -158,21 +158,29 @@ static int kiln_c99_truthy(kiln_value value) {
 static kiln_value kiln_c99_copy_text(const char *text, size_t len);
 static kiln_value kiln_c99_static_text(const char *text, size_t len) {
     typedef struct { kiln_string header; const char *source; } static_text;
-    static static_text entries[128];
+    static static_text kiln_c99_static_texts[128];
     size_t slot;
     if (len == 0) return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)&kiln_c99_empty_string, 0);
     if (!kiln_c99_ascii_scan(text, len)) return kiln_c99_copy_text(text, len);
-    for (slot = 0; slot < sizeof(entries) / sizeof(entries[0]); ++slot) {
-        if (entries[slot].source == text && entries[slot].header.unit_len == len)
-            return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)&entries[slot].header, len);
+    /* Shared by every realm of the process, so written by the slot protocol's rule on a smaller
+     * scale: a header is claimed (`source` from NULL to the claim), filled, then published by a
+     * release store of `source`; a reader matches `source` first and reads the header after.
+     * An entry is never rewritten. */
+    static const char kiln_claimed;
+    for (slot = 0; slot < sizeof(kiln_c99_static_texts) / sizeof(kiln_c99_static_texts[0]); ++slot) {
+        const char *source = __atomic_load_n(&kiln_c99_static_texts[slot].source, __ATOMIC_ACQUIRE);
+        if (source == text && kiln_c99_static_texts[slot].header.unit_len == len)
+            return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)&kiln_c99_static_texts[slot].header, len);
     }
-    for (slot = 0; slot < sizeof(entries) / sizeof(entries[0]); ++slot) {
-        if (entries[slot].source == NULL) {
-            entries[slot].source = text;
-            entries[slot].header.unit_len = (uint32_t)len;
-            entries[slot].header.flags = KILN_STRING_LATIN1;
-            entries[slot].header.data = text;
-            return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)&entries[slot].header, len);
+    for (slot = 0; slot < sizeof(kiln_c99_static_texts) / sizeof(kiln_c99_static_texts[0]); ++slot) {
+        const char *empty = NULL;
+        if (__atomic_compare_exchange_n(&kiln_c99_static_texts[slot].source, &empty, &kiln_claimed, 0,
+                                        __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+            kiln_c99_static_texts[slot].header.unit_len = (uint32_t)len;
+            kiln_c99_static_texts[slot].header.flags = KILN_STRING_LATIN1;
+            kiln_c99_static_texts[slot].header.data = text;
+            __atomic_store_n(&kiln_c99_static_texts[slot].source, text, __ATOMIC_RELEASE);
+            return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)&kiln_c99_static_texts[slot].header, len);
         }
     }
     /* Builtin text is ASCII and the table is deliberately bounded; an exhausted cache is still

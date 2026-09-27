@@ -185,7 +185,7 @@ thread_local! {
     /// 2). It changes two things and nothing else: the entry's name ends in `_p` instead of
     /// `_t`, and a `Math.<name>` call on the builtin with proven-number arguments lowers to the
     /// bare libm call with no generic fallback, because the clone runs on a thread with no realm
-    /// to fall back to. The site that calls the clone checks `kiln_c99_builtin_store_epoch` on the
+    /// to fall back to. The site that calls the clone checks `kiln_c99_builtins_unmodified()` on the
     /// realm thread first, so an overridden `Math.sqrt` never reaches it. A thread-local rather
     /// than a parameter because every emitter signature between `lib.rs` and the op would
     /// otherwise carry a flag that only one op reads.

@@ -67,6 +67,10 @@ run = "./scripts/native.sh"
 description = "The native corpus with the collector stressed on every allocation (minutes, not seconds)"
 run = "KILN_NATIVE_GC_STRESS=${KILN_NATIVE_GC_STRESS:-1} ./scripts/native.sh"
 
+[tasks.native-realms]
+description = "Each native probe as 1, 2 and core-count realms at once in one process, each printing what it prints alone"
+run = "./scripts/native-realms.sh"
+
 [tasks.thirdparty]
 description = "Real library bundles, both engines"
 run = "./scripts/thirdparty.sh"

@@ -470,7 +470,7 @@ fn native_graph_wiring_uses_resolved_star_export_origins() {
         .find(&format!("status = {}(", bootstrap.symbol))
         .expect("launcher calls the bootstrap");
     let reset = bootstrapped
-        .find("kiln_c99_builtin_store_epoch = 0;")
+        .find("kiln_c99_builtin_bootstrap_done();")
         .expect("launcher seals bootstrap writes before user code");
     assert!(bootstrap_call < reset);
     // ADR 0044: only a host-clock launcher switches the realm to wall time, and it does so

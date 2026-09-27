@@ -59,6 +59,7 @@ that assembly, in the repository, and `mise tasks` lists it beside the rest.
 | `mise run test262-update` | regenerate the baseline; deliberate, and the diff is the record |
 | `mise run test262-fetch` | fetch the pinned corpus into `~/.cache/kiln`, once per machine |
 | `mise run native-stress` | the native corpus again with the collector stressed on every allocation |
+| `mise run native-realms` | each native probe as 1, 2 and core-count realms at once in one process |
 
 `mise trust` once per checkout, or the tasks are invisible.
 
@@ -88,6 +89,15 @@ because a value that is merely *usually* reachable passes the ordinary run every
 that reason: the collection never landed inside the window. Run it after anything that touches
 allocation, rooting or the collector, and before believing a corpus that "already covers" the
 shape you changed.
+
+`mise run native-realms` (`scripts/native-realms.sh`) runs every native probe's binary alone and
+then with `KILN_REALMS=N`: N realms of the program at once in one process, each pinned to its own
+thread, each required to print exactly what the program prints alone. It asks what the other two
+cannot -- whether realms side by side see each other through the process-wide keys, shapes and
+inline caches (ADR 0071). Run it after anything that touches shared cache state or its publication
+(`KILN_C99_SLOT_*` in the prelude); name a representative subset of probes on the command line and
+set `KILN_NATIVE_GC_STRESS=1` for the stressed variant, which is minutes for a subset and far longer
+for the corpus.
 
 ### Keep the gate fast; run it once when the change is finished
 

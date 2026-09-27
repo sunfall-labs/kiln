@@ -21,6 +21,9 @@ use std::ptr;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[path = "realm/reclaim.rs"]
+mod reclaim;
+
 type Entry = unsafe extern "C" fn(*mut c_void) -> i32;
 type RunWork = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> i32;
 type DropWork = unsafe extern "C" fn(*mut c_void);
@@ -1127,6 +1130,9 @@ impl Drop for NativeRuntime {
 
 struct ActiveRealm {
     realm: Rc<NativeRealm>,
+    /// Generated code runs only inside an active realm, so the thread may read shared cache
+    /// state for exactly as long as this lives (`reclaim`). Dropped after `Drop::drop`.
+    _online: reclaim::Online,
 }
 
 impl ActiveRealm {
@@ -1154,7 +1160,10 @@ impl ActiveRealm {
         ACTIVE_REALM_RC.with(|slot| *slot.borrow_mut() = Some(Rc::clone(&realm)));
         ACTIVE_HEAP.with(|slot| slot.set(realm.gc.borrow().heap));
         bump_generation();
-        Some(Self { realm })
+        Some(Self {
+            realm,
+            _online: reclaim::online(),
+        })
     }
 }
 
@@ -1382,6 +1391,8 @@ fn drive(realm: &NativeRealm, host: *mut c_void, thrown: *mut c_void) -> i32 {
 
 async fn drive_async(realm: &NativeRealm) -> i32 {
     loop {
+        // A turn boundary: no generated frame is on this thread's stack.
+        reclaim::quiescent();
         tick_clock(realm);
         collect_if_due(realm);
         introspect_if_requested(realm);
@@ -1478,7 +1489,9 @@ async fn drive_async(realm: &NativeRealm) -> i32 {
                     return RUNTIME_ERROR;
                 };
                 let delay = introspect_park(realm, Some(deadline.saturating_sub(now)));
+                let parked = reclaim::park();
                 kiln_runtime::wait_for_turn(signal, delay).await;
+                drop(parked);
                 continue;
             }
             let timer = take_next_timer(realm);
@@ -1502,7 +1515,10 @@ async fn drive_async(realm: &NativeRealm) -> i32 {
         // deadline. The poll only brings us back around to observe signals; it must not
         // consume the next language timer early. Virtual realms use Tokio's timer wake to
         // advance their deterministic `RealmWork::now`, so they still consume it here.
-        if kiln_runtime::wait_for_turn(signal, delay).await == kiln_runtime::DriveWake::Timer
+        let parked = reclaim::park();
+        let wake = kiln_runtime::wait_for_turn(signal, delay).await;
+        drop(parked);
+        if wake == kiln_runtime::DriveWake::Timer
             && matches!(realm.clock.get(), NativeClock::Virtual)
         {
             let timer = take_next_timer(realm);
@@ -3397,6 +3413,8 @@ impl kiln_runtime::HttpDispatch for NativeHttpDispatch {
         let Some(realm) = self.realm.upgrade() else {
             return INVALID_ARGUMENT;
         };
+        // The engine calls the language while the drive is parked (offline, see `reclaim`).
+        let _online = reclaim::online();
         tick_clock(&realm);
         let (host, thrown) = realm.drive_context.get();
         let kind = match event.kind {
@@ -3478,6 +3496,7 @@ impl kiln_runtime::HttpDispatch for NativeHttpDispatch {
         if !realm_has_queued_work(&realm) {
             return 0;
         }
+        let _online = reclaim::online();
         drain_realm_queues(&realm)
     }
 
@@ -4144,6 +4163,8 @@ pub extern "C" fn kiln_realm_destroy(handle: u64) -> i32 {
         if ACTIVE_REALM.with(|active| active.get() == handle) {
             return INVALID_ARGUMENT;
         }
+        // Teardown makes the realm's sites forget its local shapes, reading shared cache state.
+        let _online = reclaim::online();
         REALMS.with(|realms| {
             if realms.borrow_mut().remove(&handle).is_some() {
                 0
@@ -4151,6 +4172,69 @@ pub extern "C" fn kiln_realm_destroy(handle: u64) -> i32 {
                 INVALID_ARGUMENT
             }
         })
+    })
+}
+
+/// A launcher's body for one of several realms: `(context, index) -> status`. It creates, enters,
+/// drives and destroys its realm itself, on the thread it is called on.
+type PinnedRun = unsafe extern "C" fn(*mut c_void, u64) -> i32;
+
+/// The launcher's context, shared by every realm thread; the launcher's body only reads it.
+#[derive(Clone, Copy)]
+struct SharedContext(*mut c_void);
+
+// SAFETY: `kiln_realm_run_pinned`'s contract: `run` may be called with it from several threads.
+unsafe impl Send for SharedContext {}
+
+/// Runs `run(context, index)` for every index below `count` at once, each on its own realm thread
+/// of one `WorkerPool` (realms issue 05: several pinned realms in one process), waits for all of
+/// them, and writes each one's status to `statuses[index]`. A realm lives on one thread for its
+/// whole life -- the provider's realm registry is per thread -- so `run` makes its realm there.
+/// Returns 0 once every realm has finished, whatever their statuses; nonzero when a thread could
+/// not be started (those realms' statuses say `RUNTIME_ERROR`).
+///
+/// # Safety
+///
+/// `run` must be callable from several threads at once with `context`, and `statuses` must have
+/// room for `count` entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_run_pinned(
+    count: u64,
+    run: Option<PinnedRun>,
+    context: *mut c_void,
+    statuses: *mut i32,
+) -> i32 {
+    ffi(|| {
+        let (Some(run), Ok(count)) = (run, usize::try_from(count)) else {
+            return INVALID_ARGUMENT;
+        };
+        if statuses.is_null() || count == 0 {
+            return INVALID_ARGUMENT;
+        }
+        let pool = kiln_runtime::WorkerPool::<TokioHost>::new(count);
+        let shared = SharedContext(context);
+        let realms: Vec<_> = (0..count as u64)
+            .map(|index| {
+                pool.spawn_pinned(move || {
+                    let shared = shared;
+                    // SAFETY: the caller's contract for `run` and `context`.
+                    unsafe { run(shared.0, index) }
+                })
+            })
+            .collect();
+        let mut started_all = true;
+        for (index, realm) in realms.into_iter().enumerate() {
+            let status = match realm {
+                Ok(realm) => realm.join().unwrap_or(RUNTIME_ERROR),
+                Err(_) => {
+                    started_all = false;
+                    RUNTIME_ERROR
+                }
+            };
+            // SAFETY: the caller gave room for `count` statuses, and `index < count`.
+            unsafe { statuses.add(index).write(status) };
+        }
+        if started_all { 0 } else { RUNTIME_ERROR }
     })
 }
 
@@ -4236,6 +4320,18 @@ macro_rules! assert_provider_export {
         };
         (realm, kiln_realm_process_shared, realm_process_shared) => {
             const _: extern "C" fn(u64) -> *mut c_void = kiln_realm_process_shared;
+        };
+        (realm, kiln_realm_retire_tag, realm_retire_tag) => {
+            const _: extern "C" fn() -> u64 = reclaim::kiln_realm_retire_tag;
+        };
+        (realm, kiln_realm_retired_safe, realm_retired_safe) => {
+            const _: extern "C" fn(u64) -> i32 = reclaim::kiln_realm_retired_safe;
+        };
+        (realm, kiln_realm_retire, realm_retire) => {
+            const _: unsafe extern "C" fn(*mut c_void) -> i32 = reclaim::kiln_realm_retire;
+        };
+        (realm, kiln_realm_run_pinned, realm_run_pinned) => {
+            const _: unsafe extern "C" fn(u64, Option<PinnedRun>, *mut c_void, *mut i32) -> i32 = kiln_realm_run_pinned;
         };
         (realm, kiln_realm_gc_attach, realm_gc_attach) => {
             const _: unsafe extern "C" fn(*const GcHooks, *mut c_void, *mut *mut c_void) -> i32 = kiln_realm_gc_attach;
