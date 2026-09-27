@@ -841,11 +841,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         let inner = self.array_like_length(&produced, instruction)?;
                         for at in 0..inner {
                             Self::walk_step(&mut steps)?;
+                            // FlattenIntoArray: a hole in the answer is skipped, and the target
+                            // index advances only past an element it wrote (issue 26).
                             if self.element_has(&produced, at, instruction)? {
                                 let nested = self.element_get(&produced, at, instruction)?;
                                 self.create_element(into, written, nested, instruction)?;
+                                written += 1;
                             }
-                            written += 1;
                         }
                     } else {
                         self.create_element(into, written, produced, instruction)?;
