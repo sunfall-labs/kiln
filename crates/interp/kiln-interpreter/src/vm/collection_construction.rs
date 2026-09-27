@@ -41,6 +41,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if let Some(source) = arguments.first().cloned()
             && !matches!(source, Value::Undefined | Value::Null)
         {
+            // Get the adder once, before opening the iterator. An override may throw or
+            // mutate the prototype; every entry must still call this captured method.
+            let adder =
+                self.read_property(&collection, if is_map { "set" } else { "add" }, current)?;
+            if !is_callable(&adder) {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "collection adder is not callable".to_owned(),
+                });
+            }
             // `AddEntriesFromIterable` steps the source and inserts what it got, one entry at a
             // time. Draining it first was not merely a different order: an entry whose getter
             // throws is how a program says "stop", and a source that never reports `done`
@@ -62,7 +71,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // Anything that goes wrong from here is the iteration's failure, and the source
                 // is told the walk is over before it travels. The close is discarded because the
                 // original throw says more than a complaint from `return`.
-                match self.insert_collection_entry(&collection, is_map, weak, item, current) {
+                match self.insert_collection_entry(&collection, &adder, is_map, item, current) {
                     Ok(()) => {}
                     Err(error) => {
                         self.close_discarding(&iterator, current);
@@ -81,8 +90,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     pub(super) fn insert_collection_entry(
         &mut self,
         collection: &Value,
+        adder: &Value,
         is_map: bool,
-        weak: bool,
         item: Value,
         current: usize,
     ) -> Result<(), ExecutionError> {
@@ -101,32 +110,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         } else {
             (item, Value::Undefined)
         };
-        // A weak collection seeded from an iterable holds its entries to the same rule a later
-        // `add` or `set` does: `new WeakSet([1])` is a TypeError, not a set holding a number no
-        // reference could ever match. The insert below goes straight to the machine-free table,
-        // so the check the dispatcher makes for the method forms is repeated here.
-        if weak && !self.can_be_held_weakly(&key) {
-            return Err(ExecutionError::TypeErrorMessage {
-                message: format!(
-                    "{} cannot be held weakly: a weak collection takes an object or an \
-                     unregistered symbol",
-                    key.to_display_string()
-                ),
-            });
-        }
-        // The collection's *own* insert, weak or strong: it is the one whose brand check this
-        // receiver passes, and the two do the same work behind it.
-        call_native(
-            &self.intrinsics,
-            match (is_map, weak) {
-                (true, true) => Native::WeakMapSet,
-                (true, false) => Native::MapSet,
-                (false, true) => Native::WeakSetAdd,
-                (false, false) => Native::SetAdd,
-            },
-            collection,
-            &[key, value],
-        )?;
+        let arguments = if is_map { vec![key, value] } else { vec![key] };
+        self.call_value(adder, collection.clone(), arguments, current)?;
         Ok(())
     }
 }

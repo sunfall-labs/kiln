@@ -1224,6 +1224,141 @@ mod tests {
         }
     }
 
+    #[test]
+    fn collection_constructors_capture_overridden_adders_and_close_abruptly() {
+        let mut probe = case(
+            r#"
+            function check(ok) { if (!ok) throw new Error('collection constructor contract'); }
+            var constructors = [Map, Set, WeakMap, WeakSet];
+            for (var c = 0; c < constructors.length; c++) {
+                var C = constructors[c];
+                var map = c % 2 === 0;
+                var name = map ? 'set' : 'add';
+                var descriptor = Object.getOwnPropertyDescriptor(C.prototype, name);
+                var reads = 0, calls = 0, closes = 0, nexts = 0;
+                var thrown = {}, closingError = {};
+                Object.defineProperty(C.prototype, name, {
+                    configurable: true,
+                    get: function() {
+                        reads++;
+                        return function(key, value) {
+                            check(this instanceof C && key === 7);
+                            check(arguments.length === (map ? 2 : 1));
+                            if (map) check(value === 8);
+                            calls++;
+                            throw thrown;
+                        };
+                    }
+                });
+                var iterable = {};
+                iterable[Symbol.iterator] = function() {
+                    check(reads === 1);
+                    return {
+                        next: function() { nexts++; return {value: map ? [7, 8] : 7, done: false}; },
+                        return: function() { closes++; throw closingError; }
+                    };
+                };
+                var caught;
+                try { new C(iterable); } catch (error) { caught = error; }
+                check(caught === thrown && calls === 1 && closes === 1 && nexts === 1 && reads === 1);
+                Object.defineProperty(C.prototype, name, descriptor);
+            }
+            var set = Map.prototype.set;
+            var adderCalls = 0;
+            Map.prototype.set = function(k, v) {
+                adderCalls++;
+                Map.prototype.set = function() { throw new Error('adder read twice'); };
+                return set.call(this, k, v);
+            };
+            var m = new Map([[1, 2], [3, 4]]);
+            check(adderCalls === 2 && m.get(1) === 2 && m.get(3) === 4);
+            Map.prototype.set = null;
+            var opened = false;
+            var source = {};
+            source[Symbol.iterator] = function() { opened = true; throw new Error('opened'); };
+            var rejected = false;
+            try { new Map(source); } catch (error) { rejected = error instanceof TypeError; }
+            check(rejected && !opened);
+            new Map(null);
+            Map.prototype.set = set;
+        "#,
+        );
+        probe.metadata.flags.push("raw".to_owned());
+        for strict in [false, true] {
+            if strict {
+                probe.source.insert_str(0, "'use strict';\n");
+            }
+            let result = run_case(&probe, RunMode::Interpreter);
+            assert_eq!(result.outcome, Outcome::Pass, "{:?}", result.diagnostics);
+        }
+    }
+
+    #[test]
+    fn typed_array_numeric_keys_preserve_index_and_coercion_contracts() {
+        let mut probe = case(
+            r#"
+            function check(ok) { if (!ok) throw new Error('typed numeric key contract'); }
+            var a = new Uint8Array([3, 4]);
+            var keys = [-0, 0, 1, 2, -1, 1.5, NaN, Infinity, -Infinity, 4294967295, 9007199254740991];
+            var reads = 0;
+            Object.defineProperty(Object.getPrototypeOf(a), '1.5', {get: function() { reads++; return 9; }});
+            for (var i = 0; i < keys.length; i++) {
+                var key = keys[i];
+                check(a[key] === a[String(key)]);
+                a[key] = 17;
+                check(a[key] === a[String(key)]);
+            }
+            check(reads === 0 && a[0] === 17 && a['-0'] === undefined);
+            a['-0'] = 99;
+            check(a[0] === 17);
+            a['01'] = 42;
+            check(a['01'] === 42 && a[1] === 17);
+            var conversions = 0;
+            a[99] = {valueOf: function() { conversions++; return 8; }};
+            a[-1] = {valueOf: function() { conversions++; return 8; }};
+            check(conversions === 2);
+            var keyConversions = 0;
+            a[{toString: function() { keyConversions++; return '0'; }}] = 23;
+            check(keyConversions === 1 && a[0] === 23);
+            var key = {toString: function() { keyConversions++; return 1; }};
+            check(a[key] === 17 && keyConversions === 2);
+            var proxyReads = 0;
+            var proxy = new Proxy(a, {get: function(target, key) { proxyReads++; check(key === '0'); return 51; }});
+            check(proxy[0] === 51 && proxyReads === 1);
+            function detach(buffer) {
+                // Older raw realms have no bootstrap; use the same storage primitive there.
+                if (typeof ArrayBuffer.prototype.transfer === 'function') {
+                    ArrayBuffer.prototype.transfer.call(buffer);
+                } else {
+                    globalThis.__kilnArrayBufferDetach(buffer, 0, false);
+                }
+            }
+            a[0] = {valueOf: function() { detach(a.buffer); return 12; }};
+            check(a[0] === undefined);
+            a[0] = {valueOf: function() { conversions++; return 8; }};
+            check(conversions === 3);
+            var big = new BigInt64Array(0);
+            var threw = false;
+            try { big[9] = 1; } catch (error) { threw = error instanceof TypeError; }
+            check(threw);
+            var resizable = new ArrayBuffer(4, {maxByteLength: 8});
+            var view = new Uint8Array(resizable);
+            view[6] = {valueOf: function() { resizable.resize(8); return 71; }};
+            check(view[6] === 71);
+            view[0] = {valueOf: function() { resizable.resize(0); return 99; }};
+            check(view[0] === undefined);
+        "#,
+        );
+        probe.metadata.flags.push("raw".to_owned());
+        for strict in [false, true] {
+            if strict {
+                probe.source.insert_str(0, "'use strict';\n");
+            }
+            let result = run_case(&probe, RunMode::Interpreter);
+            assert_eq!(result.outcome, Outcome::Pass, "{:?}", result.diagnostics);
+        }
+    }
+
     /// A directory holding one module case and the fixtures it imports.
     ///
     /// Linking is filesystem behaviour: the specifiers are relative, the fixtures are real files,

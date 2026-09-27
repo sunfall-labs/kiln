@@ -1641,6 +1641,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if matches!(target, Value::Proxy(_)) {
             return self.proxy_get_with_receiver(target, key, receiver, instruction);
         }
+        // A numeric key on an integer-indexed exotic already identifies the canonical
+        // numeric string. Avoid formatting and reparsing it for every byte of a view copy.
+        // ToPropertyKey maps numeric -0 to "0"; the distinct string "-0" still takes the
+        // generic path. Invalid numeric indices never consult the prototype or receiver.
+        if let (Value::TypedArray(view), Value::Number(number)) = (target, key) {
+            let index = if *number == 0.0 { 0.0 } else { *number };
+            return Ok(valid_integer_index(view, index)
+                .and_then(|at| view.get(at))
+                .unwrap_or(Value::Undefined));
+        }
         let property_key_units = key.property_key_units_checked()?;
 
         let property_key = PropertyKeyRef::Units(&property_key_units);
@@ -1746,6 +1756,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
         strict: bool,
     ) -> Result<(), ExecutionError> {
+        // IntegerIndexedElementSet accepts invalid indices in both strict and sloppy code,
+        // after converting the value. Only a genuine numeric key and view take this path;
+        // proxies and object keys retain their traps and ToPropertyKey ordering.
+        if let (Value::TypedArray(view), Value::Number(number)) = (target, key) {
+            let index = if *number == 0.0 { 0.0 } else { *number };
+            return self.set_typed_array_index(view, index, &value, instruction);
+        }
         if !strict {
             return self.set_computed(target, key, value, instruction);
         }
@@ -1869,6 +1886,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(())
     }
 
+    /// The integer-indexed write, shared by numeric and canonical string keys. Coercion
+    /// must precede the bounds check because it can detach or resize the buffer.
+    fn set_typed_array_index(
+        &mut self,
+        view: &Rc<TypedArrayData>,
+        index: f64,
+        value: &Value,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let element = self.as_element(view.kind, value, instruction)?;
+        if let Some(at) = valid_integer_index(view, index) {
+            view.set(at, &element)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn set_computed(
         &mut self,
         target: &Value,
@@ -1911,6 +1944,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         {
             return self.set_array_index(target, items, *number as usize, value, instruction);
         }
+        if let (Value::TypedArray(view), Value::Number(number)) = (target, key) {
+            let index = if *number == 0.0 { 0.0 } else { *number };
+            return self.set_typed_array_index(view, index, &value, instruction);
+        }
         let key_units = key.property_key_units_checked()?;
 
         let property_key = PropertyKeyRef::Units(&key_units);
@@ -1918,17 +1955,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if let Value::TypedArray(view) = target
             && let Some(index) = canonical_numeric_index_key(property_key)
         {
-            let view = Rc::clone(view);
-            // Coerced before the bounds check, and by the machine, because the coercion is what
-            // a `BigInt64Array` refuses a Number in: `big[0] = 1` is a TypeError where
-            // `big[0] = 1n` is a write, and neither is a rounding. An element key that reaches
-            // no slot -- `"1.5"`, `"-0"`, an index past the end -- is discarded after the
-            // conversion has run, which is what the specification's ordering makes observable.
-            let element = self.as_element(view.kind, &value, instruction)?;
-            if let Some(at) = valid_integer_index(&view, index) {
-                view.set(at, &element)?;
-            }
-            return Ok(());
+            return self.set_typed_array_index(view, index, &value, instruction);
         }
         // The other half of `Object.prototype.__proto__`. A value that is neither an object nor
         // null is *ignored* rather than refused -- the setter has no error to raise for one --
