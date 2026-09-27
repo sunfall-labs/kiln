@@ -2096,3 +2096,20 @@ console.log(calls, thrown, hint, d.getTime());
     };
     assert_eq!(output, "12 URIError default 0\n");
 }
+
+#[test]
+fn release_integer_remainder_of_a_negative_dividend_is_negative_zero() {
+    // Issue 20: `(value | 0) % 2` was proven an int, and its `int64_t` twin lost the sign.
+    let Some(output) = run_native_release_fixture(
+        "release-integer-remainder-negative-zero",
+        r#"
+function constantRemainder(value) { return (value | 0) % 2; }
+console.log([-4, -6, 4].map(constantRemainder).map((x) => Object.is(x, -0)).join());
+function viaArgument(value) { return 1 / ((value | 0) % 5); }
+console.log(viaArgument(-10), viaArgument(10));
+"#,
+    ) else {
+        return;
+    };
+    assert_eq!(output, "true,true,false\n-Infinity Infinity\n");
+}

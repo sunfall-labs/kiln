@@ -1619,3 +1619,93 @@ fn test_proven_types_recognize_new_object_and_method_returns() {
         .expect("GetProperty length operation exists");
     assert_eq!(intrinsics.get(&sub_len_vid), Some(&Proven::Int));
 }
+
+#[test]
+fn integer_remainder_is_an_int_only_for_a_non_negative_dividend() {
+    // function (x) { const a = (x | 0) % 2; const b = (x >>> 0) % 2; return a; }
+    //
+    // `-4 % 2` is `-0`, which an `int64_t` twin cannot hold (issue 20): `a`'s dividend may be
+    // negative, so `a` is a number but not an int; `b`'s cannot, so `b` stays an int.
+    let proto = FunctionProto {
+        inferred_name: None,
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        declared_length: 1,
+        name: Some("remainders".into()),
+        parameter_count: 1,
+        local_count: 3,
+        code: vec![
+            Instruction::LoadLocal(0),
+            Instruction::Const(0),
+            Instruction::Binary(BinaryOp::BitwiseOr),
+            Instruction::Const(1),
+            Instruction::Binary(BinaryOp::Remainder),
+            Instruction::StoreLocal(1),
+            Instruction::LoadLocal(0),
+            Instruction::Const(0),
+            Instruction::Binary(BinaryOp::UnsignedShiftRight),
+            Instruction::Const(1),
+            Instruction::Binary(BinaryOp::Remainder),
+            Instruction::StoreLocal(2),
+            Instruction::LoadLocal(1),
+            Instruction::LoadLocal(2),
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::Return,
+        ],
+        arrow: false,
+        generator: false,
+        asynchronous: false,
+        async_generator: false,
+        is_method: false,
+        mapped_arguments: false,
+        upvalues: Vec::new(),
+        type_annotations: None,
+    };
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: vec![
+            Constant::Number(0.0f64.to_bits()),
+            Constant::Number(2.0f64.to_bits()),
+        ],
+        code: vec![Instruction::Return],
+        local_count: 0,
+        functions: vec![proto.clone()],
+        template_sites: Vec::new(),
+    };
+    let graph = build_function_graph(&proto, &program).unwrap();
+    verify_function_graph(&graph).unwrap();
+    // `x` a number, as a typed entry's parameter is.
+    let assumptions =
+        std::collections::HashMap::from([(graph.initial_locals[0], crate::graph::Proven::Number)]);
+    let numbers = crate::graph::proven_numbers_with_assumptions(&graph, &assumptions);
+    let ints = crate::graph::proven_ints_with_assumptions(&graph, &assumptions);
+    let defs: std::collections::HashMap<ValueId, &GraphOp> = graph
+        .blocks
+        .iter()
+        .flat_map(|b| b.operations.iter().map(|(v, op)| (*v, op)))
+        .collect();
+    let remainders: Vec<(ValueId, BinaryOp)> = defs
+        .iter()
+        .filter_map(|(vid, op)| match op {
+            GraphOp::Binary {
+                op: BinaryOp::Remainder,
+                left,
+                ..
+            } => match defs.get(left) {
+                Some(GraphOp::Binary { op, .. }) => Some((*vid, *op)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(remainders.len(), 2, "{remainders:?}");
+    for (vid, dividend) in remainders {
+        assert!(numbers.contains(&vid));
+        match dividend {
+            BinaryOp::BitwiseOr => assert!(!ints.contains(&vid), "(x | 0) % 2 may be -0"),
+            BinaryOp::UnsignedShiftRight => assert!(ints.contains(&vid), "(x >>> 0) % 2 is >= 0"),
+            other => panic!("unexpected dividend {other:?}"),
+        }
+    }
+}

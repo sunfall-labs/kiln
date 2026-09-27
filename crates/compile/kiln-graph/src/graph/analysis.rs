@@ -429,6 +429,17 @@ pub fn proven_types_with_bounds(
         }
         false
     };
+    // A remainder takes the sign of its dividend, so an integer remainder of a negative dividend
+    // may be `-0` (`-4 % 2`), which an `int64_t` twin cannot hold: every consumer reading the
+    // twin as a double would see `+0` (issue 20). The remainder is an `Int` only when the
+    // dividend is proven non-negative; otherwise it is a `Number`, whose box and double carry
+    // the sign.
+    let defs: HashMap<ValueId, &GraphOp> = graph
+        .blocks
+        .iter()
+        .flat_map(|b| b.operations.iter().map(|(v, op)| (*v, op)))
+        .collect();
+    let is_non_negative = |v: &ValueId| non_negative_int(*v, &defs, &ivs, 8);
     loop {
         let mut changed = false;
         for block in &graph.blocks {
@@ -479,7 +490,11 @@ pub fn proven_types_with_bounds(
                             (number(&state, left) && number(&state, right)).then_some(Proven::Int)
                         }
                         BinaryOp::Remainder => {
-                            if int(&state, left) && int(&state, right) && is_non_zero(right) {
+                            if int(&state, left)
+                                && int(&state, right)
+                                && is_non_zero(right)
+                                && is_non_negative(left)
+                            {
                                 Some(Proven::Int)
                             } else if number(&state, left) && number(&state, right) {
                                 Some(Proven::Number)
@@ -593,6 +608,49 @@ pub fn proven_types_with_bounds(
         .into_iter()
         .filter_map(|(vid, kind)| kind.map(|k| (vid, k)))
         .collect()
+}
+
+/// Whether `value`, where it is an integer, is certainly `>= 0` (and so never `-0`): a
+/// non-negative constant, a non-negative induction variable, `x >>> n`, `x & c` with a constant
+/// `c` in `[0, 2^31)`, the sum of two such values, a remainder of one, or a phi of them.
+/// `depth` bounds the walk through phis; running out answers "not proven".
+fn non_negative_int(
+    value: ValueId,
+    defs: &HashMap<ValueId, &GraphOp>,
+    ivs: &HashMap<ValueId, InductionVariable>,
+    depth: u32,
+) -> bool {
+    if ivs
+        .get(&value)
+        .is_some_and(|iv| iv.non_negative && iv.min >= 0)
+    {
+        return true;
+    }
+    if depth == 0 {
+        return false;
+    }
+    let recurse = |v: &ValueId| non_negative_int(*v, defs, ivs, depth - 1);
+    let small_non_negative_const = |v: &ValueId| {
+        matches!(defs.get(v), Some(GraphOp::Const { constant, .. })
+            if as_safe_integer(constant).is_some_and(|n| (0..=i64::from(i32::MAX)).contains(&n)))
+    };
+    match defs.get(&value) {
+        Some(GraphOp::Const { constant, .. }) => as_safe_integer(constant).is_some_and(|n| n >= 0),
+        Some(GraphOp::Binary { op, left, right }) => match op {
+            BinaryOp::UnsignedShiftRight => true,
+            BinaryOp::BitwiseAnd => {
+                small_non_negative_const(left) || small_non_negative_const(right)
+            }
+            BinaryOp::Add => recurse(left) && recurse(right),
+            BinaryOp::Remainder => recurse(left),
+            _ => false,
+        },
+        Some(GraphOp::Phi { inputs }) => {
+            !inputs.is_empty() && inputs.iter().all(|(_, input)| recurse(input))
+        }
+        Some(GraphOp::StoreLocal { value, .. } | GraphOp::CheckTdz { value, .. }) => recurse(value),
+        _ => false,
+    }
 }
 
 /// Record a verdict for `vid`: unconstrained becomes the verdict; a proven kind may only be
