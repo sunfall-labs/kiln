@@ -344,14 +344,17 @@ run_interpreted() {
 	# node's is written as it happens. A bundled `vue-reactivity` emits one `console.warn` and
 	# diverged on ordering alone. Per-stream also checks that each line went to the right place,
 	# which merging could not see at all.
-	# Each engine's status comes from its stdout run; the second run exists only to separate the
-	# streams and is the same program over the same inputs.
+	# Capture both streams from the SAME execution. Running once per stream doubles compilation
+	# and execution, and can pair stdout with a different run's stderr and exit status.
 	local expected expected_err actual actual_err
 	local expected_status=0 actual_status=0
-	expected="$(TZ=UTC node "$bundle" 2>/dev/null)" || expected_status=$?
-	expected_err="$(TZ=UTC node "$bundle" 2>&1 1>/dev/null || true)"
-	actual="$("$KILN" --one-shot ${adapter:+"$adapter"} run "$bundle" 2>/dev/null)" || actual_status=$?
-	actual_err="$("$KILN" --one-shot ${adapter:+"$adapter"} run "$bundle" 2>&1 1>/dev/null || true)"
+	TZ=UTC node "$bundle" >"$WORK_DIR/$name.node.stdout" 2>"$WORK_DIR/$name.node.stderr" || expected_status=$?
+	printf '%s\n' "$expected_status" >"$WORK_DIR/$name.node.status"
+	"$KILN" --one-shot ${adapter:+"$adapter"} run "$bundle" >"$WORK_DIR/$name.interp.stdout" 2>"$WORK_DIR/$name.interp.stderr" || actual_status=$?
+	expected="$(<"$WORK_DIR/$name.node.stdout")"
+	expected_err="$(<"$WORK_DIR/$name.node.stderr")"
+	actual="$(<"$WORK_DIR/$name.interp.stdout")"
+	actual_err="$(<"$WORK_DIR/$name.interp.stderr")"
 	if [[ $actual == "$expected" && $actual_err == "$expected_err" ]] &&
 		((actual_status == expected_status)); then
 		touch "$WORK_DIR/$name.interp_matched"
@@ -434,10 +437,13 @@ run_native() {
 	fi
 	local expected expected_err actual actual_err
 	local expected_status=0 actual_status=0
-	expected="$(TZ=UTC node "$bundle" 2>/dev/null)" || expected_status=$?
-	expected_err="$(TZ=UTC node "$bundle" 2>&1 1>/dev/null || true)"
-	actual="$("$KILN" --one-shot ${adapter:+"$adapter"} run --native "$bundle" 2>/dev/null)" || actual_status=$?
-	actual_err="$("$KILN" --one-shot ${adapter:+"$adapter"} run --native "$bundle" 2>&1 1>/dev/null || true)"
+	# The interpreted pass already ran the Node oracle for this bundle.
+	expected_status="$(<"$WORK_DIR/$name.node.status")"
+	expected="$(<"$WORK_DIR/$name.node.stdout")"
+	expected_err="$(<"$WORK_DIR/$name.node.stderr")"
+	"$KILN" --one-shot ${adapter:+"$adapter"} run --native "$bundle" >"$WORK_DIR/$name.native.stdout" 2>"$WORK_DIR/$name.native.stderr" || actual_status=$?
+	actual="$(<"$WORK_DIR/$name.native.stdout")"
+	actual_err="$(<"$WORK_DIR/$name.native.stderr")"
 	if [[ $actual == "$expected" && $actual_err == "$expected_err" ]] &&
 		((actual_status == expected_status)); then
 		touch "$WORK_DIR/$name.native_matched"

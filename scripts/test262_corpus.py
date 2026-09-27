@@ -145,8 +145,9 @@ def discover_chunks(root: pathlib.Path, existing: list[str] | None = None) -> li
     return chunks
 
 
-def run_result(kiln: str, root: pathlib.Path, output: pathlib.Path, log: pathlib.Path) -> tuple[dict[str, Any], subprocess.CompletedProcess[str]]:
-    verify_effective_cap()
+def run_result(kiln: str, root: pathlib.Path, output: pathlib.Path, log: pathlib.Path, *, verify_cap: bool = True, cases: pathlib.Path | None = None) -> tuple[dict[str, Any], subprocess.CompletedProcess[str]]:
+    if verify_cap:
+        verify_effective_cap()
     try:
         output.unlink()
     except FileNotFoundError:
@@ -157,7 +158,7 @@ def run_result(kiln: str, root: pathlib.Path, output: pathlib.Path, log: pathlib
     started = time.monotonic()
     with log.open("w", encoding="utf-8") as stream:
         completed, exceeded = run_limited(
-            [kiln, "--one-shot", "test", str(root), "--out", str(output)],
+            [kiln, "--one-shot", "test", str(root), "--out", str(output)] + (["--cases", str(cases)] if cases else []),
             cwd=os.getcwd(),
             stdout=stream,
             stderr=subprocess.STDOUT,
@@ -234,7 +235,21 @@ def command_fetch(args: argparse.Namespace) -> int:
     return 0
 
 
+def initialize_chunk_worker(environment):
+    os.environ.update(environment)
+    verify_effective_cap()
+
+
+def baseline_results(args, root, chunks, baseline):
+    from test262_batches import schedule
+    yield from schedule(args, root, chunks, baseline)
+
+
 def command_baseline(args: argparse.Namespace) -> int:
+    if getattr(args, "report", None) and pathlib.Path(args.report).resolve() in {
+        pathlib.Path(args.baseline).resolve(), pathlib.Path(args.extended_manifest).resolve()
+    }:
+        raise CorpusError("result report would overwrite a baseline or extended manifest")
     checkout = load_checkout(args.checkout)
     root, _ = resolve_test_root(checkout)
     baseline_path = pathlib.Path(args.baseline)
@@ -244,11 +259,12 @@ def command_baseline(args: argparse.Namespace) -> int:
     chunks = discover_chunks(root, sorted(baseline.get("chunks", {})) or None)
     if not args.update and not baseline.get("chunks"):
         raise CorpusError("baseline holds no chunks; regenerate it with --update")
+    if args.update and args.suite != "full":
+        raise CorpusError("baseline updates require --suite full; partial runs cannot replace full coverage")
     measured, report_chunks, regressions, gains = {}, {}, [], []
-    for index, chunk in enumerate(chunks, 1):
-        out = pathlib.Path(args.work) / (chunk.replace("/", "_") + ".json")
+    section_counts = {}
+    for index, (chunk, report) in enumerate(baseline_results(args, root, chunks, baseline), 1):
         log = pathlib.Path(args.logdir) / (chunk.replace("/", "_") + ".log")
-        report, _ = run_result(args.kiln, root / chunk, out, log)
         totals = report.get("totals", {})
         total = int(totals.get("total", 0))
         if total <= 0:
@@ -256,15 +272,22 @@ def command_baseline(args: argparse.Namespace) -> int:
         passed, failed = int(totals["passed"]), int(totals["failed"])
         raw_counts = report["_kiln_counts"]
         report_chunks[chunk] = {"total": sum(raw_counts.values()), "passed": raw_counts["pass"], "failed": raw_counts["fail"], "unsupported": raw_counts["unsupported"], "skipped": raw_counts["skipped"]}
+        report_chunks[chunk]["elapsed_millis"] = report["_kiln_elapsed_millis"]
         measured[chunk] = {"passed": passed, "failed": failed}
+        section_counts[chunk] = report["_kiln_section_counts"]
         old = baseline.get("chunks", {}).get(chunk)
+        extended_expected = args.extended_document["chunks"].get(chunk, {}).get("expected", {})
+        if old and args.suite == "routine":
+            old = {key: old[key] - extended_expected.get(key, 0) for key in ("passed", "failed")}
+        elif args.suite == "extended":
+            old = extended_expected
         mark = ""
         if old:
             if passed < old["passed"]:
                 regressions.append(f"{chunk}: {old['passed']} -> {passed} passing"); mark = "  REGRESSED"
             elif passed > old["passed"]:
                 gains.append(f"{chunk}: +{passed - old['passed']}"); mark = f"  +{passed - old['passed']}"
-        print(f"[{index}/{len(chunks)}] {chunk}  {passed}/{failed}{mark}", flush=True)
+        print(f"[{index}/{len(args.selected_chunks)}] {chunk}  {passed}/{failed}{mark}  ({report['_kiln_elapsed_millis'] / 1000:.2f}s)", flush=True)
     if getattr(args, "report", None):
         report = {
             "schema": 1,
@@ -272,7 +295,9 @@ def command_baseline(args: argparse.Namespace) -> int:
             "source": {"name": "Test262 baseline", "repository": REPOSITORY, "commit": COMMIT},
             "counts": {"total": sum(v["total"] for v in report_chunks.values()), "passed": sum(v["passed"] for v in report_chunks.values()), "failed": sum(v["failed"] for v in report_chunks.values()), "unsupported": sum(v["unsupported"] for v in report_chunks.values()), "skipped": sum(v["skipped"] for v in report_chunks.values())},
             "chunks": report_chunks,
-            "expected_chunks": chunks,
+            "expected_chunks": args.selected_chunks,
+            "coverage": args.coverage,
+            "sections": section_counts,
             "regressions": regressions,
         }
         report_path = pathlib.Path(args.report)
@@ -281,6 +306,11 @@ def command_baseline(args: argparse.Namespace) -> int:
     if args.update:
         baseline.update({"schema": 1, "test262_commit": COMMIT, "chunks": measured})
         baseline_path.write_text(json.dumps(baseline, indent=2, sort_keys=True) + "\n")
+        for chunk, entry in args.extended_document["chunks"].items():
+            counts = section_counts[chunk]["extended"]
+            entry["expected"] = {"passed": counts["pass"], "failed": counts["fail"],
+                                 "unsupported": counts["unsupported"], "skipped": counts["skipped"]}
+        pathlib.Path(args.extended_manifest).write_text(json.dumps(args.extended_document, indent=2) + "\n")
         print(f"\nwrote {baseline_path}: {len(measured)} chunks, {sum(x['passed'] for x in measured.values())} passing")
         return 0
     for gain in gains: print(f"gain     {gain}")
@@ -301,11 +331,17 @@ def main() -> int:
     fetch.set_defaults(function=command_fetch)
     base = sub.add_parser("baseline")
     base.add_argument("--checkout"); base.add_argument("--kiln", required=True); base.add_argument("--baseline", required=True); base.add_argument("--work", required=True); base.add_argument("--logdir", required=True); base.add_argument("--report"); base.add_argument("--update", action="store_true"); base.set_defaults(function=command_baseline)
+    base.add_argument("--suite", choices=("routine", "extended", "full"), default="routine")
+    base.add_argument("--extended-manifest", default=str(pathlib.Path(__file__).resolve().parent.parent / "conformance/test262-extended.json"))
     args = parser.parse_args()
     try: return args.function(args)
     except (CorpusError, OSError, subprocess.CalledProcessError) as exc:
         print(f"test262 corpus: {exc}", file=sys.stderr); return 1
 
 
+# Batch workers import this policy module too; keep one exception/function identity when this
+# file is launched as a script (including multiprocessing's spawned __mp_main__).
+if __name__ in {"__main__", "__mp_main__"}:
+    sys.modules["test262_corpus"] = sys.modules[__name__]
 if __name__ == "__main__":
     raise SystemExit(main())

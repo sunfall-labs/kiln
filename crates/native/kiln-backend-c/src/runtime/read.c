@@ -92,6 +92,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
     switch (target.tag) {
     case KILN_VALUE_OBJECT: {
         kiln_value current = target;
+        kiln_value getter;
         size_t steps;
         int walk;
         /* Canonicalized once for the whole walk (ADR 0047), unless a compiled site already holds
@@ -117,13 +118,19 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 break;
             }
             object = kiln_c99_object_of(current);
+            getter = kiln_c99_undefined();
             if (object->shape != NULL) {
                 if (ikey != NULL) {
                     uint32_t slot;
                     if (kiln_c99_shape_find_slot(object->shape, ikey, &slot)) {
                         if (slot < object->slot_capacity) {
-                            *out = kiln_val_to_boundary(object->slots[slot]);
-                            return KILN_C99_OK;
+                            if (KILN_LIKELY((object->shape->accessor_mask & (1u << slot)) == 0)) {
+                                *out = kiln_val_to_boundary(object->slots[slot]);
+                                return KILN_C99_OK;
+                            }
+                            /* An accessor of a shaped object: its pair is in the slot. */
+                            getter = kiln_c99_accessor_pair_half(object->slots[slot], 0);
+                            goto read_accessor;
                         }
                     }
                 }
@@ -155,15 +162,16 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                     *out = object->properties[index].value;
                     return KILN_C99_OK;
                 }
+                getter = object->properties[index].getter;
+            read_accessor:
                 /* Reading an accessor is a call, and the receiver is the object the read
                  * started from -- not the one the accessor was found on. */
-                if (object->properties[index].getter.tag == KILN_VALUE_UNDEFINED) {
+                if (getter.tag == KILN_VALUE_UNDEFINED) {
                     KILN_C99_ABSENT("an accessor with no getter, whose read is undefined by "
                                     "definition",
                                     out);
                 }
-                return kiln_c99_call(host, out, object->properties[index].getter, target, NULL, 0,
-                                     depth, thrown);
+                return kiln_c99_call(host, out, getter, target, NULL, 0, depth, thrown);
             }
             current = object->prototype;
         }
@@ -1886,6 +1894,8 @@ static int kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object,
         if (kiln_c99_shape_find_slot(object->shape, canonical, &slot)) {
             uint32_t p;
             int found = 0;
+            /* An accessor's slot holds its pair, not a value a site may hand back. */
+            if (object->shape->accessor_mask & (1u << slot)) return 0;
             for (p = 0; p < site->pic_count; ++p) {
                 if (site->entries[p].shape == object->shape) found = 1;
             }
@@ -1944,6 +1954,8 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const kiln_stri
             {
                 uint32_t slot;
                 if (canonical != NULL && kiln_c99_shape_find_slot(object->shape, canonical, &slot)) {
+                    /* An own accessor: the generic read below calls it. */
+                    if (object->shape->accessor_mask & (1u << slot)) goto generic;
                     if (slot < object->slot_capacity) {
                         *out = kiln_val_to_boundary(object->slots[slot]);
                         if (site->pic_count < KILN_C99_PIC_SIZE) {
@@ -1961,6 +1973,7 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const kiln_stri
                         uint32_t proto_slot;
                         if (canonical != NULL &&
                             kiln_c99_shape_find_slot(proto_obj->shape, canonical, &proto_slot)) {
+                            if (proto_obj->shape->accessor_mask & (1u << proto_slot)) break;
                             if (proto_slot < proto_obj->slot_capacity) {
                                 *out = kiln_val_to_boundary(proto_obj->slots[proto_slot]);
                                 return KILN_C99_OK;
@@ -2003,6 +2016,7 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const kiln_stri
                 }
             }
         }
+    generic:
         status = kiln_c99_get_key(host, target, key, canonical, out, depth, thrown);
         if (status == KILN_C99_OK && site->misses < KILN_C99_SITE_GIVE_UP &&
             !kiln_c99_site_learn(site, object, key, canonical)) {

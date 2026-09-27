@@ -33,7 +33,7 @@ pub enum StepBudget {
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 32;
+pub const PROTOCOL_VERSION: u32 = 33;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -592,6 +592,16 @@ pub enum Request {
         changed_paths: Option<Vec<String>>,
         previously_failed: Vec<String>,
     },
+    /// List file and variant identities without executing them.
+    TestInventory {
+        root: String,
+    },
+    /// Execute exactly these discovered file IDs, including every declared variant.
+    TestBatch {
+        root: String,
+        mode: TestMode,
+        ids: Vec<String>,
+    },
     /// Whole-project summary, which depends on every module interface.
     Project {
         source_view: SourceView,
@@ -632,6 +642,7 @@ pub enum Response {
     NativeSharedBuilt(NativeSharedLibrarySummary),
     NativeRan(NativeRunSummary),
     Tested(TestSummary),
+    TestInventory(Vec<TestInventoryEntry>),
     Project(ProjectSummary),
     /// What one [`Request::CacheGc`] observed and did.
     CacheSwept(CacheGcSummary),
@@ -775,6 +786,12 @@ pub struct TestReasonSummary {
     pub outcome: TestOutcome,
     /// `phase: message`, using the compiler's own words.
     pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestInventoryEntry {
+    pub id: String,
+    pub cases: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -951,9 +968,23 @@ mod tests {
 
     #[test]
     fn current_protocol_run_step_budget_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 32);
+        assert_eq!(PROTOCOL_VERSION, 33);
 
         let requests = [
+            (
+                Request::TestInventory {
+                    root: "/corpus".into(),
+                },
+                serde_json::json!({"TestInventory": {"root": "/corpus"}}),
+            ),
+            (
+                Request::TestBatch {
+                    root: "/corpus".into(),
+                    mode: TestMode::Interpreter,
+                    ids: vec!["a.js".into()],
+                },
+                serde_json::json!({"TestBatch": {"root": "/corpus", "mode": "Interpreter", "ids": ["a.js"]}}),
+            ),
             (
                 Request::Sync {
                     files: vec![SourceHash {

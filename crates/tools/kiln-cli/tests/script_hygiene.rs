@@ -383,3 +383,19 @@ fn every_script_has_the_execute_bit_it_needs() {
         }
     }
 }
+
+#[test]
+fn gate_runner_budget_and_stream_contracts_pass() {
+    let output = Command::new("python3")
+        .args(["-B", "scripts/gate_runner_test.py"])
+        .current_dir(repo_root())
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .output()
+        .expect("python3 is available");
+    assert!(
+        output.status.success(),
+        "gate runner tests failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

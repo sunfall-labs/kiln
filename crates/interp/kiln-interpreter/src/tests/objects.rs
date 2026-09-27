@@ -1,6 +1,89 @@
 use super::*;
 
 #[test]
+fn numeric_array_writes_preserve_property_key_boundaries_and_refusals() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: Default::default(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    for strict in [false, true] {
+        let items = ArrayData::new(Vec::new());
+        let array = Value::Array(Rc::clone(&items));
+        for (number, name) in [
+            (-0.0, "0"),
+            (-1.0, "-1"),
+            (1.5, "1.5"),
+            (f64::from(u32::MAX), "4294967295"),
+            (f64::INFINITY, "Infinity"),
+            (f64::NAN, "NaN"),
+        ] {
+            vm.assign_with_strict(
+                &array,
+                &Value::Number(number),
+                Value::Boolean(true),
+                0,
+                strict,
+            )
+            .unwrap();
+            assert_eq!(
+                vm.read_computed(&array, &Value::String(name.into()), 0)
+                    .unwrap(),
+                Value::Boolean(true)
+            );
+        }
+        assert_eq!(items.borrow().len(), 1, "only numeric -0 is an element");
+        vm.assign_with_strict(
+            &array,
+            &Value::String("-0".into()),
+            Value::Boolean(false),
+            0,
+            strict,
+        )
+        .unwrap();
+        assert_eq!(items.borrow()[0], Value::Boolean(true));
+        items.length_writable.set(false);
+        let result =
+            vm.assign_with_strict(&array, &Value::Number(1.0), Value::Boolean(true), 0, strict);
+        let string_result = vm.assign_with_strict(
+            &array,
+            &Value::String("1".into()),
+            Value::Boolean(true),
+            0,
+            strict,
+        );
+        assert_eq!(
+            result, string_result,
+            "numeric and string keys share length refusal"
+        );
+        assert_eq!(items.borrow().len(), 1);
+        items.properties.borrow_mut().prevent_extensions();
+        assert_eq!(
+            vm.assign_with_strict(&array, &Value::Number(1.0), Value::Boolean(true), 0, strict)
+                .is_err(),
+            strict,
+        );
+        items.properties.borrow_mut().freeze();
+        assert_eq!(
+            vm.assign_with_strict(
+                &array,
+                &Value::Number(0.0),
+                Value::Boolean(false),
+                0,
+                strict
+            )
+            .is_err(),
+            strict,
+        );
+        assert_eq!(items.borrow()[0], Value::Boolean(true));
+    }
+}
+
+#[test]
 fn object_data_property_keys_preserve_lone_surrogates() {
     let key = StringUnits::from_units(&[0xd800]);
     let mut object = ObjectData::default();

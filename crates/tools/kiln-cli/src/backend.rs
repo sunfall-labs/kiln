@@ -338,6 +338,7 @@ fn name_of(response: &Response) -> &'static str {
         Response::NativeSharedBuilt(_) => "NativeSharedBuilt",
         Response::NativeRan(_) => "NativeRan",
         Response::Tested(_) => "Tested",
+        Response::TestInventory(_) => "TestInventory",
         Response::Project(_) => "Project",
         Response::Stats(_) => "Stats",
         Response::CacheSwept(_) => "CacheSwept",

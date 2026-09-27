@@ -1010,8 +1010,13 @@ fn runtime_prelude_size() {
     // Widened on 2026-09-26, at 51,085 lines: the shape edge index and raised fan-out ceiling,
     // absent-path hits through Object.prototype's live store, the immediate-equality fast path
     // and their comments (perf/objmodel-miss-literal, about +180 over main's 50,9xx).
+    // Widened on 2026-09-26, at 51,549 lines (51,085 before it): realms issue 04 step 3b --
+    // shapes carry property attributes, so definitions keep objects shaped (the shaped method,
+    // accessor and private definitions, the attribute masks every by-key slot path checks, the
+    // records dictionary mode materializes) and typed call sites keep a method path (+464,
+    // measured as the runtime diff's net lines).
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 51_600;
+    const CEILING_LINES: usize = 51_800;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

@@ -210,7 +210,7 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     pub(super) symbol_registry: Vec<(StringUnits, Value)>,
     /// Canonical tagged-template literal objects cached by (RealmId, program pointer, site index)
     /// per ECMA-262 §13.2.8.5 (GetTemplateObject).
-    pub(super) template_objects: std::collections::HashMap<(RealmId, usize, u32), Value>,
+    pub(super) template_objects: TemplateObjectCache,
     /// The state `Math.random` advances. Seeded from a constant rather than from the environment
     /// (ADR 0026), so the same program produces the same sequence in both engines and on every
     /// machine -- the same trade the virtual clock makes.

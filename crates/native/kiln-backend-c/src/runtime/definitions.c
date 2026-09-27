@@ -1,4 +1,99 @@
 
+/* Issue 04 step 3b. A method, a private method or an accessor defined on a shaped object keeps
+ * it shaped, with the attributes the list-mode path below would have given the property recorded
+ * in its shape (`KILN_C99_ATTR_*`), so a class prototype is shaped and a method cache names it by
+ * shape. Returns 1 when handled (`*status` is the answer), 0 to leave the definition to the
+ * list-mode path exactly as before. `kind` is 0 for a method (non-enumerable data), 3 for a
+ * private method (also read-only); accessors are `kiln_c99_define_accessor_shaped`'s.
+ *
+ * Only what the list path would do without asking anyone is done here: a new key on an ordinary,
+ * extensible, unfrozen object whose prototype chain would not intercept the assignment the list
+ * path starts with, or an existing slot that already carries exactly these attributes. */
+static int kiln_c99_define_shaped(kiln_value target, const kiln_string *key, kiln_val held,
+                                  int kind, int *status) {
+    kiln_object *object = kiln_c99_object_of(target);
+    const kiln_string *ikey;
+    uint32_t attrs;
+    uint32_t slot;
+    if (object->shape == NULL || object->properties != NULL || object->frozen ||
+        object->module_namespace || object->not_extensible ||
+        kiln_c99_is_node_hidden_key_key(key) || kiln_c99_same_name_key(key, "__proto__") ||
+        kiln_c99_key_index_key(key) >= 0.0) {
+        return 0;
+    }
+    ikey = kiln_c99_intern_key(key);
+    if (ikey == NULL) return 0;
+    /* The list path's record: `own_slot` makes it enumerable unless the key is reserved, then
+     * the method definition clears `enumerable` (and a private one clears `writable`). */
+    attrs = kiln_c99_key_is_reserved(ikey) ? 0u : KILN_C99_ATTR_ENUM_FLIP;
+    if (kind == 3) attrs |= KILN_C99_ATTR_READONLY;
+    if (kiln_c99_shape_find_slot(object->shape, ikey, &slot)) {
+        /* Only a slot the list path would leave with these attributes: its assignment writes a
+         * writable data property in place and the definition changes nothing else. */
+        if (slot >= object->slot_capacity || object->shape->attrs[slot] != attrs ||
+            (attrs & KILN_C99_ATTR_READONLY) != 0 ||
+            ((object->shape->double_slots_mask & (1u << slot)) && !KILN_VAL_IS_NUMBER(held))) {
+            return 0;
+        }
+        kiln_c99_prototype_touched(object);
+        object->slots[slot] = held;
+        *status = KILN_C99_OK;
+        return 1;
+    }
+    /* A setter or a read-only property up the chain takes the list path's assignment. */
+    if (object->prototype.tag == KILN_VALUE_OBJECT &&
+        kiln_c99_has_inherited_setter_or_readonly(object->prototype) &&
+        kiln_c99_inherited_write_blocked(object->prototype, ikey, key)) {
+        return 0;
+    }
+    return kiln_c99_shape_define_new(object, ikey, held, attrs, status);
+}
+
+/* The accessor half of the above: `get`/`set` defined on a shaped object keeps it shaped, the pair
+ * of functions in one slot (`kiln_c99_accessor_pair_new`). A new key becomes an accessor whose
+ * attributes are the list path's (`writable` off, `enumerable` as given); a second half merges
+ * into an existing accessor slot in place when that leaves its attributes as they are. */
+static int kiln_c99_define_accessor_shaped(kiln_value target, const kiln_string *key,
+                                           kiln_value getter, kiln_value setter,
+                                           int enumerable, int *status) {
+    kiln_object *object = kiln_c99_object_of(target);
+    const kiln_string *ikey;
+    uint32_t attrs;
+    uint32_t slot;
+    kiln_val pair;
+    if (object->shape == NULL || object->properties != NULL ||
+        kiln_c99_is_node_hidden_key_key(key) || kiln_c99_key_index_key(key) >= 0.0) {
+        return 0;
+    }
+    ikey = kiln_c99_intern_key(key);
+    if (ikey == NULL) return 0;
+    if (kiln_c99_shape_find_slot(object->shape, ikey, &slot)) {
+        kiln_value boxed;
+        kiln_array *halves;
+        uint32_t had = object->shape->attrs[slot];
+        int was_enumerable = kiln_c99_shape_slot_enumerable(object->shape, slot);
+        /* The merge only ever clears `enumerable`; one that would is a change of attributes. */
+        if ((had & KILN_C99_ATTR_ACCESSOR) == 0 || slot >= object->slot_capacity ||
+            (was_enumerable && !enumerable)) {
+            return 0;
+        }
+        boxed = kiln_val_to_boundary(object->slots[slot]);
+        if (boxed.tag != KILN_VALUE_ARRAY) return 0;
+        halves = kiln_c99_array_of(boxed);
+        if (halves->count != 2) return 0;
+        kiln_c99_prototype_touched(object);
+        if (getter.tag != KILN_VALUE_UNDEFINED) halves->elements[0] = kiln_val_from_boundary(getter);
+        if (setter.tag != KILN_VALUE_UNDEFINED) halves->elements[1] = kiln_val_from_boundary(setter);
+        *status = KILN_C99_OK;
+        return 1;
+    }
+    attrs = KILN_C99_ATTR_ACCESSOR | KILN_C99_ATTR_READONLY;
+    if ((enumerable != 0) != !kiln_c99_key_is_reserved(ikey)) attrs |= KILN_C99_ATTR_ENUM_FLIP;
+    *status = kiln_c99_accessor_pair_new(getter, setter, &pair);
+    if (*status != KILN_C99_OK) return 1;
+    return kiln_c99_shape_define_new(object, ikey, pair, attrs, status);
+}
+
 /* Define an accessor half, merging with a half already defined under the same key.
  *
  * Merging matters because `get x()` and `set x()` are written separately and describe one
@@ -27,6 +122,8 @@ static int kiln_c99_define_accessor_key(kiln_value target, const kiln_string *ke
     }
     object = kiln_c99_object_of(target);
     if (object->shape != NULL) {
+        if (kiln_c99_define_accessor_shaped(target, key, getter, setter, enumerable, &status))
+            return status;
         kiln_c99_ensure_dictionary(object);
         object->shape = NULL;
     }
@@ -1104,6 +1201,14 @@ static int kiln_c99_define_private(kiln_value target, const char *key, size_t ke
                                         kind == 1 ? function : kiln_c99_undefined(),
                                         kind == 2 ? function : kiln_c99_undefined(), 0);
     }
+    if (target.tag == KILN_VALUE_OBJECT && key_len <= UINT32_MAX) {
+        kiln_string view;
+        view.unit_len = (uint32_t)key_len;
+        view.flags = KILN_STRING_LATIN1;
+        view.data = key;
+        if (kiln_c99_define_shaped(target, &view, kiln_val_from_boundary(function), 3, &status))
+            return status;
+    }
     status = kiln_c99_define_method(target, key, key_len, function);
     if (status != KILN_C99_OK) {
         return status;
@@ -1129,6 +1234,9 @@ static int kiln_c99_define_private_key(kiln_value target, const kiln_string *key
                                             kind == 1 ? function : kiln_c99_undefined(),
                                             kind == 2 ? function : kiln_c99_undefined(), 0);
     }
+    if (target.tag == KILN_VALUE_OBJECT &&
+        kiln_c99_define_shaped(target, key, kiln_val_from_boundary(function), 3, &status))
+        return status;
     status = kiln_c99_define_method_key(target, key, function);
     if (status != KILN_C99_OK) {
         return status;
@@ -1159,6 +1267,11 @@ static int kiln_c99_define_method_key(kiln_value target, const kiln_string *key,
     }
     if (target.tag != KILN_VALUE_OBJECT) {
         KILN_C99_REFUSE("a method definition on a value with no property store");
+    }
+    {
+        int shaped = kiln_c99_define_shaped(target, key, kiln_val_from_boundary(method), 0,
+                                            &status);
+        if (shaped) return status;
     }
     status = kiln_c99_put_mode_key(NULL, target, key, NULL, method, 0, 0, NULL);
     if (status != KILN_C99_OK) {

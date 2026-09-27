@@ -8,16 +8,28 @@
 # its runnable work -- these are a front door, not a second implementation.
 
 [tasks.gate]
-description = "Everything that must hold before a change lands"
+description = "Routine gate: crate tests, native parity, bundles and routine Test262"
 run = "./scripts/gate.sh"
+
+[tasks.gate-full]
+description = "Complete gate, including the expensive extended Test262 section"
+run = "./scripts/gate.sh --full"
 
 [tasks.gate-quick]
 description = "Crate tests, native parity and thirdparty bundles -- the iteration loop"
 run = "./scripts/gate.sh --quick"
 
 [tasks.test262]
-description = "Check the committed Test262 chunk baseline"
+description = "Check routine Test262 coverage (extended cases are explicitly deferred)"
 run = "./scripts/test262-baseline.sh"
+
+[tasks.test262-full]
+description = "Run every pinned Test262 case, including extended coverage"
+run = "./scripts/test262-baseline.sh --suite full"
+
+[tasks.test262-extended]
+description = "Run just the expensive Test262 section; use for periodic or affected-feature checks"
+run = "./scripts/test262-baseline.sh --suite extended"
 
 [tasks.test262-update]
 description = "Regenerate the Test262 baseline (deliberate: the diff is the record)"

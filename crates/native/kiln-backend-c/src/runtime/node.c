@@ -555,7 +555,7 @@ static kiln_shape *kiln_c99_node_layout_shape(const kiln_string *const *keys, si
     size_t index;
     for (index = 0; index < count; ++index) {
         kiln_shape *next = NULL;
-        if (!kiln_c99_shape_transition_ex(shape, keys[index], 0, 1, &next)) return NULL;
+        if (!kiln_c99_shape_transition_ex(shape, keys[index], 0, 0, 1, &next)) return NULL;
         shape = next;
     }
     return shape;
@@ -684,7 +684,8 @@ static int kiln_c99_node_layout_store(kiln_value target, size_t index, const kil
         kiln_object *object = kiln_c99_object_of(target);
         if (object->shape != NULL) {
             if (index < object->shape->property_count && object->shape->keys[index] == key &&
-                index < object->slot_capacity && !object->frozen) {
+                index < object->slot_capacity && !object->frozen &&
+                (object->shape->store_mask & (1u << index)) == 0) {
                 object->slots[index] = kiln_val_from_boundary(value);
                 return KILN_C99_OK;
             }
@@ -707,7 +708,8 @@ static int kiln_c99_node_layout_load(kiln_value target, size_t index, const kiln
         const kiln_object *object = kiln_c99_object_of(target);
         if (object->shape != NULL) {
             if (index < object->shape->property_count && object->shape->keys[index] == key &&
-                index < object->slot_capacity) {
+                index < object->slot_capacity &&
+                (object->shape->accessor_mask & (1u << index)) == 0) {
                 *out = kiln_val_to_boundary(object->slots[index]);
                 return 1;
             }
@@ -3502,7 +3504,8 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
                 kiln_value provided = args[1];
                 kiln_object *object = kiln_c99_object_of(provided);
                 size_t index;
-                if (object->shape != NULL && object->elements != NULL)
+                if (object->shape != NULL &&
+                    (object->elements != NULL || object->shape->special_mask != 0))
                     kiln_c99_ensure_dictionary(object);
                 if (object->shape != NULL) {
                     for (index = 0; status == KILN_C99_OK &&

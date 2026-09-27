@@ -1810,6 +1810,61 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(removed)
     }
 
+    /// The indexed array write shared by numeric and string keys. Descriptor/refusal handling
+    /// stays here so avoiding a numeric key's string allocation cannot bypass an exotic element.
+    fn set_array_index(
+        &mut self,
+        target: &Value,
+        items: &Rc<ArrayData>,
+        index: usize,
+        value: Value,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        if items.properties.borrow().is_frozen() {
+            return Ok(());
+        }
+        // An element the program defined answers for itself: a setter is a call, and
+        // a data property that is not writable discards the write the same way a
+        // frozen object's does.
+        if let Some(entry) = array_exotic_element(items, index) {
+            match entry.property {
+                Property::Accessor { set, .. } => {
+                    if let Some(setter) = set {
+                        self.call_value(&setter, target.clone(), vec![value], instruction)?;
+                    }
+                    return Ok(());
+                }
+                Property::Value(_) if !entry.attributes.writable => return Ok(()),
+                Property::Value(_) => {}
+            }
+        }
+        // An index past the end is a *new* property and grows `length`, so an array
+        // that is closed to new properties, or whose `length` is not writable,
+        // refuses it. The write is discarded rather than raised for the same reason
+        // a frozen object's is: the machine does not know whether the code that
+        // wrote it was strict.
+        if index >= items.borrow().len()
+            && (!items.length_writable.get() || !items.properties.borrow().is_extensible())
+        {
+            return Ok(());
+        }
+        let mut elements = items.borrow_mut();
+        // Writing past the end extends with *holes*, not undefined: `a[3] = 4` on a
+        // one-element array leaves two positions that `in` denies, `for...in` skips
+        // and a console shows as `<2 empty items>`. A sparse array would pay nothing
+        // for a distant index; this one pays a slot each, so the same bound the
+        // constructor uses applies here.
+        if index >= elements.len() {
+            if index >= MAX_DENSE_ARRAY {
+                return Err(ExecutionError::ArrayTooLarge { length: index + 1 });
+            }
+            items.sparse.set(true);
+            elements.resize(index + 1, Value::Native(Native::Hole, RealmId::PRIMARY));
+        }
+        elements[index] = value;
+        Ok(())
+    }
+
     pub(crate) fn set_computed(
         &mut self,
         target: &Value,
@@ -1841,6 +1896,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 None => self.set_computed(&inner, key, value, instruction),
             };
+        }
+        // Numeric array indices are already primitive property keys. Keep their integer
+        // representation instead of allocating a decimal string and UTF-16 copy to parse back.
+        // -0 names element zero, but 2**32-1 and non-integers remain ordinary property names.
+        if let (Value::Array(items), Value::Number(number)) = (target, key)
+            && *number >= 0.0
+            && *number < f64::from(u32::MAX)
+            && number.fract() == 0.0
+        {
+            return self.set_array_index(target, items, *number as usize, value, instruction);
         }
         let key_units = key.property_key_units_checked()?;
 
@@ -1895,54 +1960,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // not know which it is in, and discarding is the one that cannot invent an error.
             Value::Array(items) if items.properties.borrow().is_frozen() => Ok(()),
             Value::Array(items) => match array_index_key(property_key) {
-                Some(index) => {
-                    // An element the program defined answers for itself: a setter is a call, and
-                    // a data property that is not writable discards the write the same way a
-                    // frozen object's does.
-                    if let Some(entry) = array_exotic_element(items, index) {
-                        match entry.property {
-                            Property::Accessor { set, .. } => {
-                                if let Some(setter) = set {
-                                    self.call_value(
-                                        &setter,
-                                        target.clone(),
-                                        vec![value],
-                                        instruction,
-                                    )?;
-                                }
-                                return Ok(());
-                            }
-                            Property::Value(_) if !entry.attributes.writable => return Ok(()),
-                            Property::Value(_) => {}
-                        }
-                    }
-                    // An index past the end is a *new* property and grows `length`, so an array
-                    // that is closed to new properties, or whose `length` is not writable,
-                    // refuses it. The write is discarded rather than raised for the same reason
-                    // a frozen object's is: the machine does not know whether the code that
-                    // wrote it was strict.
-                    if index >= items.borrow().len()
-                        && (!items.length_writable.get()
-                            || !items.properties.borrow().is_extensible())
-                    {
-                        return Ok(());
-                    }
-                    let mut elements = items.borrow_mut();
-                    // Writing past the end extends with *holes*, not undefined: `a[3] = 4` on a
-                    // one-element array leaves two positions that `in` denies, `for...in` skips
-                    // and a console shows as `<2 empty items>`. A sparse array would pay nothing
-                    // for a distant index; this one pays a slot each, so the same bound the
-                    // constructor uses applies here.
-                    if index >= elements.len() {
-                        if index >= MAX_DENSE_ARRAY {
-                            return Err(ExecutionError::ArrayTooLarge { length: index + 1 });
-                        }
-                        items.sparse.set(true);
-                        elements.resize(index + 1, Value::Native(Native::Hole, RealmId::PRIMARY));
-                    }
-                    elements[index] = value;
-                    Ok(())
-                }
+                Some(index) => self.set_array_index(target, items, index, value, instruction),
                 // `length` is derived, not stored: writing it truncates or extends. The write
                 // runs the same `ArraySetLength` a definition does, so `arr.length = 0` and
                 // `Object.defineProperty(arr, "length", {value: 0})` cannot disagree about an

@@ -91,6 +91,8 @@ pub enum Command {
         changed: bool,
         parse_only: bool,
         node: bool,
+        list: bool,
+        cases: Option<PathBuf>,
         output: Option<PathBuf>,
     },
     Project,
@@ -152,6 +154,8 @@ where
     let mut pgo_generate: Option<PathBuf> = None;
     let mut pgo_use: Option<PathBuf> = None;
     let mut dry_run = false;
+    let mut list = false;
+    let mut cases = None;
     let mut only_positional = false;
 
     let mut args = args.into_iter();
@@ -194,6 +198,13 @@ where
             "--changed" => {
                 reject_inline_value(&flag, &inline)?;
                 changed = true;
+            }
+            "--list" => {
+                reject_inline_value(&flag, &inline)?;
+                list = true;
+            }
+            "--cases" => {
+                cases = Some(PathBuf::from(value_for(&flag, inline, &mut args)?));
             }
             "--parse-only" => {
                 reject_inline_value(&flag, &inline)?;
@@ -444,6 +455,8 @@ where
             parse_only,
             node,
             output: test_output,
+            list,
+            cases: cases.clone(),
         },
         "project" => {
             no_operands(&name, &mut positional)?;
@@ -501,6 +514,16 @@ where
     // ignored: silently dropping `--one-shot` would hide which engine actually ran.
     if interval.is_some() && !matches!(command, Command::Watch { .. }) {
         return Err(Error::usage("--interval only applies to `kiln watch`"));
+    }
+    if list || cases.is_some() {
+        if !matches!(command, Command::Test { .. }) {
+            return Err(Error::usage("--list and --cases only apply to test"));
+        }
+        if changed || (list && cases.is_some()) || (list && (parse_only || node)) {
+            return Err(Error::usage(
+                "--list/--cases cannot combine with --changed or each other; --list takes no execution mode",
+            ));
+        }
     }
     if changed && !matches!(command, Command::Test { .. }) {
         return Err(Error::usage("--changed only applies to `kiln test`"));
@@ -632,6 +655,8 @@ options:
                        reruns it (default 25, min 1, max 2000). `watch` is
                        event-driven, so this coalesces one save's burst of writes;
                        it is not a polling cadence.
+    --list             with `test`, list file/variant IDs without running tests
+    --cases <json>     with `test`, run exactly the file IDs in a JSON array
     --changed          with `test`, run failures, smoke, and affected tests only
     --parse-only       with `test`, classify parser outcomes without interpreting
     --node             with `run`, `build`, or `test`, install the Tokio-owned Node compatibility Adapter
@@ -801,11 +826,40 @@ mod tests {
     }
 
     #[test]
+    fn inventory_and_batch_flags_are_explicit_and_exclusive() {
+        assert!(matches!(
+            run(&["test", "corpus", "--list"]).command,
+            Command::Test {
+                list: true,
+                cases: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            run(&["test", "corpus", "--cases", "batch.json"]).command,
+            Command::Test {
+                list: false,
+                cases: Some(_),
+                ..
+            }
+        ));
+        for args in [
+            vec!["test", "corpus", "--list", "--cases", "batch.json"],
+            vec!["test", "corpus", "--cases", "batch.json", "--changed"],
+            vec!["run", "corpus", "--list"],
+        ] {
+            assert!(parse(args.into_iter().map(str::to_owned)).is_err());
+        }
+    }
+
+    #[test]
     fn test_mode_options_are_explicit_and_scoped() {
         assert_eq!(
             run(&["test", "test262", "--changed", "--parse-only"]).command,
             Command::Test {
                 path: PathBuf::from("test262"),
+                list: false,
+                cases: None,
                 changed: true,
                 parse_only: true,
                 node: false,
@@ -816,6 +870,8 @@ mod tests {
             run(&["test", "test262", "--out=target/results.json"]).command,
             Command::Test {
                 path: PathBuf::from("test262"),
+                list: false,
+                cases: None,
                 changed: false,
                 parse_only: false,
                 node: false,

@@ -62,3 +62,20 @@ policy while retaining its separate per-chunk comparison and update rules.
   repository-corpus gates; unsupported behavior remains visible in its report.
 - Harness includes, fresh realms, async completion, module resolution, and exact error identity
   remain visible implementation work rather than behavior approximated by the initial runner.
+
+## Explicit batch coverage and the extended section (2026-09-26)
+
+`kiln test <root> --list --out inventory.json` discovers file IDs and their exact realm-variant
+IDs without execution. `--cases batch.json` accepts a nonempty JSON array of those file IDs;
+unknown or duplicate IDs fail. These protocol requests use the same conformance coordinator as
+ordinary tests, preserve original paths and harness/module behavior, and do not update the
+interactive changed-test failure state. They are explicit selection, not cached verdicts.
+
+The pinned baseline runner builds bounded batches from the inventory and checks the exact union
+of returned variant IDs. Its routine and extended selections are disjoint and cover the complete
+inventory. The reviewed `conformance/test262-extended.json` list selects expensive files; timing
+estimates affect scheduling only. Every report declares selected, deferred and discovered counts.
+The full per-chunk baseline remains authoritative for complete runs; routine passing floors are
+its counts less the extended section's recorded reference passes. Baseline regeneration requires
+full coverage and updates both documents deliberately. Default gate/test262 tasks run routine
+coverage; gate-full/test262-full run all cases and test262-extended runs only the expensive section.

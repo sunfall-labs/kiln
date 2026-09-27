@@ -307,6 +307,20 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
                 Next::Continue,
             )
         }
+        Request::TestInventory { root } => (
+            match crate::testing::ConformanceCoordinator::default().inventory(&root) {
+                Ok(tests) => Response::TestInventory(tests),
+                Err(message) => Response::Error { message },
+            },
+            Next::Continue,
+        ),
+        Request::TestBatch { root, mode, ids } => (
+            match crate::testing::ConformanceCoordinator::default().batch(&root, mode, ids) {
+                Ok(summary) => Response::Tested(summary),
+                Err(message) => Response::Error { message },
+            },
+            Next::Continue,
+        ),
         Request::Test {
             root,
             mode,

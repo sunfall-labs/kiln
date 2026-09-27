@@ -6,7 +6,9 @@
 # so each agent assembled their own in a scratch directory and got it subtly wrong. This is that
 # assembly, in the repository, where a fix to it is a fix for everyone.
 #
-# Ordered cheapest-first so a broken build fails in seconds rather than after the corpora:
+# Build once, then overlap independent correctness lanes within one CPU/memory budget.
+# Throughput benchmarks run after those lanes finish, so tests cannot perturb their timings.
+# The lanes cover:
 #
 #   1. crate tests          -- seconds; catches a broken build, which the filtered output of a
 #                              release build otherwise hides behind a working binary
@@ -45,7 +47,32 @@ cd "$(kiln_repo_root)"
 export KILN_CODE_SNAPSHOT_SHA256="$(python3 -c 'import sys; sys.path.insert(0, "scripts"); import gate_results; print(gate_results.code_snapshot())')"
 
 QUICK=0
-[[ ${1:-} == --quick ]] && QUICK=1
+export GATE_TEST262_SUITE=routine
+case ${1:-} in
+    --quick) QUICK=1 ;;
+    --full) GATE_TEST262_SUITE=full ;;
+    "") ;;
+    *) echo "usage: scripts/gate.sh [--quick|--full]" >&2; exit 2 ;;
+esac
+printf 'Test262 suite: %s (gate-full includes extended coverage)\n' "$GATE_TEST262_SUITE"
+GATE_STARTED=$SECONDS
+budget="$(python3 scripts/gate_budget.py "$@")"
+read -r GATE_PARALLEL GATE_JOBS TEST_JOBS NATIVE_JOBS TEST262_JOBS TEST262_MEMORY_MB <<<"$budget"
+export KILN_JOBS="$NATIVE_JOBS" RAYON_NUM_THREADS="$NATIVE_JOBS"
+printf 'gate budget: %s CPUs; crate tests %s, native %s, Test262 %s (%s MiB cap)\n' \
+    "$GATE_JOBS" "$TEST_JOBS" "$NATIVE_JOBS" "$TEST262_JOBS" "$TEST262_MEMORY_MB"
+BACKGROUND_PIDS=()
+
+record_elapsed() {
+    python3 - "$1" "$2" <<'PYTIME'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+doc = json.loads(path.read_text())
+doc["elapsed_seconds"] = int(sys.argv[2])
+path.write_text(json.dumps(doc, indent=2) + "\n")
+PYTIME
+}
 
 FAILURES=()
 GATE_LOG_ROOT="${GATE_LOG_DIR:-$PWD/target/gate-logs}"
@@ -66,8 +93,13 @@ step() {
 	local temporary="$logfile.tmp"
 	export GATE_STEP_LOG="$logfile"
 	printf '\n=== %s\n' "$name"
+	local started=$SECONDS
 	local status=0
 	"$@" >"$temporary" 2>&1 || status=$?
+	local elapsed=$((SECONDS - started))
+	if [[ $name == "crate tests" ]]; then
+		elapsed=$((elapsed + GATE_CACHE_TEST_SECONDS))
+	fi
 	if [[ -s $logfile ]]; then
 		# The command wrote the raw stream directly to the final log.  Preserve the filtered
 		# aggregate too; the gate's crate total and failure names are part of the evidence.
@@ -90,9 +122,30 @@ step() {
 	if [[ $envelope_status -ne 0 ]]; then
 		status=$envelope_status
 	fi
+	record_elapsed "$logfile.envelope.json" "$elapsed"
+	printf '%s: %ss\n' "$name" "$elapsed"
 	if [[ $status -eq 0 ]]; then return 0; fi
 	FAILURES+=("$name")
 	return 0
+}
+
+background_step() {
+    if [[ $GATE_PARALLEL -eq 0 ]]; then
+        step "$@"
+    else
+        # The child reserves the next number inside step; advance the parent's counter too.
+        step "$@" &
+        BACKGROUND_PIDS+=("$!")
+        GATE_STEP_NUMBER=$((GATE_STEP_NUMBER + 1))
+    fi
+}
+
+wait_background() {
+    local pid
+    for pid in "${BACKGROUND_PIDS[@]}"; do
+        wait "$pid" || FAILURES+=("background lane (pid $pid)")
+    done
+    BACKGROUND_PIDS=()
 }
 
 expect_clean() {
@@ -105,6 +158,7 @@ expect_clean() {
 
 printf '=== build\n'
 BUILD_LOG="$GATE_LOG_DIR/00-build.log"
+BUILD_STARTED=$SECONDS
 kiln_cargo build --release --locked -p kiln-cli >"$BUILD_LOG" 2>&1 || {
 	echo "full log: $BUILD_LOG" >&2
 	tail -20 "$BUILD_LOG" >&2 || true
@@ -120,10 +174,21 @@ echo "full log: $BUILD_LOG"
 KILN_BIN="$(kiln_repo_root)/target/release/kiln"
 export KILN_BIN
 python3 "$PWD/scripts/gate_results.py" process --name build --log "$BUILD_LOG" --status 0 --out "$GATE_LOG_DIR/00-build.envelope.json"
+record_elapsed "$GATE_LOG_DIR/00-build.envelope.json" "$((SECONDS - BUILD_STARTED))"
 KILN_TEST262_KILN="$KILN_BIN"
 export KILN_TEST262_KILN
 KILN_BENCH_KILN="$KILN_BIN"
 export KILN_BENCH_KILN
+
+# Keep durable cache publication/sweep tests away from concurrent native compiler writes.
+# On the measured filesystem the full suite took 45s alongside them and under one second alone.
+# Its raw summaries join the workspace evidence below, and its status cannot be discarded.
+printf '\n=== artifact cache tests (before concurrent filesystem work)\n'
+export GATE_CACHE_TEST_LOG="$GATE_LOG_DIR/artifact-cache.raw"
+export GATE_CACHE_TEST_STATUS=0
+CACHE_TEST_STARTED=$SECONDS
+mbx test -p kiln-artifact-cache --locked --jobs="$TEST_JOBS" -- --test-threads="$TEST_JOBS" >"$GATE_CACHE_TEST_LOG" 2>&1 || GATE_CACHE_TEST_STATUS=$?
+GATE_CACHE_TEST_SECONDS=$((SECONDS - CACHE_TEST_STARTED))
 
 # `--test-threads` is bounded because several of `kiln-native`'s tests each shell out to a C
 # compiler, and this repository is routinely built by more than one agent at once: unbounded, they
@@ -133,10 +198,11 @@ export KILN_BENCH_KILN
 # A broken *test* build is the one a release build does not notice: the binary is fine and the
 # suite never ran. Asserting on the summary line rather than the exit code is what catches it.
 # shellcheck disable=SC2016
-step "crate tests" "$BASH" -c '
-	test_status=0
+background_step "crate tests" env KILN_JOBS="$TEST_JOBS" RAYON_NUM_THREADS="$TEST_JOBS" KILN_TEST_THREADS="$TEST_JOBS" "$BASH" -c '
+	test_status="$GATE_CACHE_TEST_STATUS"
 	raw_log="${GATE_STEP_LOG}.raw"
-	mbx test --workspace -- --test-threads=4 >"$raw_log" 2>&1 || test_status=$?
+	cat "$GATE_CACHE_TEST_LOG" >"$raw_log"
+	mbx test --workspace --exclude kiln-artifact-cache --locked --jobs="$KILN_TEST_THREADS" -- --test-threads="$KILN_TEST_THREADS" >>"$raw_log" 2>&1 || test_status=$?
 	output="$(cat "$raw_log")"
 	# The failing *names* as well as the summary: a count says the suite is red and nothing
 	# about which part, and this step is the one that reports breakage in any other crate.
@@ -156,12 +222,23 @@ step "crate tests" "$BASH" -c '
 	[[ $test_status -eq 0 && $parser_status -eq 0 ]]
 '
 
-step "native parity" expect_clean "native" "0 diverged" "$BASH" ./scripts/native.sh
-step "thirdparty" expect_clean "thirdparty" "0 diverged" "$BASH" ./scripts/thirdparty.sh
+if [[ $QUICK -eq 0 ]]; then
+    background_step "test262 baseline" env KILN_JOBS="$TEST262_JOBS" RAYON_NUM_THREADS="$TEST262_JOBS" KILN_TEST262_MEMORY_MB="$TEST262_MEMORY_MB" "$BASH" -c '
+		status=0
+		raw_log="${GATE_STEP_LOG}.raw"
+		result="${GATE_STEP_LOG}.results.json"
+		KILN_TEST262_REPORT="$result" ./scripts/test262-baseline.sh --suite "$GATE_TEST262_SUITE" >"$raw_log" 2>&1 || status=$?
+		cat "$raw_log"
+		parser_status=0
+		python3 "$PWD/scripts/gate_results.py" test262 --name "test262 baseline" --log "$raw_log" --status "$status" --document "$result" --out "${GATE_STEP_LOG}.json" || parser_status=$?
+		[[ $status -eq 0 && $parser_status -eq 0 ]]
+	'
+fi
+
+step "native parity" expect_clean "native" "0 diverged" ./scripts/native.sh
+step "thirdparty" expect_clean "thirdparty" "0 diverged" ./scripts/thirdparty.sh
 
 if [[ $QUICK -eq 0 ]]; then
-	step "thirdparty baseline" ./scripts/thirdparty.sh --bench
-	step "facts baseline" ./scripts/facts-baseline.sh --check
 	for corpus in node server regress; do
 		step "conformance/$corpus" "$BASH" -c "
 			status=0
@@ -175,19 +252,18 @@ if [[ $QUICK -eq 0 ]]; then
 			[[ \$status -eq 0 && \$parser_status -eq 0 ]]
 		"
 	done
-	step "test262 baseline" "$BASH" -c '
-		status=0
-		raw_log="${GATE_STEP_LOG}.raw"
-		result="${GATE_STEP_LOG}.results.json"
-		KILN_TEST262_REPORT="$result" ./scripts/test262-baseline.sh >"$raw_log" 2>&1 || status=$?
-		cat "$raw_log"
-		parser_status=0
-		python3 "$PWD/scripts/gate_results.py" test262 --name "test262 baseline" --log "$raw_log" --status "$status" --document "$result" --out "${GATE_STEP_LOG}.json" || parser_status=$?
-		[[ $status -eq 0 && $parser_status -eq 0 ]]
-	'
+
+fi
+
+wait_background
+# Timings are meaningful only after the CPU-heavy correctness lanes have joined.
+if [[ $QUICK -eq 0 ]]; then
+    step "thirdparty baseline" ./scripts/thirdparty.sh --bench
+    step "facts baseline" ./scripts/facts-baseline.sh --check
 fi
 
 printf '\n=== gate\n'
+printf 'completed in %ss\n' "$((SECONDS - GATE_STARTED))"
 if [[ $QUICK -eq 1 ]]; then
 	EXPECTED_STEPS=(build "crate tests" "native parity" thirdparty)
 else
@@ -200,4 +276,4 @@ if [[ ${#FAILURES[@]} -gt 0 ]]; then
 	printf 'FAILED: %s\n' "${FAILURES[*]}" >&2
 	exit 1
 fi
-echo "all clear"
+printf 'all clear (%ss)\n' "$((SECONDS - GATE_STARTED))"

@@ -1261,6 +1261,7 @@ version = "0.1.0"
 dependencies = [
  "bitflags",
  "insta",
+ "kiln-artifact-cache",
  "kiln-builtin-surface",
  "kiln-db",
  "kiln-digest",
@@ -1271,6 +1272,7 @@ dependencies = [
  "kiln-module-graph",
  "kiln-native-provider-contract",
  "kiln-native-runtime",
+ "kiln-native-toolchain",
  "memchr",
  "proptest",
  "regress",

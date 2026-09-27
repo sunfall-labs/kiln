@@ -1511,7 +1511,7 @@ fn emit_sunk_field_store(
 ///
 /// The define is a field store. The spread copies the source's slot for each named field, under
 /// the guard `kiln_c99_spread_object_fast` (spread.c) copies under: a shaped object without
-/// symbol keys, accessors, elements or a dictionary. The slot of each field in the source's
+/// symbol keys, accessors, attribute-bearing slots, elements or a dictionary. The slot of each field in the source's
 /// shape is learnt once per shape at the site. A source that fails the guard is left to the
 /// generic clone, which spreads it itself into the literal rebuilt by `materialize_sunk`.
 fn emit_sunk_bridge(
@@ -1557,7 +1557,7 @@ fn emit_sunk_bridge(
                 output,
                 "    {{ static const kiln_shape *kiln_sp_shape_{v} = NULL; static uint32_t kiln_sp_slot_{v}[{count}]; \
                  kiln_object *kiln_sp_src = KILN_VAL_IS_OBJECT(v{source}) ? (kiln_object *)KILN_VAL_PTR(v{source}) : NULL; \
-                 if (KILN_UNLIKELY(kiln_sp_src == NULL || kiln_sp_src->shape == NULL || kiln_sp_src->properties != NULL || kiln_sp_src->elements != NULL || kiln_sp_src->accessor_count != 0 || kiln_sp_src->shape->has_symbol_key || kiln_c99_gc_kind_of_ptr(kiln_sp_src) != KILN_GC_OBJECT)) {{ {materialize} goto kiln_generic_resume_{v}; }}"
+                 if (KILN_UNLIKELY(kiln_sp_src == NULL || kiln_sp_src->shape == NULL || kiln_sp_src->properties != NULL || kiln_sp_src->elements != NULL || kiln_sp_src->accessor_count != 0 || kiln_sp_src->shape->special_mask != 0 || kiln_sp_src->shape->has_symbol_key || kiln_c99_gc_kind_of_ptr(kiln_sp_src) != KILN_GC_OBJECT)) {{ {materialize} goto kiln_generic_resume_{v}; }}"
             )
             .unwrap();
             let mut relearn = String::new();

@@ -176,12 +176,25 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
         if (object->prototype.tag == KILN_VALUE_OBJECT) {
             kiln_object *table = kiln_c99_object_of(object->prototype);
             size_t slot;
+            size_t rows = table->count;
+            kiln_value shaped_maker = kiln_c99_undefined();
             if (table->shape != NULL) {
-                kiln_c99_ensure_dictionary(table);
+                /* A class prototype is shaped: its `constructor` is read from its slot, and the
+                 * prototype stays shaped for the method caches that walk through it. */
+                const kiln_string *name = kiln_c99_interned("constructor", 11);
+                uint32_t at;
+                rows = 0;
+                if (name != NULL && kiln_c99_shape_find_slot(table->shape, name, &at) &&
+                    at < table->slot_capacity && (table->shape->accessor_mask & (1u << at)) == 0) {
+                    shaped_maker = kiln_val_to_boundary(table->slots[at]);
+                    rows = 1;
+                }
             }
-            for (slot = 0; slot < table->count; ++slot) {
-                kiln_value maker = table->properties[slot].value;
-                if (!kiln_c99_same_key(&table->properties[slot], "constructor", 11) ||
+            for (slot = 0; slot < rows; ++slot) {
+                kiln_value maker =
+                    table->shape != NULL ? shaped_maker : table->properties[slot].value;
+                if ((table->shape == NULL &&
+                     !kiln_c99_same_key(&table->properties[slot], "constructor", 11)) ||
                     maker.tag != KILN_VALUE_FUNCTION) {
                     continue;
                 }

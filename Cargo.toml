@@ -238,3 +238,14 @@ opt-level = 2
 # Optimize pure-Rust SHA-256 digest engine (only 440 lines, instant to compile, 50x faster hashing)
 [profile.dev.package.kiln-digest]
 opt-level = 3
+
+# Tests repeatedly lower and emit complete programs. Optimize those compiler passes without
+# changing dev builds, debug assertions, overflow checks, or the test harness itself.
+[profile.test.package.kiln-ir]
+opt-level = 1
+
+[profile.test.package.kiln-graph]
+opt-level = 1
+
+[profile.test.package.kiln-backend-c]
+opt-level = 1

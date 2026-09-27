@@ -70,6 +70,23 @@ class GateResultTests(unittest.TestCase):
         self.assertEqual(doc["outcomes"]["unsupported"], 1)
         self.assertEqual(doc["outcomes"]["skipped"], 1)
 
+    def test_test262_scope_is_preserved_and_cannot_hide_missing_coverage(self):
+        document = self.root / "scoped.json"
+        report = {"status": "passed", "expected_chunks": ["c"],
+                  "chunks": {"c": {"total": 1, "passed": 1, "failed": 0, "unsupported": 0, "skipped": 0}},
+                  "counts": {"total": 1, "passed": 1, "failed": 0, "unsupported": 0, "skipped": 0},
+                  "source": {"commit": "pin"}, "regressions": [],
+                  "coverage": {"suite": "routine", "discovered_cases": 3, "selected_cases": 1,
+                               "deferred_cases": 2, "verified_partition": True}}
+        document.write_text(json.dumps(report))
+        result = results.test262_document(self.log("routine\n"), 0, str(document))
+        self.assertEqual(result["coverage"], report["coverage"])
+        for change in ({"suite": "full"}, {"deferred_cases": 1}, {"selected_cases": 2}, {"verified_partition": False}):
+            bad = dict(report, coverage=dict(report["coverage"], **change))
+            document.write_text(json.dumps(bad))
+            with self.assertRaises(results.ResultError):
+                results.test262_document(self.log("invalid\n"), 0, str(document))
+
     def test_process_aggregate_rejects_missing_and_mixed_snapshots(self):
         for name, snapshot in (("build", "a"), ("tests", "b")):
             (self.root / f"{name}.envelope.json").write_text(json.dumps({"schema": 1, "verdict": "passed", "measurement": "process", "source": {"kind": "process", "name": name, "code_snapshot_sha256": snapshot}, "evidence": {"log": "run.log"}}))
