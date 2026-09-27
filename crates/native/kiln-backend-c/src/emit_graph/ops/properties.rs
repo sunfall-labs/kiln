@@ -1028,16 +1028,7 @@ pub(super) fn emit_set_computed(
                 k = key.0
             )
         };
-        let val_d_init = if ctx.live_numbers.contains(value) {
-            format!("double val_d = d{val};", val = value.0)
-        } else if ctx.live_ints.contains(value) {
-            format!("double val_d = (double)i{val};", val = value.0)
-        } else {
-            format!(
-                "double val_d; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{val}))) memcpy(&val_d, &v{val}, sizeof(val_d)); else val_d = kiln_c99_as_number(kiln_val_to_boundary(v{val}));",
-                val = value.0
-            )
-        };
+        let (val_d_init, val_guard) = typed_store_value(ctx, value);
         (
             format!(
                 "kiln_array *arr = (kiln_array *)ptr; if (KILN_LIKELY({arr_bound} && !arr->frozen)) {{ if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v{val})) arr->is_numeric = 0; arr->elements[i{k}] = v{val}; {assign_v}handled = 1; }}",
@@ -1046,23 +1037,14 @@ pub(super) fn emit_set_computed(
                 assign_v = assign_v,
             ),
             format!(
-                "kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY({typed_bound})) {{ {val_d_init} kiln_c99_typed_set(view, (size_t)i{k}, val_d); {assign_v}handled = 1; }}",
+                "kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY({typed_bound}{val_guard})) {{ {val_d_init} kiln_c99_typed_set(view, (size_t)i{k}, val_d); {assign_v}handled = 1; }}",
                 k = key.0,
                 val_d_init = val_d_init,
                 assign_v = assign_v,
             ),
         )
     } else {
-        let val_d_init = if ctx.live_numbers.contains(value) {
-            format!("double val_d = d{val};", val = value.0)
-        } else if ctx.live_ints.contains(value) {
-            format!("double val_d = (double)i{val};", val = value.0)
-        } else {
-            format!(
-                "double val_d; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{val}))) memcpy(&val_d, &v{val}, sizeof(val_d)); else val_d = kiln_c99_as_number(kiln_val_to_boundary(v{val}));",
-                val = value.0
-            )
-        };
+        let (val_d_init, val_guard) = typed_store_value(ctx, value);
         (
             format!(
                 "double idx; memcpy(&idx, &v{k}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_array *arr = (kiln_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < arr->count && !arr->frozen)) {{ if (arr->is_numeric && !KILN_VAL_IS_NUMBER(v{val})) arr->is_numeric = 0; arr->elements[slot] = v{val}; {assign_v}handled = 1; }}",
@@ -1071,7 +1053,7 @@ pub(super) fn emit_set_computed(
                 assign_v = assign_v,
             ),
             format!(
-                "double idx; memcpy(&idx, &v{k}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < view->length && !view->buffer->detached)) {{ {val_d_init} kiln_c99_typed_set(view, slot, val_d); {assign_v}handled = 1; }}",
+                "double idx; memcpy(&idx, &v{k}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < view->length && !view->buffer->detached && view->kind <= KILN_TYPED_FLOAT64{val_guard})) {{ {val_d_init} kiln_c99_typed_set(view, slot, val_d); {assign_v}handled = 1; }}",
                 k = key.0,
                 val_d_init = val_d_init,
                 assign_v = assign_v,
@@ -1143,4 +1125,25 @@ pub(super) fn emit_set_computed(
                 typed_sync = typed_sync,
             )
             .unwrap();
+}
+
+/// The value a typed-array element store's fast path writes, and the condition it adds to that
+/// path. A number -- a twin, or a box that is one -- is stored as it stands. Anything else is not
+/// the fast path's to convert: `ToNumber` of an object runs its `valueOf`, which can throw or
+/// have effects, and a BigInt view takes `ToBigInt`, not a double. Converting either here stored
+/// NaN for `{ valueOf() { return 7 } }` without calling it, and `0n` for a BigInt
+/// (`BigInt64Array.prototype.set`, parallel-builtins issue 18); the generic element write does
+/// both as the language says.
+fn typed_store_value(ctx: &OpContext, value: &ValueId) -> (String, String) {
+    let val = value.0;
+    if ctx.live_numbers.contains(value) {
+        (format!("double val_d = d{val};"), String::new())
+    } else if ctx.live_ints.contains(value) {
+        (format!("double val_d = (double)i{val};"), String::new())
+    } else {
+        (
+            format!("double val_d; memcpy(&val_d, &v{val}, sizeof(val_d));"),
+            format!(" && KILN_VAL_IS_NUMBER(v{val})"),
+        )
+    }
 }

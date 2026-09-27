@@ -353,10 +353,14 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
     }
     if (target.tag == KILN_VALUE_TYPED_ARRAY && index >= 0.0) {
         kiln_typed_array *view = kiln_c99_typed_array_of(target);
-        if (kiln_c99_typed_kind_is_bigint(view->kind))
-            return kiln_c99_typed_store(host, view, (size_t)index, value, depth, thrown);
-        kiln_c99_typed_set(view, (size_t)index, kiln_c99_as_number(value));
-        return KILN_C99_OK;
+        if (value.tag == KILN_VALUE_NUMBER && !kiln_c99_typed_kind_is_bigint(view->kind)) {
+            kiln_c99_typed_set(view, (size_t)index, kiln_c99_as_number(value));
+            return KILN_C99_OK;
+        }
+        /* Anything else takes the conversion that can call back into the program: the pure
+         * `kiln_c99_as_number` stored NaN for `{ valueOf() { return 7; } }` without calling it,
+         * and swallowed what a throwing `valueOf` threw. */
+        return kiln_c99_typed_store(host, view, (size_t)index, value, depth, thrown);
     }
     if (target.tag == KILN_VALUE_OBJECT && index >= 0.0 && index < 100000.0) {
         kiln_object *object = kiln_c99_object_of(target);
