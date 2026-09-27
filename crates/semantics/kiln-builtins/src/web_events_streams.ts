@@ -2235,13 +2235,19 @@ delete (globalThis as any).__kilnPortWait;
     ["TransformStream", TransformStream],
     ["TransformStreamDefaultController", TransformStreamDefaultController],
   ];
-  for (const [name, value] of classes) {
+  // An index loop without destructuring: `for (const [name, value] of classes)` made an iterator,
+  // its results and one more iterator per pair in every realm's bootstrap (realms issue 08).
+  const classDescriptor: PropertyDescriptor = { value: undefined, writable: true, enumerable: false, configurable: true };
+  for (let i = 0; i < classes.length; i++) {
+    const name = classes[i][0];
+    const value = classes[i][1];
     // Own and hollow -- a constructor whose prototype lacks the members node's has -- counts
     // as absent: the interpreter's stubs were exactly that.
     const existing = G[name];
     const hollow = typeof existing === "function" && Object.getOwnPropertyNames(existing.prototype || {}).length <= 1;
     if (typeof existing === "undefined" || hollow) {
-      Object.defineProperty(G, name, { value, writable: true, enumerable: false, configurable: true });
+      classDescriptor.value = value;
+      Object.defineProperty(G, name, classDescriptor);
     }
   }
 })();

@@ -30,13 +30,14 @@
   const arrayFlatMap = Array.prototype.flatMap;
   const arraySort = Array.prototype.sort;
 
+  // One descriptor for every member, not a literal per call: `defineProperty` reads its fields and
+  // keeps nothing, and a literal per member was the largest share of the garbage every realm's
+  // bootstrap made (realms issue 08).
+  const methodDescriptor: PropertyDescriptor = { value: undefined, writable: true, enumerable: false, configurable: true };
   function defineOn(owner: any, name: string, fn: any): void {
-    Object.defineProperty(owner, name, {
-      value: fn,
-      writable: true,
-      enumerable: false,
-      configurable: true,
-    });
+    methodDescriptor.value = fn;
+    Object.defineProperty(owner, name, methodDescriptor);
+    methodDescriptor.value = undefined;
   }
   function defineArrayExtension(name: string, fn: any): void {
     defineOn(Array.prototype, name, fn);

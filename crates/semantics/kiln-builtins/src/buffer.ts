@@ -311,8 +311,13 @@
 
   const proto = Object.create(U8.prototype);
 
+  // One descriptor for every member, not a literal per call: `defineProperty` reads its fields and
+  // keeps nothing, and a literal per member was garbage in every realm's bootstrap (realms issue 08).
+  const memberDescriptor: PropertyDescriptor = { value: undefined, writable: true, configurable: true, enumerable: false };
   function define(name: string, value: any): void {
-    Object.defineProperty(proto, name, { value, writable: true, configurable: true, enumerable: false });
+    memberDescriptor.value = value;
+    Object.defineProperty(proto, name, memberDescriptor);
+    memberDescriptor.value = undefined;
   }
 
   define("constructor", B);
@@ -576,7 +581,11 @@
     }
   }
   // The lowercase `Uint` spellings node keeps as aliases.
-  for (const name of Object.getOwnPropertyNames(proto)) {
+  // An index loop, not `for...of`, which makes an iterator result per name in every realm's
+  // bootstrap (realms issue 08).
+  const upperNames = Object.getOwnPropertyNames(proto);
+  for (let i = 0; i < upperNames.length; i++) {
+    const name = upperNames[i];
     if (name.indexOf("UInt") !== -1) define(name.replace("UInt", "Uint"), proto[name]);
   }
 

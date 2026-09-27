@@ -131,7 +131,14 @@ delete (globalThis as any).__kilnAtomics;
     } }.waitAsync,
     xor: { xor(view: any, index: any, value: any): any { return readModifyWrite(XOR, view, index, value); } }.xor,
   };
-  for (const name of Object.keys(methods)) {
-    Object.defineProperty(target, name, { value: methods[name], writable: true, enumerable: false, configurable: true });
+  // One descriptor for every member, not a literal per call: `defineProperty` reads its fields and
+  // keeps nothing, and a literal per member was the largest share of the garbage every realm's
+  // bootstrap made (realms issue 08).
+  const methodDescriptor: PropertyDescriptor = { value: undefined, writable: true, enumerable: false, configurable: true };
+  // An index loop, not `for...of`, which makes an iterator result per member (issue 08 again).
+  const names = Object.keys(methods);
+  for (let i = 0; i < names.length; i++) {
+    methodDescriptor.value = methods[names[i]];
+    Object.defineProperty(target, names[i], methodDescriptor);
   }
 })();

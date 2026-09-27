@@ -7,6 +7,16 @@
 (function installErrorPrototypes() {
   const G = globalThis as any;
 
+  // One descriptor for every property, not a literal per call: `defineProperty` reads its fields
+  // and keeps nothing, and a literal per member was the largest share of the garbage every
+  // realm's bootstrap made (realms issue 08).
+  const hiddenDescriptor: PropertyDescriptor = { value: undefined, writable: true, enumerable: false, configurable: true };
+  function defineHidden(target: any, name: string, value: any): void {
+    hiddenDescriptor.value = value;
+    Object.defineProperty(target, name, hiddenDescriptor);
+    hiddenDescriptor.value = undefined;
+  }
+
   // 1. Standard error subclasses: EvalError, RangeError, ReferenceError,
   //    SyntaxError, TypeError, URIError, AggregateError, Error.
   const errorSubclasses: string[] = [
@@ -31,24 +41,9 @@
         } catch (_) {}
       }
       if (Ctor.prototype) {
-        Object.defineProperty(Ctor.prototype, "name", {
-          value: name,
-          writable: true,
-          enumerable: false,
-          configurable: true,
-        });
-        Object.defineProperty(Ctor.prototype, "message", {
-          value: "",
-          writable: true,
-          enumerable: false,
-          configurable: true,
-        });
-        Object.defineProperty(Ctor.prototype, "constructor", {
-          value: Ctor,
-          writable: true,
-          enumerable: false,
-          configurable: true,
-        });
+        defineHidden(Ctor.prototype, "name", name);
+        defineHidden(Ctor.prototype, "message", "");
+        defineHidden(Ctor.prototype, "constructor", Ctor);
       }
     }
   }
@@ -72,32 +67,12 @@
     (SuppressedError as any).__proto__ = ErrorCtor;
   }
 
-  Object.defineProperty(SuppressedError.prototype, "name", {
-    value: "SuppressedError",
-    writable: true,
-    enumerable: false,
-    configurable: true,
-  });
-  Object.defineProperty(SuppressedError.prototype, "message", {
-    value: "",
-    writable: true,
-    enumerable: false,
-    configurable: true,
-  });
-  Object.defineProperty(SuppressedError.prototype, "constructor", {
-    value: SuppressedError,
-    writable: true,
-    enumerable: false,
-    configurable: true,
-  });
+  defineHidden(SuppressedError.prototype, "name", "SuppressedError");
+  defineHidden(SuppressedError.prototype, "message", "");
+  defineHidden(SuppressedError.prototype, "constructor", SuppressedError);
 
   if (typeof G.SuppressedError === "undefined") {
-    Object.defineProperty(G, "SuppressedError", {
-      value: SuppressedError,
-      writable: true,
-      enumerable: false,
-      configurable: true,
-    });
+    defineHidden(G, "SuppressedError", SuppressedError);
   } else {
     if (!G.SuppressedError.prototype || G.SuppressedError.prototype === G.Error?.prototype) {
       try {
@@ -106,24 +81,9 @@
       } catch (_) {}
     }
     if (G.SuppressedError.prototype) {
-      Object.defineProperty(G.SuppressedError.prototype, "name", {
-        value: "SuppressedError",
-        writable: true,
-        enumerable: false,
-        configurable: true,
-      });
-      Object.defineProperty(G.SuppressedError.prototype, "message", {
-        value: "",
-        writable: true,
-        enumerable: false,
-        configurable: true,
-      });
-      Object.defineProperty(G.SuppressedError.prototype, "constructor", {
-        value: G.SuppressedError,
-        writable: true,
-        enumerable: false,
-        configurable: true,
-      });
+      defineHidden(G.SuppressedError.prototype, "name", "SuppressedError");
+      defineHidden(G.SuppressedError.prototype, "message", "");
+      defineHidden(G.SuppressedError.prototype, "constructor", G.SuppressedError);
     }
   }
 })();

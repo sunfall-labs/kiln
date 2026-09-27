@@ -40,8 +40,12 @@ const __kilnStructuredClone = (function installStructuredClone() {
   const bufferSlice = ArrayBuffer.prototype.slice;
   const detachBuffer = __kilnDetachBuffer;
   const typedConstructors: any[] = [];
-  for (const name of ["Uint8Array", "Int8Array", "Uint8ClampedArray", "Int16Array", "Uint16Array", "Int32Array",
-    "Uint32Array", "Float32Array", "Float64Array", "BigInt64Array", "BigUint64Array", "Float16Array"]) {
+  const typedNames = ["Uint8Array", "Int8Array", "Uint8ClampedArray", "Int16Array", "Uint16Array", "Int32Array",
+    "Uint32Array", "Float32Array", "Float64Array", "BigInt64Array", "BigUint64Array", "Float16Array"];
+  // An index loop, not `for...of`, which makes an iterator result per name in every realm's
+  // bootstrap (realms issue 08).
+  for (let i = 0; i < typedNames.length; i++) {
+    const name = typedNames[i];
     if (typeof G[name] === "function") typedConstructors.push(G[name]);
   }
 
