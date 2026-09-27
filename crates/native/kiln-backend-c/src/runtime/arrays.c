@@ -376,6 +376,71 @@ static int kiln_c99_array_buffer_detach_raw(kiln_value *out, const kiln_value *a
     return KILN_C99_OK;
 }
 
+/* An element index or count the shared TypeScript already computed: a non-negative integral
+ * number that fits `size_t`, else no. */
+static int kiln_c99_typed_index_argument(const kiln_value *args, size_t argc, size_t at,
+                                         size_t *out) {
+    double number;
+    if (at >= argc || args[at].tag != KILN_VALUE_NUMBER) return 0;
+    number = kiln_c99_as_number(args[at]);
+    if (!(number >= 0.0) || number != trunc(number) || number > 9007199254740991.0 ||
+        number > (double)((size_t)-1))
+        return 0;
+    *out = (size_t)number;
+    return 1;
+}
+
+/* `__kilnTypedArrayCopy(target, targetIndex, source, sourceIndex, count)` (ADR 0065,
+ * representation; captured and deleted by `kiln-builtins/src/typedarray.ts`): copy `count`
+ * elements between two views of the same element type as bytes, as if through a temporary, and
+ * answer `true`. Anything the element-by-element loop in the TypeScript would treat differently --
+ * two element types, a range past either view's current length, a detached buffer -- answers
+ * `false` with nothing written, and that loop runs instead. It performs no conversion and throws
+ * nothing a caller could select. */
+static int kiln_c99_typed_array_copy_raw(kiln_value *out, const kiln_value *args, size_t argc) {
+    size_t target_index, source_index, count, width;
+    kiln_typed_array *target;
+    kiln_typed_array *source;
+    *out = kiln_c99_boolean(0);
+    if (argc < 5 || args[0].tag != KILN_VALUE_TYPED_ARRAY || args[2].tag != KILN_VALUE_TYPED_ARRAY)
+        return KILN_C99_OK;
+    if (!kiln_c99_typed_index_argument(args, argc, 1, &target_index) ||
+        !kiln_c99_typed_index_argument(args, argc, 3, &source_index) ||
+        !kiln_c99_typed_index_argument(args, argc, 4, &count))
+        return KILN_C99_OK;
+    target = kiln_c99_typed_array_of(args[0]);
+    source = kiln_c99_typed_array_of(args[2]);
+    if (target->kind != source->kind || target->buffer->detached || source->buffer->detached ||
+        target_index > target->length || count > target->length - target_index ||
+        source_index > source->length || count > source->length - source_index)
+        return KILN_C99_OK;
+    width = kiln_c99_typed_width(target->kind);
+    if (count != 0)
+        memmove(target->buffer->bytes + target->byte_offset + target_index * width,
+                source->buffer->bytes + source->byte_offset + source_index * width, count * width);
+    *out = kiln_c99_boolean(1);
+    return KILN_C99_OK;
+}
+
+/* `__kilnTypedArraySort(view)` (ADR 0065, representation; captured and deleted by
+ * `kiln-builtins/src/typedarray.ts`): sort a view's elements into `%TypedArray%.prototype.sort`'s
+ * default order in place and answer `true` -- through the provider's `kiln_typed_array_sort`,
+ * the order `kiln_number_core::typed_order` owns for both engines. A detached view, or a sort the
+ * provider could not run (scratch it could not allocate), answers `false` with nothing written. */
+static int kiln_c99_typed_array_sort_raw(kiln_value *out, const kiln_value *args, size_t argc) {
+    kiln_typed_array *view;
+    *out = kiln_c99_boolean(0);
+    if (argc < 1 || args[0].tag != KILN_VALUE_TYPED_ARRAY) return KILN_C99_OK;
+    view = kiln_c99_typed_array_of(args[0]);
+    if (view->buffer->detached) return KILN_C99_OK;
+    if (view->length > 1 &&
+        kiln_typed_array_sort(view->buffer->bytes + view->byte_offset, view->length,
+                              (int32_t)view->kind) != 0)
+        return KILN_C99_OK;
+    *out = kiln_c99_boolean(1);
+    return KILN_C99_OK;
+}
+
 /* ECMAScript's ToIndex: missing/undefined/NaN become zero, but negative, infinite and unsafe
  * integer values are RangeErrors.  The size_t bound is separate because a 32-bit C target is
  * narrower than JavaScript's maximum safe integer.  Checking both before the cast keeps the

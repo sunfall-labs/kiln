@@ -12,6 +12,27 @@ const __kilnTypedArrayOutOfBounds: ((view: any) => boolean) | undefined =
   (globalThis as any).__kilnTypedArrayOutOfBounds;
 delete (globalThis as any).__kilnTypedArrayOutOfBounds;
 
+// Element storage (ADR 0065, representation), which both engines publish for this file alone.
+//
+// `__kilnTypedArrayCopy(target, targetIndex, source, sourceIndex, count)` copies `count` elements
+// between two views of one element type as bytes, as if through a temporary -- the specification's
+// own step for a same-type `slice`, `set` and `copyWithin` -- and answers `true`. Two element types,
+// a range past either view's current length or a detached buffer answer `false` with nothing
+// written, and the element loop beside each call runs instead.
+//
+// `__kilnTypedArraySort(view)` sorts a view's elements into the default order (`-0` before `+0`,
+// `NaN` last) in place and answers `true`: the order `kiln_number_core::typed_order` owns for both
+// engines. `false` (a detached view, or scratch the engine could not allocate) writes nothing, and
+// `sortItems` below sorts instead.
+//
+// Measured on a 1M-element `Float64Array`, native (parallel issue 16): `slice` 112 ms and the
+// default `sort` 2.5 s as element loops here, against node's 2.6 ms and 84 ms.
+const __kilnTypedArrayCopy: (target: any, targetIndex: number, source: any, sourceIndex: number, count: number) => boolean =
+  (globalThis as any).__kilnTypedArrayCopy;
+delete (globalThis as any).__kilnTypedArrayCopy;
+const __kilnTypedArraySort: (view: any) => boolean = (globalThis as any).__kilnTypedArraySort;
+delete (globalThis as any).__kilnTypedArraySort;
+
 (function installTypedArrayPrototype() {
   if (typeof Uint8Array === "undefined" || !Uint8Array.prototype) {
     return;
@@ -250,7 +271,7 @@ delete (globalThis as any).__kilnTypedArrayOutOfBounds;
     const len = lengthOf(this);
     for (let k = 0; k < len; k++) {
       const kValue = this[k];
-      if (predicate.call(thisArg, kValue, k, this)) {
+      if (thisArg === undefined ? predicate(kValue, k, this) : predicate.call(thisArg, kValue, k, this)) {
         return kValue;
       }
     }
@@ -265,7 +286,7 @@ delete (globalThis as any).__kilnTypedArrayOutOfBounds;
     const len = lengthOf(this);
     for (let k = 0; k < len; k++) {
       const kValue = this[k];
-      if (predicate.call(thisArg, kValue, k, this)) {
+      if (thisArg === undefined ? predicate(kValue, k, this) : predicate.call(thisArg, kValue, k, this)) {
         return k;
       }
     }
@@ -280,7 +301,7 @@ delete (globalThis as any).__kilnTypedArrayOutOfBounds;
     const len = lengthOf(this);
     for (let k = len - 1; k >= 0; k--) {
       const kValue = this[k];
-      if (predicate.call(thisArg, kValue, k, this)) {
+      if (thisArg === undefined ? predicate(kValue, k, this) : predicate.call(thisArg, kValue, k, this)) {
         return kValue;
       }
     }
@@ -295,7 +316,7 @@ delete (globalThis as any).__kilnTypedArrayOutOfBounds;
     const len = lengthOf(this);
     for (let k = len - 1; k >= 0; k--) {
       const kValue = this[k];
-      if (predicate.call(thisArg, kValue, k, this)) {
+      if (thisArg === undefined ? predicate(kValue, k, this) : predicate.call(thisArg, kValue, k, this)) {
         return k;
       }
     }
@@ -309,7 +330,7 @@ delete (globalThis as any).__kilnTypedArrayOutOfBounds;
     }
     const len = lengthOf(this);
     for (let k = 0; k < len; k++) {
-      if (predicate.call(thisArg, this[k], k, this)) {
+      if (thisArg === undefined ? predicate(this[k], k, this) : predicate.call(thisArg, this[k], k, this)) {
         return true;
       }
     }
@@ -323,7 +344,7 @@ delete (globalThis as any).__kilnTypedArrayOutOfBounds;
     }
     const len = lengthOf(this);
     for (let k = 0; k < len; k++) {
-      if (!predicate.call(thisArg, this[k], k, this)) {
+      if (!(thisArg === undefined ? predicate(this[k], k, this) : predicate.call(thisArg, this[k], k, this))) {
         return false;
       }
     }
@@ -332,6 +353,10 @@ delete (globalThis as any).__kilnTypedArrayOutOfBounds;
 
   // --- Reducers / Iterators ---
 
+  // Every callback below is `Call(callback, thisArg, args)`. With no thisArg that is a plain call
+  // (`this` undefined, as `.call(undefined, ...)` would give it): the spelling that does not read
+  // `Function.prototype.call` -- which a program may have replaced -- and, natively, the one that
+  // does not go through a method dispatch per element.
   const forEach = { forEach(this: any, callback: any, thisArg: any = undefined): void {
     validateTypedArray(this, "forEach");
     if (typeof callback !== "function") {
@@ -339,7 +364,11 @@ delete (globalThis as any).__kilnTypedArrayOutOfBounds;
     }
     const len = lengthOf(this);
     for (let k = 0; k < len; k++) {
-      callback.call(thisArg, this[k], k, this);
+      if (thisArg === undefined) {
+        callback(this[k], k, this);
+      } else {
+        callback.call(thisArg, this[k], k, this);
+      }
     }
   } }.forEach;
 
@@ -351,7 +380,7 @@ delete (globalThis as any).__kilnTypedArrayOutOfBounds;
     const len = lengthOf(this);
     const result = typedArraySpeciesCreate(this, len, "map");
     for (let k = 0; k < len; k++) {
-      result[k] = callback.call(thisArg, this[k], k, this);
+      result[k] = thisArg === undefined ? callback(this[k], k, this) : callback.call(thisArg, this[k], k, this);
     }
     return result;
   } }.map;
@@ -365,7 +394,7 @@ delete (globalThis as any).__kilnTypedArrayOutOfBounds;
     const kept: any[] = [];
     for (let k = 0; k < len; k++) {
       const val = this[k];
-      if (callback.call(thisArg, val, k, this)) {
+      if (thisArg === undefined ? callback(val, k, this) : callback.call(thisArg, val, k, this)) {
         kept.push(val);
       }
     }
@@ -394,7 +423,7 @@ delete (globalThis as any).__kilnTypedArrayOutOfBounds;
       k = 1;
     }
     while (k < len) {
-      accumulator = callback.call(undefined, accumulator, this[k], k, this);
+      accumulator = callback(accumulator, this[k], k, this);
       k++;
     }
     return accumulator;
@@ -418,25 +447,25 @@ delete (globalThis as any).__kilnTypedArrayOutOfBounds;
       k--;
     }
     while (k >= 0) {
-      accumulator = callback.call(undefined, accumulator, this[k], k, this);
+      accumulator = callback(accumulator, this[k], k, this);
       k--;
     }
     return accumulator;
   } }.reduceRight;
 
+  const arrayJoin = Array.prototype.join;
   const join = { join(this: any, separator?: any): string {
     validateTypedArray(this, "join");
     const len = lengthOf(this);
     const sep = separator === undefined ? "," : String(separator);
-    let res = "";
+    // The pieces, joined once: appending to one string per element copied the whole prefix each
+    // time natively (5.2 s for 100k elements, against node's 6.5 ms).
+    const parts: string[] = [];
     for (let k = 0; k < len; k++) {
-      if (k > 0) res += sep;
       const el = this[k];
-      if (el !== undefined && el !== null) {
-        res += String(el);
-      }
+      parts.push(el !== undefined && el !== null ? String(el) : "");
     }
-    return res;
+    return arrayJoin.call(parts, sep);
   } }.join;
 
   function createTypedArrayIterator(ta: any, kind: "entries" | "keys" | "values"): any {
@@ -528,8 +557,12 @@ delete (globalThis as any).__kilnTypedArrayOutOfBounds;
       if (isDetached(this)) {
         throw new TypeError("Method %TypedArray%.prototype.slice called on detached ArrayBuffer");
       }
-      for (let n = 0; n < count; n++, k++) {
-        result[n] = this[k];
+      // A species constructor could hand back a view of this very buffer, which the
+      // specification copies front to back, byte by byte: only a separate buffer is a plain copy.
+      if (result.buffer === this.buffer || !__kilnTypedArrayCopy(result, 0, this, k, count)) {
+        for (let n = 0; n < count; n++, k++) {
+          result[n] = this[k];
+        }
       }
     }
     return result;
@@ -595,6 +628,9 @@ delete (globalThis as any).__kilnTypedArrayOutOfBounds;
       if (isBigIntArray(this) !== isBigIntArray(source)) {
         throw new TypeError("Cannot mix BigInt and other types, use explicit conversions");
       }
+      if (__kilnTypedArrayCopy(this, targetOffset, source, 0, srcLength)) {
+        return;
+      }
       if (this.buffer === (source as any).buffer) {
         const temp = new (source.constructor)(source);
         for (let i = 0; i < srcLength; i++) {
@@ -651,7 +687,7 @@ delete (globalThis as any).__kilnTypedArrayOutOfBounds;
     }
 
     let count = Math.min(final - from, len - to);
-    if (count > 0) {
+    if (count > 0 && !__kilnTypedArrayCopy(this, to, this, from, count)) {
       let direction = 1;
       if (from < to && to < from + count) {
         direction = -1;
@@ -698,6 +734,18 @@ delete (globalThis as any).__kilnTypedArrayOutOfBounds;
       throw new TypeError("Method %TypedArray%.prototype.fill called on detached ArrayBuffer");
     }
 
+    // One element converted and written, then doubled by byte copies -- the same bytes the
+    // loop below writes into every element, which it still does for whatever a copy declined.
+    if (k < final) {
+      this[k] = numericValue;
+      let filled = 1;
+      while (k + filled < final) {
+        const n = Math.min(filled, final - k - filled);
+        if (!__kilnTypedArrayCopy(this, k + filled, this, k, n)) break;
+        filled += n;
+      }
+      k += filled;
+    }
     while (k < final) {
       this[k] = numericValue;
       k++;
@@ -721,28 +769,15 @@ delete (globalThis as any).__kilnTypedArrayOutOfBounds;
     return this;
   } }.reverse;
 
-  const sort = { sort(this: any, compareFn?: any): any {
-    validateTypedArray(this, "sort");
-    if (compareFn !== undefined && typeof compareFn !== "function") {
-      throw new TypeError("The comparison function must be either a function or undefined");
-    }
-
-    const len = lengthOf(this);
-    if (len <= 1) return this;
-
-    const items: any[] = [];
-    for (let i = 0; i < len; i++) {
-      items.push(this[i]);
-    }
-
-    const isBigInt = isBigIntArray(this);
-
+  // `SortIndexedProperties` over `items`, a copy of a view's elements, with
+  // `TypedArraySortCompare`: the comparator's answer through `ToNumber` (`NaN` as `+0`), or with
+  // none the default order -- which `__kilnTypedArraySort` runs on the view itself, so this sorts
+  // by it only when that primitive declined.
+  function sortItems(items: any[], compareFn: any, isBigInt: boolean): void {
     if (compareFn !== undefined) {
-      items.sort((x, y) => {
-        const res = Number(compareFn(x, y));
-        if (Number.isNaN(res)) return 0;
-        return res;
-      });
+      // `Array.prototype.sort`'s `SortCompare` is this one for elements that are never
+      // `undefined`: `ToNumber` of the comparator's answer, `NaN` read as `+0`.
+      items.sort(compareFn);
     } else if (isBigInt) {
       items.sort((x: bigint, y: bigint) => {
         if (x < y) return -1;
@@ -768,6 +803,25 @@ delete (globalThis as any).__kilnTypedArrayOutOfBounds;
         return 0;
       });
     }
+  }
+
+  const sort = { sort(this: any, compareFn?: any): any {
+    validateTypedArray(this, "sort");
+    if (compareFn !== undefined && typeof compareFn !== "function") {
+      throw new TypeError("The comparison function must be either a function or undefined");
+    }
+
+    const len = lengthOf(this);
+    if (len <= 1) return this;
+    if (compareFn === undefined && __kilnTypedArraySort(this)) {
+      return this;
+    }
+
+    const items: any[] = [];
+    for (let i = 0; i < len; i++) {
+      items.push(this[i]);
+    }
+    sortItems(items, compareFn, isBigIntArray(this));
 
     if (isDetached(this)) {
       throw new TypeError("Method %TypedArray%.prototype.sort called on detached ArrayBuffer");
@@ -810,46 +864,20 @@ delete (globalThis as any).__kilnTypedArrayOutOfBounds;
     }
 
     const len = lengthOf(this);
+    const result = typedArrayCreateSameType(this, len);
+    if (
+      compareFn === undefined &&
+      __kilnTypedArrayCopy(result, 0, this, 0, len) &&
+      __kilnTypedArraySort(result)
+    ) {
+      return result;
+    }
     const items: any[] = [];
     for (let i = 0; i < len; i++) {
       items.push(this[i]);
     }
+    sortItems(items, compareFn, isBigIntArray(this));
 
-    const isBigInt = isBigIntArray(this);
-
-    if (compareFn !== undefined) {
-      items.sort((x, y) => {
-        const res = Number(compareFn(x, y));
-        if (Number.isNaN(res)) return 0;
-        return res;
-      });
-    } else if (isBigInt) {
-      items.sort((x: bigint, y: bigint) => {
-        if (x < y) return -1;
-        if (x > y) return 1;
-        return 0;
-      });
-    } else {
-      items.sort((x: number, y: number) => {
-        const isXNaN = Number.isNaN(x);
-        const isYNaN = Number.isNaN(y);
-        if (isXNaN && isYNaN) return 0;
-        if (isXNaN) return 1;
-        if (isYNaN) return -1;
-        if (x < y) return -1;
-        if (x > y) return 1;
-        if (x === 0 && y === 0) {
-          const xSign = 1 / x;
-          const ySign = 1 / y;
-          if (xSign < ySign) return -1;
-          if (xSign > ySign) return 1;
-          return 0;
-        }
-        return 0;
-      });
-    }
-
-    const result = typedArrayCreateSameType(this, len);
     for (let i = 0; i < len; i++) {
       result[i] = items[i];
     }

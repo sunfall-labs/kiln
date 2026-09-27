@@ -17,6 +17,7 @@ kiln-json = { workspace = true }
 kiln-intl = { workspace = true }
 kiln-url = { workspace = true }
 kiln-node-path = { workspace = true }
+kiln-number-core = { workspace = true }
 num-bigint = { workspace = true }
 num-traits = { workspace = true }
 regress = { workspace = true }

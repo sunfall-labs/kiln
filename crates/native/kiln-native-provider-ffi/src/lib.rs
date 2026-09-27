@@ -226,6 +226,47 @@ pub unsafe extern "C" fn kiln_string_to_number(bytes: *const u8, length: usize) 
     kiln_number_core::string_to_number(input)
 }
 
+/// Sort the `count` elements of `kiln_typed_kind` `kind` at `data` into `%TypedArray%.prototype.sort`'s
+/// default order, in place, on the calling thread: the shared order of
+/// `kiln_number_core::typed_order`, which the interpreter runs directly. One crossing per sort
+/// (ADR 0060); the sequential `sort` reaches it through the `__kilnTypedArraySort` primitive.
+///
+/// Returns 0 when sorted and `-1`, with nothing written, for a null `data`, an unknown kind, or
+/// scratch the allocator could not provide.
+///
+/// # Safety
+///
+/// When `count` is nonzero, `data` must name `count` elements of the kind, valid for reads and
+/// writes for the duration of the call, that nothing else touches during it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_typed_array_sort(data: *mut u8, count: usize, kind: i32) -> i32 {
+    use kiln_number_core::typed_order::{ElementKind, sort_elements};
+    let Some(kind) = ElementKind::from_native(kind) else {
+        return INVALID_ARGUMENT;
+    };
+    if count < 2 {
+        return 0;
+    }
+    let Some(length) = count.checked_mul(kind.width()) else {
+        return INVALID_ARGUMENT;
+    };
+    if data.is_null() || length > isize::MAX as usize {
+        return INVALID_ARGUMENT;
+    }
+    let mut keys = Vec::new();
+    if keys.try_reserve_exact(count).is_err() {
+        return INVALID_ARGUMENT;
+    }
+    keys.resize(count, 0_u64);
+    // SAFETY: the caller's contract supplies `length` readable and writable bytes that nothing
+    // else touches during the call; null and the slice size bound were rejected above.
+    let bytes = unsafe { core::slice::from_raw_parts_mut(data, length) };
+    match sort_elements(bytes, kind, &mut keys) {
+        Ok(()) => 0,
+        Err(_) => INVALID_ARGUMENT,
+    }
+}
+
 macro_rules! assert_root_provider_export {
     ($(($group:ident, $name:ident, $signature:ident);)*) => {
         $(assert_root_provider_export!($group, $name, $signature);)*
@@ -235,6 +276,9 @@ macro_rules! assert_root_provider_export {
     };
     (root, kiln_string_to_number, string_to_number) => {
         const _: unsafe extern "C" fn(*const u8, usize) -> f64 = kiln_string_to_number;
+    };
+    (root, kiln_typed_array_sort, typed_array_sort) => {
+        const _: unsafe extern "C" fn(*mut u8, usize, i32) -> i32 = kiln_typed_array_sort;
     };
     ($group:ident, $name:ident, $signature:ident) => {};
 }

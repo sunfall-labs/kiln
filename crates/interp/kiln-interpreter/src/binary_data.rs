@@ -1024,6 +1024,79 @@ impl TypedArrayData {
         Ok(())
     }
 
+    /// `__kilnTypedArrayCopy`: `count` elements from `source` at `source_index` to this view at
+    /// `target_index`, as bytes and as if through a temporary, when both views have one element
+    /// type and both ranges lie inside their current lengths -- else `false`, nothing written,
+    /// and the shared TypeScript's element loop runs instead (`kiln-builtins/src/typedarray.ts`).
+    pub(super) fn copy_elements_from(
+        &self,
+        target_index: usize,
+        source: &TypedArrayData,
+        source_index: usize,
+        count: usize,
+    ) -> Result<bool, ExecutionError> {
+        if self.kind != source.kind || self.out_of_bounds() || source.out_of_bounds() {
+            return Ok(false);
+        }
+        let fits =
+            |index: usize, length: usize| index <= length && count <= length.saturating_sub(index);
+        if !fits(target_index, self.len()) || !fits(source_index, source.len()) {
+            return Ok(false);
+        }
+        if count == 0 {
+            return Ok(true);
+        }
+        // The loop it replaces would throw at its first write.
+        if self.buffer.immutable {
+            return Err(ExecutionError::BufferImmutable);
+        }
+        let width = self.kind.width();
+        let from = source.offset + source_index * width;
+        let to = self.offset + target_index * width;
+        let length = count * width;
+        // Read out first: the two views may share a buffer (or, for a shared one, a lock).
+        let bytes = source.buffer.bytes.borrow()[from..from + length].to_vec();
+        self.buffer.bytes.borrow_mut()[to..to + length].copy_from_slice(&bytes);
+        Ok(true)
+    }
+
+    /// `__kilnTypedArraySort`: this view's elements in `%TypedArray%.prototype.sort`'s default
+    /// order, in place -- the order `kiln_number_core::typed_order` owns for both engines (the
+    /// native backend reaches it through the provider's `kiln_typed_array_sort`). `false`, with
+    /// nothing written, for a view out of bounds.
+    pub(super) fn sort_default(&self) -> Result<bool, ExecutionError> {
+        use kiln_number_core::typed_order::{ElementKind, sort_elements};
+        if self.out_of_bounds() {
+            return Ok(false);
+        }
+        let count = self.len();
+        if count < 2 {
+            return Ok(true);
+        }
+        if self.buffer.immutable {
+            return Err(ExecutionError::BufferImmutable);
+        }
+        let kind = match self.kind {
+            TypedKind::Int8 => ElementKind::Int8,
+            TypedKind::Uint8 => ElementKind::Uint8,
+            TypedKind::Uint8Clamped => ElementKind::Uint8Clamped,
+            TypedKind::Int16 => ElementKind::Int16,
+            TypedKind::Uint16 => ElementKind::Uint16,
+            TypedKind::Int32 => ElementKind::Int32,
+            TypedKind::Uint32 => ElementKind::Uint32,
+            TypedKind::Float16 => ElementKind::Float16,
+            TypedKind::Float32 => ElementKind::Float32,
+            TypedKind::Float64 => ElementKind::Float64,
+            TypedKind::BigInt64 => ElementKind::BigInt64,
+            TypedKind::BigUint64 => ElementKind::BigUint64,
+        };
+        let start = self.offset;
+        let end = start + count * self.kind.width();
+        let mut keys = vec![0_u64; count];
+        let mut bytes = self.buffer.bytes.borrow_mut();
+        Ok(sort_elements(&mut bytes[start..end], kind, &mut keys).is_ok())
+    }
+
     /// Every element, each in the numeric tower its kind belongs to.
     pub(super) fn items(&self) -> Vec<Value> {
         (0..self.len())

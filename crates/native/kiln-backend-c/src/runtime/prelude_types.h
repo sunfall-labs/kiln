@@ -2068,6 +2068,9 @@ static inline int kiln_c99_text_append(kiln_text *text, const char *bytes, size_
  * language counts in (ADR 0022) and matching over UTF-16 makes them so without a conversion. */
 int kiln_number_to_js_string(double value, char *buffer, size_t capacity);
 double kiln_string_to_number(const char *bytes, size_t len);
+/* `%TypedArray%.prototype.sort`'s default order, in place on the calling thread (the order
+ * `kiln_number_core::typed_order` owns for both engines); `kind` is a `kiln_typed_kind`. */
+int32_t kiln_typed_array_sort(uint8_t *data, size_t count, int32_t kind);
 int kiln_intl_segment(const uint8_t *bytes, size_t len, uint32_t granularity,
                       const uint32_t **out_records, size_t *out_count);
 typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);

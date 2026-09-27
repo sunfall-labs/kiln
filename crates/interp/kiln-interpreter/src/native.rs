@@ -744,6 +744,12 @@ pub enum Native {
     /// -- detached, or a resizable buffer shrunk under the window. The shared `%TypedArray%`
     /// methods ask it in `ValidateTypedArray` (`kiln-builtins/src/typedarray.ts`).
     TypedArrayOutOfBoundsRaw,
+    /// `__kilnTypedArrayCopy(target, targetIndex, source, sourceIndex, count)`: a same-type element
+    /// copy as bytes (ADR 0065, representation), `false` when the TypeScript's loop must run.
+    TypedArrayCopyRaw,
+    /// `__kilnTypedArraySort(view)`: the default-order sort in place (ADR 0065, representation),
+    /// over the order `kiln_number_core::typed_order` owns for both engines.
+    TypedArraySortRaw,
     /// `__kilnCloneData(value)`: the structured clone's plain-data fast path, which this engine
     /// never takes (it answers `undefined`, "not handled").
     CloneDataRaw,

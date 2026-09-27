@@ -1346,6 +1346,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         return kiln_c99_array_buffer_detach_raw(result, args, argc, thrown);
     if (code == KILN_C99_METHOD_CLONE_DATA_RAW)
         return kiln_c99_clone_data_raw(result, args, argc);
+    if (code == KILN_C99_METHOD_TYPED_ARRAY_COPY_RAW)
+        return kiln_c99_typed_array_copy_raw(result, args, argc);
+    if (code == KILN_C99_METHOD_TYPED_ARRAY_SORT_RAW)
+        return kiln_c99_typed_array_sort_raw(result, args, argc);
     if (code == KILN_C99_METHOD_JOBS_PENDING_RAW)
         return kiln_c99_jobs_pending_raw(result);
     if (code == KILN_C99_METHOD_PROMISE_REJECTIONS_RAW)

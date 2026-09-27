@@ -259,19 +259,9 @@ pub const SORT_KIND_VALUES: i32 = 100;
 /// about as long as waking the pool twice (issue 04's 45-90 us fork-join).
 pub const SORT_PARALLEL_MIN: usize = 10_000;
 
-/// `%TypedArray%` default order over floats (`SORT_DEFAULT`); integers compare as integers.
-fn default_float_order(x: f64, y: f64) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-    match (x.is_nan(), y.is_nan()) {
-        (true, true) => Ordering::Equal,
-        (true, false) => Ordering::Greater,
-        (false, true) => Ordering::Less,
-        _ if x < y => Ordering::Less,
-        _ if x > y => Ordering::Greater,
-        _ if x == 0.0 && y == 0.0 => (!x.is_sign_negative()).cmp(&!y.is_sign_negative()),
-        _ => Ordering::Equal,
-    }
-}
+// `%TypedArray%` default order over floats (`SORT_DEFAULT`); integers compare as integers. The
+// order is `kiln_number_core::typed_order`'s, which the sequential sort runs too.
+use kiln_number_core::typed_order::compare_default as default_float_order;
 
 /// `a - b < 0`, `> 0`, else equal, for numbers that are not `NaN` -- `Infinity - Infinity` is
 /// `NaN`, which the comparator's caller reads as `+0`, so equal.

@@ -821,6 +821,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 "__kilnTypedArrayOutOfBounds",
                 Native::TypedArrayOutOfBoundsRaw,
             ),
+            // A same-type element copy and the default-order sort (`typedarray.ts`, every realm).
+            ("__kilnTypedArrayCopy", Native::TypedArrayCopyRaw),
+            ("__kilnTypedArraySort", Native::TypedArraySortRaw),
             // `[[SetPrototypeOf]]` and `[[PreventExtensions]]` answering their boolean, which the
             // shared `Reflect` methods (`object_reflect.ts`) cannot read off `Object`'s spellings:
             // those turn `false` into a TypeError indistinguishable from a proxy trap's own.

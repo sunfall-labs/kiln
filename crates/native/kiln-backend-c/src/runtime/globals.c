@@ -479,6 +479,10 @@ static int kiln_c99_global_object(kiln_value *out) {
                      {"__kilnArrayBufferDetach", KILN_C99_METHOD_ARRAY_BUFFER_DETACH_RAW},
                      /* The structured clone's plain-data fast path, captured the same way. */
                      {"__kilnCloneData", KILN_C99_METHOD_CLONE_DATA_RAW},
+                     /* `%TypedArray%.prototype`'s element-storage primitives, captured the same
+                      * way by `kiln-builtins/src/typedarray.ts`. */
+                     {"__kilnTypedArrayCopy", KILN_C99_METHOD_TYPED_ARRAY_COPY_RAW},
+                     {"__kilnTypedArraySort", KILN_C99_METHOD_TYPED_ARRAY_SORT_RAW},
                      /* Message delivery's checkpoint question, captured the same way. */
                      {"__kilnJobsPending", KILN_C99_METHOD_JOBS_PENDING_RAW},
                      {"__kilnQueueIo", KILN_C99_METHOD_QUEUE_IO_RAW},

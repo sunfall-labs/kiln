@@ -798,6 +798,31 @@ pub(crate) fn call_native(
             Some(Value::TypedArray(view)) => Value::Boolean(view.out_of_bounds()),
             _ => Value::Boolean(false),
         },
+        // `__kilnTypedArrayCopy(target, targetIndex, source, sourceIndex, count)` and
+        // `__kilnTypedArraySort(view)` (ADR 0065, representation): the shared TypeScript has
+        // computed every index; anything else answers `false`, "run the loop".
+        Native::TypedArrayCopyRaw => {
+            let index = |at: usize| match arguments.get(at) {
+                Some(Value::Number(n)) if *n >= 0.0 && n.fract() == 0.0 && *n <= 9007199254740991.0 => {
+                    Some(*n as usize)
+                }
+                _ => None,
+            };
+            match (arguments.first(), arguments.get(2), index(1), index(3), index(4)) {
+                (
+                    Some(Value::TypedArray(target)),
+                    Some(Value::TypedArray(source)),
+                    Some(target_index),
+                    Some(source_index),
+                    Some(count),
+                ) => Value::Boolean(target.copy_elements_from(target_index, source, source_index, count)?),
+                _ => Value::Boolean(false),
+            }
+        }
+        Native::TypedArraySortRaw => match arguments.first() {
+            Some(Value::TypedArray(view)) => Value::Boolean(view.sort_default()?),
+            _ => Value::Boolean(false),
+        },
         Native::ArrayBufferResizeRaw => {
             let Some(Value::ArrayBuffer(buffer)) = arguments.first() else {
                 return Err(ExecutionError::NotABuffer);
