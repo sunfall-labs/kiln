@@ -160,6 +160,66 @@ func parallelSort(xs []float64, sortRun func([]float64)) []float64 {
 
 type record struct{ price, qty, rating float64 }
 
+// keyed is sort-records' element: an id and the key it is sorted by.
+type keyed struct {
+	id    int
+	price float64
+}
+
+// parallelSortKeyed is parallelSort for records by price, stable: runs sorted on their
+// goroutines, then merged pairwise level by level, each merge on its own goroutine.
+func parallelSortKeyed(xs []keyed) []keyed {
+	byPrice := func(a, b keyed) int {
+		switch d := a.price - b.price; {
+		case d < 0:
+			return -1
+		case d > 0:
+			return 1
+		}
+		return 0
+	}
+	b := bounds(len(xs))
+	a := make([]keyed, len(xs))
+	tmp := make([]keyed, len(xs))
+	each(b, func(_, lo, hi int) {
+		copy(a[lo:hi], xs[lo:hi])
+		slices.SortStableFunc(a[lo:hi], byPrice)
+	})
+	runs := b
+	for len(runs) > 2 {
+		next := []int{0}
+		var wg sync.WaitGroup
+		for r := 0; r+1 < len(runs); r += 2 {
+			lo, mid, hi := runs[r], runs[r+1], runs[r+1]
+			if r+2 < len(runs) {
+				hi = runs[r+2]
+			}
+			next = append(next, hi)
+			wg.Add(1)
+			go func(from, to []keyed) {
+				defer wg.Done()
+				i, j, k := lo, mid, lo
+				for i < mid && j < hi {
+					if from[j].price < from[i].price {
+						to[k] = from[j]
+						j++
+					} else {
+						to[k] = from[i]
+						i++
+					}
+					k++
+				}
+				k += copy(to[k:], from[i:mid])
+				copy(to[k:], from[j:hi])
+			}(a, tmp)
+		}
+		wg.Wait()
+		a, tmp = tmp, a
+		runs = next
+	}
+	return a
+}
+
 func ms(d time.Duration) float64 { return float64(d.Nanoseconds()) / 1e6 }
 
 // bench is bench/harness.mjs's timedSync.
@@ -303,6 +363,20 @@ func main() {
 			})
 		}
 		bench(workload, budget, func() any { return parallelSort(xs, byDifference) }, sorted)
+	case "sort-records":
+		price := floats(n)
+		records := make([]keyed, n)
+		for i := range records {
+			records[i] = keyed{i, price[i]}
+		}
+		bench(workload, budget, func() any { return parallelSortKeyed(records) }, func(v any) string {
+			sorted := v.([]keyed)
+			prices := make([]float64, len(sorted))
+			for i, r := range sorted {
+				prices[i] = r.price
+			}
+			return sortChecksum(prices)
+		})
 	case "pipeline-column":
 		xs := floats(n)
 		bench(workload, budget, fold(func(lo, hi int) float64 {

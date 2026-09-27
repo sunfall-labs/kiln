@@ -40,17 +40,14 @@ WORKLOADS = [
     ("sort-typed", "sort Float64Array, default order (copy + sort)", None),
     ("sort-array", "sort number array, `(a, b) => a - b` (copy + sort)", None),
     ("pipeline-column", "pipeline: amounts -> cents (map) -> > 500.00 (filter) -> total (reduce)", None),
-    ("pipeline-records", "pipeline: score records held as typed-array columns -> filter -> total",
-     "map reads `qty[i]`, `rating[i]`: tier 2; filter + reduce parallel"),
-    ("pipeline-objects", "pipeline: score `{price, qty, rating}` objects -> filter -> total",
-     "map reads `r.price`: tier 2; filter + reduce parallel"),
+    ("sort-records", "sort `{id, price}` records, `(a, b) => a.price - b.price` (copy + sort)", None),
+    ("pipeline-records", "pipeline: score records held as typed-array columns -> filter -> total", None),
+    ("pipeline-objects", "pipeline: score `{price, qty, rating}` objects -> filter -> total", None),
 ]
 
 # Workloads a realistic program needs that no kiln parallel lowering can take yet. Not measured:
 # the row is kept so the table grows into it as each tier lands (PRD tiers 2-4).
 WAITING = [
-    ("sort records by key, `(a, b) => a.price - b.price`", "tier 2+",
-     "a key comparator reads properties; `parallelSort` proves only `a - b` / `b - a` today"),
     ("enrich 1M row objects: `rows.map(r => ({ ...r, total: r.price * r.qty }))`", "tier 2+ (3)",
      "reads properties (tier 2) and returns a new object (tier 3, worker arenas)"),
     ("group / flatMap rows into arrays", "tier 3",

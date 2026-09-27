@@ -67,7 +67,8 @@ The pool and Go are written the way a programmer who wanted the cores would writ
 not always the same work as the methods:
 
 - The pool's inputs live in `SharedArrayBuffer`s built before the clock, so no call copies them to
-  the workers. Each call allocates its output (a fresh `SharedArrayBuffer` for map and sort;
+  the workers. `sort-records` cannot share its objects either: the pool sorts an index
+  permutation by the shared price column, and the main thread applies it to the records. Each call allocates its output (a fresh `SharedArrayBuffer` for map and sort;
   per-worker `Float64Array`s transferred back and concatenated for filter), as `map` does.
   Records as objects cannot be shared: each worker receives its slice once, at start-up, and
   keeps it.
@@ -90,9 +91,10 @@ All over 1,000,000 elements. The callbacks are written inline, identically, in e
 | `reduce-fold` | the same with eight rounds of `y = (y * 31 + k) % 1000003` per element | parallel |
 | `sort-typed` | `new Float64Array(xs).sort()` (copy inside the timing) | parallel (default numeric order) |
 | `sort-array` | `xs.slice().sort((a, b) => a - b)` on a number array | parallel (proven difference comparator) |
+| `sort-records` | `records.slice().sort((a, b) => a.price - b.price)` on 1M `{ id, price }` objects | parallel (tier 2: a key comparator; the pool sorts by key and never calls it) |
 | `pipeline-column` | order amounts: `.map(x => Math.floor(x * fx * taxed * 100)).filter(c => c > cut).reduce(sum)` | all three stages parallel (tier 1) |
-| `pipeline-records` | records as typed-array columns: `price.map((p, i) => Math.floor(p * qty[i] * (5 + rating[i])))`, then filter and sum | map sequential (`reads-property`, tier 2); filter and reduce parallel |
-| `pipeline-objects` | records as `{ price, qty, rating }` objects: `records.map(r => Math.floor(r.price * r.qty * (5 + r.rating)))`, then filter and sum | map sequential (`reads-property`, tier 2); filter and reduce parallel |
+| `pipeline-records` | records as typed-array columns: `price.map((p, i) => Math.floor(p * qty[i] * (5 + rating[i])))`, then filter and sum | all three stages parallel (the map reads the columns: tier 2) |
+| `pipeline-objects` | records as `{ price, qty, rating }` objects: `records.map(r => Math.floor(r.price * r.qty * (5 + r.rating)))`, then filter and sum | all three stages parallel (the map reads properties: tier 2) |
 
 `parallelFlatMap` has no row of its own: a callback that qualifies today returns a number, so it
 is `parallelMap`'s lowering (issue 10). It gets one at tier 3, when it can return arrays.
@@ -106,10 +108,10 @@ Today's lowering (tier 1) takes a callback that reads numbers -- its parameters 
 constants -- and returns a number, calling only `Math`. The PRD's next tiers each move a
 realistic shape from "sequential" to "parallel":
 
-- **Tier 2, read the heap** (issues 06, 07): callbacks that read arrays, typed arrays, object
-  properties and strings. `pipeline-records`' and `pipeline-objects`' score stage, and key
-  comparators such as `(a, b) => a.price - b.price` for `parallelSort`. Those two rows lose
-  "(partial)".
+- **Tier 2, read the heap** (issues 06, 07; landed): callbacks that read arrays, typed arrays,
+  object properties and strings. `pipeline-records`' and `pipeline-objects`' score stage lost
+  "(partial)", and key comparators such as `(a, b) => a.price - b.price` for `parallelSort` became
+  the `sort-records` row.
 - **Tier 3, allocate in worker arenas** (08): callbacks that return new objects, arrays and
   strings -- enriching rows, `parallelFlatMap` into arrays, `parallelFilter` keeping objects.
 - **Tier 4, pure calls** (09): callbacks that call the program's own pure functions and pure
