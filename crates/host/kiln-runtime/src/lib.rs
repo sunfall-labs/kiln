@@ -214,6 +214,17 @@ pub trait ActiveHttpRuntime {
         headers: Vec<(String, String)>,
         high_water_mark: usize,
     ) -> bool;
+    /// A fetch-style (`serve`) response whole: status, the header list in its wire form
+    /// (`\nname:value` per field, `HttpServerEngine::respond`) and the complete body. False when
+    /// the request is gone or the head is refused.
+    fn fetch_respond(
+        &mut self,
+        resource: ResourceId,
+        id: u64,
+        status: u16,
+        headers: &[u8],
+        body: Vec<u8>,
+    ) -> bool;
     fn write_response(
         &mut self,
         resource: ResourceId,
@@ -2105,6 +2116,28 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         #[cfg(not(feature = "http"))]
         {
             let _ = (resource, id, status, headers, high_water_mark);
+            return false;
+        }
+    }
+
+    fn fetch_respond(
+        &mut self,
+        resource: ResourceId,
+        id: u64,
+        status: u16,
+        headers: &[u8],
+        body: Vec<u8>,
+    ) -> bool {
+        #[cfg(feature = "http")]
+        {
+            return self
+                .state
+                .http_server
+                .respond(resource, id, status, headers, body.into());
+        }
+        #[cfg(not(feature = "http"))]
+        {
+            let _ = (resource, id, status, headers, body);
             return false;
         }
     }
