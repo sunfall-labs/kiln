@@ -88,6 +88,7 @@ PROFILE="${KILN_THIRDPARTY_PROFILE:-native-release}"
 PASSES="${PASSES:-21}"
 WARMUP="${WARMUP:-3}"
 TARGET_BUNDLES=""
+INCLUDE_POSTCSS=0
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -128,12 +129,16 @@ while [[ $# -gt 0 ]]; do
 			TARGET_BUNDLES="${2:?--bundles requires bundle names}"
 			shift 2
 			;;
+		--include-postcss)
+			INCLUDE_POSTCSS=1
+			shift
+			;;
 		-h | --help)
 			echo "Usage: scripts/thirdparty.sh [options]"
 			echo ""
 			echo "Options:"
 			echo "  --bench, --timing, --baseline   Time thirdparty bundles and verify against baseline"
-			echo "  --update                        Regenerate/update the committed baseline JSON"
+			echo "  --update                        Regenerate the full baseline (unless --bundles is set)"
 			echo "  --threshold <pct>               Regression threshold percentage (default: 25)"
 			echo "  --min-delta-ms <ms>             Minimum absolute delta in ms to consider regression (default: 3.0)"
 			echo "  --baseline-file <path>          Path to baseline JSON (default: bench/results/thirdparty-baseline.json)"
@@ -141,6 +146,7 @@ while [[ $# -gt 0 ]]; do
 			echo "  --passes <count>                Timing iterations per bundle (default: 21)"
 			echo "  --warmup <count>                Warmup iterations per bundle (default: 3)"
 			echo "  --bundles <names>               Comma-separated list of bundle names to test"
+			echo "  --include-postcss               Include postcss in the otherwise routine benchmark selection"
 			exit 0
 			;;
 		*)
@@ -178,11 +184,11 @@ cleanup() {
 trap cleanup EXIT
 
 if [[ $BENCH -eq 1 ]]; then
-	python3 - "$KILN" "$BUNDLES" "$BASELINE" "$WORK_DIR" "$UPDATE" "$THRESHOLD" "$MIN_DELTA_MS" "$PROFILE" "$PASSES" "$WARMUP" "$NODE_PLATFORM" "$TARGET_BUNDLES" <<'PY'
+python3 - "$KILN" "$BUNDLES" "$BASELINE" "$WORK_DIR" "$UPDATE" "$THRESHOLD" "$MIN_DELTA_MS" "$PROFILE" "$PASSES" "$WARMUP" "$NODE_PLATFORM" "$TARGET_BUNDLES" "$INCLUDE_POSTCSS" <<'PY'
 import json, os, statistics, subprocess, sys, time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-kiln, bundles_dir, baseline_path, work_dir, update_str, threshold_str, min_delta_str, profile, passes_str, warmup_str, node_platform_str, target_bundles_str = sys.argv[1:13]
+kiln, bundles_dir, baseline_path, work_dir, update_str, threshold_str, min_delta_str, profile, passes_str, warmup_str, node_platform_str, target_bundles_str, include_postcss_str = sys.argv[1:14]
 
 update = update_str == "1"
 threshold = float(threshold_str)
@@ -210,6 +216,29 @@ elif baseline.get("bundles"):
 else:
     bundle_names = DEFAULT_BASELINE_BUNDLES
 
+include_postcss = include_postcss_str == "1" or (update and not target_bundles_str)
+deferred_bundles = []
+if not target_bundles_str and not include_postcss and "postcss" in bundle_names:
+    bundle_names.remove("postcss")
+    deferred_bundles.append("postcss")
+
+if target_bundles_str:
+    suite = "targeted"
+elif include_postcss:
+    suite = "full"
+else:
+    suite = "routine"
+present_bundles = [
+    name for name in bundle_names
+    if os.path.exists(os.path.join(bundles_dir, f"{name}.bundle.js"))
+]
+absent_bundles = [name for name in bundle_names if name not in present_bundles]
+deferred_summary = ", ".join(deferred_bundles) if deferred_bundles else "none"
+print(
+    f"coverage: suite={suite}, selected={len(bundle_names)} ({len(present_bundles)} present, "
+    f"{len(absent_bundles)} absent), deferred={len(deferred_bundles)} ({deferred_summary})"
+)
+
 print(f"thirdparty baseline (profile={profile}, threshold={threshold:.1f}%, min_delta={min_delta_ms:.1f}ms, passes={passes}, warmup={warmup}):")
 
 measured = {}
@@ -224,27 +253,39 @@ elif max_workers < 1:
     max_workers = 1
 
 def build_one(name):
+    started = time.perf_counter()
     bundle_path = os.path.join(bundles_dir, f"{name}.bundle.js")
     if not os.path.exists(bundle_path):
-        return (name, None, "absent")
+        return (name, None, "absent", 0.0)
     bin_path = os.path.join(work_dir, f"{name}.bin")
     adapter = ["--node"] if name in node_platform else []
     build_cmd = [kiln, "--one-shot", *adapter, "build", bundle_path, "--profile", profile, "--output", bin_path]
     built = subprocess.run(build_cmd, capture_output=True, text=True)
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
     if built.returncode != 0 or not os.path.exists(bin_path):
         err_snippet = built.stderr.strip().splitlines()
         err_msg = err_snippet[-1] if err_snippet else f"exit {built.returncode}"
-        return (name, None, err_msg)
-    return (name, bin_path, None)
+        return (name, None, err_msg, elapsed_ms)
+    return (name, bin_path, None, elapsed_ms)
 
 print(f"building {len(bundle_names)} bundles with {max_workers} worker(s)...", flush=True)
+build_started = time.perf_counter()
+build_results = {}
 with ThreadPoolExecutor(max_workers=max_workers) as executor:
-    build_results = {name: (bin_path, err) for name, bin_path, err in executor.map(build_one, bundle_names)}
+    futures = [executor.submit(build_one, name) for name in bundle_names]
+    for future in as_completed(futures):
+        name, bin_path, err, elapsed_ms = future.result()
+        build_results[name] = (bin_path, err, elapsed_ms)
+        if err != "absent":
+            print(f"  build {name:16} {elapsed_ms / 1000.0:.2f}s", flush=True)
+build_elapsed = time.perf_counter() - build_started
+print(f"bundle build pool completed in {build_elapsed:.2f}s", flush=True)
 
+measurement_started = time.perf_counter()
 time.sleep(0.5)
 
 for index, name in enumerate(bundle_names, 1):
-    bin_path, err_msg = build_results.get(name, (None, "unknown"))
+    bin_path, err_msg, _build_elapsed_ms = build_results.get(name, (None, "unknown", 0.0))
     if err_msg == "absent":
         print(f"[{index}/{len(bundle_names)}] {name:16} (bundle absent on disk; skipped)", flush=True)
         continue
@@ -296,6 +337,9 @@ for index, name in enumerate(bundle_names, 1):
         print(f"[{index}/{len(bundle_names)}] {name:16} {median_ms:.2f}ms (baseline {was_ms:.2f}ms){mark}", flush=True)
     else:
         print(f"[{index}/{len(bundle_names)}] {name:16} {median_ms:.2f}ms (new)", flush=True)
+
+measurement_elapsed = time.perf_counter() - measurement_started
+print(f"serial warmup/measurement phase completed in {measurement_elapsed:.2f}s", flush=True)
 
 if update:
     baseline["schema"] = 1

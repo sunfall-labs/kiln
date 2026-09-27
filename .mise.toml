@@ -12,7 +12,7 @@ description = "Routine gate: crate tests, native parity, bundles and routine Tes
 run = "./scripts/gate.sh"
 
 [tasks.gate-full]
-description = "Complete gate, including the expensive extended Test262 section"
+description = "Complete gate, including extended Test262 and the postcss performance bundle"
 run = "./scripts/gate.sh --full"
 
 [tasks.gate-quick]

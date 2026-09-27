@@ -261,7 +261,11 @@ if [[ $QUICK -eq 0 ]]; then
     # Bundle builds can spend the full released gate budget, while each nested kiln build stays
     # single-worker. The benchmark harness still runs the built binaries serially for stable
     # timing and comparison.
-    step "thirdparty baseline" env KILN_THIRDPARTY_BUILD_JOBS="$GATE_JOBS" KILN_JOBS=1 RAYON_NUM_THREADS=1 ./scripts/thirdparty.sh --bench
+    THIRDPARTY_BENCH_ARGS=(--bench)
+    if [[ $GATE_TEST262_SUITE == full ]]; then
+        THIRDPARTY_BENCH_ARGS+=(--include-postcss)
+    fi
+    step "thirdparty baseline" env KILN_THIRDPARTY_BUILD_JOBS="$GATE_JOBS" KILN_JOBS=1 RAYON_NUM_THREADS=1 ./scripts/thirdparty.sh "${THIRDPARTY_BENCH_ARGS[@]}"
     step "facts baseline" ./scripts/facts-baseline.sh --check
 fi
 

@@ -51,7 +51,7 @@ that assembly, in the repository, and `mise tasks` lists it beside the rest.
 | task | what it does |
 | --- | --- |
 | `mise run gate` | crate tests, native parity, thirdparty bundles, the three corpora, routine Test262 |
-| `mise run gate-full` | the same gate plus every extended Test262 case |
+| `mise run gate-full` | the same gate plus every extended Test262 case and the `postcss` performance bundle |
 | `mise run gate-quick` | the first three -- the loop worth running while iterating |
 | `mise run test262` | routine Test262, with deferred coverage reported explicitly |
 | `mise run test262-extended` | the expensive section alone; periodic or affected-feature checks |
@@ -107,7 +107,11 @@ within one budget (at most 32 CPUs, or `KILN_GATE_JOBS` / `KILN_JOBS` if smaller
 one worker per GiB of its hard memory cap; the gate sizes that cap to its assigned workers, at
 most half physical memory or 16 GiB. An explicit `KILN_TEST262_MEMORY_MB` is respected.
 `KILN_GATE_SERIAL=1` runs the same checks serially for diagnosis. Performance baselines run only
-after the correctness lanes finish. Every step records its elapsed seconds in the gate evidence;
+after the correctness lanes finish. The routine thirdparty performance baseline measures every
+present baseline bundle except `postcss`; `gate-full` adds `postcss`, whose native build is much
+slower. The benchmark log records selected and deferred bundle counts. Thirdparty correctness
+parity still covers every present probe in both gates. Every step records its elapsed seconds in
+the gate evidence;
 Test262 retains per-chunk result documents including individual case timings.
 Test262 discovers an explicit file/variant inventory, then distributes bounded batches across
 processes within the same CPU and memory allowance. Every batch retains original corpus paths,
