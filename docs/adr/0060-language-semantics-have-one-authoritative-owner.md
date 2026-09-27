@@ -73,11 +73,11 @@ observable effect. The generic operation remains the semantic fallback.
 ## Migration deletes what it replaces
 
 Between 2026-09-05 and 2026-09-26 the bootstrap TypeScript in `kiln-builtins` grew from nothing to
-about 14.5k lines. Over the same three weeks the C runtime under `crates/kiln-backend-c/src/runtime/`
-grew from about 33k lines to 45k, and `crates/kiln-interpreter/src/lib.rs` from about 46k to 50k.
+about 14.5k lines. Over the same three weeks the C runtime under `crates/native/kiln-backend-c/src/runtime/`
+grew from about 33k lines to 45k, and `crates/interp/kiln-interpreter/src/lib.rs` from about 46k to 50k.
 The shared owner was being added beside the engine implementations rather than in place of them.
-`EventEmitter` is the plainest case: it exists as `crates/kiln-builtins/src/node/events.ts`, as
-`crates/kiln-interpreter/src/events.rs`, and as the event-emitter section of `runtime/node.c`. A
+`EventEmitter` is the plainest case: it exists as `crates/semantics/kiln-builtins/src/node/events.ts`, as
+`crates/interp/kiln-interpreter/src/events.rs`, and as the event-emitter section of `runtime/node.c`. A
 member with three implementations has no owner, whatever the inventory says.
 
 So a change that gives a member or family a shared owner removes the engine implementations it
@@ -100,7 +100,7 @@ beside the change that caused it.
 
 Three counts are tracked beside it, because each can grow without adding an inventory row: the
 interpreter's `Native` variants, the C runtime's `KILN_C99_METHOD_*` codes, and the line count of
-`crates/kiln-backend-c/src/runtime/*.c`. They are reported, not gated: a representation operation
+`crates/native/kiln-backend-c/src/runtime/*.c`. They are reported, not gated: a representation operation
 can legitimately add to any of them. A rise with no matching primitive or representation row is
 what a reviewer asks about.
 

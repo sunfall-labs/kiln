@@ -587,14 +587,14 @@ where the remaining third still stops.
       src/node_batch.js   the batched reference, which formats nothing and hands node's own
                           `console` a Writable instead of fd 1
       src/triage.rs       the three-way classification, and the rule it judges by
-      src/oracle.rs       the memo property, ported from crates/kiln-db/tests/oracle.rs
+      src/oracle.rs       the memo property, ported from crates/compile/kiln-db/tests/oracle.rs
       src/bin/soak.rs     the long-running modes; the source of both cost tables above
       src/bin/differ.rs   one file through all three, for reducing a reported divergence
       tests/              the five targets
       findings/           reduced reproductions, with what node says about each
       examples/           entropy_probe: how many bytes one generated program consumes
 
-`crates/kiln-db/tests/oracle.rs` is unmodified. `src/oracle.rs` carries the same property, the same
+`crates/compile/kiln-db/tests/oracle.rs` is unmodified. `src/oracle.rs` carries the same property, the same
 frontend and the same text pool behind a coverage-guided generator, which is the one thing proptest
 cannot give it: most branches of an invalidation walk need a *particular* sequence of edits and
 reads to reach at all, and random histories reach them in proportion to luck.

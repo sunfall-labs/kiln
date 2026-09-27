@@ -1,0 +1,15 @@
+[package]
+name = "kiln-liveness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kiln-graph = { workspace = true }
+kiln-ir = { workspace = true }
+kiln-module-graph = { workspace = true }
+kiln-module-resolver = { workspace = true }
+kiln-native-provider-contract = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }

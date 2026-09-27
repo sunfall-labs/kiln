@@ -1,0 +1,37 @@
+[package]
+name = "kiln-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kiln-proto = { workspace = true }
+serde_json = { workspace = true }
+kiln-data-formats = { workspace = true }
+kiln-daemon = { workspace = true }
+kiln-host-abi = { workspace = true }
+kiln-native-runtime = { workspace = true }
+kiln-module-resolver = { workspace = true }
+kiln-frontend-oxc = { workspace = true }
+kiln-hir = { workspace = true }
+kiln-backend-c = { workspace = true }
+kiln-builtin-surface = { workspace = true }
+kiln-ir = { workspace = true }
+kiln-module-graph = { workspace = true }
+notify = { workspace = true }
+notify-debouncer-full = { workspace = true }
+rayon = { workspace = true }
+annotate-snippets = { workspace = true }
+url = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[[bin]]
+name = "kiln"
+path = "src/main.rs"
+
+[[bin]]
+name = "kiln-facts"
+path = "src/bin/kiln-facts.rs"

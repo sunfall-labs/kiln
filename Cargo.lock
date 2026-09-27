@@ -458,26 +458,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "frontend-oxc"
-version = "0.1.0"
-dependencies = [
- "kiln-hir",
- "kiln-host-abi",
- "num-bigint 0.4.8",
- "oxc_allocator",
- "oxc_ast",
- "oxc_diagnostics",
- "oxc_ecmascript",
- "oxc_minifier",
- "oxc_parser",
- "oxc_semantic",
- "oxc_span",
- "oxc_syntax",
- "oxc_transformer",
- "serde_json",
-]
-
-[[package]]
 name = "fs-set-times"
 version = "0.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1282,12 +1262,14 @@ dependencies = [
  "bitflags",
  "insta",
  "kiln-builtin-surface",
+ "kiln-db",
  "kiln-digest",
+ "kiln-graph",
  "kiln-host-abi",
  "kiln-ir",
+ "kiln-liveness",
  "kiln-module-graph",
- "kiln-native-number",
- "kiln-native-number-abi",
+ "kiln-native-provider-contract",
  "kiln-native-runtime",
  "memchr",
  "proptest",
@@ -1300,13 +1282,15 @@ dependencies = [
 name = "kiln-bench"
 version = "0.1.0"
 dependencies = [
- "frontend-oxc",
  "kiln-artifact-cache",
+ "kiln-backend-c",
  "kiln-conformance",
  "kiln-daemon",
  "kiln-db",
+ "kiln-frontend-oxc",
  "kiln-interpreter",
  "kiln-ir",
+ "kiln-module-eval",
  "kiln-module-graph",
  "kiln-native",
  "kiln-native-toolchain",
@@ -1325,8 +1309,8 @@ version = "0.1.0"
 name = "kiln-builtins"
 version = "0.1.0"
 dependencies = [
- "frontend-oxc",
  "kiln-builtin-surface",
+ "kiln-frontend-oxc",
  "kiln-ir",
  "kiln-module-resolver",
 ]
@@ -1336,11 +1320,11 @@ name = "kiln-cli"
 version = "0.1.0"
 dependencies = [
  "annotate-snippets",
- "frontend-oxc",
  "kiln-backend-c",
  "kiln-builtin-surface",
  "kiln-daemon",
  "kiln-data-formats",
+ "kiln-frontend-oxc",
  "kiln-hir",
  "kiln-host-abi",
  "kiln-ir",
@@ -1360,11 +1344,12 @@ dependencies = [
 name = "kiln-conformance"
 version = "0.1.0"
 dependencies = [
- "frontend-oxc",
  "kiln-digest",
+ "kiln-frontend-oxc",
  "kiln-hir",
  "kiln-interpreter",
  "kiln-ir",
+ "kiln-module-eval",
  "kiln-module-graph",
  "kiln-module-resolver",
  "kiln-runtime",
@@ -1377,18 +1362,19 @@ dependencies = [
 name = "kiln-daemon"
 version = "0.1.0"
 dependencies = [
- "frontend-oxc",
  "kiln-artifact-cache",
  "kiln-backend-c",
  "kiln-conformance",
  "kiln-data-formats",
  "kiln-db",
  "kiln-digest",
+ "kiln-frontend-oxc",
  "kiln-hir",
  "kiln-host-abi",
  "kiln-interpreter",
  "kiln-ir",
  "kiln-liveness",
+ "kiln-module-eval",
  "kiln-module-graph",
  "kiln-module-resolver",
  "kiln-native",
@@ -1418,11 +1404,45 @@ dependencies = [
  "kiln-hir",
  "kiln-ir",
  "proptest",
+ "serde",
 ]
 
 [[package]]
 name = "kiln-digest"
 version = "0.1.0"
+
+[[package]]
+name = "kiln-frontend-oxc"
+version = "0.1.0"
+dependencies = [
+ "kiln-hir",
+ "kiln-host-abi",
+ "num-bigint 0.4.8",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_diagnostics",
+ "oxc_ecmascript",
+ "oxc_minifier",
+ "oxc_parser",
+ "oxc_semantic",
+ "oxc_span",
+ "oxc_syntax",
+ "oxc_transformer",
+ "serde_json",
+]
+
+[[package]]
+name = "kiln-graph"
+version = "0.1.0"
+dependencies = [
+ "bitflags",
+ "kiln-db",
+ "kiln-digest",
+ "kiln-ir",
+ "kiln-module-graph",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "kiln-hir"
@@ -1509,25 +1529,42 @@ dependencies = [
 name = "kiln-liveness"
 version = "0.1.0"
 dependencies = [
- "kiln-backend-c",
+ "kiln-graph",
  "kiln-ir",
  "kiln-module-graph",
  "kiln-module-resolver",
  "kiln-native-provider-contract",
+ "serde",
  "serde_json",
+]
+
+[[package]]
+name = "kiln-module-eval"
+version = "0.1.0"
+dependencies = [
+ "kiln-builtins",
+ "kiln-frontend-oxc",
+ "kiln-host-abi",
+ "kiln-interpreter",
+ "kiln-ir",
+ "kiln-module-graph",
+ "kiln-module-resolver",
+ "kiln-runtime",
+ "url",
 ]
 
 [[package]]
 name = "kiln-module-graph"
 version = "0.1.0"
 dependencies = [
- "frontend-oxc",
  "kiln-builtins",
  "kiln-data-formats",
+ "kiln-frontend-oxc",
  "kiln-hir",
  "kiln-host-abi",
  "kiln-interpreter",
  "kiln-ir",
+ "kiln-module-eval",
  "kiln-module-resolver",
  "kiln-runtime",
  "serde",
@@ -1546,11 +1583,12 @@ dependencies = [
 name = "kiln-native"
 version = "0.1.0"
 dependencies = [
- "frontend-oxc",
  "kiln-artifact-cache",
  "kiln-backend-c",
  "kiln-builtin-surface",
  "kiln-builtins",
+ "kiln-frontend-oxc",
+ "kiln-graph",
  "kiln-hir",
  "kiln-host-abi",
  "kiln-interpreter",
@@ -1558,8 +1596,6 @@ dependencies = [
  "kiln-liveness",
  "kiln-module-graph",
  "kiln-module-resolver",
- "kiln-native-number",
- "kiln-native-number-abi",
  "kiln-native-provider-contract",
  "kiln-native-runtime",
  "kiln-native-toolchain",
@@ -1572,23 +1608,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "kiln-native-number"
-version = "0.1.0"
-dependencies = [
- "kiln-number-core",
-]
-
-[[package]]
-name = "kiln-native-number-abi"
-version = "0.1.0"
-
-[[package]]
 name = "kiln-native-provider-contract"
 version = "0.1.0"
 dependencies = [
  "kiln-digest",
- "kiln-native-number",
- "kiln-native-number-abi",
+ "kiln-number-core",
  "serde",
  "serde_json",
 ]
@@ -1601,7 +1625,7 @@ dependencies = [
  "kiln-host-abi",
  "kiln-intl",
  "kiln-json",
- "kiln-native-number-abi",
+ "kiln-native-provider-contract",
  "kiln-node-path",
  "kiln-number-core",
  "kiln-runtime",
@@ -1622,7 +1646,7 @@ name = "kiln-native-runtime"
 version = "0.1.0"
 dependencies = [
  "kiln-host-abi",
- "kiln-native-number",
+ "kiln-native-provider-contract",
  "kiln-string",
 ]
 
@@ -1685,6 +1709,9 @@ dependencies = [
 [[package]]
 name = "kiln-test-selector"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "kiln-test262"

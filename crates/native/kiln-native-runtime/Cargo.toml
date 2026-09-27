@@ -1,0 +1,13 @@
+[package]
+name = "kiln-native-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kiln-native-provider-contract = { workspace = true }
+kiln-host-abi = { workspace = true }
+kiln-string = { workspace = true }
+
+[dev-dependencies]

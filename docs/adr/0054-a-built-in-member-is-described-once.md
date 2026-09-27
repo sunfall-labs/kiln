@@ -38,7 +38,7 @@ The shape is always the same: a member is described in more than one place, and 
 
 **A built-in member is described in one row, and the compiler enforces what it can.**
 
-`crates/kiln-interpreter/src/intrinsic_members.rs` holds the descriptions, and three properties of
+`crates/interp/kiln-interpreter/src/intrinsic_members.rs` holds the descriptions, and three properties of
 it are load-bearing:
 
 1. **A key's kind is a type, not a spelling.** `MemberKey::Named(&str)` and

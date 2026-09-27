@@ -13,18 +13,18 @@ publish = false
 
 [dependencies]
 # Path dependencies, not workspace dependencies: this crate is not a workspace member.
-kiln-ir = { path = "../crates/kiln-ir" }
-kiln-hir = { path = "../crates/kiln-hir" }
-kiln-interpreter = { path = "../crates/kiln-interpreter" }
-kiln-runtime = { path = "../crates/kiln-runtime" }
-kiln-host-abi = { path = "../crates/kiln-host-abi" }
-kiln-backend-c = { path = "../crates/kiln-backend-c" }
-kiln-native = { path = "../crates/kiln-native" }
-kiln-native-runtime = { path = "../crates/kiln-native-runtime" }
-kiln-native-toolchain = { path = "../crates/kiln-native-toolchain" }
-kiln-artifact-cache = { path = "../crates/kiln-artifact-cache" }
-kiln-db = { path = "../crates/kiln-db" }
-frontend-oxc = { path = "../crates/frontend-oxc" }
+kiln-ir = { path = "../crates/compile/kiln-ir" }
+kiln-hir = { path = "../crates/syntax/kiln-hir" }
+kiln-interpreter = { path = "../crates/interp/kiln-interpreter" }
+kiln-runtime = { path = "../crates/host/kiln-runtime" }
+kiln-host-abi = { path = "../crates/foundation/kiln-host-abi" }
+kiln-backend-c = { path = "../crates/native/kiln-backend-c" }
+kiln-native = { path = "../crates/native/kiln-native" }
+kiln-native-runtime = { path = "../crates/native/kiln-native-runtime" }
+kiln-native-toolchain = { path = "../crates/native/kiln-native-toolchain" }
+kiln-artifact-cache = { path = "../crates/foundation/kiln-artifact-cache" }
+kiln-db = { path = "../crates/compile/kiln-db" }
+kiln-frontend-oxc = { path = "../crates/syntax/kiln-frontend-oxc" }
 
 arbitrary = { version = "1.4", features = ["derive"] }
 bolero = { version = "0.13", features = ["arbitrary"] }

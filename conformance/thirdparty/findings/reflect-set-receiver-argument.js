@@ -8,7 +8,7 @@
 //
 // Per OrdinarySetWithOwnDescriptor the write lands on the *receiver*, not on the target: the
 // target is only where the property is looked up to decide whether the write is allowed at all.
-// `kiln_c99_reflect_set` in `crates/kiln-backend-c/src/lib.rs` takes no receiver parameter, and
+// `kiln_c99_reflect_set` in `crates/native/kiln-backend-c/src/lib.rs` takes no receiver parameter, and
 // the `Reflect.set` dispatch arm never passes `args[3]`, so every write lands on the target.
 //
 // Vue does not notice, which is why the bundle is not held up by this: its receiver is always a

@@ -1,0 +1,30 @@
+[package]
+name = "kiln-frontend-oxc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kiln-hir = { workspace = true }
+kiln-host-abi = { workspace = true }
+oxc_allocator = { workspace = true }
+oxc_ast = { workspace = true }
+# `regular_expression` turns on the pattern parser behind `ParseOptions::parse_regular_expression`.
+# It is a default feature upstream, but the workspace pins every `oxc_*` crate with
+# `default-features = false`, so it has to be asked for by name here.
+oxc_parser = { workspace = true, features = ["regular_expression"] }
+# Early errors are not the parser's: duplicate lexical bindings, `arguments` in a class field
+# initializer, and most of the strict-mode restrictions live in Oxc's semantic pass. These two are
+# pinned here rather than in `workspace.dependencies` because this is the only crate that may see
+# Oxc at all (see the module docs); the version must track the `oxc_*` pins in the root manifest,
+# as a split version would put two incompatible copies of the AST types in one build graph.
+oxc_diagnostics = { version = "0.147.0", default-features = false }
+oxc_ecmascript = { version = "0.147.0", default-features = false }
+oxc_minifier = { version = "0.147.0", default-features = false }
+oxc_semantic = { version = "0.147.0", default-features = false }
+oxc_span = { workspace = true }
+oxc_syntax = { workspace = true }
+oxc_transformer = { version = "0.147.0", default-features = false }
+serde_json = { workspace = true }
+num-bigint = { workspace = true }

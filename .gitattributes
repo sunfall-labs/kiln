@@ -1,2 +1,2 @@
 # Preserve pinned upstream bytes, including whitespace that is part of the recorded checksum.
-crates/kiln-native-number/c/ffc.h -whitespace
+crates/semantics/kiln-native-provider-contract/c/ffc.h -whitespace

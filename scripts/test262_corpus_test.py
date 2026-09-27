@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 import test262_corpus as corpus
+import test262_memory
 
 
 class CorpusPolicyTests(unittest.TestCase):
@@ -127,6 +128,96 @@ class CorpusPolicyTests(unittest.TestCase):
                 with self.assertRaisesRegex(corpus.CorpusError, "symlink"):
                     corpus.fetch_managed(link, minimum_files=1)
         self.assertEqual(target.read_text(), "preserve")
+
+
+class MemoryPolicyTests(unittest.TestCase):
+    def test_worker_count_uses_cpu_job_and_memory_limits(self):
+        self.assertEqual(test262_memory.worker_count({}, 2), 2)
+        self.assertEqual(test262_memory.worker_count({}, 0), 1)
+        self.assertEqual(
+            test262_memory.worker_count({"RAYON_NUM_THREADS": "2"}, 32), 2
+        )
+        self.assertEqual(
+            test262_memory.worker_count({"KILN_TEST262_MEMORY_MB": "4096"}, 32), 4
+        )
+        self.assertEqual(
+            test262_memory.worker_count(
+                {
+                    "KILN_TEST262_MEMORY_MB": "8192",
+                    "KILN_JOBS": "3",
+                    "RAYON_NUM_THREADS": "6",
+                },
+                32,
+            ),
+            3,
+        )
+        self.assertEqual(
+            test262_memory.worker_count(
+                {"KILN_TEST262_MEMORY_MB": "512", "KILN_JOBS": "8"}, 32
+            ),
+            1,
+        )
+
+    def test_worker_count_ignores_nonpositive_or_invalid_overrides(self):
+        environment = {
+            "KILN_TEST262_MEMORY_MB": "4096",
+            "KILN_JOBS": "0",
+            "RAYON_NUM_THREADS": "not-a-number",
+        }
+        self.assertEqual(test262_memory.worker_count(environment, 32), 4)
+
+    def test_worker_count_clamps_huge_overrides_by_cpu_and_memory(self):
+        environment = {
+            "KILN_TEST262_MEMORY_MB": "4096",
+            "KILN_JOBS": "999999999999999999999999",
+            "RAYON_NUM_THREADS": "999999999999999999999999",
+        }
+        self.assertEqual(test262_memory.worker_count(environment, 128), 4)
+
+    def test_child_environment_preserves_inputs_and_sets_the_bounded_pool(self):
+        environment = {
+            "KILN_TEST262_MEMORY_MB": "4096",
+            "KILN_JOBS": "3",
+            "PRESERVED": "yes",
+        }
+        child = test262_memory.child_environment(environment, cpu_count=32)
+        self.assertEqual(child["RAYON_NUM_THREADS"], "3")
+        self.assertEqual(child["PRESERVED"], "yes")
+        self.assertNotIn("RAYON_NUM_THREADS", environment)
+
+    def test_run_result_passes_bounded_environment_without_mutating_parent(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        output = root / "result.json"
+        log = root / "run.log"
+        report = {
+            "tests": [{"id": "a", "outcome": "pass"}],
+            "totals": {
+                "total": 1,
+                "passed": 1,
+                "failed": 0,
+                "unsupported": 0,
+                "skipped": 0,
+            },
+        }
+        captured = {}
+
+        def run_limited(argv, **kwargs):
+            captured["environment"] = kwargs["env"]
+            Path(argv[5]).write_text(json.dumps(report))
+            return subprocess.CompletedProcess(argv, 0), False
+
+        parent_environment = dict(os.environ)
+        expected_child_environment = test262_memory.child_environment(parent_environment)
+        with (
+            mock.patch.object(corpus, "verify_effective_cap"),
+            mock.patch.object(corpus, "run_limited", side_effect=run_limited),
+        ):
+            result, _ = corpus.run_result("fake-kiln", root, output, log)
+
+        self.assertEqual(result["_kiln_counts"]["pass"], 1)
+        self.assertEqual(captured["environment"], expected_child_environment)
+        self.assertEqual(dict(os.environ), parent_environment)
 
 
 if __name__ == "__main__":

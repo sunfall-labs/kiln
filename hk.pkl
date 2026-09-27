@@ -13,7 +13,7 @@ local linters = new Mapping<String, Step> {
         check = "mbx clippy --workspace --all-targets --locked -- -D warnings"
     }
     ["http_close_contract"] {
-        glob = "crates/kiln-runtime/**/*.rs"
+        glob = "crates/host/kiln-runtime/**/*.rs"
         check = "bash scripts/check-http-close-contract.sh"
     }
 }

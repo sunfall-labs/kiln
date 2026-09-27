@@ -1,0 +1,18 @@
+---
+source: crates/native/kiln-backend-c/tests/emitted_c.rs
+expression: body(&unit)
+---
+/* Program hash: c5f5386408ed495d; bytecode version: 6. */
+static void kiln_module_c5f5386408ed495d3a2dbd10ae063118_gc_roots(void *heap, void *context, int phase) {
+    kiln_c99_gc_unit_roots(heap, context, phase);
+}
+int kiln_module_c5f5386408ed495d3a2dbd10ae063118(kiln_host *host, kiln_value *result) {
+    (void)kiln_realm_gc_register_roots(kiln_module_c5f5386408ed495d3a2dbd10ae063118_gc_roots, NULL, 0);
+    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
+    kiln_c99_reset_diagnostics();
+    kiln_val v0 = KILN_VAL_UNDEFINED;
+kiln_block_0:;
+    v0 = UINT64_C(4607182418800017408);
+    *result = kiln_val_to_boundary(v0);
+    return KILN_C99_OK;
+}

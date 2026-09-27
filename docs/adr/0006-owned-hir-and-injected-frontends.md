@@ -7,7 +7,7 @@ Accepted.
 ## Context
 
 Design §14 item 4 is “Oxc → HIR.” ADR 0004 already requires Oxc to stay behind a
-`frontend-oxc` crate and forbids Oxc types in signatures outside that crate. It also says
+`kiln-frontend-oxc` crate and forbids Oxc types in signatures outside that crate. It also says
 `kiln-db` has zero dependencies. Those rules were compatible while `Parsed` was a three-field
 placeholder produced by a line scanner inside the database. A real arena-allocated parser makes
 the missing ownership boundary unavoidable.
@@ -22,12 +22,12 @@ compiler pass and make it change continuously during language development.
 ## Decision
 
 `kiln-hir` is a dependency-free foundational crate containing allocator-independent,
-compiler-owned values. Oxc's arena and every Oxc type end at the `frontend-oxc` boundary. The
+compiler-owned values. Oxc's arena and every Oxc type end at the `kiln-frontend-oxc` boundary. The
 first slice owns spans, source kind, ordered top-level item classifications, requested modules,
 ECMAScript export entries and parser diagnostics. Executable statement and expression HIR will
 grow here as the interpreter is built.
 
-`frontend-oxc` depends on Oxc and `kiln-hir`. Its public entry point is an ordinary function:
+`kiln-frontend-oxc` depends on Oxc and `kiln-hir`. Its public entry point is an ordinary function:
 
 ```text
 parse(path: &str, source: &str) -> kiln_hir::Module
@@ -36,7 +36,7 @@ parse(path: &str, source: &str) -> kiln_hir::Module
 `kiln-db` depends only on compiler-owned value layers (`kiln-hir` and `kiln-ir`) plus the small
 concrete `kiln-digest` identity primitive required by ADR 0010. It accepts the parse function
 through the `Frontend` function pointer type when `MemoEngine` is constructed. The daemon and
-timing harness inject `frontend_oxc::parse`; database unit tests inject a tiny fixture frontend.
+timing harness inject `kiln_frontend_oxc::parse`; database unit tests inject a tiny fixture frontend.
 This preserves three properties simultaneously:
 
 1. Oxc is absent from the database's normal build and test dependency graph.
@@ -65,7 +65,7 @@ make the next body-lowering changes additive, but the interpreter cannot be buil
 statements and expressions have semantic HIR forms. That incompleteness is explicit in the
 README rather than hidden behind an `Unsupported` path that pretends item 4 is finished.
 
-Oxc upgrades are localized to `frontend-oxc`, although changes in the owned output can still be
+Oxc upgrades are localized to `kiln-frontend-oxc`, although changes in the owned output can still be
 semantic changes that alter interface hashes. The adapter tests therefore cover comments and
 strings that resemble exports, default exports, type-only exports, imports, star re-exports,
 TSX source selection and recoverable diagnostic spans. The daemon test covers the full
