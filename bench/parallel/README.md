@@ -95,9 +95,12 @@ All over 1,000,000 elements. The callbacks are written inline, identically, in e
 | `pipeline-column` | order amounts: `.map(x => Math.floor(x * fx * taxed * 100)).filter(c => c > cut).reduce(sum)` | all three stages parallel (tier 1) |
 | `pipeline-records` | records as typed-array columns: `price.map((p, i) => Math.floor(p * qty[i] * (5 + rating[i])))`, then filter and sum | all three stages parallel (the map reads the columns: tier 2) |
 | `pipeline-objects` | records as `{ price, qty, rating }` objects: `records.map(r => Math.floor(r.price * r.qty * (5 + r.rating)))`, then filter and sum | all three stages parallel (the map reads properties: tier 2) |
+| `enrich-records` | `records.map(r => ({ ...r, total: r.price * r.qty }))` over 1M `{ price, qty, rating }` | parallel (tier 3: the new objects are built in worker arenas) |
+| `flatmap-records` | `records.flatMap(r => r.qty > 4 ? [r.price, r.qty] : [])` | parallel (tier 3: the arrays are built in arenas, flattened on the realm thread) |
+| `format-csv` | `records.map(r => `${r.id},${r.qty},${r.price}`)`: CSV lines | parallel (tier 3: number formatting and concatenation in arenas) |
 
-`parallelFlatMap` has no row of its own: a callback that qualifies today returns a number, so it
-is `parallelMap`'s lowering (issue 10). It gets one at tier 3, when it can return arrays.
+The three tier-3 rows have no `worker_threads` pool or Go twin yet (their cells read `--`): the
+comparison that matters for them is kiln's parallel method against its own and node's `map`.
 
 The results file prints `kiln build --explain-parallel` for every program, so a reader sees which
 site ran parallel and, when one did not, the reason code.
@@ -112,8 +115,8 @@ realistic shape from "sequential" to "parallel":
   object properties and strings. `pipeline-records`' and `pipeline-objects`' score stage lost
   "(partial)", and key comparators such as `(a, b) => a.price - b.price` for `parallelSort` became
   the `sort-records` row.
-- **Tier 3, allocate in worker arenas** (08): callbacks that return new objects, arrays and
-  strings -- enriching rows, `parallelFlatMap` into arrays, `parallelFilter` keeping objects.
+- **Tier 3, allocate in worker arenas** (08; landed): callbacks that return new objects, arrays
+  and strings -- the `enrich-records`, `flatmap-records` and `format-csv` rows.
 - **Tier 4, pure calls** (09): callbacks that call the program's own pure functions and pure
   built-ins (`split`, `trim`, `Number`), which text processing needs.
 

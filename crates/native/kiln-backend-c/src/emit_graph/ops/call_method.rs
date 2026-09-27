@@ -395,10 +395,7 @@ fn parallel_lowering(
 ) -> String {
     use crate::parallel::ParallelMethod;
     let heap = |k: usize| site.heap.get(k).copied().unwrap_or(false);
-    // Parallel issue 22: a pool of one thread cannot win anything, so the site takes the
-    // sequential method's own loop (the lowering after this one) rather than run its pooled
-    // clone on the calling thread.
-    let pooled = match site.method {
+    match site.method {
         ParallelMethod::Map if heap(0) => {
             heap_map_lowering(plan, symbol, site.targets[0], object, args[0].0, v, false)
         }
@@ -446,8 +443,7 @@ fn parallel_lowering(
             args.first().map(|a| a.0),
             v,
         ),
-    };
-    format!("if (kiln_parallel_threads() > 1) {{ {pooled} }}")
+    }
 }
 
 /// The tier-2 environment of one pooled callback (ADR 0069, parallel issue 07): a
@@ -518,7 +514,9 @@ fn heap_builds(plan: &crate::direct::CallPlan, target: u32) -> bool {
 /// arenas (tier 3, ADR 0069), which are opened just before the pool and joined to the heap just
 /// after it (`kiln_c99_par_arenas_open`/`_join`) -- or freed, when a worker declined or ran out of
 /// its budget and the site runs the sequential method from the first element instead. The answer
-/// is numeric unless a worker wrote something else (`env.mixed`). `parallelFlatMap` flattens the
+/// is numeric unless a worker wrote something else (`env.mixed`). With a pool of one thread
+/// (`kiln_parallel_threads`) the array branch stands down and `map`'s own inline-cached loop runs:
+/// the boxed, guarded clone on one thread is slower than it (parallel issue 22). `parallelFlatMap` flattens the
 /// answers on the realm thread once the arenas have joined (`kiln_c99_par_flatten`). Over a view
 /// (`parallelMap` only; a callback that builds values does not try, its workers have no arena),
 /// the answers convert as `ToNumber` converts them. Each pool run is bracketed by
@@ -585,7 +583,7 @@ fn heap_map_lowering(
              void *ptr = KILN_VAL_PTR(v{o}); \
              kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
              if (plain->body == (kiln_body_fn){symbol}_fn_{target} && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
-                 if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
+                 if (kiln_parallel_threads() > 1 && kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                      kiln_array *arr = (kiln_array *)ptr; \
                      if (arr->properties.tag == KILN_VALUE_UNDEFINED) {{ \
                          size_t count0 = arr->count; \
@@ -665,7 +663,7 @@ fn heap_filter_lowering(
              void *ptr = KILN_VAL_PTR(v{o}); \
              kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
              if (plain->body == (kiln_body_fn){symbol}_fn_{target} && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
-             if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
+             if (kiln_parallel_threads() > 1 && kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                  kiln_array *arr = (kiln_array *)ptr; \
                  if (arr->properties.tag == KILN_VALUE_UNDEFINED) {{ \
                      size_t count0 = arr->count; \

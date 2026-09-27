@@ -43,15 +43,17 @@ WORKLOADS = [
     ("sort-records", "sort `{id, price}` records, `(a, b) => a.price - b.price` (copy + sort)", None),
     ("pipeline-records", "pipeline: score records held as typed-array columns -> filter -> total", None),
     ("pipeline-objects", "pipeline: score `{price, qty, rating}` objects -> filter -> total", None),
+    ("enrich-records", "tier 3: `records.map(r => ({ ...r, total: r.price * r.qty }))`", None),
+    ("flatmap-records", "tier 3: `records.flatMap(r => r.qty > 4 ? [r.price, r.qty] : [])`", None),
+    ("format-csv", "tier 3: `records.map(r => `${r.id},${r.qty},${r.price}`)`", None),
 ]
+
+# Tier-3 workloads have no `worker_threads` pool or Go twin yet: their pool and Go cells are `--`.
+KILN_NODE_ONLY = {"enrich-records", "flatmap-records", "format-csv"}
 
 # Workloads a realistic program needs that no kiln parallel lowering can take yet. Not measured:
 # the row is kept so the table grows into it as each tier lands (PRD tiers 2-4).
 WAITING = [
-    ("enrich 1M row objects: `rows.map(r => ({ ...r, total: r.price * r.qty }))`", "tier 2+ (3)",
-     "reads properties (tier 2) and returns a new object (tier 3, worker arenas)"),
-    ("group / flatMap rows into arrays", "tier 3",
-     "`parallelFlatMap` returning arrays allocates; today only a numeric callback runs pooled"),
     ("parse and normalise a large CSV's lines", "tier 2+ (4)",
      "reads strings (tier 2), allocates strings (tier 3), calls `split`/`trim`/`Number` (tier 4)"),
 ]
@@ -164,8 +166,9 @@ def jobs_for(cfg, bins, gobin, cores):
         js = os.path.join(JS, name + ".mjs")
         jobs.append((name, "node", ["node", js, "seq", n, budget], base))
         jobs.append((name, "bun", ["bun", js, "seq", n, budget], base))
-        jobs.append((name, "pool", ["node", os.path.join(JS, "pool.mjs"), name, n, budget, str(cores)], base))
-        if gobin:
+        if name not in KILN_NODE_ONLY:
+            jobs.append((name, "pool", ["node", os.path.join(JS, "pool.mjs"), name, n, budget, str(cores)], base))
+        if gobin and name not in KILN_NODE_ONLY:
             jobs.append((name, "go", [gobin, name, n, budget], dict(base, GOMAXPROCS=str(cores))))
         binary = bins.get(name)
         if binary:
