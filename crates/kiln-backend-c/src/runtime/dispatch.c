@@ -208,6 +208,11 @@ static int kiln_c99_data_view_method(kiln_host *host, kiln_value *result, uint64
         }
     }
     little_endian = argc > flag && kiln_c99_truthy(args[flag]);
+    if (view->buffer->detached) {
+        /* A TypeError, not a RangeError: no offset is in bounds of bytes that are gone. */
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Cannot perform DataView access on a detached ArrayBuffer");
+    }
     if (!kiln_c99_data_view_at(view, offset, width, &bytes)) {
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
                                     "Offset is outside the bounds of the DataView");
@@ -1331,6 +1336,12 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         return kiln_c99_url_fast_raw(result, args, argc, thrown);
     if (code == KILN_C99_METHOD_URL_ADOPT_RAW)
         return kiln_c99_url_adopt_raw(result, args, argc);
+    if (code == KILN_C99_METHOD_ARRAY_BUFFER_DETACH_RAW)
+        return kiln_c99_array_buffer_detach_raw(result, args, argc, thrown);
+    if (code == KILN_C99_METHOD_CLONE_DATA_RAW)
+        return kiln_c99_clone_data_raw(result, args, argc);
+    if (code == KILN_C99_METHOD_JOBS_PENDING_RAW)
+        return kiln_c99_jobs_pending_raw(result);
     if ((code & KILN_C99_FFI_DYNAMIC_BASE) != 0 ||
         code == KILN_C99_METHOD_NODE_FFI_DLOPEN ||
         code == KILN_C99_METHOD_NODE_FFI_GET_RAW_POINTER ||
@@ -5771,6 +5782,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     if (receiver.tag == KILN_VALUE_ARRAY_BUFFER) {
         if (code == KILN_C99_METHOD_SLICE) {
             kiln_typed_buffer *buffer = kiln_c99_typed_buffer_of(receiver);
+            if (buffer->detached) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Cannot perform ArrayBuffer.prototype.slice on a detached ArrayBuffer");
+            }
             size_t start = kiln_c99_relative_index(argc > 0 ? args[0] : kiln_c99_undefined(),
                                                    buffer->byte_length, 0);
             size_t end = kiln_c99_relative_index(argc > 1 ? args[1] : kiln_c99_undefined(),

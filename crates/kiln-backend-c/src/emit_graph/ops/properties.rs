@@ -194,7 +194,8 @@ pub(super) fn emit_get_property(
                              site.has_cached_method = 1; \
                              {int_stmt}{double_stmt}{box_stmt} \
                              handled = 1; \
-                         }} else if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY) {{ \
+                         }} else if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY && \
+                                    KILN_LIKELY(!((const kiln_typed_array *)ptr)->buffer->detached)) {{ \
                              const kiln_typed_array *view = (const kiln_typed_array *)ptr; \
                              {ta_int_stmt}{ta_double_stmt}{ta_box_stmt} \
                              handled = 1; \
@@ -816,9 +817,9 @@ pub(super) fn emit_get_computed(
             format!("i{k} >= 0 && (uint64_t)i{k} < arr->count && ", k = key.0)
         };
         let typed_bound = if key_non_neg {
-            format!("(uint64_t)i{k} < view->length", k = key.0)
+            format!("(uint64_t)i{k} < view->length && !view->buffer->detached", k = key.0)
         } else {
-            format!("i{k} >= 0 && (uint64_t)i{k} < view->length", k = key.0)
+            format!("i{k} >= 0 && (uint64_t)i{k} < view->length && !view->buffer->detached", k = key.0)
         };
         let str_bound = if key_non_neg {
             format!("(uint64_t)i{k} < str->unit_len", k = key.0)
@@ -852,7 +853,7 @@ pub(super) fn emit_get_computed(
                 v = v
             ),
             format!(
-                "double idx; memcpy(&idx, &{vk}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < view->length)) {{ double d = kiln_c99_typed_get(view, slot); v{v} = kiln_c99_val_from_double(d); handled = 1; }}",
+                "double idx; memcpy(&idx, &{vk}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < view->length && !view->buffer->detached)) {{ double d = kiln_c99_typed_get(view, slot); v{v} = kiln_c99_val_from_double(d); handled = 1; }}",
                 vk = vk,
                 v = v
             ),
@@ -1009,9 +1010,9 @@ pub(super) fn emit_set_computed(
             format!("i{k} >= 0 && (uint64_t)i{k} < arr->count", k = key.0)
         };
         let typed_bound = if key_non_neg {
-            format!("(uint64_t)i{k} < view->length", k = key.0)
+            format!("(uint64_t)i{k} < view->length && !view->buffer->detached", k = key.0)
         } else {
-            format!("i{k} >= 0 && (uint64_t)i{k} < view->length", k = key.0)
+            format!("i{k} >= 0 && (uint64_t)i{k} < view->length && !view->buffer->detached", k = key.0)
         };
         let val_d_init = if ctx.live_numbers.contains(value) {
             format!("double val_d = d{val};", val = value.0)
@@ -1056,7 +1057,7 @@ pub(super) fn emit_set_computed(
                 assign_v = assign_v,
             ),
             format!(
-                "double idx; memcpy(&idx, &v{k}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < view->length)) {{ {val_d_init} kiln_c99_typed_set(view, slot, val_d); {assign_v}handled = 1; }}",
+                "double idx; memcpy(&idx, &v{k}, sizeof(idx)); size_t slot = (idx >= 0.0 && idx <= 4294967294.0) ? (size_t)idx : (size_t)-1; kiln_typed_array *view = (kiln_typed_array *)ptr; if (KILN_LIKELY(idx >= 0.0 && idx == (double)slot && slot < view->length && !view->buffer->detached)) {{ {val_d_init} kiln_c99_typed_set(view, slot, val_d); {assign_v}handled = 1; }}",
                 k = key.0,
                 val_d_init = val_d_init,
                 assign_v = assign_v,

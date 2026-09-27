@@ -5028,11 +5028,9 @@ fn array_buffer_transfer_moves_bytes_and_detaches_the_source() {
     let source = test_buffer(&[1, 2, 3], None, false);
     let moved = call_native(
         &Intrinsics::default(),
-        Native::ArrayBufferTransfer {
-            preserve_resizability: true,
-        },
-        &source,
-        &[],
+        Native::ArrayBufferDetachRaw,
+        &Value::Undefined,
+        &[source.clone(), Value::Undefined, Value::Boolean(true)],
     )
     .expect("transfer succeeds");
     let Value::ArrayBuffer(source) = &source else {
@@ -5052,11 +5050,9 @@ fn array_buffer_transfer_preserves_or_drops_resizability_and_checks_constraints(
     let resizable = test_buffer(&[4, 5], Some(8), false);
     let moved = call_native(
         &Intrinsics::default(),
-        Native::ArrayBufferTransfer {
-            preserve_resizability: true,
-        },
-        &resizable,
-        &[Value::Number(4.0)],
+        Native::ArrayBufferDetachRaw,
+        &Value::Undefined,
+        &[resizable.clone(), Value::Number(4.0), Value::Boolean(true)],
     )
     .expect("resizable transfer succeeds");
     let Value::ArrayBuffer(moved) = moved else {
@@ -5068,11 +5064,9 @@ fn array_buffer_transfer_preserves_or_drops_resizability_and_checks_constraints(
     let fixed = test_buffer(&[6, 7], None, false);
     let moved = call_native(
         &Intrinsics::default(),
-        Native::ArrayBufferTransfer {
-            preserve_resizability: false,
-        },
-        &fixed,
-        &[Value::Number(4.0)],
+        Native::ArrayBufferDetachRaw,
+        &Value::Undefined,
+        &[fixed.clone(), Value::Number(4.0), Value::Boolean(false)],
     )
     .expect("fixed-length transfer succeeds");
     let Value::ArrayBuffer(moved) = moved else {
@@ -5089,11 +5083,9 @@ fn array_buffer_transfer_preserves_or_drops_resizability_and_checks_constraints(
     assert!(matches!(
         call_native(
             &Intrinsics::default(),
-            Native::ArrayBufferTransfer {
-                preserve_resizability: true,
-            },
-            &too_large,
-            &[Value::Number(3.0)],
+            Native::ArrayBufferDetachRaw,
+        &Value::Undefined,
+        &[too_large.clone(), Value::Number(3.0), Value::Boolean(true)],
         ),
         Err(ExecutionError::BufferLengthOutOfRange { .. })
     ));
@@ -5101,11 +5093,9 @@ fn array_buffer_transfer_preserves_or_drops_resizability_and_checks_constraints(
     assert!(matches!(
         call_native(
             &Intrinsics::default(),
-            Native::ArrayBufferTransfer {
-                preserve_resizability: true,
-            },
-            &shared,
-            &[],
+            Native::ArrayBufferDetachRaw,
+        &Value::Undefined,
+        &[shared.clone(), Value::Undefined, Value::Boolean(true)],
         ),
         Err(ExecutionError::BufferDetached)
     ));
@@ -5128,11 +5118,9 @@ fn views_observe_array_buffer_detachment() {
 
     call_native(
         &Intrinsics::default(),
-        Native::ArrayBufferTransfer {
-            preserve_resizability: true,
-        },
-        &source,
-        &[],
+        Native::ArrayBufferDetachRaw,
+        &Value::Undefined,
+        &[source.clone(), Value::Undefined, Value::Boolean(true)],
     )
     .expect("detach");
 

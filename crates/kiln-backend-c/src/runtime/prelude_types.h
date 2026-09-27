@@ -427,6 +427,9 @@ typedef struct kiln_typed_buffer {
     /* A borrowed FFI view points into a loaded native library's memory. Ordinary ArrayBuffers
      * own their allocation; borrowed ones must never feed that pointer to free(). */
     int owns_bytes;
+    /* Set once, by `__kilnArrayBufferDetach`, and never cleared: the bytes went to another
+     * buffer, `bytes` points at a static empty block and `byte_length` is zero. */
+    int detached;
 } kiln_typed_buffer;
 
 /* The scalar-only dynamic-call ABI. Its layout is pinned by the Rust provider's repr(C) type. */
@@ -1440,6 +1443,9 @@ typedef struct kiln_next_tick {
     kiln_value callback;
     kiln_value *args;
     size_t argc;
+    /* Still counted in the heap's `next_ticks_queued`: cleared when the tick starts to run (a
+     * running tick is no longer queued), or when it is disposed of unrun. */
+    int counted;
 } kiln_next_tick;
 
 /* One generated callback payload. The Realm Runtime owns its timer identity, deadline, sequence,

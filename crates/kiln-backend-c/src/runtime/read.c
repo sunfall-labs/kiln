@@ -533,6 +533,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             *out = kiln_c99_number((double)kiln_c99_typed_buffer_of(target)->byte_length);
             return KILN_C99_OK;
         }
+        /* The internal slot `byteLength` sits beside: until 2026-09-26 this read answered
+         * `undefined`, the silent-undefined class, because nothing here could detach. */
+        if (kiln_c99_same_name_key(key, "detached")) {
+            *out = kiln_c99_boolean(kiln_c99_typed_buffer_of(target)->detached != 0);
+            return KILN_C99_OK;
+        }
         if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_BUFFER);
             return KILN_C99_OK;
