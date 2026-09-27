@@ -66,8 +66,28 @@
         continue;
       }
 
-      if (punctuators.includes(ch) || ch === " ") {
-        escaped += "\\x" + code.toString(16).padStart(2, "0");
+      // `EncodeForRegExpEscape`: the other punctuators, every WhiteSpace and LineTerminator,
+      // and a lone surrogate are written as a hex escape -- `\xHH` below 0x100, `\uHHHH` above.
+      const whiteSpace =
+        code === 0x20 || code === 0xa0 || code === 0x1680 || (code >= 0x2000 && code <= 0x200a) ||
+        code === 0x202f || code === 0x205f || code === 0x3000 || code === 0xfeff ||
+        code === 0x2028 || code === 0x2029;
+      let loneSurrogate = false;
+      if (code >= 0xd800 && code <= 0xdbff) {
+        const low = i + 1 < text.length ? text.charCodeAt(i + 1) : 0;
+        if (low >= 0xdc00 && low <= 0xdfff) {
+          escaped += ch + text.charAt(i + 1);
+          i++;
+          continue;
+        }
+        loneSurrogate = true;
+      } else if (code >= 0xdc00 && code <= 0xdfff) {
+        loneSurrogate = true;
+      }
+      if (punctuators.includes(ch) || whiteSpace || loneSurrogate) {
+        escaped += code <= 0xff
+          ? "\\x" + code.toString(16).padStart(2, "0")
+          : "\\u" + code.toString(16).padStart(4, "0");
         continue;
       }
       escaped += ch;
