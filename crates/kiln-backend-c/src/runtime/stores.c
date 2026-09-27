@@ -196,23 +196,55 @@ static void kiln_c99_drop_callable_store(void *pointer) {
     kiln_c99_gc_release(entry);
 }
 
-/* Bumped by every write that reaches a builtin's own-property store, whether it creates the store
- * or adds to one; a method-call site that cached a builtin's method compares the epoch it learned
- * under, so `Promise.resolve = f` is seen by the next call at every site in the program. Reads
- * pass with `create` clear and do not move it. */
-static uint64_t kiln_c99_builtin_store_epoch;
+/* ADR 0071: which built-ins the current realm has modified. A write that reaches a built-in's
+ * own-property store, whether it creates the store or adds to one, marks that built-in in the
+ * realm's heap (and moves the process-wide summary `kiln_c99_builtin_store_epoch`, which says
+ * only that some realm has modified something). Reads pass with `create` clear and mark nothing.
+ * A mark is never cleared: a modified built-in is the realm's own copy from then on (ADR 0070
+ * primitive B). */
+/* `kiln_c99_object_prototype_unmodified` names Object.prototype by its number. */
+typedef char kiln_c99_object_prototype_is_18[KILN_C99_BUILTIN_OBJECT_PROTOTYPE == 18 ? 1 : -1];
+
+static void kiln_c99_realm_note_builtin_store(uint32_t builtin) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    if (heap == NULL) return;
+    if (builtin < 64u * KILN_C99_MODIFIED_BUILTIN_WORDS) {
+        heap->modified_builtins[builtin >> 6] |= UINT64_C(1) << (builtin & 63u);
+    } else {
+        heap->modified_builtin_beyond = 1;
+    }
+}
+
+static int kiln_c99_realm_marked_builtin(const kiln_gc_heap *heap, uint32_t builtin) {
+    if (builtin >= 64u * KILN_C99_MODIFIED_BUILTIN_WORDS) return heap->modified_builtin_beyond;
+    return (heap->modified_builtins[builtin >> 6] >> (builtin & 63u)) & 1u;
+}
+
+/* Whether a cached member of `builtin` may have changed in the current realm: the realm has
+ * modified that built-in, or a prototype built-in its lookup falls through to (Object.prototype,
+ * Function.prototype, %TypedArray%.prototype). Asked only once some realm has modified some
+ * built-in; a realm without a heap answers yes, which only costs a cache hit. */
+static int kiln_c99_realm_builtin_modified(uint32_t builtin) {
+    const kiln_gc_heap *heap = kiln_c99_gc_heap();
+    if (heap == NULL) return 1;
+    return kiln_c99_realm_marked_builtin(heap, builtin) ||
+           kiln_c99_realm_marked_builtin(heap, KILN_C99_BUILTIN_OBJECT_PROTOTYPE) ||
+           kiln_c99_realm_marked_builtin(heap, KILN_C99_BUILTIN_FUNCTION_PROTOTYPE) ||
+           kiln_c99_realm_marked_builtin(heap, KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE);
+}
 
 
 static int kiln_c99_callable_store_lookup(kiln_value callable, kiln_value *out, int create);
 
 /* The own-property store of a callable or built-in. Object.prototype's store, once it exists, is
- * also recorded as realm state (`kiln_c99_object_prototype_store`) so a remembered read miss can
- * consult it live. */
+ * also recorded on the realm's heap so an absent path ending there can consult it live
+ * (`kiln_c99_object_prototype_lacks`). */
 static int kiln_c99_callable_store(kiln_value callable, kiln_value *out, int create) {
     int status = kiln_c99_callable_store_lookup(callable, out, create);
     if (status == KILN_C99_OK && callable.tag == KILN_VALUE_BUILTIN &&
         callable.bits == KILN_C99_BUILTIN_OBJECT_PROTOTYPE && out->tag == KILN_VALUE_OBJECT) {
-        kiln_c99_object_prototype_store = kiln_c99_object_of(*out);
+        kiln_gc_heap *heap = kiln_c99_gc_heap();
+        if (heap != NULL) heap->object_prototype_store = kiln_c99_object_of(*out);
     }
     return status;
 }
@@ -245,7 +277,10 @@ static int kiln_c99_callable_store_lookup(kiln_value callable, kiln_value *out, 
     if (callable.tag != KILN_VALUE_METHOD && callable.tag != KILN_VALUE_BUILTIN &&
         callable.tag != KILN_VALUE_SETTLER)
         KILN_C99_REFUSE("own properties are not modelled on this callable");
-    if (create) kiln_c99_builtin_store_epoch += 1;
+    if (create) {
+        kiln_c99_builtin_store_epoch += 1;
+        if (callable.tag == KILN_VALUE_BUILTIN) kiln_c99_realm_note_builtin_store((uint32_t)callable.bits);
+    }
     /* Direct C embedding fixtures exercise helpers without entering a realm. Keep that legacy
      * path local; every generated scalar/module entry creates or inherits a realm and therefore
      * uses only the shared registry below. */
@@ -362,3 +397,20 @@ static int kiln_c99_store_get_key(kiln_host *host, kiln_value target,
 
 /* Read a named property.  A missing one is undefined; a read *through* undefined or null is an
  * error, because that is a TypeError in the language and answering undefined would hide it. */
+
+static int kiln_c99_object_prototype_lacks(const kiln_string *key) {
+    const kiln_gc_heap *heap = kiln_c99_gc_heap();
+    const kiln_object *store = heap != NULL ? heap->object_prototype_store : NULL;
+    size_t index;
+    if (store == NULL) return 1;
+    if (store->shape != NULL) {
+        uint32_t slot;
+        for (slot = 0; slot < store->shape->property_count; ++slot) {
+            if (store->shape->keys[slot] == key) return 0;
+        }
+    }
+    for (index = 0; index < store->count && store->properties != NULL; ++index) {
+        if (store->properties[index].key == key) return 0;
+    }
+    return 1;
+}

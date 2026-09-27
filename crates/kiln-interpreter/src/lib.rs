@@ -16386,8 +16386,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let timer = Timer {
                     callback: arguments.first().cloned().unwrap_or(Value::Undefined),
                     // Everything after the delay is handed to the callback, which is how a
-                    // timer carries state without a closure.
-                    arguments: arguments.get(2..).unwrap_or_default().to_vec(),
+                    // timer carries state without a closure. `setImmediate` has no delay, so
+                    // its arguments start one earlier: `setImmediate(fn, x)` calls `fn(x)`.
+                    arguments: arguments
+                        .get(if matches!(native, Native::SetImmediate) { 1.. } else { 2.. })
+                        .unwrap_or_default()
+                        .to_vec(),
                     // Captured where the timer was set, not where it fires.
                     context: Rc::clone(&self.async_context),
                 };
@@ -18114,6 +18118,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
                 Ok(Value::Undefined)
             }
+            // `__kilnJobsPending()`: what a microtask checkpoint would run now, as bits -- 1 for a
+            // next tick, 2 for a microtask (promise jobs included). The queues are the realm's.
+            Native::JobsPendingRaw => Ok(Value::Number(self.with_realm(|realm| {
+                f64::from(u8::from(realm.has_queued_next_ticks()))
+                    + 2.0 * f64::from(u8::from(realm.has_queued_microtasks()))
+            }))),
             Native::ProcessNextTick => {
                 let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
                 if !is_callable(&callback) {
@@ -18162,117 +18172,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | Native::NodeAsyncLocalStorageDisable => {
                 self.async_local_storage(native, receiver, arguments, instruction)
             }
-            Native::StructuredClone => {
-                let value = arguments.first().cloned().unwrap_or(Value::Undefined);
-                let mut seen = std::collections::HashMap::new();
-                self.structured_clone_value(&value, &mut seen, instruction)
-            }
             _ => call_native(&self.intrinsics, native, receiver, arguments),
-        }
-    }
-
-    fn structured_clone_value(
-        &mut self,
-        value: &Value,
-        seen: &mut std::collections::HashMap<usize, Value>,
-        instruction: usize,
-    ) -> Result<Value, ExecutionError> {
-        match value {
-            Value::Undefined
-            | Value::Null
-            | Value::Boolean(_)
-            | Value::Number(_)
-            | Value::String(_)
-            | Value::BigInt(_) => Ok(value.clone()),
-            Value::Date(date) => Ok(new_date(date.time.get())),
-            Value::RegExp(regexp) => Ok(Value::RegExp(Rc::clone(regexp))),
-            Value::Array(array) => {
-                let ptr = Rc::as_ptr(array) as usize;
-                if let Some(existing) = seen.get(&ptr) {
-                    return Ok(existing.clone());
-                }
-                let elements = array.borrow().to_vec();
-                let new_array = Value::Array(ArrayData::new(Vec::new()));
-                seen.insert(ptr, new_array.clone());
-                let mut cloned_elements = Vec::with_capacity(elements.len());
-                for item in elements {
-                    cloned_elements.push(self.structured_clone_value(&item, seen, instruction)?);
-                }
-                if let Value::Array(ref target_arr) = new_array {
-                    *target_arr.borrow_mut() = cloned_elements;
-                }
-                Ok(new_array)
-            }
-            Value::Object(obj) => {
-                let ptr = Rc::as_ptr(obj) as usize;
-                if let Some(existing) = seen.get(&ptr) {
-                    return Ok(existing.clone());
-                }
-                let new_obj = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
-                seen.insert(ptr, new_obj.clone());
-                let slots_to_clone: Vec<(StringUnits, Value, Attributes)> = {
-                    let borrowed = obj.borrow();
-                    borrowed
-                        .properties
-                        .iter()
-                        .filter(|slot| slot.attributes.enumerable)
-                        .filter_map(|slot| match &slot.property {
-                            Property::Value(v) => {
-                                Some((slot.key.clone(), v.clone(), slot.attributes))
-                            }
-                            _ => None,
-                        })
-                        .collect()
-                };
-                if let Value::Object(ref target_obj) = new_obj {
-                    for (key, val, attrs) in slots_to_clone {
-                        let cloned_val = self.structured_clone_value(&val, seen, instruction)?;
-                        target_obj.borrow_mut().define_value(
-                            &key.to_lossy_string(),
-                            cloned_val,
-                            attrs,
-                        );
-                    }
-                }
-                Ok(new_obj)
-            }
-            Value::TypedArray(ta) => {
-                let buffer_data = BufferData {
-                    bytes: Bytes::new(ta.buffer.shared, ta.buffer.bytes.borrow().clone()),
-                    max_byte_length: ta.buffer.max_byte_length,
-                    shared: ta.buffer.shared,
-                    detached: std::cell::Cell::new(ta.buffer.detached.get()),
-                    immutable: ta.buffer.immutable,
-                    properties: RefCell::new(ObjectData::default()),
-                };
-                Ok(Value::TypedArray(Rc::new(TypedArrayData {
-                    kind: ta.kind,
-                    buffer: Rc::new(buffer_data),
-                    offset: ta.offset,
-                    length: ta.length,
-                    properties: RefCell::new(ObjectData::default()),
-                })))
-            }
-            Value::ArrayBuffer(buf) => {
-                let buffer_data = BufferData {
-                    bytes: Bytes::new(buf.shared, buf.bytes.borrow().clone()),
-                    max_byte_length: buf.max_byte_length,
-                    shared: buf.shared,
-                    detached: std::cell::Cell::new(buf.detached.get()),
-                    immutable: buf.immutable,
-                    properties: RefCell::new(ObjectData::default()),
-                };
-                Ok(Value::ArrayBuffer(Rc::new(buffer_data)))
-            }
-            Value::Function(_) | Value::Native(_, _) | Value::Generator(_) => {
-                Err(ExecutionError::TypeErrorMessage {
-                    message: "structuredClone cannot clone functions".to_owned(),
-                })
-            }
-            Value::Symbol(_) => Err(ExecutionError::TypeErrorMessage {
-                message: "structuredClone cannot clone symbols".to_owned(),
-            }),
-            _ => Ok(value.clone()),
         }
     }
 
@@ -27179,7 +27079,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             kiln_ir::Builtin::AbortSignal => Value::Native(Native::AbortSignalConstructor, realm),
             kiln_ir::Builtin::TextEncoder => Value::Native(Native::TextEncoderConstructor, realm),
-            kiln_ir::Builtin::StructuredClone => Value::Native(Native::StructuredClone, realm),
+            // Defined on the global object by the shared bootstrap
+            // (`kiln-builtins/src/structured_clone.ts`), and read from there, so a program that
+            // replaces `globalThis.structuredClone` is seen by the bare name too.
+            kiln_ir::Builtin::StructuredClone => match self.global_object_in(realm) {
+                Value::Object(globals) => globals
+                    .borrow()
+                    .get_own("structuredClone")
+                    .cloned()
+                    .unwrap_or(Value::Undefined),
+                _ => Value::Undefined,
+            },
             kiln_ir::Builtin::ArrayBuffer => Value::Native(Native::ArrayBufferConstructor, realm),
             kiln_ir::Builtin::Int8Array => {
                 Value::Native(Native::TypedArrayConstructor(TypedKind::Int8), realm)
@@ -27347,17 +27257,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             ("__kilnUrlSet", Native::UrlSetRaw),
             ("__kilnUrlFast", Native::UrlFastRaw),
             ("__kilnUrlAdopt", Native::UrlAdoptRaw),
+            // The transfer primitive `arraybuffer.ts` captures and deletes (every realm).
+            ("__kilnArrayBufferDetach", Native::ArrayBufferDetachRaw),
+            // The structured clone's plain-data fast path: measured for the native backend
+            // only, so here it always answers "not handled" and the shared TypeScript clone runs.
+            ("__kilnCloneData", Native::CloneDataRaw),
+            // Whether a microtask checkpoint would run anything now, which message delivery
+            // (`kiln-builtins/src/web_events_streams.ts`) asks before its next message.
+            ("__kilnJobsPending", Native::JobsPendingRaw),
         ] {
             globals.set_non_enumerable(name, Value::Native(native, realm));
         }
-        // Published in every realm, not only a Node one: it is a WHATWG global every host has,
-        // the bare name already resolved everywhere, and the native runtime's bootstrap defines
-        // it unconditionally -- so until 2026-09-19 `"structuredClone" in globalThis` was the one
-        // global the two engines disagreed on outside `--node`.
-        globals.set_non_enumerable(
-            "structuredClone",
-            Value::Native(Native::StructuredClone, realm),
-        );
+        // `structuredClone` is the shared bootstrap's (`kiln-builtins/src/structured_clone.ts`),
+        // defined in every realm, as the native runtime's is.
 
         // The global functions, which a program can also reach by their bare names -- and has to
         // find the *same* value both ways: `globalThis.parseInt === parseInt`.
@@ -37606,34 +37518,40 @@ fn call_native(
             arguments.first(),
             Some(Value::TypedArray(_) | Value::DataView(_))
         )),
-        // `transfer` *moves* the bytes: the buffer that comes out holds what went in, and the
-        // one it came from holds nothing at all afterwards. The detach is the whole point --
-        // it is what lets a program hand a large buffer across an ownership boundary and know
-        // that nobody on this side can still write through it.
-        Native::ArrayBufferTransfer {
-            preserve_resizability,
-        } => {
-            let Value::ArrayBuffer(buffer) = receiver else {
+        // `__kilnArrayBufferDetach(buffer, length, preserveResizability)`, the one primitive a
+        // transfer needs (ADR 0065, representation): the bytes are *moved*, not copied, into the
+        // buffer that comes out, and the one they came from holds nothing afterwards. Every
+        // check a program can observe -- the receiver, the length, the ceiling -- is made above
+        // it, in `kiln-builtins/src/arraybuffer.ts` and `structured_clone.ts`; what is left here
+        // only keeps a caller that skipped them from corrupting a buffer.
+        // `__kilnCloneData(value)` (ADR 0065, a *measured* primitive): the structured clone of a
+        // value made only of plain data, or `undefined` -- "do it the general way" -- for
+        // anything else, which the shared clone (`kiln-builtins/src/structured_clone.ts`) then
+        // does from the start. The same subset as the native backend's (`runtime/spread.c`).
+        Native::CloneDataRaw => {
+            let mut seen = std::collections::HashMap::new();
+            arguments
+                .first()
+                .and_then(|value| clone_plain_data(value, &mut seen, 0))
+                .unwrap_or(Value::Undefined)
+        }
+        Native::ArrayBufferDetachRaw => {
+            let Some(Value::ArrayBuffer(buffer)) = arguments.first() else {
                 return Err(ExecutionError::NotABuffer);
             };
-            // A shared buffer cannot be transferred at all: its other holders have no way to
-            // learn the bytes went away, which is the same reason it has no `resize`.
+            // A shared buffer cannot be detached at all: its other holders have no way to learn
+            // the bytes went away. Nor can an immutable one: detaching is the largest write.
             if buffer.shared || buffer.detached() {
                 return Err(ExecutionError::BufferDetached);
             }
-            // Nor can an immutable one: detaching is the largest write there is, and a buffer
-            // that promised never to change again cannot be emptied either.
             if buffer.immutable {
                 return Err(ExecutionError::BufferImmutable);
             }
-            let length = match arguments.first() {
-                None | Some(Value::Undefined) => buffer.byte_length(),
-                requested => bounded_buffer(to_index(requested)?, 1)?,
+            let length = match arguments.get(1) {
+                Some(Value::Number(length)) => bounded_buffer(to_index_number(*length)?, 1)?,
+                _ => buffer.byte_length(),
             };
-            // Only `transfer` carries the ceiling across. `transferToFixedLength` exists to
-            // *drop* it, so a program can turn a buffer it may still be resizing into one whose
-            // length nothing can move -- which is the only shape some consumers will accept.
-            let max_byte_length = if preserve_resizability {
+            let max_byte_length = if matches!(arguments.get(2), Some(Value::Boolean(true))) {
                 buffer.max_byte_length
             } else {
                 None
@@ -38039,8 +37957,7 @@ fn call_native(
         | Native::ReflectGetOwnPropertyDescriptor
         | Native::ReflectDeleteProperty
         | Native::ReflectIsExtensible
-        | Native::ReflectPreventExtensions
-        | Native::StructuredClone => {
+        | Native::ReflectPreventExtensions => {
             unreachable!("these built-ins are dispatched by the interpreter")
         }
         Native::DateConstructor | Native::DateNow | Native::PerformanceNow => {
@@ -39727,6 +39644,7 @@ fn call_native(
         | Native::UrlSetRaw
         | Native::UrlFastRaw
         | Native::UrlAdoptRaw
+        | Native::JobsPendingRaw
         | Native::ProcessStdinSetRawMode
         | Native::UrlConstructor
         | Native::UrlSearchParamsGet
@@ -44598,20 +44516,8 @@ fn array_buffer_method(shared: bool, name: &str) -> Value {
         "resize" if !shared => Value::Native(Native::ArrayBufferResize, RealmId::PRIMARY),
         "grow" if shared => Value::Native(Native::ArrayBufferGrow, RealmId::PRIMARY),
         "slice" => Value::Native(Native::ArrayBufferSlice, RealmId::PRIMARY),
-        // Only the unshared type: transferring is *giving the bytes away*, which is precisely
-        // what a shared buffer's other holders have no way to survive.
-        "transfer" if !shared => Value::Native(
-            Native::ArrayBufferTransfer {
-                preserve_resizability: true,
-            },
-            RealmId::PRIMARY,
-        ),
-        "transferToFixedLength" if !shared => Value::Native(
-            Native::ArrayBufferTransfer {
-                preserve_resizability: false,
-            },
-            RealmId::PRIMARY,
-        ),
+        // `transfer` and `transferToFixedLength` are the shared bootstrap's
+        // (`kiln-builtins/src/arraybuffer.ts`), over `__kilnArrayBufferDetach`.
         // Giving the bytes away and freezing them in one step. Only the unshared type again,
         // and for the same reason: a shared buffer's other holders cannot survive the giving.
         "transferToImmutable" if !shared => {
@@ -45757,7 +45663,6 @@ const fn numeric_arguments(native: Native) -> &'static [usize] {
         | N::NumberToString
         | N::ArrayBufferResize
         | N::ArrayBufferGrow
-        | N::ArrayBufferTransfer { .. }
         | N::DataViewGet(_)
         | N::DataViewSet(_)
         | N::DataViewGetBig { .. }
@@ -46808,7 +46713,6 @@ const fn native_length(native: Native) -> Option<f64> {
         | N::WeakSetConstructor
         | N::WeakMapConstructor
         | N::SymbolConstructor
-        | N::ArrayBufferTransfer { .. }
         | N::IteratorDispose
         | N::RegExpStringIteratorNext
         | N::IteratorConcat
@@ -48613,6 +48517,108 @@ fn is_symbol_key_units(key: &StringUnits) -> bool {
         .is_some_and(|name| is_symbol_key(name.as_ref()))
 }
 
+/// The plain-data subset of the structured clone, for `__kilnCloneData`: an ordinary object with
+/// the default prototype whose own properties are all enumerable data properties under string
+/// keys, an array with no named properties and no exotic elements, and primitives, which are
+/// shared. `None` for anything else -- including a reserved `@@` key (a symbol or the machine's
+/// own bookkeeping, such as a private field) -- so the caller falls back to the general clone.
+/// Nothing read here can run program code, so giving up half way has no effect to undo.
+fn clone_plain_data(
+    value: &Value,
+    seen: &mut std::collections::HashMap<usize, Value>,
+    depth: usize,
+) -> Option<Value> {
+    const MAX_DEPTH: usize = 512;
+    match value {
+        Value::Undefined
+        | Value::Null
+        | Value::Boolean(_)
+        | Value::Number(_)
+        | Value::String(_)
+        | Value::BigInt(_) => Some(value.clone()),
+        Value::Object(object) => {
+            let identity = Rc::as_ptr(object) as *const () as usize;
+            if let Some(copy) = seen.get(&identity) {
+                return Some(copy.clone());
+            }
+            if depth > MAX_DEPTH {
+                return None;
+            }
+            let entries: Vec<(StringUnits, Value)> = {
+                let data = object.borrow();
+                if data.prototype.is_some()
+                    || data.error_brand
+                    || data.arguments_brand
+                    || !data.extensible
+                    || data.frozen
+                    || data.module_namespace
+                    || !data.namespace_cells.is_empty()
+                    || data.primitive.is_some()
+                    || data.node_events.is_some()
+                    || data.node_object.is_some()
+                    || data.buffer_brand
+                    || data.shadow_realm.is_some()
+                {
+                    return None;
+                }
+                let mut entries = Vec::with_capacity(data.properties.len());
+                for slot in &data.properties {
+                    let Property::Value(item) = &slot.property else {
+                        return None;
+                    };
+                    if !slot.attributes.enumerable
+                        || (slot.key.unit_at(0) == Some(b'@' as u16)
+                            && slot.key.unit_at(1) == Some(b'@' as u16))
+                    {
+                        return None;
+                    }
+                    entries.push((slot.key.clone(), item.clone()));
+                }
+                entries
+            };
+            let copy = Rc::new(RefCell::new(ObjectData::default()));
+            seen.insert(identity, Value::Object(Rc::clone(&copy)));
+            for (key, item) in entries {
+                let item = clone_plain_data(&item, seen, depth + 1)?;
+                copy.borrow_mut()
+                    .define_value_units(&key, item, Attributes::DEFAULT);
+            }
+            Some(Value::Object(copy))
+        }
+        Value::Array(array) => {
+            let identity = Rc::as_ptr(array) as *const () as usize;
+            if let Some(copy) = seen.get(&identity) {
+                return Some(copy.clone());
+            }
+            if depth > MAX_DEPTH
+                || !array.properties.borrow().properties.is_empty()
+                || !array.elements.borrow().is_empty()
+                || array.length.get() != array.items.borrow().len()
+            {
+                return None;
+            }
+            let items = array.items.borrow().clone();
+            let copy = ArrayData::new(Vec::new());
+            seen.insert(identity, Value::Array(Rc::clone(&copy)));
+            let mut cloned = Vec::with_capacity(items.len());
+            for item in &items {
+                cloned.push(match item {
+                    Value::Native(Native::Hole, _) => item.clone(),
+                    _ => clone_plain_data(item, seen, depth + 1)?,
+                });
+            }
+            let holes = cloned
+                .iter()
+                .any(|item| matches!(item, Value::Native(Native::Hole, _)));
+            copy.sparse.set(holes);
+            copy.length.set(cloned.len());
+            *copy.items.borrow_mut() = cloned;
+            Some(Value::Array(copy))
+        }
+        _ => None,
+    }
+}
+
 /// `OrdinaryOwnPropertyKeys`: the string keys, then the symbol keys, each in insertion order.
 ///
 /// Distinct from [`own_property_keys_including_symbols`], which hands back every reserved slot
@@ -49420,15 +49426,9 @@ fn native_js_name(native: &Native) -> String {
         Native::EncodeUriComponent => "encodeURIComponent".to_owned(),
         Native::DecodeUri => "decodeURI".to_owned(),
         Native::DecodeUriComponent => "decodeURIComponent".to_owned(),
-        // The derivation works from the variant's `Debug` spelling, and a variant with a named
-        // field prints the field too -- so these two would be named `transfer { preserve
-        // resizability: true }`. The flag is which method this is, not part of what it is called.
-        Native::ArrayBufferTransfer {
-            preserve_resizability: true,
-        } => "transfer".to_owned(),
-        Native::ArrayBufferTransfer {
-            preserve_resizability: false,
-        } => "transferToFixedLength".to_owned(),
+        Native::ArrayBufferDetachRaw => "__kilnArrayBufferDetach".to_owned(),
+        Native::CloneDataRaw => "__kilnCloneData".to_owned(),
+        Native::JobsPendingRaw => "__kilnJobsPending".to_owned(),
         other => builtin_js_name(&format!("{other:?}")),
     }
 }

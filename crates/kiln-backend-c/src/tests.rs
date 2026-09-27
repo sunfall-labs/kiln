@@ -4401,6 +4401,120 @@ int main(void) {
     );
 }
 
+/// ADR 0071, realms issue 04 step 3: a process-wide site keeps what every realm can read and
+/// forgets, when a realm is torn down, everything that realm is about to free -- its realm-local
+/// shapes, and a realm-local key a list-mode holder was checked by. Which built-ins are modified
+/// is each realm's own record, and a list-mode object's layout token is never reused.
+#[test]
+fn a_site_forgets_a_torn_down_realms_local_shapes_and_keys() {
+    let generated = emit(&program(
+        vec![Constant::String("gamma".into())],
+        vec![
+            Instruction::LoadBuiltin(Builtin::Math),
+            Instruction::GetProperty(0),
+            Instruction::Return,
+        ],
+        0,
+    ))
+    .expect("a unit naming one key emits");
+    let wrapper = r#"
+static kiln_gc_heap *kiln_test_new_heap(void) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)malloc(sizeof *heap);
+    if (heap == NULL) return NULL;
+    kiln_c99_gc_heap_init(heap);
+    heap->enabled = 0;
+    kiln_c99_gc_heap_register(heap);
+    return heap;
+}
+static void kiln_test_enter(kiln_gc_heap *heap) {
+    kiln_test_heap = heap;
+    kiln_test_generation += 1;
+}
+static kiln_c99_site kiln_test_site;
+static int kiln_test_site_names(const kiln_shape *shape, const kiln_string *key) {
+    uint32_t p;
+    for (p = 0; p < kiln_test_site.pic_count; ++p)
+        if (kiln_test_site.entries[p].shape == shape && kiln_test_site.entries[p].key == key) return 1;
+    return 0;
+}
+int main(void) {
+    kiln_gc_heap *first;
+    kiln_gc_heap *second;
+    kiln_shape *root = kiln_c99_shape_root();
+    const kiln_string *alpha, *xray;
+    kiln_shape *a, *ax;
+    kiln_c99_pic_entry held;
+    kiln_value list;
+    kiln_object *level;
+    const kiln_shape *named;
+    uint32_t token, again;
+
+    first = kiln_test_new_heap();
+    if (first == NULL) return 1;
+    kiln_test_enter(first);
+    alpha = kiln_c99_intern_static("alpha", 5);
+    xray = kiln_c99_intern("xray", 4);
+    if (!kiln_c99_key_is_shared(alpha) || kiln_c99_key_is_shared(xray)) return 2;
+    if (!kiln_c99_shape_transition(root, alpha, 0, &a) ||
+        !kiln_c99_shape_transition(a, xray, 0, &ax)) return 3;
+    if (!a->shared || ax->shared) return 4;
+
+    /* Only shared shapes: the site joins no heap. */
+    kiln_c99_site_remember_own(&kiln_test_site, a, 0);
+    if (kiln_test_site.registered != 0) return 5;
+    /* A realm-local shape, and a list-mode holder checked by a realm-local key: it joins. */
+    kiln_c99_site_remember_own(&kiln_test_site, ax, 1);
+    if (kiln_test_site.registered != first->serial) return 6;
+    memset(&held, 0, sizeof held);
+    held.shape = root;
+    held.slot = UINT32_MAX;
+    held.depth = 1;
+    held.key = xray;
+    kiln_c99_site_remember(&kiln_test_site, &held);
+    if (kiln_test_site.pic_count != 3 || !kiln_test_site_names(root, xray)) return 7;
+
+    /* Which built-ins are modified is the realm's own record. */
+    kiln_c99_realm_note_builtin_store(KILN_C99_BUILTIN_MATH);
+    if (!kiln_c99_realm_builtin_modified(KILN_C99_BUILTIN_MATH)) return 8;
+    if (kiln_c99_realm_builtin_modified(KILN_C99_BUILTIN_JSON)) return 9;
+
+    /* A list-mode level's token: issued once, cleared by a mutation, never issued twice. */
+    if (kiln_c99_new_object(&list) != KILN_C99_OK) return 10;
+    level = kiln_c99_object_of(list);
+    if (kiln_c99_ensure_dictionary(level) != KILN_C99_OK || level->shape != NULL) return 11;
+    if (!kiln_c99_pic_name_level(level, &named, &token) || named != NULL || token == 0) return 12;
+    if (!kiln_c99_pic_name_level(level, &named, &again) || again != token) return 13;
+    kiln_c99_prototype_touched(level);
+    if (level->layout_token != 0) return 14;
+    if (!kiln_c99_pic_name_level(level, &named, &again) || again == token) return 15;
+
+    /* A second realm: its own record, and it reads the shared entry the first one left. */
+    second = kiln_test_new_heap();
+    if (second == NULL) return 16;
+    kiln_test_enter(second);
+    if (kiln_c99_realm_builtin_modified(KILN_C99_BUILTIN_MATH)) return 17;
+    if (kiln_c99_site_slot_for(&kiln_test_site, a) != 0) return 18;
+
+    /* The first realm goes: the site forgets its shape and its key, and keeps the shared one. */
+    kiln_c99_gc_teardown_begin(first);
+    kiln_c99_gc_teardown_end(first);
+    if (kiln_test_site.pic_count != 1 || kiln_c99_site_slot_for(&kiln_test_site, a) != 0) return 19;
+    if (kiln_test_site.registered != 0) return 20;
+    if (kiln_test_site.entries[1].shape != NULL || kiln_test_site.entries[2].key != NULL) return 21;
+    kiln_c99_gc_teardown_begin(second);
+    kiln_c99_gc_teardown_end(second);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "site-forgets-local");
+    assert!(
+        run.status.success(),
+        "a site keeping a torn-down realm's shapes or keys ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
 /// Compile one emitted unit with a `main` of the caller's choosing and report its exit code.
 fn run_with_main(generated: &CModule, wrapper: &str, label: &str) -> std::process::Output {
     let executable = std::env::temp_dir().join(format!(

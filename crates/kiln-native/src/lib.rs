@@ -563,6 +563,22 @@ fn prelude_object_options(base: Digest, profile: NativeProfile) -> Digest {
     Digest::hash(&identity)
 }
 
+/// The compile flags an object's cache key must name beyond the profile: `-march=native`, and the
+/// inline-cache oracle `KILN_IC_CHECK` compiles in (`kiln-native-toolchain`). Without the second
+/// an oracle build and an ordinary one shared object keys, so a `KILN_IC_CHECK=1` corpus run could
+/// link objects compiled without the oracle -- and pass having checked nothing -- or an ordinary
+/// build could link the oracle's slower objects.
+fn object_flag_identity(options: &NativeBuildOptions) -> String {
+    let mut identity = String::new();
+    if options.march_native {
+        identity.push_str("\0march-native");
+    }
+    if std::env::var_os("KILN_IC_CHECK").is_some_and(|v| !v.is_empty() && v != "0") {
+        identity.push_str("\0ic-check");
+    }
+    identity
+}
+
 fn pgo_options_fingerprint(options: &NativeBuildOptions) -> String {
     if let Some(dir) = &options.pgo_generate {
         format!("\0pgo-gen:{}", dir.display())
@@ -1009,11 +1025,7 @@ impl NativeBuilder {
         let (launcher_bytes, launcher_source_digest, launcher_generated_c_cache_hit) =
             self.cached_payload(&launcher_source_key, launcher.as_bytes())?;
 
-        let march_opt = if options.march_native {
-            "\0march-native"
-        } else {
-            ""
-        };
+        let march_opt = object_flag_identity(options);
         let pgo_opt = pgo_options_fingerprint(options);
         let module_opt = if profile == NativeProfile::Release {
             release_module_compile_identity(emission.generic_only)
@@ -1383,11 +1395,7 @@ impl NativeBuilder {
         shared_module_source.extend_from_slice(module_wrapper.as_bytes());
         let (module_source, module_source_digest, generated_c_hit) =
             self.cached_payload(&shared_source_key, &shared_module_source)?;
-        let march_opt = if options.march_native {
-            "\0march-native"
-        } else {
-            ""
-        };
+        let march_opt = object_flag_identity(options);
         let object_options = Digest::hash(
             format!(
                 "shared-library\0pic\0c11\0{}\0{}\0generator-{C_GENERATOR_VERSION}{march_opt}",
@@ -1806,11 +1814,7 @@ impl NativeBuilder {
         let (wrapper_bytes, wrapper_source_digest, wrapper_generated_c_hit) =
             self.cached_payload(&wrapper_source_key, wrapper.as_bytes())?;
 
-        let march_opt = if options.march_native {
-            "\0march-native"
-        } else {
-            ""
-        };
+        let march_opt = object_flag_identity(options);
         let module_object_options = module_generic_only
             .iter()
             .map(|&generic_only| {
@@ -2406,11 +2410,7 @@ impl NativeBuilder {
         let (launcher_bytes, launcher_source_digest, launcher_generated_c_cache_hit) =
             self.cached_payload(&launcher_source_key, launcher.as_bytes())?;
 
-        let march_opt = if options.march_native {
-            "\0march-native"
-        } else {
-            ""
-        };
+        let march_opt = object_flag_identity(options);
         let pgo_opt = pgo_options_fingerprint(options);
         let object_options = Digest::hash(
             format!(
@@ -3580,76 +3580,6 @@ if (typeof JSON !== "undefined") {
         Object.defineProperty(Set.prototype, name, { value: methods[name], writable: true,
                                                      configurable: true, enumerable: false });
     }
-}
-
-// `structuredClone`, the HTML structured clone over the values this runtime has: primitives,
-// Date, RegExp, Boolean/Number/String objects, Error, ArrayBuffer and the typed arrays, Map,
-// Set, arrays and plain objects, with cycles preserved. A function, a symbol, a WeakMap or a
-// Proxy is a DataCloneError, as in node. The interpreter has its own in Rust; the emitter reads
-// this one by name (`BuiltinLoad::Global`).
-{
-    const isTypedArray = (v) => ArrayBuffer.isView(v) && !(v instanceof DataView);
-    function DataCloneError(message) {
-        const err = new Error(message);
-        err.name = "DataCloneError";
-        err.code = 25;
-        return err;
-    }
-    function clone(value, seen) {
-        if (value === null || (typeof value !== "object" && typeof value !== "function")) {
-            if (typeof value === "symbol") throw DataCloneError(String(value) + " could not be cloned.");
-            return value;
-        }
-        if (typeof value === "function") throw DataCloneError(String(value).split("\n")[0] + " could not be cloned.");
-        if (seen.has(value)) return seen.get(value);
-        let out;
-        if (value instanceof Date) { out = new Date(value.getTime()); seen.set(value, out); return out; }
-        if (value instanceof RegExp) { out = new RegExp(value.source, value.flags); seen.set(value, out); return out; }
-        if (value instanceof Boolean || value instanceof Number || value instanceof String) {
-            out = Object(value.valueOf()); seen.set(value, out); return out;
-        }
-        if (value instanceof Error) {
-            const ctor = { EvalError, RangeError, ReferenceError, SyntaxError, TypeError, URIError }[value.name] || Error;
-            out = new ctor(value.message);
-            seen.set(value, out);
-            if ("stack" in value) out.stack = value.stack;
-            if ("cause" in value) out.cause = clone(value.cause, seen);
-            return out;
-        }
-        if (value instanceof ArrayBuffer) { out = value.slice(0); seen.set(value, out); return out; }
-        if (isTypedArray(value)) {
-            out = new value.constructor(value); seen.set(value, out); return out;
-        }
-        if (value instanceof DataView) {
-            out = new DataView(value.buffer.slice(0), value.byteOffset, value.byteLength); seen.set(value, out); return out;
-        }
-        if (value instanceof Map) {
-            out = new Map(); seen.set(value, out);
-            for (const [k, v] of value) out.set(clone(k, seen), clone(v, seen));
-            return out;
-        }
-        if (value instanceof Set) {
-            out = new Set(); seen.set(value, out);
-            for (const v of value) out.add(clone(v, seen));
-            return out;
-        }
-        if (Array.isArray(value)) {
-            out = new Array(value.length); seen.set(value, out);
-            for (let i = 0; i < value.length; i++) if (i in value) out[i] = clone(value[i], seen);
-            return out;
-        }
-        if (value instanceof WeakMap || value instanceof WeakSet || value instanceof Promise) {
-            throw DataCloneError('#<' + value.constructor.name + "> could not be cloned.");
-        }
-        out = {}; seen.set(value, out);
-        for (const key of Object.keys(value)) out[key] = clone(value[key], seen);
-        return out;
-    }
-    function structuredClone(value) {
-        if (arguments.length === 0) throw new TypeError("The \"value\" argument must be specified");
-        return clone(value, new Map());
-    }
-    Object.defineProperty(globalThis, "structuredClone", { value: structuredClone, writable: true, configurable: true, enumerable: true });
 }
 
 // `Object.groupBy` and `Map.groupBy` (ES2024), over the iteration protocol; both refused by

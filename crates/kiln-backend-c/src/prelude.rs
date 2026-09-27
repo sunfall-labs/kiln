@@ -1105,6 +1105,15 @@ method_ids! {
     (KILN_C99_METHOD_URL_SET_RAW, 525, Direct; 0, 0),
     (KILN_C99_METHOD_URL_FAST_RAW, 526, Direct; 0, 0),
     (KILN_C99_METHOD_URL_ADOPT_RAW, 527, Direct; 0, 0),
+    // The transfer primitive (ADR 0065, representation; ADR 0070 primitive C), captured and
+    // deleted by `kiln-builtins/src/arraybuffer.ts`.
+    (KILN_C99_METHOD_ARRAY_BUFFER_DETACH_RAW, 532, Direct; 0, 0),
+    // The plain-data fast path of the structured clone (ADR 0065, measured), captured and
+    // deleted by `kiln-builtins/src/structured_clone.ts`.
+    (KILN_C99_METHOD_CLONE_DATA_RAW, 533, Direct; 0, 0),
+    // Whether a microtask checkpoint would run anything now, for message delivery; captured and
+    // deleted by `kiln-builtins/src/web_events_streams.ts`.
+    (KILN_C99_METHOD_JOBS_PENDING_RAW, 534, Direct; 0, 0),
     (KILN_C99_METHOD_PROCESS_EXIT, 513, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC, 514, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC, 515, Direct; 0, 0),
@@ -3701,6 +3710,9 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_URL_SET_RAW),
     emit_method_define!(KILN_C99_METHOD_URL_FAST_RAW),
     emit_method_define!(KILN_C99_METHOD_URL_ADOPT_RAW),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_BUFFER_DETACH_RAW),
+    emit_method_define!(KILN_C99_METHOD_CLONE_DATA_RAW),
+    emit_method_define!(KILN_C99_METHOD_JOBS_PENDING_RAW),
     emit_method_define!(KILN_C99_METHOD_PROCESS_EXIT),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC),
@@ -4414,7 +4426,8 @@ static int kiln_c99_is_typed_array_member(int byte_view, const char *key, size_t
 /* Whether a name is a member of `ArrayBuffer.prototype` *in the language* that this backend does
  * not answer -- the same question `kiln_c99_is_typed_array_member` asks one type over. */
 static int kiln_c99_is_array_buffer_member(const char *key, size_t key_len) {
-    /* detached, maxByteLength, resizable, transfer, and transferToFixedLength are answered by arraybuffer.ts. */
+    /* detached is answered by the instance read; transfer and transferToFixedLength by arraybuffer.ts
+     * over __kilnArrayBufferDetach; maxByteLength and resizable are absent (no resizable buffers). */
     static const char *const members[] = {"immutable",
                                           "resize",
                                           "sliceToImmutable",
@@ -4579,22 +4592,13 @@ pub fn runtime_prelude_header() -> &'static str {
     static FOR_UNITS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     FOR_UNITS.get_or_init(|| {
         let mut text = PRELUDE_HEADER.replace(
-            "static uint64_t kiln_c99_proto_epoch;",
-            "extern uint64_t kiln_c99_proto_epoch __attribute__((visibility(\"hidden\")));",
+            "static uint64_t kiln_c99_builtin_store_epoch;",
+            "extern uint64_t kiln_c99_builtin_store_epoch __attribute__((visibility(\"hidden\")));",
         );
         assert!(
             text != PRELUDE_HEADER,
-            "the prototype epoch's definition moved"
+            "the built-in store summary's definition moved"
         );
-        for (definition, declaration) in [
-            (
-                "static const kiln_object *kiln_c99_object_prototype_store;",
-                "extern const kiln_object *kiln_c99_object_prototype_store __attribute__((visibility(\"hidden\")));",
-            ),
-        ] {
-            assert!(text.contains(definition), "{definition} moved");
-            text = text.replace(definition, declaration);
-        }
         let json_document =
             "static int kiln_c99_json_document(const kiln_string *source, kiln_val *out);";
         assert!(
@@ -4675,8 +4679,6 @@ fn build_runtime_prelude_source(src: &str) -> String {
         "kiln_c99_process",
         "kiln_c99_atomics",
         "kiln_c99_builtin_store_epoch",
-        "kiln_c99_proto_epoch",
-        "kiln_c99_object_prototype_store",
     ];
 
     for line in src.lines() {
@@ -4775,11 +4777,10 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ),
     // Per thread, and trusted only under the realm generation it was filled under.
     ("kiln_c99_realm_cached", C99StateOwner::Realm),
-    ("kiln_c99_builtin_store_epoch", C99StateOwner::Realm),
+    // ADR 0071: only whether *some* realm has modified *some* built-in; which ones a realm has
+    // modified is on its heap, and no cache entry holds a value of this.
+    ("kiln_c99_builtin_store_epoch", C99StateOwner::Process),
     ("kiln_c99_bytes_cache", C99StateOwner::Realm),
-    ("kiln_c99_proto_epoch", C99StateOwner::Realm),
-    // This realm's Object.prototype store, scanned live by remembered read misses.
-    ("kiln_c99_object_prototype_store", C99StateOwner::Realm),
     // Per thread, and trusted only for the heap it was built under: the `node:http` layouts.
     ("kiln_c99_node_http_layouts", C99StateOwner::Realm),
     ("kiln_c99_gc_stress_checks", C99StateOwner::Process),

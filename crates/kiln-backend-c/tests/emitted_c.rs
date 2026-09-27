@@ -1007,8 +1007,11 @@ fn runtime_prelude_size() {
     // class instances past accessor prototypes (+220), node:http req/res built from fixed shaped
     // layouts (+337) -- and main's builtins over the same days (+85). Measured per branch; the
     // three deltas sum to the total, so nothing is emitted twice.
+    // Widened on 2026-09-26, at 51,085 lines: the shape edge index and raised fan-out ceiling,
+    // absent-path hits through Object.prototype's live store, the immediate-equality fast path
+    // and their comments (perf/objmodel-miss-literal, about +180 over main's 50,9xx).
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 51_000;
+    const CEILING_LINES: usize = 51_600;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

@@ -1570,7 +1570,7 @@ fn emit_sunk_bridge(
             }
             writeln!(
                 output,
-                "    if (KILN_UNLIKELY(kiln_sp_src->shape != kiln_sp_shape_{v})) {{ kiln_sp_shape_{v} = kiln_sp_src->shape;{relearn} }}"
+                "    if (KILN_UNLIKELY(kiln_sp_src->shape != kiln_sp_shape_{v})) {{ kiln_sp_shape_{v} = kiln_sp_src->shape->shared ? kiln_sp_src->shape : NULL;{relearn} }}"
             )
             .unwrap();
             for &field_idx in scalar_obj.fields.values() {

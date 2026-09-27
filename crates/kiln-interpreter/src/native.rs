@@ -155,7 +155,6 @@ pub enum Native {
     /// `new TextEncoder().encode(text)`.
     TextEncoderConstructor,
     TextEncoderEncode,
-    StructuredClone,
     /// Any of `node:fs`'s synchronous entry points. One variant because they all end the same
     /// way: this realm's filesystem is Tokio-owned and asynchronous, so none of them can answer,
     /// and which one was asked for adds nothing to that.
@@ -745,16 +744,15 @@ pub enum Native {
     SharedArrayBufferConstructor,
     ArrayBufferGrow,
     ArrayBufferSlice,
-    /// `transfer` and `transferToFixedLength`: move the bytes into a new buffer and detach this
-    /// one.
-    ///
-    /// One marker with a flag rather than two, because the pair differ in exactly one decision
-    /// -- whether the buffer that comes out may still be resized -- and everything else about
-    /// them, down to the byte copy and the detach, is the same operation. `preserve` carries
-    /// the receiver's ceiling across, which is what makes `rab.transfer()` still resizable.
-    ArrayBufferTransfer {
-        preserve_resizability: bool,
-    },
+    /// `__kilnArrayBufferDetach(buffer, length, preserveResizability)`: move the bytes into a new
+    /// buffer and detach this one -- the primitive under `transfer`, `transferToFixedLength` and
+    /// every transfer list, which are the shared bootstrap's.
+    ArrayBufferDetachRaw,
+    /// `__kilnCloneData(value)`: the structured clone's plain-data fast path, which this engine
+    /// never takes (it answers `undefined`, "not handled").
+    CloneDataRaw,
+    /// `__kilnJobsPending()`: whether a microtask checkpoint would run anything now.
+    JobsPendingRaw,
     ArrayBufferIsView,
     /// `%TypedArray%`: the abstract constructor the nine view constructors inherit from.
     ///
