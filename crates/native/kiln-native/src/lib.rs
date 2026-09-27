@@ -465,6 +465,22 @@ fn dce_release_graph_to_fixpoint(
     Ok((graph, demand))
 }
 
+/// The `parallelMap` site records the emitter wrote into one generated module (all of its
+/// chunks), for `NativeBuildReport::parallel_sites`.
+fn parallel_sites_of(
+    module: &kiln_backend_c::CModule,
+) -> Vec<kiln_backend_c::parallel::SiteRecord> {
+    let mut sites = kiln_backend_c::parallel::SiteRecord::parse_all(&module.source);
+    for chunk in &module.chunks {
+        for site in kiln_backend_c::parallel::SiteRecord::parse_all(chunk) {
+            if !sites.contains(&site) {
+                sites.push(site);
+            }
+        }
+    }
+    sites
+}
+
 // Select the budget only on a generated-C cache miss. Warm builds must not rerun liveness,
 // and the cache payload must remember the actual policy used to compile the emitted body.
 fn emit_graph_module_for_profile(
@@ -936,6 +952,14 @@ impl NativeBuilder {
             emission.type_profile = Some(std::sync::Arc::new(profile));
         }
         let module = emit_with_policy(program, emission.clone())?;
+        let parallel_sites: Vec<(String, Vec<kiln_backend_c::parallel::SiteRecord>)> = {
+            let sites = parallel_sites_of(&module);
+            if sites.is_empty() {
+                Vec::new()
+            } else {
+                vec![("<main>".to_owned(), sites)]
+            }
+        };
         let launcher = launcher_source(&module.symbol)?;
         let emit_elapsed = emit_started.elapsed();
         let runtime = runtime_source();
@@ -1094,6 +1118,7 @@ impl NativeBuilder {
                     launcher_generated_c_cache_hit,
                     provider_capabilities,
                     required_provider_capabilities,
+                    parallel_sites,
                 });
             }
         }
@@ -1276,6 +1301,7 @@ impl NativeBuilder {
             launcher_generated_c_cache_hit,
             provider_capabilities,
             required_provider_capabilities,
+            parallel_sites,
         })
     }
 
@@ -2267,6 +2293,14 @@ impl NativeBuilder {
             generated_c_hits.push(generated_c_hit);
             modules.push((node, emitted));
         }
+        let parallel_sites: Vec<(String, Vec<kiln_backend_c::parallel::SiteRecord>)> = modules
+            .iter()
+            .zip(&logical_paths)
+            .filter_map(|((_, module), path)| {
+                let sites = parallel_sites_of(module);
+                (!sites.is_empty()).then(|| (path.clone(), sites))
+            })
+            .collect();
         let (bootstrap, bootstrap_program) = native_builtin_bootstrap_module(
             &emission,
             options.node,
@@ -2569,6 +2603,7 @@ impl NativeBuilder {
                     launcher_generated_c_cache_hit,
                     provider_capabilities,
                     required_provider_capabilities,
+                    parallel_sites,
                 });
             }
         }
@@ -2783,6 +2818,7 @@ impl NativeBuilder {
             launcher_generated_c_cache_hit,
             provider_capabilities,
             required_provider_capabilities,
+            parallel_sites,
         })
     }
 
@@ -2926,6 +2962,8 @@ impl NativeBuilder {
 
 mod graph;
 use graph::*;
+mod shared_graph;
+use shared_graph::*;
 
 /// Parse the `KILN_WORKERS` environment setting, matching the launcher's `kiln_cli_worker_count` C logic.
 ///

@@ -78,10 +78,10 @@ why; and a program that uses only Node's surface can never tell the extensions e
 | # | title | status |
 | --- | --- | --- |
 | 01 | [Mark kiln extensions and add the switch that removes them](issues/01-extension-mark-and-switch.md) | ready-for-agent |
-| 02 | [The parallel/sequential differential harness](issues/02-differential-harness.md) | ready-for-agent |
-| 03 | [`kiln build --explain-parallel`](issues/03-explain-parallel.md) | ready-for-agent |
+| 02 | [The parallel/sequential differential harness](issues/02-differential-harness.md) | resolved |
+| 03 | [`kiln build --explain-parallel`](issues/03-explain-parallel.md) | in progress (`kiln check` remains) |
 | 04 | [Cost model and thread budget](issues/04-cost-model-and-thread-budget.md) | ready-for-agent |
-| 05 | [Tier 1: read captured values](issues/05-tier-1-captured-values.md) | ready-for-agent |
+| 05 | [Tier 1: read captured values](issues/05-tier-1-captured-values.md) | resolved |
 | 06 | [The no-write read path](issues/06-no-write-read-path.md) | ready-for-agent |
 | 07 | [Tier 2: read the heap](issues/07-tier-2-read-the-heap.md) | ready-for-agent |
 | 08 | [Tier 3: worker arenas and allocation](issues/08-tier-3-worker-arenas.md) | ready-for-agent |
@@ -89,6 +89,7 @@ why; and a program that uses only Node's surface can never tell the extensions e
 | 10 | [The parallel family](issues/10-parallel-family.md) | ready-for-agent |
 | 11 | [Benchmarks on realistic workloads](issues/11-benchmarks.md) | ready-for-agent |
 | 12 | [User documentation](issues/12-user-documentation.md) | ready-for-agent |
+| 13 | [Parallel code in every module and every build profile](issues/13-parallel-code-in-every-module.md) | ready-for-agent, first |
 
 ADR 0069 was accepted on 2026-09-26. 06 and 08 are built on ADR 0070's shared region and transfer
 (realms issues 08 and 10).

@@ -55,7 +55,7 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
         for (index = 0; index < KILN_C99_SURFACE_MEMBER_COUNT && status == KILN_C99_OK; ++index) {
             const kiln_builtin_member *member = &kiln_c99_builtin_members[index];
             size_t len;
-            if (member->builtin != builtin) {
+            if (member->builtin != builtin || kiln_c99_builtin_row_withheld(index)) {
                 continue;
             }
             len = strlen(member->name);

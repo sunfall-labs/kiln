@@ -466,8 +466,16 @@ int kiln_realm_runtime_report(uint64_t *out_fields, uint64_t capacity, uint64_t 
     *out_count = 0;
     return KILN_C99_INVALID_ARGUMENT;
 }
-void *kiln_realm_gc_current_heap(void) { return NULL; }
-const uint64_t *kiln_realm_generation_slot(void) { static uint64_t generation = 1; return &generation; }
+/* A test may host heaps of its own (`kiln_test_heap`), switching between them by bumping
+ * `kiln_test_generation` the way a realm entry does; by default there is none. */
+static void *kiln_test_heap;
+static uint64_t kiln_test_generation = 1;
+void *kiln_realm_gc_current_heap(void) { return kiln_test_heap; }
+const uint64_t *kiln_realm_generation_slot(void) { return &kiln_test_generation; }
+void *kiln_realm_process_shared(uint64_t size) {
+    static union { uint64_t align; unsigned char bytes[4096]; } block;
+    return size <= sizeof block.bytes ? (void *)block.bytes : NULL;
+}
 int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap) {
     /* The fixture has no realm heap: every unit collects nothing and keeps its fallback heap. */
     (void)hooks;
@@ -745,7 +753,7 @@ int kiln_node_fs_rmdir_sync(const uint8_t *path, uint64_t path_len, int32_t *out
 /// the headed `kiln_string` ABI, whose definition lives in `HEADER`'s prefix, while the calls
 /// in the prelude see `foundation.c`'s forward declarations. A definition may follow its
 /// calls; a use of an undeclared type may not, so this order is the only one that compiles.
-fn linked_source(module_source: &str, wrapper: &str) -> String {
+pub(crate) fn linked_source(module_source: &str, wrapper: &str) -> String {
     format!(
         "#if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)\n\
              #define _POSIX_C_SOURCE 200809L\n\

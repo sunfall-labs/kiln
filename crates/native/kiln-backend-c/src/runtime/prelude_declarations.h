@@ -30,6 +30,8 @@ extern const kiln_string *kiln_c99_intern_static(const char *bytes, size_t len);
 extern const kiln_string *kiln_c99_intern(const char *bytes, size_t len);
 extern const kiln_string *kiln_c99_intern_key(const kiln_string *view);
 extern const kiln_string *kiln_c99_intern_static_key(const kiln_string *view);
+extern int kiln_c99_register_static_keys(const kiln_string *const *keys, const kiln_string **out,
+                                         size_t count);
 extern const kiln_string *kiln_c99_interned_key_in(struct kiln_gc_heap *heap,
                                                    const kiln_string *view);
 #if defined(__GNUC__) || defined(__clang__)
@@ -90,6 +92,8 @@ extern const kiln_string *kiln_c99_intern(const char *bytes, size_t len);
 extern const kiln_string *kiln_c99_intern_static(const char *bytes, size_t len);
 extern const kiln_string *kiln_c99_intern_key(const kiln_string *view);
 extern const kiln_string *kiln_c99_intern_static_key(const kiln_string *view);
+extern int kiln_c99_register_static_keys(const kiln_string *const *keys, const kiln_string **out,
+                                         size_t count);
 extern void kiln_c99_gc_release(void *payload);
 extern void kiln_c99_gc_result_roots(void *opaque, void *context, int phase);
 extern int kiln_c99_new_object(kiln_value *out);
@@ -117,6 +121,8 @@ extern int kiln_c99_define_named_fast(kiln_val target, kiln_val key, kiln_val va
 extern int kiln_c99_spread_object_fast(kiln_val target, kiln_val source, int *status);
 extern int kiln_c99_val_promise_resolve(kiln_val value, kiln_val *out);
 extern uint64_t kiln_c99_builtin_store_epoch __attribute__((visibility("hidden")));
+/* Whether this process installs kiln's own members (ADR 0068); `parallelMap`'s lowerings ask. */
+extern int kiln_c99_kiln_extensions_on(void);
 extern int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len, kiln_property **out);
 extern int kiln_c99_own_slot_key(kiln_value target, const kiln_string *key,
                                  const kiln_string *ikey, kiln_property **out);

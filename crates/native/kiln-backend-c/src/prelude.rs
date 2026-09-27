@@ -1220,6 +1220,31 @@ pub struct BuiltinMember {
     /// `"(KILN_C99_METHOD_OBJECT_KEYS)"`. Carried so a guard can join a row against the C it
     /// generates without parsing the macro invocation back out of this file.
     pub answers: &'static str,
+    /// Whether the row is one of kiln's own members rather than the language's (ADR 0068):
+    /// installed by default, left out by `KILN_EXTENSIONS=0` or `kiln build
+    /// --no-kiln-extensions`. Written on the row as a trailing `kiln_extension` and held equal to
+    /// `kiln_builtin_surface::KILN_EXTENSIONS` by [`assert_surface_is_covered`], so a member
+    /// cannot be marked on one side only.
+    pub kiln_extension: bool,
+}
+
+/// `kiln_extension` on a [`builtin_surface!`] row, as the Rust flag and as the emitted C flag.
+macro_rules! kiln_extension_flag {
+    () => {
+        false
+    };
+    (kiln_extension) => {
+        true
+    };
+}
+
+macro_rules! kiln_extension_c_flag {
+    () => {
+        "0,"
+    };
+    (kiln_extension) => {
+        "1,"
+    };
 }
 
 macro_rules! builtin_member_row {
@@ -1298,8 +1323,11 @@ macro_rules! builtin_member_row {
 ///
 /// Rows are declared in the interpreter's own order, because that order is what
 /// `Object.getOwnPropertyNames` reports on both sides and agreeing costs nothing here.
+///
+/// A trailing `kiln_extension` marks one of kiln's own members (ADR 0068); see
+/// [`BuiltinMember::kiln_extension`].
 macro_rules! builtin_surface {
-    ($(($builtin:ident, $owner:literal, $name:literal, $kind:tt $args:tt)),* $(,)?) => {
+    ($(($builtin:ident, $owner:literal, $name:literal, $kind:tt $args:tt $(, $extension:ident)?)),* $(,)?) => {
         /// Every member the emitted C answers for, by owner. See [`BuiltinMember`].
         pub const BUILTIN_SURFACE: &[BuiltinMember] = &[
             $(BuiltinMember {
@@ -1307,11 +1335,16 @@ macro_rules! builtin_surface {
                 name: $name,
                 kind: stringify!($kind),
                 answers: stringify!($args),
+                kiln_extension: kiln_extension_flag!($($extension)?),
             },)*
         ];
 
         macro_rules! emit_builtin_surface_rows {
             () => { concat!($(builtin_member_row!($builtin, $name, $kind $args)),*) };
+        }
+
+        macro_rules! emit_builtin_extension_flags {
+            () => { concat!($(kiln_extension_c_flag!($($extension)?)),*) };
         }
     };
 }
@@ -1532,7 +1565,8 @@ builtin_surface! {
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "length", num("0.0")),
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "constructor", ctor(KILN_C99_BUILTIN_ARRAY)),
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "map", code(KILN_C99_METHOD_ARRAY_GENERIC_MAP)),
-    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "parallelMap", code(KILN_C99_METHOD_ARRAY_PARALLEL_MAP)),
+    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "parallelMap", code(KILN_C99_METHOD_ARRAY_PARALLEL_MAP),
+     kiln_extension),
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "forEach", code(KILN_C99_METHOD_FOR_EACH)),
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "filter", code(KILN_C99_METHOD_ARRAY_GENERIC_FILTER)),
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "reduce", code(KILN_C99_METHOD_REDUCE)),
@@ -1921,6 +1955,24 @@ const fn assert_surface_is_covered(surface: &[BuiltinMember], backlog: &[Builtin
                  either declare it there so both engines have it, or drop the row"
             );
         }
+        index += 1;
+    }
+
+    // A kiln extension is marked on its row exactly when the shared description declares it one
+    // (ADR 0068): the switch that removes them reads the row's mark, so a mark missing here would
+    // leave the member installed under `KILN_EXTENSIONS=0`, and a stray one would remove a member
+    // of the language.
+    index = 0;
+    while index < surface.len() {
+        assert!(
+            surface[index].kiln_extension
+                == kiln_builtin_surface::is_kiln_extension(
+                    surface[index].owner,
+                    surface[index].name
+                ),
+            "a BUILTIN_SURFACE row's `kiln_extension` mark disagrees with \
+             kiln_builtin_surface::KILN_EXTENSIONS"
+        );
         index += 1;
     }
 
@@ -2555,7 +2607,9 @@ const _: () = assert_refusals_name_themselves(
 /// out at the `kiln_c99_static_text(prefix, strlen(prefix))` call in definitions.c.
 /// Seven left on 2026-09-26 with the `node:http` lazy-header probes (six header-buffer scans,
 /// now `memchr`) and the request-method table (lengths now stored beside the names).
-pub const C_STRING_LENGTH_SITES: usize = 72;
+/// One added the same day by `kiln_c99_register_builtin_keys` (surface.c), which measures a
+/// surface row's `name`: a C string literal out of the generated table, as its other readers do.
+pub const C_STRING_LENGTH_SITES: usize = 73;
 
 /// How far the `strlen(` scan may skip after reading the last byte of its seven-byte window:
 /// the Horspool shift, as `refusal_scan_shift` is for the refusal scan, so the const evaluator
@@ -4158,8 +4212,16 @@ static int kiln_c99_iterator_prototype_gap(const char *key, size_t key_len) {
     return 0;
 }
 
+static int kiln_c99_extension_withheld(uint64_t builtin, const char *key, size_t key_len);
+
+/* An array's methods by name. A kiln extension the realm withholds (ADR 0068) is not one of them,
+ * so `[].parallelMap` reads `undefined` under `KILN_EXTENSIONS=0` exactly as it does in Node. */
 static uint64_t kiln_c99_array_method(const char *key, size_t key_len) {
-    return kiln_c99_lookup_method_group(key, key_len, KILN_C99_GROUP_ARRAY_LOOKUP);
+    uint64_t code = kiln_c99_lookup_method_group(key, key_len, KILN_C99_GROUP_ARRAY_LOOKUP);
+    if (code != 0 && kiln_c99_extension_withheld(KILN_C99_BUILTIN_ARRAY_PROTOTYPE, key, key_len)) {
+        return 0;
+    }
+    return code;
 }
 
 /* Whether a name is a member of `Array.prototype` *in the language*, and the same question for
@@ -4185,6 +4247,11 @@ static int kiln_c99_is_array_member(const char *key, size_t key_len) {
         "toLocaleString", "toReversed", "toSorted", "toSpliced", "toString", "unshift", "values",
         "with"};
     size_t index;
+    /* A withheld kiln extension is not a member at all (ADR 0068), which is the answer that keeps
+     * a read of it `undefined` rather than a refusal. */
+    if (kiln_c99_extension_withheld(KILN_C99_BUILTIN_ARRAY_PROTOTYPE, key, key_len)) {
+        return 0;
+    }
     for (index = 0; index < sizeof members / sizeof *members; ++index) {
         if (kiln_c99_same_name(key, key_len, members[index])) {
             return 1;
@@ -4442,6 +4509,16 @@ static const kiln_builtin_member kiln_c99_builtin_members[] = {
 #define KILN_C99_SURFACE_MEMBER_COUNT \
     (sizeof kiln_c99_builtin_members / sizeof *kiln_c99_builtin_members)
 
+/* One flag per row above: 1 where the row is one of kiln's own members rather than the
+ * language's (ADR 0068), from the row's `kiln_extension` mark, which the Rust build holds equal to
+ * `kiln_builtin_surface::KILN_EXTENSIONS`. `kiln_c99_builtin_row_withheld` in `surface.c` is the
+ * one place it is read. */
+static const unsigned char kiln_c99_builtin_member_is_extension[] = {
+"#,
+    emit_builtin_extension_flags!(),
+    r#"
+};
+
 /* The members this backend knows the language has and it does not answer, by the global that owns
  * them. Generated from the same declaration as the Rust list, so the two cannot disagree.
  *
@@ -4697,8 +4774,12 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_gc_stress_checks", C99StateOwner::Process),
     ("kiln_c99_introspect_pending", C99StateOwner::Process),
     ("kiln_c99_introspect_armed", C99StateOwner::Process),
-    ("kiln_c99_root_shape", C99StateOwner::Constant),
+    // The process-shared block (ADR 0071): shared keys and the shape root, one per process.
+    // Each unit caches the pointer to it; the block itself is the provider archive's.
+    ("kiln_c99_shared_block", C99StateOwner::Process),
     ("kiln_c99_speculate_mode", C99StateOwner::Process),
+    // ADR 0068: whether this process installs kiln's own members, read from the environment once.
+    ("kiln_c99_kiln_extensions_state", C99StateOwner::Process),
     ("kiln_c99_node_stdin_paused", C99StateOwner::Process),
     ("kiln_c99_node_stdin_read_active", C99StateOwner::Process),
     ("kiln_c99_node_stdin_request", C99StateOwner::Process),

@@ -215,6 +215,10 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
 
     let is_test = matches!(invocation.command, Command::Test { .. });
     env::load_project_env(&root, is_test);
+    // `KILN_EXTENSIONS=0` (ADR 0068) is a property of the process that runs the program, and both
+    // engines read it once per process. A resident daemon was started with its own environment,
+    // so a command that asks for the switch is served in this process instead, where it applies.
+    let one_shot = one_shot || !kiln_builtin_surface::kiln_extensions_installed();
 
     let auto_node = |explicit: bool| -> bool {
         explicit
@@ -349,13 +353,15 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             node,
             march_native: _,
             explain,
+            no_kiln_extensions,
+            explain_parallel,
             static_link,
             pgo_generate,
             pgo_use,
         } => {
             let node = if shared { false } else { auto_node(node) };
             let mut backend = open(one_shot, &socket)?;
-            report(commands::build(
+            let mut built = commands::build(
                 backend.as_mut(),
                 &path,
                 &root,
@@ -363,11 +369,16 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                 profile,
                 shared,
                 node,
-                explain,
+                explain || explain_parallel,
+                no_kiln_extensions,
                 static_link,
                 pgo_generate.as_deref(),
                 pgo_use.as_deref(),
-            )?)
+            )?;
+            if explain_parallel && !explain {
+                built.text = render::parallel_explanation_only(&built.text);
+            }
+            report(built)
         }
         Command::Check { path, node } => {
             let node = auto_node(node);

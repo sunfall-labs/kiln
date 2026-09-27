@@ -96,3 +96,6 @@ Before committing, `origin/main` had advanced to `fa213915` with fourteen additi
 including overlapping runtime changes. The passing gate above validates the recorded input base
 plus this change, not that newer upstream tree. Integration with newer main requires a separate
 conflict review and validation; it must not be treated as already tested.
+
+The subsequent integration and its independent validation are recorded in
+[integration review](integration-review.md).

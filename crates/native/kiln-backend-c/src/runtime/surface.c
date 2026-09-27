@@ -40,6 +40,52 @@ static int kiln_c99_backlog_names(const char *owner, const char *key, size_t key
     return 0;
 }
 
+/* KILN EXTENSIONS (ADR 0068). kiln installs members Node does not have -- `parallelMap` first --
+ * and every one of them can be removed with one switch, for the rare program that audits the
+ * built-ins: `KILN_EXTENSIONS=0` in the environment of any run, or a binary built with
+ * `kiln build --no-kiln-extensions`, which defines `KILN_REALM_NO_EXTENSIONS` for this unit and
+ * then never installs them whatever its environment says.
+ *
+ * Which members are extensions is not decided here: each is a surface row marked
+ * `kiln_extension`, which the Rust build holds equal to `kiln_builtin_surface::KILN_EXTENSIONS`,
+ * and the functions below are the only readers of that mark. Read once per process, like the
+ * interpreter's `kiln_extensions_installed`: a program's surface does not change while it runs. */
+static int kiln_c99_kiln_extensions_state;
+
+static int kiln_c99_kiln_extensions_on(void) {
+#if defined(KILN_REALM_NO_EXTENSIONS)
+    return 0;
+#else
+    if (kiln_c99_kiln_extensions_state == 0) {
+        const char *value = getenv("KILN_EXTENSIONS");
+        kiln_c99_kiln_extensions_state = value != NULL && strcmp(value, "0") == 0 ? 2 : 1;
+    }
+    return kiln_c99_kiln_extensions_state == 1;
+#endif
+}
+
+/* Whether surface row `row` is a kiln extension this process leaves out. */
+static int kiln_c99_builtin_row_withheld(size_t row) {
+    return kiln_c99_builtin_member_is_extension[row] != 0 && !kiln_c99_kiln_extensions_on();
+}
+
+/* Whether `builtin.key` is a kiln extension this process leaves out: the question for the lookups
+ * that answer by name rather than by row (`kiln_c99_array_method`, `kiln_c99_is_array_member`). */
+static int kiln_c99_extension_withheld(uint64_t builtin, const char *key, size_t key_len) {
+    size_t index;
+    if (kiln_c99_kiln_extensions_on()) {
+        return 0;
+    }
+    for (index = 0; index < KILN_C99_SURFACE_MEMBER_COUNT; ++index) {
+        const kiln_builtin_member *member = &kiln_c99_builtin_members[index];
+        if (kiln_c99_builtin_member_is_extension[index] != 0 && member->builtin == builtin &&
+            kiln_c99_same_name(key, key_len, member->name)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* Whether this built-in's surface is table-driven at all.
  *
  * The ones that are not -- the prototype method tables, `Temporal`'s eight types, the typed-array
@@ -94,14 +140,21 @@ static int kiln_c99_builtin_member_entry_before(const kiln_builtin_member_entry 
 
 static void kiln_c99_builtin_member_index_build(void) {
     size_t index;
+    size_t len = 0;
     for (index = 0; index < KILN_C99_SURFACE_MEMBER_COUNT; ++index) {
         const kiln_builtin_member *member = &kiln_c99_builtin_members[index];
-        kiln_c99_builtin_member_index[index].builtin = member->builtin;
-        kiln_c99_builtin_member_index[index].name = member->name;
-        kiln_c99_builtin_member_index[index].len = member->name != NULL ? strlen(member->name) : 0;
-        kiln_c99_builtin_member_index[index].row = index;
+        /* A withheld kiln extension (ADR 0068) never enters the index, so every lookup through it
+         * -- read, call, `in`, `hasOwnProperty`, descriptors -- misses it exactly as on Node. */
+        if (kiln_c99_builtin_row_withheld(index)) {
+            continue;
+        }
+        kiln_c99_builtin_member_index[len].builtin = member->builtin;
+        kiln_c99_builtin_member_index[len].name = member->name;
+        kiln_c99_builtin_member_index[len].len = member->name != NULL ? strlen(member->name) : 0;
+        kiln_c99_builtin_member_index[len].row = index;
+        ++len;
     }
-    for (index = 1; index < KILN_C99_SURFACE_MEMBER_COUNT; ++index) {
+    for (index = 1; index < len; ++index) {
         kiln_builtin_member_entry pending = kiln_c99_builtin_member_index[index];
         size_t behind = index;
         while (behind > 0 &&
@@ -111,7 +164,7 @@ static void kiln_c99_builtin_member_index_build(void) {
         }
         kiln_c99_builtin_member_index[behind] = pending;
     }
-    kiln_c99_builtin_member_index_len = KILN_C99_SURFACE_MEMBER_COUNT;
+    kiln_c99_builtin_member_index_len = len;
     kiln_c99_builtin_member_index_ready = 1;
 }
 
@@ -318,4 +371,52 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
     default:
         return 0;
     }
+}
+
+/* ---- The built-ins' keys, registered before the first realm (ADR 0071) -----------------------
+ *
+ * The keys the prelude itself writes onto objects it builds, which no unit's constant table need
+ * name: every string-keyed member of the surface table, the per-request hot keys, the `node:http`
+ * layouts, and the handful the object-building paths spell (iterator results, property
+ * descriptors, errors, functions). Registered once per process, by whichever prelude copy's
+ * constructor runs first, and only before any heap exists (see `kiln_c99_register_static_keys`);
+ * a name missing here is not wrong, it is merely realm-local while a second realm is alive.
+ *
+ * Deliberately not the method-code table: 2.7k codes named through a linear surface lookup is
+ * a measurable cost before `main` in a program that starts in under 3 ms, and a method a program
+ * reaches by name is a constant of the unit that names it, which the unit registers. `@@` names
+ * are reserved slots reached through a Symbol, not string keys, and are left to that path. */
+static int kiln_c99_node_register_keys(kiln_shared_state *process);
+
+#define KILN_C99_OBJECT_BUILDING_KEYS(X)                                                          \
+    X("value") X("done") X("writable") X("enumerable") X("configurable") X("get") X("set")      \
+    X("length") X("name") X("prototype") X("constructor") X("message") X("stack") X("cause")    \
+    X("errors") X("code")
+
+static void kiln_c99_register_builtin_keys(void) __attribute__((constructor));
+static void kiln_c99_register_builtin_keys(void) {
+    kiln_shared_state *process = kiln_c99_process();
+    int registered = 1;
+    size_t index;
+    kiln_c99_process_lock(process);
+    if (process->builtins_registered || process->live_heaps != 0) {
+        kiln_c99_process_unlock(process);
+        return;
+    }
+    for (index = 0; registered && index < KILN_C99_HOT_KEY_COUNT; ++index)
+        registered = kiln_c99_register_static_text(process, kiln_c99_hot_key_text[index],
+                                                   kiln_c99_hot_key_len[index]);
+    for (index = 0; registered && index < KILN_C99_SURFACE_MEMBER_COUNT; ++index) {
+        const char *name = kiln_c99_builtin_members[index].name;
+        if (name == NULL || (name[0] == '@' && name[1] == '@')) continue;
+        registered = kiln_c99_register_static_text(process, name, strlen(name));
+    }
+#define KILN_C99_REGISTER_OBJECT_BUILDING_KEY(text)                                               \
+    if (registered) registered = kiln_c99_register_static_text(process, text, sizeof(text) - 1);
+    KILN_C99_OBJECT_BUILDING_KEYS(KILN_C99_REGISTER_OBJECT_BUILDING_KEY)
+#undef KILN_C99_REGISTER_OBJECT_BUILDING_KEY
+    if (registered) registered = kiln_c99_node_register_keys(process);
+    /* Out of memory leaves the rest to the run-time path; a later copy need not try again. */
+    process->builtins_registered = 1;
+    kiln_c99_process_unlock(process);
 }

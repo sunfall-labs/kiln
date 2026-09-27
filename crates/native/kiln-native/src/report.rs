@@ -74,6 +74,11 @@ pub struct NativeBuildReport {
     /// Engines the retained program actually requires. This can be a strict subset of the
     /// supplied set until a finer-grained packaged variant is available.
     pub required_provider_capabilities: crate::ProviderCapabilities,
+    /// Every `parallelMap` call site and what the emitter decided for it, per module (its
+    /// project-relative path; `<main>` for a single-program build), read back from the
+    /// generated C the build compiled -- see `kiln_backend_c::parallel::SiteRecord`. Modules
+    /// with no site are left out.
+    pub parallel_sites: Vec<(String, Vec<kiln_backend_c::parallel::SiteRecord>)>,
 }
 
 /// Cache facts for an embedded scalar shared library.

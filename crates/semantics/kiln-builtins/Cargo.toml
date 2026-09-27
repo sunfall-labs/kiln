@@ -9,5 +9,6 @@ repository.workspace = true
 kiln-module-resolver = { workspace = true }
 
 [dev-dependencies]
+kiln-builtin-surface = { workspace = true }
 kiln-frontend-oxc = { workspace = true }
 kiln-ir = { workspace = true }

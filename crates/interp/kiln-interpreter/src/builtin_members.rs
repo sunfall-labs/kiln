@@ -650,10 +650,16 @@ pub(super) const TYPED_ARRAY_GENERIC_METHODS: [&str; 28] = [
 ];
 
 /// The static spelling of one of those names, which is what a marker can carry.
+///
+/// Extensions are omitted when this process withholds them, so the marker's surface matches the
+/// installed prototype.
 pub(super) fn typed_array_generic(name: &str) -> Option<&'static str> {
     TYPED_ARRAY_GENERIC_METHODS
         .into_iter()
         .find(|method| *method == name)
+        .filter(|method| {
+            !kiln_builtin_surface::is_withheld_extension("%TypedArray%.prototype", method)
+        })
 }
 
 /// The methods on `ArrayBuffer.prototype`, for the same reason.
@@ -870,7 +876,7 @@ pub(super) fn object_method_value(
 }
 
 pub(super) fn object_property(name: &str) -> Value {
-    let Some(member) = kiln_builtin_surface::find_prototype_member(
+    let Some(member) = kiln_builtin_surface::installed_prototype_member(
         kiln_builtin_surface::PrototypeId::Object,
         name,
     ) else {
@@ -962,7 +968,7 @@ pub(super) fn intrinsic_owns(native: Native, key: &str) -> Option<Value> {
 }
 
 pub(super) fn tabulated_object_property(name: &str) -> Value {
-    let Some(member) = kiln_builtin_surface::find_prototype_member(
+    let Some(member) = kiln_builtin_surface::installed_prototype_member(
         kiln_builtin_surface::PrototypeId::Object,
         name,
     ) else {
@@ -996,7 +1002,7 @@ pub(super) fn inherit_from_object(table: PrototypeTable, found: Value, name: &st
 
 /// What `Boolean.prototype` answers, and what a boolean primitive finds through it.
 pub(super) fn boolean_method(name: &str) -> Value {
-    let Some(member) = kiln_builtin_surface::find_prototype_member(
+    let Some(member) = kiln_builtin_surface::installed_prototype_member(
         kiln_builtin_surface::PrototypeId::Boolean,
         name,
     ) else {
@@ -1018,7 +1024,7 @@ pub(super) fn boolean_method(name: &str) -> Value {
 
 /// What `BigInt.prototype` answers.
 pub(super) fn bigint_method(name: &str) -> Value {
-    let Some(member) = kiln_builtin_surface::find_prototype_member(
+    let Some(member) = kiln_builtin_surface::installed_prototype_member(
         kiln_builtin_surface::PrototypeId::BigInt,
         name,
     ) else {
@@ -1044,7 +1050,7 @@ pub(super) fn bigint_method(name: &str) -> Value {
 
 /// What `Promise.prototype` answers, and what a promise finds through it.
 pub(super) fn promise_method(name: &str) -> Value {
-    let Some(member) = kiln_builtin_surface::find_prototype_member(
+    let Some(member) = kiln_builtin_surface::installed_prototype_member(
         kiln_builtin_surface::PrototypeId::Promise,
         name,
     ) else {

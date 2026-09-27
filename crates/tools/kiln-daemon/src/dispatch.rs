@@ -196,6 +196,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             profile,
             source_view: _,
             explain,
+            no_kiln_extensions,
             static_link,
             pgo_generate,
             pgo_use,
@@ -212,6 +213,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
                         profile,
                         node,
                         explain,
+                        no_kiln_extensions,
                         static_link,
                         pgo_gen,
                         pgo_u,
@@ -224,6 +226,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
                             output,
                             profile,
                             explain,
+                            no_kiln_extensions,
                             static_link,
                             pgo_gen,
                             pgo_u,
@@ -1643,6 +1646,7 @@ pub(crate) fn native_build_program(
     output: Option<String>,
     profile: NativeProfile,
     explain: bool,
+    no_kiln_extensions: bool,
     static_link: bool,
     pgo_generate: Option<PathBuf>,
     pgo_use: Option<PathBuf>,
@@ -1676,7 +1680,8 @@ pub(crate) fn native_build_program(
         &kiln_native::NativeBuildOptions {
             output,
             profile: native_profile(profile),
-            realm: kiln_native::NativeRealmPolicy::host_clock(),
+            realm: kiln_native::NativeRealmPolicy::host_clock()
+                .without_kiln_extensions(no_kiln_extensions),
             march_native: false,
             static_link,
             pgo_generate,
@@ -1686,7 +1691,13 @@ pub(crate) fn native_build_program(
     ) {
         Ok(report) => {
             let explanation = if explain {
-                Some(kiln_backend_c::facts::analyze_program(&program, Some(&path)).format_explain())
+                // The parallel section first: `--explain-parallel` keeps it and drops the rest.
+                let mut text =
+                    kiln_backend_c::parallel::format_explain_section(&report.parallel_sites, &path);
+                text.push_str(
+                    &kiln_backend_c::facts::analyze_program(&program, Some(&path)).format_explain(),
+                );
+                Some(text)
             } else {
                 None
             };
@@ -1823,6 +1834,7 @@ pub(crate) fn native_build_graph(
     profile: NativeProfile,
     node: bool,
     explain: bool,
+    no_kiln_extensions: bool,
     static_link: bool,
     pgo_generate: Option<PathBuf>,
     pgo_use: Option<PathBuf>,
@@ -1856,7 +1868,8 @@ pub(crate) fn native_build_graph(
         &kiln_native::NativeBuildOptions {
             output,
             profile: native_profile(profile),
-            realm: kiln_native::NativeRealmPolicy::host_clock(),
+            realm: kiln_native::NativeRealmPolicy::host_clock()
+                .without_kiln_extensions(no_kiln_extensions),
             march_native: false,
             static_link,
             pgo_generate,
@@ -1866,7 +1879,10 @@ pub(crate) fn native_build_graph(
     ) {
         Ok(report) => {
             let explanation = if explain {
-                let mut text = kiln_backend_c::facts::analyze_graph(graph).format_explain();
+                // The parallel section first: `--explain-parallel` keeps it and drops the rest.
+                let mut text =
+                    kiln_backend_c::parallel::format_explain_section(&report.parallel_sites, &path);
+                text.push_str(&kiln_backend_c::facts::analyze_graph(graph).format_explain());
                 // Out-of-band attribution: failures here must never fail the
                 // build, so each section is skipped rather than propagated.
                 if let Ok(demand) = kiln_liveness::executable_demand(

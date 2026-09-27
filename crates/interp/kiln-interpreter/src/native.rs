@@ -1313,7 +1313,7 @@ impl Native {
             },
             PrototypeTable::Boolean => boolean_method(name),
             PrototypeTable::Symbol => {
-                if let Some(member) = kiln_builtin_surface::find_prototype_member(
+                if let Some(member) = kiln_builtin_surface::installed_prototype_member(
                     kiln_builtin_surface::PrototypeId::Symbol,
                     name,
                 ) {

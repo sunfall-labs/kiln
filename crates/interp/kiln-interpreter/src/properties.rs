@@ -218,7 +218,7 @@ pub(super) fn function_method_value(
 
 /// The same three with the realm's store left out: what `Function.prototype` was *built* with.
 pub(super) fn tabulated_function_property(name: &str) -> Value {
-    let Some(member) = kiln_builtin_surface::find_prototype_member(
+    let Some(member) = kiln_builtin_surface::installed_prototype_member(
         kiln_builtin_surface::PrototypeId::Function,
         name,
     ) else {
@@ -272,9 +272,10 @@ pub(super) fn map_method_value(method: kiln_builtin_surface::MapMethod, realm: R
 }
 
 pub(super) fn tabulated_map_property(name: &str) -> Value {
-    let Some(member) =
-        kiln_builtin_surface::find_prototype_member(kiln_builtin_surface::PrototypeId::Map, name)
-    else {
+    let Some(member) = kiln_builtin_surface::installed_prototype_member(
+        kiln_builtin_surface::PrototypeId::Map,
+        name,
+    ) else {
         return Value::Undefined;
     };
     match member.binding {
@@ -340,9 +341,10 @@ pub(super) fn set_method_value(method: kiln_builtin_surface::SetMethod, realm: R
 }
 
 pub(super) fn tabulated_set_property(name: &str) -> Value {
-    let Some(member) =
-        kiln_builtin_surface::find_prototype_member(kiln_builtin_surface::PrototypeId::Set, name)
-    else {
+    let Some(member) = kiln_builtin_surface::installed_prototype_member(
+        kiln_builtin_surface::PrototypeId::Set,
+        name,
+    ) else {
         return Value::Undefined;
     };
     match member.binding {
@@ -389,7 +391,7 @@ pub(super) fn weak_map_method_value(
 }
 
 pub(super) fn tabulated_weak_map_property(name: &str) -> Value {
-    let Some(member) = kiln_builtin_surface::find_prototype_member(
+    let Some(member) = kiln_builtin_surface::installed_prototype_member(
         kiln_builtin_surface::PrototypeId::WeakMap,
         name,
     ) else {
@@ -421,7 +423,7 @@ pub(super) fn weak_set_method_value(
 }
 
 pub(super) fn tabulated_weak_set_property(name: &str) -> Value {
-    let Some(member) = kiln_builtin_surface::find_prototype_member(
+    let Some(member) = kiln_builtin_surface::installed_prototype_member(
         kiln_builtin_surface::PrototypeId::WeakSet,
         name,
     ) else {
@@ -1734,7 +1736,7 @@ impl Intrinsics {
                 _ => unreachable!(),
             };
             let mut data = ObjectData::default();
-            for member in kiln_builtin_surface::prototype_members(proto_id) {
+            for member in kiln_builtin_surface::installed_prototype_members(proto_id) {
                 let key_str = match member.key {
                     kiln_builtin_surface::MemberKey::Named(name) => name,
                     kiln_builtin_surface::MemberKey::Symbol(sym) => sym.property_key(),
@@ -2367,7 +2369,7 @@ pub(super) fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String,
         PrototypeTable::WeakSet => Some(kiln_builtin_surface::PrototypeId::WeakSet),
         _ => None,
     } {
-        return kiln_builtin_surface::prototype_members(proto_id)
+        return kiln_builtin_surface::installed_prototype_members(proto_id)
             .filter_map(|member| {
                 let name = match member.key {
                     kiln_builtin_surface::MemberKey::Named(name) => name,
@@ -3322,7 +3324,7 @@ pub(super) fn intrinsic_own_attributes(target: &Value, key: &str) -> Option<Attr
             PrototypeTable::WeakSet => kiln_builtin_surface::PrototypeId::WeakSet,
             _ => unreachable!(),
         };
-        return kiln_builtin_surface::find_prototype_member(proto_id, key).map(|member| {
+        return kiln_builtin_surface::installed_prototype_member(proto_id, key).map(|member| {
             Attributes {
                 writable: member.attributes.writable,
                 enumerable: member.attributes.enumerable,

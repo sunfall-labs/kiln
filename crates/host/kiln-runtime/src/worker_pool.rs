@@ -478,7 +478,7 @@ impl<H: RealmHostProvider + 'static> WorkerPool<H> {
                     }
                 };
 
-                let executor = runtime.drive_executor();
+                let executor = std::rc::Rc::clone(runtime.executor());
                 let mut registry = ActorRegistry::<H>::default();
 
                 executor.block_on(async {

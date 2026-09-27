@@ -7,6 +7,9 @@ Final status: the follow-up fixed the allocation abort and the full gate is gree
 failure evidence below is retained; see [quality and resource review](quality-and-resource-review.md)
 for the fix, final gate evidence and timing limitations.
 
+The subsequent merge of newer upstream work is reviewed separately in
+[integration review](integration-review.md); the measurements below describe the original input.
+
 ## Trees and tools
 
 - Input commit: `30c1d54831c1200c59dec20c16ee2b18d8f2595f`.

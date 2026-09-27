@@ -1,6 +1,7 @@
 
-static struct kiln_shape *kiln_c99_shape_root(void) {
-    return &kiln_c99_root_shape;
+/* The one process-wide root (ADR 0071), in the shared block every unit reaches. */
+static inline struct kiln_shape *kiln_c99_shape_root(void) {
+    return &kiln_c99_process()->root;
 }
 
 static int kiln_c99_shape_find_slot(const kiln_shape *shape, const kiln_string *ikey, uint32_t *out_slot) {
@@ -79,48 +80,144 @@ static int kiln_c99_is_class_brand_key(const kiln_string *key) {
     return 1;
 }
 
-static int kiln_c99_shape_transition(kiln_shape *current, const kiln_string *ikey, int is_double, kiln_shape **out_shape) {
-    kiln_shape_transition *tr;
-    kiln_shape *next_shape;
-    size_t i;
-    if (current == NULL || ikey == NULL || current->property_count >= KILN_SHAPE_MAX_FAST_PROPERTIES) {
-        return 0;
-    }
-    uint32_t expected_bit = is_double ? (1u << current->property_count) : 0;
-    for (i = 0; i < 2 && i < current->num_transitions; ++i) {
+/* ---- Transitions (ADR 0050, shared per ADR 0071) --------------------------------------------
+ *
+ * A shape's own edges (two inline, the rest a list) name children of the same kind as the edge
+ * warrants: a shared shape's own edges are by shared keys to shared children only, published with
+ * release stores under the process lock because any realm's thread may add one while another
+ * reads; a realm-local shape's own edges lead to realm-local children. A realm-local edge out of
+ * a shared shape -- a key of the realm's own, or a child the realm owns -- lives in the realm
+ * heap's side table instead, so no realm ever follows an edge into another realm's memory. */
+static kiln_shape *kiln_c99_shape_inline_edge(const kiln_shape *current, uint32_t count,
+                                              const kiln_string *ikey, uint32_t bit,
+                                              uint32_t expected_bit) {
+    uint32_t i;
+    for (i = 0; i < 2 && i < count; ++i) {
         if (current->inline_trans_ikey[i] == ikey) {
             kiln_shape *cand = current->inline_trans_next[i];
-            if ((cand->double_slots_mask & (1u << current->property_count)) == expected_bit) {
-                *out_shape = cand;
-                return 1;
-            }
+            if ((cand->double_slots_mask & bit) == expected_bit) return cand;
         }
     }
-    for (tr = current->transitions; tr != NULL; tr = tr->next_transition) {
+    return NULL;
+}
+
+static kiln_shape *kiln_c99_shape_list_edge(const kiln_shape *current, const kiln_string *ikey,
+                                            uint32_t bit, uint32_t expected_bit) {
+    const kiln_shape_transition *tr;
+    for (tr = __atomic_load_n(&current->transitions, __ATOMIC_ACQUIRE); tr != NULL;
+         tr = tr->next_transition) {
         if (tr->ikey == ikey) {
             kiln_shape *cand = tr->next;
-            if ((cand->double_slots_mask & (1u << current->property_count)) == expected_bit) {
-                *out_shape = cand;
-                return 1;
-            }
+            if ((cand->double_slots_mask & bit) == expected_bit) return cand;
         }
     }
-    /* A shape stops growing branches at 32: past that its objects go to dictionary mode rather
-     * than make every miss walk a long list. A class brand (`@@private:<scope>:%brand`) is the
-     * exception, because it is the first property of every instance of every class, so every
-     * class hangs its branch off the root shape -- and a realm whose bootstrap already defines a
-     * few dozen classes had filled the root before the program's first `new`, which left every
-     * instance of every later class a dictionary from its first field on. A program has as many
-     * brands as it has classes, which bounds the list; the ceiling below only keeps it finite. */
-    if (current->num_transitions >= 32 &&
-        (current->num_transitions >= 1024 || !kiln_c99_is_class_brand_key(ikey))) {
+    return NULL;
+}
+
+static size_t kiln_c99_local_edge_home(const kiln_shape *parent, const kiln_string *key,
+                                       size_t mask) {
+    uint64_t hash = ((uint64_t)(uintptr_t)parent * UINT64_C(0x9e3779b97f4a7c15)) ^
+                    ((uint64_t)(uintptr_t)key * UINT64_C(0xff51afd7ed558ccd));
+    hash ^= hash >> 29;
+    return (size_t)hash & mask;
+}
+
+/* The side-table row for `parent` and `key` whose child agrees on the double bit, or with a NULL
+ * `key` the parent's count row. */
+static kiln_c99_local_edge *kiln_c99_local_edge_row(const kiln_gc_heap *heap,
+                                                    const kiln_shape *parent,
+                                                    const kiln_string *key, uint32_t bit,
+                                                    uint32_t expected_bit) {
+    size_t mask;
+    size_t at;
+    if (heap->local_edge_count == 0) return NULL;
+    mask = heap->local_edge_capacity - 1;
+    at = kiln_c99_local_edge_home(parent, key, mask);
+    for (;;) {
+        kiln_c99_local_edge *row = &heap->local_edges[at];
+        if (row->parent == NULL) return NULL;
+        if (row->parent == parent && row->key == key &&
+            (key == NULL || (row->child->double_slots_mask & bit) == expected_bit))
+            return row;
+        at = (at + 1) & mask;
+    }
+}
+
+static void kiln_c99_local_edge_place(kiln_c99_local_edge *rows, size_t capacity,
+                                      kiln_c99_local_edge row) {
+    size_t mask = capacity - 1;
+    size_t at = kiln_c99_local_edge_home(row.parent, row.key, mask);
+    while (rows[at].parent != NULL) at = (at + 1) & mask;
+    rows[at] = row;
+}
+
+static int kiln_c99_local_edge_reserve(kiln_gc_heap *heap) {
+    kiln_c99_local_edge *grown;
+    size_t capacity;
+    size_t index;
+    if ((heap->local_edge_count + 1) * 2 <= heap->local_edge_capacity) return 1;
+    capacity = heap->local_edge_capacity == 0 ? 64 : heap->local_edge_capacity * 2;
+    grown = (kiln_c99_local_edge *)calloc(capacity, sizeof *grown);
+    if (grown == NULL) return 0;
+    for (index = 0; index < heap->local_edge_capacity; ++index)
+        if (heap->local_edges[index].parent != NULL)
+            kiln_c99_local_edge_place(grown, capacity, heap->local_edges[index]);
+    free(heap->local_edges);
+    heap->local_edges = grown;
+    heap->local_edge_capacity = capacity;
+    return 1;
+}
+
+/* How many realm-local edges `parent` has in this heap. */
+static uint32_t kiln_c99_local_edge_count(const kiln_gc_heap *heap, const kiln_shape *parent) {
+    const kiln_c99_local_edge *row = kiln_c99_local_edge_row(heap, parent, NULL, 0, 0);
+    return row == NULL ? 0 : (uint32_t)(uintptr_t)row->child;
+}
+
+static int kiln_c99_local_edge_insert(kiln_gc_heap *heap, const kiln_shape *parent,
+                                      const kiln_string *key, kiln_shape *child) {
+    kiln_c99_local_edge *count_row;
+    kiln_c99_local_edge row;
+    /* Room for the edge and, at most, a new count row. */
+    if (!kiln_c99_local_edge_reserve(heap)) return 0;
+    heap->local_edge_count += 1;
+    if (!kiln_c99_local_edge_reserve(heap)) {
+        heap->local_edge_count -= 1;
         return 0;
     }
-    next_shape = (kiln_shape *)calloc(1, sizeof(kiln_shape));
-    if (next_shape == NULL) {
-        return 0;
+    row.parent = parent;
+    row.key = key;
+    row.child = child;
+    kiln_c99_local_edge_place(heap->local_edges, heap->local_edge_capacity, row);
+    count_row = kiln_c99_local_edge_row(heap, parent, NULL, 0, 0);
+    if (count_row != NULL) {
+        count_row->child = (kiln_shape *)(uintptr_t)((uintptr_t)count_row->child + 1);
+    } else {
+        row.key = NULL;
+        row.child = (kiln_shape *)(uintptr_t)1;
+        kiln_c99_local_edge_place(heap->local_edges, heap->local_edge_capacity, row);
+        heap->local_edge_count += 1;
     }
-    kiln_c99_pin_interned_key(ikey);
+    return 1;
+}
+
+/* A shape stops growing branches at 32: past that its objects go to dictionary mode rather than
+ * make every miss walk a long list. A class brand (`@@private:<scope>:%brand`) is the exception,
+ * because it is the first property of every instance of every class, so every class hangs its
+ * branch off the root shape -- and a realm whose bootstrap already defines a few dozen classes
+ * had filled the root before the program's first `new`, which left every instance of every later
+ * class a dictionary from its first field on. A program has as many brands as it has classes,
+ * which bounds the list; the ceiling below only keeps it finite. `unbounded` is the runtime's own
+ * fixed layouts, which must not depend on how many branches a program grew first. */
+static int kiln_c99_shape_edge_room(uint32_t edges, const kiln_string *ikey, int unbounded) {
+    if (unbounded) return 1;
+    return !(edges >= 32 && (edges >= 1024 || !kiln_c99_is_class_brand_key(ikey)));
+}
+
+static kiln_shape *kiln_c99_shape_child(kiln_shape *current, const kiln_string *ikey,
+                                        uint32_t expected_bit) {
+    kiln_shape *next_shape = (kiln_shape *)calloc(1, sizeof(kiln_shape));
+    if (next_shape == NULL) return NULL;
     next_shape->parent = current;
     next_shape->ikey = ikey;
     next_shape->has_symbol_key = current->has_symbol_key ||
@@ -133,25 +230,115 @@ static int kiln_c99_shape_transition(kiln_shape *current, const kiln_string *ike
     memcpy((void *)next_shape->keys, (const void *)current->keys,
            current->property_count * sizeof(const kiln_string *));
     next_shape->keys[current->property_count] = ikey;
+    return next_shape;
+}
 
-    if (current->num_transitions < 2) {
-        current->inline_trans_ikey[current->num_transitions] = ikey;
-        current->inline_trans_next[current->num_transitions] = next_shape;
+/* Add `next` to `current`'s own edges. The child is complete before either store that makes it
+ * reachable, and the count is stored last, so a reader that loads the count with acquire sees
+ * every edge it counts. A shared parent is only ever linked under the process lock. */
+static int kiln_c99_shape_link(kiln_shape *current, const kiln_string *ikey, kiln_shape *next) {
+    uint32_t count = current->num_transitions;
+    if (count < 2) {
+        current->inline_trans_next[count] = next;
+        current->inline_trans_ikey[count] = ikey;
     } else {
-        kiln_shape_transition *new_tr = (kiln_shape_transition *)calloc(1, sizeof(kiln_shape_transition));
-        if (new_tr == NULL) {
-            free(next_shape);
-            return 0;
-        }
+        kiln_shape_transition *new_tr =
+            (kiln_shape_transition *)calloc(1, sizeof(kiln_shape_transition));
+        if (new_tr == NULL) return 0;
         new_tr->ikey = ikey;
-        new_tr->next = next_shape;
+        new_tr->next = next;
         new_tr->next_transition = current->transitions;
-        current->transitions = new_tr;
+        __atomic_store_n(&current->transitions, new_tr, __ATOMIC_RELEASE);
     }
-    current->num_transitions++;
+    __atomic_store_n(&current->num_transitions, count + 1, __ATOMIC_RELEASE);
+    return 1;
+}
 
+static int kiln_c99_shape_add(kiln_shape *current, const kiln_string *ikey, int is_double,
+                              int unbounded, kiln_shape **out_shape) {
+    uint32_t bit = 1u << current->property_count;
+    uint32_t expected_bit = is_double ? bit : 0;
+    int key_shared = kiln_c99_key_is_shared(ikey);
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    kiln_shape *next_shape;
+    uint32_t edges;
+    if (current->shared && key_shared) {
+        kiln_shared_state *process = kiln_c99_process();
+        kiln_c99_process_lock(process);
+        /* Another thread may have added it since the unlocked look. */
+        next_shape = kiln_c99_shape_inline_edge(current, current->num_transitions, ikey, bit,
+                                                expected_bit);
+        if (next_shape == NULL)
+            next_shape = kiln_c99_shape_list_edge(current, ikey, bit, expected_bit);
+        if (next_shape == NULL) {
+            edges = current->num_transitions +
+                    (heap != NULL ? kiln_c99_local_edge_count(heap, current) : 0);
+            if (kiln_c99_shape_edge_room(edges, ikey, unbounded) &&
+                (next_shape = kiln_c99_shape_child(current, ikey, expected_bit)) != NULL) {
+                next_shape->shared = 1;
+                if (!kiln_c99_shape_link(current, ikey, next_shape)) {
+                    free(next_shape);
+                    next_shape = NULL;
+                }
+            }
+        }
+        kiln_c99_process_unlock(process);
+        if (next_shape == NULL) return 0;
+        *out_shape = next_shape;
+        return 1;
+    }
+    if (heap == NULL) return 0;
+    edges = __atomic_load_n(&current->num_transitions, __ATOMIC_ACQUIRE);
+    if (current->shared) edges += kiln_c99_local_edge_count(heap, current);
+    if (!kiln_c99_shape_edge_room(edges, ikey, unbounded)) return 0;
+    next_shape = kiln_c99_shape_child(current, ikey, expected_bit);
+    if (next_shape == NULL) return 0;
+    if (current->shared ? !kiln_c99_local_edge_insert(heap, current, ikey, next_shape)
+                        : !kiln_c99_shape_link(current, ikey, next_shape)) {
+        free(next_shape);
+        return 0;
+    }
+    /* A realm-local key is pinned: shapes are memory the collector never traces, and this one
+     * names the key for as long as the heap lives. */
+    if (!key_shared) kiln_c99_pin_interned_key(ikey);
+    next_shape->owned_next = heap->local_shapes;
+    heap->local_shapes = next_shape;
     *out_shape = next_shape;
     return 1;
+}
+
+static int kiln_c99_shape_transition_ex(kiln_shape *current, const kiln_string *ikey,
+                                        int is_double, int unbounded, kiln_shape **out_shape) {
+    uint32_t bit;
+    uint32_t expected_bit;
+    kiln_shape *next_shape;
+    if (current == NULL || ikey == NULL || current->property_count >= KILN_SHAPE_MAX_FAST_PROPERTIES) {
+        return 0;
+    }
+    bit = 1u << current->property_count;
+    expected_bit = is_double ? bit : 0;
+    next_shape = kiln_c99_shape_inline_edge(
+        current, __atomic_load_n(&current->num_transitions, __ATOMIC_ACQUIRE), ikey, bit,
+        expected_bit);
+    if (next_shape == NULL && current->shared) {
+        const kiln_gc_heap *heap = kiln_c99_gc_heap();
+        if (heap != NULL && heap->local_edge_count != 0) {
+            const kiln_c99_local_edge *row =
+                kiln_c99_local_edge_row(heap, current, ikey, bit, expected_bit);
+            if (row != NULL) next_shape = row->child;
+        }
+    }
+    if (next_shape == NULL) next_shape = kiln_c99_shape_list_edge(current, ikey, bit, expected_bit);
+    if (next_shape != NULL) {
+        *out_shape = next_shape;
+        return 1;
+    }
+    return kiln_c99_shape_add(current, ikey, is_double, unbounded, out_shape);
+}
+
+static int kiln_c99_shape_transition(kiln_shape *current, const kiln_string *ikey, int is_double,
+                                     kiln_shape **out_shape) {
+    return kiln_c99_shape_transition_ex(current, ikey, is_double, 0, out_shape);
 }
 
 static int kiln_c99_ensure_dictionary(kiln_object *object) {
@@ -256,7 +443,7 @@ static int kiln_c99_new_object(kiln_value *out) {
     object->cache_holder = 0;
     object->accessor_count = 0;
     object->read_only_seen = 0;
-    object->shape = &kiln_c99_root_shape;
+    object->shape = kiln_c99_shape_root();
     object->slots = object->inline_slots;
     object->slot_capacity = KILN_C99_INLINE_SLOTS;
     for (size_t slot_i = 0; slot_i < KILN_C99_INLINE_SLOTS; ++slot_i) {
@@ -316,7 +503,7 @@ static int kiln_c99_new_object_tenured(kiln_value *out) {
     object->cache_holder = 0;
     object->accessor_count = 0;
     object->read_only_seen = 0;
-    object->shape = &kiln_c99_root_shape;
+    object->shape = kiln_c99_shape_root();
     object->slots = object->inline_slots;
     object->slot_capacity = KILN_C99_INLINE_SLOTS;
     for (size_t slot_i = 0; slot_i < KILN_C99_INLINE_SLOTS; ++slot_i) {

@@ -76,8 +76,8 @@ The targets in the second and last rows are the ones to measure first; issue 01 
 | # | title | status |
 | --- | --- | --- |
 | 01 | [Measure what a realm costs and what state is process-global](issues/01-measure-realm-cost.md) | resolved |
-| 02 | [`worker_threads` stubs refuse instead of doing nothing](issues/02-worker-threads-stubs-refuse.md) | ready-for-agent |
-| 03 | [Implement ADR 0040: the executor split](issues/03-executor-split.md) | ready-for-agent |
+| 02 | [`worker_threads` stubs refuse instead of doing nothing](issues/02-worker-threads-stubs-refuse.md) | ready-for-agent (on branch, awaiting the final check) |
+| 03 | [Implement ADR 0040: the executor split](issues/03-executor-split.md) | resolved |
 | 04 | [All realm state reachable from the realm: shared keys, shared shapes, caches restated, atomic publication, the realm context](issues/04-realm-context.md) | ready-for-agent |
 | 05 | [Several pinned realms in one process](issues/05-several-realms-per-process.md) | ready-for-agent |
 | 06 | [`node:worker_threads` on realms](issues/06-worker-threads.md) | ready-for-agent |
@@ -87,7 +87,20 @@ The targets in the second and last rows are the ones to measure first; issue 01 
 | 10 | [Ownership transfer](issues/10-ownership-transfer.md) | ready-for-agent |
 | 11 | [Immutable shared structs: the API](issues/11-immutable-structs-api.md) | needs-triage |
 | 12 | [Actors: the API](issues/12-actors-api.md) | needs-triage |
-| 13 | [Benchmarks against Node, Bun and Go](issues/13-benchmarks.md) | ready-for-agent |
+| 13 | [Benchmarks against Node, Bun and Go](issues/13-benchmarks.md) | ready-for-agent (baseline recorded) |
+| 14 | [In-realm messaging at Node's speed](issues/14-in-realm-messaging-speed.md) | ready-for-agent |
+| 15 | [Many concurrent tasks in one realm](issues/15-many-tasks-scaling.md) | ready-for-agent |
+| 16 | [`{ code: i * 3 }` in a loop fails to compile natively](issues/16-object-literal-in-loop-compile-bug.md) | ready-for-agent |
 
 ADR 0070 was accepted on 2026-09-26; nothing here waits on a decision except the two API ADRs
 (11, 12).
+
+## Performance checks owed
+
+Changes to hot paths landed while the machine was loaded by parallel builds, so their benchmarks
+were inconclusive. They are re-measured together on a quiet machine before this plan closes:
+
+- `036d288d` the executor split (issue 03);
+- the shared keys and shapes of issue 04 steps 1 and 2;
+- step 1b's key registration before `main`: startup time of large bundles (thirdparty `typescript`,
+  `babel`) before and after.

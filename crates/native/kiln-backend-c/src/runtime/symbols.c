@@ -182,7 +182,7 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
         view.unit_len = (uint32_t)key.len;
         view.flags = KILN_STRING_LATIN1;
         view.data = key.bytes;
-        symbol->key = kiln_c99_intern_static_key(&view);
+        symbol->key = kiln_c99_intern_pinned_key(&view);
         if (symbol->key == NULL) {
             free(key.bytes);
             kiln_c99_gc_release(symbol);
@@ -274,7 +274,7 @@ static int kiln_c99_symbol_for(kiln_value *out, kiln_value key) {
     property_view.unit_len = (uint32_t)property_len;
     property_view.flags = KILN_STRING_LATIN1;
     property_view.data = property_key;
-    symbol->key = kiln_c99_intern_static_key(&property_view);
+    symbol->key = kiln_c99_intern_pinned_key(&property_view);
     free(property_key);
     if (symbol->key == NULL) {
         kiln_c99_gc_release(symbol);

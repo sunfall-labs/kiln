@@ -1489,7 +1489,7 @@ fn compact_module_with_many_keys_uses_dense_static_key_array_and_loop() {
     assert!(
         emitted
             .source
-            .contains("static const kiln_string *const ku_static_keys[6] = {")
+            .contains("static const kiln_string *const ku_key_sources[6] = {")
     );
     assert!(
         emitted
@@ -1499,15 +1499,24 @@ fn compact_module_with_many_keys_uses_dense_static_key_array_and_loop() {
     assert!(
         emitted
             .source
-            .contains("if ((ku_keys[i] = kiln_c99_intern_static_key(ku_static_keys[i])) == NULL) return KILN_C99_OUT_OF_MEMORY;")
+            .contains("if ((ku_keys[i] = kiln_c99_intern_static_key(ku_key_sources[i])) == NULL) return KILN_C99_OUT_OF_MEMORY;")
     );
+    assert!(emitted.source.contains(
+        "if (!kiln_c99_register_static_keys(ku_key_sources, ku_keys, (size_t)6)) return;"
+    ));
 
     let wrapper = r#"
 int main(void) {
     kiln_host host;
     memset(&host, 0, sizeof(host));
     kiln_value result = kiln_c99_undefined();
-    int status = ku_body(&host, &result, NULL, 0, NULL, 0);
+    int status;
+    if (ku_keys_shared != 1 || ku_keys_ready != 1) return 4;
+    for (size_t i = 0; i < 6; ++i) {
+        if (ku_keys[i] == NULL || !kiln_c99_key_is_shared(ku_keys[i])) return 5;
+    }
+    status = ku_body(&host, &result, NULL, 0, NULL, 0);
+    (void)status;
     if (ku_keys_ready != 1) return 2;
     for (size_t i = 0; i < 6; ++i) {
         if (ku_keys[i] == NULL) return 3;

@@ -411,6 +411,24 @@ pub(super) fn emit_graph_op(
             )
             .unwrap();
         }
+        // The parallel clone (tier 1, ADR 0069): a captured binding written once arrives as the
+        // `double` the call site read and guarded on the realm thread; the worker never touches
+        // the cell.
+        GraphOp::LoadUpvalue(index) if ctx.parallel => {
+            let d_stmt = if live_typed {
+                format!("d{v} = cap{index}; ")
+            } else {
+                String::new()
+            };
+            writeln!(
+                output,
+                "    {d_stmt}v{v} = kiln_c99_val_from_double(cap{index});"
+            )
+            .unwrap();
+            if live_typed_int {
+                writeln!(output, "    i{v} = (int64_t)cap{index};").unwrap();
+            }
+        }
         GraphOp::LoadUpvalue(_) if spec.arrays.contains(&vid) => {
             writeln!(output, "    v{v} = kiln_spec_{v};").unwrap();
         }

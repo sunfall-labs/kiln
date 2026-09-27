@@ -192,6 +192,16 @@ thread_local! {
     static PARALLEL_CLONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// The upvalue indices, ascending, whose values the parallel clone of proto `index` takes as
+/// `double cap<k>` parameters after its own (tier 1, ADR 0069). Empty for a proto that
+/// captures nothing or does not qualify.
+pub fn parallel_captures(plan: &crate::direct::CallPlan, index: usize) -> Vec<u32> {
+    match plan.parallel.get(index) {
+        Some(Ok(shape)) => shape.captures.clone(),
+        _ => Vec::new(),
+    }
+}
+
 /// Whether the parallel clone is being emitted on this thread.
 pub fn parallel_clone() -> bool {
     PARALLEL_CLONE.with(|c| c.get())
@@ -218,14 +228,28 @@ pub fn emit_parallel_chunk(
     symbol: &str,
     index: usize,
     parameter_count: u32,
+    captures: &[u32],
     should_chunk: bool,
 ) {
     use std::fmt::Write as _;
     let linkage = if should_chunk { "" } else { "static " };
-    let index_arg = if parameter_count == 2 {
-        ", (double)i"
+    let mut index_arg = if parameter_count == 2 {
+        ", (double)i".to_owned()
     } else {
-        ""
+        String::new()
+    };
+    // Tier 1 (ADR 0069): `ctx` is `struct { int failed; double caps[N]; }`, the captured values
+    // the call site read and guarded on the realm thread, in the clone's `cap<k>` order.
+    let caps_decl = if captures.is_empty() {
+        String::new()
+    } else {
+        for j in 0..captures.len() {
+            index_arg.push_str(&format!(", pmap_caps[{j}]"));
+        }
+        format!(
+            "    const double * pmap_caps = ((const struct {{ int failed; double caps[{}]; }} *)ctx)->caps;\n",
+            captures.len()
+        )
     };
     writeln!(
         output,
@@ -245,7 +269,7 @@ static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
     return (uint8_t)rounded;\n\
 }}\n\
 {linkage}void __attribute__((unused)) {symbol}_pmap_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
-    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n{caps_decl}\
     const kiln_val * restrict in_arr = (const kiln_val * restrict)in;\n\
     kiln_val * restrict out_arr = (kiln_val * restrict)out;\n\
     int failed = 0;\n\
@@ -259,7 +283,7 @@ static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
     if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
 }}\n\
 {linkage}void __attribute__((unused)) {symbol}_pmap_f64_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
-    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n{caps_decl}\
     const double * restrict in_arr = (const double * restrict)in;\n\
     double * restrict out_arr = (double * restrict)out;\n\
     int failed = 0;\n\
@@ -272,7 +296,7 @@ static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
     if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
 }}\n\
 {linkage}void __attribute__((unused)) {symbol}_pmap_f32_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
-    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n{caps_decl}\
     const float * restrict in_arr = (const float * restrict)in;\n\
     float * restrict out_arr = (float * restrict)out;\n\
     int failed = 0;\n\
@@ -285,7 +309,7 @@ static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
     if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
 }}\n\
 {linkage}void __attribute__((unused)) {symbol}_pmap_i32_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
-    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n{caps_decl}\
     const int32_t * restrict in_arr = (const int32_t * restrict)in;\n\
     int32_t * restrict out_arr = (int32_t * restrict)out;\n\
     int failed = 0;\n\
@@ -298,7 +322,7 @@ static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
     if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
 }}\n\
 {linkage}void __attribute__((unused)) {symbol}_pmap_u32_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
-    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n{caps_decl}\
     const uint32_t * restrict in_arr = (const uint32_t * restrict)in;\n\
     uint32_t * restrict out_arr = (uint32_t * restrict)out;\n\
     int failed = 0;\n\
@@ -311,7 +335,7 @@ static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
     if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
 }}\n\
 {linkage}void __attribute__((unused)) {symbol}_pmap_i16_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
-    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n{caps_decl}\
     const int16_t * restrict in_arr = (const int16_t * restrict)in;\n\
     int16_t * restrict out_arr = (int16_t * restrict)out;\n\
     int failed = 0;\n\
@@ -324,7 +348,7 @@ static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
     if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
 }}\n\
 {linkage}void __attribute__((unused)) {symbol}_pmap_u16_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
-    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n{caps_decl}\
     const uint16_t * restrict in_arr = (const uint16_t * restrict)in;\n\
     uint16_t * restrict out_arr = (uint16_t * restrict)out;\n\
     int failed = 0;\n\
@@ -337,7 +361,7 @@ static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
     if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
 }}\n\
 {linkage}void __attribute__((unused)) {symbol}_pmap_i8_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
-    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n{caps_decl}\
     const int8_t * restrict in_arr = (const int8_t * restrict)in;\n\
     int8_t * restrict out_arr = (int8_t * restrict)out;\n\
     int failed = 0;\n\
@@ -350,7 +374,7 @@ static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
     if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
 }}\n\
 {linkage}void __attribute__((unused)) {symbol}_pmap_u8_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
-    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n{caps_decl}\
     const uint8_t * restrict in_arr = (const uint8_t * restrict)in;\n\
     uint8_t * restrict out_arr = (uint8_t * restrict)out;\n\
     int failed = 0;\n\
@@ -363,7 +387,7 @@ static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
     if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
 }}\n\
 {linkage}void __attribute__((unused)) {symbol}_pmap_u8c_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
-    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n{caps_decl}\
     const uint8_t * restrict in_arr = (const uint8_t * restrict)in;\n\
     uint8_t * restrict out_arr = (uint8_t * restrict)out;\n\
     int failed = 0;\n\
@@ -376,7 +400,7 @@ static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
     if (KILN_UNLIKELY(failed)) {{ __atomic_store_n((int *)ctx, 1, __ATOMIC_RELAXED); return; }}\n\
 }}\n\
 {linkage}void __attribute__((unused)) {symbol}_pmap_typed_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx) {{\n\
-    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n\
+    if (KILN_UNLIKELY(__atomic_load_n((int *)ctx, __ATOMIC_RELAXED))) return;\n{caps_decl}\
     kiln_typed_array * restrict in_arr = (kiln_typed_array * restrict)in;\n\
     kiln_typed_array * restrict out_arr = (kiln_typed_array * restrict)out;\n\
     int failed = 0;\n\

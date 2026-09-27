@@ -1259,6 +1259,8 @@ pub const DATE_BOOTSTRAP_SOURCE: &str = include_str!("date.ts");
 
 /// `%TypedArray%.prototype` (ADR 0005, ADR 0063 rule 4, Phase 5.1).
 pub const TYPEDARRAY_BOOTSTRAP_SOURCE: &str = include_str!("typedarray.ts");
+/// Whether the realm installs kiln's own members (ADR 0068); first in the common bootstrap.
+pub const EXTENSIONS_BOOTSTRAP_SOURCE: &str = include_str!("extensions.ts");
 
 /// Error subclass prototypes and `SuppressedError` (ADR 0005, ADR 0063 rule 4).
 pub const ERRORS_BOOTSTRAP_SOURCE: &str = include_str!("errors.ts");
@@ -1292,7 +1294,8 @@ pub const OBJECT_REFLECT_BOOTSTRAP_SOURCE: &str = include_str!("object_reflect.t
 /// RegExp.prototype, ArrayBuffer/SharedArrayBuffer, Map.upsert, Promise extensions, Iterator extensions, and Object/Reflect extensions.
 pub fn common_bootstrap_source() -> String {
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        EXTENSIONS_BOOTSTRAP_SOURCE,
         DATE_BOOTSTRAP_SOURCE,
         TYPEDARRAY_BOOTSTRAP_SOURCE,
         ERRORS_BOOTSTRAP_SOURCE,
@@ -1374,6 +1377,40 @@ mod web_tests {
         let program = kiln_ir::compile_module(&hir)
             .expect("object_reflect bootstrap should compile to IR without error");
         assert!(!program.program.code.is_empty());
+    }
+
+    /// ADR 0068: the bootstrap installs a kiln extension only through `defineExtension`, which
+    /// asks whether the realm installs them, and only one the description declares. A member
+    /// installed with a bare `defineMethod` would survive `KILN_EXTENSIONS=0`; one installed
+    /// through `defineExtension` without a row would be counted as "extra (node lacks it)".
+    #[test]
+    fn typedarray_extensions_match_the_description() {
+        let declared: Vec<&str> = kiln_builtin_surface::KILN_EXTENSIONS
+            .iter()
+            .filter(|extension| extension.owner == "%TypedArray%.prototype")
+            .map(|extension| extension.key.property_key())
+            .collect();
+        assert!(!declared.is_empty());
+        for key in &declared {
+            assert!(
+                TYPEDARRAY_BOOTSTRAP_SOURCE.contains(&format!("defineExtension(\"{key}\"")),
+                "%TypedArray%.prototype.{key} is declared a kiln extension but not installed as one"
+            );
+            assert!(
+                !TYPEDARRAY_BOOTSTRAP_SOURCE.contains(&format!("defineMethod(\"{key}\"")),
+                "%TypedArray%.prototype.{key} is installed unconditionally"
+            );
+        }
+        for (index, _) in TYPEDARRAY_BOOTSTRAP_SOURCE.match_indices("defineExtension(\"") {
+            let rest = &TYPEDARRAY_BOOTSTRAP_SOURCE[index + "defineExtension(\"".len()..];
+            let key = &rest[..rest.find('"').expect("a quoted key")];
+            assert!(
+                declared.contains(&key),
+                "%TypedArray%.prototype.{key} is installed as a kiln extension but not declared"
+            );
+        }
+        let common = common_bootstrap_source();
+        assert!(common.starts_with(EXTENSIONS_BOOTSTRAP_SOURCE));
     }
 
     #[test]
