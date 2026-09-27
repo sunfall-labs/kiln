@@ -763,3 +763,110 @@ fn math_min_operands_are_not_shadowed_by_their_temporaries() {
     let failure = compare(&[(e, 2)], &[-1.5, 5.0, -7.0], [1.0, 2.0]);
     assert!(failure.is_none(), "{failure:?}");
 }
+
+/// Issue 14: with `parallel_workers_unit`, a generic-only module's qualifying callback gets its
+/// parallel clone and chunk workers in a unit of their own, which defines the workers under the
+/// module's link symbol and compiles on the prelude's declarations alone; the module declares
+/// them and keeps its call site's spelling. A module with no qualifying site emits exactly what
+/// it did without the flag, and no extra unit.
+#[test]
+fn a_generic_only_module_puts_its_parallel_workers_in_their_own_unit() {
+    let module_of = |program: Program| kiln_ir::ModuleProgram {
+        program,
+        ..Default::default()
+    };
+    let generic = EmissionPolicy {
+        decoupled_prelude: true,
+        compact: true,
+        generic_only: true,
+        parallel_in_generic: true,
+        ..Default::default()
+    };
+    let split = EmissionPolicy {
+        parallel_workers_unit: true,
+        ..generic.clone()
+    };
+    let emit = |program: Program, policy: &EmissionPolicy| {
+        crate::emit_module_with_logical_path_and_policy(
+            &module_of(program),
+            "main.js",
+            policy.clone(),
+        )
+        .expect("emits")
+    };
+    let site = || {
+        let mut constants = Constants::default();
+        let callback = arithmetic(&mut constants);
+        one_site(Some(callback), 0, constants)
+    };
+
+    let together = emit(site(), &generic);
+    assert_eq!(together.parallel_workers, None);
+    assert!(together.source.contains("_fn_0_p("));
+
+    let apart = emit(site(), &split);
+    let workers = apart.parallel_workers.as_deref().expect("a worker unit");
+    let symbol = &apart.symbol;
+    assert!(
+        !apart.source.contains("_fn_0_p("),
+        "the clone left the module"
+    );
+    for kind in crate::emit_graph::PARALLEL_CHUNK_KINDS {
+        let name = format!("{symbol}_pmap{kind}_0(");
+        assert!(workers.contains(&format!("void __attribute__((unused)) {name}")));
+        assert!(
+            apart.source.contains(&format!("\nvoid {name}")),
+            "declared: {name}"
+        );
+        assert!(
+            apart
+                .source
+                .contains(&format!("#define ku_pmap{kind}_0 {symbol}_pmap{kind}_0\n"))
+        );
+    }
+    assert_eq!(
+        SiteRecord::parse_all(&apart.source),
+        SiteRecord::parse_all(&together.source)
+    );
+    assert!(!workers.contains("kiln_host"), "a worker reaches no realm");
+
+    // The unit compiles alone against the prelude's declarations.
+    let dir = std::env::temp_dir().join(format!(
+        "kiln-backend-c-workers-{}-{}",
+        std::process::id(),
+        apart.program_hash
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(crate::RUNTIME_PRELUDE_HEADER_NAME),
+        crate::runtime_prelude_header(),
+    )
+    .unwrap();
+    std::fs::write(dir.join("workers.c"), workers).unwrap();
+    let compile = Command::new("cc")
+        .current_dir(&dir)
+        .args([
+            "-std=c11",
+            "-O2",
+            "-Werror=implicit-function-declaration",
+            "-c",
+            "workers.c",
+            "-o",
+            "workers.o",
+        ])
+        .output()
+        .expect("a C compiler is available for backend tests");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        compile.status.success(),
+        "worker unit did not compile:\n{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let none = || one_site(None, 0, Constants::default());
+    let plain = emit(none(), &generic);
+    let flagged = emit(none(), &split);
+    assert_eq!(flagged.parallel_workers, None);
+    assert_eq!(flagged.source, plain.source);
+    assert_eq!(flagged.symbol, plain.symbol);
+}
