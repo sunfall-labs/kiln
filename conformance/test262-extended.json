@@ -1,0 +1,1292 @@
+{
+  "schema": 1,
+  "test262_commit": "771005236e88a909635104e03ba12559688c0172",
+  "source_snapshot": "27718bf25c281ee4106b6e0aa6fb54fc7f8ad6e997c2216caf49fc4041a2be82",
+  "selection": "Files with any variant >= 500 ms in the recorded 2026-09-26 full gate. All variants stay together. Timings schedule work; this committed list alone selects extended coverage.",
+  "chunks": {
+    "annexB/built-ins": {
+      "expected": {
+        "passed": 0,
+        "failed": 4,
+        "unsupported": 0,
+        "skipped": 0
+      },
+      "files": {
+        "RegExp/RegExp-leading-escape-BMP.js": 3019,
+        "RegExp/RegExp-trailing-escape-BMP.js": 2957
+      }
+    },
+    "built-ins/Array": {
+      "expected": {
+        "passed": 4,
+        "failed": 0,
+        "unsupported": 0,
+        "skipped": 0
+      },
+      "files": {
+        "prototype/every/15.4.4.16-7-c-ii-2.js": 1013,
+        "prototype/map/15.4.4.19-8-c-ii-1.js": 1026
+      }
+    },
+    "built-ins/Iterator": {
+      "expected": {
+        "passed": 4,
+        "failed": 0,
+        "unsupported": 0,
+        "skipped": 0
+      },
+      "files": {
+        "zip/basic-longest.js": 1474,
+        "zipKeyed/basic-longest.js": 1744
+      }
+    },
+    "built-ins/Map": {
+      "expected": {
+        "passed": 0,
+        "failed": 4,
+        "unsupported": 0,
+        "skipped": 0
+      },
+      "files": {
+        "iterator-close-after-set-failure.js": 4727,
+        "iterator-close-failure-after-set-failure.js": 3854
+      }
+    },
+    "built-ins/RegExp": {
+      "expected": {
+        "passed": 896,
+        "failed": 0,
+        "unsupported": 0,
+        "skipped": 0
+      },
+      "files": {
+        "CharacterClassEscapes/character-class-digit-class-escape-negative-cases.js": 3041,
+        "CharacterClassEscapes/character-class-non-digit-class-escape-positive-cases.js": 2776,
+        "CharacterClassEscapes/character-class-non-whitespace-class-escape-positive-cases.js": 2530,
+        "CharacterClassEscapes/character-class-non-word-class-escape-positive-cases.js": 2468,
+        "CharacterClassEscapes/character-class-whitespace-class-escape-negative-cases.js": 2620,
+        "CharacterClassEscapes/character-class-word-class-escape-negative-cases.js": 2803,
+        "character-class-escape-non-whitespace.js": 3872,
+        "property-escapes/generated/ASCII.js": 2954,
+        "property-escapes/generated/ASCII_Hex_Digit.js": 2788,
+        "property-escapes/generated/Alphabetic.js": 2582,
+        "property-escapes/generated/Any.js": 2466,
+        "property-escapes/generated/Assigned.js": 2623,
+        "property-escapes/generated/Bidi_Control.js": 2717,
+        "property-escapes/generated/Bidi_Mirrored.js": 2951,
+        "property-escapes/generated/Case_Ignorable.js": 2778,
+        "property-escapes/generated/Cased.js": 2606,
+        "property-escapes/generated/Changes_When_Casefolded.js": 2599,
+        "property-escapes/generated/Changes_When_Casemapped.js": 2344,
+        "property-escapes/generated/Changes_When_Lowercased.js": 2157,
+        "property-escapes/generated/Changes_When_NFKC_Casefolded.js": 2753,
+        "property-escapes/generated/Changes_When_Titlecased.js": 2990,
+        "property-escapes/generated/Changes_When_Uppercased.js": 2820,
+        "property-escapes/generated/Dash.js": 3295,
+        "property-escapes/generated/Default_Ignorable_Code_Point.js": 2832,
+        "property-escapes/generated/Deprecated.js": 3136,
+        "property-escapes/generated/Diacritic.js": 2757,
+        "property-escapes/generated/Emoji.js": 2632,
+        "property-escapes/generated/Emoji_Component.js": 2499,
+        "property-escapes/generated/Emoji_Modifier.js": 2590,
+        "property-escapes/generated/Emoji_Modifier_Base.js": 2816,
+        "property-escapes/generated/Emoji_Presentation.js": 2895,
+        "property-escapes/generated/Extended_Pictographic.js": 2822,
+        "property-escapes/generated/Extender.js": 2687,
+        "property-escapes/generated/General_Category_-_Cased_Letter.js": 2729,
+        "property-escapes/generated/General_Category_-_Close_Punctuation.js": 2300,
+        "property-escapes/generated/General_Category_-_Connector_Punctuation.js": 2294,
+        "property-escapes/generated/General_Category_-_Control.js": 2762,
+        "property-escapes/generated/General_Category_-_Currency_Symbol.js": 3074,
+        "property-escapes/generated/General_Category_-_Dash_Punctuation.js": 2916,
+        "property-escapes/generated/General_Category_-_Decimal_Number.js": 3511,
+        "property-escapes/generated/General_Category_-_Enclosing_Mark.js": 2655,
+        "property-escapes/generated/General_Category_-_Final_Punctuation.js": 2184,
+        "property-escapes/generated/General_Category_-_Format.js": 2147,
+        "property-escapes/generated/General_Category_-_Initial_Punctuation.js": 2231,
+        "property-escapes/generated/General_Category_-_Letter.js": 2310,
+        "property-escapes/generated/General_Category_-_Letter_Number.js": 2202,
+        "property-escapes/generated/General_Category_-_Line_Separator.js": 2352,
+        "property-escapes/generated/General_Category_-_Lowercase_Letter.js": 2596,
+        "property-escapes/generated/General_Category_-_Mark.js": 3757,
+        "property-escapes/generated/General_Category_-_Math_Symbol.js": 3502,
+        "property-escapes/generated/General_Category_-_Modifier_Letter.js": 4180,
+        "property-escapes/generated/General_Category_-_Modifier_Symbol.js": 4036,
+        "property-escapes/generated/General_Category_-_Nonspacing_Mark.js": 4170,
+        "property-escapes/generated/General_Category_-_Number.js": 2858,
+        "property-escapes/generated/General_Category_-_Open_Punctuation.js": 2667,
+        "property-escapes/generated/General_Category_-_Other.js": 2712,
+        "property-escapes/generated/General_Category_-_Other_Letter.js": 2856,
+        "property-escapes/generated/General_Category_-_Other_Number.js": 3047,
+        "property-escapes/generated/General_Category_-_Other_Punctuation.js": 2969,
+        "property-escapes/generated/General_Category_-_Other_Symbol.js": 2792,
+        "property-escapes/generated/General_Category_-_Paragraph_Separator.js": 2566,
+        "property-escapes/generated/General_Category_-_Private_Use.js": 2475,
+        "property-escapes/generated/General_Category_-_Punctuation.js": 2360,
+        "property-escapes/generated/General_Category_-_Separator.js": 2647,
+        "property-escapes/generated/General_Category_-_Space_Separator.js": 2975,
+        "property-escapes/generated/General_Category_-_Spacing_Mark.js": 2940,
+        "property-escapes/generated/General_Category_-_Surrogate.js": 3315,
+        "property-escapes/generated/General_Category_-_Symbol.js": 2986,
+        "property-escapes/generated/General_Category_-_Titlecase_Letter.js": 2180,
+        "property-escapes/generated/General_Category_-_Unassigned.js": 2231,
+        "property-escapes/generated/General_Category_-_Uppercase_Letter.js": 2256,
+        "property-escapes/generated/Grapheme_Base.js": 2139,
+        "property-escapes/generated/Grapheme_Extend.js": 2148,
+        "property-escapes/generated/Hex_Digit.js": 2270,
+        "property-escapes/generated/IDS_Binary_Operator.js": 2619,
+        "property-escapes/generated/IDS_Trinary_Operator.js": 2891,
+        "property-escapes/generated/ID_Continue.js": 3940,
+        "property-escapes/generated/ID_Start.js": 3699,
+        "property-escapes/generated/Ideographic.js": 3823,
+        "property-escapes/generated/Join_Control.js": 3734,
+        "property-escapes/generated/Logical_Order_Exception.js": 3811,
+        "property-escapes/generated/Lowercase.js": 3917,
+        "property-escapes/generated/Math.js": 3606,
+        "property-escapes/generated/Noncharacter_Code_Point.js": 2935,
+        "property-escapes/generated/Pattern_Syntax.js": 2688,
+        "property-escapes/generated/Pattern_White_Space.js": 2540,
+        "property-escapes/generated/Quotation_Mark.js": 2607,
+        "property-escapes/generated/Radical.js": 2586,
+        "property-escapes/generated/Regional_Indicator.js": 2871,
+        "property-escapes/generated/Script_-_Adlam.js": 2872,
+        "property-escapes/generated/Script_-_Ahom.js": 2707,
+        "property-escapes/generated/Script_-_Anatolian_Hieroglyphs.js": 2627,
+        "property-escapes/generated/Script_-_Arabic.js": 2602,
+        "property-escapes/generated/Script_-_Armenian.js": 2236,
+        "property-escapes/generated/Script_-_Avestan.js": 2298,
+        "property-escapes/generated/Script_-_Balinese.js": 2868,
+        "property-escapes/generated/Script_-_Bamum.js": 2952,
+        "property-escapes/generated/Script_-_Bassa_Vah.js": 2915,
+        "property-escapes/generated/Script_-_Batak.js": 3147,
+        "property-escapes/generated/Script_-_Bengali.js": 2543,
+        "property-escapes/generated/Script_-_Beria_Erfe.js": 2148,
+        "property-escapes/generated/Script_-_Bhaiksuki.js": 2196,
+        "property-escapes/generated/Script_-_Bopomofo.js": 2137,
+        "property-escapes/generated/Script_-_Brahmi.js": 2179,
+        "property-escapes/generated/Script_-_Braille.js": 2129,
+        "property-escapes/generated/Script_-_Buginese.js": 2332,
+        "property-escapes/generated/Script_-_Buhid.js": 2599,
+        "property-escapes/generated/Script_-_Canadian_Aboriginal.js": 3416,
+        "property-escapes/generated/Script_-_Carian.js": 3523,
+        "property-escapes/generated/Script_-_Caucasian_Albanian.js": 4017,
+        "property-escapes/generated/Script_-_Chakma.js": 3728,
+        "property-escapes/generated/Script_-_Cham.js": 3813,
+        "property-escapes/generated/Script_-_Cherokee.js": 3902,
+        "property-escapes/generated/Script_-_Chorasmian.js": 3815,
+        "property-escapes/generated/Script_-_Common.js": 3791,
+        "property-escapes/generated/Script_-_Coptic.js": 3770,
+        "property-escapes/generated/Script_-_Cuneiform.js": 2778,
+        "property-escapes/generated/Script_-_Cypriot.js": 2839,
+        "property-escapes/generated/Script_-_Cypro_Minoan.js": 2599,
+        "property-escapes/generated/Script_-_Cyrillic.js": 2813,
+        "property-escapes/generated/Script_-_Deseret.js": 2597,
+        "property-escapes/generated/Script_-_Devanagari.js": 2351,
+        "property-escapes/generated/Script_-_Dives_Akuru.js": 2228,
+        "property-escapes/generated/Script_-_Dogra.js": 2072,
+        "property-escapes/generated/Script_-_Duployan.js": 1965,
+        "property-escapes/generated/Script_-_Egyptian_Hieroglyphs.js": 1944,
+        "property-escapes/generated/Script_-_Elbasan.js": 1946,
+        "property-escapes/generated/Script_-_Elymaic.js": 2093,
+        "property-escapes/generated/Script_-_Ethiopic.js": 2282,
+        "property-escapes/generated/Script_-_Garay.js": 3214,
+        "property-escapes/generated/Script_-_Georgian.js": 2735,
+        "property-escapes/generated/Script_-_Glagolitic.js": 2568,
+        "property-escapes/generated/Script_-_Gothic.js": 2547,
+        "property-escapes/generated/Script_-_Grantha.js": 2607,
+        "property-escapes/generated/Script_-_Greek.js": 2567,
+        "property-escapes/generated/Script_-_Gujarati.js": 2259,
+        "property-escapes/generated/Script_-_Gunjala_Gondi.js": 1961,
+        "property-escapes/generated/Script_-_Gurmukhi.js": 2196,
+        "property-escapes/generated/Script_-_Gurung_Khema.js": 2285,
+        "property-escapes/generated/Script_-_Han.js": 1931,
+        "property-escapes/generated/Script_-_Hangul.js": 1968,
+        "property-escapes/generated/Script_-_Hanifi_Rohingya.js": 2218,
+        "property-escapes/generated/Script_-_Hanunoo.js": 3120,
+        "property-escapes/generated/Script_-_Hatran.js": 2869,
+        "property-escapes/generated/Script_-_Hebrew.js": 2534,
+        "property-escapes/generated/Script_-_Hiragana.js": 2484,
+        "property-escapes/generated/Script_-_Imperial_Aramaic.js": 2500,
+        "property-escapes/generated/Script_-_Inherited.js": 2836,
+        "property-escapes/generated/Script_-_Inscriptional_Pahlavi.js": 2898,
+        "property-escapes/generated/Script_-_Inscriptional_Parthian.js": 2758,
+        "property-escapes/generated/Script_-_Javanese.js": 2672,
+        "property-escapes/generated/Script_-_Kaithi.js": 2560,
+        "property-escapes/generated/Script_-_Kannada.js": 2367,
+        "property-escapes/generated/Script_-_Katakana.js": 2271,
+        "property-escapes/generated/Script_-_Kawi.js": 2651,
+        "property-escapes/generated/Script_-_Kayah_Li.js": 2962,
+        "property-escapes/generated/Script_-_Kharoshthi.js": 2810,
+        "property-escapes/generated/Script_-_Khitan_Small_Script.js": 3241,
+        "property-escapes/generated/Script_-_Khmer.js": 2825,
+        "property-escapes/generated/Script_-_Khojki.js": 2190,
+        "property-escapes/generated/Script_-_Khudawadi.js": 2129,
+        "property-escapes/generated/Script_-_Kirat_Rai.js": 2074,
+        "property-escapes/generated/Script_-_Lao.js": 2107,
+        "property-escapes/generated/Script_-_Latin.js": 2154,
+        "property-escapes/generated/Script_-_Lepcha.js": 2175,
+        "property-escapes/generated/Script_-_Limbu.js": 2552,
+        "property-escapes/generated/Script_-_Linear_A.js": 2655,
+        "property-escapes/generated/Script_-_Linear_B.js": 3781,
+        "property-escapes/generated/Script_-_Lisu.js": 3477,
+        "property-escapes/generated/Script_-_Lycian.js": 3815,
+        "property-escapes/generated/Script_-_Lydian.js": 3728,
+        "property-escapes/generated/Script_-_Mahajani.js": 3848,
+        "property-escapes/generated/Script_-_Makasar.js": 3913,
+        "property-escapes/generated/Script_-_Malayalam.js": 3581,
+        "property-escapes/generated/Script_-_Mandaic.js": 3807,
+        "property-escapes/generated/Script_-_Manichaean.js": 3280,
+        "property-escapes/generated/Script_-_Marchen.js": 2667,
+        "property-escapes/generated/Script_-_Masaram_Gondi.js": 2722,
+        "property-escapes/generated/Script_-_Medefaidrin.js": 2735,
+        "property-escapes/generated/Script_-_Meetei_Mayek.js": 2788,
+        "property-escapes/generated/Script_-_Mende_Kikakui.js": 2558,
+        "property-escapes/generated/Script_-_Meroitic_Cursive.js": 2159,
+        "property-escapes/generated/Script_-_Meroitic_Hieroglyphs.js": 2128,
+        "property-escapes/generated/Script_-_Miao.js": 2017,
+        "property-escapes/generated/Script_-_Modi.js": 1923,
+        "property-escapes/generated/Script_-_Mongolian.js": 1951,
+        "property-escapes/generated/Script_-_Mro.js": 1978,
+        "property-escapes/generated/Script_-_Multani.js": 2088,
+        "property-escapes/generated/Script_-_Myanmar.js": 2622,
+        "property-escapes/generated/Script_-_Nabataean.js": 2983,
+        "property-escapes/generated/Script_-_Nag_Mundari.js": 2603,
+        "property-escapes/generated/Script_-_Nandinagari.js": 2537,
+        "property-escapes/generated/Script_-_New_Tai_Lue.js": 2543,
+        "property-escapes/generated/Script_-_Newa.js": 2558,
+        "property-escapes/generated/Script_-_Nko.js": 2572,
+        "property-escapes/generated/Script_-_Nushu.js": 2155,
+        "property-escapes/generated/Script_-_Nyiakeng_Puachue_Hmong.js": 2018,
+        "property-escapes/generated/Script_-_Ogham.js": 2148,
+        "property-escapes/generated/Script_-_Ol_Chiki.js": 2188,
+        "property-escapes/generated/Script_-_Ol_Onal.js": 1906,
+        "property-escapes/generated/Script_-_Old_Hungarian.js": 3956,
+        "property-escapes/generated/Script_-_Old_Italic.js": 3518,
+        "property-escapes/generated/Script_-_Old_North_Arabian.js": 3644,
+        "property-escapes/generated/Script_-_Old_Permic.js": 3203,
+        "property-escapes/generated/Script_-_Old_Persian.js": 2725,
+        "property-escapes/generated/Script_-_Old_Sogdian.js": 2644,
+        "property-escapes/generated/Script_-_Old_South_Arabian.js": 2614,
+        "property-escapes/generated/Script_-_Old_Turkic.js": 2769,
+        "property-escapes/generated/Script_-_Old_Uyghur.js": 2525,
+        "property-escapes/generated/Script_-_Oriya.js": 2164,
+        "property-escapes/generated/Script_-_Osage.js": 2141,
+        "property-escapes/generated/Script_-_Osmanya.js": 1990,
+        "property-escapes/generated/Script_-_Pahawh_Hmong.js": 1908,
+        "property-escapes/generated/Script_-_Palmyrene.js": 1940,
+        "property-escapes/generated/Script_-_Pau_Cin_Hau.js": 1942,
+        "property-escapes/generated/Script_-_Phags_Pa.js": 2034,
+        "property-escapes/generated/Script_-_Phoenician.js": 2303,
+        "property-escapes/generated/Script_-_Psalter_Pahlavi.js": 3048,
+        "property-escapes/generated/Script_-_Rejang.js": 2652,
+        "property-escapes/generated/Script_-_Runic.js": 2537,
+        "property-escapes/generated/Script_-_Samaritan.js": 2522,
+        "property-escapes/generated/Script_-_Saurashtra.js": 2541,
+        "property-escapes/generated/Script_-_Sharada.js": 2520,
+        "property-escapes/generated/Script_-_Shavian.js": 2291,
+        "property-escapes/generated/Script_-_Siddham.js": 1949,
+        "property-escapes/generated/Script_-_Sidetic.js": 2093,
+        "property-escapes/generated/Script_-_SignWriting.js": 2317,
+        "property-escapes/generated/Script_-_Sinhala.js": 1945,
+        "property-escapes/generated/Script_-_Sogdian.js": 1924,
+        "property-escapes/generated/Script_-_Sora_Sompeng.js": 2559,
+        "property-escapes/generated/Script_-_Soyombo.js": 2578,
+        "property-escapes/generated/Script_-_Sundanese.js": 2535,
+        "property-escapes/generated/Script_-_Sunuwar.js": 2245,
+        "property-escapes/generated/Script_-_Syloti_Nagri.js": 1931,
+        "property-escapes/generated/Script_-_Syriac.js": 2129,
+        "property-escapes/generated/Script_-_Tagalog.js": 2293,
+        "property-escapes/generated/Script_-_Tagbanwa.js": 1925,
+        "property-escapes/generated/Script_-_Tai_Le.js": 1966,
+        "property-escapes/generated/Script_-_Tai_Tham.js": 2247,
+        "property-escapes/generated/Script_-_Tai_Viet.js": 1953,
+        "property-escapes/generated/Script_-_Tai_Yo.js": 1930,
+        "property-escapes/generated/Script_-_Takri.js": 1952,
+        "property-escapes/generated/Script_-_Tamil.js": 1941,
+        "property-escapes/generated/Script_-_Tangsa.js": 1935,
+        "property-escapes/generated/Script_-_Tangut.js": 2297,
+        "property-escapes/generated/Script_-_Telugu.js": 1935,
+        "property-escapes/generated/Script_-_Thaana.js": 1917,
+        "property-escapes/generated/Script_-_Thai.js": 1933,
+        "property-escapes/generated/Script_-_Tibetan.js": 1973,
+        "property-escapes/generated/Script_-_Tifinagh.js": 1940,
+        "property-escapes/generated/Script_-_Tirhuta.js": 1894,
+        "property-escapes/generated/Script_-_Todhri.js": 1927,
+        "property-escapes/generated/Script_-_Tolong_Siki.js": 1944,
+        "property-escapes/generated/Script_-_Toto.js": 2139,
+        "property-escapes/generated/Script_-_Tulu_Tigalari.js": 2052,
+        "property-escapes/generated/Script_-_Ugaritic.js": 1934,
+        "property-escapes/generated/Script_-_Unknown.js": 2035,
+        "property-escapes/generated/Script_-_Vai.js": 1944,
+        "property-escapes/generated/Script_-_Vithkuqi.js": 1876,
+        "property-escapes/generated/Script_-_Wancho.js": 2888,
+        "property-escapes/generated/Script_-_Warang_Citi.js": 2743,
+        "property-escapes/generated/Script_-_Yezidi.js": 2566,
+        "property-escapes/generated/Script_-_Yi.js": 2506,
+        "property-escapes/generated/Script_-_Zanabazar_Square.js": 2272,
+        "property-escapes/generated/Script_Extensions_-_Adlam.js": 2250,
+        "property-escapes/generated/Script_Extensions_-_Ahom.js": 2682,
+        "property-escapes/generated/Script_Extensions_-_Anatolian_Hieroglyphs.js": 2910,
+        "property-escapes/generated/Script_Extensions_-_Arabic.js": 2867,
+        "property-escapes/generated/Script_Extensions_-_Armenian.js": 3296,
+        "property-escapes/generated/Script_Extensions_-_Avestan.js": 2853,
+        "property-escapes/generated/Script_Extensions_-_Balinese.js": 2180,
+        "property-escapes/generated/Script_Extensions_-_Bamum.js": 2100,
+        "property-escapes/generated/Script_Extensions_-_Bassa_Vah.js": 2132,
+        "property-escapes/generated/Script_Extensions_-_Batak.js": 2061,
+        "property-escapes/generated/Script_Extensions_-_Bengali.js": 2096,
+        "property-escapes/generated/Script_Extensions_-_Beria_Erfe.js": 2131,
+        "property-escapes/generated/Script_Extensions_-_Bhaiksuki.js": 2515,
+        "property-escapes/generated/Script_Extensions_-_Bopomofo.js": 2671,
+        "property-escapes/generated/Script_Extensions_-_Brahmi.js": 3661,
+        "property-escapes/generated/Script_Extensions_-_Braille.js": 3480,
+        "property-escapes/generated/Script_Extensions_-_Buginese.js": 3851,
+        "property-escapes/generated/Script_Extensions_-_Buhid.js": 3717,
+        "property-escapes/generated/Script_Extensions_-_Canadian_Aboriginal.js": 3775,
+        "property-escapes/generated/Script_Extensions_-_Carian.js": 3910,
+        "property-escapes/generated/Script_Extensions_-_Caucasian_Albanian.js": 3513,
+        "property-escapes/generated/Script_Extensions_-_Chakma.js": 3697,
+        "property-escapes/generated/Script_Extensions_-_Cham.js": 3330,
+        "property-escapes/generated/Script_Extensions_-_Cherokee.js": 2727,
+        "property-escapes/generated/Script_Extensions_-_Chorasmian.js": 2724,
+        "property-escapes/generated/Script_Extensions_-_Common.js": 2768,
+        "property-escapes/generated/Script_Extensions_-_Coptic.js": 2829,
+        "property-escapes/generated/Script_Extensions_-_Cuneiform.js": 2504,
+        "property-escapes/generated/Script_Extensions_-_Cypriot.js": 2200,
+        "property-escapes/generated/Script_Extensions_-_Cypro_Minoan.js": 2108,
+        "property-escapes/generated/Script_Extensions_-_Cyrillic.js": 2057,
+        "property-escapes/generated/Script_Extensions_-_Deseret.js": 1907,
+        "property-escapes/generated/Script_Extensions_-_Devanagari.js": 1945,
+        "property-escapes/generated/Script_Extensions_-_Dives_Akuru.js": 1954,
+        "property-escapes/generated/Script_Extensions_-_Dogra.js": 2079,
+        "property-escapes/generated/Script_Extensions_-_Duployan.js": 2425,
+        "property-escapes/generated/Script_Extensions_-_Egyptian_Hieroglyphs.js": 3057,
+        "property-escapes/generated/Script_Extensions_-_Elbasan.js": 2646,
+        "property-escapes/generated/Script_Extensions_-_Elymaic.js": 2535,
+        "property-escapes/generated/Script_Extensions_-_Ethiopic.js": 2211,
+        "property-escapes/generated/Script_Extensions_-_Garay.js": 3046,
+        "property-escapes/generated/Script_Extensions_-_Georgian.js": 2684,
+        "property-escapes/generated/Script_Extensions_-_Glagolitic.js": 2561,
+        "property-escapes/generated/Script_Extensions_-_Gothic.js": 2526,
+        "property-escapes/generated/Script_Extensions_-_Grantha.js": 2601,
+        "property-escapes/generated/Script_Extensions_-_Greek.js": 2569,
+        "property-escapes/generated/Script_Extensions_-_Gujarati.js": 2319,
+        "property-escapes/generated/Script_Extensions_-_Gunjala_Gondi.js": 2000,
+        "property-escapes/generated/Script_Extensions_-_Gurmukhi.js": 2160,
+        "property-escapes/generated/Script_Extensions_-_Gurung_Khema.js": 2268,
+        "property-escapes/generated/Script_Extensions_-_Han.js": 1934,
+        "property-escapes/generated/Script_Extensions_-_Hangul.js": 1951,
+        "property-escapes/generated/Script_Extensions_-_Hanifi_Rohingya.js": 1990,
+        "property-escapes/generated/Script_Extensions_-_Hanunoo.js": 2194,
+        "property-escapes/generated/Script_Extensions_-_Hatran.js": 2131,
+        "property-escapes/generated/Script_Extensions_-_Hebrew.js": 2105,
+        "property-escapes/generated/Script_Extensions_-_Hiragana.js": 2070,
+        "property-escapes/generated/Script_Extensions_-_Imperial_Aramaic.js": 2093,
+        "property-escapes/generated/Script_Extensions_-_Inherited.js": 2122,
+        "property-escapes/generated/Script_Extensions_-_Inscriptional_Pahlavi.js": 2177,
+        "property-escapes/generated/Script_Extensions_-_Inscriptional_Parthian.js": 2509,
+        "property-escapes/generated/Script_Extensions_-_Javanese.js": 2684,
+        "property-escapes/generated/Script_Extensions_-_Kaithi.js": 3760,
+        "property-escapes/generated/Script_Extensions_-_Kannada.js": 3581,
+        "property-escapes/generated/Script_Extensions_-_Katakana.js": 3816,
+        "property-escapes/generated/Script_Extensions_-_Kawi.js": 3828,
+        "property-escapes/generated/Script_Extensions_-_Kayah_Li.js": 3859,
+        "property-escapes/generated/Script_Extensions_-_Kharoshthi.js": 3902,
+        "property-escapes/generated/Script_Extensions_-_Khitan_Small_Script.js": 3603,
+        "property-escapes/generated/Script_Extensions_-_Khmer.js": 3641,
+        "property-escapes/generated/Script_Extensions_-_Khojki.js": 3288,
+        "property-escapes/generated/Script_Extensions_-_Khudawadi.js": 2632,
+        "property-escapes/generated/Script_Extensions_-_Kirat_Rai.js": 2595,
+        "property-escapes/generated/Script_Extensions_-_Lao.js": 2691,
+        "property-escapes/generated/Script_Extensions_-_Latin.js": 2797,
+        "property-escapes/generated/Script_Extensions_-_Lepcha.js": 2426,
+        "property-escapes/generated/Script_Extensions_-_Limbu.js": 2190,
+        "property-escapes/generated/Script_Extensions_-_Linear_A.js": 2117,
+        "property-escapes/generated/Script_Extensions_-_Linear_B.js": 1979,
+        "property-escapes/generated/Script_Extensions_-_Lisu.js": 1924,
+        "property-escapes/generated/Script_Extensions_-_Lycian.js": 1892,
+        "property-escapes/generated/Script_Extensions_-_Lydian.js": 1929,
+        "property-escapes/generated/Script_Extensions_-_Mahajani.js": 2051,
+        "property-escapes/generated/Script_Extensions_-_Makasar.js": 3773,
+        "property-escapes/generated/Script_Extensions_-_Malayalam.js": 2927,
+        "property-escapes/generated/Script_Extensions_-_Mandaic.js": 2801,
+        "property-escapes/generated/Script_Extensions_-_Manichaean.js": 2735,
+        "property-escapes/generated/Script_Extensions_-_Marchen.js": 2812,
+        "property-escapes/generated/Script_Extensions_-_Masaram_Gondi.js": 2730,
+        "property-escapes/generated/Script_Extensions_-_Medefaidrin.js": 2361,
+        "property-escapes/generated/Script_Extensions_-_Meetei_Mayek.js": 2235,
+        "property-escapes/generated/Script_Extensions_-_Mende_Kikakui.js": 2113,
+        "property-escapes/generated/Script_Extensions_-_Meroitic_Cursive.js": 1953,
+        "property-escapes/generated/Script_Extensions_-_Meroitic_Hieroglyphs.js": 1931,
+        "property-escapes/generated/Script_Extensions_-_Miao.js": 1958,
+        "property-escapes/generated/Script_Extensions_-_Modi.js": 2034,
+        "property-escapes/generated/Script_Extensions_-_Mongolian.js": 2047,
+        "property-escapes/generated/Script_Extensions_-_Mro.js": 3214,
+        "property-escapes/generated/Script_Extensions_-_Multani.js": 2813,
+        "property-escapes/generated/Script_Extensions_-_Myanmar.js": 2583,
+        "property-escapes/generated/Script_Extensions_-_Nabataean.js": 2541,
+        "property-escapes/generated/Script_Extensions_-_Nag_Mundari.js": 2650,
+        "property-escapes/generated/Script_Extensions_-_Nandinagari.js": 2559,
+        "property-escapes/generated/Script_Extensions_-_New_Tai_Lue.js": 2470,
+        "property-escapes/generated/Script_Extensions_-_Newa.js": 1972,
+        "property-escapes/generated/Script_Extensions_-_Nko.js": 2107,
+        "property-escapes/generated/Script_Extensions_-_Nushu.js": 2235,
+        "property-escapes/generated/Script_Extensions_-_Nyiakeng_Puachue_Hmong.js": 1953,
+        "property-escapes/generated/Script_Extensions_-_Ogham.js": 1942,
+        "property-escapes/generated/Script_Extensions_-_Ol_Chiki.js": 2293,
+        "property-escapes/generated/Script_Extensions_-_Ol_Onal.js": 1949,
+        "property-escapes/generated/Script_Extensions_-_Old_Hungarian.js": 2252,
+        "property-escapes/generated/Script_Extensions_-_Old_Italic.js": 1941,
+        "property-escapes/generated/Script_Extensions_-_Old_North_Arabian.js": 3163,
+        "property-escapes/generated/Script_Extensions_-_Old_Permic.js": 2821,
+        "property-escapes/generated/Script_Extensions_-_Old_Persian.js": 2531,
+        "property-escapes/generated/Script_Extensions_-_Old_Sogdian.js": 2528,
+        "property-escapes/generated/Script_Extensions_-_Old_South_Arabian.js": 2549,
+        "property-escapes/generated/Script_Extensions_-_Old_Turkic.js": 2740,
+        "property-escapes/generated/Script_Extensions_-_Old_Uyghur.js": 2873,
+        "property-escapes/generated/Script_Extensions_-_Oriya.js": 2792,
+        "property-escapes/generated/Script_Extensions_-_Osage.js": 2592,
+        "property-escapes/generated/Script_Extensions_-_Osmanya.js": 2606,
+        "property-escapes/generated/Script_Extensions_-_Pahawh_Hmong.js": 2362,
+        "property-escapes/generated/Script_Extensions_-_Palmyrene.js": 2105,
+        "property-escapes/generated/Script_Extensions_-_Pau_Cin_Hau.js": 2587,
+        "property-escapes/generated/Script_Extensions_-_Phags_Pa.js": 2965,
+        "property-escapes/generated/Script_Extensions_-_Phoenician.js": 2840,
+        "property-escapes/generated/Script_Extensions_-_Psalter_Pahlavi.js": 3329,
+        "property-escapes/generated/Script_Extensions_-_Rejang.js": 2868,
+        "property-escapes/generated/Script_Extensions_-_Runic.js": 2205,
+        "property-escapes/generated/Script_Extensions_-_Samaritan.js": 2096,
+        "property-escapes/generated/Script_Extensions_-_Saurashtra.js": 2095,
+        "property-escapes/generated/Script_Extensions_-_Sharada.js": 2138,
+        "property-escapes/generated/Script_Extensions_-_Shavian.js": 2095,
+        "property-escapes/generated/Script_Extensions_-_Siddham.js": 2147,
+        "property-escapes/generated/Script_Extensions_-_Sidetic.js": 2586,
+        "property-escapes/generated/Script_Extensions_-_SignWriting.js": 2620,
+        "property-escapes/generated/Script_Extensions_-_Sinhala.js": 3757,
+        "property-escapes/generated/Script_Extensions_-_Sogdian.js": 3557,
+        "property-escapes/generated/Script_Extensions_-_Sora_Sompeng.js": 3942,
+        "property-escapes/generated/Script_Extensions_-_Soyombo.js": 3681,
+        "property-escapes/generated/Script_Extensions_-_Sundanese.js": 3989,
+        "property-escapes/generated/Script_Extensions_-_Sunuwar.js": 3838,
+        "property-escapes/generated/Script_Extensions_-_Syloti_Nagri.js": 3589,
+        "property-escapes/generated/Script_Extensions_-_Syriac.js": 3778,
+        "property-escapes/generated/Script_Extensions_-_Tagalog.js": 3269,
+        "property-escapes/generated/Script_Extensions_-_Tagbanwa.js": 2670,
+        "property-escapes/generated/Script_Extensions_-_Tai_Le.js": 2717,
+        "property-escapes/generated/Script_Extensions_-_Tai_Tham.js": 2735,
+        "property-escapes/generated/Script_Extensions_-_Tai_Viet.js": 2809,
+        "property-escapes/generated/Script_Extensions_-_Tai_Yo.js": 2628,
+        "property-escapes/generated/Script_Extensions_-_Takri.js": 2147,
+        "property-escapes/generated/Script_Extensions_-_Tamil.js": 2181,
+        "property-escapes/generated/Script_Extensions_-_Tangsa.js": 1996,
+        "property-escapes/generated/Script_Extensions_-_Tangut.js": 1945,
+        "property-escapes/generated/Script_Extensions_-_Telugu.js": 1978,
+        "property-escapes/generated/Script_Extensions_-_Thaana.js": 1997,
+        "property-escapes/generated/Script_Extensions_-_Thai.js": 2042,
+        "property-escapes/generated/Script_Extensions_-_Tibetan.js": 2611,
+        "property-escapes/generated/Script_Extensions_-_Tifinagh.js": 3068,
+        "property-escapes/generated/Script_Extensions_-_Tirhuta.js": 2592,
+        "property-escapes/generated/Script_Extensions_-_Todhri.js": 2561,
+        "property-escapes/generated/Script_Extensions_-_Tolong_Siki.js": 2601,
+        "property-escapes/generated/Script_Extensions_-_Toto.js": 2574,
+        "property-escapes/generated/Script_Extensions_-_Tulu_Tigalari.js": 2580,
+        "property-escapes/generated/Script_Extensions_-_Ugaritic.js": 2092,
+        "property-escapes/generated/Script_Extensions_-_Unknown.js": 2168,
+        "property-escapes/generated/Script_Extensions_-_Vai.js": 2214,
+        "property-escapes/generated/Script_Extensions_-_Vithkuqi.js": 2050,
+        "property-escapes/generated/Script_Extensions_-_Wancho.js": 1940,
+        "property-escapes/generated/Script_Extensions_-_Warang_Citi.js": 2125,
+        "property-escapes/generated/Script_Extensions_-_Yezidi.js": 2120,
+        "property-escapes/generated/Script_Extensions_-_Yi.js": 1932,
+        "property-escapes/generated/Script_Extensions_-_Zanabazar_Square.js": 1932,
+        "property-escapes/generated/Sentence_Terminal.js": 1927,
+        "property-escapes/generated/Soft_Dotted.js": 1850,
+        "property-escapes/generated/Terminal_Punctuation.js": 1743,
+        "property-escapes/generated/Unified_Ideograph.js": 1704,
+        "property-escapes/generated/Uppercase.js": 1705,
+        "property-escapes/generated/Variation_Selector.js": 1705,
+        "property-escapes/generated/White_Space.js": 1678,
+        "property-escapes/generated/XID_Continue.js": 1735,
+        "property-escapes/generated/XID_Start.js": 1709
+      }
+    },
+    "built-ins/Set": {
+      "expected": {
+        "passed": 0,
+        "failed": 2,
+        "unsupported": 0,
+        "skipped": 0
+      },
+      "files": {
+        "set-iterator-close-after-add-failure.js": 1326
+      }
+    },
+    "built-ins/TypedArray": {
+      "expected": {
+        "passed": 0,
+        "failed": 6,
+        "unsupported": 0,
+        "skipped": 0
+      },
+      "files": {
+        "prototype/copyWithin/coerced-values-end-detached-prototype.js": 22567,
+        "prototype/copyWithin/coerced-values-end-detached.js": 21340,
+        "prototype/copyWithin/coerced-values-start-detached.js": 16004
+      }
+    },
+    "built-ins/decodeURI": {
+      "expected": {
+        "passed": 14,
+        "failed": 2,
+        "unsupported": 0,
+        "skipped": 0
+      },
+      "files": {
+        "S15.1.3.1_A1.12_T1.js": 1198,
+        "S15.1.3.1_A1.12_T2.js": 1200,
+        "S15.1.3.1_A1.12_T3.js": 950,
+        "S15.1.3.1_A1.2_T1.js": 1095,
+        "S15.1.3.1_A1.2_T2.js": 1245,
+        "S15.1.3.1_A2.1_T1.js": 971,
+        "S15.1.3.1_A2.4_T1.js": 1753,
+        "S15.1.3.1_A2.5_T1.js": 2881
+      }
+    },
+    "built-ins/decodeURIComponent": {
+      "expected": {
+        "passed": 10,
+        "failed": 2,
+        "unsupported": 0,
+        "skipped": 0
+      },
+      "files": {
+        "S15.1.3.2_A1.12_T2.js": 1257,
+        "S15.1.3.2_A1.12_T3.js": 1115,
+        "S15.1.3.2_A1.2_T1.js": 1137,
+        "S15.1.3.2_A1.2_T2.js": 1061,
+        "S15.1.3.2_A2.4_T1.js": 1633,
+        "S15.1.3.2_A2.5_T1.js": 2842
+      }
+    },
+    "built-ins/encodeURI": {
+      "expected": {
+        "passed": 2,
+        "failed": 0,
+        "unsupported": 0,
+        "skipped": 0
+      },
+      "files": {
+        "S15.1.3.3_A2.3_T1.js": 1540
+      }
+    },
+    "built-ins/encodeURIComponent": {
+      "expected": {
+        "passed": 2,
+        "failed": 0,
+        "unsupported": 0,
+        "skipped": 0
+      },
+      "files": {
+        "S15.1.3.4_A2.3_T1.js": 1523
+      }
+    },
+    "intl402/DateTimeFormat": {
+      "expected": {
+        "passed": 2,
+        "failed": 0,
+        "unsupported": 0,
+        "skipped": 0
+      },
+      "files": {
+        "prototype/formatToParts/compare-to-temporal.js": 1561
+      }
+    },
+    "intl402/Temporal": {
+      "expected": {
+        "passed": 0,
+        "failed": 2,
+        "unsupported": 0,
+        "skipped": 0
+      },
+      "files": {
+        "ZonedDateTime/prototype/equals/canonical-not-equal.js": 1889
+      }
+    },
+    "language/comments": {
+      "expected": {
+        "passed": 0,
+        "failed": 2,
+        "unsupported": 0,
+        "skipped": 0
+      },
+      "files": {
+        "S7.4_A5.js": 1596
+      }
+    },
+    "language/identifiers": {
+      "expected": {
+        "passed": 2,
+        "failed": 0,
+        "unsupported": 0,
+        "skipped": 0
+      },
+      "files": {
+        "start-unicode-10.0.0-class.js": 1031
+      }
+    },
+    "language/literals": {
+      "expected": {
+        "passed": 0,
+        "failed": 8,
+        "unsupported": 0,
+        "skipped": 0
+      },
+      "files": {
+        "regexp/S7.8.5_A1.1_T2.js": 2586,
+        "regexp/S7.8.5_A1.4_T2.js": 2201,
+        "regexp/S7.8.5_A2.1_T2.js": 2251,
+        "regexp/S7.8.5_A2.4_T2.js": 2201
+      }
+    },
+    "staging/sm": {
+      "expected": {
+        "passed": 14,
+        "failed": 20,
+        "unsupported": 2,
+        "skipped": 0
+      },
+      "files": {
+        "Date/dst-offset-caching-1-of-8.js": 1955,
+        "Date/dst-offset-caching-2-of-8.js": 1883,
+        "Date/dst-offset-caching-3-of-8.js": 1976,
+        "Date/dst-offset-caching-4-of-8.js": 2037,
+        "Date/dst-offset-caching-5-of-8.js": 2210,
+        "Date/dst-offset-caching-6-of-8.js": 2015,
+        "Date/dst-offset-caching-7-of-8.js": 1999,
+        "Date/dst-offset-caching-8-of-8.js": 2153,
+        "Date/two-digit-years.js": 2117,
+        "Function/has-instance-jitted.js": 1064,
+        "Proxy/ownkeys-linear.js": 11941,
+        "RegExp/unicode-class-braced.js": 1909,
+        "String/string-upper-lower-mapping.js": 45977,
+        "TypedArray/set-same-buffer-different-source-target-types.js": 4618,
+        "TypedArray/sort_sorted.js": 1360,
+        "regress/regress-1507322-deep-weakmap.js": 1008,
+        "regress/regress-610026.js": 6114,
+        "statements/for-of-iterator-close-throw.js": 1030
+      }
+    }
+  },
+  "inventory": {
+    "annexB/built-ins": {
+      "files": 241,
+      "cases": 482,
+      "case_ids_sha256": "c087c440b7e3e21317d2c9139a800eb36c2d94fe43976d8147e6d193a6830534"
+    },
+    "annexB/language": {
+      "files": 845,
+      "cases": 895,
+      "case_ids_sha256": "d1d2aaae7257bc5da01716625cd0e1c39a5371108027868b23fb0d9a3afe5dcb"
+    },
+    "built-ins/AbstractModuleSource": {
+      "files": 8,
+      "cases": 8,
+      "case_ids_sha256": "8001c378aa13ceb0ad3740aa15da55db14081c26674d0160ac235723a76c6403"
+    },
+    "built-ins/AggregateError": {
+      "files": 25,
+      "cases": 50,
+      "case_ids_sha256": "d6970cb6daf9c40e7679427f0148366850c5fd5c8022efdc8cde3b93efed9a49"
+    },
+    "built-ins/Array": {
+      "files": 3082,
+      "cases": 6117,
+      "case_ids_sha256": "f175636acfd4f4e2495635397e4547b07641847fee415487f701fd419d2a48f8"
+    },
+    "built-ins/ArrayBuffer": {
+      "files": 221,
+      "cases": 442,
+      "case_ids_sha256": "e435ac3b8f2229c4b255a1031321c3286aa4a128fae8127045b9e2c19ed98e35"
+    },
+    "built-ins/ArrayIteratorPrototype": {
+      "files": 27,
+      "cases": 46,
+      "case_ids_sha256": "5a171ab63d2bc27f9407de3717c029e1f86eb14c2d5065131ae79ae0de80b123"
+    },
+    "built-ins/AsyncDisposableStack": {
+      "files": 104,
+      "cases": 208,
+      "case_ids_sha256": "b9922dc6e80d061f5c1b6282172db059bf62510bab27f50395c9ad36aa3c6616"
+    },
+    "built-ins/AsyncFromSyncIteratorPrototype": {
+      "files": 38,
+      "cases": 76,
+      "case_ids_sha256": "5f7f8bfc651b198fd44b288db9d9c3eba480321218e2e8107c2fbbba554b486f"
+    },
+    "built-ins/AsyncFunction": {
+      "files": 18,
+      "cases": 36,
+      "case_ids_sha256": "72fbdfea0c959d11354587b8850aad9d645779ba4bfe412055e62e09134fa15e"
+    },
+    "built-ins/AsyncGeneratorFunction": {
+      "files": 23,
+      "cases": 46,
+      "case_ids_sha256": "3a90954194aff1adee508ca9387c30f826a025c1cd5acea9b5d864b941908ff8"
+    },
+    "built-ins/AsyncGeneratorPrototype": {
+      "files": 48,
+      "cases": 96,
+      "case_ids_sha256": "653aaa85d8352e9c27b126388c5787957c4ada940c27a809628fd86929a22ebc"
+    },
+    "built-ins/AsyncIteratorPrototype": {
+      "files": 13,
+      "cases": 26,
+      "case_ids_sha256": "79d35c51f92708effa84337f911365f14652fb52a514265ff5f49fb6322aaae1"
+    },
+    "built-ins/Atomics": {
+      "files": 389,
+      "cases": 778,
+      "case_ids_sha256": "7d032dcfca398e161c367320d10bc79be39e204a0f93f863ef9fbaa1bad5e074"
+    },
+    "built-ins/BigInt": {
+      "files": 77,
+      "cases": 154,
+      "case_ids_sha256": "1e293598ab274e95b2f58dd91d754b56cbba3750f1887990f17b545522c0dc47"
+    },
+    "built-ins/Boolean": {
+      "files": 51,
+      "cases": 101,
+      "case_ids_sha256": "ba216a1c174a9dd8c9e18468fccdabba39cb310049db2c81748b4b79135d95db"
+    },
+    "built-ins/DataView": {
+      "files": 561,
+      "cases": 1122,
+      "case_ids_sha256": "92e13be227a1ba29503fe0ef8f401f8abb2a27ecb10cea755fba9b96ef9c78c7"
+    },
+    "built-ins/Date": {
+      "files": 594,
+      "cases": 1188,
+      "case_ids_sha256": "757668f8003e807650772ae7d1f137d8ff0258f83803e2d4b7012adc55ef39c6"
+    },
+    "built-ins/DisposableStack": {
+      "files": 93,
+      "cases": 186,
+      "case_ids_sha256": "8e1ca7077d9a84fb9216d45a9886c9b5727d7d89769fd990fb00f824856e8e81"
+    },
+    "built-ins/Error": {
+      "files": 93,
+      "cases": 186,
+      "case_ids_sha256": "bf892c522096f2ec589401a0a07e8b80a41af119d03f9562be217e66f72b3733"
+    },
+    "built-ins/FinalizationRegistry": {
+      "files": 47,
+      "cases": 94,
+      "case_ids_sha256": "e6495cf80d2544a43c01806d9c34eb68c1cfb0bf6a63db4b5793f2b384193581"
+    },
+    "built-ins/Function": {
+      "files": 509,
+      "cases": 893,
+      "case_ids_sha256": "0b825b7964d626bfed99763d1832a93aa238729d093918e6241c78d3cb49bcfd"
+    },
+    "built-ins/GeneratorFunction": {
+      "files": 23,
+      "cases": 46,
+      "case_ids_sha256": "940c06bf7b4d2366f094e7a736abe49a61a5982e9499f66a7f5dde9df08ed851"
+    },
+    "built-ins/GeneratorPrototype": {
+      "files": 61,
+      "cases": 122,
+      "case_ids_sha256": "7a41f1273850505c1ce90e595b20a38bc9cfa491181d7ad5b99e757a41d3407f"
+    },
+    "built-ins/Infinity": {
+      "files": 6,
+      "cases": 10,
+      "case_ids_sha256": "99076aad1b39ff2d0ebc17bee6240a29775942b5f074b6a9c4b26adbe2104239"
+    },
+    "built-ins/Iterator": {
+      "files": 654,
+      "cases": 1308,
+      "case_ids_sha256": "c3cb87234317be1f53efc8c720b69d46a80c453ff29f126c8e9abd95fe288912"
+    },
+    "built-ins/JSON": {
+      "files": 165,
+      "cases": 330,
+      "case_ids_sha256": "74701b63669773ee71713a5eef3d74afc90a95d9a236b7f9e443696bf5c6c224"
+    },
+    "built-ins/Map": {
+      "files": 204,
+      "cases": 405,
+      "case_ids_sha256": "3cfc4442704fb6b778b3ec97236541bae01e486cfca7d4041c1460df22623413"
+    },
+    "built-ins/MapIteratorPrototype": {
+      "files": 11,
+      "cases": 22,
+      "case_ids_sha256": "4f45af86ed223ad7bda3f1edd338e1d3b0347dcb7eadf3e6eca729a7b2945952"
+    },
+    "built-ins/Math": {
+      "files": 327,
+      "cases": 654,
+      "case_ids_sha256": "7343b67b051aec76c482f90e52300fdb6fb87994164236e98edb0e0fae25fa8c"
+    },
+    "built-ins/NaN": {
+      "files": 6,
+      "cases": 10,
+      "case_ids_sha256": "a1b47f27838a99502d68ea4ae03732de0f04e187e0f13f7f45e71eeaf6d860f6"
+    },
+    "built-ins/NativeErrors": {
+      "files": 94,
+      "cases": 188,
+      "case_ids_sha256": "ac1bbafb93fd3ed18c843ac59e01ee00885480b364cef91136e89d923c2fb275"
+    },
+    "built-ins/Number": {
+      "files": 340,
+      "cases": 680,
+      "case_ids_sha256": "e3cebe549c8fb26120d0cf5a2867814a9292c36b3f330aaf918629f20325632b"
+    },
+    "built-ins/Object": {
+      "files": 3411,
+      "cases": 6802,
+      "case_ids_sha256": "8869c9d8f49ebd45023eab711c7bc67e0825ed0298731e03de325ab5c17f379c"
+    },
+    "built-ins/Promise": {
+      "files": 732,
+      "cases": 1458,
+      "case_ids_sha256": "8b7ab66ba1a6786875d4dfc41f030cc64a008752494b26d0aff60080da7b4530"
+    },
+    "built-ins/Proxy": {
+      "files": 311,
+      "cases": 607,
+      "case_ids_sha256": "a1f7e1256b298857e2665826ee3620f1367104e65999b591ee2ba5a6d2aea5b8"
+    },
+    "built-ins/Reflect": {
+      "files": 153,
+      "cases": 306,
+      "case_ids_sha256": "2f86e5c86331cb69936a53564a98d67b960c5e80aea5521a3ca208bd9ea139a1"
+    },
+    "built-ins/RegExp": {
+      "files": 1879,
+      "cases": 3756,
+      "case_ids_sha256": "ede7be2b7e038b7f5f4af64bb88fede0b30dc0d3bc3fa12d1426658e7e655275"
+    },
+    "built-ins/RegExpStringIteratorPrototype": {
+      "files": 17,
+      "cases": 34,
+      "case_ids_sha256": "26855c9404ccfdac2e80b46c53e3eb5d511ec0ceb0b283d87d2c985da97ed313"
+    },
+    "built-ins/Set": {
+      "files": 383,
+      "cases": 764,
+      "case_ids_sha256": "39a2ad498feaf7d904ad3ab562b38d0d5447efa4295e5964b2d686619fb668f9"
+    },
+    "built-ins/SetIteratorPrototype": {
+      "files": 11,
+      "cases": 22,
+      "case_ids_sha256": "104f95d8157d8245c9dcd79678d87839fd2b0705bd9e79400e908396da0323c0"
+    },
+    "built-ins/ShadowRealm": {
+      "files": 64,
+      "cases": 124,
+      "case_ids_sha256": "09414a7bee83109f45973082a11586646c3c6613dd87ef967ba27cd7ae1c3556"
+    },
+    "built-ins/SharedArrayBuffer": {
+      "files": 104,
+      "cases": 208,
+      "case_ids_sha256": "7b2a76941bf29644a1dfc15de67ceff5202130e16f9fc261c4387cafca676afe"
+    },
+    "built-ins/String": {
+      "files": 1223,
+      "cases": 2443,
+      "case_ids_sha256": "2c69c997bc7b3dc279763d36d73ae3ceeb03c7116b19b5cab2944a0853647177"
+    },
+    "built-ins/StringIteratorPrototype": {
+      "files": 7,
+      "cases": 14,
+      "case_ids_sha256": "97ef71980b90c226ba7c623fa9334523040e7971fa05867d60ec924b3f4e3929"
+    },
+    "built-ins/SuppressedError": {
+      "files": 22,
+      "cases": 44,
+      "case_ids_sha256": "bc7e676ea208c67d663e8fd63e3b1211cb60b91bf10b2c70270cd091f085d602"
+    },
+    "built-ins/Symbol": {
+      "files": 98,
+      "cases": 192,
+      "case_ids_sha256": "f4785f4a330f508834d1b3132706ca806656d2a9b0f0271cc9a5c8168d9901ff"
+    },
+    "built-ins/Temporal": {
+      "files": 4603,
+      "cases": 9206,
+      "case_ids_sha256": "040c8f63f3926523965c052354ae5b617afc3da7d8d7845e7988b6f4b24e60f6"
+    },
+    "built-ins/ThrowTypeError": {
+      "files": 14,
+      "cases": 28,
+      "case_ids_sha256": "eb315d181a381526b6a36324313d788057a0749029a2fc802e3c47a2ba197ce1"
+    },
+    "built-ins/TypedArray": {
+      "files": 1446,
+      "cases": 2876,
+      "case_ids_sha256": "e5e4fc432700107cf9d55240af378a248cd0ed9ab7bcef8ab00a26546b729d00"
+    },
+    "built-ins/TypedArrayConstructors": {
+      "files": 738,
+      "cases": 1446,
+      "case_ids_sha256": "e6cf6c99da311457f6f5e29120aee1032898b3451e5caaddf623564069a2edb2"
+    },
+    "built-ins/Uint8Array": {
+      "files": 70,
+      "cases": 140,
+      "case_ids_sha256": "b23d9166d1b012fa0fb01fa5f900f3f68a27abee44d8e4de90694fb49d0ca3a4"
+    },
+    "built-ins/WeakMap": {
+      "files": 141,
+      "cases": 281,
+      "case_ids_sha256": "44893f67adddbc215599e0e49f2def7ae7692321f3dcf5412bbfd38b09de2554"
+    },
+    "built-ins/WeakRef": {
+      "files": 29,
+      "cases": 58,
+      "case_ids_sha256": "7c59edc6069562b0b17e996a870d890975fcd0e7588ffaabdf2356288fdf4f5b"
+    },
+    "built-ins/WeakSet": {
+      "files": 85,
+      "cases": 170,
+      "case_ids_sha256": "21654a4617d5f4ef922b69b93b22fd2432ef405661d9d08536f74b94aa922733"
+    },
+    "built-ins/decodeURI": {
+      "files": 55,
+      "cases": 110,
+      "case_ids_sha256": "71cc1a229cea5874f7a35e3afd916b0a99feead1ae29e0f994b3980f2b3b9d0c"
+    },
+    "built-ins/decodeURIComponent": {
+      "files": 56,
+      "cases": 112,
+      "case_ids_sha256": "e458eca7e1d145cb23ae2f6a98a5442839afbe31a32b1979a273e0d0d0791534"
+    },
+    "built-ins/encodeURI": {
+      "files": 31,
+      "cases": 62,
+      "case_ids_sha256": "6498ae7dfa44122ffa37ea9101244a274de6b0ac8f29d78d7b001409f545213e"
+    },
+    "built-ins/encodeURIComponent": {
+      "files": 31,
+      "cases": 62,
+      "case_ids_sha256": "f07d01b81f1bbe1d164b8d8b290a2daf97617dc1d24c726305e2e33cc9228cd9"
+    },
+    "built-ins/eval": {
+      "files": 10,
+      "cases": 20,
+      "case_ids_sha256": "0cb24544b283c3127b0939f5c4e2ab6bfdbfb701a0134778d6c40665bec98ccd"
+    },
+    "built-ins/global": {
+      "files": 29,
+      "cases": 56,
+      "case_ids_sha256": "17e8075af480502212f021081a521a4a16e8b17e1275eb6f189b1a2108b7e9e7"
+    },
+    "built-ins/isFinite": {
+      "files": 15,
+      "cases": 30,
+      "case_ids_sha256": "87cd4262cd3b7544684738f41fa22d9c3eeca7353a1d772605ea5a7a7de915c8"
+    },
+    "built-ins/isNaN": {
+      "files": 15,
+      "cases": 30,
+      "case_ids_sha256": "1dde9cd6058491270a1a0129bab59047ca823850a687e44165e1216a82185964"
+    },
+    "built-ins/parseFloat": {
+      "files": 54,
+      "cases": 108,
+      "case_ids_sha256": "9f69628b9b80c55736e4e23f161fac48a94a461fe2d103ad0a5eaa9ff32f7032"
+    },
+    "built-ins/parseInt": {
+      "files": 55,
+      "cases": 110,
+      "case_ids_sha256": "d518db5de3e9c7c4df73541e258106627c67016226bf905e443dc3cc7381a37c"
+    },
+    "built-ins/undefined": {
+      "files": 8,
+      "cases": 12,
+      "case_ids_sha256": "0d7f716bbc61fd5255a0714187e6d2814e6701f1cfc03b21310662821d4c904a"
+    },
+    "intl402/Array": {
+      "files": 2,
+      "cases": 4,
+      "case_ids_sha256": "2f20462f50e0d4da47961414e023b08a3f503760c4c600d2643053acc8e8cd4c"
+    },
+    "intl402/BigInt": {
+      "files": 11,
+      "cases": 22,
+      "case_ids_sha256": "427da24d74186f684d9c2a695a7ea0cb5dcedfd5d04391dcc3ff92b5974269cd"
+    },
+    "intl402/Collator": {
+      "files": 65,
+      "cases": 130,
+      "case_ids_sha256": "5e63ede32c0155c9324d41954e7da2883546174df358822f83a1e6fc9b787639"
+    },
+    "intl402/Date": {
+      "files": 12,
+      "cases": 24,
+      "case_ids_sha256": "c8127c59725cdb7bbdf21fac50aab390b4b0761b9df0d36b431008a26a214087"
+    },
+    "intl402/DateTimeFormat": {
+      "files": 244,
+      "cases": 488,
+      "case_ids_sha256": "b3cd73d00904fc80315bd179f59ca985ab265a3206ff385feb02e872866a678d"
+    },
+    "intl402/DisplayNames": {
+      "files": 57,
+      "cases": 114,
+      "case_ids_sha256": "b10cc5cd70133fd2c5eff11afb1643bb16b19b43b9a8e4ed42010582781ea349"
+    },
+    "intl402/DurationFormat": {
+      "files": 110,
+      "cases": 220,
+      "case_ids_sha256": "f5f578d3659977cad495ef586e52e74a3e9cad79ad1c91b437ee7383b265d17f"
+    },
+    "intl402/FallbackSymbol": {
+      "files": 2,
+      "cases": 4,
+      "case_ids_sha256": "1143de4d264488b429ee40aee006a5bffd1c1f79968ea5c406e30064f78005fc"
+    },
+    "intl402/Intl": {
+      "files": 66,
+      "cases": 132,
+      "case_ids_sha256": "0e442a264aae6b500ec6590d6bea7877c091ee4bd63f4f6caab21a1cefbb001c"
+    },
+    "intl402/ListFormat": {
+      "files": 81,
+      "cases": 162,
+      "case_ids_sha256": "931b9f266c3bca038dfa2b9c358668a99d77384df08bbfbf3ccc032683704f06"
+    },
+    "intl402/Locale": {
+      "files": 168,
+      "cases": 336,
+      "case_ids_sha256": "eb6c4dc8272af73975a4139bf02ea6b2885cdf21cd38516c46fddda140a999aa"
+    },
+    "intl402/Number": {
+      "files": 7,
+      "cases": 14,
+      "case_ids_sha256": "caa77cdac08acdd64d52d8255aeab44aaae311e4399e91a0f4c74ebe69f314fe"
+    },
+    "intl402/NumberFormat": {
+      "files": 249,
+      "cases": 498,
+      "case_ids_sha256": "eac333cd122bb5d761da14c5152e7336044326f6e4a403d13baafdda103dd22d"
+    },
+    "intl402/PluralRules": {
+      "files": 53,
+      "cases": 106,
+      "case_ids_sha256": "eee495bafa2de40196f39d32c3edeb7455d2cdebbd1c31922df71a45f3d8268b"
+    },
+    "intl402/RelativeTimeFormat": {
+      "files": 80,
+      "cases": 160,
+      "case_ids_sha256": "ddfdb0a11b0c5af622c69eec8d5fda3c610e61556ab63c702a2f5d7f3653df38"
+    },
+    "intl402/Segmenter": {
+      "files": 79,
+      "cases": 158,
+      "case_ids_sha256": "fea2bf119a91aa73ba201c672abf6d2fd3993757523221f75e7c87d45401525c"
+    },
+    "intl402/String": {
+      "files": 19,
+      "cases": 38,
+      "case_ids_sha256": "e8c03dd034b1939af0b17fb4f8f5847ae796d31cb79642c743336da400cf5846"
+    },
+    "intl402/Temporal": {
+      "files": 2029,
+      "cases": 4058,
+      "case_ids_sha256": "c2394b2d2cccb135288d9ddff9c0a42fbdd916fe2d5e915039815fa32b8a16bf"
+    },
+    "intl402/TypedArray": {
+      "files": 1,
+      "cases": 2,
+      "case_ids_sha256": "23f4bf232fa5d279a465d60080282bb5b201e6691b96c4a203d4eff46828e114"
+    },
+    "language/arguments-object": {
+      "files": 263,
+      "cases": 460,
+      "case_ids_sha256": "2ff4aa0a4d269d2663955cdf898cbdd2b56663fdf12d27a50b527801db502f93"
+    },
+    "language/asi": {
+      "files": 102,
+      "cases": 204,
+      "case_ids_sha256": "e227a20e75c899340092841dde97d3b5be321ed38ecafa3f8cc0fea56d834775"
+    },
+    "language/block-scope": {
+      "files": 145,
+      "cases": 287,
+      "case_ids_sha256": "b3ff9e74b5d9868206b330d37d5013f4b441edef9bf1f690ca2faa2c8125766d"
+    },
+    "language/comments": {
+      "files": 52,
+      "cases": 81,
+      "case_ids_sha256": "ecceb1b19fe9749f31437e17d68d039dc5c22d2f2ead6de53afdb14937c90771"
+    },
+    "language/computed-property-names": {
+      "files": 48,
+      "cases": 96,
+      "case_ids_sha256": "b1ee9d13e5cf18cefef236f4d9204ca6bba696448378132eaee56b680a2e7b5f"
+    },
+    "language/destructuring": {
+      "files": 19,
+      "cases": 37,
+      "case_ids_sha256": "b82f90acfb2e965491350777fce73a6b419b7ae0e61e20deb525ccd88141683a"
+    },
+    "language/directive-prologue": {
+      "files": 62,
+      "cases": 62,
+      "case_ids_sha256": "52fedc0d6b5d38300727a5ba776f3f17d5e2915cbefc42a3bcaf7e67c8f166b0"
+    },
+    "language/eval-code": {
+      "files": 347,
+      "cases": 454,
+      "case_ids_sha256": "27beb4137fd2ea6cd2ab0d7a28a95ca217f42234fdbd53d71bc56a2da5383640"
+    },
+    "language/export": {
+      "files": 3,
+      "cases": 3,
+      "case_ids_sha256": "f3c94bbf945021ee3dde6585ba9c1996df45d2b0c8014f7b432e7ae450cb71a8"
+    },
+    "language/expressions": {
+      "files": 11102,
+      "cases": 21286,
+      "case_ids_sha256": "c697db66a7ee241d6e2b01022e8065986135bca7eab5e48995e50ef6c01409d5"
+    },
+    "language/function-code": {
+      "files": 217,
+      "cases": 281,
+      "case_ids_sha256": "38309f1ee4038b6a83e2861ba259ecfc13459df866b958526f94cea12c3fae7a"
+    },
+    "language/future-reserved-words": {
+      "files": 55,
+      "cases": 85,
+      "case_ids_sha256": "87a15c6365bf57f6a64c3fa17bfc4b14dc35ca31351629e792d5e3231a2eff65"
+    },
+    "language/global-code": {
+      "files": 42,
+      "cases": 75,
+      "case_ids_sha256": "5c81a48b77ec47d75ac00a2851fc8a8bdf8ff19e48b0cda8a49988497be8f539"
+    },
+    "language/identifier-resolution": {
+      "files": 14,
+      "cases": 22,
+      "case_ids_sha256": "1bbc930ead45a937c6d78bbe5c3dbb39c2aa215b173a296a27d1af4c65f34d6d"
+    },
+    "language/identifiers": {
+      "files": 268,
+      "cases": 535,
+      "case_ids_sha256": "70558c5de5695c6e087240a3cea0ee1c96ba204a9e6141bec35fd830f7a3b193"
+    },
+    "language/import": {
+      "files": 129,
+      "cases": 135,
+      "case_ids_sha256": "a674ef81522ee87bea92dca1c11727e94611013c90ed5178203099499dbd1d60"
+    },
+    "language/keywords": {
+      "files": 25,
+      "cases": 50,
+      "case_ids_sha256": "144436e36d2f939f8f66a7d8f6694579eb2c7f179c287ecd8e4bf090fd8667c7"
+    },
+    "language/line-terminators": {
+      "files": 41,
+      "cases": 82,
+      "case_ids_sha256": "b93ac10961f309938e8a0840abccd926e1a7719279d9423aba178cd0a575ee65"
+    },
+    "language/literals": {
+      "files": 536,
+      "cases": 1041,
+      "case_ids_sha256": "bcb53937819b039c8fc8a738a99f7ed09ae0f8b8626bb538804e6bcc64e01636"
+    },
+    "language/module-code": {
+      "files": 599,
+      "cases": 602,
+      "case_ids_sha256": "e889690e27d08e6c80ec9fb6c2acd5b6c1d3756d3660e5f940f80db457c22db7"
+    },
+    "language/punctuators": {
+      "files": 11,
+      "cases": 22,
+      "case_ids_sha256": "9d61475ab0ddc4b6cef106e2b47ad52c0781d1c01229cb685cc31c1388cd33a6"
+    },
+    "language/reserved-words": {
+      "files": 27,
+      "cases": 53,
+      "case_ids_sha256": "7aa1287117b1067086d00ee206a14f6cf7cb9424a5d549c6532e541e0e08299d"
+    },
+    "language/rest-parameters": {
+      "files": 11,
+      "cases": 22,
+      "case_ids_sha256": "495d99803c0cdc7e404c638266696aaabf9a1372b2ee4b19a9ed38ae165bf557"
+    },
+    "language/source-text": {
+      "files": 1,
+      "cases": 2,
+      "case_ids_sha256": "1da0ba6dcb70c6b562d1266b0bf8108abfbc9ca2eddc68e7beab9c5249f51e35"
+    },
+    "language/statementList": {
+      "files": 80,
+      "cases": 160,
+      "case_ids_sha256": "c73bf0d8795053c8073eb02d5689c131cd08f506484d49273bf1dcc20962770a"
+    },
+    "language/statements": {
+      "files": 9347,
+      "cases": 18015,
+      "case_ids_sha256": "df4e7867a1835d6648a7be9810e0ce18c6bb6eb6ae62925170280be254c3d8d0"
+    },
+    "language/types": {
+      "files": 113,
+      "cases": 211,
+      "case_ids_sha256": "d856aab66b7e971e36701eb3626c240a0a4abd4709529c98765fad6d765730df"
+    },
+    "language/white-space": {
+      "files": 67,
+      "cases": 134,
+      "case_ids_sha256": "35e359a659f6db10680c40af06f4e72e790914ec10f636483dd425de564c776c"
+    },
+    "staging/Temporal": {
+      "files": 2,
+      "cases": 4,
+      "case_ids_sha256": "c2bad13357e4b334e9e37feb440728df6cc1b4d4d5a846ca41c84ef2d146477f"
+    },
+    "staging/Uint8Array": {
+      "files": 1,
+      "cases": 2,
+      "case_ids_sha256": "caf02bea34c8f10bc6e684f47b3fab3b9b1bde6d10d0d440b8fc21e564f2ba4a"
+    },
+    "staging/built-ins": {
+      "files": 8,
+      "cases": 16,
+      "case_ids_sha256": "38ae8af52e8db323c7fc6fd312534de40e5bfbe0f2163125ffa4568b23cae240"
+    },
+    "staging/decorators": {
+      "files": 3,
+      "cases": 6,
+      "case_ids_sha256": "1d6c561579060e2dfe6a513fde354adbbdb8a8ee17d5b6a2bc4de018cc809f62"
+    },
+    "staging/explicit-resource-management": {
+      "files": 53,
+      "cases": 105,
+      "case_ids_sha256": "77719e02ec1d9e3bc816c2c552fa27018a428de669fa567ff3290cc9f2c4730a"
+    },
+    "staging/set-methods": {
+      "files": 3,
+      "cases": 6,
+      "case_ids_sha256": "be8e47546458d1a81ff121d57c52109f87fd5b12d6459469af3d2504e1ff3378"
+    },
+    "staging/sm": {
+      "files": 1406,
+      "cases": 2631,
+      "case_ids_sha256": "82ba7c4bc4a0035d1bbc1ac68bcdb5d9239418a9591acac85c34bfadead9f222"
+    },
+    "staging/source-phase-imports": {
+      "files": 2,
+      "cases": 4,
+      "case_ids_sha256": "5b190a6b347c3f518f2b471057ebfaaf1281cfd70acf80032f8e11a8d2ce3c9d"
+    },
+    "staging/top-level-await": {
+      "files": 1,
+      "cases": 1,
+      "case_ids_sha256": "4c02f9c5d40b612ac98e51daa3e2d1fff515c9e7e214753c6498f565416782c0"
+    }
+  }
+}

@@ -985,6 +985,99 @@ pub fn test(
     })
 }
 
+/// Explicit inventory/batch requests do not read or overwrite the interactive failure state.
+/// Their caller owns the full coverage manifest and may run disjoint batches concurrently.
+pub fn test_batch(
+    backend: &mut dyn Backend,
+    corpus: &Path,
+    project_root: &Path,
+    parse_only: bool,
+    node: bool,
+    cases: Option<&Path>,
+    output: Option<&Path>,
+) -> Result<Output> {
+    let root = canonical_path(corpus)?;
+    let destination = output.map(|path| {
+        if path.is_absolute() {
+            path.to_owned()
+        } else {
+            project_root.join(path)
+        }
+    });
+    let state_path = project_root.join(".kiln/test-failures.json");
+    if destination.as_ref().is_some_and(|path| {
+        path == &state_path
+            || std::fs::canonicalize(path)
+                .ok()
+                .zip(std::fs::canonicalize(&state_path).ok())
+                .is_some_and(|(a, b)| a == b)
+    }) {
+        return Err(Error::BadInput(
+            "test inventory/batch results would overwrite failure state".into(),
+        ));
+    }
+    let (text, exit_code) = if let Some(cases) = cases {
+        let bytes =
+            std::fs::read(cases).map_err(|error| Error::io("cannot read test batch", error))?;
+        let ids: Vec<String> = serde_json::from_slice(&bytes)
+            .map_err(|error| Error::BadInput(format!("invalid test batch: {error}")))?;
+        let mode = if parse_only {
+            TestMode::Parse
+        } else if node {
+            TestMode::Node
+        } else {
+            TestMode::Interpreter
+        };
+        let kiln_proto::Response::Tested(summary) =
+            backend.request(kiln_proto::Request::TestBatch {
+                root: root.clone(),
+                mode,
+                ids,
+            })?
+        else {
+            return Err(Error::Protocol(
+                "test batch returned an unexpected response".into(),
+            ));
+        };
+        if let Some(path) = destination {
+            write_conformance_results(&path, &summary)?;
+        }
+        (render_test(&root, &summary), test_exit_code(&summary))
+    } else {
+        let kiln_proto::Response::TestInventory(tests) =
+            backend.request(kiln_proto::Request::TestInventory { root })?
+        else {
+            return Err(Error::Protocol(
+                "test inventory returned an unexpected response".into(),
+            ));
+        };
+        let text = serde_json::to_string_pretty(&tests)
+            .map_err(|error| Error::Protocol(error.to_string()))?;
+        if let Some(path) = destination {
+            write_json_atomically(&path, &text, "test inventory")?;
+            (
+                format!(
+                    "discovered {} files; inventory {}\n",
+                    tests.len(),
+                    path.display()
+                ),
+                0,
+            )
+        } else {
+            (text + "\n", 0)
+        }
+    };
+    Ok(Output {
+        text,
+        error_text: String::new(),
+        notes: Vec::new(),
+        exit_code,
+        revision: None,
+        value: None,
+        source_view: None,
+    })
+}
+
 /// Exit status for `kiln test`.
 ///
 /// A failure is a failure, and that half is obvious. The half that is not: a run which selected
@@ -1066,13 +1159,19 @@ fn outcome_tag(outcome: TestOutcome) -> &'static str {
 /// Write the schema-1 document consumed by `scripts/ci-conformance.sh`.
 ///
 /// The report is assembled from the cases rather than the summary counters so its totals always
-/// agree with the detail that the gate reads. Sorting the stable ids makes repeated runs produce
-/// the same document even if discovery order changes.
+/// agree with the detail that the gate reads. Sorting stable ids preserves case ordering even
+/// if discovery or completion order changes; elapsed times remain available for profiling.
 fn write_conformance_results(path: &Path, summary: &TestSummary) -> Result<()> {
     let mut cases = summary
         .cases
         .iter()
-        .map(|case| (case.id.clone(), outcome_tag(case.outcome)))
+        .map(|case| {
+            (
+                case.id.clone(),
+                outcome_tag(case.outcome),
+                case.elapsed_nanos,
+            )
+        })
         .collect::<Vec<_>>();
     cases.sort_by(|left, right| left.0.cmp(&right.0));
     if cases.is_empty() {
@@ -1096,7 +1195,7 @@ fn write_conformance_results(path: &Path, summary: &TestSummary) -> Result<()> {
     let mut skipped = 0usize;
     let tests = cases
         .iter()
-        .map(|(id, outcome)| {
+        .map(|(id, outcome, elapsed_nanos)| {
             match *outcome {
                 "pass" => passed += 1,
                 "fail" => failed += 1,
@@ -1104,7 +1203,7 @@ fn write_conformance_results(path: &Path, summary: &TestSummary) -> Result<()> {
                 "skipped" => skipped += 1,
                 _ => unreachable!("outcome_tag only returns known outcomes"),
             }
-            json!({"id": id, "outcome": outcome})
+            json!({"id": id, "outcome": outcome, "elapsed_nanos": elapsed_nanos})
         })
         .collect::<Vec<_>>();
     let document = json!({
@@ -1340,6 +1439,8 @@ mod tests {
                     Request::NativeSharedBuild { .. } => "NativeSharedBuild",
                     Request::NativeRun { .. } => "NativeRun",
                     Request::Test { .. } => "Test",
+                    Request::TestInventory { .. } => "TestInventory",
+                    Request::TestBatch { .. } => "TestBatch",
                     Request::Project { .. } => "Project",
                     Request::Stats => "Stats",
                     Request::CacheGc { .. } => "CacheGc",
@@ -2056,10 +2157,10 @@ mod tests {
         assert_eq!(
             document["tests"],
             serde_json::json!([
-                {"id": "a-first", "outcome": "pass"},
-                {"id": "b-fail", "outcome": "fail"},
-                {"id": "m-middle", "outcome": "unsupported"},
-                {"id": "z-last", "outcome": "skipped"},
+                {"id": "a-first", "outcome": "pass", "elapsed_nanos": 0},
+                {"id": "b-fail", "outcome": "fail", "elapsed_nanos": 0},
+                {"id": "m-middle", "outcome": "unsupported", "elapsed_nanos": 0},
+                {"id": "z-last", "outcome": "skipped", "elapsed_nanos": 0},
             ])
         );
         assert_eq!(

@@ -1810,13 +1810,20 @@ mod tests {
 
         // Rewriting the same bytes must not spend a recompute. That is the whole reason the
         // content comparison outlives the poll it was written for.
-        std::fs::write(&path, "export const a = 1;").expect("rewrite");
+        // Publish a complete edit. A truncate/write can expose a real empty file when the
+        // writer is descheduled, which is a second content change this test does not model.
+        let save = |source: &str| {
+            let staged = path.with_extension("tmp");
+            std::fs::write(&staged, source).expect("stage edit");
+            std::fs::rename(&staged, &path).expect("publish edit");
+        };
+        save("export const a = 1;");
         assert!(
             printed.recv_timeout(Duration::from_millis(750)).is_err(),
             "an unchanged save re-checked"
         );
 
-        std::fs::write(&path, "export const a = 2;").expect("edit");
+        save("export const a = 2;");
         let second = printed
             .recv_timeout(Duration::from_secs(5))
             .expect("a real edit should run");

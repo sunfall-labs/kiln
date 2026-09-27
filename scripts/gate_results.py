@@ -217,7 +217,18 @@ def test262_document(log: str, status: int, document: str) -> dict[str, Any]:
         raise ResultError("Test262 aggregate counts disagree with chunks")
     if report["status"] == "passed" and report.get("regressions"):
         raise ResultError("Test262 passing report lists regressions")
-    doc = _envelope("Test262 baseline", "test262", log, status, counts.get("total"), counts.get("passed"), counts.get("failed"), verdict=report["status"] if status == 0 else "failed", outcome_extra={"unsupported": counts.get("unsupported", 0), "skipped": counts.get("skipped", 0)}, chunks=len(report["chunks"]), result_document=str(Path(document).resolve()), regressions=report.get("regressions", []), corpus_pin=report.get("source", {}).get("commit"))
+    coverage = report.get("coverage")
+    if coverage is not None:
+        if not isinstance(coverage, dict) or coverage.get("suite") not in {"routine", "extended", "full"}:
+            raise ResultError("Test262 report has invalid coverage scope")
+        discovered = _nonnegative(coverage.get("discovered_cases"), "discovered_cases")
+        selected = _nonnegative(coverage.get("selected_cases"), "selected_cases")
+        deferred = _nonnegative(coverage.get("deferred_cases"), "deferred_cases")
+        if selected != counts["total"] or selected + deferred != discovered or coverage.get("verified_partition") is not True:
+            raise ResultError("Test262 coverage partition is incomplete")
+        if coverage["suite"] == "full" and deferred:
+            raise ResultError("full Test262 coverage cannot defer cases")
+    doc = _envelope("Test262 baseline", "test262", log, status, counts.get("total"), counts.get("passed"), counts.get("failed"), verdict=report["status"] if status == 0 else "failed", outcome_extra={"unsupported": counts.get("unsupported", 0), "skipped": counts.get("skipped", 0)}, chunks=len(report["chunks"]), result_document=str(Path(document).resolve()), regressions=report.get("regressions", []), corpus_pin=report.get("source", {}).get("commit"), coverage=coverage)
     return doc
 
 

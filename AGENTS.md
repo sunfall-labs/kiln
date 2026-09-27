@@ -50,9 +50,12 @@ that assembly, in the repository, and `mise tasks` lists it beside the rest.
 
 | task | what it does |
 | --- | --- |
-| `mise run gate` | crate tests, native parity, thirdparty bundles, the three corpora, the Test262 baseline |
+| `mise run gate` | crate tests, native parity, thirdparty bundles, the three corpora, routine Test262 |
+| `mise run gate-full` | the same gate plus every extended Test262 case |
 | `mise run gate-quick` | the first three -- the loop worth running while iterating |
-| `mise run test262` | the Test262 baseline alone, chunk by chunk |
+| `mise run test262` | routine Test262, with deferred coverage reported explicitly |
+| `mise run test262-extended` | the expensive section alone; periodic or affected-feature checks |
+| `mise run test262-full` | every Test262 case, checked against the full chunk baseline |
 | `mise run test262-update` | regenerate the baseline; deliberate, and the diff is the record |
 | `mise run test262-fetch` | fetch the pinned corpus into `~/.cache/kiln`, once per machine |
 | `mise run native-stress` | the native corpus again with the collector stressed on every allocation |
@@ -86,14 +89,53 @@ that reason: the collection never landed inside the window. Run it after anythin
 allocation, rooting or the collector, and before believing a corpus that "already covers" the
 shape you changed.
 
-### Run the gate once, at the end, not as a progress bar
+### Keep the gate fast; run it once when the change is finished
 
-The full gate is expensive: several hundred native compiles, the thirdparty bundles, three corpora
-and the Test262 baseline, and several agents share one machine and one CPU budget. Run it **once,
-when the change is finished**, and not after every edit. While iterating, run the narrowest thing
-that can answer the question you actually have: the one crate's tests, `scripts/native.sh` for a
-prelude change, `kiln test` on the one corpus directory the change touches, or the single probe
-that failed. `gate-quick` is the widest loop worth running mid-change, and even that is minutes.
+The gate builds the CLI once, runs the artifact-cache suite before concurrent filesystem work,
+then overlaps the remaining crate tests, native/thirdparty parity and Test262
+within one budget (at most 32 CPUs, or `KILN_GATE_JOBS` / `KILN_JOBS` if smaller). Test262 keeps
+one worker per GiB of its hard memory cap; the gate sizes that cap to its assigned workers, at
+most half physical memory or 16 GiB. An explicit `KILN_TEST262_MEMORY_MB` is respected.
+`KILN_GATE_SERIAL=1` runs the same checks serially for diagnosis. Performance baselines run only
+after the correctness lanes finish. Every step records its elapsed seconds in the gate evidence;
+Test262 retains per-chunk result documents including individual case timings.
+Test262 discovers an explicit file/variant inventory, then distributes bounded batches across
+processes within the same CPU and memory allowance. Every batch retains original corpus paths,
+harness includes, module fixtures and fresh realms. The runner verifies exact case IDs per batch
+and across the selected suite before accepting its counts; crashes, missing or duplicate cases
+fail the run. Complete per-chunk result documents remain available beside batch logs.
+
+`conformance/test262-extended.json` is the reviewed list of expensive files, initially 502 files
+(1,004 variants) whose measured cost consumed 88% of case execution time. The everyday gate runs
+the complement, initially 101,634 variants. This is a cost classification, not a claim that these
+tests must be slow: Unicode sweeps dominate it, and several entries expose optimization or
+correctness problems. All variants of a file stay together. Selection uses the committed list;
+timings only order batches and never silently omit a case.
+
+The full chunk baseline remains unchanged. The extended manifest records its section's reference
+counts; the routine passing floor is the full chunk floor minus that section's reference passes.
+A full run checks the original full floor. Reports name the suite, selected/deferred/discovered
+counts and manifest digest. `test262-update` requires full coverage and deliberately updates both
+sets of counts. Changing the extended list requires a complete run and reviewed baseline split.
+
+Backend C unit fixtures honor `CC` and cache compiled objects under
+`target/kiln-backend-test-cache`. Every invocation still preprocesses the source (so included
+headers affect the key), relinks against the current host libraries, and executes the fixture.
+The key includes compiler identity, flags and preprocessed content. Test-only modules do not
+participate in the production C emitter fingerprint; editing a fixture does not invalidate all
+native artifacts. These are compilation caches, not cached test verdicts.
+The test profile optimizes IR, graph and C emission passes at level 1 while retaining debug
+assertions and overflow checks; ordinary dev builds keep their existing settings.
+The cache suite keeps its full stress repetition and contributes to the same workspace totals;
+overlapping its durable writes with native compilers made a subsecond suite take 45 seconds.
+
+Run the routine gate once when a change is finished. Use `gate-full` for changes to this runner,
+its classification or baseline, and periodically or before releases; use `test262-extended` or the
+pinned subtree runner when changing the features those cases exercise. While iterating, use the
+narrowest check that answers the question: one crate, one Test262 subtree, or affected native
+probes. `gate-quick` has the workspace/native/thirdparty lanes. No mode caches test verdicts, and
+routine coverage must never be reported as a complete conformance run. The target is a few
+minutes; investigate slow steps instead of accepting a longer loop.
 
 Keep the whole log when the gate runs in the background. A `tail -8` on `native.sh` kept the
 refusal backlog and cut the one summary line above it, and the same on `thirdparty.sh` kept the

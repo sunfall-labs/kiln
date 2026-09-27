@@ -1876,6 +1876,12 @@ impl ModuleRealmSession {
     }
 }
 
+// A pointer identifies the compiled call site only while its allocation cannot be reused.
+// Keep a weak owner beside the value: eval may release its program's code, but the Rc allocation
+// remains reserved until this cache entry dies, preventing a later eval from inheriting its site.
+type TemplateObjectCache =
+    std::collections::HashMap<(RealmId, usize, u32), (std::rc::Weak<Program>, Value)>;
+
 struct ModuleRealmShared {
     realm: Realm<Scheduled, Timer>,
     global_objects: Vec<Option<Value>>,
@@ -1887,7 +1893,7 @@ struct ModuleRealmShared {
     symbol_serial: u64,
     symbol_registry: Vec<(StringUnits, Value)>,
     symbols: Vec<Rc<UniqueSymbol>>,
-    template_objects: std::collections::HashMap<(RealmId, usize, u32), Value>,
+    template_objects: TemplateObjectCache,
     intrinsics: Rc<Intrinsics>,
 }
 

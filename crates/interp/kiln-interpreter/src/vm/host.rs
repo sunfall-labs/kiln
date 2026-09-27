@@ -99,18 +99,28 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
     pub(crate) fn get_template_object(&self, site: u32) -> Option<Value> {
         let key = (self.current_realm, Rc::as_ptr(&self.program) as usize, site);
         if let Some(realm) = &self.module_realm {
-            realm.borrow().template_objects.get(&key).cloned()
+            realm
+                .borrow()
+                .template_objects
+                .get(&key)
+                .map(|(_, value)| value.clone())
         } else {
-            self.template_objects.get(&key).cloned()
+            self.template_objects
+                .get(&key)
+                .map(|(_, value)| value.clone())
         }
     }
 
     pub(crate) fn insert_template_object(&mut self, site: u32, value: Value) {
         let key = (self.current_realm, Rc::as_ptr(&self.program) as usize, site);
         if let Some(realm) = &self.module_realm {
-            realm.borrow_mut().template_objects.insert(key, value);
+            realm
+                .borrow_mut()
+                .template_objects
+                .insert(key, (Rc::downgrade(&self.program), value));
         } else {
-            self.template_objects.insert(key, value);
+            self.template_objects
+                .insert(key, (Rc::downgrade(&self.program), value));
         }
     }
 

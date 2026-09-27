@@ -22,6 +22,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+kiln-artifact-cache = { workspace = true }
+kiln-native-toolchain = { workspace = true }
 insta = { workspace = true }
 proptest = { workspace = true }
 regress = { workspace = true }

@@ -3,6 +3,8 @@ use kiln_ir::Builtin;
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
+mod fixture_cache;
+
 fn program(constants: Vec<Constant>, code: Vec<Instruction>, local_count: u32) -> Program {
     Program {
         source: "".into(),
@@ -788,45 +790,8 @@ fn function(code: Vec<Instruction>) -> FunctionProto {
 }
 
 /// Compile one emitted unit with a `main` of the caller's choosing and report its exit code.
-fn run_with_main(generated: &CModule, wrapper: &str, label: &str) -> std::process::Output {
-    let executable = std::env::temp_dir().join(format!(
-        "kiln-backend-c-{label}-{}-{}",
-        std::process::id(),
-        generated.program_hash
-    ));
-    let mut child = Command::new("cc")
-        .args([
-            "-std=c99",
-            "-pedantic",
-            "-Werror=implicit-function-declaration",
-            "-x",
-            "c",
-            "-",
-            "-lm",
-            "-o",
-        ])
-        .arg(&executable)
-        .stdin(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("a C compiler is available for backend tests");
-    child
-        .stdin
-        .take()
-        .expect("stdin is piped")
-        .write_all(linked_source(&generated.source, wrapper).as_bytes())
-        .expect("source is accepted by cc stdin");
-    let compile = child.wait_with_output().expect("cc exits");
-    assert!(
-        compile.status.success(),
-        "generated C did not compile:\n{}",
-        String::from_utf8_lossy(&compile.stderr)
-    );
-    let run = Command::new(&executable)
-        .output()
-        .expect("generated executable runs");
-    let _ = std::fs::remove_file(&executable);
-    run
+fn run_with_main(generated: &CModule, wrapper: &str, _label: &str) -> std::process::Output {
+    fixture_cache::run(&linked_source(&generated.source, wrapper))
 }
 
 #[cfg(any())]

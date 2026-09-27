@@ -746,6 +746,18 @@ fn handle<E: QueryEngine>(
             steps,
             source_view,
         } => handle_run(state, path, project_root, args, node, steps, source_view),
+        Request::TestInventory { root } => {
+            run_without_engine_lock(|| match shared.tests.inventory(&root) {
+                Ok(tests) => Response::TestInventory(tests),
+                Err(message) => Response::Error { message },
+            })
+        }
+        Request::TestBatch { root, mode, ids } => {
+            run_without_engine_lock(|| match shared.tests.batch(&root, mode, ids) {
+                Ok(summary) => Response::Tested(summary),
+                Err(message) => Response::Error { message },
+            })
+        }
         Request::Test {
             root,
             mode,

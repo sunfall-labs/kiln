@@ -2338,11 +2338,14 @@ impl NativeBuilder {
                 (!sites.is_empty()).then(|| (path.clone(), sites))
             })
             .collect();
-        let (bootstrap, bootstrap_program) = native_builtin_bootstrap_module(
-            &emission,
-            options.node,
-            group_mask & kiln_graph::method_groups::URL != 0,
-        )?;
+        let (bootstrap, bootstrap_program, bootstrap_generated_c_hit) =
+            native_builtin_bootstrap_module(
+                &self.cache,
+                &target,
+                &emission,
+                options.node,
+                group_mask & kiln_graph::method_groups::URL != 0,
+            )?;
         if !symbols.insert(bootstrap.symbol.clone()) {
             return Err(NativeError::SymbolCollision {
                 symbol: bootstrap.symbol,
@@ -2419,8 +2422,9 @@ impl NativeBuilder {
             Digest::hash(b"native-builtin-bootstrap-c11"),
             [Digest::hash(bootstrap.source.as_bytes())],
         );
-        module_sources
-            .push(self.cached_payload(&bootstrap_source_key, bootstrap.source.as_bytes())?);
+        let (bootstrap_bytes, bootstrap_digest, _) =
+            self.cached_payload(&bootstrap_source_key, bootstrap.source.as_bytes())?;
+        module_sources.push((bootstrap_bytes, bootstrap_digest, bootstrap_generated_c_hit));
         module_generic_only.push(bootstrap.generic_only);
         let runtime_source_key = NativeArtifactFamily::RuntimeSource.source_key(
             &target,

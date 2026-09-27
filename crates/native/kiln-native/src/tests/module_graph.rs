@@ -144,6 +144,42 @@ fn graph_emission_cache_hits_persist_and_all_input_classes_invalidate() {
 }
 
 #[test]
+fn bootstrap_emission_cache_reopens_and_separates_surface_and_policy() {
+    let project = TestDirectory::new("kiln-bootstrap-emission-cache");
+    let cache_path = project.path.join("bootstrap-cache");
+    let policy = EmissionPolicy {
+        decoupled_prelude: true,
+        compact: true,
+        ..Default::default()
+    };
+    let cache = ArtifactCache::new(&cache_path);
+    let (first, program, hit) =
+        native_builtin_bootstrap_module(&cache, "test-target", &policy, false, false).unwrap();
+    assert!(!hit);
+    let reopened = ArtifactCache::new(&cache_path);
+    let (again, again_program, hit) =
+        native_builtin_bootstrap_module(&reopened, "test-target", &policy, false, false).unwrap();
+    assert!(hit);
+    assert_eq!(first, again);
+    assert_eq!(program, again_program);
+    // A surface change and an emission-policy change must not return the earlier bootstrap.
+    for (policy, url) in [
+        (policy.clone(), true),
+        (
+            EmissionPolicy {
+                no_kiln_extensions: true,
+                ..policy
+            },
+            false,
+        ),
+    ] {
+        let (_, _, hit) =
+            native_builtin_bootstrap_module(&reopened, "test-target", &policy, false, url).unwrap();
+        assert!(!hit);
+    }
+}
+
+#[test]
 fn one_realm_defers_dependency_work_until_the_complete_native_graph_finishes() {
     let root = TestDirectory::new("kiln-native-realm-graph");
     let graph = realm_scheduling_graph(&root.path.join("project"));
@@ -410,9 +446,14 @@ fn native_graph_wiring_uses_resolved_star_export_origins() {
         1
     );
     assert!(!launcher.contains("kiln_graph_enter_module"));
-    let (bootstrap, _) =
-        native_builtin_bootstrap_module(&NativeRealmPolicy::default().emission(), false, true)
-            .expect("builtin bootstrap emits");
+    let (bootstrap, _, _) = native_builtin_bootstrap_module(
+        &root.cache(),
+        "test-target",
+        &NativeRealmPolicy::default().emission(),
+        false,
+        true,
+    )
+    .expect("builtin bootstrap emits");
     let bootstrapped = graph_launcher_source_with_imports(
         &graph,
         &modules,

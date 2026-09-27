@@ -951,7 +951,7 @@ fn default_variant(case: &TestCase) -> Variant {
     }
 }
 
-fn variants(case: &TestCase) -> Vec<Variant> {
+pub(crate) fn variants(case: &TestCase) -> Vec<Variant> {
     if has_flag(case, "module") {
         vec![Variant::Module]
     } else if has_flag(case, "raw") {

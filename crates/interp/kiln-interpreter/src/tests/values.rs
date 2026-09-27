@@ -663,3 +663,25 @@ fn decode_uri_preserves_lone_surrogates() {
         .unwrap_err();
     assert!(matches!(err, ExecutionError::MalformedUri));
 }
+
+#[test]
+fn repeating_an_empty_string_with_a_huge_count_finishes_without_iteration() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: Default::default(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    assert_eq!(
+        vm.dispatch_native(
+            Native::StringRepeat,
+            &Value::String("".into()),
+            &[Value::Number(1e15)],
+            0
+        ),
+        Ok(Value::String("".into()))
+    );
+}

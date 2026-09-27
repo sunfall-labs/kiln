@@ -2141,7 +2141,7 @@ pub(crate) fn call_native(
                 }
                 Native::StringRepeat => {
                     let count = arguments.first().map_or(0.0, Value::as_number);
-                    if count < 0.0 || !count.is_finite() {
+                    if text.is_empty() || count < 0.0 || !count.is_finite() {
                         Value::String(String::new().into())
                     } else {
                         // Checked before the allocation rather than after: `repeat` is handed a

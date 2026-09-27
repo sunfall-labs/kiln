@@ -6,13 +6,93 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import test262_corpus as corpus
 import test262_memory
+from test262_batches import inventory_identity
 
 
 class CorpusPolicyTests(unittest.TestCase):
+    def test_parallel_batches_overlap_with_partitioned_limits_and_propagate_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for chunk in ("a", "b", "c"):
+                (root / chunk).mkdir()
+            fake = root / "fake-kiln"
+            fake.write_text("""#!/usr/bin/env python3
+import json, os, pathlib, resource, sys, time
+chunk = pathlib.Path(sys.argv[3]).name
+root = pathlib.Path(sys.argv[3]).parent
+output = pathlib.Path(sys.argv[sys.argv.index('--out') + 1])
+if '--list' in sys.argv:
+    output.write_text(json.dumps([{'id': chunk, 'cases': [chunk + '#sloppy']}]))
+    sys.exit(0)
+ids = json.loads(pathlib.Path(sys.argv[sys.argv.index('--cases') + 1]).read_text())
+assert ids == [chunk]
+assert [int(os.environ['RAYON_NUM_THREADS']), int(os.environ['KILN_TEST262_MEMORY_MB'])] == [4, 4096]
+if sys.platform.startswith('linux'):
+    assert resource.getrlimit(resource.RLIMIT_AS)[0] == 4096 * 1024 * 1024
+(root / ('started-' + chunk)).touch()
+deadline = time.monotonic() + 5
+while len(list(root.glob('started-*'))) < 2:
+    if time.monotonic() > deadline: sys.exit(9)
+    time.sleep(0.01)
+failed = chunk == os.environ.get('FAKE_FAIL_CHUNK')
+report = {'tests': [{'id': chunk + '#sloppy', 'outcome': 'fail' if failed else 'pass'}],
+          'totals': {'total': 1, 'passed': int(not failed), 'failed': int(failed), 'unsupported': 0, 'skipped': 0}}
+output.write_text(json.dumps(report))
+sys.exit(int(failed))
+""")
+            fake.chmod(0o755)
+            args = SimpleNamespace(kiln=str(fake), logdir=str(root), checkout=None, suite="full",
+                                   extended_manifest=str(root / "extended.json"),
+                                   baseline=str(root / "baseline.json"), report=str(root / "report.json"), update=False)
+            (root / "baseline.json").write_text(json.dumps({
+                "test262_commit": corpus.COMMIT,
+                "chunks": {chunk: {"passed": 1, "failed": 0} for chunk in ("a", "b", "c")},
+            }))
+            (root / "extended.json").write_text(json.dumps({"schema": 1, "test262_commit": corpus.COMMIT,
+                "chunks": {"a": {"files": {"a": 1000}, "expected": {"passed": 1, "failed": 0, "unsupported": 0, "skipped": 0}}},
+                "inventory": {chunk: inventory_identity({chunk: [chunk + "#sloppy"]}) for chunk in ("a", "b", "c")}}))
+            env = {"KILN_JOBS": "12", "RAYON_NUM_THREADS": "12", "KILN_TEST262_MEMORY_MB": "12288", "KILN_GATE_SERIAL": "0"}
+            with mock.patch.dict(os.environ, env), \
+                 mock.patch.object(corpus, "load_checkout", return_value=root), \
+                 mock.patch.object(corpus, "resolve_test_root", return_value=(root, ".")), \
+                 mock.patch.object(corpus, "discover_chunks", return_value=["a", "b", "c"]):
+                self.assertEqual(corpus.command_baseline(args), 0)
+                report = json.loads((root / "report.json").read_text())
+                self.assertEqual(report["counts"]["passed"], 3)
+                self.assertEqual(report["coverage"]["selected_cases"], 3)
+                self.assertEqual(report["coverage"]["deferred_cases"], 0)
+                with mock.patch.dict(os.environ, {"FAKE_FAIL_CHUNK": "c"}):
+                    with self.assertRaisesRegex(corpus.CorpusError, "1 chunk.*regressed"):
+                        corpus.command_baseline(args)
+                self.assertEqual(json.loads((root / "report.json").read_text())["regressions"], ["c: 1 -> 0 passing"])
+
+    def test_suite_partition_and_batch_union_are_exact(self):
+        from test262_batches import partition, batches, verify_batch
+        inventory = {"chunk": {"fast": ["fast#sloppy", "fast#strict"], "slow": ["slow#module"]}}
+        manifest = {"chunks": {"chunk": {"files": {"slow": 1200}}},
+                    "inventory": {"chunk": inventory_identity(inventory["chunk"])}}
+        routine, _, normal_scope = partition(inventory, manifest, "routine")
+        extended, _, slow_scope = partition(inventory, manifest, "extended")
+        full, _, full_scope = partition(inventory, manifest, "full")
+        self.assertEqual(set(routine["chunk"]) | set(extended["chunk"]), set(full["chunk"]))
+        self.assertFalse(set(routine["chunk"]) & set(extended["chunk"]))
+        self.assertEqual((normal_scope["selected_cases"], slow_scope["selected_cases"], full_scope["selected_cases"]), (2, 1, 3))
+        tasks = batches(full, manifest, 4)
+        self.assertEqual(sorted(name for _, _, ids in tasks for name in ids), ["fast", "slow"])
+        with self.assertRaisesRegex(corpus.CorpusError, "undiscovered"):
+            partition(inventory, dict(manifest, chunks={"chunk": {"files": {"missing": 1}}}), "routine")
+        with self.assertRaisesRegex(corpus.CorpusError, "pinned IDs"):
+            partition({"chunk": {"slow": ["slow#module"]}}, manifest, "full")
+        verify_batch({"tests": [{"id": "a"}, {"id": "b"}]}, ["a", "b"])
+        for ids in (["a"], ["a", "a"], ["a", "b", "c"]):
+            with self.assertRaisesRegex(corpus.CorpusError, "coverage mismatch"):
+                verify_batch({"tests": [{"id": name} for name in ids]}, ["a", "b"])
+
     def checkout(self, files=None):
         root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)

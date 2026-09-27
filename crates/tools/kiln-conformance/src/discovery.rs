@@ -108,6 +108,14 @@ impl ConformanceTest {
         }
     }
 
+    /// Realm variants that execution will produce, without compiling or running the case.
+    pub fn variants(&self) -> Vec<Variant> {
+        match &self.declaration {
+            Declaration::Frontmatter(case) => test262::variants(case),
+            _ => vec![Variant::Sloppy],
+        }
+    }
+
     /// Run every realm variant this test calls for.
     ///
     /// A manifest test has exactly one: its expected output was observed from a single ordinary

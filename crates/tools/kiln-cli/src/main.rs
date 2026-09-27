@@ -390,9 +390,22 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             changed,
             parse_only,
             node,
+            list,
+            cases,
             output,
         } => {
             let mut backend = open(one_shot, &socket)?;
+            if list || cases.is_some() {
+                return report(commands::test_batch(
+                    backend.as_mut(),
+                    &path,
+                    &root,
+                    parse_only,
+                    node,
+                    cases.as_deref(),
+                    output.as_deref(),
+                )?);
+            }
             report(commands::test(
                 backend.as_mut(),
                 &path,

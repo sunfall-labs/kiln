@@ -1,6 +1,18 @@
 use std::path::Path;
 
 fn fingerprint(path: &Path, bytes: &mut Vec<u8>) {
+    // These modules are declared #[cfg(test)] by the backend and IR crates. Editing a fixture
+    // cannot change production emission, and must not invalidate every native artifact.
+    if path
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == "src")
+        && path
+            .file_name()
+            .is_some_and(|name| name == "tests" || name == "tests.rs")
+    {
+        return;
+    }
     if path.is_dir() {
         println!("cargo:rerun-if-changed={}", path.display());
         let mut entries = std::fs::read_dir(path)

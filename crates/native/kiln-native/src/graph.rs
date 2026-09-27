@@ -701,6 +701,15 @@ pub(super) fn cached_graph_module(
     let input = Digest::hash(
         format!("{:?}", (&node.program, node.source, logical_path, policy)).as_bytes(),
     );
+    cached_emitted_module(cache, target, input, emit)
+}
+
+fn cached_emitted_module(
+    cache: &ArtifactCache,
+    target: &str,
+    input: Digest,
+    emit: impl FnOnce() -> Result<kiln_backend_c::CModule, NativeError>,
+) -> Result<(kiln_backend_c::CModule, bool), NativeError> {
     let cache_key = NativeArtifactFamily::ModuleSource.source_key(
         target,
         Digest::hash(b"native-graph-emission-input-v4"),
@@ -850,10 +859,12 @@ pub(super) fn emit_native_graph_module_with_policy(
 }
 
 pub(super) fn native_builtin_bootstrap_module(
+    cache: &ArtifactCache,
+    target: &str,
     policy: &EmissionPolicy,
     node: bool,
     retain_url: bool,
-) -> Result<(kiln_backend_c::CModule, kiln_ir::ModuleProgram), NativeError> {
+) -> Result<(kiln_backend_c::CModule, kiln_ir::ModuleProgram, bool), NativeError> {
     const LOGICAL_PATH: &str = "@kiln/runtime-bootstrap.ts";
     // `URL` rides the retain group liveness computed: a program that names neither it nor
     // anything built on it gets no class, and the prelude behind it compiled out. `--node`
@@ -889,9 +900,35 @@ pub(super) fn native_builtin_bootstrap_module(
     // cache). The generic path alone is what a program that never calls `console.table` pays for.
     let mut bootstrap_policy = policy.clone();
     bootstrap_policy.generic_only = true;
-    let c_module =
-        emit_module_with_logical_path_and_policy(&program, LOGICAL_PATH, bootstrap_policy)?;
-    Ok((c_module, program))
+    if !bootstrap_policy.decoupled_prelude {
+        let module =
+            emit_module_with_logical_path_and_policy(&program, LOGICAL_PATH, bootstrap_policy)?;
+        return Ok((module, program, false));
+    }
+    // The bootstrap is shared by hundreds of unrelated executables. Cache before C rendering,
+    // just like ordinary modules: hashing its rendered source only saves the downstream C
+    // compile and still rebuilds the entire Value Graph on every cache hit. Use compiled IR
+    // rather than source text, so frontend/IR changes participate in the identity too.
+    let input = Digest::hash(
+        format!(
+            "{:?}",
+            (
+                &program,
+                ModuleSource::Source,
+                LOGICAL_PATH,
+                &bootstrap_policy
+            )
+        )
+        .as_bytes(),
+    );
+    let (c_module, hit) = cached_emitted_module(cache, target, input, || {
+        Ok(emit_module_with_logical_path_and_policy(
+            &program,
+            LOGICAL_PATH,
+            bootstrap_policy,
+        )?)
+    })?;
+    Ok((c_module, program, hit))
 }
 
 pub(super) fn cached_payload(

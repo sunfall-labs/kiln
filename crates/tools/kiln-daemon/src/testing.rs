@@ -181,6 +181,57 @@ impl ConformanceCoordinator {
         )
     }
 
+    pub(crate) fn inventory(
+        &self,
+        root: &str,
+    ) -> Result<Vec<kiln_proto::TestInventoryEntry>, String> {
+        let discovered = self.discover(Path::new(root), None, None)?;
+        Ok(discovered
+            .tests
+            .iter()
+            .map(|test| kiln_proto::TestInventoryEntry {
+                id: test.id().to_owned(),
+                cases: test
+                    .variants()
+                    .into_iter()
+                    .map(|variant| match test.provenance() {
+                        Provenance::Manifest => test.id().to_owned(),
+                        Provenance::Frontmatter => format!("{}#{}", test.id(), variant.name()),
+                    })
+                    .collect(),
+            })
+            .collect())
+    }
+
+    pub(crate) fn batch(
+        &self,
+        root: &str,
+        mode: TestMode,
+        ids: Vec<String>,
+    ) -> Result<TestSummary, String> {
+        if ids.is_empty() {
+            return Err("test batch must contain at least one file ID".into());
+        }
+        let discovered = self.discover(Path::new(root), None, None)?;
+        let by_id = discovered
+            .tests
+            .iter()
+            .map(|test| (test.id(), test))
+            .collect::<BTreeMap<_, _>>();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut selected = Vec::with_capacity(ids.len());
+        for id in ids {
+            if !seen.insert(id.clone()) {
+                return Err(format!("duplicate test batch ID: {id}"));
+            }
+            let test = by_id
+                .get(id.as_str())
+                .ok_or_else(|| format!("unknown test batch ID: {id}"))?;
+            selected.push((*test).clone());
+        }
+        run_discovered(&selected, mode, None, Vec::new(), discovered.cache_hit)
+    }
+
     fn discover(
         &self,
         root: &Path,
@@ -876,6 +927,82 @@ expected_stdout = "bundle\n"
     impl Drop for RawFrontmatterCorpus {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn explicit_batches_match_full_execution_and_inventory_variants() {
+        let temporary = TemporaryCorpus::new();
+        let root = temporary.path.join("external");
+        let tests = root.join("test");
+        fs::create_dir_all(&tests).unwrap();
+        fs::create_dir_all(root.join("harness")).unwrap();
+        fs::write(
+            root.join("harness/assert.js"),
+            "function assert(v) { if (!v) throw new Error('assert'); }",
+        )
+        .unwrap();
+        fs::write(root.join("harness/sta.js"), "// harness fixture").unwrap();
+        fs::write(
+            root.join("harness/helper.js"),
+            "function check(v) { if (v !== 7) throw new Error('helper'); }",
+        )
+        .unwrap();
+        fs::write(
+            tests.join("a.js"),
+            "/*---\nincludes: [helper.js]\n---*/\ncheck(7); globalThis.leak = 1;",
+        )
+        .unwrap();
+        fs::write(tests.join("b.js"), "/*---\nflags: [onlyStrict]\n---*/\nif (typeof leak !== 'undefined') throw new Error('realm leaked');").unwrap();
+        fs::write(tests.join("raw.js"), "/*---\nflags: [raw]\n---*/\nif (typeof leak !== 'undefined') throw new Error('raw realm leaked');").unwrap();
+        fs::write(tests.join("module.js"), "/*---\nflags: [module]\n---*/\nimport { value } from './value_FIXTURE.js'; if (value !== 7) throw new Error('module');").unwrap();
+        fs::write(tests.join("value_FIXTURE.js"), "export const value = 7;").unwrap();
+        fs::write(
+            tests.join("fail.js"),
+            "/*---\ndescription: intentional failure\n---*/\nthrow new Error('intentional');",
+        )
+        .unwrap();
+        fs::write(tests.join("template.js"), "/*---\ndescription: eval call sites retain distinct identity after the compiled program is released\n---*/\nvar seen = []; for (var i = 0; i < 32; i++) { var value = eval('(function tag(t) { return t; })`hello`'); for (var j = 0; j < i; j++) { if (value === seen[j]) throw new Error('eval reused a template site'); } seen.push(value); }").unwrap();
+        let coordinator = ConformanceCoordinator::default();
+        let root = tests.to_str().unwrap();
+        let inventory = coordinator.inventory(root).unwrap();
+        assert_eq!(inventory.len(), 6);
+        let full = coordinator
+            .run(root, TestMode::Interpreter, None, None, Vec::new())
+            .unwrap();
+        let expected = full
+            .cases
+            .iter()
+            .map(|case| (case.id.clone(), case.outcome))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!((full.passed, full.failed), (7, 2), "{full:#?}");
+        assert_eq!(
+            inventory
+                .iter()
+                .flat_map(|entry| entry.cases.iter().cloned())
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected.keys().cloned().collect()
+        );
+        let mut actual = BTreeMap::new();
+        for entries in inventory.chunks(2) {
+            let result = coordinator
+                .batch(
+                    root,
+                    TestMode::Interpreter,
+                    entries.iter().map(|entry| entry.id.clone()).collect(),
+                )
+                .unwrap();
+            for case in result.cases {
+                assert!(actual.insert(case.id, case.outcome).is_none());
+            }
+        }
+        assert_eq!(expected, actual);
+        for ids in [
+            Vec::new(),
+            vec!["missing".into()],
+            vec!["a.js".into(), "a.js".into()],
+        ] {
+            assert!(coordinator.batch(root, TestMode::Interpreter, ids).is_err());
         }
     }
 
