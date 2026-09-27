@@ -1409,10 +1409,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 ));
             }
             let key = entry.property_key_units_checked()?;
-            if keys.contains(&key) {
+            keys.push(key);
+        }
+        // Finish CreateListFromArrayLike before checking duplicates: later indexed getters
+        // are observable even when an earlier pair repeats. Keep order in `keys`, but use a
+        // membership index so reversing a large target's key list does not take quadratic time.
+        let mut key_set = HashSet::with_capacity(keys.len());
+        for key in &keys {
+            if !key_set.insert(key) {
                 return Err(Self::proxy_invariant("ownKeys must not repeat a key"));
             }
-            keys.push(key);
         }
         // A proxy target has its own `[[OwnPropertyKeys]]` operation. Calling the ordinary
         // store helper on it would lose keys hidden behind an inner proxy, and would make the
@@ -1430,20 +1436,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // A non-configurable key cannot be taken away, so a list that leaves it out is
             // describing an object the target is not. On a target that cannot grow or shrink
             // either, the same is true of *every* key it has.
-            if (locked || !extensible) && !keys.contains(key) {
+            if (locked || !extensible) && !key_set.contains(key) {
                 return Err(Self::proxy_invariant(
                     "ownKeys must report every own key the target cannot lose",
                 ));
             }
         }
-        if !extensible {
-            for key in &keys {
-                if !held.contains(key) {
-                    return Err(Self::proxy_invariant(
-                        "ownKeys cannot report a key a non-extensible target does not have",
-                    ));
-                }
-            }
+        // Both lists are unique, and every held key was checked above. A size mismatch is
+        // therefore exactly an extra reported key; no second membership scan is needed.
+        if !extensible && keys.len() != held.len() {
+            return Err(Self::proxy_invariant(
+                "ownKeys cannot report a key a non-extensible target does not have",
+            ));
         }
         Ok(keys)
     }
@@ -1552,6 +1556,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if matches!(target, Value::Proxy(_)) {
             return self.proxy_get_with_receiver(target, key, receiver, instruction);
         }
+        // A numeric key on an integer-indexed exotic already identifies the canonical
+        // numeric string. Avoid formatting and reparsing it for every byte of a view copy.
+        // ToPropertyKey maps numeric -0 to "0"; the distinct string "-0" still takes the
+        // generic path. Invalid numeric indices never consult the prototype or receiver.
+        if let (Value::TypedArray(view), Value::Number(number)) = (target, key) {
+            let index = if *number == 0.0 { 0.0 } else { *number };
+            return Ok(valid_integer_index(view, index)
+                .and_then(|at| view.get(at))
+                .unwrap_or(Value::Undefined));
+        }
         let property_key_units = key.property_key_units_checked()?;
 
         let property_key = PropertyKeyRef::Units(&property_key_units);
@@ -1657,6 +1671,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
         strict: bool,
     ) -> Result<(), ExecutionError> {
+        // IntegerIndexedElementSet accepts invalid indices in both strict and sloppy code,
+        // after converting the value. Only a genuine numeric key and view take this path;
+        // proxies and object keys retain their traps and ToPropertyKey ordering.
+        if let (Value::TypedArray(view), Value::Number(number)) = (target, key) {
+            let index = if *number == 0.0 { 0.0 } else { *number };
+            return self.set_typed_array_index(view, index, &value, instruction);
+        }
         if !strict {
             return self.set_computed(target, key, value, instruction);
         }
@@ -1725,9 +1746,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(removed)
     }
 
+    /// Whether a missing array element can be created. An inherited setter is consulted
+    /// before this storage constraint because calling it creates no own element.
+    pub(crate) fn array_index_creation_allowed(items: &ArrayData, index: usize) -> bool {
+        items.properties.borrow().is_extensible()
+            && (index < items.borrow().len() || items.length_writable.get())
+    }
+
     /// The indexed array write shared by numeric and string keys. Descriptor/refusal handling
     /// stays here so avoiding a numeric key's string allocation cannot bypass an exotic element.
-    fn set_array_index(
+    pub(crate) fn set_array_index(
         &mut self,
         target: &Value,
         items: &Rc<ArrayData>,
@@ -1735,13 +1763,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         value: Value,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
-        if items.properties.borrow().is_frozen() {
-            return Ok(());
-        }
         // An element the program defined answers for itself: a setter is a call, and
         // a data property that is not writable discards the write the same way a
         // frozen object's does.
-        if let Some(entry) = array_exotic_element(items, index) {
+        let exotic = array_exotic_element(items, index);
+        let has_own_element = exotic.is_some()
+            || items
+                .borrow()
+                .get(index)
+                .is_some_and(|value| !Self::is_hole(value));
+        if let Some(entry) = exotic {
             match entry.property {
                 Property::Accessor { set, .. } => {
                     if let Some(setter) = set {
@@ -1753,14 +1784,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Property::Value(_) => {}
             }
         }
-        // An index past the end is a *new* property and grows `length`, so an array
-        // that is closed to new properties, or whose `length` is not writable,
-        // refuses it. The write is discarded rather than raised for the same reason
-        // a frozen object's is: the machine does not know whether the code that
-        // wrote it was strict.
-        if index >= items.borrow().len()
-            && (!items.length_writable.get() || !items.properties.borrow().is_extensible())
-        {
+        if !has_own_element {
+            // Ordinary arrays with untouched intrinsic numeric properties cannot encounter
+            // a setter. Otherwise reuse the same descriptor walk as the other exotic stores.
+            if (self.intrinsics.indexed_array_prototype.get()
+                || items.properties.borrow().prototype().is_some())
+                && self.chain_setter_key(
+                    target,
+                    PropertyKeyRef::Utf8(&index.to_string()),
+                    &value,
+                    instruction,
+                )?
+            {
+                return Ok(());
+            }
+            if !Self::array_index_creation_allowed(items, index) {
+                return Ok(());
+            }
+        }
+        if items.properties.borrow().is_frozen() {
             return Ok(());
         }
         let mut elements = items.borrow_mut();
@@ -1777,6 +1819,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             elements.resize(index + 1, Value::Native(Native::Hole, RealmId::PRIMARY));
         }
         elements[index] = value;
+        Ok(())
+    }
+
+    /// The integer-indexed write, shared by numeric and canonical string keys. Coercion
+    /// must precede the bounds check because it can detach or resize the buffer.
+    fn set_typed_array_index(
+        &mut self,
+        view: &Rc<TypedArrayData>,
+        index: f64,
+        value: &Value,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let element = self.as_element(view.kind, value, instruction)?;
+        if let Some(at) = valid_integer_index(view, index) {
+            view.set(at, &element)?;
+        }
         Ok(())
     }
 
@@ -1822,6 +1880,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         {
             return self.set_array_index(target, items, *number as usize, value, instruction);
         }
+        if let (Value::TypedArray(view), Value::Number(number)) = (target, key) {
+            let index = if *number == 0.0 { 0.0 } else { *number };
+            return self.set_typed_array_index(view, index, &value, instruction);
+        }
         let key_units = key.property_key_units_checked()?;
 
         let property_key = PropertyKeyRef::Units(&key_units);
@@ -1829,17 +1891,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if let Value::TypedArray(view) = target
             && let Some(index) = canonical_numeric_index_key(property_key)
         {
-            let view = Rc::clone(view);
-            // Coerced before the bounds check, and by the machine, because the coercion is what
-            // a `BigInt64Array` refuses a Number in: `big[0] = 1` is a TypeError where
-            // `big[0] = 1n` is a write, and neither is a rounding. An element key that reaches
-            // no slot -- `"1.5"`, `"-0"`, an index past the end -- is discarded after the
-            // conversion has run, which is what the specification's ordering makes observable.
-            let element = self.as_element(view.kind, &value, instruction)?;
-            if let Some(at) = valid_integer_index(&view, index) {
-                view.set(at, &element)?;
-            }
-            return Ok(());
+            return self.set_typed_array_index(view, index, &value, instruction);
         }
         // The other half of `Object.prototype.__proto__`. A value that is neither an object nor
         // null is *ignored* rather than refused -- the setter has no error to raise for one --
@@ -1870,10 +1922,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return Err(restricted_property_error());
         }
         match target {
-            // A frozen array ignores an element write, the same way a frozen object ignores a
-            // property write. Sloppy mode discards it and strict mode throws; the machine does
-            // not know which it is in, and discarding is the one that cannot invent an error.
-            Value::Array(items) if items.properties.borrow().is_frozen() => Ok(()),
+            // Indexed writes still reach their descriptor walk: even a frozen array may
+            // inherit a setter, and invoking it does not create or change an own element.
+            Value::Array(items)
+                if items.properties.borrow().is_frozen()
+                    && array_index_key(property_key).is_none() =>
+            {
+                Ok(())
+            }
             Value::Array(items) => match array_index_key(property_key) {
                 Some(index) => self.set_array_index(target, items, index, value, instruction),
                 // `length` is derived, not stored: writing it truncates or extends. The write

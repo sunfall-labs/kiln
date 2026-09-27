@@ -9,3 +9,4 @@ repository.workspace = true
 kiln-hir = { workspace = true }
 kiln-string = { workspace = true }
 kiln-host-abi = { workspace = true }
+rustc-hash = { workspace = true }

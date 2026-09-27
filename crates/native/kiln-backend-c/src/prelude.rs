@@ -72,7 +72,7 @@ const fn validate_native_constructors(constructors: &[NativeConstructor], method
 
 pub(crate) fn render_native_constructor_table() -> String {
     let mut table =
-        String::from("static kiln_native_constructor kiln_c99_native_constructors[] = {\n");
+        String::from("static const kiln_native_constructor kiln_c99_native_constructors[] = {\n");
     for constructor in NATIVE_CONSTRUCTORS {
         let parent = constructor.parent.unwrap_or(0);
         let surface = match constructor.surface {
@@ -84,7 +84,7 @@ pub(crate) fn render_native_constructor_table() -> String {
         use std::fmt::Write as _;
         writeln!(
             table,
-            "    {{ UINT64_C({}), UINT64_C({parent}), {surface}, {{KILN_VALUE_UNDEFINED, 0, {{0}}}} }},",
+            "    {{ UINT64_C({}), UINT64_C({parent}), {surface} }},",
             constructor.method
         )
         .expect("writing to String cannot fail");
@@ -1092,6 +1092,9 @@ method_ids! {
     // Whether a microtask checkpoint would run anything now, for message delivery; captured and
     // deleted by `kiln-builtins/src/web_events_streams.ts`.
     (KILN_C99_METHOD_JOBS_PENDING_RAW, 534, Direct; 0, 0),
+    // The realm's I/O lane, node's poll phase, where the same file queues a port's delivery;
+    // the timer case of the generic dispatch, beside `setImmediate`.
+    (KILN_C99_METHOD_QUEUE_IO_RAW, 535, Generic; 0, 0),
     (KILN_C99_METHOD_PROCESS_EXIT, 513, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC, 514, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC, 515, Direct; 0, 0),
@@ -2791,31 +2794,63 @@ macro_rules! header_prefix {
     };
 }
 
+/// The refusal diagnostic's fields and their names. One per thread (ADR 0070, realms issue 04 step
+/// 5): the diagnostic describes the failure the running call is unwinding, which the same thread's
+/// launcher reads the moment its realm hands the failure back -- after the realm has exited, so it
+/// cannot be the realm's -- and a realm publishes what it keeps to its own record
+/// (`kiln_realm_diagnostic_note`). Each name below is a field of `kiln_c99_diagnostic`, so the code
+/// that reads and writes a diagnostic did not change.
+macro_rules! diagnostic_fields {
+    () => {
+        r#"typedef struct kiln_refusal_diagnostic {
+    const char *site;
+    const char *operation;
+    size_t instruction;
+    size_t depth;
+    uint64_t method;
+    uint64_t receiver_tag;
+    int has_method;
+    const char *detail;
+    const char *function;
+    size_t function_len;
+    /* Generated and inferred function names remain canonical units until the diagnostic reaches
+     * its UTF-8 host boundary. Fixed runtime names may still use the legacy ASCII slot above. */
+    const kiln_string *function_key;
+    /* Composed text for a diagnostic that wants more than one name. `GetComputed` is the only
+     * operation whose key is a value rather than a constant, so its refusal could not say which
+     * member was read -- `operation=GetComputed` and nothing else. Written at the moment of
+     * failure, when nothing else is using it. */
+    char compose[128];
+} kiln_refusal_diagnostic;
+#define kiln_c99_diagnostic_site (kiln_c99_diagnostic.site)
+#define kiln_c99_diagnostic_operation (kiln_c99_diagnostic.operation)
+#define kiln_c99_diagnostic_instruction (kiln_c99_diagnostic.instruction)
+#define kiln_c99_diagnostic_depth (kiln_c99_diagnostic.depth)
+#define kiln_c99_diagnostic_method (kiln_c99_diagnostic.method)
+#define kiln_c99_diagnostic_receiver_tag (kiln_c99_diagnostic.receiver_tag)
+#define kiln_c99_diagnostic_has_method (kiln_c99_diagnostic.has_method)
+#define kiln_c99_diagnostic_detail (kiln_c99_diagnostic.detail)
+#define kiln_c99_diagnostic_function (kiln_c99_diagnostic.function)
+#define kiln_c99_diagnostic_function_len (kiln_c99_diagnostic.function_len)
+#define kiln_c99_diagnostic_function_key (kiln_c99_diagnostic.function_key)
+#define kiln_c99_diagnostic_compose (kiln_c99_diagnostic.compose)
+"#
+    };
+}
+
 macro_rules! header_static_diagnostics {
     () => {
+        concat!(
         r#"/* Refusals are runtime/compiler diagnostics, not JavaScript exceptions.  Keep the most specific
  * detail at the failing helper and attach the generated module + bytecode site as control
  * unwinds.  The entry boundary renders this into its ordinary scalar result, so no private
  * runtime pointer or new public ABI type escapes. */
-static const char *kiln_c99_diagnostic_site = NULL;
-static const char *kiln_c99_diagnostic_operation = NULL;
-static size_t kiln_c99_diagnostic_instruction = 0;
-static size_t kiln_c99_diagnostic_depth = 0;
-static uint64_t kiln_c99_diagnostic_method = 0;
-static uint64_t kiln_c99_diagnostic_receiver_tag = 0;
-static int kiln_c99_diagnostic_has_method = 0;
-static const char *kiln_c99_diagnostic_detail = NULL;
-static const char *kiln_c99_diagnostic_function = NULL;
-static size_t kiln_c99_diagnostic_function_len = 0;
-/* Generated and inferred function names remain canonical units until the diagnostic reaches its
- * UTF-8 host boundary. Fixed runtime names may still use the legacy ASCII slot below. */
-static const kiln_string *kiln_c99_diagnostic_function_key = NULL;
-/* Composed text for a diagnostic that wants more than one name. `GetComputed` is the only
- * operation whose key is a value rather than a constant, so its refusal could not say which member
- * was read -- `operation=GetComputed` and nothing else. Written at the moment of failure, when
- * nothing else is using it. */
-static char kiln_c99_diagnostic_compose[128];
-static int kiln_c99_diagnostic_active_depth = 0;
+"#,
+        diagnostic_fields!(),
+        r#"static _Thread_local kiln_refusal_diagnostic kiln_c99_diagnostic;
+/* The depth of the running call, saved and restored around every closure invocation: a frame
+ * register (see `builtins.c`), so per thread. */
+static _Thread_local int kiln_c99_diagnostic_active_depth = 0;
 
 /* THE FOUR WAYS TO PRODUCE `KILN_C99_CONTROL_ERROR`, AND THERE ARE NO OTHERS.
  *
@@ -2907,26 +2942,19 @@ static KILN_COLD int kiln_c99_internal_status(const char *converted_by) {
 #define KILN_C99_REFUSE_INTERNAL(converted_by) return kiln_c99_internal_status(converted_by)
 
 "#
+        )
     };
 }
 
 macro_rules! header_extern_diagnostics {
     () => {
+        concat!(
         r#"/* Refusals are runtime/compiler diagnostics, not JavaScript exceptions. */
 #define KILN_SEPARATE_PRELUDE 1
-extern const char *kiln_c99_diagnostic_site;
-extern const char *kiln_c99_diagnostic_operation;
-extern size_t kiln_c99_diagnostic_instruction;
-extern size_t kiln_c99_diagnostic_depth;
-extern uint64_t kiln_c99_diagnostic_method;
-extern uint64_t kiln_c99_diagnostic_receiver_tag;
-extern int kiln_c99_diagnostic_has_method;
-extern const char *kiln_c99_diagnostic_detail;
-extern const char *kiln_c99_diagnostic_function;
-extern size_t kiln_c99_diagnostic_function_len;
-extern const kiln_string *kiln_c99_diagnostic_function_key;
-extern char kiln_c99_diagnostic_compose[128];
-extern int kiln_c99_diagnostic_active_depth;
+"#,
+        diagnostic_fields!(),
+        r#"extern _Thread_local kiln_refusal_diagnostic kiln_c99_diagnostic;
+extern _Thread_local int kiln_c99_diagnostic_active_depth;
 
 int kiln_c99_refuse(const char *lacked);
 int kiln_c99_refuse_named(const char *lacked, const char *subject, size_t subject_len);
@@ -2941,6 +2969,7 @@ int kiln_c99_internal_status(const char *converted_by);
 #define KILN_C99_REFUSE_INTERNAL(converted_by) return kiln_c99_internal_status(converted_by)
 
 "#
+        )
     };
 }
 
@@ -2948,17 +2977,18 @@ macro_rules! header_rest {
     () => {
         concat!(
             r#"static inline void kiln_c99_reset_diagnostics(void) {
-    kiln_c99_diagnostic_site = NULL;
-    kiln_c99_diagnostic_operation = NULL;
-    kiln_c99_diagnostic_instruction = 0;
-    kiln_c99_diagnostic_depth = 0;
-    kiln_c99_diagnostic_method = 0;
-    kiln_c99_diagnostic_receiver_tag = 0;
-    kiln_c99_diagnostic_has_method = 0;
-    kiln_c99_diagnostic_detail = NULL;
-    kiln_c99_diagnostic_function = NULL;
-    kiln_c99_diagnostic_function_len = 0;
-    kiln_c99_diagnostic_function_key = NULL;
+    kiln_refusal_diagnostic *diagnostics = &kiln_c99_diagnostic;
+    diagnostics->site = NULL;
+    diagnostics->operation = NULL;
+    diagnostics->instruction = 0;
+    diagnostics->depth = 0;
+    diagnostics->method = 0;
+    diagnostics->receiver_tag = 0;
+    diagnostics->has_method = 0;
+    diagnostics->detail = NULL;
+    diagnostics->function = NULL;
+    diagnostics->function_len = 0;
+    diagnostics->function_key = NULL;
 }
 
 /* THE OTHER HALF OF A REFUSAL, AND THE ONE THAT HAD NO CEREMONY.
@@ -3680,6 +3710,7 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_ARRAY_BUFFER_DETACH_RAW),
     emit_method_define!(KILN_C99_METHOD_CLONE_DATA_RAW),
     emit_method_define!(KILN_C99_METHOD_JOBS_PENDING_RAW),
+    emit_method_define!(KILN_C99_METHOD_QUEUE_IO_RAW),
     emit_method_define!(KILN_C99_METHOD_PROCESS_EXIT),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC),
@@ -4575,19 +4606,8 @@ pub fn runtime_prelude_header() -> &'static str {
 fn build_runtime_prelude_source(src: &str) -> String {
     let mut out = String::with_capacity(src.len() + 1024);
     const VARS_TO_EXPORT: &[&str] = &[
-        "kiln_c99_diagnostic_site",
-        "kiln_c99_diagnostic_operation",
-        "kiln_c99_diagnostic_instruction",
-        "kiln_c99_diagnostic_depth",
-        "kiln_c99_diagnostic_method",
-        "kiln_c99_diagnostic_receiver_tag",
-        "kiln_c99_diagnostic_has_method",
-        "kiln_c99_diagnostic_detail",
-        "kiln_c99_diagnostic_function",
-        "kiln_c99_diagnostic_function_len",
-        "kiln_c99_diagnostic_function_key",
-        "kiln_c99_diagnostic_compose",
         "kiln_c99_diagnostic_active_depth",
+        "kiln_c99_diagnostic;",
         "kiln_c99_new_target",
         "kiln_c99_inheriting_new_target",
         "kiln_c99_typed_status",
@@ -4605,7 +4625,6 @@ fn build_runtime_prelude_source(src: &str) -> String {
         "kiln_c99_empty_string",
         "kiln_c99_single_char_bytes",
         "kiln_c99_ascii_strings",
-        "kiln_c99_symbols",
         "kiln_c99_globals",
         "kiln_c99_process",
         "kiln_c99_atomics",
@@ -4646,23 +4665,14 @@ fn build_runtime_prelude_source(src: &str) -> String {
 
 /// Mutable static state embedded in the generated-C prelude, classified by its required owner.
 ///
-/// This is the migration manifest for ADR 0036. Adding a new mutable `kiln_c99_*` static without
-/// naming its owner fails the architecture test below. Realm entries move into the shared value
-/// kernel; frame entries remain save/restore state local to one synchronous generated-body call.
+/// This is the migration manifest for ADR 0036, and since realms issue 04 step 5 (ADR 0070) it has
+/// no `Realm` owner: realm state is not a static at all but a field of `kiln_c99_realm_state`
+/// (`runtime/foundation.c`), reached through the realm's heap. Adding a mutable `kiln_c99_*`
+/// static without naming one of the owners below fails the architecture test, and the owners that
+/// are per thread fail it unless the declaration says `_Thread_local`.
 #[cfg(test)]
 pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
-    ("kiln_c99_diagnostic_site", C99StateOwner::Realm),
-    ("kiln_c99_diagnostic_operation", C99StateOwner::Realm),
-    ("kiln_c99_diagnostic_instruction", C99StateOwner::Realm),
-    ("kiln_c99_diagnostic_depth", C99StateOwner::Realm),
-    ("kiln_c99_diagnostic_method", C99StateOwner::Realm),
-    ("kiln_c99_diagnostic_receiver_tag", C99StateOwner::Realm),
-    ("kiln_c99_diagnostic_has_method", C99StateOwner::Realm),
-    ("kiln_c99_diagnostic_detail", C99StateOwner::Realm),
-    ("kiln_c99_diagnostic_function", C99StateOwner::Realm),
-    ("kiln_c99_diagnostic_function_len", C99StateOwner::Realm),
-    ("kiln_c99_diagnostic_function_key", C99StateOwner::Realm),
-    ("kiln_c99_diagnostic_compose", C99StateOwner::Realm),
+    ("kiln_c99_diagnostic", C99StateOwner::Frame),
     ("kiln_c99_diagnostic_active_depth", C99StateOwner::Frame),
     ("kiln_c99_active_http_response", C99StateOwner::Frame),
     ("kiln_c99_new_target", C99StateOwner::Frame),
@@ -4677,12 +4687,6 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_frame_is_arrow", C99StateOwner::Frame),
     ("kiln_c99_frame_mapped_arguments", C99StateOwner::Frame),
     ("kiln_c99_frame_callee", C99StateOwner::Frame),
-    ("kiln_c99_symbols", C99StateOwner::Realm),
-    ("kiln_c99_symbol_count", C99StateOwner::Realm),
-    ("kiln_c99_symbol_capacity", C99StateOwner::Realm),
-    ("kiln_c99_ffi_functions", C99StateOwner::Realm),
-    ("kiln_c99_ffi_callbacks", C99StateOwner::Realm),
-    ("kiln_c99_ffi_next_root", C99StateOwner::Realm),
     ("kiln_c99_ffi_callback_status", C99StateOwner::Frame),
     ("kiln_c99_ffi_callback_host", C99StateOwner::Frame),
     ("kiln_c99_ffi_callback_thrown", C99StateOwner::Frame),
@@ -4691,11 +4695,6 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_fixture_method_stores", C99StateOwner::TestFixture),
     ("kiln_c99_gc_fallback", C99StateOwner::TestFixture),
     ("kiln_c99_keys_check_mode", C99StateOwner::TestFixture),
-    // Its `prototype` fields are filled on first construction, reset per realm and marked as GC
-    // roots -- realm state, and invisible to the ownership guard until that guard learned to read
-    // a declaration that spans lines.
-    ("kiln_c99_native_constructors", C99StateOwner::Realm),
-    ("kiln_c99_array_unscopables", C99StateOwner::Realm),
     ("kiln_c99_method_index", C99StateOwner::Constant),
     ("kiln_c99_method_index_len", C99StateOwner::Constant),
     ("kiln_c99_method_index_ready", C99StateOwner::Constant),
@@ -4707,13 +4706,14 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
         C99StateOwner::Constant,
     ),
     // Per thread, and trusted only under the realm generation it was filled under.
-    ("kiln_c99_realm_cached", C99StateOwner::Realm),
+    ("kiln_c99_realm_cached", C99StateOwner::ThreadCache),
     // ADR 0071: only whether *some* realm has modified *some* built-in; which ones a realm has
     // modified is on its heap, and no cache entry holds a value of this.
     ("kiln_c99_builtin_store_epoch", C99StateOwner::Process),
-    ("kiln_c99_bytes_cache", C99StateOwner::Realm),
-    // Per thread, and trusted only for the heap it was built under: the `node:http` layouts.
-    ("kiln_c99_node_http_layouts", C99StateOwner::Realm),
+    // Recycled byte blocks: plain memory that names no realm's value.
+    ("kiln_c99_bytes_cache", C99StateOwner::ThreadCache),
+    // Per thread, and trusted only for the heap serial it was built under: the `node:http` layouts.
+    ("kiln_c99_node_http_layouts", C99StateOwner::ThreadCache),
     ("kiln_c99_gc_stress_checks", C99StateOwner::Process),
     ("kiln_c99_introspect_pending", C99StateOwner::Process),
     ("kiln_c99_introspect_armed", C99StateOwner::Process),
@@ -4733,8 +4733,13 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg(test)]
 pub(crate) enum C99StateOwner {
-    Realm,
+    /// A register of the running call, saved and restored around it, so idle at every turn
+    /// boundary: per thread (`_Thread_local`), because the machine stack it spills is the
+    /// thread's. See `runtime/builtins.c`.
     Frame,
+    /// A per-thread cache that is either validated against the realm it was filled in (the realm
+    /// generation, a heap serial) or holds nothing any realm made. `_Thread_local`.
+    ThreadCache,
     TestFixture,
     /// Derived once from compile-time constants and never changed again, so every realm in the
     /// process would compute the same bytes. Two threads racing to build it duplicate the work and
@@ -4745,6 +4750,14 @@ pub(crate) enum C99StateOwner {
     /// for the first realm is still installed for the second, and the flag it sets names a
     /// request that has arrived, not a value some realm made.
     Process,
+}
+
+#[cfg(test)]
+impl C99StateOwner {
+    /// Whether the owner requires the declaration to be `_Thread_local`.
+    pub(crate) fn per_thread(self) -> bool {
+        matches!(self, Self::Frame | Self::ThreadCache)
+    }
 }
 
 /// The stack each emitted C function needs: the module body, then one entry per compiled

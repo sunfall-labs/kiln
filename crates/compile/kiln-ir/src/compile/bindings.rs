@@ -380,14 +380,11 @@ impl super::Compiler {
     /// an instruction that names one by index rather than carrying it inline is what lets the
     /// table hold one copy.
     pub(super) fn constant_index(&mut self, constant: Constant) -> u32 {
-        if let Some(existing) = self
-            .constants
-            .iter()
-            .position(|candidate| *candidate == constant)
-        {
-            return existing as u32;
+        if let Some(&existing) = self.constant_indices.get(&constant) {
+            return existing;
         }
         let index = self.constants.len() as u32;
+        self.constant_indices.insert(constant.clone(), index);
         self.constants.push(constant);
         index
     }

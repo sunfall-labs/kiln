@@ -2301,14 +2301,7 @@ fn binary(
                 );
                 let total = left.len().saturating_add(right.len());
                 bounded_string(total)?;
-                // Sized exactly. `push_str` onto an empty string reserves what it is given and
-                // then doubles for the second half, so the growth path holds twice the result
-                // while copying it -- which is the difference between a bound this can reach and
-                // one the host is killed before it reaches.
-                let mut joined = Vec::with_capacity(total);
-                joined.extend(left.units());
-                joined.extend(right.units());
-                Value::String(StringUnits::from_units(&joined))
+                Value::String(left.concat(&right))
             } else {
                 Value::Number(left.as_number() + right.as_number())
             }

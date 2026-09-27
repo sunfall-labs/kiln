@@ -74,33 +74,39 @@ static int kiln_c99_callable_prototype(kiln_value callable, kiln_value *out) {
     for (index = 0;
          index < sizeof kiln_c99_native_constructors / sizeof *kiln_c99_native_constructors;
          ++index) {
-        kiln_native_constructor *constructor = &kiln_c99_native_constructors[index];
+        const kiln_native_constructor *constructor = &kiln_c99_native_constructors[index];
+        kiln_value *prototype;
         if (constructor->method != callable.bits) continue;
-        if (constructor->prototype.tag == KILN_VALUE_UNDEFINED) {
-            status = kiln_c99_new_object(&constructor->prototype);
+        /* The realm's own prototype for this constructor (ADR 0038): the slot is in the realm
+         * context, which does not move, so the pointer stays good across the allocations below. */
+        prototype = &kiln_c99_realm()->native_prototypes[index];
+        if (prototype->tag == KILN_VALUE_UNDEFINED) {
+            kiln_value built;
+            status = kiln_c99_new_object(&built);
             if (status != KILN_C99_OK) return status;
-            status = kiln_c99_define_method(constructor->prototype, "constructor", 11, callable);
+            *prototype = built;
+            status = kiln_c99_define_method(*prototype, "constructor", 11, callable);
             if (status != KILN_C99_OK) return status;
             if (constructor->parent != 0) {
                 kiln_value parent;
                 status = kiln_c99_callable_prototype(kiln_c99_method(constructor->parent),
                                                      &parent);
                 if (status == KILN_C99_OK)
-                    status = kiln_c99_set_prototype(constructor->prototype, parent);
+                    status = kiln_c99_set_prototype(*prototype, parent);
                 if (status != KILN_C99_OK) return status;
             }
             switch (constructor->surface) {
             case KILN_C99_NATIVE_EVENT_EMITTER:
-                status = kiln_c99_install_event_emitter_methods(constructor->prototype);
+                status = kiln_c99_install_event_emitter_methods(*prototype);
                 break;
             case KILN_C99_NATIVE_READABLE:
-                status = kiln_c99_install_readable_methods(constructor->prototype);
+                status = kiln_c99_install_readable_methods(*prototype);
                 break;
             case KILN_C99_NATIVE_WRITABLE:
-                status = kiln_c99_install_writable_methods(constructor->prototype);
+                status = kiln_c99_install_writable_methods(*prototype);
                 break;
             case KILN_C99_NATIVE_SERVER_RESPONSE:
-                status = kiln_c99_install_server_response_methods(constructor->prototype);
+                status = kiln_c99_install_server_response_methods(*prototype);
                 break;
             default:
                 status = kiln_c99_refuse("a native constructor whose prototype surface this "
@@ -109,7 +115,7 @@ static int kiln_c99_callable_prototype(kiln_value callable, kiln_value *out) {
             }
             if (status != KILN_C99_OK) return status;
         }
-        *out = constructor->prototype;
+        *out = *prototype;
         return KILN_C99_OK;
     }
     KILN_C99_REFUSE("a prototype for a method id that is not a registered native constructor");
@@ -124,10 +130,9 @@ static int kiln_c99_callable_prototype(kiln_value callable, kiln_value *out) {
  * Its property descriptor on Array.prototype is non-writable, non-enumerable,
  * configurable (`w0e0c1`). Identity is observable across reads:
  * `Array.prototype[Symbol.unscopables] === Array.prototype[Symbol.unscopables]`. */
-static kiln_value kiln_c99_array_unscopables;
-
 int kiln_c99_get_array_unscopables(kiln_value *out) {
-    if (kiln_c99_array_unscopables.tag == KILN_VALUE_UNDEFINED) {
+    /* The realm's (`kiln_c99_realm_state.array_unscopables`). */
+    if (kiln_c99_realm()->array_unscopables.tag == KILN_VALUE_UNDEFINED) {
         kiln_value built;
         int status = kiln_c99_new_object(&built);
         if (status != KILN_C99_OK) {
@@ -161,9 +166,9 @@ int kiln_c99_get_array_unscopables(kiln_value *out) {
                 return status;
             }
         }
-        kiln_c99_array_unscopables = built;
+        kiln_c99_realm()->array_unscopables = built;
     }
-    *out = kiln_c99_array_unscopables;
+    *out = kiln_c99_realm()->array_unscopables;
     return KILN_C99_OK;
 }
 

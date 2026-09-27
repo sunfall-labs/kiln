@@ -2239,24 +2239,15 @@ static int kiln_c99_val_make_cell(kiln_val *slot) {
     return KILN_C99_OK;
 }
 
-/* This unit's own roots (ADR 0041): the symbols it made, the intrinsic prototypes it filled in
- * lazily, and the call-transient statics, which are marked rather than cleared so a stale read
- * after a collection still names live memory. Module-scope slots are marked by the emitted root
- * function that calls this. At teardown the statics are reset, because a later realm in the same
- * process must not find the previous realm's freed objects in them. */
+/* The frame registers (ADR 0041; `builtins.c`), which are marked rather than cleared so a stale
+ * read after a collection still names live memory. The realm's own roots -- its symbols, the
+ * built-in objects it made lazily, every unit's module block -- are its heap's (ADR 0070,
+ * `kiln_c99_gc_mark_realm`) and die with it; nothing here holds one. At teardown the registers
+ * are reset, on the thread tearing the realm down, so that thread's next realm starts idle. */
 static void kiln_c99_gc_unit_roots(void *opaque, void *context, int phase) {
     kiln_gc_heap *heap = (kiln_gc_heap *)opaque;
-    size_t index;
-    size_t constructors = sizeof kiln_c99_native_constructors / sizeof *kiln_c99_native_constructors;
     (void)context;
     if (phase == KILN_GC_PHASE_RESET) {
-        free(kiln_c99_symbols);
-        kiln_c99_symbols = NULL;
-        kiln_c99_symbol_count = 0;
-        kiln_c99_symbol_capacity = 0;
-        for (index = 0; index < constructors; ++index)
-            kiln_c99_native_constructors[index].prototype = kiln_c99_undefined();
-        kiln_c99_array_unscopables = kiln_c99_undefined();
         kiln_c99_new_target = kiln_c99_undefined();
         kiln_c99_adopted_this = kiln_c99_undefined();
         kiln_c99_captured_arguments = kiln_c99_undefined();
@@ -2265,10 +2256,6 @@ static void kiln_c99_gc_unit_roots(void *opaque, void *context, int phase) {
         return;
     }
     if (phase != KILN_GC_PHASE_MARK) return;
-    kiln_c99_gc_mark_values(heap, kiln_c99_symbols, kiln_c99_symbol_count);
-    for (index = 0; index < constructors; ++index)
-        kiln_c99_gc_mark_value(heap, &kiln_c99_native_constructors[index].prototype);
-    kiln_c99_gc_mark_value(heap, &kiln_c99_array_unscopables);
     kiln_c99_gc_mark_value(heap, &kiln_c99_new_target);
     kiln_c99_gc_mark_value(heap, &kiln_c99_adopted_this);
     kiln_c99_gc_mark_value(heap, &kiln_c99_captured_arguments);

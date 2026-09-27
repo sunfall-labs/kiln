@@ -5,14 +5,17 @@ expression: body(&unit)
 /* Program hash: a565026db870a77a; bytecode version: 6. */
 static const uint8_t kiln_module_a565026db870a77a306e28a6a100fa79_function_name_0_data[4] = { 114, 101, 97, 100 };
 static const kiln_string kiln_module_a565026db870a77a306e28a6a100fa79_function_name_0 = { 4, KILN_STRING_LATIN1, kiln_module_a565026db870a77a306e28a6a100fa79_function_name_0_data };
-static kiln_val kiln_module_a565026db870a77a306e28a6a100fa79_globals[2];
+static kiln_c99_unit kiln_module_a565026db870a77a306e28a6a100fa79_unit = { 0, 2 };
+static _Thread_local kiln_c99_unit_cache kiln_module_a565026db870a77a306e28a6a100fa79_unit_cached;
+static inline __attribute__((unused)) kiln_val *kiln_module_a565026db870a77a306e28a6a100fa79_unit_vals(void) { return kiln_c99_unit_vals(&kiln_module_a565026db870a77a306e28a6a100fa79_unit, &kiln_module_a565026db870a77a306e28a6a100fa79_unit_cached); }
+#define kiln_module_a565026db870a77a306e28a6a100fa79_globals (kiln_module_a565026db870a77a306e28a6a100fa79_unit_vals())
 static void kiln_module_a565026db870a77a306e28a6a100fa79_gc_roots(void *heap, void *context, int phase) {
-    if (phase == KILN_GC_PHASE_MARK) kiln_c99_gc_mark_vals((struct kiln_gc_heap *)heap, kiln_module_a565026db870a77a306e28a6a100fa79_globals, 2);
     kiln_c99_gc_unit_roots(heap, context, phase);
 }
 static inline int kiln_module_a565026db870a77a306e28a6a100fa79_fn_0(kiln_call_context *ctx, kiln_val * restrict result, kiln_val * restrict upvalues, const kiln_val * restrict receiver_ptr, const kiln_val * restrict args, size_t argc);
 /* function 0: read */
 static inline int kiln_module_a565026db870a77a306e28a6a100fa79_fn_0(kiln_call_context *ctx, kiln_val * restrict result, kiln_val * restrict upvalues, const kiln_val * restrict receiver_ptr, const kiln_val * restrict args, size_t argc) {
+    kiln_val *const kiln_mg = kiln_module_a565026db870a77a306e28a6a100fa79_globals;
     kiln_host *host = ctx->host;
     kiln_value *thrown = ctx->thrown;
     kiln_generator *frame = ctx->frame;
@@ -24,7 +27,7 @@ static inline int kiln_module_a565026db870a77a306e28a6a100fa79_fn_0(kiln_call_co
     (void)args; (void)argc;
     kiln_val v0 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
-    v0 = kiln_module_a565026db870a77a306e28a6a100fa79_globals[0];
+    v0 = kiln_mg[0];
     *result = v0; return KILN_C99_OK;
 kiln_unwind:;
     return KILN_C99_THROWN;

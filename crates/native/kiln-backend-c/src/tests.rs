@@ -577,6 +577,18 @@ int kiln_realm_set_interval(double delay_ms,
                             uint64_t *out_id) {
     return kiln_test_set_timer(delay_ms, run, drop, work, out_id);
 }
+int kiln_realm_set_immediate(kiln_realm_work_fn run,
+                             kiln_realm_drop_fn drop,
+                             void *work,
+                             uint64_t *out_id) {
+    return kiln_test_set_timer(0.0, run, drop, work, out_id);
+}
+int kiln_realm_queue_io(kiln_realm_work_fn run,
+                        kiln_realm_drop_fn drop,
+                        void *work,
+                        uint64_t *out_id) {
+    return kiln_test_set_timer(0.0, run, drop, work, out_id);
+}
 int kiln_realm_clear_timer(uint64_t id) {
     (void)id;
     return KILN_C99_OK;

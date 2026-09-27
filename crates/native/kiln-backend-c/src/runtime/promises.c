@@ -105,7 +105,9 @@ static int kiln_c99_enqueue_next_tick(kiln_value callback, const kiln_value *arg
 }
 
 static int kiln_c99_new_promise(kiln_value *out) {
-    kiln_promise *promise = (kiln_promise *)kiln_c99_gc_alloc(KILN_GC_PROMISE, sizeof *promise);
+    /* The inlined bump: a promise is made on every `await`-driven sleep and every `then`. */
+    kiln_promise *promise =
+        (kiln_promise *)kiln_c99_gc_alloc_hot(KILN_GC_PROMISE, sizeof *promise, 1);
     if (promise == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
@@ -154,9 +156,48 @@ static int kiln_c99_bind(kiln_value *out, kiln_value target, kiln_value receiver
 
 static int kiln_c99_settle(kiln_value promise, kiln_value value, int rejected);
 
+/* Append one reaction to a pending promise: into the inline slot when it is the first, then into
+ * a doubling malloc'd array that starts by copying the inline one out. */
+static int kiln_c99_promise_add_reaction(kiln_promise *promise, const kiln_reaction *reaction) {
+    if (promise->capacity == 0) {
+        promise->reactions = &promise->inline_reaction;
+        promise->capacity = 1;
+    }
+    if (promise->count == promise->capacity) {
+        size_t grown = promise->capacity < 4 ? 4 : promise->capacity * 2;
+        kiln_reaction *moved;
+        if (grown > ((size_t)-1) / sizeof *moved) return KILN_C99_OUT_OF_MEMORY;
+        if (promise->reactions == &promise->inline_reaction) {
+            moved = (kiln_reaction *)malloc(grown * sizeof *moved);
+            if (moved == NULL) return KILN_C99_OUT_OF_MEMORY;
+            memcpy(moved, promise->reactions, promise->count * sizeof *moved);
+            /* The promise owns memory outside its block now (`KILN_GC_FINALIZED_AT_ALLOC`). */
+            kiln_c99_gc_note_finalizable(promise);
+        } else {
+            moved = (kiln_reaction *)realloc(promise->reactions, grown * sizeof *moved);
+            if (moved == NULL) return KILN_C99_OUT_OF_MEMORY;
+        }
+        promise->reactions = moved;
+        promise->capacity = grown;
+    }
+    promise->reactions[promise->count] = *reaction;
+    promise->count += 1;
+    return KILN_C99_OK;
+}
+
 /* Queue one reaction against a promise that has already settled. */
 static int kiln_c99_schedule(kiln_promise *promise, const kiln_reaction *reaction) {
     int rejected = promise->state == KILN_C99_REJECTED;
+    /* The job runs in this checkpoint, and for an `await` its handler is a suspended frame
+     * nothing has touched since it suspended: start bringing it in now. A hint only. */
+    if (reaction->continuation != 0) {
+        const char *frame = (const char *)(uintptr_t)reaction->on_fulfilled.bits;
+        size_t line;
+        /* The frame's fields and the first of its locals, which follow it in the block. */
+        for (line = 0; line < sizeof(kiln_generator) + 64; line += 64) {
+            __builtin_prefetch(frame + line);
+        }
+    }
     return kiln_c99_enqueue(rejected ? reaction->on_rejected : reaction->on_fulfilled,
                             promise->value, reaction->derived, rejected, reaction->continuation);
 }
@@ -218,11 +259,17 @@ static int kiln_c99_settle(kiln_value promise, kiln_value value, int rejected) {
         }
     }
     state->count = 0;
+    /* A settled promise never takes another reaction into the list -- a later `then` is
+     * scheduled at once -- so the list is released now rather than when the promise dies. */
+    if (state->reactions != &state->inline_reaction) free(state->reactions);
+    state->reactions = NULL;
+    state->capacity = 0;
     return KILN_C99_OK;
 }
 
 static int kiln_c99_new_settler(kiln_value *out, kiln_value promise, int rejects) {
-    kiln_settler *settler = (kiln_settler *)kiln_c99_gc_alloc(KILN_GC_SETTLER, sizeof *settler);
+    kiln_settler *settler =
+        (kiln_settler *)kiln_c99_gc_alloc_hot(KILN_GC_SETTLER, sizeof *settler, 1);
     if (settler == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
@@ -256,14 +303,24 @@ static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value
     if (state->state != KILN_C99_PENDING) {
         return kiln_c99_schedule(state, &reaction);
     }
-    status = kiln_c99_reserve((void **)&state->reactions, &state->capacity, state->count + 1,
-                              sizeof *state->reactions);
-    if (status != KILN_C99_OK) {
-        return status;
+    return kiln_c99_promise_add_reaction(state, &reaction);
+}
+
+/* `p.then(f, r)` for the runtime's own bookkeeping, where nothing can ever read the promise `then`
+ * would return: the reaction runs `f` or `r` and settles nothing after. A combinator's per-element
+ * step is exactly that, and a derived promise per element was one more block for every task a
+ * `Promise.all` waits on. */
+static int kiln_c99_react(kiln_value promise, kiln_value on_fulfilled, kiln_value on_rejected) {
+    kiln_promise *state = kiln_c99_promise_of(promise);
+    kiln_reaction reaction;
+    reaction.on_fulfilled = on_fulfilled;
+    reaction.on_rejected = on_rejected;
+    reaction.derived = kiln_c99_undefined();
+    reaction.continuation = 0;
+    if (state->state != KILN_C99_PENDING) {
+        return kiln_c99_schedule(state, &reaction);
     }
-    state->reactions[state->count] = reaction;
-    state->count += 1;
-    return KILN_C99_OK;
+    return kiln_c99_promise_add_reaction(state, &reaction);
 }
 
 /* `await p`: the suspended frame is the reaction, on both sides.
@@ -275,7 +332,6 @@ static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value
 static int kiln_c99_then_continue_mode(kiln_value promise, kiln_value generator, int mode) {
     kiln_promise *state = kiln_c99_promise_of(promise);
     kiln_reaction reaction;
-    int status;
     reaction.on_fulfilled = generator;
     reaction.on_rejected = generator;
     reaction.derived = kiln_c99_undefined();
@@ -283,14 +339,7 @@ static int kiln_c99_then_continue_mode(kiln_value promise, kiln_value generator,
     if (state->state != KILN_C99_PENDING) {
         return kiln_c99_schedule(state, &reaction);
     }
-    status = kiln_c99_reserve((void **)&state->reactions, &state->capacity, state->count + 1,
-                              sizeof *state->reactions);
-    if (status != KILN_C99_OK) {
-        return status;
-    }
-    state->reactions[state->count] = reaction;
-    state->count += 1;
-    return KILN_C99_OK;
+    return kiln_c99_promise_add_reaction(state, &reaction);
 }
 
 static int kiln_c99_then_continue(kiln_value promise, kiln_value generator) {
@@ -541,6 +590,100 @@ static int kiln_c99_run_timer(void *work, void *host_pointer, void *thrown_point
      * this pointer while its callback's captures are still live. */
     kiln_c99_gc_keep_alive(timer);
     return status;
+}
+
+/* A timer whose callback is a heap function and that carries no extra arguments -- nearly every
+ * `setTimeout(fn, ms)` -- hands the realm the function itself as its work, with no `kiln_timer`
+ * block around it: one allocation and one release fewer per timer, and one block fewer for every
+ * pending timer the collector marks. The realm roots the work pointer exactly as it rooted the
+ * `kiln_timer`, and a function is released by the collector, not by the timer, so there is
+ * nothing to drop. One run function per tag, because the pointer alone does not say which it
+ * was. */
+static int kiln_c99_run_timer_value(kiln_value callback, void *host_pointer,
+                                    void *thrown_pointer) {
+    kiln_host *host = (kiln_host *)host_pointer;
+    kiln_value *thrown = (kiln_value *)thrown_pointer;
+    kiln_value produced = kiln_c99_undefined();
+    int status;
+    if (thrown == NULL) return KILN_C99_INVALID_ARGUMENT;
+    status = kiln_c99_call(host, &produced, callback, kiln_c99_undefined(), NULL, 0, 0, thrown);
+    kiln_c99_publish_turn_refusal(status, produced, thrown);
+    kiln_c99_gc_keep_alive((const void *)(uintptr_t)callback.bits);
+    return status;
+}
+
+static int kiln_c99_run_timer_function(void *work, void *host, void *thrown) {
+    return kiln_c99_run_timer_value(
+        kiln_c99_value(KILN_VALUE_FUNCTION, (uint64_t)(uintptr_t)work, NULL, 0), host, thrown);
+}
+
+/* A promise's own `resolve` or `reject` as the callback -- `new Promise((r) => setTimeout(r, ms))`
+ * -- is the commonest timer there is, and calling a settler is exactly settling its promise with
+ * no value. So the timer holds the promise itself: the settler is garbage as soon as the
+ * executor returns instead of living as long as the timer, and the one object the timer's run
+ * touches is the one it settles. Nothing can tell: a settler has no identity a call observes. */
+static int kiln_c99_run_timer_resolve(void *work, void *host, void *thrown) {
+    int status;
+    (void)host;
+    if (thrown == NULL) return KILN_C99_INVALID_ARGUMENT;
+    status = kiln_c99_settle(kiln_c99_value(KILN_VALUE_PROMISE, (uint64_t)(uintptr_t)work, NULL, 0),
+                             kiln_c99_undefined(), 0);
+    kiln_c99_publish_turn_refusal(status, kiln_c99_undefined(), (kiln_value *)thrown);
+    kiln_c99_gc_keep_alive(work);
+    return status;
+}
+
+static int kiln_c99_run_timer_reject(void *work, void *host, void *thrown) {
+    int status;
+    (void)host;
+    if (thrown == NULL) return KILN_C99_INVALID_ARGUMENT;
+    status = kiln_c99_settle(kiln_c99_value(KILN_VALUE_PROMISE, (uint64_t)(uintptr_t)work, NULL, 0),
+                             kiln_c99_undefined(), 1);
+    kiln_c99_publish_turn_refusal(status, kiln_c99_undefined(), (kiln_value *)thrown);
+    kiln_c99_gc_keep_alive(work);
+    return status;
+}
+
+static int kiln_c99_run_timer_bound(void *work, void *host, void *thrown) {
+    return kiln_c99_run_timer_value(
+        kiln_c99_value(KILN_VALUE_BOUND, (uint64_t)(uintptr_t)work, NULL, 0), host, thrown);
+}
+
+static void kiln_c99_drop_timer_value(void *work) {
+    (void)work;
+}
+
+typedef int (*kiln_c99_timer_run_fn)(void *work, void *host, void *thrown);
+
+/* The direct run function for `callback`, or NULL when it needs a `kiln_timer`; `*work` is the
+ * pointer the realm is to hold -- the function itself, or a settler's promise. */
+static kiln_c99_timer_run_fn kiln_c99_timer_direct_run(kiln_value callback, void **work) {
+    if (callback.bits == 0) return NULL;
+    *work = (void *)(uintptr_t)callback.bits;
+    switch (callback.tag) {
+    case KILN_VALUE_FUNCTION: return kiln_c99_run_timer_function;
+    case KILN_VALUE_SETTLER: {
+        kiln_settler *settler = (kiln_settler *)(uintptr_t)callback.bits;
+        if (settler->promise.tag != KILN_VALUE_PROMISE || settler->promise.bits == 0) return NULL;
+        *work = (void *)(uintptr_t)settler->promise.bits;
+        return settler->rejects ? kiln_c99_run_timer_reject : kiln_c99_run_timer_resolve;
+    }
+    case KILN_VALUE_BOUND: return kiln_c99_run_timer_bound;
+    default: return NULL;
+    }
+}
+
+/* Arms `work` in the realm lane the scheduling method `code` names: a timeout or an interval
+ * after `delay`, an immediate (node's check phase), or an I/O callback (its poll phase, where
+ * `__kilnQueueIo` puts a message port's delivery). */
+static int kiln_c99_arm_timer(uint64_t code, double delay, kiln_realm_work_fn run,
+                              kiln_realm_drop_fn drop, void *work, uint64_t *id) {
+    switch (code) {
+    case KILN_C99_METHOD_SET_INTERVAL: return kiln_realm_set_interval(delay, run, drop, work, id);
+    case KILN_C99_METHOD_SET_IMMEDIATE: return kiln_realm_set_immediate(run, drop, work, id);
+    case KILN_C99_METHOD_QUEUE_IO_RAW: return kiln_realm_queue_io(run, drop, work, id);
+    default: return kiln_realm_set_timeout(delay, run, drop, work, id);
+    }
 }
 
 /* One step of an async function: resume the body, and decide what to do with where it stopped.

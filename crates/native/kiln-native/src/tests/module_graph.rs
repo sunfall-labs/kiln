@@ -441,7 +441,7 @@ fn native_graph_wiring_uses_resolved_star_export_origins() {
     assert_eq!(launcher.matches("kiln_realm_destroy(realm)").count(), 1);
     assert_eq!(
         launcher
-            .matches("kiln_realm_enter(realm, kiln_graph_enter, &graph)")
+            .matches("kiln_realm_enter(realm, kiln_graph_enter, graph)")
             .count(),
         1
     );
@@ -485,7 +485,7 @@ fn native_graph_wiring_uses_resolved_star_export_origins() {
     assert!(
         switch
             < wall
-                .find("kiln_realm_enter(realm, kiln_graph_enter, &graph)")
+                .find("kiln_realm_enter(realm, kiln_graph_enter, graph)")
                 .unwrap()
     );
     let wrapper = graph_shared_wrapper_source(&graph, &modules, "kiln_star_graph")
@@ -586,7 +586,8 @@ fn native_graph_reserves_commonjs_wrapper_bindings_for_the_launcher() {
     let logical_commonjs =
         logical_module_path(graph.project_root(), &modules[commonjs_index].0.path)
             .expect("logical CommonJS path");
-    assert!(launcher.contains("static kiln_value kiln_imports_0[5];"));
+    assert!(launcher.contains("    kiln_value imports_0[5];"));
+    assert!(launcher.contains("#define kiln_imports_0 (graph->imports_0)"));
     assert!(launcher.contains("_commonjs_wrapper(kiln_imports_0, (size_t)5, "));
     assert!(launcher.contains(&format!(
             "{}_commonjs_wrapper(kiln_imports_{commonjs_index}, (size_t)5, {}, (size_t){}, {}, (size_t){}",
@@ -2217,10 +2218,13 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
     let main = launcher
         .find("int main(int argc, char **argv)")
         .expect("launcher has main");
-    assert!(launcher[..main].contains("static kiln_value kiln_exports_"));
-    assert!(launcher[..main].contains("static kiln_value kiln_imports_"));
-    assert!(!launcher[main..].contains("kiln_value kiln_exports_"));
-    assert!(!launcher[main..].contains("kiln_value kiln_imports_"));
+    // The linkage arrays are the realm's graph context's fields (realms issue 04 step 5).
+    assert!(launcher[..main].contains("    kiln_value exports_"));
+    assert!(launcher[..main].contains("    kiln_value imports_"));
+    assert!(!launcher.contains("static kiln_value kiln_exports_"));
+    assert!(!launcher.contains("static kiln_value kiln_imports_"));
+    assert!(!launcher[main..].contains("kiln_value exports_"));
+    assert!(!launcher[main..].contains("kiln_value imports_"));
     let builder = NativeBuilder::new(ArtifactCache::new(root.join("cache")), toolchain);
     let first = builder
         .build_graph(
@@ -3500,4 +3504,56 @@ int main(void) {{
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(output.stdout, b"start\ntrue\n");
+}
+
+/// `kiln check --explain-parallel` asks `parallel_sites_graph`, which stops the build after
+/// emission. Its answer must be the build's, and it must not compile or link anything.
+#[test]
+fn parallel_sites_without_compiling_are_the_builds_own() {
+    use kiln_backend_c::parallel::Reason;
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping parallel-site planning: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-parallel-sites-only");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "const xs = [1, 2, 3, 4];\nlet bump = 1;\nbump = 2;\nconsole.log(xs.parallelMap(x => x * 2 + 1).join(','));\nconsole.log(xs.parallelMap(x => x + bump).join(','));\n",
+    )
+    .expect("write parallel-sites entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build parallel-sites graph");
+    let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
+    let options = NativeBuildOptions {
+        output: root.path.join("program"),
+        profile: NativeProfile::Release,
+        realm: NativeRealmPolicy::default(),
+        ..NativeBuildOptions::default()
+    };
+    let planned = builder
+        .parallel_sites_graph(&graph, &options)
+        .expect("plan parallel sites");
+    assert!(
+        !options.output.exists(),
+        "planning must not link an executable"
+    );
+    let sites: Vec<_> = planned.iter().flat_map(|(_, sites)| sites).collect();
+    assert_eq!(sites.len(), 2, "{planned:?}");
+    assert!(sites[0].refusal.is_none(), "{planned:?}");
+    assert_eq!(
+        sites[1].refusal.as_ref().map(|refusal| refusal.reason),
+        Some(Reason::CapturesReassigned),
+        "{planned:?}"
+    );
+    let built = builder
+        .build_graph(&graph, &options)
+        .expect("build parallel-sites graph");
+    assert_eq!(planned, built.parallel_sites);
 }

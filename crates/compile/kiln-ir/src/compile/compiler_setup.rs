@@ -44,6 +44,7 @@ impl super::Compiler {
         let mut compiler = Self {
             source: Arc::clone(&module.source),
             constants: Vec::new(),
+            constant_indices: rustc_hash::FxHashMap::default(),
             code: Vec::new(),
             functions: Vec::new(),
             template_sites: Vec::new(),

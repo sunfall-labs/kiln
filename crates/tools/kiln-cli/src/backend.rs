@@ -6,8 +6,8 @@
 
 use kiln_proto::{
     CacheGcSummary, ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary,
-    NativeSharedLibrarySummary, ProjectSummary, Request, ResolutionMap, Response, RunSummary,
-    SourceHash, SourceView, Stats, StepBudget, SyncId, TestMode, TestSummary,
+    NativeSharedLibrarySummary, ProjectSummary, RecordedWorkers, Request, ResolutionMap, Response,
+    RunSummary, SourceHash, SourceView, Stats, StepBudget, SyncId, TestMode, TestSummary,
 };
 
 use crate::error::{Error, Result};
@@ -163,6 +163,7 @@ pub trait Backend: Send {
         node: bool,
         explain: bool,
         no_kiln_extensions: bool,
+        workers: Option<RecordedWorkers>,
         static_link: bool,
         pgo_generate: Option<String>,
         pgo_use: Option<String>,
@@ -176,6 +177,7 @@ pub trait Backend: Send {
             node,
             explain,
             no_kiln_extensions,
+            workers,
             static_link,
             pgo_generate,
             pgo_use,
@@ -184,6 +186,28 @@ pub trait Backend: Send {
             Response::NativeBuilt(summary) => Ok(SourceResponse::Ready(summary)),
             Response::StaleSourceView { current } => Ok(SourceResponse::Stale(current)),
             other => Err(mismatch("NativeBuild", &other)),
+        }
+    }
+    /// `kiln check --explain-parallel`: the `parallel:` section of the native build at
+    /// `profile`, which the daemon stops after emission.
+    fn explain_parallel_at_view(
+        &mut self,
+        path: String,
+        project_root: String,
+        node: bool,
+        profile: NativeProfile,
+        source_view: SourceView,
+    ) -> Result<SourceResponse<String>> {
+        match self.request(Request::ExplainParallel {
+            path,
+            project_root,
+            node,
+            profile,
+            source_view,
+        })? {
+            Response::ParallelExplained { text } => Ok(SourceResponse::Ready(text)),
+            Response::StaleSourceView { current } => Ok(SourceResponse::Stale(current)),
+            other => Err(mismatch("ExplainParallel", &other)),
         }
     }
     #[allow(clippy::too_many_arguments)]
@@ -336,6 +360,7 @@ fn name_of(response: &Response) -> &'static str {
         Response::NativeBuilt(_) => "NativeBuilt",
         Response::Stale { .. } => "Stale",
         Response::NativeSharedBuilt(_) => "NativeSharedBuilt",
+        Response::ParallelExplained { .. } => "ParallelExplained",
         Response::NativeRan(_) => "NativeRan",
         Response::Tested(_) => "Tested",
         Response::TestInventory(_) => "TestInventory",

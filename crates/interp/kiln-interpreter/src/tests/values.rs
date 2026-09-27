@@ -694,3 +694,46 @@ fn repeating_an_empty_string_with_a_huge_count_finishes_without_iteration() {
         Ok(Value::String("".into()))
     );
 }
+
+#[test]
+fn numeric_unary_dispatch_preserves_ieee_edges_and_step_accounting() {
+    for (operator, number, expected) in [
+        (UnaryOp::Negate, 0.0, Value::Number(-0.0)),
+        (UnaryOp::Plus, -0.0, Value::Number(-0.0)),
+        (UnaryOp::ToNumeric, f64::NAN, Value::Number(f64::NAN)),
+        (
+            UnaryOp::Increment,
+            f64::INFINITY,
+            Value::Number(f64::INFINITY),
+        ),
+        (UnaryOp::Decrement, 0.0, Value::Number(-1.0)),
+        (UnaryOp::BitwiseNot, 4294967296.0, Value::Number(-1.0)),
+        (UnaryOp::Not, f64::NAN, Value::Boolean(true)),
+        (UnaryOp::TypeOf, 3.0, Value::String("number".into())),
+        (UnaryOp::Void, 3.0, Value::Undefined),
+    ] {
+        let program = program(
+            vec![Constant::Number(number.to_bits())],
+            vec![
+                Instruction::Const(0),
+                Instruction::Unary(operator),
+                Instruction::Return,
+            ],
+        );
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+            entropy: Default::default(),
+            timezone: None,
+            locale: None,
+        };
+        let mut vm = test_vm(&program, &mut host);
+        let result = vm.run().unwrap();
+        assert!(
+            same_value(&result.value, &expected),
+            "{operator:?}: {:?}",
+            result.value
+        );
+        assert_eq!(result.steps, 3);
+    }
+}

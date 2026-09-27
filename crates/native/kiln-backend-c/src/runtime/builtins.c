@@ -336,26 +336,38 @@ static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
     return KILN_C99_OK;
 }
 
+/* THE FRAME REGISTERS (ADR 0070, realms issue 04 step 5).
+ *
+ * Everything from here to `kiln_c99_frame_callee` is state of the *running call*, saved and
+ * restored around every call the way a machine register would be. It is thread-local rather than
+ * part of the realm context because it is a spill of the machine stack, and the stack belongs to
+ * the thread (ADR 0040's executor), not to the realm: a realm runs on one thread at a time, holds
+ * no generated frame between turns (ADR 0041), and every call restores what it found, so at a turn
+ * boundary each register holds its idle value and the next realm the thread runs finds nothing of
+ * the last one's. Marking them (`kiln_c99_gc_unit_roots`) happens on the collecting thread, which
+ * is the realm's. A thread-local costs what a static costs on the hot path; a realm-context field
+ * would cost a generation check on every save and restore. */
+
 /* The constructor the running call was reached through, or undefined.
  *
  * A module-level value with save-and-restore around every call, rather than a field on a frame:
  * the body signature is fixed by the embedding ABI, and the C stack already gives the discipline
  * this needs -- each call restores what it found. */
-static kiln_value kiln_c99_new_target;
+static _Thread_local kiln_value kiln_c99_new_target;
 
 /* Set when a `super(...)` is about to call, and cleared by the call that honours it.
  *
  * `super()` keeps the `new.target` of the call that is building the instance, which is how a base
  * constructor can name the subclass it is being built for -- so exactly one call has to *not*
  * compute a fresh one. */
-static int kiln_c99_inheriting_new_target;
+static _Thread_local int kiln_c99_inheriting_new_target;
 
 /* Why a typed entry returned `KILN_VAL_TYPED_FAIL`, and what it threw when the status is a
  * throw. A typed entry carries no `thrown` slot of its own unless its body needs one, so a
  * failure leaves the way an exception leaves any frame: pending, for the caller to pick up at
  * once. Both are frame state; nothing reads them past the call that set them. */
-static int kiln_c99_typed_status;
-static kiln_value kiln_c99_typed_thrown;
+static _Thread_local int kiln_c99_typed_status;
+static _Thread_local kiln_value kiln_c99_typed_thrown;
 
 /* What a derived constructor's `super()` produced, when a built-in parent produced something
  * other than the instance `new` allocated.
@@ -366,7 +378,7 @@ static kiln_value kiln_c99_typed_thrown;
  * hands back says which object `this` ended up being. This is that channel. Saved and restored
  * around every construction and every `super()` so a nested one cannot be mistaken for this
  * one. */
-static kiln_value kiln_c99_adopted_this;
+static _Thread_local kiln_value kiln_c99_adopted_this;
 
 /* The running call's own arguments, and the list an arrow sees instead.
  *
@@ -377,10 +389,10 @@ static kiln_value kiln_c99_adopted_this;
  *
  * The raw pointer and count rather than an array, because a call must not pay to materialise an
  * `arguments` nothing asked for; the array is built where one is actually read. */
-static const kiln_val *kiln_c99_frame_args;
-static size_t kiln_c99_frame_argc;
-static kiln_value kiln_c99_captured_arguments;
-static int kiln_c99_frame_is_arrow;
+static _Thread_local const kiln_val *kiln_c99_frame_args;
+static _Thread_local size_t kiln_c99_frame_argc;
+static _Thread_local kiln_value kiln_c99_captured_arguments;
+static _Thread_local int kiln_c99_frame_is_arrow;
 /* The one `arguments` object this call has handed out, built on first mention and undefined
  * until then.
  *
@@ -388,13 +400,13 @@ static int kiln_c99_frame_is_arrow;
  * visible to the next read of `arguments`, and `arguments === arguments` is true. Materialising
  * a fresh array per mention made both false, and every definition made on one was discarded by
  * the statement after it. Still built lazily, so a call nothing asks it of pays nothing. */
-static kiln_value kiln_c99_frame_arguments_object;
+static _Thread_local kiln_value kiln_c99_frame_arguments_object;
 /* Whether this call's `arguments` is the *mapped* kind: sloppy code with a simple parameter
  * list. Written by the body's own prologue, because it is a fact about the function that the
  * compiler decided and the emitted code carries as a constant. */
-static int kiln_c99_frame_mapped_arguments;
+static _Thread_local int kiln_c99_frame_mapped_arguments;
 /* The function this call is of, for a mapped `arguments` object's `callee`. */
-static kiln_value kiln_c99_frame_callee;
+static _Thread_local kiln_value kiln_c99_frame_callee;
 
 /* `CreateUnmappedArgumentsObject`: an ordinary object carrying the call's arguments.
  *

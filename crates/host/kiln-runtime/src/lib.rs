@@ -11,6 +11,7 @@
 )]
 
 mod process_wire;
+mod timer_queue;
 pub use process_wire::{
     ProcessWireError, ProcessWireRequest, decode as decode_process_wire,
     encode as encode_process_wire,
@@ -70,13 +71,13 @@ pub use worker_pool::{
     ActorHandler, ActorId, DEFAULT_MAILBOX_CAPACITY, WorkerError, WorkerPool, WorkerRealmHandle,
 };
 
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::time::Duration;
+use timer_queue::{SequenceBuild, TimerEntry, TimerQueue};
 
 pub use kiln_artifact_cache::{CapabilityIdentity, RealmCapabilityIdentity};
 use kiln_host_abi::{
@@ -4055,16 +4056,51 @@ fn io_error(syscall: &str, path: String, error: std::io::Error) -> AsyncHostErro
 /// Microtasks are FIFO. Timers are ordered by `(deadline, sequence)` and each timer is followed
 /// by a complete microtask drain. The observable clock starts at the Unix epoch and is represented
 /// as elapsed virtual time from that epoch.
+///
+/// Macrotasks come from three lanes, taken in the order of one turn of node's event loop (libuv's
+/// timers, poll and check phases): the timers that were due when the turn began, then the I/O
+/// callbacks that were queued when the poll phase began (a message port's delivery), then the
+/// `setImmediate` callbacks that were queued when the check phase began. Work a phase queues
+/// for its own lane waits for the next turn, which is what keeps a ping-pong between two ports,
+/// or an immediate that schedules an immediate, from starving the other lanes. Until
+/// 2026-09-27 an immediate was a zero-delay timeout, so an immediate scheduled before a
+/// `postMessage` ran before the message, and one scheduled from a timer callback after a
+/// zero-delay timeout scheduled beside it; node runs both the other way round.
 pub struct Realm<M = WorkId, T = WorkId> {
     now: Duration,
     next_sequence: u64,
     next_timer_id: u64,
     microtasks: VecDeque<M>,
     next_ticks: VecDeque<M>,
-    timers: BinaryHeap<TimerEntry<T>>,
-    cancelled_timers: HashSet<TimerId>,
-    active_timers: HashSet<TimerId>,
+    timers: TimerQueue<T>,
+    io: VecDeque<(TimerId, T)>,
+    immediates: VecDeque<(TimerId, T)>,
+    phase: Phase,
+    cancelled_timers: HashSet<TimerId, SequenceBuild>,
+    active_timers: HashSet<TimerId, SequenceBuild>,
     _not_send: PhantomData<Rc<()>>,
+}
+
+/// Where a realm is in its turn (see [`Realm`]).
+#[derive(Debug, Clone, Copy)]
+enum Phase {
+    /// Running the timers due at `time` and armed before `sequence`: a timer armed by one of
+    /// them, even with no delay, belongs to the next turn, as libuv's does.
+    Timers { time: Duration, sequence: u64 },
+    /// Running the `remaining` I/O callbacks at the front of the lane.
+    Io { remaining: usize },
+    /// Running the `remaining` immediates at the front of the lane.
+    Check { remaining: usize },
+}
+
+/// The macrotask a realm runs next.
+#[derive(Debug, Clone, Copy)]
+enum Next {
+    Timer,
+    Io,
+    Immediate,
+    /// Nothing runs until the clock reaches this timer's deadline.
+    Wait(Duration),
 }
 
 impl<M, T> Default for Realm<M, T> {
@@ -4094,9 +4130,13 @@ impl<M, T> Realm<M, T> {
             next_timer_id: 1,
             microtasks: VecDeque::new(),
             next_ticks: VecDeque::new(),
-            timers: BinaryHeap::new(),
-            cancelled_timers: HashSet::new(),
-            active_timers: HashSet::new(),
+            timers: TimerQueue::new(),
+            io: VecDeque::new(),
+            immediates: VecDeque::new(),
+            // The finished end of a turn, so the first question starts one.
+            phase: Phase::Check { remaining: 0 },
+            cancelled_timers: HashSet::default(),
+            active_timers: HashSet::default(),
             _not_send: PhantomData,
         }
     }
@@ -4145,6 +4185,10 @@ impl<M, T> Realm<M, T> {
     /// discarded yet, without running or removing it.
     pub fn for_each_timer(&self, mut visit: impl FnMut(&T)) {
         self.timers.iter().for_each(|entry| visit(&entry.work));
+        self.io
+            .iter()
+            .chain(&self.immediates)
+            .for_each(|(_, work)| visit(work));
     }
 
     /// Adds one FIFO microtask. The caller retains ownership of the work represented by `work`.
@@ -4192,23 +4236,48 @@ impl<M, T> Realm<M, T> {
         self.schedule_timer(interval, work, Some(interval.max(Duration::from_millis(1))))
     }
 
+    /// Queues a `setImmediate` callback: node's check phase, after this turn's I/O callbacks.
+    /// Its identity is a timer's, so `clear_timeout` cancels it.
+    pub fn set_immediate(&mut self, work: T) -> TimerId {
+        let id = self.new_timer_id();
+        self.immediates.push_back((id, work));
+        id
+    }
+
+    /// Queues an I/O callback: node's poll phase, after the timers due when a turn begins and
+    /// before its immediates. A message port's delivery is one; nothing else in a realm reaches
+    /// it yet, since a Tokio completion is its own turn (`RuntimeTurn::Completion`).
+    pub fn queue_io(&mut self, work: T) -> TimerId {
+        let id = self.new_timer_id();
+        self.io.push_back((id, work));
+        id
+    }
+
+    fn new_timer_id(&mut self) -> TimerId {
+        let id = TimerId(self.next_timer_id);
+        self.next_timer_id = self.next_timer_id.wrapping_add(1);
+        self.active_timers.insert(id);
+        id
+    }
+
     fn schedule_timer(&mut self, delay: Duration, work: T, interval: Option<Duration>) -> TimerId {
         // Saturating arithmetic gives callers the same well-defined behaviour as a timer delay
         // clamped to the largest representable duration, without allowing an integer overflow to
         // become a scheduler panic.
         let deadline = self.now.saturating_add(delay);
-        let id = TimerId(self.next_timer_id);
-        self.next_timer_id = self.next_timer_id.wrapping_add(1);
+        let id = self.new_timer_id();
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.wrapping_add(1);
-        self.active_timers.insert(id);
-        self.timers.push(TimerEntry {
-            deadline,
-            sequence,
-            id,
-            work,
-            interval,
-        });
+        self.timers.push(
+            delay,
+            TimerEntry {
+                deadline,
+                sequence,
+                id,
+                work,
+                interval,
+            },
+        );
         id
     }
 
@@ -4227,84 +4296,176 @@ impl<M, T> Realm<M, T> {
         !self.next_ticks.is_empty() || !self.microtasks.is_empty() || !self.active_timers.is_empty()
     }
 
-    /// The earliest armed timer's virtual deadline, discarding cancelled entries.
+    /// When the next macrotask can run: now, when one is ready, or the deadline of the timer
+    /// the realm is waiting for. Cancelled entries are discarded on the way.
     pub fn next_timer_deadline(&mut self) -> Option<Duration> {
-        self.discard_cancelled_timers();
-        self.timers.peek().map(|timer| timer.deadline)
+        match self.next()? {
+            Next::Wait(deadline) => Some(deadline),
+            Next::Timer | Next::Io | Next::Immediate => Some(self.now),
+        }
+    }
+
+    /// Which lane the next macrotask comes from, moving through the turn's phases as each one
+    /// runs out.
+    fn next(&mut self) -> Option<Next> {
+        loop {
+            match self.phase {
+                Phase::Timers { time, sequence } => {
+                    self.discard_cancelled_timers();
+                    if self
+                        .timers
+                        .peek_key()
+                        .is_some_and(|(deadline, armed, _)| deadline <= time && armed < sequence)
+                    {
+                        return Some(Next::Timer);
+                    }
+                    self.phase = Phase::Io {
+                        remaining: self.io.len(),
+                    };
+                }
+                Phase::Io { remaining } => {
+                    let remaining = discard_cancelled_front(
+                        &mut self.io,
+                        &mut self.cancelled_timers,
+                        remaining,
+                    );
+                    if remaining > 0 {
+                        self.phase = Phase::Io { remaining };
+                        return Some(Next::Io);
+                    }
+                    self.phase = Phase::Check {
+                        remaining: self.immediates.len(),
+                    };
+                }
+                Phase::Check { remaining } => {
+                    let remaining = discard_cancelled_front(
+                        &mut self.immediates,
+                        &mut self.cancelled_timers,
+                        remaining,
+                    );
+                    if remaining > 0 {
+                        self.phase = Phase::Check { remaining };
+                        return Some(Next::Immediate);
+                    }
+                    self.phase = Phase::Check { remaining: 0 };
+                    // The turn is over. The next one starts now if anything is ready at this
+                    // time; otherwise the realm waits for its earliest timer.
+                    if self.io.is_empty() && self.immediates.is_empty() {
+                        self.discard_cancelled_timers();
+                        let (deadline, _, _) = self.timers.peek_key()?;
+                        if deadline > self.now {
+                            return Some(Next::Wait(deadline));
+                        }
+                    }
+                    self.begin_turn();
+                }
+            }
+        }
+    }
+
+    fn begin_turn(&mut self) {
+        self.phase = Phase::Timers {
+            time: self.now,
+            sequence: self.next_sequence,
+        };
     }
 
     fn discard_cancelled_timers(&mut self) {
+        if self.cancelled_timers.is_empty() {
+            return;
+        }
         while self
             .timers
-            .peek()
-            .is_some_and(|timer| self.cancelled_timers.contains(&timer.id))
+            .peek_key()
+            .is_some_and(|(_, _, id)| self.cancelled_timers.contains(&TimerId(id)))
         {
             let timer = self.timers.pop().expect("peeked timer exists");
             self.cancelled_timers.remove(&timer.id);
         }
     }
 
-    /// Advance virtual time to the earliest timer and take it, re-arming an interval.
+    /// The work of the timer expected to run `ahead` timers after the next one, for a cache hint
+    /// (see `TimerQueue::upcoming`). Not an ordering promise.
+    pub fn upcoming_timer_work(&self, ahead: usize) -> Option<&T> {
+        self.timers.upcoming(ahead).map(|entry| &entry.work)
+    }
+
+    /// Take the next macrotask -- advancing virtual time to the earliest timer when nothing is
+    /// ready before it -- re-arming an interval.
     pub fn run_next_timer(&mut self) -> Option<WorkItem<M, T>>
     where
         T: Clone,
     {
-        self.discard_cancelled_timers();
+        let lane = match self.next()? {
+            Next::Wait(deadline) => {
+                self.now = self.now.max(deadline);
+                self.begin_turn();
+                return self.run_next_timer();
+            }
+            Next::Timer => return self.take_timer(),
+            Next::Io => &mut self.io,
+            Next::Immediate => &mut self.immediates,
+        };
+        // `next` has just counted this entry in the phase that runs it.
+        let (id, work) = lane.pop_front().expect("the phase counted this entry");
+        if let Phase::Io { remaining } | Phase::Check { remaining } = &mut self.phase {
+            *remaining -= 1;
+        }
+        self.active_timers.remove(&id);
+        Some(WorkItem::Timer { id, work })
+    }
+
+    fn take_timer(&mut self) -> Option<WorkItem<M, T>>
+    where
+        T: Clone,
+    {
         let timer = self.timers.pop()?;
         self.now = self.now.max(timer.deadline);
-        let work = timer.work.clone();
-        if let Some(interval) = timer.interval {
+        let TimerEntry {
+            deadline,
+            id,
+            work,
+            interval,
+            ..
+        } = timer;
+        if let Some(interval) = interval {
             // Rearm before handing control to the callback. `clear_timeout` can therefore cancel
             // the next occurrence from within the current callback.
             let sequence = self.next_sequence;
             self.next_sequence = self.next_sequence.wrapping_add(1);
-            let deadline = timer.deadline.saturating_add(interval);
-            self.timers.push(TimerEntry {
-                deadline,
-                sequence,
-                id: timer.id,
-                work: timer.work,
-                interval: Some(interval),
-            });
+            let rearmed = work.clone();
+            self.timers.push(
+                interval,
+                TimerEntry {
+                    deadline: deadline.saturating_add(interval),
+                    sequence,
+                    id,
+                    work: rearmed,
+                    interval: Some(interval),
+                },
+            );
         } else {
-            self.active_timers.remove(&timer.id);
+            self.active_timers.remove(&id);
         }
-        Some(WorkItem::Timer { id: timer.id, work })
+        Some(WorkItem::Timer { id, work })
     }
 }
 
-struct TimerEntry<T> {
-    deadline: Duration,
-    sequence: u64,
-    id: TimerId,
-    work: T,
-    interval: Option<Duration>,
-}
-
-impl<T> PartialEq for TimerEntry<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.deadline == other.deadline && self.sequence == other.sequence && self.id == other.id
+/// Drops cancelled entries from the front of the first `remaining` of an I/O or check lane,
+/// answering how many of those are left.
+fn discard_cancelled_front<T>(
+    lane: &mut VecDeque<(TimerId, T)>,
+    cancelled: &mut HashSet<TimerId, SequenceBuild>,
+    mut remaining: usize,
+) -> usize {
+    while remaining > 0
+        && let Some((id, _)) = lane.front()
+        && cancelled.remove(id)
+    {
+        lane.pop_front();
+        remaining -= 1;
     }
-}
-
-impl<T> Eq for TimerEntry<T> {}
-
-impl<T> Ord for TimerEntry<T> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // BinaryHeap is a max-heap; reverse the semantic order so the earliest, then oldest,
-        // timer is returned first.
-        other
-            .deadline
-            .cmp(&self.deadline)
-            .then_with(|| other.sequence.cmp(&self.sequence))
-            .then_with(|| other.id.0.cmp(&self.id.0))
-    }
-}
-
-impl<T> PartialOrd for TimerEntry<T> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
+    remaining
 }
 
 async fn drive_realm<M, T, F, C, E>(

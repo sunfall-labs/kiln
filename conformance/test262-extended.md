@@ -5,8 +5,10 @@ section. `mise run test262-full` runs both. The corresponding gate commands are 
 and `mise run gate-full`. Existing `scripts/test262.sh --out report.json --path <subtree>` still
 runs every case in that pinned subtree, regardless of its classification here.
 
-The initial split defers **502 files / 1,004 variants**, leaving **101,634 routine variants**.
-Those files accounted for 88% of summed case durations in the recorded full run. Classification
+The split now defers **499 files / 998 variants**, leaving **101,640 routine variants**.
+The original 502 files accounted for 88% of summed case durations in the recorded full run.
+Three Map/Set iterator-close files were promoted after fixing constructor adder dispatch:
+all six variants now pass in milliseconds instead of consuming the instruction budget. Classification
 is explicit in `test262-extended.json`, not recalculated from noisy timing on every invocation.
 All variants of each selected file execute. Reports declare which suite ran and how much was
 deferred; a routine report is never evidence that the complete corpus passed.
@@ -17,15 +19,21 @@ This is an execution-cost policy, not a claim that these tests inherently need s
 
 | Files | Workload | Interpretation |
 | ---: | --- | --- |
-| 448 | Unicode/RegExp sweeps | Large exhaustive inputs, with substantial interpreter optimization opportunity |
-| 6 | Three TypedArray, two Map, one Set case | Hit the eight-million-step limit; optimization/correctness backlog, not justified inherent cost |
-| 48 | Mixed Unicode, URI, iterator, internationalization and other workloads | Need individual profiling before attributing the cost |
+| 448 | Unicode/RegExp sweeps | Large inputs; guarded indexed writes, numeric dispatch and string storage improvements reduced measured wall time by 25% |
+| 3 | TypedArray copyWithin cases | Earlier implementation exhausted its budget on finite setup; latest main's shared implementation instead fails promptly on missing post-coercion detachment checks, still unresolved |
+| 48 | Mixed compiler, property, URI, iterator and calendar workloads | Constant interning and key membership had quadratic costs; profiling separates finite budget exhaustion from an erroneous iterator-close loop |
 
 A representative Unicode-builder probe produced identical output in Node and Kiln. Median
 end-to-end process times over three runs were 56 ms and 1.11 s, respectively. These include
 process startup and are triage measurements, not steady-state benchmark claims or measurements
 of every Unicode case. Map/Set iterator-close tests expect an overridden insertion method to
-throw promptly; consuming an infinite iterator until the step limit is a correctness problem.
+throw promptly; consuming an infinite iterator until the step limit was a correctness problem, now fixed.
+
+The optimization evidence lives under `.scratch/extended-unicode`, `.scratch/extended-limits`,
+and `.scratch/extended-mixed`. Those controlled comparisons name their pre-bootstrap baseline
+`80f55d78`. The [combined report](../.scratch/slow-case-opt/README.md) validates the newer common
+bootstrap in every realm: all 102,638 variants ran, with no chunk regressions and 43 gained passes.
+They do not claim that time to a fuel limit is the time needed to finish an exhaustive test.
 
 Run the extended section periodically, before releases, and when changing features it exercises.
 Keep optimizing its entries and promote files back into routine coverage after a complete run

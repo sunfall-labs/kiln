@@ -1319,6 +1319,71 @@ fn native_build_launcher_supports_workers_auto() {
 }
 
 #[test]
+fn native_build_records_a_worker_count_and_surfaces_a_worker_exit_status() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping recorded workers test: no C compiler found");
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-recorded-workers");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "console.log(`worker ${process.env.KILN_WORKER_INDEX}/${process.env.KILN_WORKER_COUNT}`);\n\
+         if (process.env.KILN_WORKER_INDEX === '1') process.exit(7);",
+    )
+    .expect("write fixture");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("source graph compiles");
+    let options = NativeBuildOptions::new(project.path.join("program"), NativeProfile::Dev)
+        .with_realm_policy(
+            NativeRealmPolicy::default().with_workers(Some(NativeWorkers::Count(3))),
+        );
+    let report = project
+        .builder(toolchain)
+        .build_graph(&graph, &options)
+        .expect("native build succeeds");
+
+    // The recorded count applies with KILN_WORKERS unset. Worker 1 exits 7 on purpose: that is an
+    // answer, not a crash, so it is not restarted and becomes the supervisor's status. Workers 0
+    // and 2 may be stopped before they print, which is that same rule, so only worker 1 is read.
+    let out = Command::new(&report.output)
+        .env_remove("KILN_WORKERS")
+        .output_when_launchable()
+        .expect("run native executable with its recorded worker count");
+    assert_eq!(out.status.code(), Some(7), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .any(|line| line == "worker 1/3"),
+        "{out:?}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("exited with status 7; stopping the other workers"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("restarting"), "{stderr}");
+
+    // KILN_WORKERS overrides the recorded count: one realm, neither variable set.
+    let out = Command::new(&report.output)
+        .env("KILN_WORKERS", "1")
+        .output_when_launchable()
+        .expect("run native executable with KILN_WORKERS=1");
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "worker undefined/undefined"
+    );
+}
+
+#[test]
 fn parse_http3_enabled_semantics() {
     assert!(!parse_http3_enabled(None, &[] as &[&str]));
     assert!(!parse_http3_enabled(Some(""), &[] as &[&str]));

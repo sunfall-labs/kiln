@@ -26,8 +26,9 @@ use crate::dispatch::{
     GraphRunPlan, Next, PreparedRun, build_graph_from_snapshot, dispatch, dispatch_source,
     execute_prepared_run, graph_run_plan, graph_snapshot_is_current, graph_sources_from_snapshot,
     native_build_graph, native_build_output, native_build_program, native_build_shared_graph,
-    native_build_shared_program, native_graph_with_cache, native_program, native_run_graph,
-    native_run_program, patch_graph_from_snapshot, prepare_run_with_cache,
+    native_build_shared_program, native_explain_parallel_graph, native_explain_parallel_program,
+    native_graph_with_cache, native_program, native_run_graph, native_run_program,
+    patch_graph_from_snapshot, prepare_run_with_cache,
 };
 use crate::framing::{MAX_MESSAGE_BYTES, read_frame, write_frame};
 use crate::graph_cache::GraphCache;
@@ -786,6 +787,7 @@ fn handle<E: QueryEngine>(
             node,
             explain,
             no_kiln_extensions,
+            workers,
             source_view,
             static_link,
             pgo_generate,
@@ -815,6 +817,7 @@ fn handle<E: QueryEngine>(
                         node,
                         explain,
                         no_kiln_extensions,
+                        workers,
                         static_link,
                         pgo_gen,
                         pgo_u,
@@ -829,10 +832,38 @@ fn handle<E: QueryEngine>(
                         profile,
                         explain,
                         no_kiln_extensions,
+                        workers,
                         static_link,
                         pgo_gen,
                         pgo_u,
                     )
+                }),
+            }
+        }
+        Request::ExplainParallel {
+            path,
+            project_root,
+            node,
+            profile,
+            source_view,
+        } => {
+            let prepared = match prepare_native_snapshot(
+                state,
+                &path,
+                &project_root,
+                source_view,
+                false,
+                node,
+            ) {
+                Ok(prepared) => prepared,
+                Err(response) => return (response, Next::Continue),
+            };
+            match prepared {
+                PreparedNative::Graph(graph) => run_without_engine_lock(|| {
+                    native_explain_parallel_graph(&graph, &path, &project_root, profile, node)
+                }),
+                PreparedNative::Program(program) => run_without_engine_lock(|| {
+                    native_explain_parallel_program(&program, &path, &project_root, profile)
                 }),
             }
         }
@@ -1242,6 +1273,7 @@ fn handle_native_build_at_revision<E: QueryEngine>(
             node,
             explain,
             false,
+            None,
             static_link,
             pgo_gen.clone(),
             pgo_u.clone(),
@@ -1254,6 +1286,7 @@ fn handle_native_build_at_revision<E: QueryEngine>(
             profile,
             explain,
             false,
+            None,
             static_link,
             pgo_gen,
             pgo_u,

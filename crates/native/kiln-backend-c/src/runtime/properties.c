@@ -603,6 +603,14 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
                 /* An own read-only property refuses the write; an own accessor takes it -- as
                  * the list-mode records below would, without leaving shape mode. */
                 kiln_value setter;
+                /* A writable method slot whose code the shape records (step 3c): stored in
+                 * place for the same code, otherwise after dropping the record. */
+                if ((object->shape->code_mask & (1u << slot)) != 0) {
+                    if (kiln_c99_shape_store_recorded(object, slot, kiln_val_from_boundary(value)))
+                        return KILN_C99_OK;
+                    return kiln_c99_put_mode_key(host, target, key, ikey, value, strict, depth,
+                                                 thrown);
+                }
                 if ((object->shape->accessor_mask & (1u << slot)) == 0 ||
                     slot >= object->slot_capacity) {
                     return strict ? kiln_c99_throw_read_only_key(thrown, key) : KILN_C99_OK;

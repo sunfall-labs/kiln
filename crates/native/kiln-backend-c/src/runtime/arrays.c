@@ -243,7 +243,10 @@ typedef struct kiln_bytes_entry {
     uint8_t *bytes;
     size_t size;
 } kiln_bytes_entry;
-static kiln_bytes_entry kiln_c99_bytes_cache[KILN_C99_BYTES_CACHE];
+/* Per thread, not per realm: the blocks are plain memory that hold no realm's values, any realm
+ * on the thread may reuse one, and `kiln_c99_bytes_retire` runs from a sweep -- including the
+ * teardown sweep, where no realm is current to name a context. */
+static _Thread_local kiln_bytes_entry kiln_c99_bytes_cache[KILN_C99_BYTES_CACHE];
 
 /* Called by the collector when a typed buffer dies: keep the block if it is worth keeping. */
 static void kiln_c99_bytes_retire(uint8_t *bytes, size_t size) {

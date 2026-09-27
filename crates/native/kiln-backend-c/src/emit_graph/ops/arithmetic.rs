@@ -425,6 +425,15 @@ pub(super) fn emit_binary_ints(
             writeln!(output, "    i{v} = (int64_t)((uint32_t)i{l} >> ((uint32_t)i{r} & 31));{double_assign}{box_stmt}").unwrap();
         }
         BinaryOp::Remainder => {
+            // The integer twin cannot represent NaN or negative zero. A boxed-only
+            // consumer must retain those values even when no double twin is live.
+            let box_stmt = if need_box && !need_double {
+                format!(
+                    " v{v} = kiln_c99_val_from_double(i{r} == 0 ? NAN : ((i{v} == 0 && i{l} < 0) ? -0.0 : (double)i{v}));"
+                )
+            } else {
+                box_stmt
+            };
             let is_const_nonzero = defs.get(right).is_some_and(|op| match op {
                 GraphOp::Const { constant, .. } => {
                     as_safe_integer(constant).is_some_and(|k| k != 0)

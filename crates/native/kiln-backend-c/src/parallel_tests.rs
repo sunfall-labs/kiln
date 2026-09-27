@@ -764,6 +764,53 @@ fn math_min_operands_are_not_shadowed_by_their_temporaries() {
     assert!(failure.is_none(), "{failure:?}");
 }
 
+/// Integer operands do not make a remainder an integer: a zero divisor yields NaN,
+/// and an exact division of a negative dividend yields negative zero. Exercise both
+/// the boxed return and double consumers (reciprocals expose the sign of zero).
+#[test]
+fn integer_remainders_preserve_nan_and_negative_zero_when_boxed() {
+    let integer_element = Expr::Binary(
+        BinaryOp::BitwiseOr,
+        Box::new(Expr::Element),
+        Box::new(Expr::Number(0.0)),
+    );
+    let divisors = [
+        Expr::Binary(
+            BinaryOp::ShiftRight,
+            Box::new(Expr::Number(1e-310)),
+            Box::new(Expr::Index),
+        ),
+        Expr::Number(2.0),
+        Expr::Binary(
+            BinaryOp::BitwiseOr,
+            Box::new(Expr::Index),
+            Box::new(Expr::Number(0.0)),
+        ),
+    ];
+    let callbacks = divisors
+        .into_iter()
+        .flat_map(|divisor| {
+            let remainder = Expr::Binary(
+                BinaryOp::Remainder,
+                Box::new(integer_element.clone()),
+                Box::new(divisor),
+            );
+            let reciprocal = Expr::Binary(
+                BinaryOp::Divide,
+                Box::new(Expr::Number(1.0)),
+                Box::new(remainder.clone()),
+            );
+            [(remainder, 2), (reciprocal, 2)]
+        })
+        .collect::<Vec<_>>();
+    let failure = compare(
+        &callbacks,
+        &[-4.0, -0.0, -4.0, f64::NAN, f64::INFINITY, 4.0, -6.0],
+        [0.0, 0.0],
+    );
+    assert!(failure.is_none(), "{failure:?}");
+}
+
 /// Issue 14: with `parallel_workers_unit`, a generic-only module's qualifying callback gets its
 /// parallel clone and chunk workers in a unit of their own, which defines the workers under the
 /// module's link symbol and compiles on the prelude's declarations alone; the module declares

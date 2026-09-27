@@ -35,6 +35,38 @@ impl StringUnits {
         }
     }
 
+    /// Concatenate code units using the stored width, preserving lone surrogates.
+    pub fn concat(&self, other: &Self) -> Self {
+        if self.is_empty() {
+            return other.clone();
+        }
+        if other.is_empty() {
+            return self.clone();
+        }
+        let length = self
+            .len()
+            .checked_add(other.len())
+            .expect("string length overflow");
+        match (&self.0, &other.0) {
+            (Repr::Latin1(left), Repr::Latin1(right)) => {
+                let mut joined = Vec::with_capacity(length);
+                joined.extend_from_slice(left);
+                joined.extend_from_slice(right);
+                Self(Repr::Latin1(joined.into()))
+            }
+            (left, right) => {
+                let mut joined = Vec::with_capacity(length);
+                for part in [left, right] {
+                    match part {
+                        Repr::Latin1(bytes) => joined.extend(bytes.iter().copied().map(u16::from)),
+                        Repr::Utf16(units) => joined.extend_from_slice(units),
+                    }
+                }
+                Self(Repr::Utf16(joined.into()))
+            }
+        }
+    }
+
     pub fn unit_len(&self) -> usize {
         match &self.0 {
             Repr::Latin1(bytes) => bytes.len(),
@@ -260,6 +292,37 @@ mod tests {
     use std::borrow::Cow;
 
     use super::{StringUnits, StringView};
+
+    #[test]
+    fn concat_preserves_units_across_storage_widths() {
+        let pieces = [
+            StringUnits::from(""),
+            StringUnits::from("a\u{ff}"),
+            StringUnits::from_units(&[0x100, 0xd800]),
+            StringUnits::from_units(&[0xdc00, 0xffff]),
+            StringUnits::from_view(StringView::Utf16(&[0x61, 0xff])),
+        ];
+        for left in &pieces {
+            for right in &pieces {
+                let expected: Vec<_> = left.units().chain(right.units()).collect();
+                let joined = left.concat(right);
+                assert_eq!(joined.to_units().as_ref(), expected.as_slice());
+                assert_eq!(joined, StringUnits::from_units(&expected));
+                assert_eq!(left.concat(&StringUnits::from("")), *left);
+            }
+        }
+        assert!(matches!(
+            pieces[1].concat(&pieces[1]).as_view(),
+            StringView::Latin1(_)
+        ));
+        assert_eq!(
+            StringUnits::from_units(&[0xd83d])
+                .concat(&StringUnits::from_units(&[0xde00]))
+                .to_scalar_string()
+                .unwrap(),
+            "😀"
+        );
+    }
 
     #[test]
     fn latin1_index() {

@@ -1224,6 +1224,217 @@ mod tests {
         }
     }
 
+    #[test]
+    fn collection_constructors_capture_overridden_adders_and_close_abruptly() {
+        let mut probe = case(
+            r#"
+            function check(ok) { if (!ok) throw new Error('collection constructor contract'); }
+            var constructors = [Map, Set, WeakMap, WeakSet];
+            for (var c = 0; c < constructors.length; c++) {
+                var C = constructors[c];
+                var map = c % 2 === 0;
+                var name = map ? 'set' : 'add';
+                var descriptor = Object.getOwnPropertyDescriptor(C.prototype, name);
+                var reads = 0, calls = 0, closes = 0, nexts = 0;
+                var thrown = {}, closingError = {};
+                Object.defineProperty(C.prototype, name, {
+                    configurable: true,
+                    get: function() {
+                        reads++;
+                        return function(key, value) {
+                            check(this instanceof C && key === 7);
+                            check(arguments.length === (map ? 2 : 1));
+                            if (map) check(value === 8);
+                            calls++;
+                            throw thrown;
+                        };
+                    }
+                });
+                var iterable = {};
+                iterable[Symbol.iterator] = function() {
+                    check(reads === 1);
+                    return {
+                        next: function() { nexts++; return {value: map ? [7, 8] : 7, done: false}; },
+                        return: function() { closes++; throw closingError; }
+                    };
+                };
+                var caught;
+                try { new C(iterable); } catch (error) { caught = error; }
+                check(caught === thrown && calls === 1 && closes === 1 && nexts === 1 && reads === 1);
+                Object.defineProperty(C.prototype, name, descriptor);
+            }
+            var set = Map.prototype.set;
+            var adderCalls = 0;
+            Map.prototype.set = function(k, v) {
+                adderCalls++;
+                Map.prototype.set = function() { throw new Error('adder read twice'); };
+                return set.call(this, k, v);
+            };
+            var m = new Map([[1, 2], [3, 4]]);
+            check(adderCalls === 2 && m.get(1) === 2 && m.get(3) === 4);
+            Map.prototype.set = null;
+            var opened = false;
+            var source = {};
+            source[Symbol.iterator] = function() { opened = true; throw new Error('opened'); };
+            var rejected = false;
+            try { new Map(source); } catch (error) { rejected = error instanceof TypeError; }
+            check(rejected && !opened);
+            new Map(null);
+            Map.prototype.set = set;
+        "#,
+        );
+        probe.metadata.flags.push("raw".to_owned());
+        for strict in [false, true] {
+            if strict {
+                probe.source.insert_str(0, "'use strict';\n");
+            }
+            let result = run_case(&probe, RunMode::Interpreter);
+            assert_eq!(result.outcome, Outcome::Pass, "{:?}", result.diagnostics);
+        }
+    }
+
+    #[test]
+    fn array_index_writes_honor_inherited_descriptors_before_creation() {
+        let mut probe = case(
+            r#"
+            function check(ok, label) { if (!ok) throw new Error(label); }
+            function strictWrite(a, key, value) { 'use strict'; a[key] = value; }
+            function sloppyWrite(a, key, value) { a[key] = value; }
+            function refuses(a, key) {
+                var threw = false;
+                try { strictWrite(a, key, 91); } catch (e) { threw = e instanceof TypeError; }
+                check(threw, 'strict inherited refusal');
+                sloppyWrite(a, key, 91);
+                check(!Object.prototype.hasOwnProperty.call(a, key), 'sloppy refusal creates nothing');
+            }
+            // Defining from a child VM must invalidate the caller's dense-write guard.
+            function installGetter() {
+                Object.defineProperty(Array.prototype, '0', {get: function() {return 7;}, configurable: true});
+            }
+            installGetter();
+            try {
+                var a = [];
+                refuses(a, 0);
+                refuses(a, '0');
+                check(a[0] === 7 && a.length === 0, 'inherited getter remains visible');
+            } finally { delete Array.prototype[0]; }
+
+            var seen, calls = 0, receiver;
+            Object.defineProperty(Array.prototype, '3', {set: function(value) {
+                seen = value; receiver = this; calls++;
+            }, configurable: true});
+            try {
+                var arrays = [[], Object.preventExtensions([]), Object.freeze([]), new Array(4)];
+                Object.defineProperty(arrays[0], 'length', {writable: false});
+                for (var i = 0; i < arrays.length; i++) {
+                    var a = arrays[i];
+                    var originalLength = a.length;
+                    for (var j = 0; j < 2; j++) {
+                        var key = j === 0 ? 3 : '3';
+                        strictWrite(a, key, i + 10);
+                        check(receiver === a && seen === i + 10, 'inherited setter receives array');
+                        check(a.length === originalLength && !Object.prototype.hasOwnProperty.call(a, key), 'setter creates no element');
+                    }
+                }
+                check(calls === 8, 'setter call count');
+                var own = [0, 1, 2, 3];
+                strictWrite(own, 3, 99);
+                check(own[3] === 99 && calls === 8, 'own element shadows setter');
+            } finally { delete Array.prototype[3]; }
+
+            Object.defineProperty(Object.prototype, '2', {value: 7, writable: false, configurable: true});
+            try {
+                refuses([], 2);
+                refuses(new Array(3), '2');
+            } finally { delete Object.prototype[2]; }
+            Object.defineProperty(Array.prototype, '0', {value: 7, writable: true, configurable: true});
+            try {
+                var a = [];
+                strictWrite(a, -0, 8);
+                check(a[0] === 8 && a.length === 1 && Array.prototype[0] === 7, 'writable inherited data is shadowed');
+            } finally { delete Array.prototype[0]; }
+            var closedHole = new Array(1);
+            Object.preventExtensions(closedHole);
+            refuses(closedHole, 0);
+            var fixedLength = [];
+            Object.defineProperty(fixedLength, 'length', {writable: false});
+            refuses(fixedLength, 0);
+            var setterCalls = 0;
+            var custom = {};
+            Object.defineProperty(custom, '0', {set: function(v) {receiver = this; setterCalls += v;}});
+            var a = [];
+            Object.setPrototypeOf(a, custom);
+            Object.preventExtensions(a);
+            strictWrite(a, 0, 5);
+            check(setterCalls === 5 && receiver === a && a.length === 0, 'custom prototype setter');
+        "#,
+        );
+        probe.metadata.flags.push("raw".to_owned());
+        let result = run_case(&probe, RunMode::Interpreter);
+        assert_eq!(result.outcome, Outcome::Pass, "{:?}", result.diagnostics);
+    }
+
+    #[test]
+    fn typed_array_numeric_keys_preserve_index_and_coercion_contracts() {
+        let mut probe = case(
+            r#"
+            function check(ok) { if (!ok) throw new Error('typed numeric key contract'); }
+            var a = new Uint8Array([3, 4]);
+            var keys = [-0, 0, 1, 2, -1, 1.5, NaN, Infinity, -Infinity, 4294967295, 9007199254740991];
+            var reads = 0;
+            Object.defineProperty(Object.getPrototypeOf(a), '1.5', {get: function() { reads++; return 9; }});
+            for (var i = 0; i < keys.length; i++) {
+                var key = keys[i];
+                check(a[key] === a[String(key)]);
+                a[key] = 17;
+                check(a[key] === a[String(key)]);
+            }
+            check(reads === 0 && a[0] === 17 && a['-0'] === undefined);
+            a['-0'] = 99;
+            check(a[0] === 17);
+            a['01'] = 42;
+            check(a['01'] === 42 && a[1] === 17);
+            var conversions = 0;
+            a[99] = {valueOf: function() { conversions++; return 8; }};
+            a[-1] = {valueOf: function() { conversions++; return 8; }};
+            check(conversions === 2);
+            var keyConversions = 0;
+            a[{toString: function() { keyConversions++; return '0'; }}] = 23;
+            check(keyConversions === 1 && a[0] === 23);
+            var key = {toString: function() { keyConversions++; return 1; }};
+            check(a[key] === 17 && keyConversions === 2);
+            var proxyReads = 0;
+            var proxy = new Proxy(a, {get: function(target, key) { proxyReads++; check(key === '0'); return 51; }});
+            check(proxy[0] === 51 && proxyReads === 1);
+            function detach(buffer) {
+                buffer.transfer();
+            }
+            a[0] = {valueOf: function() { detach(a.buffer); return 12; }};
+            check(a[0] === undefined);
+            a[0] = {valueOf: function() { conversions++; return 8; }};
+            check(conversions === 3);
+            var big = new BigInt64Array(0);
+            var threw = false;
+            try { big[9] = 1; } catch (error) { threw = error instanceof TypeError; }
+            check(threw);
+            var resizable = new ArrayBuffer(4, {maxByteLength: 8});
+            var view = new Uint8Array(resizable);
+            view[6] = {valueOf: function() { resizable.resize(8); return 71; }};
+            check(view[6] === 71);
+            view[0] = {valueOf: function() { resizable.resize(0); return 99; }};
+            check(view[0] === undefined);
+        "#,
+        );
+        probe.metadata.flags.push("raw".to_owned());
+        for strict in [false, true] {
+            if strict {
+                probe.source.insert_str(0, "'use strict';\n");
+            }
+            let result = run_case(&probe, RunMode::Interpreter);
+            assert_eq!(result.outcome, Outcome::Pass, "{:?}", result.diagnostics);
+        }
+    }
+
     /// A directory holding one module case and the fixtures it imports.
     ///
     /// Linking is filesystem behaviour: the specifiers are relative, the fixtures are real files,

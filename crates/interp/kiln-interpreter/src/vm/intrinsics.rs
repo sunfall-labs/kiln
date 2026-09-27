@@ -1333,47 +1333,36 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::MathRandom => Ok(Value::Number(self.random_double(instruction)?)),
             // The scheduling built-ins are the event loop's only entry points, and the loop lives
             // on the machine, so they cannot be pure functions of their arguments.
-            Native::SetTimeout | Native::SetInterval | Native::SetImmediate => {
+            Native::SetTimeout
+            | Native::SetInterval
+            | Native::SetImmediate
+            | Native::QueueIoRaw => {
+                // An immediate and an I/O callback have no delay, so their arguments start one
+                // earlier: `setImmediate(fn, x)` calls `fn(x)`.
+                let undelayed = matches!(native, Native::SetImmediate | Native::QueueIoRaw);
                 let delay = match arguments.get(1).map(Value::as_number) {
                     // A negative, missing or NaN delay is zero: "as soon as possible", which is
                     // still after everything already queued.
-                    Some(delay) if delay.is_finite() && delay > 0.0 => delay,
+                    Some(delay) if !undelayed && delay.is_finite() && delay > 0.0 => delay,
                     _ => 0.0,
                 };
                 let timer = Timer {
                     callback: arguments.first().cloned().unwrap_or(Value::Undefined),
                     // Everything after the delay is handed to the callback, which is how a
-                    // timer carries state without a closure. `setImmediate` has no delay, so
-                    // its arguments start one earlier: `setImmediate(fn, x)` calls `fn(x)`.
+                    // timer carries state without a closure.
                     arguments: arguments
-                        .get(if matches!(native, Native::SetImmediate) {
-                            1..
-                        } else {
-                            2..
-                        })
+                        .get(if undelayed { 1.. } else { 2.. })
                         .unwrap_or_default()
                         .to_vec(),
                     // Captured where the timer was set, not where it fires.
                     context: Rc::clone(&self.async_context),
                 };
                 let delay = duration_from_milliseconds(delay);
-                let id = self.with_realm_mut(|realm| {
-                    if matches!(native, Native::SetInterval) {
-                        realm.set_interval(delay, timer)
-                    } else {
-                        // The realm scheduler owns the turn and identity. An immediate is a
-                        // zero-delay one-shot in the check lane; until that lane is represented
-                        // separately this preserves FIFO, cancellation, next-tick/microtask
-                        // checkpoints, and deterministic execution without ambient drivers.
-                        realm.set_timeout(
-                            if matches!(native, Native::SetImmediate) {
-                                std::time::Duration::ZERO
-                            } else {
-                                delay
-                            },
-                            timer,
-                        )
-                    }
+                let id = self.with_realm_mut(|realm| match native {
+                    Native::SetInterval => realm.set_interval(delay, timer),
+                    Native::SetImmediate => realm.set_immediate(timer),
+                    Native::QueueIoRaw => realm.queue_io(timer),
+                    _ => realm.set_timeout(delay, timer),
                 });
                 Ok(Value::Number(id.get() as f64))
             }
@@ -2972,10 +2961,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
                 Ok(Value::Undefined)
             }
-            Native::JobsPendingRaw => Ok(Value::Number(self.with_realm(|realm| {
-                f64::from(u8::from(realm.has_queued_next_ticks()))
-                    + 2.0 * f64::from(u8::from(realm.has_queued_microtasks()))
-            }))),
+            // 4: a rejection nothing handled, which the loop reports at the end of this turn's
+            // checkpoint -- so a delivery ends its batch there, as node reports one before the
+            // next message.
+            Native::JobsPendingRaw => Ok(Value::Number(
+                self.with_realm(|realm| {
+                    f64::from(u8::from(realm.has_queued_next_ticks()))
+                        + 2.0 * f64::from(u8::from(realm.has_queued_microtasks()))
+                }) + 4.0 * f64::from(u8::from(self.unhandled.is_some())),
+            )),
             Native::ProcessNextTick => {
                 let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
                 if !is_callable(&callback) {

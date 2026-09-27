@@ -185,13 +185,6 @@ pub fn accessor(table: PrototypeTable, key: &str) -> Option<BuiltinAccessor> {
         .map(|row| row.getter)
 }
 
-/// Whether `key` names an accessor on `table`.
-///
-/// The same row that resolves the getter, so listing one and resolving it cannot disagree.
-pub fn is_accessor(table: PrototypeTable, key: &str) -> bool {
-    accessor(table, key).is_some()
-}
-
 /// The accessor names `table` publishes, in table order.
 pub fn accessor_keys(table: PrototypeTable) -> impl Iterator<Item = &'static str> {
     PROTOTYPE_ACCESSORS
@@ -221,7 +214,7 @@ mod tests {
         for row in PROTOTYPE_ACCESSORS {
             let key = row.key.property_key();
             assert!(
-                is_accessor(row.table, key),
+                accessor(row.table, key).is_some(),
                 "{key} is listed on {:?} but does not resolve",
                 row.table
             );

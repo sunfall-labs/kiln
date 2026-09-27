@@ -14,10 +14,15 @@
 // source is treated as a default stream whose chunks are the views it enqueues.
 
 // What a microtask checkpoint would run now, as bits: 1 a `process.nextTick` callback, 2 a
-// promise job or `queueMicrotask` callback (ADR 0065, representation: the realm's queues).
-// Captured here, where message delivery is the one user.
+// promise job or `queueMicrotask` callback, 4 a rejection nothing handled, which the loop reports
+// once the checkpoint is over (ADR 0065, representation: the realm's queues). And the realm's I/O
+// lane: `fn(arg)` in node's poll phase, after the timers due when a turn begins and before its
+// immediates, which is where node delivers a port's messages. Captured here, where message
+// delivery is the one user of both.
 const __kilnJobsPending: () => number = (globalThis as any).__kilnJobsPending;
+const __kilnQueueIo: (fn: (arg: any) => void, arg: any) => void = (globalThis as any).__kilnQueueIo;
 delete (globalThis as any).__kilnJobsPending;
+delete (globalThis as any).__kilnQueueIo;
 
 (function installWebEventsAndStreams() {
   const G = globalThis as any;
@@ -59,11 +64,14 @@ delete (globalThis as any).__kilnJobsPending;
   }
 
   // Captured once: a program that replaces `setImmediate` or `performance` (a fake-timer
-  // library does) does not change when node delivers a message or stamps an event.
+  // library does) does not change when node delivers a message, closes a port or stamps an
+  // event.
   const schedule: (fn: (arg: any) => void, arg: any) => void =
     typeof G.setImmediate === "function" ? G.setImmediate
       : typeof G.setTimeout === "function" ? (fn, arg) => G.setTimeout(fn, 0, arg)
         : (fn, arg) => G.queueMicrotask(() => fn(arg));
+  const deliverLater: (fn: (arg: any) => void, arg: any) => void =
+    typeof __kilnQueueIo === "function" ? __kilnQueueIo : schedule;
   const performanceNow: () => number = typeof G.performance?.now === "function"
     ? G.performance.now.bind(G.performance) : Date.now;
   const clone = __kilnStructuredClone;
@@ -86,16 +94,34 @@ delete (globalThis as any).__kilnJobsPending;
   let dispatchTo: (target: any, event: any, list: Listener[] | undefined) => boolean;
   let listenersOf: (target: any) => Map<string, Listener[]>;
 
-  // Event state is four private fields: the booleans are bits of one number, and the phase and
-  // current target follow from whether a dispatch is running (an event here is only ever at its
-  // target). Every field is a store on every event, and there is an event per message.
-  const BUBBLES = 1, CANCELABLE = 2, COMPOSED = 4, DEFAULT_PREVENTED = 8, STOP = 16,
-    STOP_IMMEDIATE = 32, IN_PASSIVE = 64, DISPATCHING = 128;
+  // Node keeps four of an event's slots as own enumerable properties under symbols of its own,
+  // so `Reflect.ownKeys(new Event("x"))` lists them and `{ ...event }` copies them, and a
+  // CustomEvent's detail as a fifth. These are those symbols, with node's descriptions, and the
+  // properties are the state itself as they are there: writing one is what `event.type` reads,
+  // and an object is an event when it has a string under `kType` (node's `isEvent`). The rest
+  // is private: the booleans are bits of one number, and the phase and current target follow
+  // from whether a dispatch is running (an event here is only ever at its target). A symbol-keyed
+  // define or store takes the native object model's generic path, and the four of them are most
+  // of what an event costs there over the private fields they replaced (issue 14).
+  const kType = Symbol("type");
+  const kTarget = Symbol("kTarget");
+  const kIsBeingDispatched = Symbol("kIsBeingDispatched");
+  const kInPassiveListener = Symbol("kInPassiveListener");
+  const kDetail = Symbol("detail");
+  const BUBBLES = 1, CANCELABLE = 2, COMPOSED = 4, DEFAULT_PREVENTED = 8, STOP = 16, STOP_IMMEDIATE = 32;
+
+  function eventThis(value: any): void {
+    if (value === null || value === undefined || typeof value[kType] !== "string") {
+      throw typeError("Value of \"this\" must be of type Event", "ERR_INVALID_THIS");
+    }
+  }
 
   class Event {
-    #type: string;
+    [kType] = "";
+    [kTarget]: any = null;
+    [kIsBeingDispatched] = false;
+    [kInPassiveListener] = false;
     #flags: number;
-    #target: any = null;
     #timeStamp: number;
 
     static NONE = 0;
@@ -105,21 +131,21 @@ delete (globalThis as any).__kilnJobsPending;
 
     constructor(type: any, init?: any) {
       if (type === undefined && arguments.length === 0) throw new TypeError("The \"type\" argument must be specified");
-      this.#type = typeof type === "string" ? type : String(type);
+      this[kType] = typeof type === "string" ? type : String(type);
       this.#flags = init === undefined || init === null ? 0
         : (init.bubbles ? BUBBLES : 0) | (init.cancelable ? CANCELABLE : 0) | (init.composed ? COMPOSED : 0);
       this.#timeStamp = performanceNow();
     }
 
-    get type(): string { return this.#type; }
+    get type(): string { eventThis(this); return this[kType]; }
     get bubbles(): boolean { return (this.#flags & BUBBLES) !== 0; }
     get cancelable(): boolean { return (this.#flags & CANCELABLE) !== 0; }
     get composed(): boolean { return (this.#flags & COMPOSED) !== 0; }
     get defaultPrevented(): boolean { return (this.#flags & DEFAULT_PREVENTED) !== 0; }
-    get target(): any { return this.#target; }
-    get srcElement(): any { return this.#target; }
-    get currentTarget(): any { return (this.#flags & DISPATCHING) !== 0 ? this.#target : null; }
-    get eventPhase(): number { return (this.#flags & DISPATCHING) !== 0 ? 2 : 0; }
+    get target(): any { eventThis(this); return this[kTarget]; }
+    get srcElement(): any { eventThis(this); return this[kTarget]; }
+    get currentTarget(): any { eventThis(this); return this[kIsBeingDispatched] ? this[kTarget] : null; }
+    get eventPhase(): number { eventThis(this); return this[kIsBeingDispatched] ? 2 : 0; }
     get timeStamp(): number { return this.#timeStamp; }
     get isTrusted(): boolean { return false; }
     get returnValue(): boolean { return !this.defaultPrevented; }
@@ -128,23 +154,24 @@ delete (globalThis as any).__kilnJobsPending;
     set cancelBubble(value: boolean) { if (value) this.#flags |= STOP; }
 
     preventDefault(): void {
-      if ((this.#flags & (CANCELABLE | IN_PASSIVE)) === CANCELABLE) this.#flags |= DEFAULT_PREVENTED;
+      if ((this.#flags & CANCELABLE) !== 0 && !this[kInPassiveListener]) this.#flags |= DEFAULT_PREVENTED;
     }
     stopPropagation(): void { this.#flags |= STOP; }
     stopImmediatePropagation(): void { this.#flags |= STOP | STOP_IMMEDIATE; }
-    composedPath(): any[] { return (this.#flags & DISPATCHING) !== 0 && this.#target ? [this.#target] : []; }
+    composedPath(): any[] { eventThis(this); return this[kIsBeingDispatched] && this[kTarget] ? [this[kTarget]] : []; }
     initEvent(type: any, bubbles?: any, cancelable?: any): void {
-      if ((this.#flags & DISPATCHING) !== 0) return;
-      this.#type = String(type);
+      eventThis(this);
+      if (this[kIsBeingDispatched]) return;
+      this[kType] = String(type);
       this.#flags = (this.#flags & ~(BUBBLES | CANCELABLE)) | (bubbles ? BUBBLES : 0) | (cancelable ? CANCELABLE : 0);
     }
     get [Symbol.toStringTag](): string { return "Event"; }
 
     static {
       dispatchTo = (target: any, event: Event, list: Listener[] | undefined): boolean => {
-        if ((event.#flags & DISPATCHING) !== 0) throw invalidState("The event is already being dispatched");
-        event.#flags |= DISPATCHING;
-        event.#target = target;
+        if (event[kIsBeingDispatched]) throw invalidState("The event is already being dispatched");
+        event[kIsBeingDispatched] = true;
+        event[kTarget] = target;
         if (list !== undefined && list.length !== 0) {
           // A snapshot: a listener added during dispatch does not run, one removed does not.
           const snapshot = list.length === 1 ? null : list.slice();
@@ -154,7 +181,7 @@ delete (globalThis as any).__kilnJobsPending;
             if (listener.removed) continue;
             if (listener.once) removeListener(list, listener);
             const callback = listener.callback;
-            if (listener.passive) event.#flags |= IN_PASSIVE;
+            if (listener.passive) event[kInPassiveListener] = true;
             try {
               if (typeof callback === "function") callback.call(target, event);
               else if (callback && typeof callback.handleEvent === "function") callback.handleEvent(event);
@@ -162,13 +189,11 @@ delete (globalThis as any).__kilnJobsPending;
               // A throwing listener does not stop the others; node reports it as uncaught.
               reportUncaught(error);
             }
-            if ((event.#flags & (IN_PASSIVE | STOP_IMMEDIATE)) !== 0) {
-              event.#flags &= ~IN_PASSIVE;
-              if ((event.#flags & STOP_IMMEDIATE) !== 0) break;
-            }
+            if (listener.passive) event[kInPassiveListener] = false;
+            if ((event.#flags & STOP_IMMEDIATE) !== 0) break;
           }
         }
-        event.#flags &= ~DISPATCHING;
+        event[kIsBeingDispatched] = false;
         return (event.#flags & DEFAULT_PREVENTED) === 0;
       };
     }
@@ -178,12 +203,12 @@ delete (globalThis as any).__kilnJobsPending;
   }
 
   class CustomEvent extends Event {
-    #detail: any;
+    [kDetail]: any;
     constructor(type: any, init?: any) {
       super(type, init);
-      this.#detail = init && init.detail !== undefined ? init.detail : null;
+      this[kDetail] = init && init.detail !== undefined ? init.detail : null;
     }
-    get detail(): any { return this.#detail; }
+    get detail(): any { eventThis(this); return this[kDetail]; }
     get [Symbol.toStringTag](): string { return "CustomEvent"; }
   }
 
@@ -366,6 +391,7 @@ delete (globalThis as any).__kilnJobsPending;
   const CONTINUATION_HOPS = 64;
   const TICKS = 1;
   const MICROTASKS = 2;
+  const REJECTION = 4;
   const nextTick: ((fn: (arg: any) => void, arg: any) => void) | null =
     G.process && typeof G.process.nextTick === "function" ? G.process.nextTick : null;
   const queueMicrotask: (fn: () => void) => void = G.queueMicrotask;
@@ -438,7 +464,7 @@ delete (globalThis as any).__kilnJobsPending;
       other.#queue.push(data, ports);
       if (other.#started && !other.#scheduled) {
         other.#scheduled = true;
-        schedule(deliverNext, other);
+        deliverLater(deliverNext, other);
       }
       return true;
     }
@@ -448,7 +474,7 @@ delete (globalThis as any).__kilnJobsPending;
       this.#started = true;
       if (this.#head < this.#queue.length && !this.#scheduled) {
         this.#scheduled = true;
-        schedule(deliverNext, this);
+        deliverLater(deliverNext, this);
       }
     }
 
@@ -464,7 +490,7 @@ delete (globalThis as any).__kilnJobsPending;
         other.#queue.push(CLOSE_MARK, NO_PORTS);
         if (other.#started && !other.#scheduled) {
           other.#scheduled = true;
-          schedule(deliverNext, other);
+          deliverLater(deliverNext, other);
         }
       }
       schedule(closed, this);
@@ -543,14 +569,13 @@ delete (globalThis as any).__kilnJobsPending;
             if (nextTick === null) break;
             port.#scheduled = true;
             port.#budget = budget;
-            if ((pending & TICKS) !== 0) nextTick(continueFromTick, port);
-            else queueMicrotask(() => continueFromMicrotask(port));
+            continueAfter(port, pending);
             return;
           }
         }
         if (!port.#scheduled && !port.#closed && port.#head < port.#queue.length) {
           port.#scheduled = true;
-          schedule(deliverNext, port);
+          deliverLater(deliverNext, port);
         }
       };
       // Two ports continuing at once each see the other's continuation queued; after a bounded
@@ -558,18 +583,22 @@ delete (globalThis as any).__kilnJobsPending;
       // macrotask instead, so neither can hold the other forever.
       const yielded = (port: MessagePort): boolean => {
         if (++port.#hops <= CONTINUATION_HOPS) return false;
-        schedule(deliverNext, port);
+        deliverLater(deliverNext, port);
         return true;
+      };
+      // Where a delivery goes on from when the checkpoint has `pending` work: behind the ticks,
+      // behind the promise jobs, and once only a rejection nothing handled is left -- which the
+      // loop reports when the checkpoint ends, and node reports before the next message -- from
+      // the next turn's I/O callbacks.
+      const continueAfter = (port: MessagePort, pending: number) => {
+        if ((pending & TICKS) !== 0) (nextTick as any)(continueFromTick, port);
+        else if ((pending & MICROTASKS) !== 0) queueMicrotask(() => continueFromMicrotask(port));
+        else deliverLater(deliverNext, port);
       };
       continueFromTick = (port: MessagePort) => {
         const pending = __kilnJobsPending();
-        if (pending !== 0 && yielded(port)) return;
-        if ((pending & TICKS) !== 0) {
-          (nextTick as any)(continueFromTick, port);
-          return;
-        }
-        if ((pending & MICROTASKS) !== 0) {
-          queueMicrotask(() => continueFromMicrotask(port));
+        if (pending !== 0) {
+          if (!yielded(port)) continueAfter(port, pending);
           return;
         }
         port.#scheduled = false;
@@ -663,7 +692,7 @@ delete (globalThis as any).__kilnJobsPending;
         if (!first) data = clone.serialize(message, undefined);
         first = false;
         const copy = data;
-        schedule(() => {
+        deliverLater(() => {
           if (peer.#closed) return;
           dispatchTo(peer, messageEvent(copy, []), listenersOf(peer).get("message"));
         }, undefined);

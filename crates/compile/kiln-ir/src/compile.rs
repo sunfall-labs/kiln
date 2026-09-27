@@ -718,6 +718,8 @@ struct Compiler {
     /// definition. Shared, never copied: see [`Program::source`].
     source: Arc<str>,
     constants: Vec<Constant>,
+    /// Lookup only: insertion order in `constants` remains the bytecode's stable index order.
+    constant_indices: rustc_hash::FxHashMap<Constant, u32>,
     functions: Vec<FunctionProto>,
     template_sites: Vec<TemplateSite>,
     /// Whether `functions[i]` was compiled as strict code, in the same order.

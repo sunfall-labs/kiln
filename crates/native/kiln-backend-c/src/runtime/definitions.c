@@ -35,6 +35,12 @@ static int kiln_c99_define_shaped(kiln_value target, const kiln_string *key, kil
             ((object->shape->double_slots_mask & (1u << slot)) && !KILN_VAL_IS_NUMBER(held))) {
             return 0;
         }
+        /* A slot whose code the shape records keeps the record only for the same code. */
+        if ((object->shape->code_mask & (1u << slot)) != 0) {
+            if (!kiln_c99_shape_store_recorded(object, slot, held)) return 0;
+            *status = KILN_C99_OK;
+            return 1;
+        }
         kiln_c99_prototype_touched(object);
         object->slots[slot] = held;
         *status = KILN_C99_OK;
@@ -46,7 +52,14 @@ static int kiln_c99_define_shaped(kiln_value target, const kiln_string *key, kil
         kiln_c99_inherited_write_blocked(object->prototype, ikey, key)) {
         return 0;
     }
-    return kiln_c99_shape_define_new(object, ikey, held, attrs, status);
+    /* Issue 04 step 3c: a method's code is recorded in the shape its definition takes -- not a
+     * private method's (read and called by brand, never through a method cache) and not a
+     * prototype's `constructor`, which every class prototype defines first: a record there
+     * would give the root one branch per class for nothing a method call site reads. */
+    return kiln_c99_shape_define_new(
+        object, ikey, held, attrs,
+        kind == 0 && !kiln_c99_same_name_key(ikey, "constructor") ? kiln_c99_val_code(held) : NULL,
+        status);
 }
 
 /* The accessor half of the above: `get`/`set` defined on a shaped object keeps it shaped, the pair
@@ -91,7 +104,7 @@ static int kiln_c99_define_accessor_shaped(kiln_value target, const kiln_string 
     if ((enumerable != 0) != !kiln_c99_key_is_reserved(ikey)) attrs |= KILN_C99_ATTR_ENUM_FLIP;
     *status = kiln_c99_accessor_pair_new(getter, setter, &pair);
     if (*status != KILN_C99_OK) return 1;
-    return kiln_c99_shape_define_new(object, ikey, pair, attrs, status);
+    return kiln_c99_shape_define_new(object, ikey, pair, attrs, NULL, status);
 }
 
 /* Define an accessor half, merging with a half already defined under the same key.
@@ -1218,7 +1231,14 @@ static int kiln_c99_define_private(kiln_value target, const char *key, size_t ke
         KILN_C99_REFUSE("a private definition that left no property slot");
     }
     slot->writable = 0;
-    kiln_c99_object_of(target)->read_only_seen = 1;
+    /* The flag belongs to the object that holds the property: a static private method's is the
+     * class's property store, and a function value is not a `kiln_object` -- written through
+     * `kiln_c99_object_of(target)` it landed in the closure itself. */
+    {
+        kiln_value holder =
+            target.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(target)->properties : target;
+        if (holder.tag == KILN_VALUE_OBJECT) kiln_c99_object_of(holder)->read_only_seen = 1;
+    }
     return KILN_C99_OK;
 }
 
@@ -1246,7 +1266,14 @@ static int kiln_c99_define_private_key(kiln_value target, const kiln_string *key
         KILN_C99_REFUSE("a private definition that left no property slot");
     }
     slot->writable = 0;
-    kiln_c99_object_of(target)->read_only_seen = 1;
+    /* The flag belongs to the object that holds the property: a static private method's is the
+     * class's property store, and a function value is not a `kiln_object` -- written through
+     * `kiln_c99_object_of(target)` it landed in the closure itself. */
+    {
+        kiln_value holder =
+            target.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(target)->properties : target;
+        if (holder.tag == KILN_VALUE_OBJECT) kiln_c99_object_of(holder)->read_only_seen = 1;
+    }
     return KILN_C99_OK;
 }
 

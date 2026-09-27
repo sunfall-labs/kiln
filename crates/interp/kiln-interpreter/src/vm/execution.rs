@@ -163,6 +163,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 Instruction::Unary(operator) => {
                     let value = self.pop(current)?;
+                    // Numbers cannot invoke coercion or fail a unary operation. Reuse the
+                    // scalar implementation without constructing two fallible call results.
+                    if matches!(value, Value::Number(_)) {
+                        self.stack.push(unary_of_number(*operator, &value));
+                        continue;
+                    }
                     // Only the numeric operators coerce. `typeof` reports a type, `void`
                     // discards, and `!` asks whether the value is truthy -- an object always is,
                     // whatever its `valueOf` would have said, so reducing it would both be wrong
