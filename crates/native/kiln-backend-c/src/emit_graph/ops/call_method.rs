@@ -1752,29 +1752,26 @@ pub(super) fn emit_call_method(
                 load0 = load0,
                 v = v
             )),
-            ("clz32", 1) => {
-                let a0 = args[0].0;
-                let load_u0 = if ctx.live_ints.contains(&args[0]) {
-                    format!("uint32_t u0 = (uint32_t)i{a0};")
-                } else if ctx.live_numbers.contains(&args[0]) {
-                    format!("uint32_t u0 = (uint32_t)(int64_t)d{a0};")
-                } else {
-                    format!(
-                        "uint32_t u0; {{ double d; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a0}))) memcpy(&d, &v{a0}, sizeof(d)); else d = kiln_c99_as_number(kiln_val_to_boundary(v{a0})); u0 = (uint32_t)(int64_t)d; }}"
-                    )
-                };
-                Some(format!(
-                    "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
-                         {load_u0} \
-                         int32_t res = u0 ? (int32_t)__builtin_clz(u0) : 32; \
-                         v{v} = kiln_c99_val_from_double((double)res); \
-                         handled = 1; \
-                     }}",
-                    o = object.0,
-                    load_u0 = load_u0,
-                    v = v
-                ))
-            }
+            // `ToUint32` of a number: truncate, wrap modulo 2^32, and 0 for NaN and the
+            // infinities. An argument that is not a number leaves for the generic call, which
+            // runs its `valueOf` -- converting it here with the pure `kiln_c99_as_number` answered
+            // `Math.clz32({ valueOf() { return 3; } })` as 32 without calling it, and the
+            // `(int64_t)` of a NaN or an infinity was undefined behaviour.
+            ("clz32", 1) => Some(format!(
+                "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
+                             {guard0}{{ \
+                                 {load0} \
+                                 uint32_t u0 = isfinite(d) ? (uint32_t)(int64_t)fmod(trunc(d), 4294967296.0) : 0u; \
+                                 int32_t res = u0 ? (int32_t)__builtin_clz(u0) : 32; \
+                                 v{v} = kiln_c99_val_from_double((double)res); \
+                                 handled = 1; \
+                             }} \
+                         }}",
+                o = object.0,
+                guard0 = guard0,
+                load0 = load0,
+                v = v
+            )),
             ("fround", 1) => Some(format!(
                 "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
                              {guard0}{{ \
@@ -1788,34 +1785,23 @@ pub(super) fn emit_call_method(
                 load0 = load0,
                 v = v
             )),
-            ("imul", 2) => {
-                let load_imul = |a: ValueId, name: &str| -> String {
-                    if ctx.live_ints.contains(&a) {
-                        format!("int32_t {name} = (int32_t)i{};", a.0)
-                    } else if ctx.live_numbers.contains(&a) {
-                        format!("int32_t {name} = (int32_t)(uint32_t)(int64_t)d{};", a.0)
-                    } else {
-                        format!(
-                            "int32_t {name}; {{ double d; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{a}))) memcpy(&d, &v{a}, sizeof(d)); else d = kiln_c99_as_number(kiln_val_to_boundary(v{a})); {name} = (int32_t)(uint32_t)(int64_t)d; }}",
-                            a = a.0
-                        )
-                    }
-                };
-                let load_i0 = load_imul(args[0], "i0");
-                let load_i1 = load_imul(args[1], "i1");
-                Some(format!(
-                    "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
-                         {load_i0} {load_i1} \
-                         int32_t res = (int32_t)((uint32_t)i0 * (uint32_t)i1); \
-                         v{v} = kiln_c99_val_from_double((double)res); \
-                         handled = 1; \
-                     }}",
-                    o = object.0,
-                    load_i0 = load_i0,
-                    load_i1 = load_i1,
-                    v = v
-                ))
-            }
+            // `ToInt32` of each argument, as `clz32` above: numbers only, wrapped rather than cast.
+            ("imul", 2) => Some(format!(
+                "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
+                             {guard2}{{ \
+                                 {load2} \
+                                 uint32_t i0 = isfinite(ma0) ? (uint32_t)(int64_t)fmod(trunc(ma0), 4294967296.0) : 0u; \
+                                 uint32_t i1 = isfinite(ma1) ? (uint32_t)(int64_t)fmod(trunc(ma1), 4294967296.0) : 0u; \
+                                 int32_t res = (int32_t)(i0 * i1); \
+                                 v{v} = kiln_c99_val_from_double((double)res); \
+                                 handled = 1; \
+                             }} \
+                         }}",
+                o = object.0,
+                guard2 = guard2,
+                load2 = load2,
+                v = v
+            )),
             ("pow", 2) => Some(format!(
                 "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
                              {guard2}{{ \
