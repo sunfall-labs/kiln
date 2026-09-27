@@ -947,7 +947,7 @@ pub fn bridge_effect(instruction: &Instruction) -> Option<(usize, u8)> {
         Instruction::Apply
         | Instruction::DefineMethod
         | Instruction::DefineAccessor { .. }
-        | Instruction::DefineNamedProperty
+        | Instruction::DefineNamedProperty { .. }
         | Instruction::SetPrivate(_)
         | Instruction::SetSuperElementStrict { .. } => (3, 1),
         Instruction::SuperApply

@@ -481,7 +481,14 @@ pub enum Instruction {
     /// the two cannot share one instruction. Emitted only where the value is a *syntactically*
     /// anonymous function: `{ [k]: (0, function () {}) }` is a parenthesised reference and keeps
     /// the empty name, which a runtime test for "has no name yet" could not tell apart.
-    DefineNamedProperty,
+    ///
+    /// `name_function` is false for a pair defined this way only because it follows a spread:
+    /// `{ ...o, f: foo }` defines `f` on the accumulator but must not rename `foo`, since only an
+    /// anonymous function definition takes the property's name (issue 28). The define is the
+    /// same; only the naming is skipped.
+    DefineNamedProperty {
+        name_function: bool,
+    },
     /// Put the dead-zone marker in a slot, for a `let` or `const` whose declaration has not run.
     ///
     /// Reading it is a `ReferenceError`. Emitted for lexical bindings as they enter scope, which

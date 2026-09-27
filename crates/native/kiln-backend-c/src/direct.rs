@@ -1755,7 +1755,7 @@ fn known_callees(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGr
                 instruction,
                 Instruction::DefineMethod
                     | Instruction::DefineAccessor { .. }
-                    | Instruction::DefineNamedProperty
+                    | Instruction::DefineNamedProperty { .. }
                     | Instruction::DefinePrivate { .. }
                     | Instruction::SetPrototype
                     | Instruction::PushHole

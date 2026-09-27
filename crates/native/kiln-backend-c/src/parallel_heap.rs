@@ -354,7 +354,7 @@ pub fn emit_heap_clone(
                 )
                 .unwrap(),
                 GraphOp::Bridge {
-                    instruction: kiln_ir::Instruction::DefineNamedProperty,
+                    instruction: kiln_ir::Instruction::DefineNamedProperty { .. },
                     operands,
                     ..
                 } => {

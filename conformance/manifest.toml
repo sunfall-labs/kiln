@@ -2135,3 +2135,40 @@ true null
 true null
 2 true true
 """
+
+[[test]]
+id = "regress/r42-class-element-key-order"
+group = "regress"
+source = "regress/r42-class-element-key-order.js"
+status = "runnable"
+features = ["classes", "computed-keys", "class-fields", "static-blocks", "evaluation-order"]
+catches = """
+Class element key order (parallel-builtins issue 28, item 1), recorded from node 26.8.1: every element's computed key -- method, instance field and static field -- is evaluated and converted in source order, and only then do the static field initialisers and static blocks run. Both engines evaluated a static field's key together with its value, before every method key, and ran static fields before the methods were defined. Node also evaluates every key before the heritage check, and refuses a computed static field named `prototype` where its key is evaluated.\
+"""
+expected_stdout = """
+key m1, key s1, key i1, key m2, key s2, key g1, value s1, block, value s2
+value i1
+late
+stop key a, key b
+toString x, toString y, toString z [ 'x' ] [ 'z' ]
+TypeError 1
+TypeError 
+"""
+
+[[test]]
+id = "regress/r43-spread-pair-keeps-function-name"
+group = "regress"
+source = "regress/r43-spread-pair-keeps-function-name.js"
+status = "runnable"
+features = ["object-literals", "spread", "function-names"]
+catches = """
+A pair after a spread keeps its value's name (parallel-builtins issue 28, item 2), recorded from node 26.8.1: `{ ...{}, f: foo }` defined `f` through `DefineNamedProperty`, which named `foo` \"f\" in both engines. Only an anonymous function definition takes the key as its name.\
+"""
+expected_stdout = """
+foo foo true
+bar bar foo a,bc,d
+K K
+g h i j m
+1 x,__proto__ true
+bound foo
+"""

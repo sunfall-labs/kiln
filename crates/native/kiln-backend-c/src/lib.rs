@@ -3178,7 +3178,7 @@ fn literal_key_constants(program: &Program, code: &[Instruction], keys: &mut Vec
                 }
                 // `{ ...rest, name: value }`: a member after a spread (or beside a computed key)
                 // is defined one at a time, its static key the constant beneath its value.
-                Instruction::DefineNamedProperty => {
+                Instruction::DefineNamedProperty { .. } => {
                     if let Some(Some(constant)) = labels.len().checked_sub(2).map(|at| labels[at])
                         && matches!(
                             program.constants.get(constant as usize),
@@ -3994,7 +3994,7 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
             | Instruction::SetSuperPropertyStrict { .. }
             | Instruction::SetSuperElementStrict { .. }
             | Instruction::SetPrivate(_)
-            | Instruction::DefineNamedProperty
+            | Instruction::DefineNamedProperty { .. }
             | Instruction::Unary(_)
             | Instruction::DirectEval(_) => {
                 *has_status = true;

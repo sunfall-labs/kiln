@@ -1279,7 +1279,7 @@ fn tier_3_builds_run_in_worker_arenas_and_match_the_sequential_methods() {
             Instruction::Const(s),
             Instruction::LoadLocal(0),
             Instruction::GetProperty(q),
-            Instruction::DefineNamedProperty,
+            Instruction::DefineNamedProperty { name_function: true },
             Instruction::Return,
         ],
         1,

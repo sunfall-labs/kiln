@@ -562,7 +562,7 @@ pub(super) fn emit_graph_op(
             pushes: 1,
         } if matches!(
             instruction,
-            Instruction::SpreadObject | Instruction::DefineNamedProperty
+            Instruction::SpreadObject | Instruction::DefineNamedProperty { .. }
         ) && graph
             .scalar_alias_map
             .get(&operands[0])
@@ -1628,7 +1628,7 @@ fn emit_sunk_bridge(
     let scalar_obj = &graph.scalar_objects[&root];
     let alloc = root.0;
     match instruction {
-        Instruction::DefineNamedProperty => {
+        Instruction::DefineNamedProperty { .. } => {
             let key = resolve_const_string(operands[1], ctx.defs, ctx.program)
                 .expect("a sunk define's key is a constant string: the escape analysis checked");
             if let Some(&field_idx) = scalar_obj.fields.get(&key) {

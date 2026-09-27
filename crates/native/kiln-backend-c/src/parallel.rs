@@ -692,7 +692,7 @@ pub fn heap_verdict(
                     None
                 }
                 GraphOp::Bridge {
-                    instruction: kiln_ir::Instruction::DefineNamedProperty,
+                    instruction: kiln_ir::Instruction::DefineNamedProperty { .. },
                     operands,
                     ..
                 } if operands.len() == 3 => {
@@ -2500,7 +2500,7 @@ mod tests {
             Instruction::GetProperty(4),
             Instruction::Const(6),
             Instruction::Binary(BinaryOp::Add),
-            Instruction::DefineNamedProperty,
+            Instruction::DefineNamedProperty { name_function: true },
             Instruction::Return,
         ];
         assert_eq!(why(proto(code.clone(), 1)), Some(Reason::Allocates));

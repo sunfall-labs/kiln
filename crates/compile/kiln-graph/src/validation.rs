@@ -137,7 +137,7 @@ pub fn stack_effect(
         // several accessors on one object without reloading it.
         Instruction::DefineAccessor { .. }
         | Instruction::DefineMethod
-        | Instruction::DefineNamedProperty => {
+        | Instruction::DefineNamedProperty { .. } => {
             if height < 3 {
                 Err(underflow(3))
             } else {

@@ -652,7 +652,12 @@ impl super::Compiler {
                         if method && home.is_some() {
                             self.home_bindings.pop();
                         }
-                        self.code.push(Instruction::DefineNamedProperty);
+                        // Only an anonymous function definition takes the key as its name: a
+                        // pair here only because it follows a spread defines without renaming
+                        // what its value already is (`{ ...o, f: foo }` keeps `foo.name`).
+                        self.code.push(Instruction::DefineNamedProperty {
+                            name_function: method || anonymous_function_value(&property.value),
+                        });
                         continue;
                     }
                     match &property.key {

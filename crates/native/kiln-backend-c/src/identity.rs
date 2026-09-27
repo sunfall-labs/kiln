@@ -275,7 +275,10 @@ pub(super) fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 byte(&mut hash, u8::from(*enumerable));
             }
             Instruction::DefineMethod => byte(&mut hash, 43),
-            Instruction::DefineNamedProperty => byte(&mut hash, 194),
+            Instruction::DefineNamedProperty { name_function } => {
+                byte(&mut hash, 194);
+                byte(&mut hash, u8::from(*name_function));
+            }
             Instruction::LoadTemplateObject(site) => {
                 byte(&mut hash, 195);
                 word(&mut hash, u64::from(*site));

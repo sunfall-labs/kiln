@@ -1517,7 +1517,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // they are not enumerated -- see `Instruction::DefineMethod`.
                 // Like `DefineMethod`, but the property is enumerated: an object literal's
                 // members are, and a class's methods are not.
-                Instruction::DefineNamedProperty => {
+                Instruction::DefineNamedProperty { name_function } => {
                     let function = self.pop(current)?;
                     let key = self.pop(current)?;
                     let coerced = self.computed_key(&key, current);
@@ -1528,9 +1528,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     else {
                         continue;
                     };
-                    if self
-                        .catchable(define_function_name(&function, &key, None), current)?
-                        .is_none()
+                    if *name_function
+                        && self
+                            .catchable(define_function_name(&function, &key, None), current)?
+                            .is_none()
                     {
                         continue;
                     }
