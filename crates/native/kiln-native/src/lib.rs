@@ -5,6 +5,7 @@
 //! generated module C, application object, reusable runtime object, launcher object, executable.
 
 mod number_provider;
+mod provider_link_input;
 pub mod shared_publication;
 
 use std::collections::hash_map::DefaultHasher;
@@ -725,6 +726,7 @@ mod worker;
 
 pub(crate) use materialize::*;
 pub(crate) use paths::*;
+pub(crate) use provider_link_input::materialize_provider_archive;
 pub(crate) use worker::*;
 
 /// A configured cache and compiler driver reusable across daemon requests.
@@ -1290,7 +1292,12 @@ impl NativeBuilder {
                     materialize(&paths.prelude_o, &prelude_object, false)?;
                     materialize(&paths.runtime_o, &runtime_object, false)?;
                     materialize(&paths.launcher_o, &launcher_object, false)?;
-                    materialize(&paths.number_provider_a, &number_provider, false)?;
+                    materialize_provider_archive(
+                        &self.cache,
+                        &paths.number_provider_a,
+                        &number_provider,
+                        number_provider_digest,
+                    )?;
                     let mut link_options = LinkOptions {
                         profile: profile.toolchain(),
                         static_link: options.static_link,
@@ -1623,7 +1630,12 @@ impl NativeBuilder {
             Lookup::Miss => {
                 materialize(&paths.module_o, &object, false)?;
                 materialize(&paths.prelude_o, &prelude_object, false)?;
-                materialize(&paths.number_provider_a, &number_provider, false)?;
+                materialize_provider_archive(
+                    &self.cache,
+                    &paths.number_provider_a,
+                    &number_provider,
+                    number_provider_digest,
+                )?;
                 let mut link_options = LinkOptions {
                     profile: profile.toolchain(),
                     ..LinkOptions::default()
@@ -2186,7 +2198,12 @@ impl NativeBuilder {
                 }
                 materialize(&paths.prelude_o, &prelude_object.0, false)?;
                 objects.push(paths.prelude_o.clone());
-                materialize(&paths.number_provider_a, &number_provider, false)?;
+                materialize_provider_archive(
+                    &self.cache,
+                    &paths.number_provider_a,
+                    &number_provider,
+                    number_provider_digest,
+                )?;
                 materialize(&paths.wrapper_o, &wrapper_object.0, false)?;
                 objects.push(paths.wrapper_o.clone());
                 let mut link_options = LinkOptions {
@@ -2825,7 +2842,12 @@ impl NativeBuilder {
                 materialize(&paths.prelude_o, &prelude_object, false)?;
                 materialize(&paths.runtime_o, &runtime_object, false)?;
                 materialize(&paths.launcher_o, &launcher_object, false)?;
-                materialize(&paths.number_provider_a, &number_provider, false)?;
+                materialize_provider_archive(
+                    &self.cache,
+                    &paths.number_provider_a,
+                    &number_provider,
+                    number_provider_digest,
+                )?;
                 objects.push(paths.prelude_o.clone());
                 objects.push(paths.runtime_o.clone());
                 objects.push(paths.launcher_o.clone());
