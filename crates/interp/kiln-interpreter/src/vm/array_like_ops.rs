@@ -64,6 +64,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if Self::dense_element(target, index).is_some() {
             return Ok(true);
         }
+        // A hole on an ordinary array has no inherited answer once both indexed prototype
+        // surfaces are known to be empty. Check the invariant for this position each time, so a
+        // callback can still add an element later in the walk; custom chains and exotic element
+        // descriptors keep the generic `HasProperty` path. Array indices stop below 2^32-1.
+        if let Value::Array(items) = target
+            && index < u64::from(u32::MAX)
+            && items.elements.borrow().is_empty()
+            && items.properties.borrow().prototype().is_none()
+            && !self.intrinsics.indexed_array_prototype.get()
+        {
+            return Ok(false);
+        }
         self.has(target, &Self::element_key(index), instruction)
     }
 
