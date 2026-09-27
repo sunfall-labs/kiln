@@ -133,3 +133,22 @@ clone was faster on the graph because it did not copy Maps and Sets; node 0.09-0
 
 Probes: `conformance/regress/r17-message-port-delivery-and-transfer.mjs` (node-recorded),
 `conformance/native/message-port-transfer.mjs` (both engines, also clean under GC stress).
+
+### 2026-09-26, integrator: what remains open
+
+Landed as `c3915a76`. Ping-pong is within 2x of node; one-way, the 1 MB graph and the transfer row
+are not, and the profile says why:
+
+- Cloned records come out as dictionary-mode objects, so reading the copy costs 9-11 ms natively
+  against node's 0.12 ms. The fast clone (`__kilnCloneData`) must build shaped objects: a clone of
+  an object with a shape should produce an object with the same shared shape (ADR 0071 makes the
+  shapes of constant keys shared, so this is a transition walk, not a dictionary).
+- Typed-array reads in the transfer row are 2-3x node's.
+- Ordering: an immediate scheduled before the first `postMessage` runs before the messages (node
+  delivers the messages first), and an unhandled rejection is reported after the batch rather
+  than before the next message.
+- `Reflect.ownKeys(event)` is `[]` where node shows four symbol keys.
+- The three `__kiln*` bridge globals are interim primitives until architecture issue 08's
+  declared primitive table exists; migrate them then.
+- Found and fixed separately: the parallel typed-array fast path read detached views
+  (`2c370546`, verified with the final combined run).

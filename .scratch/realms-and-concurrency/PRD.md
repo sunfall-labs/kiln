@@ -103,4 +103,7 @@ were inconclusive. They are re-measured together on a quiet machine before this 
 - `036d288d` the executor split (issue 03);
 - the shared keys and shapes of issue 04 steps 1 and 2;
 - step 1b's key registration before `main`: startup time of large bundles (thirdparty `typescript`,
-  `babel`) before and after.
+  `babel`) before and after;
+- issue 14's single structured clone in TypeScript: interpreter startup (+~50M instructions
+  measured), native hello-world size (+260 KB, +500 KB with `--node`), and one interpreter
+  typed-array loop that took ~19% more cycles for 2% more instructions.
