@@ -84,6 +84,12 @@ pub struct EmissionPolicy {
     pub compact: bool,
     /// Emit only generic bodies, without speculative, typed, fast, or parallel clones.
     pub generic_only: bool,
+    /// With `generic_only`: still give each `parallelMap` site whose callback qualifies its
+    /// parallel lowering -- the callback's typed entry and parallel clone, and the pooled path at
+    /// the site -- and nothing else (issue 13). The release profiles set it: a module is emitted
+    /// generic-only for its size, which says nothing about its sites. The development profile
+    /// does not: its sites say `dev-profile`.
+    pub parallel_in_generic: bool,
     /// Whether speculative versioning is enabled. Native orchestration resolves its process
     /// setting before emission; `None` preserves the direct emitter's default.
     pub speculate: Option<bool>,
@@ -2003,6 +2009,7 @@ fn plan_unit(
     compact: bool,
     compile_regex: bool,
     generic_only: bool,
+    parallel_in_generic: bool,
     speculate: Option<bool>,
     extra_entry_slots: Option<&HashSet<u32>>,
 ) -> Result<
@@ -2041,6 +2048,7 @@ fn plan_unit(
         compact,
         compile_regex,
         generic_only,
+        parallel_in_generic,
         speculate,
     );
     Ok((graphs, body, entry_graph, direct))
@@ -3778,6 +3786,7 @@ fn render_positioned(
         policy.compact,
         policy.should_compile_regex(),
         policy.generic_only,
+        policy.parallel_in_generic,
         policy.speculate,
         extra_entry_slots.as_ref(),
     )?;
@@ -4093,6 +4102,7 @@ fn render_module_positioned(
         policy.compact,
         policy.should_compile_regex(),
         policy.generic_only,
+        policy.parallel_in_generic,
         policy.speculate,
         Some(&extra_entry_slots),
     )?;

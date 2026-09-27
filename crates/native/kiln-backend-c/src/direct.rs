@@ -79,6 +79,9 @@ pub struct CallPlan {
     /// Emit only the generic body; native-dev uses this to keep the edit/run loop proportional
     /// to the program instead of multiplying it by speculative clones.
     pub generic_only: bool,
+    /// With `generic_only`: the unit still lowers its qualifying `parallelMap` sites (see
+    /// [`DirectPlan::plan_parallel_sites`]); without it, a site says `dev-profile`.
+    pub parallel_in_generic: bool,
     /// Explicit speculation setting resolved by the native orchestration layer. `None` keeps the
     /// direct emitter's default for backend-only callers.
     pub speculate: Option<bool>,
@@ -154,6 +157,7 @@ impl DirectPlan {
         compact: bool,
         compile_regex: bool,
         generic_only: bool,
+        parallel_in_generic: bool,
         speculate: Option<bool>,
     ) -> Self {
         if generic_only {
@@ -164,7 +168,11 @@ impl DirectPlan {
             let function_count = graphs.len();
             let generic_verdicts = std::sync::Arc::new(vec![
                 Err(crate::parallel::Refusal::new(
-                    crate::parallel::Reason::GenericOnly
+                    if parallel_in_generic {
+                        crate::parallel::Reason::CallbackUnknown
+                    } else {
+                        crate::parallel::Reason::DevProfile
+                    }
                 ));
                 function_count
             ]);
@@ -172,6 +180,7 @@ impl DirectPlan {
                 compact,
                 compile_regex,
                 generic_only: true,
+                parallel_in_generic,
                 speculate,
                 typed_returns: vec![false; function_count],
                 typed_needs: vec![TypedNeeds::default(); function_count],
@@ -184,12 +193,16 @@ impl DirectPlan {
                 publishes_frame: publishes_frame.to_vec(),
                 ..CallPlan::default()
             };
-            return Self {
+            let mut generic = Self {
                 functions: (0..function_count).map(|_| plan()).collect(),
                 typed: vec![None; function_count],
                 parallel: vec![None; function_count],
                 entry: plan(),
             };
+            if parallel_in_generic {
+                generic.plan_parallel_sites(program, graphs, entry, publishes_frame, speculate);
+            }
+            return generic;
         }
         let known = known_callees(program, graphs, entry);
         let direct: Vec<bool> = program
@@ -439,6 +452,7 @@ impl DirectPlan {
                 compact,
                 compile_regex,
                 generic_only,
+                parallel_in_generic,
                 speculate,
                 known: if generic_only {
                     HashMap::new()
@@ -691,6 +705,317 @@ impl DirectPlan {
             plan.typed_entries = typed_entries.clone();
         }
         plan
+    }
+
+    /// The parallel lowering of a generic-only unit (issue 13): the `parallelMap` sites whose
+    /// callback is proven to be one proto, that proto's verdict, and -- where it qualifies -- its
+    /// typed entry and parallel clone. Nothing else in the unit is planned: every body stays
+    /// generic, and the only facts added to a generic body's plan are the callback values of its
+    /// own `parallelMap` sites.
+    ///
+    /// A generic-only unit is one `kiln-native` judged too large to specialize (or a size
+    /// profile), and the budget that judgement protects is emission and C compile time across
+    /// the whole unit. This spends it only where a site exists: a unit without a `parallelMap`
+    /// call pays one scan of its operations, and one with sites pays the binding walk
+    /// (`known_callees`) and one settle per callback -- not the whole-unit fixpoint, the
+    /// per-body settles, the method candidates, or any clone of a body that is not a callback.
+    ///
+    /// The verdict is the full plan's, step for step (`plan` above): the source rules, a typed
+    /// entry the full plan would give it, and a number returned with the parameters and captured
+    /// reads seeded as numbers. A qualifying callback calls nothing but listed `Math`
+    /// functions, so its proof does not depend on any other proto's typed return.
+    fn plan_parallel_sites(
+        &mut self,
+        program: &Program,
+        graphs: &[FunctionGraph],
+        entry: &FunctionGraph,
+        publishes_frame: &[bool],
+        speculate: Option<bool>,
+    ) {
+        use crate::parallel::{Reason, Refusal};
+        let is_parallel_map = |name: u32| {
+            matches!(
+                program.constants.get(name as usize),
+                Some(Constant::String(key)) if key == "parallelMap"
+            )
+        };
+        let site_arguments = |graph: &FunctionGraph| -> Vec<ValueId> {
+            graph
+                .blocks
+                .iter()
+                .flat_map(|b| b.operations.iter())
+                .filter_map(|(_, op)| match op {
+                    GraphOp::CallMethod { name, args, .. }
+                        if args.len() == 1 && is_parallel_map(*name) =>
+                    {
+                        Some(args[0])
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let function_arguments: Vec<Vec<ValueId>> = graphs.iter().map(site_arguments).collect();
+        let entry_arguments = site_arguments(entry);
+        if entry_arguments.is_empty() && function_arguments.iter().all(Vec::is_empty) {
+            return;
+        }
+        let known = known_callees(program, graphs, entry);
+        // A generic body calls a value in `known` by name (`GraphOp::Call`'s direct arm), so a
+        // callback value that is also called directly in the same body is left out: the site
+        // then says `callback-unknown`, and the call stays generic.
+        let site_known = |graph: &FunctionGraph,
+                          arguments: &[ValueId],
+                          known: &KnownValues|
+         -> HashMap<ValueId, u32> {
+            let called: HashSet<ValueId> = graph
+                .blocks
+                .iter()
+                .flat_map(|b| b.operations.iter())
+                .filter_map(|(_, op)| match op {
+                    GraphOp::Call { callee, .. } => Some(*callee),
+                    _ => None,
+                })
+                .collect();
+            arguments
+                .iter()
+                .filter(|a| !called.contains(a))
+                .filter_map(|a| known.known.get(a).map(|&t| (*a, t)))
+                .collect()
+        };
+        let function_known: Vec<HashMap<ValueId, u32>> = graphs
+            .iter()
+            .enumerate()
+            .map(|(i, g)| site_known(g, &function_arguments[i], &known.functions[i]))
+            .collect();
+        let entry_known = site_known(entry, &entry_arguments, &known.entry);
+        let targets: std::collections::BTreeSet<u32> = function_known
+            .iter()
+            .chain(std::iter::once(&entry_known))
+            .flat_map(|k| k.values().copied())
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+
+        let count = graphs.len();
+        let params: Vec<u32> = program
+            .functions
+            .iter()
+            .map(|p| p.parameter_count)
+            .collect();
+        let has_open_world = program.has_direct_eval() || program.has_dynamic_import();
+        // The full plan's typed eligibility, asked of the callbacks only.
+        let mut typed_eligible = vec![false; count];
+        for &t in &targets {
+            let proto = &program.functions[t as usize];
+            typed_eligible[t as usize] = direct_callable(proto, publishes_frame[t as usize])
+                && !proto
+                    .code
+                    .iter()
+                    .any(|instruction| matches!(instruction, Instruction::RestArguments(_)))
+                && proto.code.len() <= crate::MAX_SPECIALIZED_INSTRUCTIONS;
+        }
+        let direct_targets: Vec<bool> = program
+            .functions
+            .iter()
+            .zip(publishes_frame)
+            .map(|(proto, &publishes)| direct_callable(proto, publishes))
+            .collect();
+        let returns_number = |g: &FunctionGraph, proven: &HashMap<ValueId, Proven>| {
+            g.blocks
+                .iter()
+                .filter(|b| b.is_reachable_from_entry(g.entry_block))
+                .all(|b| match &b.terminator {
+                    Terminator::Return(Some(v)) => proven.get(v).is_some_and(|k| k.is_number()),
+                    Terminator::Return(None) => false,
+                    _ => true,
+                })
+        };
+        struct Callback {
+            sites: Vec<Site>,
+            intrinsics: HashMap<ValueId, Proven>,
+            length_bounds: HashSet<ValueId>,
+        }
+        let callback_of = |i: usize| -> Callback {
+            let g = &graphs[i];
+            let mut sites = Vec::new();
+            for block in &g.blocks {
+                for (vid, op) in &block.operations {
+                    if let GraphOp::Call { callee, args, .. } = op
+                        && let Some(&target) = known.functions[i].known.get(callee)
+                        && direct_targets[target as usize]
+                    {
+                        sites.push(Site {
+                            result: *vid,
+                            target,
+                            args: args.clone(),
+                        });
+                    }
+                }
+            }
+            let length_bounds = g
+                .blocks
+                .iter()
+                .flat_map(|b| b.operations.iter())
+                .filter_map(|(v, op)| match op {
+                    GraphOp::GetProperty { name, .. } => {
+                        match program.constants.get(*name as usize) {
+                            Some(Constant::String(s)) if s == "length" => Some(*v),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                })
+                .collect();
+            Callback {
+                sites,
+                intrinsics: if has_open_world {
+                    HashMap::new()
+                } else {
+                    intrinsic_results(g, program)
+                },
+                length_bounds,
+            }
+        };
+        // Typed returns, as the full plan's fixpoint would find them for these protos: a
+        // callback's settle reads another proto's typed return only through a direct call, which
+        // a qualifying callback does not make, so a site that would need one is simply untyped.
+        let callbacks: HashMap<u32, Callback> = targets
+            .iter()
+            .filter(|&&t| typed_eligible[t as usize])
+            .map(|&t| (t, callback_of(t as usize)))
+            .collect();
+        let no_returns = vec![false; count];
+        let typed_seeds = |i: usize, cb: &Callback| -> HashMap<ValueId, Proven> {
+            let g = &graphs[i];
+            let mut seeds: HashMap<ValueId, Proven> = g
+                .initial_locals
+                .iter()
+                .take(params[i] as usize)
+                .map(|&v| (v, Proven::Number))
+                .collect();
+            let (this_cols, _) = this_columns(g);
+            for (vid, _) in this_cols {
+                seeds.insert(vid, Proven::Number);
+            }
+            seeds.extend(cb.intrinsics.iter().map(|(&v, &k)| (v, k)));
+            seeds
+        };
+        let mut typed_returns = vec![false; count];
+        for (&t, cb) in &callbacks {
+            let i = t as usize;
+            let (proven, _) = settle(
+                &graphs[i],
+                typed_seeds(i, cb),
+                &cb.sites,
+                &typed_eligible,
+                &no_returns,
+                &params,
+                &cb.length_bounds,
+            );
+            typed_returns[i] = returns_number(&graphs[i], &proven);
+        }
+
+        let mut verdicts = (*self.entry.parallel).clone();
+        let mut parallel_seeds: HashMap<u32, HashMap<ValueId, Proven>> = HashMap::new();
+        for &t in &targets {
+            let i = t as usize;
+            verdicts[i] = (|| {
+                let shape = crate::parallel::parallel_verdict(
+                    &graphs[i],
+                    &program.functions[i],
+                    program,
+                    &known.captures[i],
+                )?;
+                let Some(cb) = callbacks.get(&t) else {
+                    return Err(Refusal::new(Reason::NotTyped));
+                };
+                let mut seeds: HashMap<ValueId, Proven> = graphs[i]
+                    .initial_locals
+                    .iter()
+                    .take(params[i] as usize)
+                    .map(|&v| (v, Proven::Number))
+                    .collect();
+                seeds.extend(shape.captured_values.iter().map(|&v| (v, Proven::Number)));
+                seeds.extend(cb.intrinsics.iter().map(|(&v, &k)| (v, k)));
+                let (proven, _) = settle(
+                    &graphs[i],
+                    seeds.clone(),
+                    &cb.sites,
+                    &typed_eligible,
+                    &typed_returns,
+                    &params,
+                    &cb.length_bounds,
+                );
+                if !returns_number(&graphs[i], &proven) {
+                    return Err(Refusal::new(Reason::ReturnsNonNumber));
+                }
+                parallel_seeds.insert(t, seeds);
+                Ok(shape)
+            })();
+        }
+        let parallel_safe: Vec<bool> = verdicts.iter().map(Result::is_ok).collect();
+        let verdicts = std::sync::Arc::new(verdicts);
+
+        // The callback's own plans: its typed entry (which the site's typed-callback check and
+        // the clone's references hang off) and its parallel clone, specialized like the full
+        // plan's. Only a qualifying callback gets them; any other runs its generic body.
+        let base = self.entry.clone();
+        let specialized = |i: usize, seeds: HashMap<ValueId, Proven>| -> CallPlan {
+            let cb = &callbacks[&(i as u32)];
+            let (proven, typed_sites) = settle(
+                &graphs[i],
+                seeds,
+                &cb.sites,
+                &typed_eligible,
+                &typed_returns,
+                &params,
+                &cb.length_bounds,
+            );
+            CallPlan {
+                generic_only: false,
+                speculate,
+                known: known.functions[i].known.clone(),
+                typed_sites,
+                numbers: proven
+                    .iter()
+                    .filter_map(|(&v, &kind)| kind.is_number().then_some(v))
+                    .collect(),
+                ints: proven
+                    .iter()
+                    .filter_map(|(&v, &kind)| (kind == Proven::Int).then_some(v))
+                    .collect(),
+                unchecked: known.functions[i].unchecked.clone(),
+                invariant: known.functions[i].invariant.clone(),
+                ..base.clone()
+            }
+        };
+        for &t in &targets {
+            let i = t as usize;
+            let Some(seeds) = parallel_seeds.remove(&t) else {
+                continue;
+            };
+            let cb = &callbacks[&t];
+            self.typed[i] = Some(specialized(i, typed_seeds(i, cb)));
+            self.parallel[i] = Some(specialized(i, seeds));
+        }
+        let typed_entries: Vec<bool> = self.typed.iter().map(Option::is_some).collect();
+        for (i, plan) in self.functions.iter_mut().enumerate() {
+            plan.known = function_known[i].clone();
+        }
+        self.entry.known = entry_known;
+        for plan in self
+            .functions
+            .iter_mut()
+            .chain(self.typed.iter_mut().flatten())
+            .chain(self.parallel.iter_mut().flatten())
+            .chain(std::iter::once(&mut self.entry))
+        {
+            plan.typed_returns = typed_returns.clone();
+            plan.typed_entries = typed_entries.clone();
+            plan.parallel_safe = parallel_safe.clone();
+            plan.parallel = verdicts.clone();
+        }
     }
 
     /// Record what every typed entry needs, in every body's plan.

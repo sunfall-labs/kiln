@@ -99,8 +99,7 @@ pub enum Reason {
     /// Some reachable `return` is not proven to be a number.
     ReturnsNonNumber,
     // The plan and the emitter.
-    /// The callback has no typed entry: not directly callable, too large, or the unit is
-    /// emitted generic-only.
+    /// The callback has no typed entry: not directly callable, or too large.
     NotTyped,
     /// The emitted parallel clone reaches realm state (host, heap, upvalue table), so the
     /// machine check in `lib.rs` rejected it.
@@ -110,8 +109,15 @@ pub enum Reason {
     CallbackUnknown,
     /// More than the callback was passed (a `thisArg`).
     ExtraArguments,
-    /// The module is emitted with generic bodies only (a development or size profile).
+    /// The module is emitted with generic bodies only and without the per-site parallel
+    /// lowering. No build profile produces this any more (issue 13: release modules past the
+    /// specialization limit still lower their qualifying sites, and the development profile
+    /// says [`Reason::DevProfile`]); the code stays so a record in an older artifact parses.
     GenericOnly,
+    /// A development build (`native-dev`, `check`): it emits no typed or parallel code, by
+    /// decision -- the edit-run loop stays proportional to the program, and the answer is
+    /// identical either way. `--profile native-release` gives the site its parallel lowering.
+    DevProfile,
 }
 
 impl Reason {
@@ -140,6 +146,7 @@ impl Reason {
         Reason::CallbackUnknown,
         Reason::ExtraArguments,
         Reason::GenericOnly,
+        Reason::DevProfile,
     ];
 
     /// The stable code printed by `--explain-parallel`.
@@ -168,6 +175,7 @@ impl Reason {
             Reason::CallbackUnknown => "callback-unknown",
             Reason::ExtraArguments => "extra-arguments",
             Reason::GenericOnly => "generic-only",
+            Reason::DevProfile => "dev-profile",
         }
     }
 
@@ -210,7 +218,10 @@ impl Reason {
             }
             Reason::ExtraArguments => "parallelMap is passed more than the callback",
             Reason::GenericOnly => {
-                "the module is compiled with generic bodies only (the development and size profiles, and a release module past the specialization size limit)"
+                "the module is compiled with generic bodies only and no parallel lowering"
+            }
+            Reason::DevProfile => {
+                "this is a development build, which emits no parallel code; build with `--profile native-release`"
             }
         }
     }
@@ -1016,7 +1027,7 @@ mod tests {
 
     // One test per reason code the source rules produce (issue 03). The plan and site reasons
     // (`returns-non-number`, `not-typed`, `clone-rejected`, `callback-unknown`,
-    // `extra-arguments`, `generic-only`) are pinned where they are decided, in `tests.rs`.
+    // `extra-arguments`, `dev-profile`) are pinned where they are decided, in `parallel_tests.rs`.
 
     #[test]
     fn reason_not_plain_function() {

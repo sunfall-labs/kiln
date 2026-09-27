@@ -31,5 +31,8 @@ The `parallel-*.js` probes -- the parallel/sequential differential harness of
 `.scratch/parallel-builtins` issue 02 -- use it, because only a release build emits the parallel
 lowering of `parallelMap`, and because a result that depends on how many threads computed it is a
 divergence like any other. A release module past 16 functions or 512 instructions is emitted
-generic-only, with no parallel lowering at all, so those probes stay small; `kiln build --profile
-native-release --explain-parallel <probe>` says which of their sites run in parallel.
+generic-only, but its qualifying `parallelMap` sites keep their parallel lowering (issue 13):
+most probes stay under the limit so their bodies are specialized, and `parallel-large-module.js`
+covers the generic case. The development profile emits no parallel code, and `--explain-parallel`
+says `dev-profile` there. `kiln build --profile native-release --explain-parallel <probe>` says
+which sites run in parallel.

@@ -297,6 +297,19 @@ fn cache_identity(
     .identity_digest()
 }
 
+/// Whether a generic-only module still lowers its qualifying `parallelMap` sites (issue 13).
+///
+/// Every profile but the development ones does: a release module goes generic-only for its
+/// size (the budget below), which says nothing about its sites, and the lowering costs only
+/// where a site exists. The development profiles (`native-dev`, `check`) do not, by decision:
+/// they are the edit-run loop, which emits no typed code at all and is compiled for build
+/// speed rather than run speed, so a pooled site there would buy little and cost emission and
+/// compile time on every edit; the answer is identical either way. Their sites say
+/// `dev-profile`, naming `--profile native-release`.
+fn parallel_in_generic(profile: NativeProfile) -> bool {
+    !matches!(profile, NativeProfile::Dev | NativeProfile::Check)
+}
+
 fn release_module_uses_generic_bodies(module: &ModuleProgram, policy: &EmissionPolicy) -> bool {
     let (instructions, functions) =
         kiln_backend_c::retained_module_size(module, policy.live_module_slots.as_deref());
@@ -490,6 +503,7 @@ fn emit_graph_module_for_profile(
     profile: NativeProfile,
 ) -> Result<kiln_backend_c::CModule, NativeError> {
     let mut policy = policy.clone();
+    policy.parallel_in_generic = parallel_in_generic(profile);
     if profile == NativeProfile::Release {
         policy.generic_only = release_module_uses_generic_bodies(&node.program, &policy);
     } else if profile == NativeProfile::ReleaseSize {
@@ -942,6 +956,7 @@ impl NativeBuilder {
             options.profile,
             NativeProfile::Dev | NativeProfile::Check | NativeProfile::ReleaseSize
         );
+        emission.parallel_in_generic = parallel_in_generic(options.profile);
         if options.profile == NativeProfile::ReleaseSize {
             emission.omit_source = true;
         }
@@ -1330,6 +1345,7 @@ impl NativeBuilder {
             options.profile,
             NativeProfile::Dev | NativeProfile::Check | NativeProfile::ReleaseSize
         );
+        emission.parallel_in_generic = parallel_in_generic(options.profile);
         if options.profile == NativeProfile::ReleaseSize {
             emission.omit_source = true;
         }
@@ -1674,6 +1690,7 @@ impl NativeBuilder {
             options.profile,
             NativeProfile::Dev | NativeProfile::Check | NativeProfile::ReleaseSize
         );
+        emission.parallel_in_generic = parallel_in_generic(options.profile);
         if options.profile == NativeProfile::ReleaseSize {
             emission.omit_source = true;
         }
@@ -2216,6 +2233,7 @@ impl NativeBuilder {
             options.profile,
             NativeProfile::Dev | NativeProfile::Check | NativeProfile::ReleaseSize
         );
+        emission.parallel_in_generic = parallel_in_generic(options.profile);
         if options.profile == NativeProfile::ReleaseSize {
             emission.omit_source = true;
         }

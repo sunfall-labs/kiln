@@ -136,7 +136,7 @@ fn a_qualifying_site_is_recorded_parallel() {
 }
 
 #[test]
-fn reason_generic_only() {
+fn reason_dev_profile() {
     let mut constants = Constants::default();
     let callback = arithmetic(&mut constants);
     let program = one_site(Some(callback), 0, constants);
@@ -144,7 +144,80 @@ fn reason_generic_only() {
         generic_only: true,
         ..Default::default()
     };
-    assert_eq!(only_reason(&program, policy), Some(Reason::GenericOnly));
+    assert_eq!(only_reason(&program, policy), Some(Reason::DevProfile));
+}
+
+/// Issue 13: a unit emitted generic-only (a release module past the specialization limit)
+/// still lowers a qualifying site, and still names the real reason for one that is not.
+#[test]
+fn a_generic_only_unit_still_lowers_its_qualifying_sites() {
+    let policy = EmissionPolicy {
+        generic_only: true,
+        parallel_in_generic: true,
+        ..Default::default()
+    };
+    let mut constants = Constants::default();
+    let callback = arithmetic(&mut constants);
+    let program = one_site(Some(callback), 0, constants);
+    assert_eq!(only_reason(&program, policy.clone()), None);
+    let mut constants = Constants::default();
+    let callback = arithmetic(&mut constants);
+    let program = one_site(Some(callback), 1, constants);
+    assert_eq!(
+        only_reason(&program, policy.clone()),
+        Some(Reason::ExtraArguments)
+    );
+    let program = one_site(None, 0, Constants::default());
+    assert_eq!(only_reason(&program, policy), Some(Reason::CallbackUnknown));
+}
+
+/// The same, run: in a generic-only unit every qualifying site -- element, index, captures,
+/// `Math` -- takes the pool and answers `map`'s bits.
+#[test]
+fn a_generic_only_unit_runs_its_qualifying_sites_in_the_pool() {
+    let element = || Box::new(Expr::Element);
+    let callbacks = vec![
+        (
+            Expr::Binary(BinaryOp::Multiply, element(), Box::new(Expr::Capture(0))),
+            1,
+        ),
+        (
+            Expr::Binary(BinaryOp::Add, element(), Box::new(Expr::Index)),
+            2,
+        ),
+        (Expr::Math1("sqrt", element()), 1),
+        (
+            Expr::Binary(
+                BinaryOp::Divide,
+                Box::new(Expr::Number(1.0)),
+                Box::new(Expr::Binary(
+                    BinaryOp::Subtract,
+                    element(),
+                    Box::new(Expr::Capture(1)),
+                )),
+            ),
+            1,
+        ),
+    ];
+    let policy = EmissionPolicy {
+        generic_only: true,
+        parallel_in_generic: true,
+        ..Default::default()
+    };
+    let input = [
+        0.0,
+        -0.0,
+        1.5,
+        -2.0,
+        f64::NAN,
+        f64::INFINITY,
+        4.0,
+        1e-310,
+        9.0,
+    ];
+    if let Some(failure) = compare_with(&callbacks, &input, [1.25, -0.0], policy) {
+        panic!("{failure}");
+    }
 }
 
 #[test]
@@ -229,6 +302,7 @@ fn reason_clone_rejected() {
         &graphs,
         &entry,
         &[false],
+        false,
         false,
         false,
         false,
@@ -497,6 +571,16 @@ fn run_threaded(generated: &CModule, wrapper: &str) -> std::process::Output {
 /// returns the failure text, or `None` when every pair is identical bit for bit and every
 /// `parallelMap` took the pool.
 fn compare(callbacks: &[(Expr, u32)], input: &[f64], captures: [f64; 2]) -> Option<String> {
+    compare_with(callbacks, input, captures, EmissionPolicy::default())
+}
+
+/// [`compare`], emitted under `policy`.
+fn compare_with(
+    callbacks: &[(Expr, u32)],
+    input: &[f64],
+    captures: [f64; 2],
+    policy: EmissionPolicy,
+) -> Option<String> {
     let mut constants = Constants::default();
     let parallel_map = constants.string("parallelMap");
     let map = constants.string("map");
@@ -556,7 +640,7 @@ fn compare(callbacks: &[(Expr, u32)], input: &[f64], captures: [f64; 2]) -> Opti
         functions,
         template_sites: Vec::new(),
     };
-    let generated = emit_with_policy(&program, EmissionPolicy::default()).expect("emits");
+    let generated = emit_with_policy(&program, policy).expect("emits");
     let records = SiteRecord::parse_all(&generated.source);
     if let Some(sequential) = records.iter().find(|r| r.refusal.is_some()) {
         return Some(format!(

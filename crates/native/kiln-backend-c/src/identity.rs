@@ -44,6 +44,11 @@ pub(super) fn hash_program_with_policy_and_seed(
         hash ^= u64::from(value);
         hash = hash.wrapping_mul(0x100000001b3);
     }
+    // Mixed in only when it changes the emission, so every existing key is unchanged.
+    if policy.generic_only && policy.parallel_in_generic {
+        hash ^= 0x7f;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
     if policy.no_kiln_extensions {
         hash ^= 0x7e;
         hash = hash.wrapping_mul(0x100000001b3);
@@ -582,6 +587,11 @@ pub(super) fn hash_module_with_policy_and_seed(
         u8::from(policy.generic_only),
     ] {
         hash ^= u64::from(value);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    // Mixed in only when it changes the emission, so every existing key is unchanged.
+    if policy.generic_only && policy.parallel_in_generic {
+        hash ^= 0x7f;
         hash = hash.wrapping_mul(0x100000001b3);
     }
     if policy.no_kiln_extensions {
