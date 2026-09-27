@@ -703,7 +703,7 @@ pub(super) fn cached_graph_module(
     );
     let cache_key = NativeArtifactFamily::ModuleSource.source_key(
         target,
-        Digest::hash(b"native-graph-emission-input-v3"),
+        Digest::hash(b"native-graph-emission-input-v4"),
         [
             input,
             prelude_header_digest(),
@@ -713,12 +713,13 @@ pub(super) fn cached_graph_module(
     );
     match cache.lookup(&cache_key)? {
         Lookup::Hit(artifact) => {
-            let (program_hash, symbol, source, generic_only, chunks): (
+            let (program_hash, symbol, source, generic_only, chunks, parallel_workers): (
                 u64,
                 String,
                 String,
                 bool,
                 Vec<String>,
+                Option<String>,
             ) = serde_json::from_slice(&artifact.bytes).map_err(|error| CacheError::Corrupt {
                 path: artifact.path,
                 reason: format!("invalid cached C module: {error}"),
@@ -730,6 +731,7 @@ pub(super) fn cached_graph_module(
                     source,
                     generic_only,
                     chunks,
+                    parallel_workers,
                 },
                 true,
             ))
@@ -742,6 +744,7 @@ pub(super) fn cached_graph_module(
                 &module.source,
                 module.generic_only,
                 &module.chunks,
+                &module.parallel_workers,
             ))
             .expect("C module contains only strings and an integer");
             cache.put(&cache_key, &bytes)?;

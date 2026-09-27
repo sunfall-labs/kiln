@@ -223,9 +223,15 @@ pub fn with_parallel_clone<R>(f: impl FnOnce() -> R) -> R {
 /// is admitted (`lib.rs`) -- so no host, receiver, upvalue table, shape row or thread-local heap
 /// cache is reached from here. An entry that bails out (`KILN_VAL_TYPED_FAIL`)
 /// flags `ctx` and stops; the caller then takes the sequential lowering, which recomputes.
+///
+/// The workers are named `{symbol}_pmap*_{index}` and call the clone `{clone_symbol}_fn_{index}_p`.
+/// The two differ only in a generic-only module's worker unit (issue 14), where the workers
+/// take the module's link-visible symbol and the clone keeps the unit-private name it was
+/// emitted with.
 pub fn emit_parallel_chunk(
     output: &mut String,
     symbol: &str,
+    clone_symbol: &str,
     index: usize,
     parameter_count: u32,
     captures: &[u32],
@@ -276,7 +282,7 @@ static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
     #pragma clang loop vectorize(enable) interleave(enable)\n\
     for (size_t i = start; i < end; ++i) {{\n\
         double d; memcpy(&d, &in_arr[i], sizeof d);\n\
-        double r = {symbol}_fn_{index}_p(1, d{index_arg});\n\
+        double r = {clone_symbol}_fn_{index}_p(1, d{index_arg});\n\
         failed |= kiln_c99_typed_failed(r);\n\
         out_arr[i] = kiln_c99_val_from_double(r);\n\
     }}\n\
@@ -289,7 +295,7 @@ static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
     int failed = 0;\n\
     #pragma clang loop vectorize(enable) interleave(enable)\n\
     for (size_t i = start; i < end; ++i) {{\n\
-        double r = {symbol}_fn_{index}_p(1, in_arr[i]{index_arg});\n\
+        double r = {clone_symbol}_fn_{index}_p(1, in_arr[i]{index_arg});\n\
         failed |= kiln_c99_typed_failed(r);\n\
         out_arr[i] = r;\n\
     }}\n\
@@ -302,7 +308,7 @@ static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
     int failed = 0;\n\
     #pragma clang loop vectorize(enable) interleave(enable)\n\
     for (size_t i = start; i < end; ++i) {{\n\
-        double r = {symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
+        double r = {clone_symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
         failed |= kiln_c99_typed_failed(r);\n\
         out_arr[i] = (float)r;\n\
     }}\n\
@@ -315,7 +321,7 @@ static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
     int failed = 0;\n\
     #pragma clang loop vectorize(enable) interleave(enable)\n\
     for (size_t i = start; i < end; ++i) {{\n\
-        double r = {symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
+        double r = {clone_symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
         failed |= kiln_c99_typed_failed(r);\n\
         out_arr[i] = (int32_t){symbol}_to_u32_{index}(r);\n\
     }}\n\
@@ -328,7 +334,7 @@ static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
     int failed = 0;\n\
     #pragma clang loop vectorize(enable) interleave(enable)\n\
     for (size_t i = start; i < end; ++i) {{\n\
-        double r = {symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
+        double r = {clone_symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
         failed |= kiln_c99_typed_failed(r);\n\
         out_arr[i] = {symbol}_to_u32_{index}(r);\n\
     }}\n\
@@ -341,7 +347,7 @@ static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
     int failed = 0;\n\
     #pragma clang loop vectorize(enable) interleave(enable)\n\
     for (size_t i = start; i < end; ++i) {{\n\
-        double r = {symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
+        double r = {clone_symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
         failed |= kiln_c99_typed_failed(r);\n\
         out_arr[i] = (int16_t)(uint16_t){symbol}_to_u32_{index}(r);\n\
     }}\n\
@@ -354,7 +360,7 @@ static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
     int failed = 0;\n\
     #pragma clang loop vectorize(enable) interleave(enable)\n\
     for (size_t i = start; i < end; ++i) {{\n\
-        double r = {symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
+        double r = {clone_symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
         failed |= kiln_c99_typed_failed(r);\n\
         out_arr[i] = (uint16_t){symbol}_to_u32_{index}(r);\n\
     }}\n\
@@ -367,7 +373,7 @@ static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
     int failed = 0;\n\
     #pragma clang loop vectorize(enable) interleave(enable)\n\
     for (size_t i = start; i < end; ++i) {{\n\
-        double r = {symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
+        double r = {clone_symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
         failed |= kiln_c99_typed_failed(r);\n\
         out_arr[i] = (int8_t)(uint8_t){symbol}_to_u32_{index}(r);\n\
     }}\n\
@@ -380,7 +386,7 @@ static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
     int failed = 0;\n\
     #pragma clang loop vectorize(enable) interleave(enable)\n\
     for (size_t i = start; i < end; ++i) {{\n\
-        double r = {symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
+        double r = {clone_symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
         failed |= kiln_c99_typed_failed(r);\n\
         out_arr[i] = (uint8_t){symbol}_to_u32_{index}(r);\n\
     }}\n\
@@ -393,7 +399,7 @@ static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
     int failed = 0;\n\
     #pragma clang loop vectorize(enable) interleave(enable)\n\
     for (size_t i = start; i < end; ++i) {{\n\
-        double r = {symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
+        double r = {clone_symbol}_fn_{index}_p(1, (double)in_arr[i]{index_arg});\n\
         failed |= kiln_c99_typed_failed(r);\n\
         out_arr[i] = {symbol}_clamp_u8_{index}(r);\n\
     }}\n\
@@ -406,7 +412,7 @@ static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
     int failed = 0;\n\
     for (size_t i = start; i < end; ++i) {{\n\
         double d = kiln_c99_typed_get(in_arr, i);\n\
-        double r = {symbol}_fn_{index}_p(1, d{index_arg});\n\
+        double r = {clone_symbol}_fn_{index}_p(1, d{index_arg});\n\
         failed |= kiln_c99_typed_failed(r);\n\
         kiln_c99_typed_set(out_arr, i, r);\n\
     }}\n\
@@ -415,6 +421,12 @@ static inline uint8_t {symbol}_clamp_u8_{index}(double value) {{\n\
     )
     .unwrap();
 }
+
+/// The suffixes of the chunk workers `emit_parallel_chunk` defines for one proto, in the order
+/// they are declared: `{symbol}_pmap{suffix}_{index}`.
+pub const PARALLEL_CHUNK_KINDS: [&str; 11] = [
+    "", "_f64", "_f32", "_i32", "_u32", "_i16", "_u16", "_i8", "_u8", "_u8c", "_typed",
+];
 
 pub(crate) use crate::graph::array_slots;
 

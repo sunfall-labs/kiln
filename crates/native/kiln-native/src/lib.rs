@@ -506,6 +506,9 @@ fn emit_graph_module_for_profile(
     policy.parallel_in_generic = parallel_in_generic(profile);
     if profile == NativeProfile::Release {
         policy.generic_only = release_module_uses_generic_bodies(&node.program, &policy);
+        // Issue 14: such a module is compiled at -O0 for build time; its parallel workers go to
+        // a unit of their own, compiled like a specialized module (`module_units`).
+        policy.parallel_workers_unit = policy.generic_only;
     } else if profile == NativeProfile::ReleaseSize {
         policy.generic_only = true;
         policy.omit_source = true;
@@ -1809,6 +1812,18 @@ impl NativeBuilder {
                     module_generic_only.push(module.generic_only);
                 }
             }
+            if let Some(workers) = &module.parallel_workers {
+                // Issue 14: the parallel workers of a generic-only module, compiled at the
+                // optimising level of a specialized module. Its own source digest keys it; a
+                // module with no qualifying site has none, and its units are unchanged.
+                symbol_list.push(format!("{}_parallel_workers", module.symbol));
+                module_sources.push((
+                    workers.as_bytes().to_vec(),
+                    Digest::hash(workers.as_bytes()),
+                    hit,
+                ));
+                module_generic_only.push(false);
+            }
         }
         let paths = SharedGraphLibraryPaths::new(workspace.path(), &symbol_list);
         let profile = options.profile;
@@ -2368,6 +2383,18 @@ impl NativeBuilder {
                     ));
                     module_generic_only.push(module.generic_only);
                 }
+            }
+            if let Some(workers) = &module.parallel_workers {
+                // Issue 14: the parallel workers of a generic-only module, compiled at the
+                // optimising level of a specialized module. Its own source digest keys it; a
+                // module with no qualifying site has none, and its units are unchanged.
+                symbol_list.push(format!("{}_parallel_workers", module.symbol));
+                module_sources.push((
+                    workers.as_bytes().to_vec(),
+                    Digest::hash(workers.as_bytes()),
+                    hit,
+                ));
+                module_generic_only.push(false);
             }
             module_chunk_ranges.push(start..symbol_list.len());
         }
