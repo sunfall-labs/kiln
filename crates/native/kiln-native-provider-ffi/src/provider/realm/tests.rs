@@ -630,6 +630,115 @@ fn the_collector_seam_marks_registered_roots_and_tears_down_once() {
     assert_eq!(COLLECTS.load(AtomicOrdering::SeqCst), 0);
 }
 
+/// Realms issue 24. Teardown runs prelude code -- a callable store's destructor releases its
+/// record, the collector's teardown hooks sweep -- and the prelude finds its heap by asking which
+/// one is current on the thread. A realm is destroyed outside `ActiveRealm`, so each of those
+/// used to find none and fall back to one process-wide heap, which every realm thread tearing
+/// down at the same moment initialised and used at once (a segfault in about one run in a
+/// thousand at `KILN_REALMS=16`). The realm's own heap must be current for the whole teardown,
+/// and nothing may be current once the heap is freed.
+#[test]
+fn teardown_runs_with_the_realms_own_heap_current_and_none_after() {
+    static SEEN: std::sync::Mutex<Vec<(&'static str, usize)>> = std::sync::Mutex::new(Vec::new());
+    fn note(what: &'static str) {
+        SEEN.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((what, kiln_realm_gc_current_heap() as usize));
+    }
+    unsafe extern "C" fn collect(_heap: *mut c_void, _force: i32) {}
+    unsafe extern "C" fn teardown_begin(_heap: *mut c_void) {
+        note("teardown_begin");
+    }
+    unsafe extern "C" fn teardown_end(heap: *mut c_void) {
+        note("teardown_end");
+        // SAFETY: the test allocated this heap as one Box below.
+        drop(unsafe { Box::from_raw(heap.cast::<[*const GcHooks; 2]>()) });
+    }
+    unsafe extern "C" fn mark_value(_heap: *mut c_void, _value: *const c_void) {}
+    unsafe extern "C" fn mark_block(_heap: *mut c_void, _pointer: *mut c_void) {}
+    unsafe extern "C" fn introspect(_heap: *mut c_void) -> i32 {
+        0
+    }
+    unsafe extern "C" fn roots(_heap: *mut c_void, _context: *mut c_void, phase: i32) {
+        if phase == GC_PHASE_RESET {
+            note("reset");
+        }
+    }
+    unsafe extern "C" fn store_drop(_pointer: *mut c_void) {
+        note("callable store");
+    }
+    static HOOKS: GcHooks = GcHooks {
+        version: GC_HOOKS_VERSION,
+        size: std::mem::size_of::<GcHooks>() as u32,
+        collect: Some(collect),
+        teardown_begin: Some(teardown_begin),
+        teardown_end: Some(teardown_end),
+        mark_value: Some(mark_value),
+        mark_block: Some(mark_block),
+        introspect: Some(introspect),
+    };
+    unsafe extern "C" fn enter(context: *mut c_void) -> i32 {
+        let mut heap = std::ptr::null_mut();
+        let mut store = std::ptr::null_mut();
+        let candidate =
+            Box::into_raw(Box::new([&raw const HOOKS, std::ptr::null()])).cast::<c_void>();
+        // SAFETY: the candidate stays live until teardown frees it; the outputs are this frame's
+        // and the caller's.
+        unsafe {
+            assert_eq!(
+                kiln_realm_gc_attach(&raw const HOOKS, candidate, &raw mut heap),
+                0
+            );
+            assert_eq!(kiln_realm_gc_register_roots(Some(roots), context, 0), 0);
+            assert_eq!(
+                kiln_realm_callable_store(
+                    8,
+                    27,
+                    opaque_test_pointer(5),
+                    Some(store_drop),
+                    &raw mut store,
+                ),
+                0
+            );
+            context.cast::<usize>().write(heap as usize);
+        }
+        0
+    }
+
+    let mut handle = 0;
+    let mut heap = 0usize;
+    // SAFETY: the output slot and the root context stay live through the calls.
+    assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
+    assert_eq!(
+        unsafe { kiln_realm_enter(handle, Some(enter), (&raw mut heap).cast::<c_void>()) },
+        0
+    );
+    assert_ne!(heap, 0);
+    assert!(
+        kiln_realm_gc_current_heap().is_null(),
+        "no realm is active between entries"
+    );
+    let generation = unsafe { *kiln_realm_generation_slot() };
+    assert_eq!(kiln_realm_destroy(handle), 0);
+    assert_eq!(
+        SEEN.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_slice(),
+        &[
+            ("callable store", heap),
+            ("teardown_begin", heap),
+            ("teardown_end", heap),
+            ("reset", 0),
+        ]
+    );
+    assert!(kiln_realm_gc_current_heap().is_null());
+    assert_ne!(
+        unsafe { *kiln_realm_generation_slot() },
+        generation,
+        "a cached answer from before the teardown must be asked again"
+    );
+}
+
 /// The dump has to be offered where the collector sweeps, and the numbers it prints have
 /// to be readable from there: the prelude calls back into this archive in the middle of
 /// the hook, so anything the drive still had borrowed would panic instead of printing.

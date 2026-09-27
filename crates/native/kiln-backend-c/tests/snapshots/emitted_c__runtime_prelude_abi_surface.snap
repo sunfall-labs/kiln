@@ -1908,7 +1908,7 @@ typedef struct kiln_c99_local_edge {
 #define KILN_GC_PENDING_EDGES 16u
 typedef struct kiln_gc_heap {
 static const kiln_gc_hooks kiln_c99_gc_hooks;
-static kiln_gc_heap kiln_c99_gc_fallback;
+static _Thread_local kiln_gc_heap kiln_c99_gc_fallback;
 #define KILN_C99_PROCESS_LAYOUT (UINT64_C(0x6b696c6e00010000) | (uint64_t)sizeof(struct kiln_shared_state))
 typedef struct kiln_shared_key_table {
 typedef struct kiln_shared_state {

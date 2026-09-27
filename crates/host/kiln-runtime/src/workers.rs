@@ -19,7 +19,11 @@
 //! travelling in a message, and the realm that decodes it is the one that waits on it.
 //!
 //! A broadcast group is a set of endpoints with no peer: posting copies the message to every
-//! other member.
+//! other member. Groups are named within one *program* -- a top-level realm and the workers it
+//! started, and theirs -- never across the process: the realms `KILN_REALMS` and `KILN_WORKERS`
+//! thread mode run side by side are separate programs, as node's `cluster` processes are, and a
+//! `BroadcastChannel` of one must not reach another (realms issue 25). Ports need no such scope:
+//! a port is reached only through its number, which travels in a message of its own program.
 //!
 //! # Workers
 //!
@@ -180,7 +184,7 @@ struct Endpoint {
     queue: VecDeque<Message>,
     notify: Arc<Notify>,
     peer_closed: bool,
-    group: Option<String>,
+    group: Option<GroupName>,
     /// The parent's end of a running worker's channel: the worker closing its `parentPort`
     /// does not close this end, because the runtime still has the worker's `exit` to deliver
     /// through it.
@@ -200,11 +204,14 @@ impl Endpoint {
     }
 }
 
+/// A broadcast group's name: the program it belongs to, and the name that program gave it.
+type GroupName = (u64, String);
+
 #[derive(Default)]
 struct Ports {
     next: u64,
     endpoints: HashMap<u64, Endpoint>,
-    groups: HashMap<String, Vec<u64>>,
+    groups: HashMap<GroupName, Vec<u64>>,
 }
 
 impl Ports {
@@ -341,14 +348,15 @@ pub fn close(port: u64) {
     drop(endpoint);
 }
 
-/// Join the broadcast group `name` with a new endpoint.
+/// Join the broadcast group `name` of this thread's program with a new endpoint.
 pub fn broadcast_join(name: &str) -> u64 {
+    let group = (program().id, name.to_owned());
     let mut ports = ports();
     let port = ports.allocate();
     let mut endpoint = Endpoint::new(0);
-    endpoint.group = Some(name.to_owned());
+    endpoint.group = Some(group.clone());
     ports.endpoints.insert(port, endpoint);
-    ports.groups.entry(name.to_owned()).or_default().push(port);
+    ports.groups.entry(group).or_default().push(port);
     port
 }
 
@@ -419,8 +427,9 @@ pub struct WorkerContext {
     /// The worker's identity in the runtime, unique in the process: what [`terminate`] and
     /// [`reap`] take.
     pub key: u64,
-    /// Where this program's `threadId`s come from; a worker's own workers draw from it too.
-    ids: Arc<AtomicU64>,
+    /// The program the worker belongs to: its `threadId`s and its broadcast groups. A worker's
+    /// own workers belong to it too.
+    program: Arc<Program>,
     pub spec: WorkerSpec,
     /// The parent's end of the worker's channel, where the runtime's own messages go.
     parent: u64,
@@ -494,8 +503,30 @@ thread_local! {
     static CHILDREN: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
     /// The current worker's terminate flag, for the checks on hot paths.
     static TERMINATE: Cell<Option<&'static AtomicBool>> = const { Cell::new(None) };
-    /// Where a main thread's program takes its workers' `threadId`s from.
-    static PROGRAM_IDS: RefCell<Option<Arc<AtomicU64>>> = const { RefCell::new(None) };
+    /// The program a main thread runs; see [`Program`].
+    static PROGRAM: RefCell<Option<Arc<Program>>> = const { RefCell::new(None) };
+}
+
+/// One program: a top-level realm and every worker under it. What node scopes to a process --
+/// `threadId`s numbered from 1, the names `BroadcastChannel`s meet by -- kiln scopes to this,
+/// because one kiln process can run several programs at once (`KILN_REALMS`, `KILN_WORKERS` thread
+/// mode, the daemon and the test runner), each on its own main thread.
+#[derive(Debug)]
+struct Program {
+    /// Unique in the process: what a broadcast group's name is qualified by.
+    id: u64,
+    /// The next worker's `threadId`.
+    thread_ids: AtomicU64,
+}
+
+impl Program {
+    fn new() -> Arc<Self> {
+        static NEXT_PROGRAM: AtomicU64 = AtomicU64::new(1);
+        Arc::new(Self {
+            id: NEXT_PROGRAM.fetch_add(1, Ordering::Relaxed),
+            thread_ids: AtomicU64::new(1),
+        })
+    }
 }
 
 /// The worker running on this thread, `None` on a main thread.
@@ -508,24 +539,22 @@ pub fn thread_id() -> u64 {
     CURRENT.with(|current| current.borrow().as_ref().map_or(0, |ctx| ctx.thread_id))
 }
 
-/// A new program starts on this (main) thread: its first worker is `threadId` 1 again, as in a
-/// new node process.
+/// A new program starts on this (main) thread: its first worker is `threadId` 1 again, and its
+/// broadcast groups are its own, as in a new node process.
 pub fn begin_program() {
     if current().is_none() {
-        PROGRAM_IDS.with(|ids| *ids.borrow_mut() = Some(Arc::new(AtomicU64::new(1))));
+        PROGRAM.with(|program| *program.borrow_mut() = Some(Program::new()));
     }
 }
 
-fn thread_ids() -> Arc<AtomicU64> {
+/// The program this thread's realm belongs to: a worker's is its parent's; a main thread's is
+/// the one it began, or one of its own from its first use (each top-level realm of a native
+/// process runs on its own thread).
+fn program() -> Arc<Program> {
     if let Some(worker) = current() {
-        return Arc::clone(&worker.ids);
+        return Arc::clone(&worker.program);
     }
-    PROGRAM_IDS.with(|ids| {
-        Arc::clone(
-            ids.borrow_mut()
-                .get_or_insert_with(|| Arc::new(AtomicU64::new(1))),
-        )
-    })
+    PROGRAM.with(|program| Arc::clone(program.borrow_mut().get_or_insert_with(Program::new)))
 }
 
 fn current_key() -> u64 {
@@ -589,8 +618,8 @@ pub fn spawn<F>(spec: WorkerSpec, run: F) -> Result<(u64, u64), String>
 where
     F: FnOnce(Arc<WorkerContext>) -> i32 + Send + 'static,
 {
-    let ids = thread_ids();
-    let thread_id = ids.fetch_add(1, Ordering::Relaxed);
+    let program = program();
+    let thread_id = program.thread_ids.fetch_add(1, Ordering::Relaxed);
     let key = NEXT_KEY.fetch_add(1, Ordering::Relaxed);
     let terminate = Arc::new(AtomicBool::new(false));
     let control = spec.control;
@@ -608,7 +637,7 @@ where
     let context = Arc::new(WorkerContext {
         thread_id,
         key,
-        ids,
+        program,
         spec,
         parent,
         terminate: Arc::clone(&terminate),
@@ -893,6 +922,59 @@ mod tests {
         assert!(take(two).is_none());
         assert!(take(three).is_some());
         for port in [one, two, three] {
+            close(port);
+        }
+    }
+
+    #[test]
+    fn a_broadcast_group_is_the_programs_own() {
+        // Two top-level realms on two threads are two programs: the same name is two groups.
+        let here = broadcast_join("kiln-test-scoped");
+        let there = std::thread::spawn(|| broadcast_join("kiln-test-scoped"))
+            .join()
+            .unwrap();
+        let sent = Message::new(kind::USER, vec![Token::Number(1.0)]);
+        assert_eq!(broadcast_post(here, sent), 0);
+        assert!(take(there).is_none());
+        let sent = Message::new(kind::USER, vec![Token::Number(2.0)]);
+        assert_eq!(broadcast_post(there, sent), 0);
+        assert!(take(here).is_none());
+
+        // A worker belongs to the program that started it, and meets it by name.
+        let (parent, port) = channel();
+        let (control, _unused) = channel();
+        let spec = WorkerSpec {
+            entry: WorkerEntry::Eval(String::new()),
+            argv: Vec::new(),
+            info: String::new(),
+            port,
+            control,
+            pipe_stdio: true,
+        };
+        let (id, _) = spawn(spec, |_| {
+            let member = broadcast_join("kiln-test-scoped");
+            let sent = Message::new(kind::USER, vec![Token::Number(3.0)]);
+            let delivered = broadcast_post(member, sent);
+            close(member);
+            i32::try_from(delivered).unwrap_or(-1)
+        })
+        .unwrap();
+        reap(id);
+        assert!(matches!(take(here).unwrap().tokens[..], [Token::Number(n)] if n == 3.0));
+        assert!(take(there).is_none());
+        assert_eq!(take(parent).unwrap().kind, kind::ONLINE);
+        let exit = take(parent).unwrap();
+        assert!(matches!(exit.tokens[..], [_, _, Token::Number(n)] if n == 1.0));
+
+        // A new program on the same thread starts with groups of its own.
+        begin_program();
+        let later = broadcast_join("kiln-test-scoped");
+        assert_eq!(
+            broadcast_post(later, Message::new(kind::USER, Vec::new())),
+            0
+        );
+        assert!(take(here).is_none());
+        for port in [here, there, later, parent] {
             close(port);
         }
     }
