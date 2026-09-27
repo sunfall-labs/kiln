@@ -1326,12 +1326,7 @@ mod tests {
             var proxy = new Proxy(a, {get: function(target, key) { proxyReads++; check(key === '0'); return 51; }});
             check(proxy[0] === 51 && proxyReads === 1);
             function detach(buffer) {
-                // Older raw realms have no bootstrap; use the same storage primitive there.
-                if (typeof ArrayBuffer.prototype.transfer === 'function') {
-                    ArrayBuffer.prototype.transfer.call(buffer);
-                } else {
-                    globalThis.__kilnArrayBufferDetach(buffer, 0, false);
-                }
+                buffer.transfer();
             }
             a[0] = {valueOf: function() { detach(a.buffer); return 12; }};
             check(a[0] === undefined);
