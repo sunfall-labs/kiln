@@ -2048,3 +2048,189 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const kiln_stri
         return status;
     }
 }
+
+/* ---- Tier 2 of the parallel built-ins: the reads a pool thread makes (parallel issue 07) ----
+ *
+ * Out-of-line halves of the readers in `prelude_types.h`. Each answers what the ordinary read
+ * (`kiln_c99_get_own_kind` above, `kiln_c99_val_read_property_key`) answers for the same value
+ * and key, or declines with 0 wherever that read could run code, allocate or write -- and where
+ * it gives an answer this walk does not reproduce exactly. Nothing here writes: no cache is
+ * taught (the worker's own site cache is on its stack), no key is interned
+ * (`kiln_c99_interned_key_in` only looks), no object is converted to dictionary mode. */
+
+/* A name that falls off the end of an ordinary object's chain. The ordinary read answers some
+ * names there by kind -- `constructor`, `__proto__` (an accessor), `Object.prototype`'s methods,
+ * whatever the realm's `Object.prototype` store holds -- and those decline; any other name is
+ * absent, which is undefined. */
+static int kiln_c99_par_absent(const kiln_string *key, const kiln_string *ikey, kiln_val *out) {
+    char buffer[256];
+    const char *bytes = NULL;
+    size_t len = 0;
+    if (kiln_c99_same_name_key(key, "constructor") || kiln_c99_same_name_key(key, "__proto__")) {
+        return 0;
+    }
+    if (kiln_c99_intrinsic_ascii_view(key, buffer, &bytes, &len) &&
+        kiln_c99_namespace_method(KILN_C99_BUILTIN_OBJECT_PROTOTYPE, bytes, len) != 0) {
+        return 0;
+    }
+    /* A key the realm never interned is in no store; one it did, the store is scanned live. */
+    if (!kiln_c99_object_prototype_unmodified() && ikey != NULL &&
+        !kiln_c99_object_prototype_lacks(ikey)) {
+        return 0;
+    }
+    *out = KILN_VAL_UNDEFINED;
+    return 1;
+}
+
+/* `object[key]` by name, over ordinary objects only: each level's own data property, then its
+ * prototype, to the end of the chain. `ikey` is the interned key, or NULL for a spelling the realm
+ * never interned (which no object stores). A level that is not an ordinary object, an accessor, a
+ * refused member, a shaped object with a property list beside its shape: decline. `site`, when
+ * given, learns the receiver's own data slot. */
+static int kiln_c99_par_walk(kiln_c99_par_site *site, kiln_val object, const kiln_string *ikey,
+                             const kiln_string *key, kiln_val *out) {
+    kiln_val current = object;
+    size_t steps;
+    if (key == NULL || kiln_c99_key_is_reserved(key) || kiln_c99_key_index_key(key) >= 0.0) {
+        return 0;
+    }
+    for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
+        const kiln_object *obj;
+        if (!KILN_VAL_IS_OBJECT(current)) return 0;
+        obj = (const kiln_object *)KILN_VAL_PTR(current);
+        if (kiln_c99_gc_payload_kind(obj) != KILN_GC_OBJECT || obj->arguments_brand ||
+            obj->error_brand || obj->module_namespace) {
+            return 0;
+        }
+        if (obj->shape != NULL) {
+            uint32_t slot;
+            if (ikey != NULL && kiln_c99_shape_find_slot(obj->shape, ikey, &slot)) {
+                if (slot >= obj->slot_capacity || slot >= 32u ||
+                    (obj->shape->accessor_mask & (1u << slot)) != 0) {
+                    return 0;
+                }
+                *out = obj->slots[slot];
+                if (steps == 0 && site != NULL) {
+                    site->shape = obj->shape;
+                    site->slot = slot;
+                }
+                return 1;
+            }
+            /* The ordinary read converts such an object to a list first; that is a write. */
+            if (obj->properties != NULL) return 0;
+        } else {
+            size_t index;
+            for (index = 0; index < obj->count && obj->properties != NULL; ++index) {
+                const kiln_property *property = &obj->properties[index];
+                if (ikey != NULL ? property->key == ikey : kiln_c99_same_key_view(property, key)) {
+                    if (property->refused || property->accessor) return 0;
+                    *out = kiln_val_from_boundary(property->value);
+                    return 1;
+                }
+            }
+        }
+        switch (obj->prototype.tag) {
+        case KILN_VALUE_OBJECT:
+            current = kiln_val_from_boundary(obj->prototype);
+            continue;
+        case KILN_VALUE_NULL:
+            /* `Object.create(null)` itself answers every absent name undefined. */
+            if (steps == 0) {
+                *out = KILN_VAL_UNDEFINED;
+                return 1;
+            }
+            return kiln_c99_par_absent(key, ikey, out);
+        case KILN_VALUE_UNDEFINED:
+            return kiln_c99_par_absent(key, ikey, out);
+        default:
+            return 0;
+        }
+    }
+    return 0;
+}
+
+static int kiln_c99_par_get_slow(const kiln_c99_par_env *env, kiln_c99_par_site *site,
+                                 kiln_val object, const kiln_string *ikey, kiln_val *out) {
+    (void)env;
+    return kiln_c99_par_walk(site, object, ikey, ikey, out);
+}
+
+/* `object[key]` when the inline half did not answer. A number key: an array's hole or a key past
+ * its end (absent, and neither `Array.prototype` nor `Object.prototype` names an index while the
+ * built-ins are unmodified, which the call site checked), a view's key outside it (undefined), a
+ * string's code unit (a one-unit string from the static table, below 256) or a key past it, an
+ * ordinary object's dense element. A string key: an ordinary object's property by name. */
+static int kiln_c99_par_index_slow(const kiln_c99_par_env *env, kiln_val object, kiln_val key,
+                                   kiln_val *out) {
+    if (KILN_VAL_IS_NUMBER(key)) {
+        double d;
+        memcpy(&d, &key, sizeof d);
+        if ((object & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX) {
+            const void *payload = KILN_VAL_PTR(object);
+            uint32_t kind = kiln_c99_gc_payload_kind(payload);
+            if (kind == KILN_GC_ARRAY) {
+                const kiln_array *arr = (const kiln_array *)payload;
+                /* A number names an element, or a property whose name is a number's spelling;
+                 * an array with no named properties holds neither beyond its elements. */
+                if (arr->properties.tag != KILN_VALUE_UNDEFINED) return 0;
+                if (d >= 0.0 && d < (double)arr->count && d == floor(d) &&
+                    arr->elements[(size_t)d] != KILN_VAL_HOLE) {
+                    *out = arr->elements[(size_t)d];
+                    return 1;
+                }
+                *out = KILN_VAL_UNDEFINED;
+                return 1;
+            }
+            if (kind == KILN_GC_TYPED_ARRAY) {
+                const kiln_typed_array *view = (const kiln_typed_array *)payload;
+                if (view->kind > KILN_TYPED_FLOAT64) return 0;
+                /* A number is always a canonical numeric key: an integer index inside the view
+                 * reads it, every other reads undefined, never the prototype. */
+                if (!view->buffer->detached && d >= 0.0 && d < (double)view->length &&
+                    d == floor(d)) {
+                    *out = kiln_c99_val_from_double(kiln_typed_load(view, (size_t)d));
+                    return 1;
+                }
+                *out = KILN_VAL_UNDEFINED;
+                return 1;
+            }
+            return 0;
+        }
+        if (KILN_VAL_IS_STRING(object)) {
+            const kiln_string *str = (const kiln_string *)KILN_VAL_PTR(object);
+            if (d >= 0.0 && d < (double)str->unit_len && d == floor(d)) {
+                uint16_t unit = kiln_string_unit_at(str, (size_t)d);
+                if (unit > 0xFF) return 0;
+                *out = kiln_c99_val_single_char((unsigned char)unit);
+                return 1;
+            }
+            *out = KILN_VAL_UNDEFINED;
+            return 1;
+        }
+        if (KILN_VAL_IS_OBJECT(object)) {
+            const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(object);
+            if (kiln_c99_gc_payload_kind(obj) == KILN_GC_OBJECT && obj->shape != NULL &&
+                !obj->arguments_brand && !obj->error_brand && !obj->module_namespace &&
+                obj->elements != NULL && d >= 0.0 && d < (double)obj->element_count &&
+                d < 100000.0 && d == floor(d) && obj->elements[(size_t)d] != KILN_VAL_HOLE) {
+                *out = obj->elements[(size_t)d];
+                return 1;
+            }
+        }
+        return 0;
+    }
+    if (KILN_VAL_IS_STRING(key) && KILN_VAL_IS_OBJECT(object)) {
+        const kiln_string *name = (const kiln_string *)KILN_VAL_PTR(key);
+        return kiln_c99_par_walk(NULL, object, kiln_c99_interned_key_in(env->heap, name), name,
+                                 out);
+    }
+    return 0;
+}
+
+/* On the realm thread, before the pool starts: build what the readers above reach lazily (the
+ * built-in member index `kiln_c99_namespace_method` searches), and answer the heap they read. */
+static struct kiln_gc_heap *kiln_c99_par_prepare(void) {
+    int owned = 0;
+    (void)kiln_c99_surface_method(KILN_C99_BUILTIN_OBJECT_PROTOTYPE, NULL, 0, &owned);
+    return (struct kiln_gc_heap *)kiln_c99_gc_heap();
+}

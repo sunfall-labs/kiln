@@ -1430,6 +1430,64 @@ static void kiln_c99_no_write_leave(kiln_c99_no_write_frame *frame) {
     kiln_c99_realm_cached = frame->saved;
 }
 
+/* A tier-2 chunk worker's section (parallel issue 07): the no-write frame above, kept in the
+ * opaque `kiln_c99_par_frame` a module unit can declare, since this struct is the prelude's. */
+_Static_assert(sizeof(kiln_c99_no_write_frame) <= sizeof(kiln_c99_par_frame),
+               "kiln_c99_par_frame holds a no-write frame");
+_Static_assert(_Alignof(kiln_c99_no_write_frame) <= _Alignof(kiln_c99_par_frame),
+               "kiln_c99_par_frame is aligned for a no-write frame");
+
+static void kiln_c99_par_enter(const kiln_c99_par_env *env, kiln_c99_par_frame *frame) {
+    kiln_c99_no_write_enter((kiln_gc_heap *)env->heap, (kiln_c99_no_write_frame *)(void *)frame);
+}
+
+static void kiln_c99_par_leave(kiln_c99_par_frame *frame) {
+    kiln_c99_no_write_leave((kiln_c99_no_write_frame *)(void *)frame);
+}
+
+/* The write detector of parallel issue 06: with `KILN_PARALLEL_PROTECT=1` in the environment, a
+ * tier-2 call site maps its realm's heap read-only for the length of the pool's run -- every slab
+ * and every nursery region, the pages that hold the headers of objects, arrays, strings and
+ * views -- so a write any read path forgot (a cache taught, an ASCII answer stored in a string's
+ * header, a layout token issued) faults at the write instead of racing. Large blocks are the
+ * allocator's and share pages with other memory, so they are not covered. Off, it costs the site
+ * one load. Read once per process: 0 not yet read, 1 off, 2 on. */
+static int kiln_c99_par_protect_state;
+
+static void kiln_c99_par_protect_regions(kiln_gc_heap *heap, int prot) {
+#if defined(__unix__) || defined(__APPLE__)
+    kiln_gc_slab *slab;
+    size_t index;
+    for (slab = heap->all_slabs; slab != NULL; slab = slab->all_next) {
+        (void)mprotect(slab, KILN_GC_SLAB_SIZE, prot);
+    }
+    for (index = 0; index < heap->nursery.regions.capacity; ++index) {
+        void *region = heap->nursery.regions.table[index];
+        if (region != NULL) (void)mprotect(region, heap->nursery.capacity, prot);
+    }
+#else
+    (void)heap;
+    (void)prot;
+#endif
+}
+
+/* `frozen` nonzero just before a tier-2 pool run, zero just after it. */
+static void kiln_c99_par_section(int frozen) {
+    int state = __atomic_load_n(&kiln_c99_par_protect_state, __ATOMIC_RELAXED);
+    kiln_gc_heap *heap;
+    if (KILN_UNLIKELY(state == 0)) {
+        const char *setting = getenv("KILN_PARALLEL_PROTECT");
+        state = setting != NULL && setting[0] == '1' ? 2 : 1;
+        __atomic_store_n(&kiln_c99_par_protect_state, state, __ATOMIC_RELAXED);
+    }
+    if (KILN_LIKELY(state != 2)) return;
+    heap = kiln_c99_gc_heap();
+    if (heap == NULL) return;
+#if defined(__unix__) || defined(__APPLE__)
+    kiln_c99_par_protect_regions(heap, frozen ? PROT_READ : PROT_READ | PROT_WRITE);
+#endif
+}
+
 /* A compiled unit's block in this thread's realm, made on the realm's first entry into the unit
  * (see `kiln_c99_unit`). The slow half of `kiln_c99_unit_vals`: taken once per realm switch on
  * this thread, then the cache answers until the generation moves. */
@@ -2568,6 +2626,18 @@ static void kiln_c99_gc_collect(void *opaque, int force);
 
 /* A collection from inside a turn, at an allocation. */
 static void kiln_c99_gc_collect_mid_turn(kiln_gc_heap *heap) {
+    /* A thread in no-write mode -- a parallel section's chunk (ADR 0069, parallel issue 07) --
+     * reads a heap that other threads read at the same time, so it must never allocate, and an
+     * allocation that reached a collection is a proof the backend admitted by mistake: sweeping
+     * now would free memory the other workers are reading. Stop at the cause instead. On the
+     * collection path only, so an allocation costs nothing more; `KILN_GC_STRESS`, which
+     * collects at every allocation, makes any such allocation arrive here. */
+    if (KILN_UNLIKELY(kiln_c99_no_write())) {
+        fputs("kiln: a collection was due on a thread reading a frozen heap (a parallel section "
+              "allocated)\n",
+              stderr);
+        abort();
+    }
     heap->mid_turn = 1;
     kiln_c99_gc_collect(heap, 1);
     heap->mid_turn = 0;

@@ -1040,8 +1040,12 @@ fn runtime_prelude_size() {
     // Widened on 2026-09-27 for realms issue 08 (+~430 lines): the shared immutable region (its
     // reservation, sealing and the closure accessors), the no-write read path, lazily initialised
     // slabs, and the generated list of the prelude's literal keys (~75 lines, packed).
+    // Widened on 2026-09-27 for parallel issue 07 (+~480 lines): tier 2's guarded readers (the
+    // inline halves in the header, the walks and the absent-name check in `read.c`), the
+    // no-write frame a worker enters, the collection that refuses to run on a frozen heap, issue
+    // 06's `KILN_PARALLEL_PROTECT` write detector, and the comments saying what each proves.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 55_600;
+    const CEILING_LINES: usize = 56_200;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

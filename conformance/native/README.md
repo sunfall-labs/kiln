@@ -37,4 +37,15 @@ covers the generic case. The development profile emits no parallel code, and `--
 says `dev-profile` there. `kiln build --profile native-release --explain-parallel <probe>` says
 which sites run in parallel. The family (`parallel-filter`, `parallel-flatmap`, `parallel-reduce`,
 `parallel-sort`, `parallel-family-refused`; issue 10) is held to `filter`, `flatMap` and `sort`,
-and `parallelReduce` to its fixed tree written out again in the probe.
+and `parallelReduce` to its fixed tree written out again in the probe. Tier 2 (issue 07,
+callbacks that read the heap) has `parallel-heap-reads` (own, dictionary and inherited
+properties, holes, typed columns), `parallel-heap-strings`, `parallel-heap-sort` (key
+comparators) and `parallel-heap-getters`, where every getter, proxy trap and `arguments` read
+logs its calls and the log must be the sequential method's -- the read declines on the pool, and
+the call runs sequentially from the first element.
+
+`native.sh` skips the `parallelism=` probes under `KILN_NATIVE_GC_STRESS` (see the script). A
+collection can never run inside a parallel section, because nothing there allocates; the
+collector says so itself: an allocation that reaches a collection on a thread in no-write mode
+aborts (`kiln_c99_gc_collect_mid_turn`), so running a tier-2 probe's binary by hand under
+`KILN_GC_STRESS` checks it at every allocation around the call.

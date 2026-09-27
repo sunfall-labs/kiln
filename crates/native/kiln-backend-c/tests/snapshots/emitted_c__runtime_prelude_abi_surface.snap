@@ -1069,6 +1069,32 @@ static inline int kiln_c99_recv_refused(const kiln_shape *const *refused, const 
 static inline const uint32_t *kiln_c99_recv_claim(const kiln_shape **shapes,
 typedef struct kiln_array {
 static inline int kiln_c99_array_elements_owned(const kiln_array *array) {
+typedef struct kiln_c99_par_env {
+typedef struct kiln_c99_par_site {
+typedef struct kiln_c99_par_frame {
+#ifdef KILN_SEPARATE_PRELUDE
+extern void kiln_c99_par_enter(const kiln_c99_par_env *env, kiln_c99_par_frame *frame);
+extern void kiln_c99_par_leave(kiln_c99_par_frame *frame);
+extern int kiln_c99_par_get_slow(const kiln_c99_par_env *env, kiln_c99_par_site *site,
+extern int kiln_c99_par_index_slow(const kiln_c99_par_env *env, kiln_val object, kiln_val key,
+extern struct kiln_gc_heap *kiln_c99_par_prepare(void);
+extern void kiln_c99_par_section(int frozen);
+#else
+static void kiln_c99_par_enter(const kiln_c99_par_env *env, kiln_c99_par_frame *frame);
+static void kiln_c99_par_leave(kiln_c99_par_frame *frame);
+static int kiln_c99_par_get_slow(const kiln_c99_par_env *env, kiln_c99_par_site *site,
+static int kiln_c99_par_index_slow(const kiln_c99_par_env *env, kiln_val object, kiln_val key,
+static struct kiln_gc_heap *kiln_c99_par_prepare(void);
+static void kiln_c99_par_section(int frozen);
+#endif
+static KILN_ALWAYS_INLINE inline int kiln_c99_par_number(kiln_val v, double *out) {
+static KILN_ALWAYS_INLINE inline int kiln_c99_par_get(const kiln_c99_par_env *env,
+static KILN_ALWAYS_INLINE inline int kiln_c99_par_length(const kiln_c99_par_env *env,
+static KILN_ALWAYS_INLINE inline int kiln_c99_par_index(const kiln_c99_par_env *env,
+static KILN_ALWAYS_INLINE inline int kiln_c99_par_relational(int op, kiln_val a, kiln_val b) {
+static KILN_ALWAYS_INLINE inline int kiln_c99_par_strict_equal(kiln_val a, kiln_val b) {
+static inline int kiln_c99_par_loose_equal(kiln_val a, kiln_val b) {
+static KILN_ALWAYS_INLINE inline int kiln_c99_par_char_code_at(kiln_val s, kiln_val pos,
 typedef struct kiln_generator {
 typedef struct kiln_date_parts {
 typedef struct kiln_entry {
@@ -1845,6 +1871,18 @@ typedef struct kiln_c99_no_write_frame {
 static inline int kiln_c99_no_write(void) {
 static void kiln_c99_no_write_enter(kiln_gc_heap *heap, kiln_c99_no_write_frame *frame) {
 static void kiln_c99_no_write_leave(kiln_c99_no_write_frame *frame) {
+_Static_assert(sizeof(kiln_c99_no_write_frame) <= sizeof(kiln_c99_par_frame),
+_Static_assert(_Alignof(kiln_c99_no_write_frame) <= _Alignof(kiln_c99_par_frame),
+static void kiln_c99_par_enter(const kiln_c99_par_env *env, kiln_c99_par_frame *frame) {
+static void kiln_c99_par_leave(kiln_c99_par_frame *frame) {
+static int kiln_c99_par_protect_state;
+static void kiln_c99_par_protect_regions(kiln_gc_heap *heap, int prot) {
+#if defined(__unix__) || defined(__APPLE__)
+#else
+#endif
+static void kiln_c99_par_section(int frozen) {
+#if defined(__unix__) || defined(__APPLE__)
+#endif
 static kiln_val *kiln_c99_unit_vals_slow(kiln_c99_unit *unit, kiln_c99_unit_cache *cache) {
 static int kiln_c99_unit_keys_claim(uint64_t *owner) {
 static void kiln_c99_unit_keys_release(uint64_t *owner, void *opaque) {
@@ -2591,6 +2629,11 @@ static int kiln_c99_get_ikey(kiln_host *host, kiln_value target, const char *key
 static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object,
 static int kiln_c99_get_site(kiln_host *host, kiln_value target, const kiln_string *key,
+static int kiln_c99_par_absent(const kiln_string *key, const kiln_string *ikey, kiln_val *out) {
+static int kiln_c99_par_walk(kiln_c99_par_site *site, kiln_val object, const kiln_string *ikey,
+static int kiln_c99_par_get_slow(const kiln_c99_par_env *env, kiln_c99_par_site *site,
+static int kiln_c99_par_index_slow(const kiln_c99_par_env *env, kiln_val object, kiln_val key,
+static struct kiln_gc_heap *kiln_c99_par_prepare(void) {
 static int kiln_c99_put_site_key(kiln_host *host, kiln_value target, const kiln_string *key,
 static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_reduce_key(kiln_host *host, kiln_value target, kiln_value key,

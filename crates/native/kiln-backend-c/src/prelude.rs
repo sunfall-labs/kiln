@@ -4742,6 +4742,8 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     // Per thread, and trusted only for the heap serial it was built under: the `node:http` layouts.
     ("kiln_c99_node_http_layouts", C99StateOwner::ThreadCache),
     ("kiln_c99_gc_stress_checks", C99StateOwner::Process),
+    // Parallel issue 06's write detector (`KILN_PARALLEL_PROTECT`), read from the environment once.
+    ("kiln_c99_par_protect_state", C99StateOwner::Process),
     ("kiln_c99_introspect_pending", C99StateOwner::Process),
     ("kiln_c99_introspect_armed", C99StateOwner::Process),
     // The process-shared block (ADR 0071): shared keys and the shape root, one per process.

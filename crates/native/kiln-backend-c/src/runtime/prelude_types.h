@@ -1949,6 +1949,261 @@ static inline int kiln_c99_array_elements_owned(const kiln_array *array) {
            array->elements != (const kiln_val *)(array + 1);
 }
 
+/* ---- Tier 2 of the parallel built-ins: callbacks that read the heap (ADR 0069, issue 07) ----
+ *
+ * A tier-2 callback (`parallel::heap_verdict`) reads arrays, typed arrays, the own and inherited
+ * data properties of ordinary objects, and strings, and writes nothing. Its clone (`_h`, emitted
+ * by `parallel_heap.rs`) runs on the pool's threads while the realm thread is blocked in the
+ * call, so nothing can change the heap; and nothing collects, because nothing allocates -- the
+ * proof admits no allocation, and every read below is a load. Each worker also reads in no-write
+ * mode (`kiln_c99_par_enter`, which is `kiln_c99_no_write_enter`), so the few paths that would
+ * write while reading -- a string's ASCII answer, a key lookup -- compute without storing.
+ *
+ * Every read here answers exactly what the sequential read answers, or declines with 0: a getter
+ * anywhere on the path, a proxy, an exotic object (`arguments`, an error, a namespace), a name an
+ * `Object.prototype` member might answer, an element that would need a string allocated. A
+ * decline is not an error. The worker sets the call's failure flag, and the call site then runs
+ * the method's sequential lowering from the first element. That is sound because nothing the
+ * pool did is observable: a tier-2 callback writes nothing, and a declined read ran no user code,
+ * so the sequential run performs every effect -- the getter's included -- once, in order. */
+typedef struct kiln_c99_par_env {
+    /* Offset 0, as in tier 1: a worker that declines sets it, and every worker stops early. */
+    int failed;
+    /* A `parallelMap` over an array wrote something other than a number (a hole, a boolean):
+     * the result is not a numeric array. */
+    int mixed;
+    /* The frozen realm's heap, which the workers read in no-write mode. */
+    struct kiln_gc_heap *heap;
+    /* The callback's captured values (bindings written once), read on the realm thread. */
+    const kiln_val *caps;
+    /* The property names the callback reads, as the unit interned them. */
+    const kiln_string *const *keys;
+    /* The string literals it compares with. */
+    const kiln_val *strs;
+} kiln_c99_par_env;
+
+/* A worker's own cache for one named read of the clone: the shape it last met there and the own
+ * data slot the name has in it. It lives in the chunk worker's frame, so nothing shared is taught
+ * (ADR 0071's caches are consulted by nothing here, and written by nothing here). */
+typedef struct kiln_c99_par_site {
+    const kiln_shape *shape;
+    uint32_t slot;
+} kiln_c99_par_site;
+
+/* Where `kiln_c99_par_enter` keeps what `kiln_c99_par_leave` restores (a no-write frame). */
+typedef struct kiln_c99_par_frame {
+    uint64_t words[4];
+} kiln_c99_par_frame;
+
+#ifdef KILN_SEPARATE_PRELUDE
+extern void kiln_c99_par_enter(const kiln_c99_par_env *env, kiln_c99_par_frame *frame);
+extern void kiln_c99_par_leave(kiln_c99_par_frame *frame);
+extern int kiln_c99_par_get_slow(const kiln_c99_par_env *env, kiln_c99_par_site *site,
+                                 kiln_val object, const kiln_string *ikey, kiln_val *out);
+extern int kiln_c99_par_index_slow(const kiln_c99_par_env *env, kiln_val object, kiln_val key,
+                                   kiln_val *out);
+extern struct kiln_gc_heap *kiln_c99_par_prepare(void);
+extern void kiln_c99_par_section(int frozen);
+#else
+static void kiln_c99_par_enter(const kiln_c99_par_env *env, kiln_c99_par_frame *frame);
+static void kiln_c99_par_leave(kiln_c99_par_frame *frame);
+static int kiln_c99_par_get_slow(const kiln_c99_par_env *env, kiln_c99_par_site *site,
+                                 kiln_val object, const kiln_string *ikey, kiln_val *out);
+static int kiln_c99_par_index_slow(const kiln_c99_par_env *env, kiln_val object, kiln_val key,
+                                   kiln_val *out);
+static struct kiln_gc_heap *kiln_c99_par_prepare(void);
+static void kiln_c99_par_section(int frozen);
+#endif
+
+/* `ToNumber` of a value whose conversion runs no code and allocates nothing: a number, undefined
+ * (NaN), null and false (0), true (1). A string would parse and an object would call `valueOf`,
+ * so both decline. */
+static KILN_ALWAYS_INLINE inline int kiln_c99_par_number(kiln_val v, double *out) {
+    if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v))) {
+        memcpy(out, &v, sizeof *out);
+        return 1;
+    }
+    if (v == KILN_VAL_UNDEFINED) {
+        *out = NAN;
+        return 1;
+    }
+    if (v == KILN_VAL_NULL || v == KILN_VAL_FALSE) {
+        *out = 0.0;
+        return 1;
+    }
+    if (v == KILN_VAL_TRUE) {
+        *out = 1.0;
+        return 1;
+    }
+    return 0;
+}
+
+/* `object[ikey]` for a name that is not an index: an ordinary object's own data slot, from the
+ * worker's cache when the shape is the one it last met there, else the whole walk. */
+static KILN_ALWAYS_INLINE inline int kiln_c99_par_get(const kiln_c99_par_env *env,
+                                                      kiln_c99_par_site *site, kiln_val object,
+                                                      const kiln_string *ikey, kiln_val *out) {
+    if (KILN_LIKELY(KILN_VAL_IS_OBJECT(object))) {
+        const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(object);
+        if (KILN_LIKELY(site->shape != NULL &&
+                        kiln_c99_gc_payload_kind(obj) == KILN_GC_OBJECT &&
+                        obj->shape == site->shape && site->slot < obj->slot_capacity &&
+                        !obj->arguments_brand && !obj->error_brand && !obj->module_namespace)) {
+            *out = obj->slots[site->slot];
+            return 1;
+        }
+    }
+    return kiln_c99_par_get_slow(env, site, object, ikey, out);
+}
+
+/* `object.length`: an array's count, a view's length, a string's code units; an ordinary
+ * object's own or inherited `length` property through the walk. */
+static KILN_ALWAYS_INLINE inline int kiln_c99_par_length(const kiln_c99_par_env *env,
+                                                         kiln_c99_par_site *site, kiln_val object,
+                                                         const kiln_string *ikey, kiln_val *out) {
+    if ((object & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX) {
+        const void *payload = KILN_VAL_PTR(object);
+        uint32_t kind = kiln_c99_gc_payload_kind(payload);
+        if (KILN_LIKELY(kind == KILN_GC_ARRAY)) {
+            *out = kiln_c99_val_from_double((double)((const kiln_array *)payload)->count);
+            return 1;
+        }
+        if (kind == KILN_GC_TYPED_ARRAY && !((const kiln_typed_array *)payload)->buffer->detached) {
+            *out = kiln_c99_val_from_double((double)((const kiln_typed_array *)payload)->length);
+            return 1;
+        }
+        return 0;
+    }
+    if (KILN_VAL_IS_STRING(object)) {
+        *out = kiln_c99_val_from_double(
+            (double)((const kiln_string *)KILN_VAL_PTR(object))->unit_len);
+        return 1;
+    }
+    return kiln_c99_par_get(env, site, object, ikey, out);
+}
+
+/* `object[key]`: an element of an array (a hole declines to the slow path, which answers it) or
+ * of a Number-kind view, inline; everything else -- strings, objects by name -- out of line. */
+static KILN_ALWAYS_INLINE inline int kiln_c99_par_index(const kiln_c99_par_env *env,
+                                                        kiln_val object, kiln_val key,
+                                                        kiln_val *out) {
+    if (KILN_LIKELY(KILN_VAL_IS_NUMBER(key) &&
+                    (object & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) {
+        const void *payload = KILN_VAL_PTR(object);
+        uint32_t kind = kiln_c99_gc_payload_kind(payload);
+        double d;
+        memcpy(&d, &key, sizeof d);
+        if (KILN_LIKELY(kind == KILN_GC_ARRAY)) {
+            const kiln_array *arr = (const kiln_array *)payload;
+            if (d >= 0.0 && d < (double)arr->count) {
+                size_t i = (size_t)d;
+                if ((double)i == d && arr->elements[i] != KILN_VAL_HOLE) {
+                    *out = arr->elements[i];
+                    return 1;
+                }
+            }
+        } else if (kind == KILN_GC_TYPED_ARRAY) {
+            const kiln_typed_array *view = (const kiln_typed_array *)payload;
+            if (d >= 0.0 && d < (double)view->length && view->kind <= KILN_TYPED_FLOAT64 &&
+                !view->buffer->detached) {
+                size_t i = (size_t)d;
+                if ((double)i == d) {
+                    *out = kiln_c99_val_from_double(kiln_typed_load(view, i));
+                    return 1;
+                }
+            }
+        }
+    }
+    return kiln_c99_par_index_slow(env, object, key, out);
+}
+
+/* `a < b` (9), `<=` (10), `>` (11), `>=` (12) where neither side runs code to convert: two
+ * strings compare by code units, anything `kiln_c99_par_number` converts compares as numbers
+ * (NaN answering false). 1 or 0, or -1 to decline. */
+static KILN_ALWAYS_INLINE inline int kiln_c99_par_relational(int op, kiln_val a, kiln_val b) {
+    double x, y;
+    if (KILN_UNLIKELY(KILN_VAL_IS_STRING(a) && KILN_VAL_IS_STRING(b))) {
+        int c = kiln_string_compare_units((const kiln_string *)KILN_VAL_PTR(a),
+                                          (const kiln_string *)KILN_VAL_PTR(b));
+        switch (op) {
+        case 9: return c < 0;
+        case 10: return c <= 0;
+        case 11: return c > 0;
+        default: return c >= 0;
+        }
+    }
+    if (!kiln_c99_par_number(a, &x) || !kiln_c99_par_number(b, &y)) return -1;
+    switch (op) {
+    case 9: return x < y;
+    case 10: return x <= y;
+    case 11: return x > y;
+    default: return x >= y;
+    }
+}
+
+/* `a === b`: numbers by value (NaN unequal, the zeros equal), strings by code units, every other
+ * value by identity; a BigInt, which compares by value, declines. 1 or 0, or -1. */
+static KILN_ALWAYS_INLINE inline int kiln_c99_par_strict_equal(kiln_val a, kiln_val b) {
+    if (KILN_VAL_IS_NUMBER(a) || KILN_VAL_IS_NUMBER(b)) {
+        double x, y;
+        if (!(KILN_VAL_IS_NUMBER(a) && KILN_VAL_IS_NUMBER(b))) return 0;
+        memcpy(&x, &a, sizeof x);
+        memcpy(&y, &b, sizeof y);
+        return x == y;
+    }
+    if (KILN_VAL_IS_STRING(a) && KILN_VAL_IS_STRING(b)) {
+        return a == b || kiln_string_equal((const kiln_string *)KILN_VAL_PTR(a),
+                                           (const kiln_string *)KILN_VAL_PTR(b));
+    }
+    if ((a & UINT64_C(0xFFFF800000000000)) == KILN_TAG_BIGINT_PREFIX ||
+        (b & UINT64_C(0xFFFF800000000000)) == KILN_TAG_BIGINT_PREFIX) {
+        return -1;
+    }
+    return a == b;
+}
+
+/* `a == b` where no conversion runs code: null and undefined equal each other and nothing else;
+ * numbers and booleans compare as numbers; two strings by code units; two objects (or two
+ * symbols) by identity. A string against a number parses and an object against a primitive calls
+ * `valueOf`, so those, and BigInts, decline. 1 or 0, or -1. */
+static inline int kiln_c99_par_loose_equal(kiln_val a, kiln_val b) {
+    double x, y;
+    int a_prim, b_prim;
+    if (KILN_VAL_IS_NULLISH(a) || KILN_VAL_IS_NULLISH(b)) {
+        return KILN_VAL_IS_NULLISH(a) && KILN_VAL_IS_NULLISH(b);
+    }
+    if ((KILN_VAL_IS_NUMBER(a) || KILN_VAL_IS_BOOLEAN(a)) &&
+        (KILN_VAL_IS_NUMBER(b) || KILN_VAL_IS_BOOLEAN(b))) {
+        (void)kiln_c99_par_number(a, &x);
+        (void)kiln_c99_par_number(b, &y);
+        return x == y;
+    }
+    if (KILN_VAL_IS_STRING(a) && KILN_VAL_IS_STRING(b)) return kiln_c99_par_strict_equal(a, b);
+    a_prim = KILN_VAL_IS_NUMBER(a) || KILN_VAL_IS_BOOLEAN(a) || KILN_VAL_IS_STRING(a) ||
+             (a & UINT64_C(0xFFFF800000000000)) == KILN_TAG_BIGINT_PREFIX;
+    b_prim = KILN_VAL_IS_NUMBER(b) || KILN_VAL_IS_BOOLEAN(b) || KILN_VAL_IS_STRING(b) ||
+             (b & UINT64_C(0xFFFF800000000000)) == KILN_TAG_BIGINT_PREFIX;
+    if (a_prim || b_prim || KILN_VAL_IS_SYMBOL(a) != KILN_VAL_IS_SYMBOL(b)) return -1;
+    return a == b;
+}
+
+/* `s.charCodeAt(pos)` for a string `s` (anything else declines: an object could own the name):
+ * the code unit at `ToIntegerOrInfinity(pos)`, or NaN past either end. */
+static KILN_ALWAYS_INLINE inline int kiln_c99_par_char_code_at(kiln_val s, kiln_val pos,
+                                                               kiln_val *out) {
+    const kiln_string *str;
+    double d;
+    if (!KILN_VAL_IS_STRING(s) || !kiln_c99_par_number(pos, &d)) return 0;
+    str = (const kiln_string *)KILN_VAL_PTR(s);
+    d = isnan(d) ? 0.0 : trunc(d);
+    if (d < 0.0 || d >= (double)str->unit_len) {
+        *out = KILN_QNAN_BASE;
+        return 1;
+    }
+    *out = kiln_c99_val_from_double((double)kiln_string_unit_at(str, (size_t)d));
+    return 1;
+}
+
 /* A suspended body.
  *
  * A generator does not run when it is called: it hands back this, and each `next` resumes the

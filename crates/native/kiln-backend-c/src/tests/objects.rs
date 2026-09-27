@@ -2117,3 +2117,100 @@ int main(void) {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+/// Parallel issue 06's write detector, and the tier-2 readers under it (issue 07). With
+/// `KILN_PARALLEL_PROTECT=1` a parallel section maps the realm heap's slabs and nursery regions
+/// read-only: the readers answer own, inherited and absent names and a string's length through
+/// it, in no-write mode, and a write to an object's header faults (in a child, so the test sees
+/// the signal) until the section ends.
+#[cfg(unix)]
+#[test]
+fn a_parallel_section_maps_the_heap_read_only_and_the_tier_2_readers_read_through_it() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+#include <sys/wait.h>
+#include <unistd.h>
+static kiln_gc_heap *kiln_test_new_heap(void) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)malloc(sizeof *heap);
+    if (heap == NULL) return NULL;
+    kiln_c99_gc_heap_init(heap);
+    heap->enabled = 0;
+    kiln_c99_gc_heap_register(heap);
+    return heap;
+}
+static void kiln_test_enter(kiln_gc_heap *heap) {
+    kiln_test_heap = heap;
+    kiln_test_generation += 1;
+}
+int main(void) {
+    kiln_gc_heap *heap = kiln_test_new_heap();
+    kiln_value proto, object, text;
+    kiln_c99_par_env env;
+    kiln_c99_par_site own_site, inherited_site, absent_site;
+    kiln_c99_par_frame frame;
+    kiln_val out;
+    const kiln_string *own, *inherited, *absent;
+    pid_t child;
+    int status;
+    if (heap == NULL) return 1;
+    kiln_test_enter(heap);
+    if (kiln_c99_new_object(&proto) != KILN_C99_OK ||
+        kiln_c99_put(NULL, proto, "inherited", 9, kiln_c99_number(2.0), 0, NULL) != KILN_C99_OK) return 2;
+    if (kiln_c99_new_object(&object) != KILN_C99_OK ||
+        kiln_c99_put(NULL, object, "own", 3, kiln_c99_number(1.0), 0, NULL) != KILN_C99_OK) return 3;
+    kiln_c99_object_of(object)->prototype = proto;
+    own = kiln_c99_intern("own", 3);
+    inherited = kiln_c99_intern("inherited", 9);
+    absent = kiln_c99_intern("absent", 6);
+    text = kiln_c99_copy_text("plain", 5);
+    if (own == NULL || inherited == NULL || absent == NULL || text.tag != KILN_VALUE_STRING) return 4;
+    setenv("KILN_PARALLEL_PROTECT", "1", 1);
+    memset(&env, 0, sizeof env);
+    memset(&own_site, 0, sizeof own_site);
+    memset(&inherited_site, 0, sizeof inherited_site);
+    memset(&absent_site, 0, sizeof absent_site);
+    env.heap = kiln_c99_par_prepare();
+    if (env.heap != heap) return 5;
+
+    kiln_c99_par_section(1);
+    kiln_c99_par_enter(&env, &frame);
+    if (!kiln_c99_no_write()) return 6;
+    if (!kiln_c99_par_get(&env, &own_site, kiln_val_from_boundary(object), own, &out) ||
+        out != kiln_c99_val_from_double(1.0)) return 7;
+    /* The worker's own cache learned the slot; a second read hits it. */
+    if (own_site.shape == NULL ||
+        !kiln_c99_par_get(&env, &own_site, kiln_val_from_boundary(object), own, &out) ||
+        out != kiln_c99_val_from_double(1.0)) return 8;
+    if (!kiln_c99_par_get(&env, &inherited_site, kiln_val_from_boundary(object), inherited, &out) ||
+        out != kiln_c99_val_from_double(2.0)) return 9;
+    if (!kiln_c99_par_get(&env, &absent_site, kiln_val_from_boundary(object), absent, &out) ||
+        out != KILN_VAL_UNDEFINED) return 10;
+    if (!kiln_c99_par_length(&env, &absent_site, kiln_val_from_boundary(text), absent, &out) ||
+        out != kiln_c99_val_from_double(5.0)) return 11;
+    kiln_c99_par_leave(&frame);
+    /* A write to the object's header, as a cache teaching itself would make, faults. */
+    fflush(NULL);
+    child = fork();
+    if (child == 0) {
+        kiln_c99_object_of(object)->layout_token = 7;
+        _exit(0);
+    }
+    if (child < 0 || waitpid(child, &status, 0) != child) return 12;
+    if (!WIFSIGNALED(status) || (WTERMSIG(status) != SIGSEGV && WTERMSIG(status) != SIGBUS)) return 13;
+    kiln_c99_par_section(0);
+    /* After the section the heap is writable again. */
+    kiln_c99_object_of(object)->layout_token = 0;
+    kiln_c99_gc_teardown_begin(heap);
+    kiln_c99_gc_teardown_end(heap);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "parallel-section-protect");
+    assert!(
+        run.status.success(),
+        "the parallel section's write detector ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}

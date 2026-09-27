@@ -403,14 +403,27 @@ impl DirectPlan {
                 if !parallel_callbacks.contains(&(i as u32)) {
                     return Err(Refusal::new(Reason::CallbackUnknown));
                 }
-                let shape = crate::parallel::parallel_verdict(
+                // A callback tier 1 refuses may still read the heap in parallel (tier 2).
+                let tier_2 = |refusal| {
+                    crate::parallel::tier_2(
+                        g,
+                        &program.functions[i],
+                        program,
+                        &known.captures[i],
+                        refusal,
+                    )
+                };
+                let shape = match crate::parallel::parallel_verdict(
                     g,
                     &program.functions[i],
                     program,
                     &known.captures[i],
-                )?;
+                ) {
+                    Ok(shape) => shape,
+                    Err(refusal) => return tier_2(refusal),
+                };
                 if !typed_eligible[i] {
-                    return Err(Refusal::new(Reason::NotTyped));
+                    return tier_2(Refusal::new(Reason::NotTyped));
                 }
                 let mut seeds: HashMap<ValueId, Proven> = g
                     .initial_locals
@@ -439,7 +452,11 @@ impl DirectPlan {
                 })
             })
             .collect();
-        let parallel_safe: Vec<bool> = parallel_verdicts.iter().map(Result::is_ok).collect();
+        // A tier-2 verdict has no typed clone: `parallel_safe` is tier 1's.
+        let parallel_safe: Vec<bool> = parallel_verdicts
+            .iter()
+            .map(|v| matches!(v, Ok(shape) if shape.heap.is_none()))
+            .collect();
         let parallel_verdicts = std::sync::Arc::new(parallel_verdicts);
         let plan_for = |graph: &FunctionGraph,
                         known: &KnownValues,
@@ -963,14 +980,27 @@ impl DirectPlan {
         for &t in &targets {
             let i = t as usize;
             verdicts[i] = (|| {
-                let shape = crate::parallel::parallel_verdict(
+                // A callback tier 1 refuses may still read the heap in parallel (tier 2).
+                let tier_2 = |refusal| {
+                    crate::parallel::tier_2(
+                        &graphs[i],
+                        &program.functions[i],
+                        program,
+                        &known.captures[i],
+                        refusal,
+                    )
+                };
+                let shape = match crate::parallel::parallel_verdict(
                     &graphs[i],
                     &program.functions[i],
                     program,
                     &known.captures[i],
-                )?;
+                ) {
+                    Ok(shape) => shape,
+                    Err(refusal) => return tier_2(refusal),
+                };
                 let Some(cb) = callbacks.get(&t) else {
-                    return Err(Refusal::new(Reason::NotTyped));
+                    return tier_2(Refusal::new(Reason::NotTyped));
                 };
                 let mut seeds: HashMap<ValueId, Proven> = graphs[i]
                     .initial_locals
@@ -1000,7 +1030,11 @@ impl DirectPlan {
                 })
             })();
         }
-        let parallel_safe: Vec<bool> = verdicts.iter().map(Result::is_ok).collect();
+        // A tier-2 verdict has no typed clone: `parallel_safe` is tier 1's.
+        let parallel_safe: Vec<bool> = verdicts
+            .iter()
+            .map(|v| matches!(v, Ok(shape) if shape.heap.is_none()))
+            .collect();
         let verdicts = std::sync::Arc::new(verdicts);
 
         // The callback's own plans: its typed entry (which the site's typed-callback check and

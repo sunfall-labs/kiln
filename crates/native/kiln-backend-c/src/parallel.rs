@@ -99,7 +99,10 @@ pub enum Reason {
     /// Some reachable `return` is not proven to be a number.
     ReturnsNonNumber,
     // The plan and the emitter.
-    /// The callback has no typed entry: not directly callable, or too large.
+    /// The callback has no typed entry: not directly callable, or too large. Since tier 2 a
+    /// callback the plan finds untyped runs as its heap clone instead (every callback tier 1's
+    /// source rules admit, tier 2's admit too), so this is only the call site's answer when a
+    /// verdict it holds has no typed entry behind it.
     NotTyped,
     /// The emitted parallel clone reaches realm state (host, heap, upvalue table), so the
     /// machine check in `lib.rs` rejected it.
@@ -125,6 +128,12 @@ pub enum Reason {
     /// decision -- the edit-run loop stays proportional to the program, and the answer is
     /// identical either way. `--profile native-release` gives the site its parallel lowering.
     DevProfile,
+    /// Tier 2: the callback reads a property this module defines as an accessor (a `get` in an
+    /// object literal or a class), or `__proto__`: reading it calls a function, which may be user
+    /// code, so the read cannot run on a pool thread. A getter the compiler cannot see (defined
+    /// in another module, or with `Object.defineProperty`) is found at run time instead: the
+    /// read declines and the call runs sequentially.
+    ReadsAccessor,
 }
 
 impl Reason {
@@ -156,6 +165,7 @@ impl Reason {
         Reason::DevProfile,
         Reason::ArgumentShape,
         Reason::ComparatorUnproven,
+        Reason::ReadsAccessor,
     ];
 
     /// The stable code printed by `--explain-parallel`.
@@ -187,6 +197,7 @@ impl Reason {
             Reason::DevProfile => "dev-profile",
             Reason::ArgumentShape => "argument-shape",
             Reason::ComparatorUnproven => "comparator-unproven",
+            Reason::ReadsAccessor => "reads-accessor",
         }
     }
 
@@ -243,7 +254,11 @@ impl Reason {
             }
             Reason::ComparatorUnproven => {
                 "the comparator is not proven consistent (tier 1 knows `(a, b) => a - b` and \
-                 `(a, b) => b - a`)"
+                 `(a, b) => b - a`; tier 2 a difference of one key read from each, \
+                 `(a, b) => a.k - b.k`)"
+            }
+            Reason::ReadsAccessor => {
+                "the callback reads a property the program defines with a getter, which is a call"
             }
         }
     }
@@ -303,6 +318,509 @@ pub struct ParallelShape {
     /// boxed value rather than a double, and only `parallelFilter` -- which reads the answer
     /// through `ToBoolean` -- runs it on the pool ([`parallel_result`]).
     pub boolean_result: bool,
+    /// Tier 2 (ADR 0069, parallel issue 07): the callback reads the heap, and runs as its heap
+    /// clone (`parallel_heap.rs`) rather than as a typed `_p` clone. `captures` and
+    /// `captured_values` above are then empty: the heap clone reads its captures, of any kind,
+    /// from [`HeapShape::captures`].
+    pub heap: Option<HeapShape>,
+}
+
+/// What a tier-2 callback (one that reads the heap, [`heap_verdict`]) needs at its call site and
+/// in its clone: the values the realm thread hands every chunk, and how many named reads each
+/// worker keeps a cache for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HeapShape {
+    /// Captured bindings (upvalue indices, ascending), each written once in the unit, which the
+    /// realm thread reads once before the pool starts -- a value of any kind, since the clone
+    /// reads it through the same guarded readers as an element.
+    pub captures: Vec<u32>,
+    /// The constant indices of the property names the body reads by name, in first-use order:
+    /// the call site hands the clone the unit's interned keys in this order.
+    pub keys: Vec<u32>,
+    /// The constant indices of the string literals the body uses, in first-use order.
+    pub strings: Vec<u32>,
+    /// How many named reads the body makes: the size of each chunk worker's site cache.
+    pub sites: usize,
+    /// As a `parallelSort` comparator: `(a, b) => K(a) - K(b)` (ascending) or `K(b) - K(a)`
+    /// (descending), where `K` reads one element and nothing else varies between the two sides
+    /// ([`key_comparator`]); the value is `K` applied to the first parameter.
+    pub key: Option<(SortOrder, crate::graph::ValueId)>,
+}
+
+impl HeapShape {
+    /// The position of upvalue `index` among the captures the call site hands over.
+    pub fn capture_slot(&self, index: u32) -> Option<usize> {
+        self.captures.iter().position(|&k| k == index)
+    }
+
+    /// The position of the property name at constant `name` among the keys.
+    pub fn key_slot(&self, name: u32) -> Option<usize> {
+        self.keys.iter().position(|&k| k == name)
+    }
+
+    /// The position of the string literal at constant `index` among the strings.
+    pub fn string_slot(&self, index: u32) -> Option<usize> {
+        self.strings.iter().position(|&k| k == index)
+    }
+}
+
+/// `Math`'s value properties: each is non-writable and non-configurable, so a read of one is the
+/// constant whatever the program has done, and a tier-2 clone reads it as the constant.
+pub const MATH_CONSTANTS: &[(&str, f64)] = &[
+    ("E", std::f64::consts::E),
+    ("LN10", std::f64::consts::LN_10),
+    ("LN2", std::f64::consts::LN_2),
+    ("LOG10E", std::f64::consts::LOG10_E),
+    ("LOG2E", std::f64::consts::LOG2_E),
+    ("PI", std::f64::consts::PI),
+    ("SQRT1_2", std::f64::consts::FRAC_1_SQRT_2),
+    ("SQRT2", std::f64::consts::SQRT_2),
+];
+
+/// Every property name the program defines as an accessor with the syntax that says so -- a `get`
+/// or `set` in an object literal or a class body (`DefineAccessor`, its key the constant pushed
+/// two instructions before, ahead of the function). A tier-2 read of such a name would very
+/// likely call it, so the verdict says so at compile time ([`Reason::ReadsAccessor`]); an
+/// accessor defined any other way is met at run time, where the read declines.
+pub fn accessor_names(program: &Program) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    for code in std::iter::once(&program.code).chain(program.functions.iter().map(|f| &f.code)) {
+        for (pc, instruction) in code.iter().enumerate() {
+            if !matches!(instruction, kiln_ir::Instruction::DefineAccessor { .. }) || pc < 2 {
+                continue;
+            }
+            if let (kiln_ir::Instruction::MakeFunction(_), kiln_ir::Instruction::Const(k)) =
+                (&code[pc - 1], &code[pc - 2])
+                && let Some(name) = constant_name(program, *k)
+            {
+                names.insert(name);
+            }
+        }
+    }
+    names
+}
+
+/// Tier 2 of the proof (ADR 0069, parallel issue 07): whether `graph` (the body of `proto`) may
+/// run on a pool thread while reading the heap, and what its call site hands it.
+///
+/// Rules 1 and 2 are tier 1's (a plain function, no handler, no throw). The rest, each with the
+/// reason it refuses with:
+///
+/// 3. Values come from constants (numbers, booleans, `undefined`, `null`, and string literals,
+///    which the clone reads as the unit's own static strings), the parameters and locals, the
+///    captures of rule 4, `Phi`, and the operators -- every unary and binary operator but
+///    `typeof`, `in` and `instanceof`. Their operands are not proven anything: the clone
+///    converts only what converts without running code (`kiln_c99_par_number`), compares strings
+///    by code units, and declines the rest at run time (a string `+` allocates; an object's
+///    `valueOf` is user code).
+/// 4. Captured bindings written exactly once, read once by the realm thread, of any kind; no
+///    write to a capture, no global, no `this`, no `arguments`.
+/// 5. Reads: `o.name` and `o[key]`, through the guarded readers in `prelude_types.h`; a name the
+///    module defines as an accessor, or `__proto__`, refuses here ([`Reason::ReadsAccessor`]).
+///    `Math.<constant>` is the constant. No write, no allocation, no call other than a listed
+///    `Math` function and `String.prototype.charCodeAt`.
+/// 6. Every reachable `return` has a value, and none is proven a string or an object (what the
+///    answer must be -- a number for `map` and `reduce`, anything for `filter` -- is checked per
+///    element).
+pub fn heap_verdict(
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+    program: &Program,
+    captures: &[Capture],
+) -> Result<HeapShape, Refusal> {
+    use crate::graph::ValueId;
+    if proto.generator || proto.asynchronous || proto.async_generator {
+        return Err(Refusal::new(Reason::NotPlainFunction));
+    }
+    if proto
+        .code
+        .iter()
+        .any(|i| matches!(i, kiln_ir::Instruction::RestArguments(_)))
+    {
+        return Err(Refusal::new(Reason::RestParameter));
+    }
+    if !(1..=3).contains(&proto.parameter_count) {
+        return Err(Refusal::with(
+            Reason::Arity,
+            format!("{} parameters", proto.parameter_count),
+        ));
+    }
+    let math: std::collections::HashSet<ValueId> = graph
+        .blocks
+        .iter()
+        .flat_map(|b| b.operations.iter())
+        .filter_map(|(v, op)| matches!(op, GraphOp::LoadBuiltin(Builtin::Math)).then_some(*v))
+        .collect();
+    let label = |vid: &ValueId| {
+        graph
+            .origins
+            .get(vid)
+            .map(|o| o.label.clone())
+            .unwrap_or_else(|| "operation".to_owned())
+    };
+    let mut accessors: Option<std::collections::HashSet<String>> = None;
+    let mut shape = HeapShape::default();
+    for block in &graph.blocks {
+        if block.exception_handler.is_some() {
+            return Err(Refusal::new(Reason::ExceptionHandler));
+        }
+        let reachable = block.is_reachable_from_entry(graph.entry_block);
+        match &block.terminator {
+            Terminator::Throw(_) => return Err(Refusal::new(Reason::Throws)),
+            Terminator::Return(None) if reachable => {
+                return Err(Refusal::new(Reason::ReturnsUndefined));
+            }
+            Terminator::Suspend { .. } => return Err(Refusal::new(Reason::NotPlainFunction)),
+            _ => {}
+        }
+        for (vid, op) in &block.operations {
+            let refusal = match op {
+                GraphOp::Const { index, constant } => match constant {
+                    Constant::Number(_)
+                    | Constant::Boolean(_)
+                    | Constant::Undefined
+                    | Constant::Null => None,
+                    Constant::String(_) => {
+                        if !shape.strings.contains(index) {
+                            shape.strings.push(*index);
+                        }
+                        None
+                    }
+                    _ => Some(Refusal::new(Reason::NonNumericConstant)),
+                },
+                GraphOp::LoadLocal(_)
+                | GraphOp::StoreLocal { .. }
+                | GraphOp::Phi { .. }
+                | GraphOp::MarkUninitialized(_)
+                | GraphOp::CheckTdz { .. } => None,
+                GraphOp::LoadBuiltin(Builtin::Math) => None,
+                GraphOp::LoadBuiltin(_) => {
+                    Some(Refusal::with(Reason::UnsupportedOperation, label(vid)))
+                }
+                GraphOp::Unary { op, .. } => matches!(op, UnaryOp::TypeOf)
+                    .then(|| Refusal::with(Reason::UnsupportedOperation, format!("{op:?}"))),
+                GraphOp::Binary { op, .. } => {
+                    matches!(op, kiln_ir::BinaryOp::In | kiln_ir::BinaryOp::InstanceOf)
+                        .then(|| Refusal::with(Reason::UnsupportedOperation, format!("{op:?}")))
+                }
+                GraphOp::LoadUpvalue(index) => {
+                    let name = upvalue_name(proto, program, *index)
+                        .unwrap_or_else(|| format!("upvalue {index}"));
+                    match captures.get(*index as usize) {
+                        Some(Capture::Writes(1)) => {
+                            if !shape.captures.contains(index) {
+                                shape.captures.push(*index);
+                            }
+                            None
+                        }
+                        Some(Capture::Writes(n)) => Some(Refusal {
+                            writes: Some(*n),
+                            ..Refusal::with(Reason::CapturesReassigned, name)
+                        }),
+                        _ => Some(Refusal::with(Reason::CapturesUnresolved, name)),
+                    }
+                }
+                GraphOp::StoreUpvalue { index, .. } => Some(Refusal::with(
+                    Reason::WritesCapture,
+                    upvalue_name(proto, program, *index)
+                        .unwrap_or_else(|| format!("upvalue {index}")),
+                )),
+                GraphOp::LoadGlobal(_) | GraphOp::StoreGlobal { .. } => {
+                    Some(Refusal::new(Reason::ReadsGlobal))
+                }
+                GraphOp::LoadThis | GraphOp::LoadNewTarget => Some(Refusal::new(Reason::ReadsThis)),
+                GraphOp::GetProperty { object, name, .. } => {
+                    let key = constant_name(program, *name);
+                    if math.contains(object)
+                        && key
+                            .as_deref()
+                            .is_some_and(|k| MATH_CONSTANTS.iter().any(|(c, _)| *c == k))
+                    {
+                        None
+                    } else {
+                        match key {
+                            None => Some(Refusal::new(Reason::ReadsProperty)),
+                            Some(key) => {
+                                let accessors =
+                                    accessors.get_or_insert_with(|| accessor_names(program));
+                                if key == "__proto__" || accessors.contains(&key) {
+                                    Some(Refusal::with(Reason::ReadsAccessor, key))
+                                } else {
+                                    if !shape.keys.contains(name) {
+                                        shape.keys.push(*name);
+                                    }
+                                    shape.sites += 1;
+                                    None
+                                }
+                            }
+                        }
+                    }
+                }
+                GraphOp::GetComputed { .. } => None,
+                GraphOp::SetProperty { name, .. } | GraphOp::SetPropertyStrict { name, .. } => {
+                    Some(match constant_name(program, *name) {
+                        Some(n) => Refusal::with(Reason::WritesProperty, n),
+                        None => Refusal::new(Reason::WritesProperty),
+                    })
+                }
+                GraphOp::SetComputed { .. } | GraphOp::SetComputedStrict { .. } => {
+                    Some(Refusal::new(Reason::WritesProperty))
+                }
+                GraphOp::NewArray { .. }
+                | GraphOp::NewObject { .. }
+                | GraphOp::MakeFunction { .. }
+                | GraphOp::MakeCell(_) => Some(Refusal::with(Reason::Allocates, label(vid))),
+                GraphOp::LoadCell(_) | GraphOp::StoreCell { .. } => {
+                    Some(Refusal::with(Reason::Allocates, "a cell"))
+                }
+                GraphOp::CallMethod {
+                    object, name, args, ..
+                } => {
+                    let key = constant_name(program, *name);
+                    let listed_math = math.contains(object)
+                        && key.as_deref().is_some_and(|key| {
+                            PARALLEL_MATH
+                                .iter()
+                                .any(|(k, n)| key == *k && *n == args.len())
+                        });
+                    let char_code = !math.contains(object)
+                        && key.as_deref() == Some("charCodeAt")
+                        && args.len() <= 1;
+                    if listed_math || char_code {
+                        None
+                    } else {
+                        let callee = match key {
+                            Some(k) if math.contains(object) => format!("Math.{k}"),
+                            Some(k) => format!(".{k}()"),
+                            None => "a method".to_owned(),
+                        };
+                        Some(Refusal::with(Reason::Calls, callee))
+                    }
+                }
+                GraphOp::Call { .. } | GraphOp::New { .. } => {
+                    Some(Refusal::with(Reason::Calls, label(vid)))
+                }
+                GraphOp::Bridge { instruction, .. }
+                    if matches!(instruction, kiln_ir::Instruction::LoadArguments) =>
+                {
+                    Some(Refusal::with(Reason::ReadsThis, "arguments"))
+                }
+                _ => Some(Refusal::with(Reason::UnsupportedOperation, label(vid))),
+            };
+            if let Some(refusal) = refusal {
+                return Err(refusal);
+            }
+        }
+    }
+    // Rule 6: an answer the graph proves a string or an object is never one the pool can keep.
+    let proven = crate::graph::proven_types(graph);
+    for block in graph
+        .blocks
+        .iter()
+        .filter(|b| b.is_reachable_from_entry(graph.entry_block))
+    {
+        if let Terminator::Return(Some(v)) = &block.terminator
+            && matches!(
+                proven.get(v),
+                Some(Proven::String | Proven::Object | Proven::Callable)
+            )
+        {
+            return Err(Refusal::new(Reason::ReturnsNonNumber));
+        }
+    }
+    shape.captures.sort_unstable();
+    shape.key = key_comparator(graph, proto);
+    Ok(shape)
+}
+
+/// The verdict of a callback tier 1 refused with `refusal`: tier 2's, when [`heap_verdict`]
+/// admits it, as a [`ParallelShape`] carrying the [`HeapShape`]; otherwise tier 2's refusal,
+/// since it is the more permissive tier and so names what really keeps the callback sequential.
+pub fn tier_2(
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+    program: &Program,
+    captures: &[Capture],
+    refusal: Refusal,
+) -> Result<ParallelShape, Refusal> {
+    // What tier 2 cannot change: the function itself, and a callback that is fine by the source
+    // rules but not numeric where tier 1 needs it (that is the site's or the plan's reason).
+    if matches!(
+        refusal.reason,
+        Reason::NotPlainFunction | Reason::RestParameter | Reason::Arity
+    ) {
+        return Err(refusal);
+    }
+    heap_verdict(graph, proto, program, captures).map(|heap| ParallelShape {
+        heap: Some(heap),
+        ..ParallelShape::default()
+    })
+}
+
+/// The order a two-parameter comparator is when it returns the difference of one key read from
+/// each element -- `(a, b) => a.k - b.k` (ascending) or `(a, b) => b.k - a.k` (descending) --
+/// and the value of that key applied to the first parameter.
+///
+/// The body must be one straight-line block whose `return` is `L - R`, where `L` is computed
+/// from one parameter and `R` from the other by the same operations (captures, constants and the
+/// reads of rule 5 shared or equal), and neither side is the parameter itself (that is tier 1's
+/// [`comparator_order`]). Then `compare(a, b)` is `K(a) - K(b)` for one pure `K`, and over keys
+/// that are numbers and not `NaN` such a comparator is consistent exactly as `a - b` is over
+/// numbers, so a stable sort by `K` is `sort`'s answer. The pool computes every key, declines
+/// the call when one is not a number or is `NaN` (and when an element is `undefined` or a hole,
+/// which `sort` never passes to a comparator), and sorts by key.
+pub fn key_comparator(
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+) -> Option<(SortOrder, crate::graph::ValueId)> {
+    use crate::graph::ValueId;
+    if proto.parameter_count != 2 {
+        return None;
+    }
+    let mut reachable = graph
+        .blocks
+        .iter()
+        .filter(|b| b.is_reachable_from_entry(graph.entry_block));
+    let block = reachable.next()?;
+    if reachable.next().is_some() {
+        return None;
+    }
+    let Terminator::Return(Some(ret)) = &block.terminator else {
+        return None;
+    };
+    let defs: std::collections::HashMap<ValueId, &GraphOp> =
+        block.operations.iter().map(|(v, op)| (*v, op)).collect();
+    if block
+        .operations
+        .iter()
+        .any(|(_, op)| matches!(op, GraphOp::StoreLocal { slot, .. } if *slot < 2))
+    {
+        return None;
+    }
+    let parameter = |v: ValueId| -> Option<usize> {
+        if let Some(k) = graph.initial_locals.iter().take(2).position(|p| *p == v) {
+            return Some(k);
+        }
+        match defs.get(&v) {
+            Some(GraphOp::LoadLocal(slot)) if *slot < 2 => Some(*slot as usize),
+            _ => None,
+        }
+    };
+    // Which parameters a value's computation reads: bit 0 the first, bit 1 the second, bit 2 a
+    // value this rule does not follow (which disqualifies it).
+    fn reads(
+        v: ValueId,
+        defs: &std::collections::HashMap<ValueId, &GraphOp>,
+        parameter: &dyn Fn(ValueId) -> Option<usize>,
+        depth: usize,
+    ) -> u8 {
+        if let Some(k) = parameter(v) {
+            return 1 << k;
+        }
+        if depth > 64 {
+            return 4;
+        }
+        match defs.get(&v) {
+            Some(
+                GraphOp::Const { .. }
+                | GraphOp::LoadUpvalue(_)
+                | GraphOp::LoadBuiltin(_)
+                | GraphOp::LoadLocal(_),
+            ) => 0,
+            Some(
+                op @ (GraphOp::GetProperty { .. }
+                | GraphOp::GetComputed { .. }
+                | GraphOp::Binary { .. }
+                | GraphOp::Unary { .. }
+                | GraphOp::CheckTdz { .. }
+                | GraphOp::CallMethod { .. }),
+            ) => op
+                .operands()
+                .into_iter()
+                .fold(0, |acc, o| acc | reads(o, defs, parameter, depth + 1)),
+            _ => 4,
+        }
+    }
+    fn same(
+        l: ValueId,
+        r: ValueId,
+        defs: &std::collections::HashMap<ValueId, &GraphOp>,
+        parameter: &dyn Fn(ValueId) -> Option<usize>,
+        depth: usize,
+    ) -> bool {
+        if depth > 64 {
+            return false;
+        }
+        match (parameter(l), parameter(r)) {
+            (Some(0), Some(1)) => return true,
+            (Some(_), _) | (_, Some(_)) => return false,
+            _ => {}
+        }
+        let same_all = |a: &[ValueId], b: &[ValueId]| {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b)
+                    .all(|(x, y)| same(*x, *y, defs, parameter, depth + 1))
+        };
+        match (defs.get(&l), defs.get(&r)) {
+            // A shared operand that reads no parameter (a capture, `Math`) is the same on both.
+            _ if l == r => reads(l, defs, parameter, depth) == 0,
+            (
+                Some(GraphOp::Const { constant: a, .. }),
+                Some(GraphOp::Const { constant: b, .. }),
+            ) => a == b,
+            (Some(GraphOp::LoadUpvalue(a)), Some(GraphOp::LoadUpvalue(b))) => a == b,
+            (Some(GraphOp::LoadBuiltin(a)), Some(GraphOp::LoadBuiltin(b))) => a == b,
+            (
+                Some(GraphOp::GetProperty {
+                    object: o1,
+                    name: n1,
+                    ..
+                }),
+                Some(GraphOp::GetProperty {
+                    object: o2,
+                    name: n2,
+                    ..
+                }),
+            ) => n1 == n2 && same(*o1, *o2, defs, parameter, depth + 1),
+            (Some(a @ GraphOp::GetComputed { .. }), Some(b @ GraphOp::GetComputed { .. }))
+            | (Some(a @ GraphOp::CheckTdz { .. }), Some(b @ GraphOp::CheckTdz { .. })) => {
+                same_all(&a.operands(), &b.operands())
+            }
+            (Some(a @ GraphOp::Binary { op: x, .. }), Some(b @ GraphOp::Binary { op: y, .. })) => {
+                x == y && same_all(&a.operands(), &b.operands())
+            }
+            (Some(a @ GraphOp::Unary { op: x, .. }), Some(b @ GraphOp::Unary { op: y, .. })) => {
+                x == y && same_all(&a.operands(), &b.operands())
+            }
+            (
+                Some(a @ GraphOp::CallMethod { name: x, .. }),
+                Some(b @ GraphOp::CallMethod { name: y, .. }),
+            ) => x == y && same_all(&a.operands(), &b.operands()),
+            _ => false,
+        }
+    }
+    let Some(GraphOp::Binary {
+        op: kiln_ir::BinaryOp::Subtract,
+        left,
+        right,
+    }) = defs.get(ret)
+    else {
+        return None;
+    };
+    if parameter(*left).is_some() || parameter(*right).is_some() {
+        return None;
+    }
+    match (
+        reads(*left, &defs, &parameter, 0),
+        reads(*right, &defs, &parameter, 0),
+    ) {
+        (1, 2) if same(*left, *right, &defs, &parameter, 0) => Some((SortOrder::Ascending, *left)),
+        (2, 1) if same(*right, *left, &defs, &parameter, 0) => {
+            Some((SortOrder::Descending, *right))
+        }
+        _ => None,
+    }
 }
 
 /// What every reachable `return` of a callback is proven to be, with its parameters and captures
@@ -733,11 +1251,10 @@ pub fn parallel_verdict(
                 GraphOp::Call { .. } | GraphOp::New { .. } => {
                     Some(Refusal::with(Reason::Calls, label(vid)))
                 }
-                GraphOp::Bridge { instruction, .. }
-                    if matches!(instruction, kiln_ir::Instruction::LoadArguments) =>
-                {
-                    Some(Refusal::with(Reason::ReadsThis, "arguments"))
-                }
+                GraphOp::Bridge {
+                    instruction: kiln_ir::Instruction::LoadArguments,
+                    ..
+                } => Some(Refusal::with(Reason::ReadsThis, "arguments")),
                 _ => Some(Refusal::with(Reason::UnsupportedOperation, label(vid))),
             };
             if let Some(refusal) = refusal {
@@ -783,6 +1300,8 @@ pub struct SiteRecord {
     pub at: Option<(u32, u32)>,
     /// `parallelSort` with no comparator: parallel on typed arrays only.
     pub default_order: bool,
+    /// Tier 2: a callback of the site reads the heap (its reads are guarded per element).
+    pub heap: bool,
 }
 
 thread_local! {
@@ -975,6 +1494,9 @@ impl SiteRecord {
         if self.default_order {
             out.push_str(" order=default");
         }
+        if self.heap {
+            out.push_str(" tier=2");
+        }
         out.push_str(" */");
         out
     }
@@ -1006,6 +1528,7 @@ impl SiteRecord {
             captures: 0,
             at: None,
             default_order: false,
+            heap: false,
         };
         let mut parallel = None;
         let mut reason = None;
@@ -1023,6 +1546,7 @@ impl SiteRecord {
                 "detail" => detail = Some(unescape(value)),
                 "writes" => writes = value.parse().ok(),
                 "order" => record.default_order = value == "default",
+                "tier" => record.heap = value == "2",
                 "at" => {
                     let (l, c) = value.split_once(':')?;
                     record.at = Some((l.parse().ok()?, c.parse().ok()?));
@@ -1054,6 +1578,7 @@ impl SiteRecord {
             self.method.name()
         );
         match &self.refusal {
+            None if self.heap => format!("{head}parallel (tier 2: reads the heap)\n"),
             None if self.captures > 0 => {
                 format!("{head}parallel (tier 1: reads captured values)\n")
             }
@@ -1078,6 +1603,12 @@ impl SiteRecord {
                     }
                     (Reason::WritesCapture, Some(name)) => format!("assigns captured `{name}`{at}"),
                     (Reason::ReadsProperty, Some(name)) => format!("reads property `{name}`"),
+                    (Reason::ReadsAccessor, Some(name)) if name == "__proto__" => {
+                        "reads `__proto__`, which is an accessor".to_owned()
+                    }
+                    (Reason::ReadsAccessor, Some(name)) => {
+                        format!("reads `{name}`, which this module defines with a getter or setter")
+                    }
                     (Reason::WritesProperty, Some(name)) => format!("writes property `{name}`"),
                     (Reason::Calls, Some(callee)) => format!("calls {callee}"),
                     (_, Some(detail)) => format!("{} ({detail})", r.reason.describe()),
@@ -1582,6 +2113,7 @@ mod tests {
                 captures: 1,
                 at: None,
                 default_order: false,
+                heap: false,
             },
             SiteRecord {
                 method: ParallelMethod::Map,
@@ -1594,6 +2126,7 @@ mod tests {
                 captures: 0,
                 at: Some((7, 54)),
                 default_order: false,
+                heap: false,
             },
             SiteRecord {
                 method: ParallelMethod::Sort,
@@ -1603,6 +2136,7 @@ mod tests {
                 captures: 0,
                 at: None,
                 default_order: true,
+                heap: false,
             },
             SiteRecord {
                 method: ParallelMethod::Reduce,
@@ -1612,6 +2146,17 @@ mod tests {
                 captures: 0,
                 at: None,
                 default_order: false,
+                heap: false,
+            },
+            SiteRecord {
+                method: ParallelMethod::Filter,
+                line: 10,
+                column: 5,
+                refusal: None,
+                captures: 2,
+                at: None,
+                default_order: false,
+                heap: true,
             },
         ];
         let c: String = records
@@ -1630,7 +2175,228 @@ mod tests {
              src/a.ts:8:3  parallelSort  parallel (typed arrays: the default numeric order)\n\
              src/a.ts:9:3  parallelReduce  sequential\n  \
              argument-shape: the call does not pass the arguments the parallel lowering takes \
-             (parallelReduce: callback, combine, initial)\n"
+             (parallelReduce: callback, combine, initial)\n\
+             src/a.ts:10:5  parallelFilter  parallel (tier 2: reads the heap)\n"
         );
+    }
+
+    /// Tier 2's verdict for `proto` in `program` (built from [`program`] when `None`).
+    fn heap(proto: FunctionProto, program: Option<Program>) -> Result<HeapShape, Reason> {
+        let program = program.unwrap_or_else(|| self::program(&proto));
+        let graph = build_function_graph(&proto, &program).unwrap();
+        heap_verdict(&graph, &proto, &program, &[]).map_err(|r| r.reason)
+    }
+
+    #[test]
+    fn tier_2_reads_by_name_by_index_and_compares_strings() {
+        // `x => (x.x === "s") + x.x * x[1] + x.length`
+        let code = vec![
+            Instruction::LoadLocal(0),
+            Instruction::GetProperty(4),
+            Instruction::Const(6),
+            Instruction::Binary(BinaryOp::StrictEqual),
+            Instruction::LoadLocal(0),
+            Instruction::GetProperty(4),
+            Instruction::LoadLocal(0),
+            Instruction::Const(0),
+            Instruction::GetComputed,
+            Instruction::Binary(BinaryOp::Multiply),
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::LoadLocal(0),
+            Instruction::GetProperty(3),
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::Return,
+        ];
+        // Tier 1 refuses the read; tier 2 admits it, and hands the site what the clone reads.
+        assert_eq!(why(proto(code.clone(), 1)), Some(Reason::ReadsProperty));
+        let shape = heap(proto(code.clone(), 1), None).expect("tier 2 admits reads");
+        assert_eq!(shape.keys, vec![4, 3]);
+        assert_eq!(shape.strings, vec![6]);
+        assert_eq!(shape.sites, 3);
+        assert_eq!(shape.key, None);
+        let callback = proto(code, 1);
+        let program = program(&callback);
+        let graph = build_function_graph(&callback, &program).unwrap();
+        let refusal = parallel_verdict(&graph, &callback, &program, &[]).unwrap_err();
+        let verdict = tier_2(&graph, &callback, &program, &[], refusal).unwrap();
+        assert_eq!(verdict.heap, Some(shape));
+        assert!(verdict.captures.is_empty());
+    }
+
+    #[test]
+    fn tier_2_captures_of_any_kind_written_once() {
+        let mut callback = proto(
+            vec![
+                Instruction::LoadUpvalue(0),
+                Instruction::LoadLocal(0),
+                Instruction::GetComputed,
+                Instruction::Return,
+            ],
+            1,
+        );
+        callback.upvalues = vec![kiln_ir::Upvalue::ParentLocal(0)];
+        let program = program(&callback);
+        let graph = build_function_graph(&callback, &program).unwrap();
+        let shape = heap_verdict(&graph, &callback, &program, &[Capture::Writes(1)]).unwrap();
+        assert_eq!(shape.captures, vec![0]);
+        assert_eq!(
+            heap_verdict(&graph, &callback, &program, &[Capture::Writes(2)])
+                .unwrap_err()
+                .reason,
+            Reason::CapturesReassigned
+        );
+    }
+
+    #[test]
+    fn tier_2_still_refuses_writes_allocation_calls_and_this() {
+        let refused = |code: Vec<Instruction>| heap(proto(code, 1), None).err();
+        assert_eq!(
+            refused(vec![
+                Instruction::LoadLocal(0),
+                Instruction::Const(0),
+                Instruction::SetProperty(4),
+                Instruction::Return,
+            ]),
+            Some(Reason::WritesProperty)
+        );
+        assert_eq!(
+            refused(vec![
+                Instruction::NewObject { count: 0 },
+                Instruction::Return
+            ]),
+            Some(Reason::Allocates)
+        );
+        assert_eq!(
+            refused(vec![
+                Instruction::LoadLocal(0),
+                Instruction::CallMethod { name: 5, argc: 0 },
+                Instruction::Return,
+            ]),
+            Some(Reason::Calls)
+        );
+        assert_eq!(
+            refused(vec![Instruction::LoadThis, Instruction::Return]),
+            Some(Reason::ReadsThis)
+        );
+        assert_eq!(
+            refused(vec![
+                Instruction::LoadLocal(0),
+                Instruction::Unary(UnaryOp::TypeOf),
+                Instruction::Return,
+            ]),
+            Some(Reason::UnsupportedOperation)
+        );
+        // An answer proven a string is never one the pool keeps.
+        assert_eq!(
+            refused(vec![Instruction::Const(6), Instruction::Return]),
+            Some(Reason::ReturnsNonNumber)
+        );
+    }
+
+    #[test]
+    fn reason_reads_accessor() {
+        // The module defines `get x() {}` somewhere: a read of `x` would call it.
+        let callback = proto(
+            vec![
+                Instruction::LoadLocal(0),
+                Instruction::GetProperty(4),
+                Instruction::Return,
+            ],
+            1,
+        );
+        let mut with_getter = program(&callback);
+        with_getter.code = vec![
+            Instruction::NewObject { count: 0 },
+            Instruction::Const(4),
+            Instruction::MakeFunction(0),
+            Instruction::DefineAccessor {
+                setter: false,
+                enumerable: true,
+            },
+            Instruction::Return,
+        ];
+        assert_eq!(
+            heap(callback.clone(), Some(with_getter)).err(),
+            Some(Reason::ReadsAccessor)
+        );
+        assert!(heap(callback, None).is_ok(), "no accessor named `x`");
+        // `__proto__` is an accessor of `Object.prototype` whatever the module defines.
+        let mut constants = program(&proto(Vec::new(), 1)).constants;
+        constants.push(Constant::String("__proto__".into()));
+        let proto_read = proto(
+            vec![
+                Instruction::LoadLocal(0),
+                Instruction::GetProperty(constants.len() as u32 - 1),
+                Instruction::Return,
+            ],
+            1,
+        );
+        let mut reads_proto = program(&proto_read);
+        reads_proto.constants = constants;
+        assert_eq!(
+            heap(proto_read, Some(reads_proto)).err(),
+            Some(Reason::ReadsAccessor)
+        );
+    }
+
+    #[test]
+    fn a_key_comparator_is_a_difference_of_one_key_read_from_each_side() {
+        let key = |code: Vec<Instruction>| {
+            let callback = proto(code, 2);
+            let program = program(&callback);
+            let graph = build_function_graph(&callback, &program).unwrap();
+            key_comparator(&graph, &callback).map(|(order, _)| order)
+        };
+        let difference = |left: Vec<Instruction>, right: Vec<Instruction>| {
+            let mut code = left;
+            code.extend(right);
+            code.push(Instruction::Binary(BinaryOp::Subtract));
+            code.push(Instruction::Return);
+            code
+        };
+        let read = |parameter: u32, name: u32| {
+            vec![
+                Instruction::LoadLocal(parameter),
+                Instruction::GetProperty(name),
+            ]
+        };
+        // `(a, b) => a.x - b.x` and `(a, b) => b.x - a.x`.
+        assert_eq!(
+            key(difference(read(0, 4), read(1, 4))),
+            Some(SortOrder::Ascending)
+        );
+        assert_eq!(
+            key(difference(read(1, 4), read(0, 4))),
+            Some(SortOrder::Descending)
+        );
+        // Different keys on the two sides, one side's key twice, and tier 1's plain difference.
+        assert_eq!(key(difference(read(0, 4), read(1, 3))), None);
+        assert_eq!(key(difference(read(0, 4), read(0, 4))), None);
+        assert_eq!(
+            key(difference(
+                vec![Instruction::LoadLocal(0)],
+                vec![Instruction::LoadLocal(1)]
+            )),
+            None
+        );
+        // `(a, b) => a.x * 2 - b.x * 2`: the same computation on each side.
+        let scaled = |parameter| {
+            let mut code = read(parameter, 4);
+            code.extend([
+                Instruction::Const(0),
+                Instruction::Binary(BinaryOp::Multiply),
+            ]);
+            code
+        };
+        assert_eq!(
+            key(difference(scaled(0), scaled(1))),
+            Some(SortOrder::Ascending)
+        );
+        // The verdict carries it for `parallelSort`.
+        let callback = proto(difference(read(0, 4), read(1, 4)), 2);
+        let program = program(&callback);
+        let graph = build_function_graph(&callback, &program).unwrap();
+        let shape = heap_verdict(&graph, &callback, &program, &[]).unwrap();
+        assert!(matches!(shape.key, Some((SortOrder::Ascending, _))));
     }
 }

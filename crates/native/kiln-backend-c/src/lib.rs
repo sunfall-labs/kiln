@@ -709,6 +709,7 @@ pub mod emit_graph;
 pub mod facts;
 pub mod graph;
 pub mod parallel;
+pub mod parallel_heap;
 pub mod regex;
 pub mod state_owners;
 pub mod summary;
@@ -1653,6 +1654,41 @@ fn render_functions(
     }
     let admitted: Vec<bool> = parallel_clones.iter().map(Option::is_some).collect();
     direct.set_parallel(&admitted);
+    // Tier 2 (ADR 0069, parallel issue 07): a callback whose verdict reads the heap gets a heap
+    // clone (`_h`, and `_hk` for a key comparator's key), emitted from its graph by the lowering
+    // in `parallel_heap.rs`, which knows only what `parallel::heap_verdict` admits.
+    let heap_clones: Vec<Option<(String, crate::parallel::HeapShape)>> =
+        (0..program.functions.len())
+            .map(|index| {
+                let Some(Ok(shape)) = direct.entry.parallel.get(index) else {
+                    return None;
+                };
+                let heap = shape.heap.clone()?;
+                let proto = &program.functions[index];
+                let mut text = String::new();
+                parallel_heap::emit_heap_clone(
+                    &mut text,
+                    &graphs[index],
+                    proto,
+                    program,
+                    &format!("{symbol}_fn_{index}_h"),
+                    &heap,
+                    None,
+                );
+                if let Some((_, key)) = heap.key {
+                    parallel_heap::emit_heap_clone(
+                        &mut text,
+                        &graphs[index],
+                        proto,
+                        program,
+                        &format!("{symbol}_fn_{index}_hk"),
+                        &heap,
+                        Some(key),
+                    );
+                }
+                Some((text, heap))
+            })
+            .collect();
     let fast: Vec<bool> = program
         .functions
         .iter()
@@ -1803,6 +1839,39 @@ fn render_functions(
                         )
                         .unwrap();
                     }
+                }
+            }
+        }
+        // Tier 2's workers, declared like tier 1's (issue 14's worker unit included).
+        if let Some((_, heap)) = &heap_clones[index] {
+            let worker_symbol = workers.as_ref().map_or(symbol, |(link, _)| *link);
+            let pmap_link = if should_chunk || workers.is_some() {
+                ""
+            } else {
+                "static "
+            };
+            for kind in parallel_heap::heap_chunk_kinds(
+                program.functions[index].parameter_count,
+                heap.key.is_some(),
+            ) {
+                writeln!(
+                    output,
+                    "{pmap_link}void {worker_symbol}_pmap{kind}_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);"
+                )
+                .unwrap();
+                if worker_symbol != symbol {
+                    writeln!(
+                        output,
+                        "#define {symbol}_pmap{kind}_{index} {worker_symbol}_pmap{kind}_{index}"
+                    )
+                    .unwrap();
+                }
+                if should_chunk {
+                    writeln!(
+                        fn_declarations[index],
+                        "void {worker_symbol}_pmap{kind}_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);"
+                    )
+                    .unwrap();
                 }
             }
         }
@@ -2064,6 +2133,37 @@ fn render_functions(
                         should_chunk,
                     );
                 }
+            }
+        }
+        // Tier 2: the heap clone and its chunk workers, where tier 1's go (issue 14's worker
+        // unit, compiled optimised, when there is one). The workers reach the heap only through
+        // the prelude's `kiln_c99_par_*` readers, which the worker unit's header declares.
+        if let Some((clone, heap)) = &heap_clones[index] {
+            let kinds = parallel_heap::heap_chunk_kinds(proto.parameter_count, heap.key.is_some());
+            if let Some((link, unit)) = workers.as_mut() {
+                unit.push_str(clone);
+                parallel_heap::emit_heap_workers(
+                    unit,
+                    link,
+                    symbol,
+                    index,
+                    proto.parameter_count,
+                    &kinds,
+                    heap.sites,
+                    "",
+                );
+            } else {
+                target_buf.push_str(clone);
+                parallel_heap::emit_heap_workers(
+                    target_buf,
+                    symbol,
+                    symbol,
+                    index,
+                    proto.parameter_count,
+                    &kinds,
+                    heap.sites,
+                    if should_chunk { "" } else { "static " },
+                );
             }
         }
         // Emitted again now that every plan knows the fast set: a fast clone calls other fast
