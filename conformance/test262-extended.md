@@ -8,7 +8,7 @@ runs every case in that pinned subtree, regardless of its classification here.
 The split now defers **499 files / 998 variants**, leaving **101,640 routine variants**.
 The original 502 files accounted for 88% of summed case durations in the recorded full run.
 Three Map/Set iterator-close files were promoted after fixing constructor adder dispatch:
-all six variants now pass in under a millisecond instead of consuming the instruction budget. Classification
+all six variants now pass in milliseconds instead of consuming the instruction budget. Classification
 is explicit in `test262-extended.json`, not recalculated from noisy timing on every invocation.
 All variants of each selected file execute. Reports declare which suite ran and how much was
 deferred; a routine report is never evidence that the complete corpus passed.
@@ -20,7 +20,7 @@ This is an execution-cost policy, not a claim that these tests inherently need s
 | Files | Workload | Interpretation |
 | ---: | --- | --- |
 | 448 | Unicode/RegExp sweeps | Large inputs; guarded indexed writes, numeric dispatch and string storage improvements reduced measured wall time by 25% |
-| 3 | TypedArray copyWithin cases | Finite byte-by-byte harness setup exhausts the eight-million-step limit; all assertions complete in a separately labeled reduced-size diagnostic |
+| 3 | TypedArray copyWithin cases | Earlier implementation exhausted its budget on finite setup; latest main's shared implementation instead fails promptly on missing post-coercion detachment checks, still unresolved |
 | 48 | Mixed compiler, property, URI, iterator and calendar workloads | Constant interning and key membership had quadratic costs; profiling separates finite budget exhaustion from an erroneous iterator-close loop |
 
 A representative Unicode-builder probe produced identical output in Node and Kiln. Median
@@ -31,7 +31,8 @@ throw promptly; consuming an infinite iterator until the step limit was a correc
 
 The optimization evidence lives under `.scratch/extended-unicode`, `.scratch/extended-limits`,
 and `.scratch/extended-mixed`. Those controlled comparisons name their pre-bootstrap baseline
-`80f55d78`; combined validation must also include the newer common bootstrap in every realm.
+`80f55d78`. The [combined report](../.scratch/slow-case-opt/README.md) validates the newer common
+bootstrap in every realm: all 102,638 variants ran, with no chunk regressions and 43 gained passes.
 They do not claim that time to a fuel limit is the time needed to finish an exhaustive test.
 
 Run the extended section periodically, before releases, and when changing features it exercises.
