@@ -295,15 +295,6 @@ fn cache_identity(
     .identity_digest()
 }
 
-/// Whether a generic-only module still lowers its qualifying `parallelMap` sites (issue 13).
-///
-/// Every profile but the development ones does: a release module goes generic-only for its
-/// size (the budget below), which says nothing about its sites, and the lowering costs only
-/// where a site exists. The development profiles (`native-dev`, `check`) do not, by decision:
-/// they are the edit-run loop, which emits no typed code at all and is compiled for build
-/// speed rather than run speed, so a pooled site there would buy little and cost emission and
-/// compile time on every edit; the answer is identical either way. Their sites say
-/// `dev-profile`, naming `--profile native-release`.
 /// Map a native build profile to liveness selection: only release-style
 /// builds drop the development arm of the exact two-arm production
 /// dispatcher; development, measurement, and interpreter reduction keep

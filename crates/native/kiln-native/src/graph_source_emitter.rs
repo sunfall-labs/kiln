@@ -12,6 +12,15 @@ pub(super) const MAX_RELEASE_SPECIALIZED_MODULE_FUNCTIONS: usize = 16;
 pub(super) static SOURCE_EMITTER_ID: std::sync::LazyLock<Digest> =
     std::sync::LazyLock::new(|| Digest::hash(include_str!("graph_source_emitter.rs").as_bytes()));
 
+/// Whether a generic-only module still lowers its qualifying `parallelMap` sites (issue 13).
+///
+/// Every profile but the development ones does: a release module goes generic-only for its
+/// size (the budget below), which says nothing about its sites, and the lowering costs only
+/// where a site exists. The development profiles (`native-dev`, `check`) do not, by decision:
+/// they are the edit-run loop, which emits no typed code at all and is compiled for build
+/// speed rather than run speed, so a pooled site there would buy little and cost emission and
+/// compile time on every edit; the answer is identical either way. Their sites say
+/// `dev-profile`, naming `--profile native-release`.
 pub(super) fn parallel_in_generic(profile: NativeProfile) -> bool {
     !matches!(profile, NativeProfile::Dev | NativeProfile::Check)
 }
