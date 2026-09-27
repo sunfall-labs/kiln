@@ -7,47 +7,100 @@ use std::sync::OnceLock;
 /// handed back untouched.
 pub type ChunkFn = unsafe extern "C" fn(*const c_void, *mut c_void, usize, usize, *mut c_void);
 
-/// Below this many elements the whole range runs on the calling thread.
-///
-/// Measured on an 18-core M-series laptop at load average 7 (another agent benchmarking
-/// alongside), `bench/non-io/parallel-map-large.mjs`'s body per element -- a square root, a
-/// `pow`, a remainder and a `floor`, ~9 ns inline -- pool against inline, us per call:
-///
-/// | elements | pool | inline |
-/// | --- | --- | --- |
-/// | 2,048 | 14.9 | 14.8 |
-/// | 4,096 | 97.6 | 32.1 |
-/// | 8,192 | 107.8 | 63.1 |
-/// | 16,384 | 125.2 | 128.2 |
-/// | 65,536 | 197.4 | 543.6 |
-///
-/// The fork-join costs 60-90 us of wake-up and join here, so it breaks even near 16k of that
-/// body and loses below; a lighter body (`x * 2 + 1`, ~1 ns) needs several times that. The
-/// floor sits at the heavy body's break-even, so `multicore-parallel.mjs`'s 5,000-element
-/// `x * 2 + 1` runs inline and does not regress, and a 2e6-element map is 8x faster.
-pub const SEQUENTIAL_FLOOR: usize = 16384;
+// -- Interim cost model and thread budget ---------------------------------------------------
+//
+// Everything from here to `pool()` is the interim answer of parallel-builtins issue 04. ADR 0070
+// replaces this private pool with the realm scheduler (realms issue 09): chunks become scheduled
+// work, the budget becomes the scheduler's, and these constants and `pool_size` go with the pool.
+// The probe in `kiln_parallel_map` is the one piece worth keeping: whatever runs the chunks still
+// has to know whether a call is worth splitting and how finely.
 
-/// Elements per unit of work handed to the pool. Small enough that stealing evens out uneven
-/// bodies across workers, large enough that the per-chunk call is noise: 1,024 elements of
-/// a 15 ns body is 15 us of work against a ~50 ns call.
-pub const CHUNK: usize = 1024;
+/// The probe's first batch, run on the calling thread: a call of at most this many elements
+/// runs there without reading the clock and never touches the pool.
+pub const PROBE_START: usize = 128;
 
-/// The worker count: `KILN_PARALLELISM` when set to a positive integer, else the machine's
-/// available parallelism, else 1. `1` disables the pool entirely and every call runs inline,
-/// which is how a benchmark measures the sequential answer with the same binary.
-fn parallelism() -> usize {
-    match std::env::var("KILN_PARALLELISM") {
-        Ok(value) => match value.trim().parse::<usize>() {
-            Ok(n) if n >= 1 => n,
-            _ => 1,
-        },
-        Err(_) => std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1),
+/// Each probe batch is this many times the last, so a light body (~1 ns) reaches a timeable
+/// batch in three clock reads rather than six.
+pub const PROBE_GROWTH: usize = 4;
+
+/// The probe grows its batch until one batch takes at least this long, so the per-element
+/// estimate is well above the clock's resolution (tens of ns) and the cost of reading it (~20 ns).
+/// The probe as a whole spends under about 6x this inline before the pool sees the call (a body
+/// that just missed the mark, then one batch `PROBE_GROWTH` times larger).
+pub const PROBE_BATCH_NS: u64 = 2_000;
+
+/// Estimated remaining work below which the call finishes on the calling thread.
+///
+/// A fork-join over the pool costs a wake-up of every worker and a join: 45-55 us measured on an
+/// 8-core/16-thread Ryzen 7 5800H with other agents' builds running, 60-90 us on an 18-core
+/// M-series laptop under load (the table this replaced). Splitting `w` of work over `t` threads
+/// costs about `overhead + w / t`, which beats `w` once `w` is past the overhead; the floor is
+/// about twice the overhead measured here, so a call the pool would only tie stays inline, even
+/// on the slower machine. The old floor was an element count (16,384) tuned for one ~9 ns body:
+/// a ~1 ns body lost at 64k elements (74 us pooled against 58 us for `map`), and a 1 us body was
+/// left sequential up to 16 ms of work.
+pub const PARALLEL_MIN_WORK_NS: u64 = 100_000;
+
+/// Work per chunk handed to the pool once a call goes parallel: large enough that the per-chunk
+/// dispatch (~100-200 ns in Rayon) is under 1%, small enough to steal.
+pub const CHUNK_TARGET_NS: u64 = 25_000;
+
+/// At least this many chunks per pool thread, so stealing evens out uneven bodies and a thread
+/// that is descheduled (the box is shared) does not hold the join for a whole slice.
+pub const CHUNKS_PER_THREAD: usize = 4;
+
+/// How finely to split `remaining` elements of a body measured at `per_element_ns`, over
+/// `threads` workers: `None` keeps the rest on the calling thread.
+pub fn chunk_plan(per_element_ns: f64, remaining: usize, threads: usize) -> Option<usize> {
+    if threads <= 1 || remaining < 2 {
+        return None;
     }
+    let per_element_ns = per_element_ns.max(0.01);
+    if per_element_ns * (remaining as f64) < PARALLEL_MIN_WORK_NS as f64 {
+        return None;
+    }
+    let by_cost = (CHUNK_TARGET_NS as f64 / per_element_ns) as usize;
+    let by_balance = remaining.div_ceil(threads.saturating_mul(CHUNKS_PER_THREAD));
+    Some(by_cost.min(by_balance).max(1))
 }
 
-/// The pool, built on first use: private to this archive, so it never shares Rayon's
+/// The pool's size: `KILN_PARALLELISM` when set (a positive integer; anything else is 1), else
+/// the machine's available parallelism divided among the `KILN_WORKER_COUNT` process workers the
+/// supervisor started (`KILN_WORKERS`, which sets it in every worker before its realm runs), so
+/// N workers together run at most one pool thread per core rather than N per core. Unset means
+/// the only realm. `1` disables the pool and every call runs inline, which is how a benchmark
+/// measures the sequential answer with the same binary.
+pub fn pool_size(parallelism: Option<&str>, worker_count: Option<&str>, cores: usize) -> usize {
+    if let Some(value) = parallelism {
+        return match value.trim().parse::<usize>() {
+            Ok(n) if n >= 1 => n,
+            _ => 1,
+        };
+    }
+    let workers = worker_count
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(1);
+    cores.checked_div(workers).unwrap_or(1).max(1)
+}
+
+/// The pool size for this process, read once.
+fn parallelism() -> usize {
+    static THREADS: OnceLock<usize> = OnceLock::new();
+    *THREADS.get_or_init(|| {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        pool_size(
+            std::env::var("KILN_PARALLELISM").ok().as_deref(),
+            std::env::var("KILN_WORKER_COUNT").ok().as_deref(),
+            cores,
+        )
+    })
+}
+
+/// The pool, built the first time a call decides to use it (a program whose calls all stay
+/// inline never starts its threads): private to this archive, so it never shares Rayon's
 /// global pool with anything else linked into the process, and sized once per process.
 /// `None` when the answer is one worker.
 fn pool() -> Option<&'static rayon::ThreadPool> {
@@ -123,22 +176,58 @@ pub unsafe extern "C" fn kiln_parallel_map(
         ctx,
         chunk,
     };
-    let pool = match pool() {
-        Some(pool) if count >= SEQUENTIAL_FLOOR => pool,
-        _ => {
-            // SAFETY: the caller contract, for the whole range on this thread.
-            unsafe { job.run(0, count) };
+    let threads = parallelism();
+    if threads <= 1 {
+        // SAFETY: the caller contract, for the whole range on this thread.
+        unsafe { job.run(0, count) };
+        return 0;
+    }
+    // The probe: run a growing prefix inline, one batch after another, until a batch is long
+    // enough to time; then decide from what that batch cost. A call too small to be worth a
+    // fork-join finishes here, having paid one clock read per batch -- none at all at or below
+    // `PROBE_START` elements, since the last batch of a call is never timed. That is the "never
+    // slower than `map`" half of the cost model. The estimate is the last timed batch alone, the
+    // largest: it is the one most like the rest of the array (in a fresh output past the first
+    // page every element carries its share of a page fault, which a small first batch misses).
+    let mut done = 0usize;
+    let mut batch = PROBE_START;
+    let mut clock: Option<std::time::Instant> = None;
+    let per_element_ns = loop {
+        let end = done.saturating_add(batch).min(count);
+        if end == count {
+            // SAFETY: `[done, count)` is the rest of the range, on this thread.
+            unsafe { job.run(done, count) };
             return 0;
         }
+        let started = *clock.get_or_insert_with(std::time::Instant::now);
+        // SAFETY: `[done, end)` is within the arrays, and nothing else is in flight yet.
+        unsafe { job.run(done, end) };
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(started).as_nanos() as u64;
+        clock = Some(now);
+        let ran = end.saturating_sub(done);
+        done = end;
+        if elapsed >= PROBE_BATCH_NS {
+            break elapsed as f64 / ran as f64;
+        }
+        batch = batch.saturating_mul(PROBE_GROWTH);
     };
-    let chunks = count.div_ceil(CHUNK);
+    let remaining = count.saturating_sub(done);
+    let plan = chunk_plan(per_element_ns, remaining, threads);
+    let Some((chunk, pool)) = plan.and_then(|chunk| Some((chunk, pool()?))) else {
+        // SAFETY: `[done, count)` is the rest of the range, on this thread.
+        unsafe { job.run(done, count) };
+        return 0;
+    };
+    let chunks = remaining.div_ceil(chunk);
     let ran = catch_unwind(AssertUnwindSafe(|| {
         pool.install(|| {
             use rayon::prelude::*;
             (0..chunks).into_par_iter().for_each(|k| {
-                let start = k.saturating_mul(CHUNK);
-                let end = start.saturating_add(CHUNK).min(count);
-                // SAFETY: `[start, end)` is this chunk's own disjoint range of a live array.
+                let start = done.saturating_add(k.saturating_mul(chunk));
+                let end = start.saturating_add(chunk).min(count);
+                // SAFETY: `[start, end)` is this chunk's own disjoint range of a live array, past
+                // the prefix the probe already wrote.
                 unsafe { job.run(start, end) };
             });
         })
@@ -203,13 +292,54 @@ mod tests {
     }
 
     #[test]
-    fn every_element_is_visited_exactly_once_below_and_above_the_floor() {
-        for count in [0, 1, SEQUENTIAL_FLOOR - 1, SEQUENTIAL_FLOOR, 10 * CHUNK + 7] {
+    fn every_element_is_visited_exactly_once_inline_probed_and_pooled() {
+        for count in [
+            0,
+            1,
+            PROBE_START,
+            PROBE_START + 1,
+            3 * PROBE_START + 5,
+            1 << 20,
+            (1 << 22) + 7,
+        ] {
             let (status, out, seen) = run(count);
             assert_eq!(status, 0, "count {count}");
             assert_eq!(seen, count, "count {count}");
             assert!(out.iter().enumerate().all(|(i, &v)| v == 2.0 * i as f64));
         }
+    }
+
+    #[test]
+    fn small_or_cheap_work_stays_on_the_calling_thread() {
+        assert_eq!(chunk_plan(1.0, 50_000, 16), None, "50 us of work");
+        assert_eq!(chunk_plan(1_000.0, 90, 16), None, "90 us of work");
+        assert_eq!(chunk_plan(1_000.0, 1 << 20, 1), None, "one thread");
+        assert!(chunk_plan(1.0, 1 << 20, 16).is_some(), "1 ms of work");
+    }
+
+    #[test]
+    fn chunks_follow_the_measured_cost_and_leave_room_to_steal() {
+        // A light body: the cost target decides.
+        assert_eq!(chunk_plan(1.0, 10_000_000, 16), Some(25_000));
+        // A heavy body: fewer elements per chunk, never zero.
+        assert_eq!(chunk_plan(10_000.0, 1_000, 16), Some(2));
+        assert_eq!(chunk_plan(1_000_000.0, 1_000, 16), Some(1));
+        // Just past the floor: the balance bound keeps four chunks per thread.
+        assert_eq!(chunk_plan(1.0, 256_000, 16), Some(4_000));
+    }
+
+    #[test]
+    fn the_pool_is_shared_among_process_workers() {
+        assert_eq!(pool_size(None, None, 16), 16);
+        assert_eq!(pool_size(None, Some("4"), 16), 4);
+        assert_eq!(pool_size(None, Some("3"), 16), 5);
+        assert_eq!(pool_size(None, Some("32"), 16), 1);
+        assert_eq!(pool_size(None, Some("junk"), 16), 16);
+        assert_eq!(pool_size(None, Some("0"), 16), 16);
+        // `KILN_PARALLELISM` still overrides, including over a worker count.
+        assert_eq!(pool_size(Some("6"), Some("4"), 16), 6);
+        assert_eq!(pool_size(Some("0"), None, 16), 1);
+        assert_eq!(pool_size(Some("x"), None, 16), 1);
     }
 
     #[test]
