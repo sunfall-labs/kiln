@@ -1737,7 +1737,7 @@ pub(super) fn emit_call_method(
                      }} else if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY) {{ \
                          kiln_typed_array *view = (kiln_typed_array *)ptr; \
                          kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                         if (kiln_c99_builtin_store_epoch == 0 && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
+                         if (kiln_c99_builtin_store_epoch == 0 && !kiln_c99_inheriting_new_target && !view->buffer->detached && depth < KILN_C99_MAX_CALL_DEPTH && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
                              {env_decl} \
                              if (pmap_caps_ok) {{ \
                              size_t count0 = view->length; \
@@ -1838,7 +1838,7 @@ pub(super) fn emit_call_method(
                          }} else if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_TYPED_ARRAY) {{ \
                              kiln_typed_array *view = (kiln_typed_array *)ptr; \
                              kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(v{a0}); \
-                             if (!plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok})) {{ \
+                             if (!plain->generator && !kiln_inheriting && !view->buffer->detached && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok})) {{ \
                                  kiln_value built_val; \
                                  int status = kiln_c99_typed_alloc(&built_val, view->kind, view->length); \
                                  if (status != KILN_C99_OK) return status; \
