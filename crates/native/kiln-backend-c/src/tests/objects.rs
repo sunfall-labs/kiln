@@ -1666,3 +1666,85 @@ int main(void) {{
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+/// Issue 20: a speculation asks about the built-ins it relies on. The object-granular answer
+/// reads the realm's program record (with the prototypes every lookup falls through to folded
+/// in); the member-granular one reads the built-in's own-property store, so `Math.foo = 1` leaves
+/// `Math.sqrt` the table's. What a bootstrap stored is part of the built-ins, not a modification,
+/// and a remembered member answer is dropped by the next store.
+#[test]
+fn a_speculation_asks_only_about_the_builtins_it_relies_on() {
+    let generated = emit(&program(
+        vec![Constant::String("sqrt".into())],
+        vec![
+            Instruction::LoadBuiltin(Builtin::Math),
+            Instruction::GetProperty(0),
+            Instruction::Return,
+        ],
+        0,
+    ))
+    .expect("a unit naming one key emits");
+    let wrapper = r#"
+#define KILN_TEST_MASK(id) KILN_C99_BIT_OF_BUILTIN(id, 0), KILN_C99_BIT_OF_BUILTIN(id, 1), 0
+int main(void) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)malloc(sizeof *heap);
+    kiln_value store;
+    if (heap == NULL) return 1;
+    kiln_c99_gc_heap_init(heap);
+    heap->enabled = 0;
+    kiln_c99_gc_heap_register(heap);
+    kiln_test_heap = heap;
+    kiln_test_generation += 1;
+
+    /* Nothing stored: every answer is yes. */
+    if (!kiln_c99_realm_builtins_untouched(KILN_TEST_MASK(KILN_C99_BUILTIN_MATH))) return 2;
+    if (!kiln_c99_realm_builtin_member_untouched(KILN_C99_BUILTIN_MATH, "sqrt", 4)) return 3;
+
+    /* The bootstrap defines a member on Math: while it runs that is a store, and once it is done
+     * it is what Math is. */
+    if (kiln_c99_callable_store(kiln_c99_builtin(KILN_C99_BUILTIN_MATH), &store, 1) != KILN_C99_OK ||
+        store.tag != KILN_VALUE_OBJECT)
+        return 4;
+    if (kiln_c99_define_method_key(store, kiln_c99_intern("boot", 4), kiln_c99_builtin(KILN_C99_BUILTIN_JSON)) != KILN_C99_OK)
+        return 5;
+    if (kiln_c99_realm_builtins_untouched(KILN_TEST_MASK(KILN_C99_BUILTIN_MATH))) return 6;
+    if (kiln_c99_realm_builtin_member_untouched(KILN_C99_BUILTIN_MATH, "boot", 4)) return 7;
+    kiln_c99_builtin_bootstrap_done();
+    if (!kiln_c99_realm_builtins_untouched(KILN_TEST_MASK(KILN_C99_BUILTIN_MATH))) return 8;
+    if (!kiln_c99_realm_builtin_member_untouched(KILN_C99_BUILTIN_MATH, "boot", 4)) return 9;
+
+    /* The program writes `Math.foo`: Math is modified as a whole, but `Math.sqrt` is still the
+     * table's, and Array is untouched. The answer about `sqrt` is remembered. */
+    if (kiln_c99_callable_store(kiln_c99_builtin(KILN_C99_BUILTIN_MATH), &store, 1) != KILN_C99_OK) return 10;
+    if (kiln_c99_define_method_key(store, kiln_c99_intern("foo", 3), kiln_c99_builtin(KILN_C99_BUILTIN_JSON)) != KILN_C99_OK)
+        return 11;
+    if (kiln_c99_realm_builtins_untouched(KILN_TEST_MASK(KILN_C99_BUILTIN_MATH))) return 12;
+    if (!kiln_c99_realm_builtins_untouched(KILN_TEST_MASK(KILN_C99_BUILTIN_ARRAY))) return 13;
+    if (!kiln_c99_realm_builtin_member_untouched(KILN_C99_BUILTIN_MATH, "sqrt", 4)) return 14;
+    if (kiln_c99_realm_builtin_member_untouched(KILN_C99_BUILTIN_MATH, "foo", 3)) return 15;
+    if (!kiln_c99_realm_builtin_member_untouched(KILN_C99_BUILTIN_NUMBER, "isInteger", 9)) return 16;
+
+    /* Then `Math.sqrt` itself: the remembered answer goes with the store. */
+    if (kiln_c99_callable_store(kiln_c99_builtin(KILN_C99_BUILTIN_MATH), &store, 1) != KILN_C99_OK) return 17;
+    if (kiln_c99_define_method_key(store, kiln_c99_intern("sqrt", 4), kiln_c99_builtin(KILN_C99_BUILTIN_JSON)) != KILN_C99_OK)
+        return 18;
+    if (kiln_c99_realm_builtin_member_untouched(KILN_C99_BUILTIN_MATH, "sqrt", 4)) return 19;
+
+    /* Object.prototype is where every lookup ends: writing it touches every object-granular
+     * answer, and no member found on the built-in itself. */
+    kiln_c99_realm_note_store();
+    kiln_c99_realm_note_builtin_store(KILN_C99_BUILTIN_OBJECT_PROTOTYPE);
+    if (kiln_c99_realm_builtins_untouched(KILN_TEST_MASK(KILN_C99_BUILTIN_ARRAY))) return 20;
+    if (!kiln_c99_realm_builtin_member_untouched(KILN_C99_BUILTIN_NUMBER, "isInteger", 9)) return 21;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "narrow-builtin-guards");
+    assert!(
+        run.status.success(),
+        "a speculation answering about built-ins it does not rely on ({:?}): {}{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}

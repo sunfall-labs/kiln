@@ -1937,11 +1937,66 @@ export async function microtasks() {
     .expect("emit microtasks fixture");
     let guard_start = emitted
         .source
-        .find("kiln_c99_builtins_unmodified() && KILN_VAL_IS_BUILTIN")
+        .find("kiln_c99_builtin_member_unmodified(KILN_C99_BUILTIN_PROMISE_PROTOTYPE, \"constructor\") && KILN_VAL_IS_BUILTIN")
         .expect("Promise.resolve await guard emitted");
     let guard = &emitted.source[guard_start..guard_start + 300];
     assert!(guard.contains("KILN_VAL_IS_NUMBER(v"), "{guard}");
     assert!(guard.contains("handled = 1;"), "{guard}");
+}
+
+/// Realms issue 20: a typed method entry that inlines `Math.sqrt` is entered only after its call
+/// site asks about that one member -- not about every built-in -- and the entry, which reaches
+/// nothing, does not ask again (under `KILN_IC_CHECK` it checks its caller did).
+#[test]
+fn typed_entry_call_sites_ask_about_the_members_the_entry_inlines() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let project = TestDirectory::new("typed-entry-relies-emission");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        r#"
+class Point { constructor(x, y) { this.x = x; this.y = y; }
+              dist() { return Math.sqrt(this.x * this.x + this.y * this.y); } }
+const pts = []; for (let i = 0; i < 1000; i++) pts.push(new Point(i, i + 1));
+let s = 0; for (const p of pts) s += p.dist();
+console.log(s);
+"#,
+    )
+    .expect("write typed entry emission fixture");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build typed entry emission graph");
+    let emitted = emit_native_graph_module_with_policy(
+        graph.module(graph.entry()).expect("entry module"),
+        "main.mjs",
+        &kiln_backend_c::EmissionPolicy::default(),
+    )
+    .expect("emit typed entry fixture");
+    let source = &emitted.source;
+    let sqrt = "kiln_c99_builtin_member_unmodified(KILN_C99_BUILTIN_MATH, \"sqrt\")";
+    assert!(
+        source.contains(&format!("kiln_typed_ok && ({sqrt})")),
+        "the typed arm asks about Math.sqrt before entering"
+    );
+    let definition = source
+        .lines()
+        .find(|line| line.contains("_t(int depth") && line.trim_end().ends_with('{'))
+        .expect("typed entry defined");
+    let body = &source[source.find(definition).expect("definition in source")..];
+    let body = &body[..body.find("\n}\n").expect("typed entry ends")];
+    assert!(
+        body.contains(&format!("KILN_C99_TYPED_RELIES_CHECK({sqrt})")),
+        "the entry leaves the check to its callers: {body}"
+    );
+    assert!(
+        !body.contains("kiln_c99_builtins_unmodified()"),
+        "the entry asks about no other built-in: {body}"
+    );
 }
 
 #[test]

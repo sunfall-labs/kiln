@@ -1,5 +1,5 @@
 mod arithmetic;
-mod call_method;
+pub(crate) mod call_method;
 mod callback_loops;
 mod properties;
 
@@ -891,6 +891,82 @@ pub(super) fn emit_graph_op(
                 // A failed typed callee has left its status pending. A typed caller with a
                 // handler hands a throw to it; without one it fails on, the status still
                 // pending. A boxed caller answers as it would to any status.
+                //
+                // Issue 20: a boxed caller asks about the built-ins the entry relies on before
+                // entering it, and on a no makes the boxed call a callee without a typed entry
+                // would get -- before the callee has run, so nothing is repeated or lost. What
+                // the caller proved about the answer (a number, an integer) came from the typed
+                // entry; the boxed answer is checked against it, and one that breaks it (a
+                // patched built-in answering a string) refuses by name rather than being read
+                // as a double. A typed caller that reaches nothing makes no such check: its own
+                // callers asked about this entry's built-ins with its own
+                // (`CallPlan::typed_guards` is transitive), and nothing since can have modified
+                // one. A typed caller that reaches the runtime may have, and has what the boxed
+                // call needs, so it asks.
+                let caller_reaches_runtime = !in_typed
+                    || self_index.is_some_and(|index| {
+                        plan.typed_needs
+                            .get(index as usize)
+                            .is_some_and(|needs| needs.runtime)
+                    });
+                let relies_fallback = match plan.typed_guards.get(target as usize) {
+                    Some(guard) if !guard.is_empty() && caller_reaches_runtime => {
+                        let boxed_init = if args.is_empty() {
+                            "KILN_VAL_UNDEFINED".to_owned()
+                        } else {
+                            args.iter()
+                                .map(|a| {
+                                    if live_numbers.contains(a) {
+                                        format!("kiln_c99_val_from_double(d{})", a.0)
+                                    } else if live_ints.contains(a) {
+                                        format!("kiln_c99_val_from_double((double)i{})", a.0)
+                                    } else {
+                                        format!("v{}", a.0)
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        };
+                        let boxed_check = call_status_check(diagnostic_site, pc, label, unwind);
+                        let proof = if live_typed || live_typed_int {
+                            let refuse = |detail: &str| {
+                                format!(
+                                    "{{ int status = KILN_C99_CONTROL_ERROR; if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"{detail}\"; {boxed_check} }}"
+                                )
+                            };
+                            let not_number = refuse(
+                                "a built-in the callee's typed entry relies on was modified, and the boxed call answered a non-number where the caller was compiled for a number",
+                            );
+                            let mut text = format!(
+                                " if (KILN_UNLIKELY(!KILN_VAL_IS_NUMBER(v{v}))) {not_number} double kiln_fb_{v}; memcpy(&kiln_fb_{v}, &v{v}, sizeof(kiln_fb_{v}));"
+                            );
+                            if live_typed {
+                                text.push_str(&format!(" d{v} = kiln_fb_{v};"));
+                            }
+                            if live_typed_int {
+                                let not_int = refuse(
+                                    "a built-in the callee's typed entry relies on was modified, and the boxed call answered a non-integer where the caller was compiled for an integer",
+                                );
+                                text.push_str(&format!(
+                                    " if (KILN_UNLIKELY(!(kiln_fb_{v} >= -9007199254740992.0 && kiln_fb_{v} <= 9007199254740992.0) || (double)(int64_t)kiln_fb_{v} != kiln_fb_{v})) {not_int} i{v} = (int64_t)kiln_fb_{v};"
+                                ));
+                            }
+                            text
+                        } else {
+                            String::new()
+                        };
+                        format!(
+                            " else if (KILN_UNLIKELY(!({guard}))) {{ kiln_val call_args[{n}] = {{ {boxed_init} }}; {receiver} kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}{fast}(&ctx_call, &v{v}, {upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc}); {boxed_check}{proof} }}",
+                            n = argc.max(1),
+                            fast = if plan.fast.get(target as usize).copied().unwrap_or(false) {
+                                "_f"
+                            } else {
+                                ""
+                            },
+                        )
+                    }
+                    _ => String::new(),
+                };
                 let failed = if in_typed && unwind != "goto kiln_unwind;" {
                     format!(
                         "{{ if (kiln_c99_typed_status == KILN_C99_THROWN) {{ *thrown = kiln_c99_typed_thrown; {unwind} }} return {}; }}",
@@ -912,7 +988,7 @@ pub(super) fn emit_graph_op(
                         };
                         writeln!(
                             output,
-                            "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow} else {{ {recv} d{v} = {symbol}_fn_{target}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(d{v}))) {failed} v{v} = kiln_c99_val_from_double(d{v});{int_twin} }}"
+                            "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow}{relies_fallback} else {{ {recv} d{v} = {symbol}_fn_{target}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(d{v}))) {failed} v{v} = kiln_c99_val_from_double(d{v});{int_twin} }}"
                         )
                         .unwrap();
                     } else {
@@ -923,7 +999,7 @@ pub(super) fn emit_graph_op(
                         };
                         writeln!(
                             output,
-                            "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow} else {{ {recv} double d_ret_{v} = {symbol}_fn_{target}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(d_ret_{v}))) {failed} v{v} = kiln_c99_val_from_double(d_ret_{v});{int_twin} }}"
+                            "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow}{relies_fallback} else {{ {recv} double d_ret_{v} = {symbol}_fn_{target}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(d_ret_{v}))) {failed} v{v} = kiln_c99_val_from_double(d_ret_{v});{int_twin} }}"
                         )
                         .unwrap();
                     }
@@ -946,7 +1022,7 @@ pub(super) fn emit_graph_op(
                     };
                     writeln!(
                         output,
-                        "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow} else {{ {recv} v{v} = {symbol}_fn_{target}_t({call_args}); if (KILN_UNLIKELY(v{v} == KILN_VAL_TYPED_FAIL)) {failed}{twin}{int_twin} }}"
+                        "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow}{relies_fallback} else {{ {recv} v{v} = {symbol}_fn_{target}_t({call_args}); if (KILN_UNLIKELY(v{v} == KILN_VAL_TYPED_FAIL)) {failed}{twin}{int_twin} }}"
                     )
                     .unwrap();
                 }

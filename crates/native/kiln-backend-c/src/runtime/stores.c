@@ -215,8 +215,10 @@ static void kiln_c99_realm_note_builtin_store(uint32_t builtin) {
     if (heap == NULL) return;
     if (builtin < 64u * KILN_C99_MODIFIED_BUILTIN_WORDS) {
         heap->modified_builtins[builtin >> 6] |= UINT64_C(1) << (builtin & 63u);
+        heap->program_builtins[builtin >> 6] |= UINT64_C(1) << (builtin & 63u);
     } else {
         heap->modified_builtin_beyond = 1;
+        heap->program_builtin_beyond = 1;
     }
 }
 
@@ -225,7 +227,10 @@ static void kiln_c99_realm_note_builtin_store(uint32_t builtin) {
 static void kiln_c99_realm_note_store(void) {
     kiln_gc_heap *heap = kiln_c99_gc_heap();
     __atomic_add_fetch(&kiln_c99_builtin_store_epoch, 1u, __ATOMIC_RELAXED);
-    if (heap != NULL) heap->builtin_stores += 1;
+    if (heap != NULL) {
+        heap->builtin_stores += 1;
+        heap->builtin_store_serial += 1;
+    }
 }
 
 /* The launcher, once the realm's bootstrap has run: what the bootstrap stored is the built-ins'
@@ -236,13 +241,21 @@ static void kiln_c99_builtin_bootstrap_done(void) {
     if (heap == NULL) return;
     __atomic_sub_fetch(&kiln_c99_builtin_store_epoch, heap->builtin_stores, __ATOMIC_RELAXED);
     heap->builtin_stores = 0;
+    memset(heap->program_builtins, 0, sizeof heap->program_builtins);
+    heap->program_builtin_beyond = 0;
 }
 
 /* The slow half of `kiln_c99_builtins_unmodified`, asked once some realm has stored onto a
  * built-in: whether the current realm has not, outside its bootstrap. No heap answers no. */
-static __attribute__((noinline, pure)) KILN_C99_RARE_CALL int kiln_c99_realm_builtins_unmodified(void) {
+static __attribute__((noinline)) KILN_C99_RARE_CALL int kiln_c99_realm_builtins_unmodified_uncached(void) {
     const kiln_gc_heap *heap = kiln_c99_gc_heap();
     return heap != NULL && heap->builtin_stores == 0;
+}
+/* Calls nothing while the heap is cached: see the narrow answers below. */
+static __attribute__((noinline, pure)) KILN_C99_RARE_CALL int kiln_c99_realm_builtins_unmodified(void) {
+    const kiln_gc_heap *heap = kiln_c99_gc_heap_if_cached();
+    if (KILN_UNLIKELY(heap == NULL)) return kiln_c99_realm_builtins_unmodified_uncached();
+    return heap->builtin_stores == 0;
 }
 
 static int kiln_c99_realm_marked_builtin(const kiln_gc_heap *heap, uint32_t builtin) {
@@ -377,6 +390,128 @@ static int kiln_c99_callable_store_lookup(kiln_value callable, kiln_value *out, 
     }
     *out = entry->properties;
     return KILN_C99_OK;
+}
+
+/* Issue 20: the speculations ask about the built-ins they rely on, not about the realm as a whole.
+ * `Math.foo = 1` is a store onto Math and nothing else; a body that inlined `Math.sqrt` or that
+ * iterates an array has no reason to leave its fast path for it. Both answers below read the
+ * realm's *program* record (`program_builtins`, what it stored after its bootstrap), so they are
+ * never wrong where `kiln_c99_realm_builtins_unmodified` would have said yes. No heap answers no. */
+
+/* Both answers are the cold half of a guard that runs on every call once any realm has stored onto
+ * any built-in, and they preserve every register (`KILN_C99_RARE_CALL`): so their common path --
+ * the heap cached, the answer in the record or remembered -- calls nothing, and anything that has
+ * to call (finding the heap, reading a store) is in a function of its own that preserves every
+ * register too, so only that rare path pays for the saves. Measured on a
+ * class-poly loop in a realm that wrote `JSON.foo`: a slow half that called `kiln_c99_gc_heap` saved
+ * and restored all sixteen vector registers per guard, 190 instructions per method call. */
+
+/* The object-granular answer: none of the built-ins in the mask (bit `n` of word `n / 64`), nor a
+ * prototype built-in every lookup can fall through to (Object.prototype, Function.prototype,
+ * %TypedArray%.prototype), has had an own property written by this realm's program. `beyond` asks
+ * about the numbers past the bitmap as well. */
+static int kiln_c99_realm_builtins_untouched_in(const kiln_gc_heap *heap, uint64_t mask0,
+                                                uint64_t mask1, int beyond) {
+    if (heap == NULL) return 0;
+    if (heap->builtin_stores == 0) return 1;
+    mask0 |= (UINT64_C(1) << KILN_C99_BUILTIN_OBJECT_PROTOTYPE) |
+             (UINT64_C(1) << KILN_C99_BUILTIN_FUNCTION_PROTOTYPE) |
+             (UINT64_C(1) << KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE);
+    return (heap->program_builtins[0] & mask0) == 0 && (heap->program_builtins[1] & mask1) == 0 &&
+           !(beyond && heap->program_builtin_beyond);
+}
+typedef char kiln_c99_folded_prototypes_fit_word_0[KILN_C99_BUILTIN_FUNCTION_PROTOTYPE < 64 &&
+                                                           KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE < 64
+                                                       ? 1
+                                                       : -1];
+static __attribute__((noinline)) KILN_C99_RARE_CALL int kiln_c99_realm_builtins_untouched_uncached(uint64_t mask0,
+                                                                              uint64_t mask1,
+                                                                              int beyond) {
+    return kiln_c99_realm_builtins_untouched_in(kiln_c99_gc_heap(), mask0, mask1, beyond);
+}
+static __attribute__((noinline, pure)) KILN_C99_RARE_CALL int
+kiln_c99_realm_builtins_untouched(uint64_t mask0, uint64_t mask1, int beyond) {
+    const kiln_gc_heap *heap = kiln_c99_gc_heap_if_cached();
+    if (KILN_UNLIKELY(heap == NULL)) {
+        return kiln_c99_realm_builtins_untouched_uncached(mask0, mask1, beyond);
+    }
+    return kiln_c99_realm_builtins_untouched_in(heap, mask0, mask1, beyond);
+}
+
+/* Whether `builtin`'s own-property store holds `member` (spelt `len` bytes). A built-in's own
+ * members are its table's until the program writes one: every read consults the store first
+ * (`read.c`, the top of the built-in case), and a delete of a table member changes nothing. So a
+ * store without the name means the member is the table's. Reads only; converts nothing. */
+static int kiln_c99_builtin_store_has_own(uint32_t builtin, const char *member, size_t len) {
+    kiln_value store;
+    const kiln_object *object;
+    size_t index;
+    if (kiln_c99_callable_store(kiln_c99_builtin(builtin), &store, 0) != KILN_C99_OK) return 1;
+    if (store.tag != KILN_VALUE_OBJECT) return 0;
+    object = kiln_c99_object_of(store);
+    if (object->shape != NULL) return kiln_c99_shape_slot_named(object->shape, member, len) != UINT32_MAX;
+    for (index = 0; index < object->count; ++index) {
+        if (kiln_c99_same_key(&object->properties[index], member, len)) return 1;
+    }
+    return 0;
+}
+
+/* Where `member_answers` keeps the answer about (`builtin`, `member`). */
+static inline size_t kiln_c99_member_answer_at(uint32_t builtin, const char *member) {
+    return (((uintptr_t)member >> 3) ^ builtin) & 7u;
+}
+
+/* The member-granular answer's common path, or -1 when it has to read the store: yes while the
+ * realm's program has not modified the built-in at all, and a remembered answer while no store
+ * onto any built-in has happened since it was taken. */
+static inline int kiln_c99_realm_member_known(const kiln_gc_heap *heap, uint32_t builtin,
+                                              const char *member) {
+    size_t at;
+    if (heap->builtin_stores == 0) return 1;
+    if (builtin < 64u * KILN_C99_MODIFIED_BUILTIN_WORDS
+            ? ((heap->program_builtins[builtin >> 6] >> (builtin & 63u)) & 1u) == 0
+            : !heap->program_builtin_beyond) {
+        return 1;
+    }
+    at = kiln_c99_member_answer_at(builtin, member);
+    if (heap->member_answers[at].member == member && heap->member_answers[at].builtin == builtin &&
+        heap->member_answers[at].serial == heap->builtin_store_serial) {
+        return heap->member_answers[at].untouched;
+    }
+    return -1;
+}
+
+static __attribute__((noinline)) KILN_C99_RARE_CALL int kiln_c99_realm_member_answer(uint32_t builtin,
+                                                                 const char *member, size_t len) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    size_t at;
+    int untouched;
+    if (heap == NULL) return 0;
+    untouched = kiln_c99_realm_member_known(heap, builtin, member);
+    if (untouched >= 0) return untouched;
+    untouched = !kiln_c99_builtin_store_has_own(builtin, member, len);
+    at = kiln_c99_member_answer_at(builtin, member);
+    heap->member_answers[at].member = member;
+    heap->member_answers[at].builtin = builtin;
+    heap->member_answers[at].serial = heap->builtin_store_serial;
+    heap->member_answers[at].untouched = (uint8_t)untouched;
+    return untouched;
+}
+
+/* The member-granular answer, for a speculation on one own member of one built-in (`Math.sqrt`,
+ * `Number.isInteger`, `Promise.resolve`, `Promise.prototype.constructor`): the member is still
+ * the table's in this realm. A member found on the built-in itself does not depend on its
+ * prototype, so nothing is folded in. The answer is remembered until the realm next stores onto
+ * a built-in (`builtin_store_serial`), so a realm that wrote `Math.foo` reads the store once per
+ * store, and compares a few words per call after that. */
+static __attribute__((noinline, pure)) KILN_C99_RARE_CALL int
+kiln_c99_realm_builtin_member_untouched(uint32_t builtin, const char *member, size_t len) {
+    const kiln_gc_heap *heap = kiln_c99_gc_heap_if_cached();
+    int known;
+    if (KILN_UNLIKELY(heap == NULL)) return kiln_c99_realm_member_answer(builtin, member, len);
+    known = kiln_c99_realm_member_known(heap, builtin, member);
+    if (KILN_LIKELY(known >= 0)) return known;
+    return kiln_c99_realm_member_answer(builtin, member, len);
 }
 
 /* Canonical headed store walk shared by arrays, collections and promises. The raw helper in

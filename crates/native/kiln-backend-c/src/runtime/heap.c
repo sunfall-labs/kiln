@@ -422,6 +422,26 @@ typedef struct kiln_gc_heap {
      * kept alive by the realm's registry; read live by `kiln_c99_object_prototype_lacks`. */
     const struct kiln_object *object_prototype_store;
     uint8_t modified_builtin_beyond;
+    /* The same record restricted to what the realm stored after its bootstrap finished
+     * (`kiln_c99_builtin_bootstrap_done` clears it): which built-ins the *program* has modified.
+     * The emitted speculations ask it (`kiln_c99_builtins_unmodified_mask`,
+     * `kiln_c99_builtin_member_unmodified`); the bootstrap's own definitions are part of what the
+     * built-ins are and must not switch those off. */
+    uint8_t program_builtin_beyond;
+    uint64_t program_builtins[KILN_C99_MODIFIED_BUILTIN_WORDS];
+    /* Moves on every store onto a built-in's own-property store (the one choke point,
+     * `kiln_c99_callable_store` with `create`), so an answer computed from those stores is
+     * current while this is unchanged. */
+    uint64_t builtin_store_serial;
+    /* `kiln_c99_realm_builtin_member_untouched`'s answers, each valid while `serial` is the
+     * heap's `builtin_store_serial`: a speculation on `Math.sqrt` in a realm that wrote
+     * `Math.foo` asks the store once per store, not once per call. */
+    struct {
+        uint64_t serial;
+        const char *member;
+        uint32_t builtin;
+        uint8_t untouched;
+    } member_answers[8];
     /* The promise job lane (Phase 6.3). A promise reaction and an await resumption used to be a
      * GC cell and a call across the private ABI each; they are values in this array now, which
      * the realm drains by calling back into the prelude. It lives in the heap because the heap
@@ -994,6 +1014,19 @@ static kiln_gc_heap *kiln_c99_gc_heap(void) {
     cache->heap = heap;
     cache->generation = generation;
     return heap;
+}
+
+/* The heap `kiln_c99_gc_heap` would answer when its cache answers, else NULL -- without a call,
+ * for a register-preserving slow half that must not call anything on its common path (a call
+ * there makes it save every register it could clobber, on every call; see
+ * `kiln_c99_realm_builtin_member_untouched`). */
+static inline KILN_ALWAYS_INLINE kiln_gc_heap *kiln_c99_gc_heap_if_cached(void) {
+    const kiln_realm_cache *cache = &kiln_c99_realm_cached;
+    if (KILN_LIKELY(cache->generation_slot != NULL && cache->heap != NULL) &&
+        KILN_LIKELY(cache->generation == *cache->generation_slot)) {
+        return cache->heap;
+    }
+    return NULL;
 }
 
 /* The realm context of the realm this thread is in (see `kiln_c99_realm_state`). Outside any
