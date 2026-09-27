@@ -1155,7 +1155,9 @@ static int kiln_c99_val_read_property_view(kiln_host *host, kiln_val target,
         }
     } else if ((target & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX) {
         void *ptr = KILN_VAL_PTR(target);
-        if (site != NULL && (site->cached_tag == KILN_VALUE_ARRAY || kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY)) {
+        /* The block's own kind, not the site's memory of one: a site that saw an array's
+         * `length` also sees typed arrays, whose block is not a `kiln_array` (it read 0). */
+        if (site != NULL && kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {
             if (key != NULL && key->unit_len == 6 && kiln_c99_same_name_key(key, "length")) {
                 if (site != NULL) {
                     site->cached_tag = KILN_VALUE_ARRAY;

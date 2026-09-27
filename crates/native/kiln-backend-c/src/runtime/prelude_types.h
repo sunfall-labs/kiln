@@ -332,6 +332,12 @@ typedef void (*kiln_parallel_chunk_fn)(const void * restrict in, void * restrict
                                        void *ctx);
 int32_t kiln_parallel_map(const void *in, size_t count, void *out, kiln_parallel_chunk_fn chunk,
                           void *ctx);
+/* `parallelSort` (ADR 0069): a stable in-place sort of `count` elements -- a `kiln_typed_kind`
+ * (0..8), or 100 for an array's own numeric elements -- by 0 (the typed-array default order), 1
+ * (`(a, b) => a - b`) or 2 (`(a, b) => b - a`), on the same pool. 0 sorted; 1 a comparator order
+ * met a NaN and nothing was written; -1 an argument it does not take. The emitter asks only where
+ * the order is proven and the elements are numbers, so the answer is `sort`'s. */
+int32_t kiln_parallel_sort(void *data, size_t count, int32_t kind, int32_t order);
 
 static inline int kiln_c99_val_truthy(kiln_val v) {
     if (v == KILN_VAL_FALSE || v == KILN_VAL_UNDEFINED || v == KILN_VAL_NULL) return 0;

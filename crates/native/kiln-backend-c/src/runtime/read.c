@@ -777,6 +777,18 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 }
             }
         }
+        {
+            /* A member defined on `Array.prototype` itself rather than answered by the table:
+             * one the shared bootstrap installs (the parallel family, ADR 0069) or a program's
+             * own polyfill. It lives in the prototype built-in's store, which a read of
+             * `Array.prototype.x` already consults; an instance has to reach it too, or
+             * `[].x()` is "undefined is not a function" about a method `Array.prototype.x`
+             * demonstrably has. */
+            int found;
+            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_ARRAY_PROTOTYPE, key,
+                                                       ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+        }
         if (kiln_c99_same_name_key(key, "toLocaleString")) {
             *out = kiln_c99_method(KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING);
             return KILN_C99_OK;

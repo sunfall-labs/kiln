@@ -2019,6 +2019,21 @@ pub struct KilnExtension {
     pub attributes: DescriptorAttributes,
     /// Where the decision to have it is written down.
     pub decided_by: &'static str,
+    /// Who installs it: a [`PROTOTYPE_SURFACE`] row both engines answer, or the shared
+    /// TypeScript bootstrap (`kiln-builtins`, ADR 0060/0065), which defines it on the owner.
+    pub installed_by: ExtensionInstaller,
+}
+
+/// Where a [`KilnExtension`] is defined. Exactly one place defines each: a `Description` row on a
+/// [`PrototypeId`] owner must have its [`PROTOTYPE_SURFACE`] row, and a `Bootstrap` one must not
+/// (the bootstrap and the surface would otherwise both answer it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtensionInstaller {
+    /// A [`PROTOTYPE_SURFACE`] row, answered natively by each engine.
+    Description,
+    /// The common TypeScript bootstrap, through its `define*Extension` helpers, which a
+    /// `kiln-builtins` test holds to these rows in both directions.
+    Bootstrap,
 }
 
 /// Every kiln extension, in both engines. See [`KilnExtension`].
@@ -2028,14 +2043,76 @@ pub const KILN_EXTENSIONS: &[KilnExtension] = &[
         key: MemberKey::Named("parallelMap"),
         attributes: DescriptorAttributes::METHOD,
         decided_by: "ADR 0058",
+        installed_by: ExtensionInstaller::Description,
     },
     KilnExtension {
         owner: "%TypedArray%.prototype",
         key: MemberKey::Named("parallelMap"),
         attributes: DescriptorAttributes::METHOD,
         decided_by: "ADR 0058",
+        installed_by: ExtensionInstaller::Bootstrap,
+    },
+    // The parallel family (ADR 0069, parallel-builtins issue 10): sequential definitions in
+    // `kiln-builtins/src/parallel.ts`, and a pooled lowering where the native backend proves the
+    // callback pure (`kiln-backend-c/src/parallel.rs`). `parallelFlatMap` is on arrays only.
+    KilnExtension {
+        owner: "Array.prototype",
+        key: MemberKey::Named("parallelFilter"),
+        attributes: DescriptorAttributes::METHOD,
+        decided_by: "ADR 0069",
+        installed_by: ExtensionInstaller::Bootstrap,
+    },
+    KilnExtension {
+        owner: "Array.prototype",
+        key: MemberKey::Named("parallelFlatMap"),
+        attributes: DescriptorAttributes::METHOD,
+        decided_by: "ADR 0069",
+        installed_by: ExtensionInstaller::Bootstrap,
+    },
+    KilnExtension {
+        owner: "Array.prototype",
+        key: MemberKey::Named("parallelSort"),
+        attributes: DescriptorAttributes::METHOD,
+        decided_by: "ADR 0069",
+        installed_by: ExtensionInstaller::Bootstrap,
+    },
+    KilnExtension {
+        owner: "Array.prototype",
+        key: MemberKey::Named("parallelReduce"),
+        attributes: DescriptorAttributes::METHOD,
+        decided_by: "ADR 0069",
+        installed_by: ExtensionInstaller::Bootstrap,
+    },
+    KilnExtension {
+        owner: "%TypedArray%.prototype",
+        key: MemberKey::Named("parallelFilter"),
+        attributes: DescriptorAttributes::METHOD,
+        decided_by: "ADR 0069",
+        installed_by: ExtensionInstaller::Bootstrap,
+    },
+    KilnExtension {
+        owner: "%TypedArray%.prototype",
+        key: MemberKey::Named("parallelSort"),
+        attributes: DescriptorAttributes::METHOD,
+        decided_by: "ADR 0069",
+        installed_by: ExtensionInstaller::Bootstrap,
+    },
+    KilnExtension {
+        owner: "%TypedArray%.prototype",
+        key: MemberKey::Named("parallelReduce"),
+        attributes: DescriptorAttributes::METHOD,
+        decided_by: "ADR 0069",
+        installed_by: ExtensionInstaller::Bootstrap,
     },
 ];
+
+/// The leaf of `parallelReduce`'s combining tree (ADR 0069): the input's indices are cut into
+/// runs of this many, each folded from the initial value, and the runs' results combined pairwise
+/// level by level. The tree -- and so the answer of a combine that is not associative -- is fixed
+/// by the input length and this number alone, in both engines and at every core count; the
+/// TypeScript definition (`kiln-builtins/src/parallel.ts`) and the native lowering both read it
+/// here, and a test holds the TypeScript constant to it. Changing it changes the method's answer.
+pub const PARALLEL_REDUCE_LEAF: usize = 256;
 
 /// The environment variable that removes every kiln extension at run time when it is `0`, in
 /// either engine (ADR 0068 rule 4). Any other value, or none, leaves them installed.
@@ -2124,6 +2201,7 @@ const fn validate_kiln_extensions(extensions: &[KilnExtension]) {
             other += 1;
         }
         if let Some(prototype) = PrototypeId::from_name(extension.owner) {
+            let described = matches!(extension.installed_by, ExtensionInstaller::Description);
             let mut found = false;
             let mut row = 0;
             while row < PROTOTYPE_SURFACE.len() {
@@ -2141,8 +2219,12 @@ const fn validate_kiln_extensions(extensions: &[KilnExtension]) {
                 row += 1;
             }
             assert!(
-                found,
+                found || !described,
                 "a kiln extension on a PrototypeId owner has no PROTOTYPE_SURFACE row"
+            );
+            assert!(
+                !found || described,
+                "a kiln extension the bootstrap installs also has a PROTOTYPE_SURFACE row"
             );
         }
         index += 1;

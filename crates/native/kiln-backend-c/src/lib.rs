@@ -1407,7 +1407,9 @@ fn render_functions(
                 strict_functions,
                 typed,
                 emit_graph::EntryKind::Typed {
-                    returns_number: true,
+                    // A predicate (a boolean on some path) answers boxed, for
+                    // `parallelFilter`'s workers alone (`parallel::parallel_result`).
+                    returns_number: !emit_graph::parallel_boolean_result(&direct.entry, index),
                     restartable: false,
                 },
                 None,
@@ -1566,7 +1568,10 @@ fn render_functions(
                 } else {
                     "static "
                 };
-                for kind in emit_graph::PARALLEL_CHUNK_KINDS {
+                for kind in emit_graph::parallel_chunk_kinds(
+                    program.functions[index].parameter_count,
+                    emit_graph::parallel_boolean_result(&direct.entry, index),
+                ) {
                     writeln!(
                         output,
                         "{pmap_link}void {worker_symbol}_pmap{kind}_{index}(const void * restrict in, void * restrict out, size_t start, size_t end, void * restrict ctx);"
@@ -1837,6 +1842,7 @@ fn render_functions(
                         symbol,
                         index,
                         proto.parameter_count,
+                        emit_graph::parallel_boolean_result(&direct.entry, index),
                         &captures,
                         true,
                     );
@@ -1848,6 +1854,7 @@ fn render_functions(
                         symbol,
                         index,
                         proto.parameter_count,
+                        emit_graph::parallel_boolean_result(&direct.entry, index),
                         &captures,
                         should_chunk,
                     );
@@ -3658,7 +3665,7 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
             if (ku_pv != KILN_VAL_HOLE) { (DST) = ku_pv; break; } \\\n\
         } \\\n\
     } else if (ku_s != NULL && !ku_s->has_cached_method) { \\\n\
-        if (ku_s->cached_tag == KILN_VALUE_ARRAY && ((ku_t & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) { \\\n\
+        if (ku_s->cached_tag == KILN_VALUE_ARRAY && ((ku_t & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX) && kiln_c99_gc_kind_of_ptr(KILN_VAL_PTR(ku_t)) == KILN_GC_ARRAY) { \\\n\
             const kiln_array *ku_arr = (const kiln_array *)KILN_VAL_PTR(ku_t); \\\n\
             (DST) = kiln_c99_val_from_double((double)ku_arr->count); \\\n\
             break; \\\n\

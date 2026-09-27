@@ -30,6 +30,46 @@ static int kiln_c99_delete_computed(kiln_host *host, kiln_value target, kiln_val
                                thrown);
 }
 
+/* The keys a program (or the shared TypeScript bootstrap) defined on a built-in, held in its
+ * own-property store, appended to `built` after the ones the table answers -- skipping any it
+ * already lists. Both branches of `kiln_c99_builtin_own_keys` end here: a table-driven prototype
+ * such as `Array.prototype` carries bootstrap members too (the parallel family, ADR 0069), and a
+ * list without them made `hasOwnProperty` refuse a member a read answers. */
+static int kiln_c99_builtin_store_keys(uint64_t builtin, kiln_value built) {
+    kiln_value store;
+    kiln_object *obj;
+    size_t p;
+    int status;
+    if (kiln_c99_callable_store(kiln_c99_builtin(builtin), &store, 0) != KILN_C99_OK ||
+        store.tag != KILN_VALUE_OBJECT) {
+        return KILN_C99_OK;
+    }
+    obj = kiln_c99_object_of(store);
+    if (obj->shape != NULL) kiln_c99_ensure_dictionary(obj);
+    for (p = 0; p < obj->count; ++p) {
+        size_t b_idx;
+        int duplicate = 0;
+        kiln_value key;
+        kiln_array *arr = kiln_c99_array_of(built);
+        if (kiln_c99_key_is_reserved(obj->properties[p].key)) {
+            if (!kiln_c99_symbol_of_key_view(obj->properties[p].key, &key)) continue;
+        } else {
+            key = kiln_c99_stable_key_value(obj->properties[p].key);
+        }
+        for (b_idx = 0; b_idx < arr->count; ++b_idx) {
+            if (kiln_c99_strict_equal(kiln_val_to_boundary(arr->elements[b_idx]), key)) {
+                duplicate = 1;
+                break;
+            }
+        }
+        if (!duplicate) {
+            status = kiln_c99_array_push(built, key);
+            if (status != KILN_C99_OK) return status;
+        }
+    }
+    return KILN_C99_OK;
+}
+
 /* Every name a built-in namespace or prototype table answers to.
  *
  * Derived by round-tripping the code space through the same lookup a read uses, rather than
@@ -84,6 +124,9 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
                 prototype.tag == KILN_VALUE_BUILTIN) {
                 status = kiln_c99_array_push(built, kiln_c99_copy_text("prototype", 9));
             }
+        }
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_builtin_store_keys(builtin, built);
         }
         *out = built;
         return status;
@@ -176,47 +219,8 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
             }
         }
     }
-    {
-        kiln_value store;
-        if (kiln_c99_callable_store(kiln_c99_builtin(builtin), &store, 0) == KILN_C99_OK &&
-            store.tag == KILN_VALUE_OBJECT) {
-            kiln_object *obj = kiln_c99_object_of(store);
-            size_t p;
-            if (obj->shape != NULL) kiln_c99_ensure_dictionary(obj);
-            for (p = 0; p < obj->count; ++p) {
-                size_t b_idx;
-                int duplicate = 0;
-                kiln_array *arr = kiln_c99_array_of(built);
-                if (kiln_c99_key_is_reserved(obj->properties[p].key)) {
-                    kiln_value symbol;
-                    if (kiln_c99_symbol_of_key_view(obj->properties[p].key, &symbol)) {
-                        for (b_idx = 0; b_idx < arr->count; ++b_idx) {
-                            if (kiln_c99_strict_equal(kiln_val_to_boundary(arr->elements[b_idx]), symbol)) {
-                                duplicate = 1;
-                                break;
-                            }
-                        }
-                        if (!duplicate) {
-                            status = kiln_c99_array_push(built, symbol);
-                            if (status != KILN_C99_OK) return status;
-                        }
-                    }
-                } else {
-                    kiln_value str_val = kiln_c99_stable_key_value(obj->properties[p].key);
-                    for (b_idx = 0; b_idx < arr->count; ++b_idx) {
-                        if (kiln_c99_strict_equal(kiln_val_to_boundary(arr->elements[b_idx]), str_val)) {
-                            duplicate = 1;
-                            break;
-                        }
-                    }
-                    if (!duplicate) {
-                        status = kiln_c99_array_push(built, str_val);
-                        if (status != KILN_C99_OK) return status;
-                    }
-                }
-            }
-        }
-    }
+    status = kiln_c99_builtin_store_keys(builtin, built);
+    if (status != KILN_C99_OK) return status;
     *out = built;
     return KILN_C99_OK;
 }

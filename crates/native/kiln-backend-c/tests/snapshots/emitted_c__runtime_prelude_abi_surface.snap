@@ -874,6 +874,7 @@ static inline kiln_val kiln_c99_val_from_double(double d) {
 int32_t kiln_bigint_is_zero(const void *handle);
 typedef void (*kiln_parallel_chunk_fn)(const void * restrict in, void * restrict out, size_t start, size_t end,
 int32_t kiln_parallel_map(const void *in, size_t count, void *out, kiln_parallel_chunk_fn chunk,
+int32_t kiln_parallel_sort(void *data, size_t count, int32_t kind, int32_t order);
 static inline int kiln_c99_val_truthy(kiln_val v) {
 static inline const char *kiln_c99_string_ascii_bytes(kiln_value value, size_t *length) {
 static inline int kiln_c99_string_equals_ascii(kiln_value value, const char *ascii,
@@ -2332,6 +2333,7 @@ static int kiln_c99_proxy_all_keys(kiln_host *host, kiln_value proxy, kiln_value
 static int kiln_c99_proxy_own_keys(kiln_host *host, kiln_value proxy, kiln_value *out, int depth,
 static int kiln_c99_has_computed(kiln_host *host, kiln_value target, kiln_value key, int *answer,
 static int kiln_c99_delete_computed(kiln_host *host, kiln_value target, kiln_value key,
+static int kiln_c99_builtin_store_keys(uint64_t builtin, kiln_value built) {
 static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
 static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value *out, int depth,
 static kiln_value *kiln_c99_exotic_store(kiln_value target) {

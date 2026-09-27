@@ -344,6 +344,20 @@ pub unsafe extern "C" fn kiln_parallel_map(
     INVALID_ARGUMENT
 }
 
+#[cfg(not(feature = "parallel"))]
+/// # Safety
+///
+/// This disabled feature stub does not dereference its arguments.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_parallel_sort(
+    _data: *mut core::ffi::c_void,
+    _count: usize,
+    _kind: i32,
+    _order: i32,
+) -> i32 {
+    INVALID_ARGUMENT
+}
+
 #[cfg(not(feature = "ffi"))]
 #[path = "provider/ffi_stubs.rs"]
 mod ffi_stubs;

@@ -371,10 +371,16 @@ impl DirectPlan {
             for (_, op) in graph.blocks.iter().flat_map(|b| b.operations.iter()) {
                 if let GraphOp::CallMethod { name, args, .. } = op
                     && let Some(Constant::String(key)) = program.constants.get(*name as usize)
-                    && key == "parallelMap"
-                    && let Some(&target) = args.first().and_then(|a| known.known.get(a))
+                    && let Some(method) = key
+                        .to_scalar_string()
+                        .ok()
+                        .and_then(|k| crate::parallel::ParallelMethod::from_name(&k))
                 {
-                    parallel_callbacks.insert(target);
+                    for &(position, _) in method.callbacks(args.len()) {
+                        if let Some(&target) = known.known.get(&args[position]) {
+                            parallel_callbacks.insert(target);
+                        }
+                    }
                 }
             }
         }
@@ -415,20 +421,14 @@ impl DirectPlan {
                     &params,
                     &length_bounds[i],
                 );
-                let returns_number = g
-                    .blocks
-                    .iter()
-                    .filter(|b| b.is_reachable_from_entry(g.entry_block))
-                    .all(|b| match &b.terminator {
-                        Terminator::Return(Some(v)) => proven.get(v).is_some_and(|k| k.is_number()),
-                        Terminator::Return(None) => false,
-                        _ => true,
-                    });
-                if !returns_number {
+                let Some(boolean_result) = crate::parallel::parallel_result(g, &proven) else {
                     return Err(Refusal::new(Reason::ReturnsNonNumber));
-                }
+                };
                 parallel_seeds[i] = Some(seeds);
-                Ok(shape)
+                Ok(crate::parallel::ParallelShape {
+                    boolean_result,
+                    ..shape
+                })
             })
             .collect();
         let parallel_safe: Vec<bool> = parallel_verdicts.iter().map(Result::is_ok).collect();
@@ -599,6 +599,31 @@ impl DirectPlan {
                 if let GraphOp::CallMethod { name, args, .. } = op
                     && let Some(Constant::String(key)) = program.constants.get(*name as usize)
                 {
+                    // The family's pooled lowerings (parallel issue 10) call the clones of the
+                    // callbacks at these positions, like `parallelMap`'s; a `parallelSort`
+                    // comparator is never called there, only recognised.
+                    if let Some(method) = key
+                        .to_scalar_string()
+                        .ok()
+                        .and_then(|k| crate::parallel::ParallelMethod::from_name(&k))
+                        .filter(|m| {
+                            !matches!(
+                                m,
+                                crate::parallel::ParallelMethod::Map
+                                    | crate::parallel::ParallelMethod::Sort
+                            )
+                        })
+                    {
+                        for &(position, arities) in method.callbacks(args.len()) {
+                            if let Some(&target) = plan.known.get(&args[position])
+                                && parallel_safe[target as usize]
+                                && arities.contains(&params[target as usize])
+                            {
+                                targets.push(target);
+                            }
+                        }
+                        continue;
+                    }
                     let arities: &[u32] = match (key.to_scalar_string().ok().as_deref(), args.len())
                     {
                         (Some("map"), 1) | (Some("filter"), 1) => &[1, 2],
@@ -733,24 +758,31 @@ impl DirectPlan {
         speculate: Option<bool>,
     ) {
         use crate::parallel::{Reason, Refusal};
-        let is_parallel_map = |name: u32| {
-            matches!(
-                program.constants.get(name as usize),
-                Some(Constant::String(key)) if key == "parallelMap"
-            )
+        let parallel_method = |name: u32| match program.constants.get(name as usize) {
+            Some(Constant::String(key)) => key
+                .to_scalar_string()
+                .ok()
+                .and_then(|k| crate::parallel::ParallelMethod::from_name(&k)),
+            _ => None,
         };
+        // Every callback argument of a parallel site (`parallelMap` and the family): the
+        // positions `ParallelMethod::callbacks` names for the call's argument count.
         let site_arguments = |graph: &FunctionGraph| -> Vec<ValueId> {
             graph
                 .blocks
                 .iter()
                 .flat_map(|b| b.operations.iter())
-                .filter_map(|(_, op)| match op {
-                    GraphOp::CallMethod { name, args, .. }
-                        if args.len() == 1 && is_parallel_map(*name) =>
-                    {
-                        Some(args[0])
-                    }
-                    _ => None,
+                .flat_map(|(_, op)| match op {
+                    GraphOp::CallMethod { name, args, .. } => parallel_method(*name)
+                        .map(|method| {
+                            method
+                                .callbacks(args.len())
+                                .iter()
+                                .map(|&(position, _)| args[position])
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
                 })
                 .collect()
         };
@@ -947,11 +979,15 @@ impl DirectPlan {
                     &params,
                     &cb.length_bounds,
                 );
-                if !returns_number(&graphs[i], &proven) {
+                let Some(boolean_result) = crate::parallel::parallel_result(&graphs[i], &proven)
+                else {
                     return Err(Refusal::new(Reason::ReturnsNonNumber));
-                }
+                };
                 parallel_seeds.insert(t, seeds);
-                Ok(shape)
+                Ok(crate::parallel::ParallelShape {
+                    boolean_result,
+                    ..shape
+                })
             })();
         }
         let parallel_safe: Vec<bool> = verdicts.iter().map(Result::is_ok).collect();
@@ -1097,21 +1133,12 @@ impl DirectPlan {
     }
 
     /// Narrow `parallel_safe` to the protos whose parallel clone was emitted and scanned clean
-    /// (`lib.rs`), in every body's plan, so a `parallelMap` site anywhere reads the final answer.
+    /// (`lib.rs`), in every body's plan, so a parallel site anywhere reads the final answer: a
+    /// site whose callback runs on the pool refuses with `clone-rejected` when its proto is not
+    /// `parallel_safe`. The verdict itself is kept -- a `parallelSort` comparator runs nowhere,
+    /// so it needs no clone, only the order its verdict proved.
     pub fn set_parallel(&mut self, admitted: &[bool]) {
-        let verdicts: Vec<_> = self
-            .entry
-            .parallel
-            .iter()
-            .enumerate()
-            .map(|(i, verdict)| match verdict {
-                Ok(_) if !admitted.get(i).copied().unwrap_or(false) => Err(
-                    crate::parallel::Refusal::new(crate::parallel::Reason::CloneRejected),
-                ),
-                other => other.clone(),
-            })
-            .collect();
-        let verdicts = std::sync::Arc::new(verdicts);
+        let verdicts = self.entry.parallel.clone();
         for plan in self
             .functions
             .iter_mut()
