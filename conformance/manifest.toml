@@ -1989,3 +1989,18 @@ true
 true
 012 true
 """
+
+[[test]]
+id = "regress/r36-dead-closure-captures-import"
+requires_host = "node"
+group = "regress"
+source = "regress/r36-dead-closure-captures-import.mjs"
+status = "runnable"
+features = ["modules", "closures", "builtin-modules"]
+catches = """
+A function nothing calls still captures the imports it names (realms issue 22). The linker drops an import nothing live reads, but the body hoists the dead declaration and captures the import's slot anyway; the interpreter failed the whole module with "local slot 0 does not hold a captured cell" before its first line (`bench/concurrency/js/common.mjs`'s `rssKiB`). The native backend's locals start `undefined` and never failed.\
+"""
+expected_stdout = """
+live-7
+done
+"""

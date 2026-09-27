@@ -801,6 +801,16 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
             other => Value::Cell(Rc::new(RefCell::new(other.clone()))),
         };
     }
+    // A slot the body reads as a cell (a capture, `LoadCell`, `StoreCell`) that no `NewCell`
+    // creates is an import's -- and the linker drops an import nothing live reads. A function
+    // that only a dead declaration reaches still captures the slot when the body hoists it, so
+    // the slot needs a cell even though no value will ever arrive in it. The native backend's
+    // locals start `undefined` and read a dropped import the same way (realms issue 22).
+    for slot in module_cell_slots_without_new_cell(&module.program) {
+        if let Some(local @ Value::Undefined) = locals.get_mut(slot as usize) {
+            *local = Value::Cell(Rc::new(RefCell::new(Value::Undefined)));
+        }
+    }
 
     // An import this module makes from itself names a binding that does not exist yet, so
     // there was no value for the loop above to place. Both kinds are set up here instead: a
@@ -1058,4 +1068,38 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
         exports,
         commonjs_exports,
     })
+}
+
+/// Slots a module body reads as cells -- captured by a function it makes, or loaded and stored
+/// as a cell -- that no `NewCell` in the body creates: the ones whose cell must already be there
+/// when the body starts. The native backend's `slots_read_as_cells` is the same walk.
+fn module_cell_slots_without_new_cell(program: &Program) -> Vec<u32> {
+    let mut needed = HashSet::new();
+    let mut created = HashSet::new();
+    for instruction in &program.code {
+        match instruction {
+            Instruction::LoadCell(slot) | Instruction::StoreCell(slot) => {
+                needed.insert(*slot);
+            }
+            Instruction::NewCell(slot) => {
+                created.insert(*slot);
+            }
+            Instruction::MakeFunction(proto) => {
+                if let Some(target) = program.functions.get(*proto as usize) {
+                    for upvalue in &target.upvalues {
+                        if let Upvalue::ParentLocal(slot) | Upvalue::NamedParentLocal { slot, .. } =
+                            upvalue
+                        {
+                            needed.insert(*slot);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    needed.retain(|slot| !created.contains(slot));
+    let mut slots: Vec<u32> = needed.into_iter().collect();
+    slots.sort_unstable();
+    slots
 }
