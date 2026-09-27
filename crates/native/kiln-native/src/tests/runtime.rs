@@ -2072,3 +2072,27 @@ Object.defineProperty(Promise.prototype, "constructor", {
         "{error}"
     );
 }
+
+#[test]
+fn release_source_dce_keeps_a_discarded_coercion_and_a_throwing_global_call() {
+    // Issue 19: Oxc's dead-code pass assumes coercions are pure and `decodeURIComponent` never
+    // throws; the release build deleted both statements and folded `calls` to 0.
+    let Some(output) = run_native_release_fixture(
+        "release-source-dce-observable-effects",
+        r#"
+let calls = 0;
+const o = { valueOf() { calls += 1; return 2; }, toString() { calls += 10; return "o"; } };
+o < 10;
+o == 2;
+`${o}`;
+let thrown = "no";
+try { decodeURIComponent("%"); } catch (error) { thrown = error.name; }
+let hint = "none";
+const d = new Date({ [Symbol.toPrimitive](h) { hint = h; return 0; } });
+console.log(calls, thrown, hint, d.getTime());
+"#,
+    ) else {
+        return;
+    };
+    assert_eq!(output, "12 URIError default 0\n");
+}

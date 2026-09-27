@@ -4,6 +4,8 @@
 //! accepts ordinary strings and returns [`kiln_hir`] values, so an Oxc upgrade cannot leak AST
 //! types or arena lifetimes into the query database, interpreter, or backends.
 
+mod dce_guard;
+
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     path::Path,
@@ -568,7 +570,9 @@ fn worker_script_specifiers(
             if scoping.symbol_is_mutated(symbol) {
                 return;
             }
-            let declaration = semantic.nodes().get_node(scoping.symbol_declaration(symbol));
+            let declaration = semantic
+                .nodes()
+                .get_node(scoping.symbol_declaration(symbol));
             if let AstKind::VariableDeclarator(declarator) = declaration.kind()
                 && let Some(init) = &declarator.init
             {
@@ -1052,8 +1056,12 @@ fn parse_source_in_context(
         && !has_unexported_top_level_class_heritage(&parsed.program)
     {
         expose_only_demanded_declarations(&allocator, &mut parsed.program, demanded_exports);
+        // Oxc's side-effect model assumes coercions are pure and that some global functions
+        // never throw; guard what the language can observe before it runs (issue 19).
+        dce_guard::guard_observable_effects(&allocator, &mut parsed.program);
         Compressor::new(&allocator)
             .dead_code_elimination(&mut parsed.program, CompressOptions::dce());
+        dce_guard::release_observable_guards(&allocator, &mut parsed.program);
     }
     let node_runtime_requests = if parsed.panicked || !parsed.diagnostics.is_empty() {
         Vec::new()
@@ -4050,6 +4058,87 @@ mod tests {
 
         assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
         assert_eq!(module.body.len(), 3);
+    }
+
+    /// The HIR of a release (DCE) parse, as text: enough to ask whether a name survived.
+    fn dce_text(source: &str) -> String {
+        let module = parse_dce("module.js", source, &BTreeSet::new());
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let text = format!("{:?}", module.body);
+        assert!(
+            !text.contains(dce_guard::OBSERVABLE),
+            "a DCE guard survived into the HIR"
+        );
+        text
+    }
+
+    #[test]
+    fn dce_keeps_expressions_whose_coercion_can_run_user_code() {
+        // Each statement's only effect is a coercion of `o` (issue 19); Oxc assumes coercions
+        // are pure. `k` is a parameter, so it survives as a use only if the statement does.
+        for source in [
+            "function f(o, k) { o < k; } f({}, 1);",
+            "function f(o, k) { o == k; } f({}, 1);",
+            "function f(o, k) { `${o}${k}`; } f({}, 1);",
+            "function f(o, k) { [o] + k; } f({}, 1);",
+            "function f(o, k) { ({ [o]: k }); } f({}, 1);",
+            "function f(o, k) { class C { [o]() { return k; } } } f({}, 1);",
+            "function f(o, k) { const unused = o < k; } f({}, 1);",
+            "function f(o, k) { String(o, k); } f({}, 1);",
+            "function f(o, k) { Math.abs(o, k); } f({}, 1);",
+            "function f(o, k) { new Date(o, k); } f({}, 1);",
+        ] {
+            let text = dce_text(source);
+            assert!(text.matches("\"k\"").count() >= 2, "{source}: {text}");
+        }
+        for source in [
+            "function f(o) { +o; } f({});",
+            "function f(o) { -o; } f({});",
+            "function f(o) { ~o; } f({});",
+        ] {
+            assert!(dce_text(source).contains("Unary"), "{source}");
+        }
+    }
+
+    #[test]
+    fn dce_keeps_calls_and_classes_that_may_throw() {
+        for (source, marker) in [
+            (
+                "try { decodeURIComponent('%'); } catch {}",
+                "decodeURIComponent",
+            ),
+            ("try { decodeURI?.('%'); } catch {}", "decodeURI"),
+            ("try { parseInt('1'); } catch {}", "parseInt"),
+            (
+                "function f() { const n = 1; class KeptSubclass extends n {} } f();",
+                "KeptSubclass",
+            ),
+        ] {
+            assert!(dce_text(source).contains(marker), "{source}");
+        }
+    }
+
+    #[test]
+    fn dce_guard_keeps_what_the_pass_is_for() {
+        // Primitive comparisons still fold, `x == null` and `===` do not coerce, unused
+        // declarations still go, and module-scope allocations bundles never use still go.
+        let text = dce_text(
+            "const LIMIT = 3; if (LIMIT > 5) { deadBranch(); } \
+             function f(x) { x == null; x === 1; } f(1); \
+             function unusedFunction() {} \
+             const unusedMap = new Map(); const unusedSymbol = Symbol('s'); \
+             function g() { class UnusedBase {} class UnusedDerived extends UnusedBase {} } g(); \
+             console.log('live');",
+        );
+        for dropped in [
+            "deadBranch",
+            "unusedFunction",
+            "unusedMap",
+            "unusedSymbol",
+            "UnusedDerived",
+        ] {
+            assert!(!text.contains(dropped), "{dropped} survived: {text}");
+        }
     }
 
     #[test]
