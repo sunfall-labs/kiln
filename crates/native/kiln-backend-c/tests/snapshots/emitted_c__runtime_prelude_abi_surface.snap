@@ -1,5 +1,6 @@
 ---
 source: crates/native/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 804
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -2724,6 +2725,12 @@ static void kiln_c99_drop_callable_store(void *pointer) {
 typedef char kiln_c99_object_prototype_is_18[KILN_C99_BUILTIN_OBJECT_PROTOTYPE == 18 ? 1 : -1];
 static void kiln_c99_realm_note_builtin_store(uint32_t builtin) {
 static void kiln_c99_realm_note_store(void) {
+static void kiln_c99_stack_release_below(void) {
+#if defined(__linux__)
+#ifndef MADV_DONTNEED
+#define MADV_DONTNEED 4
+#endif
+#endif
 static void kiln_c99_builtin_bootstrap_done(void) {
 static __attribute__((noinline)) KILN_C99_RARE_CALL int kiln_c99_realm_builtins_unmodified_uncached(void) {
 static __attribute__((noinline, pure)) KILN_C99_RARE_CALL int kiln_c99_realm_builtins_unmodified(void) {
