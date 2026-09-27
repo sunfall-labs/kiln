@@ -24,8 +24,15 @@ const holey = [];
 for (let i = 0; i < n; i++) if (i & 3) holey[i] = i;
 const around = x => [x - 1, x + 1];
 check("holey receiver", holey.parallelFlatMap(around), holey.flatMap(around));
-// (A hole in an answer is skipped by `flatMap`; the interpreter keeps it as undefined, so the
-// arrays here have none -- see the issue 08 comments.)
 const shared = [1, 2, 3];
 const reuse = (x, i) => (i & 1) === 1 ? shared : [x];
 check("existing arrays", xs.parallelFlatMap(reuse), xs.flatMap(reuse));
+// A hole in an answer is skipped: FlattenIntoArray advances the target only past an element it
+// wrote (issue 26), whether the answer already existed or a worker built it.
+const holeyShared = [1, , 3];
+const reuseHoley = (x, i) => i % 2 ? holeyShared : [x];
+check("existing holey arrays", xs.parallelFlatMap(reuseHoley), xs.flatMap(reuseHoley));
+const builtHoley = (x, i) => (i & 3) === 0 ? [, x] : (i & 3) === 1 ? [x, , x] : [x];
+check("built holey arrays", xs.parallelFlatMap(builtHoley), xs.flatMap(builtHoley));
+const small = [10, 20, 30, 40];
+console.log(JSON.stringify(small.parallelFlatMap(reuseHoley)), JSON.stringify(small.parallelFlatMap(builtHoley)));
