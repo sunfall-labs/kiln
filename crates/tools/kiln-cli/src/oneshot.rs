@@ -114,11 +114,10 @@ mod tests {
         SourceHash, StepBudget, source_digest,
     };
 
-    // These four tests execute the same canonical HTTP programs from fresh project roots. Their
-    // assertions cover native behavior, not cache misses, so sharing content-addressed native
-    // artifacts avoids recompiling the prelude for every temporary fixture. Tests that assert
-    // cache behavior keep their private `.kiln/cache`; unsupported symlink setups fall back to
-    // that same private cache.
+    // These tests exercise native behavior from fresh project roots. Their assertions cover
+    // runtime behavior, not cache misses, so sharing content-addressed native artifacts avoids
+    // recompiling the prelude for every temporary fixture. Tests that assert cache behavior keep
+    // their private `.kiln/cache`; unsupported symlink setups fall back to that same private cache.
     #[cfg(unix)]
     fn share_native_semantic_cache(fixture: &std::path::Path) {
         let shared = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -509,6 +508,7 @@ server.listen(0, "127.0.0.1", () => {
 "#,
         )
         .expect("write HTTP request identity fixture");
+        share_native_semantic_cache(&fixture);
 
         let interpreted = {
             let mut session = OneShot::start().expect("start interpreted engine");
@@ -560,6 +560,7 @@ server.listen(0, "127.0.0.1", () => {
             &source,
         )
         .expect("copy pinned HTTP half-close fixture");
+        share_native_semantic_cache(&fixture);
 
         let interpreted = {
             let mut session = OneShot::start().expect("start interpreted engine");
