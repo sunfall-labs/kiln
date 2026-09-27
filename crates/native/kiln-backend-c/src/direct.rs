@@ -405,12 +405,20 @@ impl DirectPlan {
                 }
                 // A callback tier 1 refuses may still read the heap in parallel (tier 2).
                 let tier_2 = |refusal| {
+                    let lookup = |f: u32, v: ValueId| known.parallel_callee(graphs, f, v);
+                    let calls = crate::parallel::CallGraph {
+                        graphs,
+                        captures: &known.captures,
+                        known: &lookup,
+                        root: i as u32,
+                    };
                     crate::parallel::tier_2(
                         g,
                         &program.functions[i],
                         program,
                         &known.captures[i],
                         refusal,
+                        Some(&calls),
                     )
                 };
                 let shape = match crate::parallel::parallel_verdict(
@@ -982,12 +990,20 @@ impl DirectPlan {
             verdicts[i] = (|| {
                 // A callback tier 1 refuses may still read the heap in parallel (tier 2).
                 let tier_2 = |refusal| {
+                    let lookup = |f: u32, v: ValueId| known.parallel_callee(graphs, f, v);
+                    let calls = crate::parallel::CallGraph {
+                        graphs,
+                        captures: &known.captures,
+                        known: &lookup,
+                        root: i as u32,
+                    };
                     crate::parallel::tier_2(
                         &graphs[i],
                         &program.functions[i],
                         program,
                         &known.captures[i],
                         refusal,
+                        Some(&calls),
                     )
                 };
                 let shape = match crate::parallel::parallel_verdict(
@@ -1445,6 +1461,40 @@ struct Known {
     entry: KnownValues,
     /// Per proto, per upvalue index: what the unit knows about the binding it captures.
     captures: Vec<Vec<crate::parallel::Capture>>,
+    /// Per proto: the upvalues whose binding's one real store is a closure of a proto made at
+    /// one site (tier 4's calls through a captured `const f = x => ...`, body-checked per call).
+    captured_closures: Vec<HashMap<u32, u32>>,
+}
+
+impl Known {
+    /// Tier 4's answer to "which proto would a call through value `v` of proto `f`'s body run":
+    /// a known closure, or a captured binding holding one closure (checked again at run time).
+    fn parallel_callee(&self, graphs: &[FunctionGraph], f: u32, v: ValueId) -> Option<u32> {
+        if let Some(&t) = self.functions.get(f as usize)?.known.get(&v) {
+            return Some(t);
+        }
+        let graph = graphs.get(f as usize)?;
+        let def = |v: ValueId| {
+            graph
+                .blocks
+                .iter()
+                .flat_map(|b| b.operations.iter())
+                .find(|(id, _)| *id == v)
+                .map(|(_, op)| op)
+        };
+        let upvalue = match def(v)? {
+            GraphOp::LoadUpvalue(k) => *k,
+            GraphOp::CheckTdz { value, .. } => match def(*value)? {
+                GraphOp::LoadUpvalue(k) => *k,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        self.captured_closures
+            .get(f as usize)?
+            .get(&upvalue)
+            .copied()
+    }
 }
 
 /// What a stored value is, for the binding rule.
@@ -1810,10 +1860,44 @@ fn known_callees(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGr
                 .collect()
         })
         .collect();
+    // Tier 4 of the parallel built-ins: a captured binding whose one real store is a closure of a
+    // proto made at one site -- the function a call through it would run, if it runs any. Weaker
+    // than a known binding (a read may still be in the dead zone, or before the store), which is
+    // why a parallel clone never calls through one without comparing the closure's body with the
+    // proto's first (`parallel_heap`'s body check).
+    let captured_closures: Vec<HashMap<u32, u32>> = (0..graphs.len() as u32)
+        .map(|f| {
+            let mut out = HashMap::new();
+            if poisoned {
+                return out;
+            }
+            for k in 0..program.functions[f as usize].upvalues.len() as u32 {
+                let Some(binding) = resolve(program, &parent, f, k) else {
+                    continue;
+                };
+                let real: Vec<&Store> = stores
+                    .get(&binding)
+                    .map(|all| {
+                        all.iter()
+                            .filter(|s| s.stored != Stored::Undefined)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if let [one] = real[..]
+                    && let Stored::Closure(index) = one.stored
+                    && unique(index)
+                {
+                    out.insert(k, index);
+                }
+            }
+            out
+        })
+        .collect();
     let mut known = Known {
         functions: vec![KnownValues::default(); graphs.len()],
         entry: KnownValues::default(),
         captures,
+        captured_closures,
     };
     fn values_of(known: &mut Known, owner: Owner) -> &mut KnownValues {
         match owner {

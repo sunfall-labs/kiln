@@ -140,6 +140,177 @@ fn cone(graph: &FunctionGraph, key: ValueId) -> HashSet<ValueId> {
 ///
 /// With `key`, the key comparator's key: only the computation of that value (one straight-line
 /// block, [`crate::parallel::key_comparator`]), taking one element, answering the key.
+/// Which body a heap clone is emitted for (tier 4, parallel issue 09): the callback's own, or one
+/// of the functions it calls, each of which gets a clone of its own per callback.
+#[derive(Debug, Clone, Copy)]
+pub struct CloneContext<'a> {
+    /// The unit's C symbol prefix (`{symbol}_fn_{index}` are its bodies).
+    pub symbol: &'a str,
+    /// The callback's proto, which names its callees' clones.
+    pub root: u32,
+    /// `Some(t)` for callee `t`'s clone, `None` for the callback's.
+    pub callee: Option<u32>,
+}
+
+/// The C name of callee `target`'s clone for the callback `root`.
+pub fn callee_clone_name(symbol: &str, root: u32, target: u32) -> String {
+    format!("{symbol}_fn_{root}_hc{target}")
+}
+
+/// The parameter list of a callee clone taking `parameters` arguments: the callback's env, sites
+/// and arena, the captures its closure holds (`ups`, by upvalue index), and the call depth.
+fn callee_parameters(parameters: u32) -> String {
+    let mut params = String::from(
+        "const kiln_c99_par_env *env, kiln_c99_par_site *sites, kiln_c99_par_arena *arena, const kiln_val *ups, unsigned depth",
+    );
+    for k in 0..parameters {
+        write!(params, ", kiln_val p{k}").unwrap();
+    }
+    params
+}
+
+/// The clones of every function the callback `root` calls (tier 4), each declared first so they
+/// may call each other in any order, recursion included.
+pub fn emit_heap_callees(
+    output: &mut String,
+    graphs: &[FunctionGraph],
+    program: &Program,
+    symbol: &str,
+    root: u32,
+    shape: &HeapShape,
+) {
+    for &(target, _) in &shape.callees {
+        let proto = &program.functions[target as usize];
+        writeln!(
+            output,
+            "static __attribute__((unused)) kiln_val {}({});",
+            callee_clone_name(symbol, root, target),
+            callee_parameters(proto.parameter_count)
+        )
+        .unwrap();
+    }
+    for &(target, _) in &shape.callees {
+        emit_heap_clone(
+            output,
+            &graphs[target as usize],
+            &program.functions[target as usize],
+            program,
+            &callee_clone_name(symbol, root, target),
+            shape,
+            None,
+            &CloneContext {
+                symbol,
+                root,
+                callee: Some(target),
+            },
+        );
+    }
+}
+
+/// The C function a pure built-in runs as on a pool thread (tier 4): every
+/// `kiln_builtin_surface::PURE_MEMBERS` row has one, and a test holds the two to each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PurePath {
+    /// A listed `Math` function, inline ([`math_expression`]).
+    Math,
+    /// `String.prototype.charCodeAt`, tier 2's inline reader.
+    CharCodeAt,
+    /// `kiln_c99_par_f_<name>(env, arena, argc, args, &out)`.
+    Function(&'static str),
+    /// `kiln_c99_par_m_<key>(env, arena, self, argc, args, &out)`, dispatched on the receiver.
+    Method(&'static str),
+    /// `map`, `filter`, `some`, `every`: a loop in the clone, calling the callback's clone.
+    Loop(&'static str),
+}
+
+/// The worker path of the pure member `owner.key`.
+pub fn pure_path(owner: &str, key: &str) -> Option<PurePath> {
+    use PurePath::*;
+    let path = match (owner, key) {
+        ("Math", k) => {
+            return crate::parallel::PARALLEL_MATH
+                .iter()
+                .any(|(name, _)| *name == k)
+                .then_some(Math);
+        }
+        ("globalThis", "Number") => Function("Number"),
+        ("globalThis", "String") => Function("String"),
+        ("globalThis", "Boolean") => Function("Boolean"),
+        ("globalThis", "parseInt") => Function("parseInt"),
+        ("globalThis", "parseFloat") => Function("parseFloat"),
+        ("Number", "isInteger") => Function("Number_isInteger"),
+        ("Number", "isSafeInteger") => Function("Number_isSafeInteger"),
+        ("Number", "isNaN") => Function("Number_isNaN"),
+        ("Number", "isFinite") => Function("Number_isFinite"),
+        ("Number", "parseInt") => Function("Number_parseInt"),
+        ("Number", "parseFloat") => Function("Number_parseFloat"),
+        ("JSON", "stringify") => Function("JSON_stringify"),
+        ("String.prototype", "charCodeAt") => CharCodeAt,
+        ("Array.prototype", "map") => Loop("map"),
+        ("Array.prototype", "filter") => Loop("filter"),
+        ("Array.prototype", "some") => Loop("some"),
+        ("Array.prototype", "every") => Loop("every"),
+        ("String.prototype" | "Number.prototype" | "Array.prototype", k) => {
+            return PURE_METHODS.iter().find(|m| **m == k).map(|m| Method(m));
+        }
+        _ => return None,
+    };
+    Some(path)
+}
+
+/// The keys `kiln_c99_par_m_<key>` exists for (`boxed.c`).
+pub const PURE_METHODS: &[&str] = &[
+    "trim",
+    "trimStart",
+    "trimEnd",
+    "toUpperCase",
+    "toLowerCase",
+    "at",
+    "charAt",
+    "codePointAt",
+    "substring",
+    "slice",
+    "indexOf",
+    "includes",
+    "lastIndexOf",
+    "startsWith",
+    "endsWith",
+    "padStart",
+    "padEnd",
+    "repeat",
+    "split",
+    "toString",
+    "toFixed",
+    "join",
+];
+
+/// The `kiln_c99_par_f_*` name of a callable global's pure path.
+fn global_function(builtin: Builtin) -> Option<&'static str> {
+    let key = crate::parallel::pure_global(builtin)?;
+    match pure_path("globalThis", key)? {
+        PurePath::Function(name) => Some(name),
+        _ => None,
+    }
+}
+
+/// A C array literal of `args` (`NULL, 0` when there are none): `(decl, pointer, count)`.
+fn argument_list(args: &[String], name: &str) -> (String, String, usize) {
+    if args.is_empty() {
+        (String::new(), "NULL".to_owned(), 0)
+    } else {
+        (
+            format!(
+                "const kiln_val {name}[{}] = {{ {} }}; ",
+                args.len(),
+                args.join(", ")
+            ),
+            name.to_owned(),
+            args.len(),
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn emit_heap_clone(
     output: &mut String,
     graph: &FunctionGraph,
@@ -148,8 +319,10 @@ pub fn emit_heap_clone(
     name: &str,
     shape: &HeapShape,
     key: Option<ValueId>,
+    ctx: &CloneContext,
 ) {
     let only = key.map(|k| cone(graph, k));
+    let owner_code = ctx.callee.unwrap_or(u32::MAX);
     let parameters = if key.is_some() {
         1
     } else {
@@ -184,18 +357,30 @@ pub fn emit_heap_clone(
             values.insert(v.0);
         }
     }
-    let mut params = String::from(
-        "const kiln_c99_par_env * restrict env, kiln_c99_par_site * restrict sites, kiln_c99_par_arena * restrict arena",
-    );
-    for k in 0..parameters {
-        write!(params, ", kiln_val p{k}").unwrap();
-    }
+    let params = if ctx.callee.is_some() {
+        callee_parameters(parameters)
+    } else {
+        let mut params = String::from(
+            "const kiln_c99_par_env * restrict env, kiln_c99_par_site * restrict sites, kiln_c99_par_arena * restrict arena",
+        );
+        for k in 0..parameters {
+            write!(params, ", kiln_val p{k}").unwrap();
+        }
+        params
+    };
     writeln!(
         output,
         "static __attribute__((unused)) kiln_val {name}({params}) {{"
     )
     .unwrap();
     output.push_str("    (void)env; (void)sites; (void)arena;\n");
+    if ctx.callee.is_some() {
+        output.push_str(
+            "    (void)ups;\n    if (KILN_UNLIKELY(depth > KILN_C99_PAR_CALL_DEPTH)) return KILN_VAL_TYPED_FAIL;\n",
+        );
+    } else {
+        output.push_str("    const unsigned depth = 0; (void)depth;\n");
+    }
     for v in &values {
         writeln!(output, "    kiln_val v{v} = KILN_VAL_UNDEFINED;").unwrap();
     }
@@ -209,7 +394,82 @@ pub fn emit_heap_clone(
     }
     // Named reads and member definitions are numbered in emission order, one worker cache entry
     // each.
-    let mut site = 0usize;
+    let mut site = ctx.callee.and_then(|t| shape.callee_base(t)).unwrap_or(0);
+    // The captures a closure written here needs, from this body's own: the callback's through
+    // the call site's `env->caps`, a callee's from its `ups`.
+    let enclosing_capture = |j: u32| -> String {
+        match ctx.callee {
+            Some(_) => format!("ups[{j}]"),
+            None => format!(
+                "env->caps[{}]",
+                shape
+                    .capture_slot(j)
+                    .expect("the verdict lists every capture a closure written here reads")
+            ),
+        }
+    };
+    // A call to callee `target` through the value `callee` with the C expressions `args`, its
+    // answer into `result`.
+    let user_call = |output: &mut String,
+                     target: u32,
+                     callee: ValueId,
+                     args: &[String],
+                     result: &str| {
+        let inner = &program.functions[target as usize];
+        let ups = inner.upvalues.len();
+        let mut text = format!("    {{ kiln_val u_c[{}]; (void)u_c;", ups.max(1));
+        if let Some(GraphOp::MakeFunction { .. }) = defs.get(&callee) {
+            for (i, up) in inner.upvalues.iter().enumerate() {
+                let j = match up {
+                    kiln_ir::Upvalue::ParentUpvalue(j)
+                    | kiln_ir::Upvalue::NamedParentUpvalue { index: j, .. } => *j,
+                    _ => unreachable!("the verdict admits a closure capturing only captures"),
+                };
+                write!(text, " u_c[{i}] = {};", enclosing_capture(j)).unwrap();
+            }
+        } else {
+            let b = shape
+                .body_slot(target)
+                .expect("the verdict lists every body called through a closure");
+            write!(
+                text,
+                " if (KILN_UNLIKELY(!KILN_VAL_IS_CLOSURE(v{c}) || ((const kiln_closure *)KILN_VAL_PTR(v{c}))->body != env->bodies[{b}])) goto kiln_hfail;",
+                c = callee.0
+            )
+            .unwrap();
+            if ups > 0 {
+                write!(
+                    text,
+                    " {{ const kiln_closure *cl = (const kiln_closure *)KILN_VAL_PTR(v{c});",
+                    c = callee.0
+                )
+                .unwrap();
+                for i in 0..ups {
+                    write!(
+                        text,
+                        " u_c[{i}] = *(const kiln_val *)KILN_VAL_PTR(cl->upvalues[{i}]);"
+                    )
+                    .unwrap();
+                }
+                text.push_str(" }");
+            }
+        }
+        let mut call_args = String::new();
+        for k in 0..inner.parameter_count as usize {
+            let arg = args
+                .get(k)
+                .cloned()
+                .unwrap_or_else(|| "KILN_VAL_UNDEFINED".to_owned());
+            write!(call_args, ", {arg}").unwrap();
+        }
+        writeln!(
+            text,
+            " kiln_val r_c = {}(env, sites, arena, u_c, depth + 1u{call_args}); if (KILN_UNLIKELY(r_c == KILN_VAL_TYPED_FAIL)) goto kiln_hfail; {result} = r_c; }}",
+            callee_clone_name(ctx.symbol, ctx.root, target)
+        )
+        .unwrap();
+        output.push_str(&text);
+    };
     // A member definition (tier 3): a constant name the call site interned, through the worker's
     // cache entry for it, or a computed key looked up per element.
     let define = |output: &mut String, site: &mut usize, target: u32, key: u32, value: u32| {
@@ -296,21 +556,51 @@ pub fn emit_heap_clone(
                     x = value.0
                 )
                 .unwrap(),
-                // `String` is only ever the callee of `String(x)`, emitted below.
-                GraphOp::LoadBuiltin(Builtin::String) => {
-                    writeln!(output, "    v{v} = KILN_VAL_UNDEFINED;").unwrap()
-                }
-                GraphOp::LoadBuiltin(_) => writeln!(
+                GraphOp::LoadBuiltin(Builtin::Math) => writeln!(
                     output,
                     "    v{v} = KILN_VAL_BUILTIN(KILN_C99_BUILTIN_MATH);"
                 )
                 .unwrap(),
-                GraphOp::Call { args, .. } => writeln!(
-                    output,
-                    "    if (KILN_UNLIKELY(!kiln_c99_par_to_string(arena, v{x}, &v{v}))) goto kiln_hfail;",
-                    x = args[0].0
-                )
-                .unwrap(),
+                GraphOp::LoadBuiltin(Builtin::NotANumber) => {
+                    writeln!(output, "    v{v} = {};", number_literal(f64::NAN)).unwrap()
+                }
+                GraphOp::LoadBuiltin(Builtin::Infinity) => {
+                    writeln!(output, "    v{v} = {};", number_literal(f64::INFINITY)).unwrap()
+                }
+                // Every other built-in, and a closure written here, is a placeholder: only ever
+                // called, a static's receiver, or a pure array method's callback (the verdict's
+                // uses check), each emitted at its use.
+                GraphOp::LoadBuiltin(_) | GraphOp::MakeFunction { .. } => {
+                    writeln!(output, "    v{v} = KILN_VAL_UNDEFINED;").unwrap()
+                }
+                GraphOp::Call { callee, args, .. } => {
+                    let texts: Vec<String> = args.iter().map(|a| format!("v{}", a.0)).collect();
+                    match defs.get(callee) {
+                        Some(GraphOp::LoadBuiltin(Builtin::String)) if args.len() == 1 => writeln!(
+                            output,
+                            "    if (KILN_UNLIKELY(!kiln_c99_par_to_string(arena, v{x}, &v{v}))) goto kiln_hfail;",
+                            x = args[0].0
+                        )
+                        .unwrap(),
+                        Some(GraphOp::LoadBuiltin(b)) => {
+                            let function = global_function(*b)
+                                .expect("the verdict admits only pure callable globals");
+                            let (decl, pointer, count) = argument_list(&texts, "a_c");
+                            writeln!(
+                                output,
+                                "    {{ {decl}if (KILN_UNLIKELY(!kiln_c99_par_f_{function}(env, arena, {count}, {pointer}, &v{v}))) goto kiln_hfail; }}"
+                            )
+                            .unwrap();
+                        }
+                        _ => {
+                            let target = *shape
+                                .targets
+                                .get(&(owner_code, callee.0))
+                                .expect("the verdict resolves every call");
+                            user_call(output, target, *callee, &texts, &format!("v{v}"));
+                        }
+                    }
+                }
                 GraphOp::NewObject { pairs, .. } => {
                     writeln!(
                         output,
@@ -362,12 +652,21 @@ pub fn emit_heap_clone(
                     define(output, &mut site, t, operands[1].0, operands[2].0);
                     writeln!(output, "    v{v} = v{t};").unwrap();
                 }
-                GraphOp::LoadUpvalue(index) => {
-                    let j = shape
-                        .capture_slot(*index)
-                        .expect("the verdict lists every capture");
-                    writeln!(output, "    v{v} = env->caps[{j}];").unwrap();
-                }
+                GraphOp::LoadUpvalue(index) => match ctx.callee {
+                    None => {
+                        let j = shape
+                            .capture_slot(*index)
+                            .expect("the verdict lists every capture");
+                        writeln!(output, "    v{v} = env->caps[{j}];").unwrap();
+                    }
+                    // A callee's captures come from its closure, read on this thread: a binding
+                    // written once, which may still be in its dead zone.
+                    Some(_) => writeln!(
+                        output,
+                        "    v{v} = ups[{index}]; if (KILN_UNLIKELY(v{v} == KILN_VAL_UNINITIALIZED)) goto kiln_hfail;"
+                    )
+                    .unwrap(),
+                },
                 GraphOp::Unary { op, value } => {
                     let x = value.0;
                     let numeric = |expr: &str| {
@@ -518,8 +817,8 @@ pub fn emit_heap_clone(
                             "    {{ double a = 0.0, b = 0.0; (void)b; if (KILN_UNLIKELY({load})) goto kiln_hfail; v{v} = kiln_c99_val_from_double({expr}); }}"
                         )
                         .unwrap();
-                    } else {
-                        // `charCodeAt`, the one string method the verdict admits.
+                    } else if key == "charCodeAt" && args.len() <= 1 {
+                        // Tier 2's string reader.
                         let position = args
                             .first()
                             .map_or("KILN_VAL_UNDEFINED".to_owned(), |x| format!("v{}", x.0));
@@ -529,6 +828,100 @@ pub fn emit_heap_clone(
                             o = object.0
                         )
                         .unwrap();
+                    } else {
+                        let texts: Vec<String> = args.iter().map(|a| format!("v{}", a.0)).collect();
+                        let (decl, pointer, count) = argument_list(&texts, "a_m");
+                        let path = match defs.get(object) {
+                            Some(GraphOp::LoadBuiltin(Builtin::Json)) => pure_path("JSON", &key),
+                            Some(GraphOp::LoadBuiltin(Builtin::Number)) => {
+                                pure_path("Number", &key)
+                            }
+                            _ => ["String.prototype", "Number.prototype", "Array.prototype"]
+                                .iter()
+                                .find_map(|owner| pure_path(owner, &key)),
+                        };
+                        match path.expect("the verdict admits only pure members") {
+                            PurePath::Function(function) => writeln!(
+                                output,
+                                "    {{ {decl}if (KILN_UNLIKELY(!kiln_c99_par_f_{function}(env, arena, {count}, {pointer}, &v{v}))) goto kiln_hfail; }}"
+                            )
+                            .unwrap(),
+                            PurePath::Method(method) => writeln!(
+                                output,
+                                "    {{ {decl}if (KILN_UNLIKELY(!kiln_c99_par_m_{method}(env, arena, v{o}, {count}, {pointer}, &v{v}))) goto kiln_hfail; }}",
+                                o = object.0
+                            )
+                            .unwrap(),
+                            PurePath::Loop(method) => {
+                                let callback = args[0];
+                                let o = object.0;
+                                writeln!(
+                                    output,
+                                    "    {{ const kiln_array *src_l; if (KILN_UNLIKELY(!kiln_c99_par_plain_array(v{o}, &src_l))) goto kiln_hfail; size_t n_l = src_l->count;"
+                                )
+                                .unwrap();
+                                match method {
+                                    "map" | "filter" => writeln!(
+                                        output,
+                                        "    kiln_array *out_l; if (KILN_UNLIKELY(!kiln_c99_par_array_sized(arena, n_l, &v{v}, &out_l))) goto kiln_hfail; size_t kept_l = 0; (void)kept_l;"
+                                    )
+                                    .unwrap(),
+                                    "some" => writeln!(output, "    v{v} = KILN_VAL_FALSE;").unwrap(),
+                                    _ => writeln!(output, "    v{v} = KILN_VAL_TRUE;").unwrap(),
+                                }
+                                writeln!(
+                                    output,
+                                    "    for (size_t i_l = 0; i_l < n_l; ++i_l) {{ kiln_val e_l = src_l->elements[i_l]; if (e_l == KILN_VAL_HOLE) continue; kiln_val r_l = KILN_VAL_UNDEFINED; const kiln_val cb_l[3] = {{ e_l, kiln_c99_val_from_double((double)i_l), v{o} }}; (void)cb_l;"
+                                )
+                                .unwrap();
+                                match defs.get(&callback) {
+                                    Some(GraphOp::LoadBuiltin(b)) => {
+                                        let function = global_function(*b)
+                                            .expect("the verdict admits only pure callable globals");
+                                        writeln!(
+                                            output,
+                                            "    if (KILN_UNLIKELY(!kiln_c99_par_f_{function}(env, arena, 3, cb_l, &r_l))) goto kiln_hfail;"
+                                        )
+                                        .unwrap();
+                                    }
+                                    _ => {
+                                        let target = *shape
+                                            .targets
+                                            .get(&(owner_code, callback.0))
+                                            .expect("the verdict resolves every callback");
+                                        let cb_args: Vec<String> =
+                                            (0..3).map(|k| format!("cb_l[{k}]")).collect();
+                                        user_call(output, target, callback, &cb_args, "r_l");
+                                    }
+                                }
+                                let step = match method {
+                                    "map" => "out_l->elements[i_l] = r_l;".to_owned(),
+                                    "filter" => {
+                                        "if (kiln_c99_val_truthy(r_l)) out_l->elements[kept_l++] = e_l;"
+                                            .to_owned()
+                                    }
+                                    "some" => format!(
+                                        "if (kiln_c99_val_truthy(r_l)) {{ v{v} = KILN_VAL_TRUE; break; }}"
+                                    ),
+                                    _ => format!(
+                                        "if (!kiln_c99_val_truthy(r_l)) {{ v{v} = KILN_VAL_FALSE; break; }}"
+                                    ),
+                                };
+                                writeln!(output, "    {step} }}").unwrap();
+                                match method {
+                                    "map" => writeln!(output, "    kiln_c99_par_array_seal(out_l); }}").unwrap(),
+                                    "filter" => writeln!(
+                                        output,
+                                        "    out_l->count = kept_l; kiln_c99_par_array_seal(out_l); }}"
+                                    )
+                                    .unwrap(),
+                                    _ => writeln!(output, "    }}").unwrap(),
+                                }
+                            }
+                            PurePath::Math | PurePath::CharCodeAt => {
+                                unreachable!("emitted above")
+                            }
+                        }
                     }
                 }
                 // Assigned on the edge into the block.

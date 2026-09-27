@@ -1279,7 +1279,9 @@ fn tier_3_builds_run_in_worker_arenas_and_match_the_sequential_methods() {
             Instruction::Const(s),
             Instruction::LoadLocal(0),
             Instruction::GetProperty(q),
-            Instruction::DefineNamedProperty { name_function: true },
+            Instruction::DefineNamedProperty {
+                name_function: true,
+            },
             Instruction::Return,
         ],
         1,
@@ -1379,8 +1381,176 @@ fn tier_3_builds_run_in_worker_arenas_and_match_the_sequential_methods() {
         .unwrap_or(0);
     let n = n as usize;
     assert_eq!(tokens.len(), 4 * n, "{stdout}");
-    assert_eq!(tokens[..n], tokens[n..2 * n], "the joined strings are map's");
-    assert_eq!(tokens[2 * n..3 * n], tokens[3 * n..], "the built objects read back");
+    assert_eq!(
+        tokens[..n],
+        tokens[n..2 * n],
+        "the joined strings are map's"
+    );
+    assert_eq!(
+        tokens[2 * n..3 * n],
+        tokens[3 * n..],
+        "the built objects read back"
+    );
     assert_eq!(tokens[3], "1.5|3", "{stdout}");
+    assert_eq!(calls, 2, "both sites took the pool:\n{stdout}");
+}
+
+/// Tier 4 (parallel issue 09): callbacks that call pure built-ins -- `trim`, `split`, `map` with
+/// the `Number` global, `join`, `toUpperCase` -- and a closure written in the callback, run on the
+/// pool and answer exactly what `map` answers.
+#[test]
+fn tier_4_pure_calls_run_in_the_pool_and_match_the_sequential_methods() {
+    let mut constants = Constants::default();
+    let parallel_map = constants.string("parallelMap");
+    let map = constants.string("map");
+    let trim = constants.string("trim");
+    let split = constants.string("split");
+    let semicolon = constants.string(";");
+    let join = constants.string("join");
+    let bar = constants.string("|");
+    let upper = constants.string("toUpperCase");
+    // `l => l.trim().split(";").map(Number).join("|")`
+    let parse = || {
+        proto(
+            vec![
+                Instruction::LoadLocal(0),
+                Instruction::CallMethod {
+                    name: trim,
+                    argc: 0,
+                },
+                Instruction::Const(semicolon),
+                Instruction::CallMethod {
+                    name: split,
+                    argc: 1,
+                },
+                Instruction::LoadBuiltin(Builtin::Number),
+                Instruction::CallMethod { name: map, argc: 1 },
+                Instruction::Const(bar),
+                Instruction::CallMethod {
+                    name: join,
+                    argc: 1,
+                },
+                Instruction::Return,
+            ],
+            1,
+            Vec::new(),
+        )
+    };
+    // `l => [l].map(x => x.toUpperCase()).join("|")`, the inner arrow being proto 4.
+    let shout = || {
+        proto(
+            vec![
+                Instruction::LoadLocal(0),
+                Instruction::NewArray { count: 1 },
+                Instruction::MakeFunction(4),
+                Instruction::CallMethod { name: map, argc: 1 },
+                Instruction::Const(bar),
+                Instruction::CallMethod {
+                    name: join,
+                    argc: 1,
+                },
+                Instruction::Return,
+            ],
+            1,
+            Vec::new(),
+        )
+    };
+    let upper_case = proto(
+        vec![
+            Instruction::LoadLocal(0),
+            Instruction::CallMethod {
+                name: upper,
+                argc: 0,
+            },
+            Instruction::Return,
+        ],
+        1,
+        Vec::new(),
+    );
+    let n = 64u32;
+    let mut code = Vec::new();
+    for k in 0..n {
+        let text = format!(" a{k};{} ", k % 5);
+        code.push(Instruction::Const(constants.string(&text)));
+    }
+    code.push(Instruction::NewArray { count: n });
+    code.push(Instruction::StoreLocal(0));
+    code.extend([
+        Instruction::LoadLocal(0),
+        Instruction::MakeFunction(0),
+        Instruction::CallMethod {
+            name: parallel_map,
+            argc: 1,
+        },
+        Instruction::LoadLocal(0),
+        Instruction::MakeFunction(1),
+        Instruction::CallMethod { name: map, argc: 1 },
+        Instruction::LoadLocal(0),
+        Instruction::MakeFunction(2),
+        Instruction::CallMethod {
+            name: parallel_map,
+            argc: 1,
+        },
+        Instruction::LoadLocal(0),
+        Instruction::MakeFunction(3),
+        Instruction::CallMethod { name: map, argc: 1 },
+        Instruction::NewArray { count: 4 },
+        Instruction::Return,
+    ]);
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: constants.0,
+        code,
+        local_count: 1,
+        functions: vec![parse(), parse(), shout(), shout(), upper_case],
+        template_sites: Vec::new(),
+    };
+    let generated = emit_with_policy(&program, EmissionPolicy::default()).expect("emits");
+    let records = SiteRecord::parse_all(&generated.source);
+    assert!(!records.is_empty());
+    for record in &records {
+        assert!(
+            record.refusal.is_none() && record.calls,
+            "a tier-4 site: {record:?}"
+        );
+    }
+    let wrapper = format!(
+        "int main(void) {{\n\
+             kiln_value result; size_t i;\n\
+             kiln_test_realm_active = 1;\n\
+             int status = {symbol}(NULL, &result);\n\
+             if (status != 0 || result.tag != KILN_VALUE_STRING) {{ printf(\"status %d tag %d\\n\", status, (int)result.tag); return 2; }}\n\
+             const kiln_string *text = (const kiln_string *)result.ptr;\n\
+             for (i = 0; i < text->unit_len; ++i) putchar((int)kiln_string_unit_at(text, i));\n\
+             printf(\"\\n%d\\n\", kiln_test_pmap_calls);\n\
+             return 0;\n\
+         }}\n",
+        symbol = generated.symbol,
+    );
+    let run = run_threaded(&generated, &wrapper);
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        run.status.success(),
+        "{:?}\n{stdout}{}",
+        run.status,
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let mut lines = stdout.lines();
+    let tokens: Vec<&str> = lines.next().unwrap_or_default().split(',').collect();
+    let calls: usize = lines
+        .next()
+        .and_then(|l| l.trim().parse().ok())
+        .unwrap_or(0);
+    let n = n as usize;
+    assert_eq!(tokens.len(), 4 * n, "{stdout}");
+    assert_eq!(tokens[..n], tokens[n..2 * n], "the parsed lines are map's");
+    assert_eq!(
+        tokens[2 * n..3 * n],
+        tokens[3 * n..],
+        "the shouted lines are map's"
+    );
+    assert_eq!(tokens[3], "NaN|3", "{stdout}");
+    assert_eq!(tokens[2 * n + 3], " A3;3 ", "{stdout}");
     assert_eq!(calls, 2, "both sites took the pool:\n{stdout}");
 }

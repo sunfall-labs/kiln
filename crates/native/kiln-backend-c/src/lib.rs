@@ -1666,6 +1666,20 @@ fn render_functions(
                 let heap = shape.heap.clone()?;
                 let proto = &program.functions[index];
                 let mut text = String::new();
+                let ctx = parallel_heap::CloneContext {
+                    symbol,
+                    root: index as u32,
+                    callee: None,
+                };
+                // Tier 4: the functions it calls, each cloned for it, ahead of it.
+                parallel_heap::emit_heap_callees(
+                    &mut text,
+                    &graphs,
+                    program,
+                    symbol,
+                    index as u32,
+                    &heap,
+                );
                 parallel_heap::emit_heap_clone(
                     &mut text,
                     &graphs[index],
@@ -1674,6 +1688,7 @@ fn render_functions(
                     &format!("{symbol}_fn_{index}_h"),
                     &heap,
                     None,
+                    &ctx,
                 );
                 if let Some((_, key)) = heap.key {
                     parallel_heap::emit_heap_clone(
@@ -1684,6 +1699,7 @@ fn render_functions(
                         &format!("{symbol}_fn_{index}_hk"),
                         &heap,
                         Some(key),
+                        &ctx,
                     );
                 }
                 Some((text, heap))

@@ -154,6 +154,7 @@ fn parallel_site(
         default_order: false,
         heap: false,
         alloc: false,
+        calls: false,
     };
     let refuse = |record: &mut SiteRecord, callback: Option<u32>, refusal: Refusal| {
         if let (Some(cb), Some(name)) = (callback, refusal.detail.as_deref())
@@ -260,6 +261,9 @@ fn parallel_site(
                 }
             } else if reads.builds() {
                 record.alloc = true;
+            }
+            if reads.calls {
+                record.calls = true;
             }
             if method == ParallelMethod::Sort {
                 let Some((proven, _)) = reads.key else {
@@ -498,6 +502,20 @@ fn heap_env(
         decl.push_str(&format!(
             " if (({prefix}_defs[{j}] = kiln_c99_par_intern((const kiln_string *)&{symbol}_string_{index})) == NULL) {ok} = 0;"
         ));
+    }
+    // Tier 4: the bodies of the functions it calls through a closure value, which each clone
+    // compares with the closure it finds before calling that function's clone.
+    if !shape.bodies.is_empty() {
+        decl.push_str(&format!(
+            " kiln_body_fn {prefix}_bodies[{}];",
+            shape.bodies.len()
+        ));
+        for (j, target) in shape.bodies.iter().enumerate() {
+            decl.push_str(&format!(
+                " {prefix}_bodies[{j}] = (kiln_body_fn){symbol}_fn_{target};"
+            ));
+        }
+        decl.push_str(&format!(" {env}.bodies = {prefix}_bodies;"));
     }
     (decl, format!("&{env}"), format!("{env}.failed"), ok)
 }

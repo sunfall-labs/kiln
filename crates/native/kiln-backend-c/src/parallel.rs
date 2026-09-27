@@ -138,6 +138,19 @@ pub enum Reason {
     /// only `parallelMap`, `parallelFilter` and `parallelFlatMap` keep: `parallelReduce` folds
     /// numbers and `parallelSort` compares keys.
     AllocatesForMethod,
+    /// Tier 4: the callback calls a built-in not marked pure (`kiln_builtin_surface::PURE_MEMBERS`)
+    /// -- `console.log`, `Math.random`, `Date.now`, `arr.push` -- or one marked pure in a form the
+    /// mark does not cover (a `thisArg`, a `JSON.stringify` replacer).
+    CallsImpure,
+    /// Tier 4: the callback calls a function of the program the proof does not admit: the
+    /// function's own body breaks a rule (named in the detail), directly or in a function it calls.
+    CallsUnproven,
+    /// Tier 4: the callback calls a value the compiler cannot identify as one function (a
+    /// parameter, a binding assigned more than once, a property).
+    CallsUnknown,
+    /// Tier 4: the functions the callback calls nest deeper than the proof follows
+    /// ([`PARALLEL_CALL_DEPTH`]), or are more than it emits ([`PARALLEL_CALLEES`]).
+    CallsTooDeep,
 }
 
 impl Reason {
@@ -171,6 +184,10 @@ impl Reason {
         Reason::ComparatorUnproven,
         Reason::ReadsAccessor,
         Reason::AllocatesForMethod,
+        Reason::CallsImpure,
+        Reason::CallsUnproven,
+        Reason::CallsUnknown,
+        Reason::CallsTooDeep,
     ];
 
     /// The stable code printed by `--explain-parallel`.
@@ -204,6 +221,10 @@ impl Reason {
             Reason::ComparatorUnproven => "comparator-unproven",
             Reason::ReadsAccessor => "reads-accessor",
             Reason::AllocatesForMethod => "allocates-for-method",
+            Reason::CallsImpure => "calls-impure",
+            Reason::CallsUnproven => "calls-unproven",
+            Reason::CallsUnknown => "calls-unknown",
+            Reason::CallsTooDeep => "calls-too-deep",
         }
     }
 
@@ -272,6 +293,18 @@ impl Reason {
             Reason::AllocatesForMethod => {
                 "the callback builds values, which only parallelMap, parallelFilter and \
                  parallelFlatMap keep (tier 3)"
+            }
+            Reason::CallsImpure => {
+                "the callback calls a built-in that is not marked pure (tier 4 calls Math, string \
+                 and number formatting methods, parseInt/parseFloat/Number, JSON.stringify and \
+                 array slice/map/filter/join on plain data)"
+            }
+            Reason::CallsUnproven => "the callback calls a function that is not proven pure",
+            Reason::CallsUnknown => {
+                "the callback calls a value the compiler cannot identify as one function"
+            }
+            Reason::CallsTooDeep => {
+                "the functions the callback calls nest deeper than the proof follows"
             }
         }
     }
@@ -370,9 +403,38 @@ pub struct HeapShape {
     /// The constant indices of the member names the body defines (object literal keys, the keys
     /// of `{ ...r, k: v }`), in first-use order: the call site interns them before the pool starts.
     pub defines: Vec<u32>,
+    /// Tier 4 (parallel issue 09): the callback calls something beyond tier 2's `Math`,
+    /// `charCodeAt` and `String(x)` -- a pure built-in or a function of the program.
+    pub calls: bool,
+    /// Tier 4: the program's functions the callback calls, directly or through each other (the
+    /// callback itself too, when it is recursive), each with the first of its worker cache
+    /// entries: every one gets a clone of its own for this callback
+    /// (`{symbol}_fn_{callback}_hc{proto}`, [`crate::parallel_heap::emit_heap_callees`]), whose
+    /// named reads use `sites[base..]`.
+    pub callees: Vec<(u32, usize)>,
+    /// Tier 4: the functions called through a closure value (a captured declaration), whose
+    /// bodies the call site hands the workers (`env->bodies`) so a clone can check, per call,
+    /// that the closure is the one the proof is about.
+    pub bodies: Vec<u32>,
+    /// Tier 4: what each call site in the callback and its callees calls, by the body it is in
+    /// (`u32::MAX` for the callback) and the call's callee value: a function of the program.
+    pub targets: std::collections::BTreeMap<(u32, u32), u32>,
 }
 
 impl HeapShape {
+    /// The position of proto `index` among the bodies the call site hands over.
+    pub fn body_slot(&self, index: u32) -> Option<usize> {
+        self.bodies.iter().position(|&k| k == index)
+    }
+
+    /// The first worker cache entry of callee `index`'s clone.
+    pub fn callee_base(&self, index: u32) -> Option<usize> {
+        self.callees
+            .iter()
+            .find(|(k, _)| *k == index)
+            .map(|(_, base)| *base)
+    }
+
     /// The position of upvalue `index` among the captures the call site hands over.
     pub fn capture_slot(&self, index: u32) -> Option<usize> {
         self.captures.iter().position(|&k| k == index)
@@ -472,8 +534,7 @@ pub fn accessor_names(program: &Program) -> std::collections::HashSet<String> {
 ///    write to a capture, no global, no `this`, no `arguments`.
 /// 5. Reads: `o.name` and `o[key]`, through the guarded readers in `prelude_types.h`; a name the
 ///    module defines as an accessor, or `__proto__`, refuses here ([`Reason::ReadsAccessor`]).
-///    `Math.<constant>` is the constant. No write, and no call other than a listed `Math`
-///    function, `String.prototype.charCodeAt` and `String(x)`.
+///    `Math.<constant>` is the constant. No write.
 /// 6. Every reachable `return` has a value. One proven a string, an object or a function is
 ///    recorded ([`HeapShape::answers_value`]): `map`, `filter` and `flatMap` keep it, and the
 ///    site of `parallelReduce` or `parallelSort` refuses.
@@ -482,14 +543,58 @@ pub fn accessor_names(program: &Program) -> std::collections::HashSet<String> {
 ///    ([`plain_member_name`]; computed ones are checked per element), `{ ...r }` and the members
 ///    defined after it, array literals of at most [`PARALLEL_ARRAY_ELEMENTS`] elements,
 ///    `String(x)` (a template's substitutions) and `+` on strings. A closure or a cell refuses
-///    ([`Reason::Allocates`]).
+///    ([`Reason::Allocates`]), except a closure that is only ever called (rule 8).
+/// 8. Tier 4 (parallel issue 09): calls. A built-in marked pure in the member description
+///    (`kiln_builtin_surface::PURE_MEMBERS`: `Math`, string methods, number formatting,
+///    `parseInt`/`parseFloat`/`Number`, `JSON.stringify`, array `slice`/`map`/`filter`/`join`...)
+///    -- a method by name, whatever the receiver, since the clone dispatches on the receiver's kind
+///    and declines one the mark does not cover -- and a function of the program ([`CallGraph`])
+///    whose own body satisfies these same rules (a `return` without a value allowed), followed to
+///    [`PARALLEL_CALL_DEPTH`] levels and [`PARALLEL_CALLEES`] functions; a call back into a
+///    function already being proven (recursion) is admitted, since every function of the cycle
+///    is then proven by the same walk. A callee's captures are bindings written once, read on the
+///    worker from the closure the call finds (whose body the clone checks), or handed down to a
+///    closure written inside the callback that is only ever called. Anything else refuses:
+///    [`Reason::CallsImpure`] naming the built-in, [`Reason::CallsUnproven`] naming the function
+///    and why, [`Reason::CallsUnknown`], [`Reason::CallsTooDeep`].
 pub fn heap_verdict(
     graph: &FunctionGraph,
     proto: &FunctionProto,
     program: &Program,
     captures: &[Capture],
 ) -> Result<HeapShape, Refusal> {
-    use crate::graph::ValueId;
+    heap_verdict_in(graph, proto, program, captures, None)
+}
+
+/// How many functions deep tier 4 follows calls below the callback.
+pub const PARALLEL_CALL_DEPTH: usize = 8;
+
+/// The most functions one callback's proof admits: each gets a clone of its own.
+pub const PARALLEL_CALLEES: usize = 32;
+
+/// The most parameters a function the callback calls may declare.
+pub const PARALLEL_CALLEE_PARAMETERS: u32 = 8;
+
+/// What tier 4 needs to follow a call into the program's other functions: every proto's graph,
+/// what the unit knows about each one's captures, which values are known closures, and which
+/// proto the verdict is for (so a recursive call to it resolves).
+pub struct CallGraph<'a> {
+    pub graphs: &'a [FunctionGraph],
+    pub captures: &'a [Vec<Capture>],
+    /// The proto a value of proto `f`'s body is known to be the closure of.
+    pub known: &'a dyn Fn(u32, crate::graph::ValueId) -> Option<u32>,
+    pub root: u32,
+}
+
+/// [`heap_verdict`], with the program's call graph for tier 4's calls to its functions (without
+/// one, every such call is [`Reason::CallsUnknown`]).
+pub fn heap_verdict_in(
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+    program: &Program,
+    captures: &[Capture],
+    calls: Option<&CallGraph>,
+) -> Result<HeapShape, Refusal> {
     if proto.generator || proto.asynchronous || proto.async_generator {
         return Err(Refusal::new(Reason::NotPlainFunction));
     }
@@ -506,278 +611,15 @@ pub fn heap_verdict(
             format!("{} parameters", proto.parameter_count),
         ));
     }
-    let math: std::collections::HashSet<ValueId> = graph
-        .blocks
-        .iter()
-        .flat_map(|b| b.operations.iter())
-        .filter_map(|(v, op)| matches!(op, GraphOp::LoadBuiltin(Builtin::Math)).then_some(*v))
-        .collect();
-    let label = |vid: &ValueId| {
-        graph
-            .origins
-            .get(vid)
-            .map(|o| o.label.clone())
-            .unwrap_or_else(|| "operation".to_owned())
+    let mut proof = Proof {
+        program,
+        calls,
+        shape: HeapShape::default(),
+        accessors: None,
+        admitted: std::collections::HashSet::new(),
     };
-    let defs: std::collections::HashMap<ValueId, &GraphOp> = graph
-        .blocks
-        .iter()
-        .flat_map(|b| b.operations.iter())
-        .map(|(v, op)| (*v, op))
-        .collect();
-    let string_builtin: std::collections::HashSet<ValueId> = defs
-        .iter()
-        .filter(|(_, op)| matches!(op, GraphOp::LoadBuiltin(Builtin::String)))
-        .map(|(v, _)| *v)
-        .collect();
-    // A member a literal defines: a constant name the sequential fast path defines by a
-    // transition (listed, for the call site to intern, with a worker cache entry), or a computed
-    // one (checked per element: an interned string that is a plain name, or the worker declines).
-    let member = |key: &ValueId, shape: &mut HeapShape| -> Option<Refusal> {
-        let Some(GraphOp::Const {
-            index,
-            constant: Constant::String(_),
-        }) = defs.get(key)
-        else {
-            return None;
-        };
-        let name = constant_name(program, *index).unwrap_or_default();
-        if !plain_member_name(&name) {
-            return Some(Refusal::with(Reason::Allocates, format!("the member `{name}`")));
-        }
-        if !shape.defines.contains(index) {
-            shape.defines.push(*index);
-        }
-        shape.sites += 1;
-        None
-    };
-    let mut accessors: Option<std::collections::HashSet<String>> = None;
-    let mut shape = HeapShape::default();
-    for block in &graph.blocks {
-        if block.exception_handler.is_some() {
-            return Err(Refusal::new(Reason::ExceptionHandler));
-        }
-        let reachable = block.is_reachable_from_entry(graph.entry_block);
-        match &block.terminator {
-            Terminator::Throw(_) => return Err(Refusal::new(Reason::Throws)),
-            Terminator::Return(None) if reachable => {
-                return Err(Refusal::new(Reason::ReturnsUndefined));
-            }
-            Terminator::Suspend { .. } => return Err(Refusal::new(Reason::NotPlainFunction)),
-            _ => {}
-        }
-        for (vid, op) in &block.operations {
-            let refusal = match op {
-                GraphOp::Const { index, constant } => match constant {
-                    Constant::Number(_)
-                    | Constant::Boolean(_)
-                    | Constant::Undefined
-                    | Constant::Null => None,
-                    Constant::String(_) => {
-                        if !shape.strings.contains(index) {
-                            shape.strings.push(*index);
-                        }
-                        None
-                    }
-                    _ => Some(Refusal::new(Reason::NonNumericConstant)),
-                },
-                GraphOp::LoadLocal(_)
-                | GraphOp::StoreLocal { .. }
-                | GraphOp::Phi { .. }
-                | GraphOp::MarkUninitialized(_)
-                | GraphOp::CheckTdz { .. } => None,
-                GraphOp::LoadBuiltin(Builtin::Math) => None,
-                // Only as the callee of `String(x)` (a template's substitutions are that call),
-                // which the uses check below holds it to.
-                GraphOp::LoadBuiltin(Builtin::String) => None,
-                GraphOp::LoadBuiltin(_) => {
-                    Some(Refusal::with(Reason::UnsupportedOperation, label(vid)))
-                }
-                GraphOp::Unary { op, .. } => matches!(op, UnaryOp::TypeOf)
-                    .then(|| Refusal::with(Reason::UnsupportedOperation, format!("{op:?}"))),
-                GraphOp::Binary { op, .. } => {
-                    matches!(op, kiln_ir::BinaryOp::In | kiln_ir::BinaryOp::InstanceOf)
-                        .then(|| Refusal::with(Reason::UnsupportedOperation, format!("{op:?}")))
-                }
-                GraphOp::LoadUpvalue(index) => {
-                    let name = upvalue_name(proto, program, *index)
-                        .unwrap_or_else(|| format!("upvalue {index}"));
-                    match captures.get(*index as usize) {
-                        Some(Capture::Writes(1)) => {
-                            if !shape.captures.contains(index) {
-                                shape.captures.push(*index);
-                            }
-                            None
-                        }
-                        Some(Capture::Writes(n)) => Some(Refusal {
-                            writes: Some(*n),
-                            ..Refusal::with(Reason::CapturesReassigned, name)
-                        }),
-                        _ => Some(Refusal::with(Reason::CapturesUnresolved, name)),
-                    }
-                }
-                GraphOp::StoreUpvalue { index, .. } => Some(Refusal::with(
-                    Reason::WritesCapture,
-                    upvalue_name(proto, program, *index)
-                        .unwrap_or_else(|| format!("upvalue {index}")),
-                )),
-                GraphOp::LoadGlobal(_) | GraphOp::StoreGlobal { .. } => {
-                    Some(Refusal::new(Reason::ReadsGlobal))
-                }
-                GraphOp::LoadThis | GraphOp::LoadNewTarget => Some(Refusal::new(Reason::ReadsThis)),
-                GraphOp::GetProperty { object, name, .. } => {
-                    let key = constant_name(program, *name);
-                    if math.contains(object)
-                        && key
-                            .as_deref()
-                            .is_some_and(|k| MATH_CONSTANTS.iter().any(|(c, _)| *c == k))
-                    {
-                        None
-                    } else {
-                        match key {
-                            None => Some(Refusal::new(Reason::ReadsProperty)),
-                            Some(key) => {
-                                let accessors =
-                                    accessors.get_or_insert_with(|| accessor_names(program));
-                                if key == "__proto__" || accessors.contains(&key) {
-                                    Some(Refusal::with(Reason::ReadsAccessor, key))
-                                } else {
-                                    if !shape.keys.contains(name) {
-                                        shape.keys.push(*name);
-                                    }
-                                    shape.sites += 1;
-                                    None
-                                }
-                            }
-                        }
-                    }
-                }
-                GraphOp::GetComputed { .. } => None,
-                GraphOp::SetProperty { name, .. } | GraphOp::SetPropertyStrict { name, .. } => {
-                    Some(match constant_name(program, *name) {
-                        Some(n) => Refusal::with(Reason::WritesProperty, n),
-                        None => Refusal::new(Reason::WritesProperty),
-                    })
-                }
-                GraphOp::SetComputed { .. } | GraphOp::SetComputedStrict { .. } => {
-                    Some(Refusal::new(Reason::WritesProperty))
-                }
-                // Tier 3: literals the worker builds in its arena, as the sequential literal
-                // builds them (`kiln_c99_par_object`, `kiln_c99_par_array`).
-                GraphOp::NewArray { elements, .. } => {
-                    shape.allocates = true;
-                    (elements.len() > PARALLEL_ARRAY_ELEMENTS).then(|| {
-                        Refusal::with(
-                            Reason::Allocates,
-                            format!("an array literal of {} elements", elements.len()),
-                        )
-                    })
-                }
-                GraphOp::NewObject { pairs, .. } => {
-                    shape.allocates = true;
-                    if pairs.len() > PARALLEL_OBJECT_MEMBERS {
-                        Some(Refusal::with(
-                            Reason::Allocates,
-                            format!("an object literal of {} members", pairs.len()),
-                        ))
-                    } else {
-                        pairs.iter().find_map(|(key, _)| member(key, &mut shape))
-                    }
-                }
-                GraphOp::Bridge {
-                    instruction: kiln_ir::Instruction::SpreadObject,
-                    ..
-                } => {
-                    shape.allocates = true;
-                    None
-                }
-                GraphOp::Bridge {
-                    instruction: kiln_ir::Instruction::DefineNamedProperty { .. },
-                    operands,
-                    ..
-                } if operands.len() == 3 => {
-                    shape.allocates = true;
-                    member(&operands[1], &mut shape)
-                }
-                GraphOp::MakeFunction { .. } | GraphOp::MakeCell(_) => {
-                    Some(Refusal::with(Reason::Allocates, label(vid)))
-                }
-                GraphOp::LoadCell(_) | GraphOp::StoreCell { .. } => {
-                    Some(Refusal::with(Reason::Allocates, "a cell"))
-                }
-                GraphOp::CallMethod {
-                    object, name, args, ..
-                } => {
-                    let key = constant_name(program, *name);
-                    let listed_math = math.contains(object)
-                        && key.as_deref().is_some_and(|key| {
-                            PARALLEL_MATH
-                                .iter()
-                                .any(|(k, n)| key == *k && *n == args.len())
-                        });
-                    let char_code = !math.contains(object)
-                        && key.as_deref() == Some("charCodeAt")
-                        && args.len() <= 1;
-                    if listed_math || char_code {
-                        None
-                    } else {
-                        let callee = match key {
-                            Some(k) if math.contains(object) => format!("Math.{k}"),
-                            Some(k) => format!(".{k}()"),
-                            None => "a method".to_owned(),
-                        };
-                        Some(Refusal::with(Reason::Calls, callee))
-                    }
-                }
-                // `String(x)`: `ToString` of a primitive, into the arena.
-                GraphOp::Call { callee, args, .. }
-                    if args.len() == 1
-                        && matches!(defs.get(callee), Some(GraphOp::LoadBuiltin(Builtin::String))) =>
-                {
-                    shape.allocates = true;
-                    None
-                }
-                GraphOp::Call { .. } | GraphOp::New { .. } => {
-                    Some(Refusal::with(Reason::Calls, label(vid)))
-                }
-                GraphOp::Bridge { instruction, .. }
-                    if matches!(instruction, kiln_ir::Instruction::LoadArguments) =>
-                {
-                    Some(Refusal::with(Reason::ReadsThis, "arguments"))
-                }
-                _ => Some(Refusal::with(Reason::UnsupportedOperation, label(vid))),
-            };
-            if let Some(refusal) = refusal {
-                return Err(refusal);
-            }
-        }
-    }
-    // `String` is loaded only to be called: any other use (`String.raw`, passing it on) is a
-    // read of a built-in the rules do not list.
-    for (vid, op) in graph.blocks.iter().flat_map(|b| b.operations.iter()) {
-        let used_otherwise = match op {
-            GraphOp::Call { callee, args, .. } => {
-                args.iter().any(|a| string_builtin.contains(a))
-                    || (string_builtin.contains(callee) && args.len() != 1)
-            }
-            other => other.operands().iter().any(|a| string_builtin.contains(a)),
-        };
-        if used_otherwise {
-            return Err(Refusal::with(Reason::UnsupportedOperation, label(vid)));
-        }
-    }
-    for block in graph.blocks.iter() {
-        match &block.terminator {
-            Terminator::Return(Some(v))
-            | Terminator::Branch { condition: v, .. }
-            | Terminator::BranchNotNullish { condition: v, .. }
-                if string_builtin.contains(v) =>
-            {
-                return Err(Refusal::with(Reason::UnsupportedOperation, "String"));
-            }
-            _ => {}
-        }
-    }
+    proof.body(None, graph, proto, captures, &[])?;
+    let mut shape = proof.shape;
     // Rule 6: an answer the graph proves a string, an object or a function is one only `map`,
     // `filter` and `flatMap` keep; the site decides (`parallelReduce` and `parallelSort` refuse).
     let proven = crate::graph::proven_types(graph);
@@ -795,23 +637,622 @@ pub fn heap_verdict(
             shape.answers_value = true;
         }
     }
-    // A `+` of two operands not both proven numbers may join strings.
-    shape.concat = graph
-        .blocks
-        .iter()
-        .flat_map(|b| b.operations.iter())
-        .any(|(_, op)| match op {
-            GraphOp::Binary {
-                op: kiln_ir::BinaryOp::Add,
-                left,
-                right,
-            } => !(proven.get(left).is_some_and(Proven::is_number)
-                && proven.get(right).is_some_and(Proven::is_number)),
-            _ => false,
-        });
     shape.captures.sort_unstable();
     shape.key = key_comparator(graph, proto);
     Ok(shape)
+}
+
+/// The display name of a built-in global in a reason.
+fn builtin_name(builtin: Builtin) -> String {
+    match builtin {
+        Builtin::Json => "JSON".to_owned(),
+        Builtin::ParseInt => "parseInt".to_owned(),
+        Builtin::ParseFloat => "parseFloat".to_owned(),
+        Builtin::GlobalThis => "globalThis".to_owned(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// The callable globals a pure call may name (`Number(x)`, `parseInt(s, r)`), with their
+/// [`kiln_builtin_surface::PURE_MEMBERS`] key.
+pub fn pure_global(builtin: Builtin) -> Option<&'static str> {
+    let key = match builtin {
+        Builtin::Number => "Number",
+        Builtin::String => "String",
+        Builtin::Boolean => "Boolean",
+        Builtin::ParseInt => "parseInt",
+        Builtin::ParseFloat => "parseFloat",
+        _ => return None,
+    };
+    kiln_builtin_surface::pure_member("globalThis", key).map(|m| m.key)
+}
+
+/// The name a person knows proto `index` by.
+fn function_name(program: &Program, index: u32) -> String {
+    program
+        .functions
+        .get(index as usize)
+        .map(|f| f.display_name_units())
+        .and_then(|units| units.to_scalar_string().ok())
+        .filter(|name| !name.is_empty())
+        .map_or_else(
+            || "an anonymous function".to_owned(),
+            |name| format!("`{name}`"),
+        )
+}
+
+/// Tier 2-4's walk over one callback and every function it calls.
+struct Proof<'a> {
+    program: &'a Program,
+    calls: Option<&'a CallGraph<'a>>,
+    shape: HeapShape,
+    accessors: Option<std::collections::HashSet<String>>,
+    /// The protos admitted, or being admitted (a call back into one is recursion, admitted
+    /// once the whole cycle is).
+    admitted: std::collections::HashSet<u32>,
+}
+
+impl Proof<'_> {
+    /// The rules over one body: the callback's (`owner` `None`) or a callee's, reached through
+    /// `chain` (the callees above it). Its named reads take the next worker cache entries in
+    /// emission order; its callees are walked after it, so each body's entries are contiguous.
+    fn body(
+        &mut self,
+        owner: Option<u32>,
+        graph: &FunctionGraph,
+        proto: &FunctionProto,
+        captures: &[Capture],
+        chain: &[u32],
+    ) -> Result<(), Refusal> {
+        use crate::graph::ValueId;
+        let program = self.program;
+        let owner_code = owner.unwrap_or(u32::MAX);
+        let math: std::collections::HashSet<ValueId> = graph
+            .blocks
+            .iter()
+            .flat_map(|b| b.operations.iter())
+            .filter_map(|(v, op)| matches!(op, GraphOp::LoadBuiltin(Builtin::Math)).then_some(*v))
+            .collect();
+        let label = |vid: &ValueId| {
+            graph
+                .origins
+                .get(vid)
+                .map(|o| o.label.clone())
+                .unwrap_or_else(|| "operation".to_owned())
+        };
+        let defs: std::collections::HashMap<ValueId, &GraphOp> = graph
+            .blocks
+            .iter()
+            .flat_map(|b| b.operations.iter())
+            .map(|(v, op)| (*v, op))
+            .collect();
+        // Values the clone never materialises: a built-in other than `Math` (its placeholder is
+        // only ever called or used as a static's receiver) and a closure written here (only ever
+        // called). Their uses are checked after the walk.
+        let placeholders: std::collections::HashMap<ValueId, Option<Builtin>> = defs
+            .iter()
+            .filter_map(|(v, op)| match op {
+                GraphOp::LoadBuiltin(Builtin::Math | Builtin::NotANumber | Builtin::Infinity) => {
+                    None
+                }
+                GraphOp::LoadBuiltin(b) => Some((*v, Some(*b))),
+                GraphOp::MakeFunction { .. } => Some((*v, None)),
+                _ => None,
+            })
+            .collect();
+        let builtin_of = |v: &ValueId| -> Option<Builtin> {
+            match defs.get(v) {
+                Some(GraphOp::LoadBuiltin(b)) => Some(*b),
+                _ => None,
+            }
+        };
+        // What a value called here is: a callable global, or a function of the program -- written
+        // here, or a closure the unit knows.
+        let proto_of = |v: &ValueId| -> Option<u32> {
+            if let Some(GraphOp::MakeFunction { index, .. }) = defs.get(v) {
+                return Some(*index);
+            }
+            let calls = self.calls?;
+            (calls.known)(owner.unwrap_or(calls.root), *v)
+        };
+        let mut callees: Vec<u32> = Vec::new();
+        // A member a literal defines: a constant name the sequential fast path defines by a
+        // transition (listed, for the call site to intern, with a worker cache entry), or a computed
+        // one (checked per element: an interned string that is a plain name, or the worker declines).
+        let member = |key: &ValueId, shape: &mut HeapShape| -> Option<Refusal> {
+            let Some(GraphOp::Const {
+                index,
+                constant: Constant::String(_),
+            }) = defs.get(key)
+            else {
+                return None;
+            };
+            let name = constant_name(program, *index).unwrap_or_default();
+            if !plain_member_name(&name) {
+                return Some(Refusal::with(
+                    Reason::Allocates,
+                    format!("the member `{name}`"),
+                ));
+            }
+            if !shape.defines.contains(index) {
+                shape.defines.push(*index);
+            }
+            shape.sites += 1;
+            None
+        };
+        for block in &graph.blocks {
+            if block.exception_handler.is_some() {
+                return Err(Refusal::new(Reason::ExceptionHandler));
+            }
+            let reachable = block.is_reachable_from_entry(graph.entry_block);
+            match &block.terminator {
+                Terminator::Throw(_) => return Err(Refusal::new(Reason::Throws)),
+                Terminator::Return(None) if reachable && owner.is_none() => {
+                    return Err(Refusal::new(Reason::ReturnsUndefined));
+                }
+                Terminator::Suspend { .. } => return Err(Refusal::new(Reason::NotPlainFunction)),
+                _ => {}
+            }
+            for (vid, op) in &block.operations {
+                let refusal = match op {
+                    GraphOp::Const { index, constant } => match constant {
+                        Constant::Number(_)
+                        | Constant::Boolean(_)
+                        | Constant::Undefined
+                        | Constant::Null => None,
+                        Constant::String(_) => {
+                            if !self.shape.strings.contains(index) {
+                                self.shape.strings.push(*index);
+                            }
+                            None
+                        }
+                        _ => Some(Refusal::new(Reason::NonNumericConstant)),
+                    },
+                    GraphOp::LoadLocal(_)
+                    | GraphOp::StoreLocal { .. }
+                    | GraphOp::Phi { .. }
+                    | GraphOp::MarkUninitialized(_)
+                    | GraphOp::CheckTdz { .. } => None,
+                    // `Math` is a value; every other built-in is a placeholder, held to its uses.
+                    GraphOp::LoadBuiltin(_) => None,
+                    GraphOp::Unary { op, .. } => matches!(op, UnaryOp::TypeOf)
+                        .then(|| Refusal::with(Reason::UnsupportedOperation, format!("{op:?}"))),
+                    GraphOp::Binary { op, .. } => {
+                        matches!(op, kiln_ir::BinaryOp::In | kiln_ir::BinaryOp::InstanceOf)
+                            .then(|| Refusal::with(Reason::UnsupportedOperation, format!("{op:?}")))
+                    }
+                    GraphOp::LoadUpvalue(index) => {
+                        let name = upvalue_name(proto, program, *index)
+                            .unwrap_or_else(|| format!("upvalue {index}"));
+                        match captures.get(*index as usize) {
+                            Some(Capture::Writes(1)) => {
+                                if owner.is_none() && !self.shape.captures.contains(index) {
+                                    self.shape.captures.push(*index);
+                                }
+                                None
+                            }
+                            Some(Capture::Writes(n)) => Some(Refusal {
+                                writes: Some(*n),
+                                ..Refusal::with(Reason::CapturesReassigned, name)
+                            }),
+                            _ => Some(Refusal::with(Reason::CapturesUnresolved, name)),
+                        }
+                    }
+                    GraphOp::StoreUpvalue { index, .. } => Some(Refusal::with(
+                        Reason::WritesCapture,
+                        upvalue_name(proto, program, *index)
+                            .unwrap_or_else(|| format!("upvalue {index}")),
+                    )),
+                    GraphOp::LoadGlobal(_) | GraphOp::StoreGlobal { .. } => {
+                        Some(Refusal::new(Reason::ReadsGlobal))
+                    }
+                    GraphOp::LoadThis | GraphOp::LoadNewTarget => {
+                        Some(Refusal::new(Reason::ReadsThis))
+                    }
+                    GraphOp::GetProperty { object, name, .. } => {
+                        let key = constant_name(program, *name);
+                        if math.contains(object)
+                            && key
+                                .as_deref()
+                                .is_some_and(|k| MATH_CONSTANTS.iter().any(|(c, _)| *c == k))
+                        {
+                            None
+                        } else if placeholders.contains_key(object) {
+                            Some(Refusal::with(Reason::UnsupportedOperation, label(vid)))
+                        } else {
+                            match key {
+                                None => Some(Refusal::new(Reason::ReadsProperty)),
+                                Some(key) => {
+                                    let accessors = self
+                                        .accessors
+                                        .get_or_insert_with(|| accessor_names(program));
+                                    if key == "__proto__" || accessors.contains(&key) {
+                                        Some(Refusal::with(Reason::ReadsAccessor, key))
+                                    } else {
+                                        if !self.shape.keys.contains(name) {
+                                            self.shape.keys.push(*name);
+                                        }
+                                        self.shape.sites += 1;
+                                        None
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    GraphOp::GetComputed { .. } => None,
+                    GraphOp::SetProperty { name, .. } | GraphOp::SetPropertyStrict { name, .. } => {
+                        Some(match constant_name(program, *name) {
+                            Some(n) => Refusal::with(Reason::WritesProperty, n),
+                            None => Refusal::new(Reason::WritesProperty),
+                        })
+                    }
+                    GraphOp::SetComputed { .. } | GraphOp::SetComputedStrict { .. } => {
+                        Some(Refusal::new(Reason::WritesProperty))
+                    }
+                    // Tier 3: literals the worker builds in its arena, as the sequential literal
+                    // builds them (`kiln_c99_par_object`, `kiln_c99_par_array`).
+                    GraphOp::NewArray { elements, .. } => {
+                        self.shape.allocates = true;
+                        (elements.len() > PARALLEL_ARRAY_ELEMENTS).then(|| {
+                            Refusal::with(
+                                Reason::Allocates,
+                                format!("an array literal of {} elements", elements.len()),
+                            )
+                        })
+                    }
+                    GraphOp::NewObject { pairs, .. } => {
+                        self.shape.allocates = true;
+                        if pairs.len() > PARALLEL_OBJECT_MEMBERS {
+                            Some(Refusal::with(
+                                Reason::Allocates,
+                                format!("an object literal of {} members", pairs.len()),
+                            ))
+                        } else {
+                            pairs
+                                .iter()
+                                .find_map(|(key, _)| member(key, &mut self.shape))
+                        }
+                    }
+                    GraphOp::Bridge {
+                        instruction: kiln_ir::Instruction::SpreadObject,
+                        ..
+                    } => {
+                        self.shape.allocates = true;
+                        None
+                    }
+                    GraphOp::Bridge {
+                        instruction: kiln_ir::Instruction::DefineNamedProperty { .. },
+                        operands,
+                        ..
+                    } if operands.len() == 3 => {
+                        self.shape.allocates = true;
+                        member(&operands[1], &mut self.shape)
+                    }
+                    // A closure written here that is only ever called (the uses check below):
+                    // nothing is allocated; each call runs its clone, handed the captures it
+                    // reads from this body's own.
+                    GraphOp::MakeFunction { index, .. } => {
+                        match program.functions.get(*index as usize) {
+                            Some(inner) if self.calls.is_some() => inner
+                                .upvalues
+                                .iter()
+                                .find_map(|up| match up {
+                                    kiln_ir::Upvalue::ParentUpvalue(j)
+                                    | kiln_ir::Upvalue::NamedParentUpvalue { index: j, .. } => {
+                                        match captures.get(*j as usize) {
+                                            Some(Capture::Writes(1)) => {
+                                                if owner.is_none()
+                                                    && !self.shape.captures.contains(j)
+                                                {
+                                                    self.shape.captures.push(*j);
+                                                }
+                                                None
+                                            }
+                                            _ => Some(Refusal::with(
+                                                Reason::Allocates,
+                                                "a closure capturing a binding written more than once",
+                                            )),
+                                        }
+                                    }
+                                    _ => Some(Refusal::with(
+                                        Reason::Allocates,
+                                        "a closure capturing a local of the callback",
+                                    )),
+                                }),
+                            _ => Some(Refusal::with(Reason::Allocates, label(vid))),
+                        }
+                    }
+                    GraphOp::MakeCell(_) => Some(Refusal::with(Reason::Allocates, label(vid))),
+                    GraphOp::LoadCell(_) | GraphOp::StoreCell { .. } => {
+                        Some(Refusal::with(Reason::Allocates, "a cell"))
+                    }
+                    GraphOp::CallMethod {
+                        object, name, args, ..
+                    } => {
+                        let key = constant_name(program, *name).unwrap_or_default();
+                        if math.contains(object) {
+                            let listed = PARALLEL_MATH
+                                .iter()
+                                .any(|(k, n)| key == *k && *n == args.len());
+                            (!listed)
+                                .then(|| Refusal::with(Reason::CallsImpure, format!("Math.{key}")))
+                        } else if let Some(builtin) = builtin_of(object) {
+                            let owner_name = builtin_name(builtin);
+                            let pure = match builtin {
+                                Builtin::Json => key == "stringify" && args.len() == 1,
+                                Builtin::Number => {
+                                    kiln_builtin_surface::pure_member("Number", &key).is_some()
+                                        && args.len() <= 2
+                                }
+                                _ => false,
+                            };
+                            if pure {
+                                self.shape.calls = true;
+                                if builtin == Builtin::Json {
+                                    self.shape.allocates = true;
+                                }
+                                None
+                            } else {
+                                Some(Refusal::with(
+                                    Reason::CallsImpure,
+                                    format!("{owner_name}.{key}"),
+                                ))
+                            }
+                        } else if placeholders.contains_key(object) {
+                            Some(Refusal::with(Reason::CallsImpure, format!(".{key}()")))
+                        } else {
+                            let rows: Vec<_> = kiln_builtin_surface::pure_methods(&key).collect();
+                            if rows.is_empty() {
+                                Some(Refusal::with(Reason::CallsImpure, format!(".{key}()")))
+                            } else if rows.iter().any(|r| r.callback.is_some()) {
+                                // `map`/`filter`/`some`/`every`: the callback is proven too.
+                                if args.len() != 1 {
+                                    Some(Refusal::with(
+                                        Reason::CallsImpure,
+                                        format!(".{key}() with other than one argument"),
+                                    ))
+                                } else if builtin_of(&args[0]).and_then(pure_global).is_some() {
+                                    self.shape.calls = true;
+                                    self.shape.allocates |= key == "map" || key == "filter";
+                                    None
+                                } else if let Some(target) = proto_of(&args[0]) {
+                                    self.shape.calls = true;
+                                    self.shape.allocates |= key == "map" || key == "filter";
+                                    self.shape.targets.insert((owner_code, args[0].0), target);
+                                    if !matches!(
+                                        defs.get(&args[0]),
+                                        Some(GraphOp::MakeFunction { .. })
+                                    ) && !self.shape.bodies.contains(&target)
+                                    {
+                                        self.shape.bodies.push(target);
+                                    }
+                                    if !callees.contains(&target) {
+                                        callees.push(target);
+                                    }
+                                    None
+                                } else {
+                                    Some(Refusal::with(
+                                        Reason::CallsUnknown,
+                                        format!("the callback of .{key}()"),
+                                    ))
+                                }
+                            } else {
+                                // `charCodeAt` is tier 2's; every other marked method is tier 4.
+                                if key != "charCodeAt" {
+                                    self.shape.calls = true;
+                                }
+                                if rows.iter().any(|r| {
+                                    matches!(
+                                        r.answers,
+                                        kiln_builtin_surface::PureAnswer::String
+                                            | kiln_builtin_surface::PureAnswer::Array
+                                            | kiln_builtin_surface::PureAnswer::Value
+                                    )
+                                }) {
+                                    self.shape.allocates = true;
+                                }
+                                None
+                            }
+                        }
+                    }
+                    GraphOp::Call { callee, args, .. } => {
+                        if let Some(builtin) = builtin_of(callee) {
+                            match builtin {
+                                // `String(x)`: `ToString` of a primitive, into the arena.
+                                Builtin::String if args.len() == 1 => {
+                                    self.shape.allocates = true;
+                                    None
+                                }
+                                b if pure_global(b).is_some() && b != Builtin::String => {
+                                    self.shape.calls = true;
+                                    None
+                                }
+                                b => Some(Refusal::with(
+                                    Reason::CallsImpure,
+                                    format!("{}()", builtin_name(b)),
+                                )),
+                            }
+                        } else if let Some(target) = proto_of(callee) {
+                            self.shape.calls = true;
+                            self.shape.targets.insert((owner_code, callee.0), target);
+                            if !matches!(defs.get(callee), Some(GraphOp::MakeFunction { .. }))
+                                && !self.shape.bodies.contains(&target)
+                            {
+                                self.shape.bodies.push(target);
+                            }
+                            if !callees.contains(&target) {
+                                callees.push(target);
+                            }
+                            None
+                        } else {
+                            // Name what was called: a captured binding by its name.
+                            let upvalue = match defs.get(callee) {
+                                Some(GraphOp::LoadUpvalue(k)) => Some(*k),
+                                Some(GraphOp::CheckTdz { value, .. }) => match defs.get(value) {
+                                    Some(GraphOp::LoadUpvalue(k)) => Some(*k),
+                                    _ => None,
+                                },
+                                _ => None,
+                            };
+                            let named = upvalue
+                                .and_then(|k| upvalue_name(proto, program, k))
+                                .map_or_else(|| label(vid), |name| format!("`{name}`"));
+                            Some(Refusal::with(Reason::CallsUnknown, named))
+                        }
+                    }
+                    GraphOp::New { .. } => Some(Refusal::with(
+                        Reason::CallsImpure,
+                        format!("`new` ({})", label(vid)),
+                    )),
+                    GraphOp::Bridge { instruction, .. }
+                        if matches!(instruction, kiln_ir::Instruction::LoadArguments) =>
+                    {
+                        Some(Refusal::with(Reason::ReadsThis, "arguments"))
+                    }
+                    _ => Some(Refusal::with(Reason::UnsupportedOperation, label(vid))),
+                };
+                if let Some(refusal) = refusal {
+                    return Err(refusal);
+                }
+            }
+        }
+        // A placeholder is only ever called, or a static's receiver, or the callback of a pure
+        // array method: any other use would read a value the clone never made. (A placeholder
+        // called or used as a receiver the rules do not admit was refused above.)
+        let array_slots = crate::graph::array_slots(graph, program);
+        for (vid, op) in graph.blocks.iter().flat_map(|b| b.operations.iter()) {
+            let misused = |v: &ValueId| placeholders.contains_key(v);
+            let bad = match op {
+                GraphOp::Call { args, .. } => args.iter().any(misused),
+                // `const f = x => ...`: a local the graph forwards (every read of it is the
+                // closure itself), unless the slot lives in the frame's array and is read back.
+                GraphOp::StoreLocal { slot, .. } => {
+                    array_slots.contains(slot) && op.operands().iter().any(misused)
+                }
+                GraphOp::CallMethod { name, args, .. } => {
+                    let key = constant_name(program, *name).unwrap_or_default();
+                    let callback = args.len() == 1
+                        && kiln_builtin_surface::pure_methods(&key).any(|r| r.callback.is_some());
+                    args.iter()
+                        .enumerate()
+                        .any(|(k, a)| misused(a) && !(k == 0 && callback))
+                }
+                other => other.operands().iter().any(misused),
+            };
+            if bad {
+                let closure = op
+                    .operands()
+                    .iter()
+                    .any(|v| matches!(placeholders.get(v), Some(None)));
+                return Err(if closure {
+                    Refusal::with(Reason::Allocates, "a closure that is not only called")
+                } else {
+                    Refusal::with(Reason::UnsupportedOperation, label(vid))
+                });
+            }
+        }
+        for block in graph.blocks.iter() {
+            match &block.terminator {
+                Terminator::Return(Some(v))
+                | Terminator::Branch { condition: v, .. }
+                | Terminator::BranchNotNullish { condition: v, .. }
+                    if placeholders.contains_key(v) =>
+                {
+                    return Err(match placeholders.get(v) {
+                        Some(Some(b)) => {
+                            Refusal::with(Reason::UnsupportedOperation, builtin_name(*b))
+                        }
+                        _ => Refusal::with(Reason::Allocates, "a closure"),
+                    });
+                }
+                _ => {}
+            }
+        }
+        // A `+` of two operands not both proven numbers may join strings.
+        let proven = crate::graph::proven_types(graph);
+        self.shape.concat |=
+            graph
+                .blocks
+                .iter()
+                .flat_map(|b| b.operations.iter())
+                .any(|(_, op)| match op {
+                    GraphOp::Binary {
+                        op: kiln_ir::BinaryOp::Add,
+                        left,
+                        right,
+                    } => {
+                        !(proven.get(left).is_some_and(Proven::is_number)
+                            && proven.get(right).is_some_and(Proven::is_number))
+                    }
+                    _ => false,
+                });
+        // Tier 4: each function called here, after this body (so its worker cache entries follow
+        // this body's), unless it is already admitted or being admitted (recursion).
+        for target in callees {
+            if !self.admitted.insert(target) {
+                continue;
+            }
+            let mut path: Vec<u32> = chain.to_vec();
+            path.push(target);
+            let named = || {
+                path.iter()
+                    .map(|&t| function_name(program, t))
+                    .collect::<Vec<_>>()
+                    .join(" -> ")
+            };
+            if path.len() > PARALLEL_CALL_DEPTH || self.admitted.len() > PARALLEL_CALLEES {
+                return Err(Refusal::with(Reason::CallsTooDeep, named()));
+            }
+            let calls = self
+                .calls
+                .expect("a callee is resolved only through the call graph");
+            let callee = &program.functions[target as usize];
+            let unproven = |inner: Refusal| {
+                let why = match &inner.detail {
+                    Some(detail) => format!("{}: {detail}", inner.reason.code()),
+                    None => inner.reason.code().to_owned(),
+                };
+                Refusal::with(Reason::CallsUnproven, format!("{} ({why})", named()))
+            };
+            if callee.generator || callee.asynchronous || callee.async_generator {
+                return Err(unproven(Refusal::new(Reason::NotPlainFunction)));
+            }
+            if callee
+                .code
+                .iter()
+                .any(|i| matches!(i, kiln_ir::Instruction::RestArguments(_)))
+            {
+                return Err(unproven(Refusal::new(Reason::RestParameter)));
+            }
+            if callee.parameter_count > PARALLEL_CALLEE_PARAMETERS {
+                return Err(unproven(Refusal::with(
+                    Reason::Arity,
+                    format!("{} parameters", callee.parameter_count),
+                )));
+            }
+            let Some(callee_graph) = calls.graphs.get(target as usize) else {
+                return Err(Refusal::with(Reason::CallsUnknown, named()));
+            };
+            let callee_captures = calls
+                .captures
+                .get(target as usize)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let start = self.shape.sites;
+            self.shape.callees.push((target, start));
+            match self.body(Some(target), callee_graph, callee, callee_captures, &path) {
+                Ok(()) => {}
+                // Already about a call below: it names its own chain, which starts with this one.
+                Err(inner)
+                    if matches!(inner.reason, Reason::CallsUnproven | Reason::CallsTooDeep) =>
+                {
+                    return Err(inner);
+                }
+                Err(inner) => return Err(unproven(inner)),
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The verdict of a callback tier 1 refused with `refusal`: tier 2's, when [`heap_verdict`]
@@ -823,6 +1264,7 @@ pub fn tier_2(
     program: &Program,
     captures: &[Capture],
     refusal: Refusal,
+    calls: Option<&CallGraph>,
 ) -> Result<ParallelShape, Refusal> {
     // What tier 2 cannot change: the function itself, and a callback that is fine by the source
     // rules but not numeric where tier 1 needs it (that is the site's or the plan's reason).
@@ -832,7 +1274,7 @@ pub fn tier_2(
     ) {
         return Err(refusal);
     }
-    heap_verdict(graph, proto, program, captures).map(|heap| ParallelShape {
+    heap_verdict_in(graph, proto, program, captures, calls).map(|heap| ParallelShape {
         heap: Some(heap),
         ..ParallelShape::default()
     })
@@ -919,6 +1361,13 @@ pub fn key_comparator(
                 .operands()
                 .into_iter()
                 .fold(0, |acc, o| acc | reads(o, defs, parameter, depth + 1)),
+            // Tier 4: a pure callable global (`parseInt(a) - parseInt(b)`), whose clone is a
+            // function of its arguments alone.
+            Some(op @ GraphOp::Call { callee, .. }) if matches!(defs.get(callee), Some(GraphOp::LoadBuiltin(b)) if pure_global(*b).is_some()) => {
+                op.operands()
+                    .into_iter()
+                    .fold(0, |acc, o| acc | reads(o, defs, parameter, depth + 1))
+            }
             _ => 4,
         }
     }
@@ -978,6 +1427,9 @@ pub fn key_comparator(
                 Some(a @ GraphOp::CallMethod { name: x, .. }),
                 Some(b @ GraphOp::CallMethod { name: y, .. }),
             ) => x == y && same_all(&a.operands(), &b.operands()),
+            (Some(a @ GraphOp::Call { .. }), Some(b @ GraphOp::Call { .. })) => {
+                same_all(&a.operands(), &b.operands())
+            }
             _ => false,
         }
     }
@@ -1485,6 +1937,8 @@ pub struct SiteRecord {
     pub heap: bool,
     /// Tier 3: the callback builds values, which its workers keep in arenas.
     pub alloc: bool,
+    /// Tier 4: the callback calls pure built-ins or functions of the program.
+    pub calls: bool,
 }
 
 thread_local! {
@@ -1677,7 +2131,12 @@ impl SiteRecord {
         if self.default_order {
             out.push_str(" order=default");
         }
-        if self.alloc {
+        if self.calls {
+            out.push_str(" tier=4");
+            if self.alloc {
+                out.push_str(" builds=1");
+            }
+        } else if self.alloc {
             out.push_str(" tier=3");
         } else if self.heap {
             out.push_str(" tier=2");
@@ -1715,6 +2174,7 @@ impl SiteRecord {
             default_order: false,
             heap: false,
             alloc: false,
+            calls: false,
         };
         let mut parallel = None;
         let mut reason = None;
@@ -1733,9 +2193,11 @@ impl SiteRecord {
                 "writes" => writes = value.parse().ok(),
                 "order" => record.default_order = value == "default",
                 "tier" => {
-                    record.heap = value == "2" || value == "3";
+                    record.heap = value == "2" || value == "3" || value == "4";
                     record.alloc = value == "3";
+                    record.calls = value == "4";
                 }
+                "builds" => record.alloc = value == "1",
                 "at" => {
                     let (l, c) = value.split_once(':')?;
                     record.at = Some((l.parse().ok()?, c.parse().ok()?));
@@ -1767,6 +2229,7 @@ impl SiteRecord {
             self.method.name()
         );
         match &self.refusal {
+            None if self.calls => format!("{head}parallel (tier 4: pure calls)\n"),
             None if self.alloc => {
                 format!("{head}parallel (tier 3: builds values in worker arenas)\n")
             }
@@ -1803,6 +2266,20 @@ impl SiteRecord {
                     }
                     (Reason::WritesProperty, Some(name)) => format!("writes property `{name}`"),
                     (Reason::Calls, Some(callee)) => format!("calls {callee}"),
+                    (Reason::CallsImpure, Some(callee)) => {
+                        format!("calls {callee}, which is not marked pure")
+                    }
+                    (Reason::CallsUnproven, Some(chain)) => {
+                        format!("calls {chain}, which is not proven pure")
+                    }
+                    (Reason::CallsUnknown, Some(callee)) => {
+                        format!(
+                            "calls {callee}, which the compiler cannot identify as one function"
+                        )
+                    }
+                    (Reason::CallsTooDeep, Some(chain)) => format!(
+                        "calls {chain}: deeper than {PARALLEL_CALL_DEPTH} functions, or more than {PARALLEL_CALLEES}"
+                    ),
                     (_, Some(detail)) => format!("{} ({detail})", r.reason.describe()),
                     (_, None) => r.reason.describe().to_owned(),
                 };
@@ -2307,6 +2784,7 @@ mod tests {
                 default_order: false,
                 heap: false,
                 alloc: false,
+                calls: false,
             },
             SiteRecord {
                 method: ParallelMethod::Map,
@@ -2321,6 +2799,7 @@ mod tests {
                 default_order: false,
                 heap: false,
                 alloc: false,
+                calls: false,
             },
             SiteRecord {
                 method: ParallelMethod::Sort,
@@ -2332,6 +2811,7 @@ mod tests {
                 default_order: true,
                 heap: false,
                 alloc: false,
+                calls: false,
             },
             SiteRecord {
                 method: ParallelMethod::Reduce,
@@ -2343,6 +2823,7 @@ mod tests {
                 default_order: false,
                 heap: false,
                 alloc: false,
+                calls: false,
             },
             SiteRecord {
                 method: ParallelMethod::Filter,
@@ -2354,6 +2835,7 @@ mod tests {
                 default_order: false,
                 heap: true,
                 alloc: false,
+                calls: false,
             },
         ];
         let c: String = records
@@ -2415,7 +2897,7 @@ mod tests {
         let program = program(&callback);
         let graph = build_function_graph(&callback, &program).unwrap();
         let refusal = parallel_verdict(&graph, &callback, &program, &[]).unwrap_err();
-        let verdict = tier_2(&graph, &callback, &program, &[], refusal).unwrap();
+        let verdict = tier_2(&graph, &callback, &program, &[], refusal, None).unwrap();
         assert_eq!(verdict.heap, Some(shape));
         assert!(verdict.captures.is_empty());
     }
@@ -2461,13 +2943,14 @@ mod tests {
             refused(vec![Instruction::MakeFunction(0), Instruction::Return]),
             Some(Reason::Allocates)
         );
+        // `x.random()`: no prototype marks `random` pure (tier 4 names it).
         assert_eq!(
             refused(vec![
                 Instruction::LoadLocal(0),
                 Instruction::CallMethod { name: 5, argc: 0 },
                 Instruction::Return,
             ]),
-            Some(Reason::Calls)
+            Some(Reason::CallsImpure)
         );
         assert_eq!(
             refused(vec![Instruction::LoadThis, Instruction::Return]),
@@ -2483,8 +2966,11 @@ mod tests {
         );
         // An answer proven a string is one only `map`, `filter` and `flatMap` keep: the verdict
         // says so, and the site decides.
-        let string = heap(proto(vec![Instruction::Const(6), Instruction::Return], 1), None)
-            .expect("the site decides what a string answer means");
+        let string = heap(
+            proto(vec![Instruction::Const(6), Instruction::Return], 1),
+            None,
+        )
+        .expect("the site decides what a string answer means");
         assert!(string.answers_value && !string.allocates);
     }
 
@@ -2500,7 +2986,9 @@ mod tests {
             Instruction::GetProperty(4),
             Instruction::Const(6),
             Instruction::Binary(BinaryOp::Add),
-            Instruction::DefineNamedProperty { name_function: true },
+            Instruction::DefineNamedProperty {
+                name_function: true,
+            },
             Instruction::Return,
         ];
         assert_eq!(why(proto(code.clone(), 1)), Some(Reason::Allocates));
@@ -2532,7 +3020,10 @@ mod tests {
         assert_eq!(
             heap(
                 proto(
-                    vec![Instruction::LoadBuiltin(Builtin::String), Instruction::Return],
+                    vec![
+                        Instruction::LoadBuiltin(Builtin::String),
+                        Instruction::Return
+                    ],
                     1
                 ),
                 None
@@ -2584,10 +3075,19 @@ mod tests {
             default_order: false,
             heap: true,
             alloc: true,
+            calls: false,
         };
         let parsed = SiteRecord::parse_all(&record.marker());
-        assert_eq!(parsed, vec![record.clone()], "tier 3 round-trips through the marker");
-        assert!(record.render("m.js").contains("parallel (tier 3: builds values in worker arenas)"));
+        assert_eq!(
+            parsed,
+            vec![record.clone()],
+            "tier 3 round-trips through the marker"
+        );
+        assert!(
+            record
+                .render("m.js")
+                .contains("parallel (tier 3: builds values in worker arenas)")
+        );
     }
 
     #[test]
@@ -2695,5 +3195,384 @@ mod tests {
         let graph = build_function_graph(&callback, &program).unwrap();
         let shape = heap_verdict(&graph, &callback, &program, &[]).unwrap();
         assert!(matches!(shape.key, Some((SortOrder::Ascending, _))));
+    }
+
+    /// A program of `functions` over `constants`, for tier 4's tests.
+    fn unit(functions: Vec<FunctionProto>, constants: &[&str]) -> Program {
+        Program {
+            source: "".into(),
+            version: BYTECODE_VERSION,
+            constants: constants
+                .iter()
+                .map(|c| Constant::String((*c).into()))
+                .collect(),
+            code: vec![Instruction::Return],
+            local_count: 0,
+            functions,
+            template_sites: Vec::new(),
+        }
+    }
+
+    /// Tier 4's verdict for function 0 of `program`, where every captured read of a function's
+    /// body is the closure `closures[f][k]` (and every capture is written once).
+    fn tier_4(program: &Program, closures: &[Vec<u32>]) -> Result<HeapShape, Refusal> {
+        let graphs: Vec<FunctionGraph> = program
+            .functions
+            .iter()
+            .map(|f| build_function_graph(f, program).unwrap())
+            .collect();
+        let captures: Vec<Vec<Capture>> = program
+            .functions
+            .iter()
+            .map(|f| vec![Capture::Writes(1); f.upvalues.len()])
+            .collect();
+        let known = |f: u32, v: crate::graph::ValueId| -> Option<u32> {
+            graphs[f as usize]
+                .blocks
+                .iter()
+                .flat_map(|b| b.operations.iter())
+                .find_map(|(id, op)| match op {
+                    GraphOp::LoadUpvalue(k) if *id == v => {
+                        closures.get(f as usize)?.get(*k as usize).copied()
+                    }
+                    _ => None,
+                })
+        };
+        let calls = CallGraph {
+            graphs: &graphs,
+            captures: &captures,
+            known: &known,
+            root: 0,
+        };
+        heap_verdict_in(
+            &graphs[0],
+            &program.functions[0],
+            program,
+            &captures[0],
+            Some(&calls),
+        )
+    }
+
+    fn function(code: Vec<Instruction>, parameters: u32, upvalues: u32) -> FunctionProto {
+        let mut f = proto(code, parameters);
+        f.upvalues = (0..upvalues).map(kiln_ir::Upvalue::ParentLocal).collect();
+        f
+    }
+
+    #[test]
+    fn tier_4_calls_built_ins_marked_pure() {
+        // `l => l.trim().split(",").map(Number)`: the acceptance shape.
+        let program = unit(
+            vec![function(
+                vec![
+                    Instruction::LoadLocal(0),
+                    Instruction::CallMethod { name: 0, argc: 0 },
+                    Instruction::Const(2),
+                    Instruction::CallMethod { name: 1, argc: 1 },
+                    Instruction::LoadBuiltin(Builtin::Number),
+                    Instruction::CallMethod { name: 3, argc: 1 },
+                    Instruction::Return,
+                ],
+                1,
+                0,
+            )],
+            &["trim", "split", ",", "map"],
+        );
+        let shape = tier_4(&program, &[]).expect("pure built-ins qualify");
+        assert!(shape.calls && shape.allocates, "{shape:?}");
+        assert!(shape.callees.is_empty() && shape.bodies.is_empty());
+        // Without a call graph, the same holds: no function of the program is called.
+        let graph = build_function_graph(&program.functions[0], &program).unwrap();
+        assert!(heap_verdict(&graph, &program.functions[0], &program, &[]).is_ok());
+    }
+
+    #[test]
+    fn tier_4_names_a_built_in_that_is_not_marked_pure() {
+        let refused = |code: Vec<Instruction>| {
+            let program = unit(
+                vec![function(code, 1, 0)],
+                &["push", "random", "now", "trim"],
+            );
+            tier_4(&program, &[]).unwrap_err()
+        };
+        let push = refused(vec![
+            Instruction::LoadLocal(0),
+            Instruction::Const(0),
+            Instruction::CallMethod { name: 0, argc: 1 },
+            Instruction::Return,
+        ]);
+        assert_eq!(
+            (push.reason, push.detail.as_deref()),
+            (Reason::CallsImpure, Some(".push()"))
+        );
+        let random = refused(vec![
+            Instruction::LoadBuiltin(Builtin::Math),
+            Instruction::CallMethod { name: 1, argc: 0 },
+            Instruction::Return,
+        ]);
+        assert_eq!(random.detail.as_deref(), Some("Math.random"));
+        let now = refused(vec![
+            Instruction::LoadBuiltin(Builtin::Date),
+            Instruction::CallMethod { name: 2, argc: 0 },
+            Instruction::Return,
+        ]);
+        assert_eq!(
+            (now.reason, now.detail.as_deref()),
+            (Reason::CallsImpure, Some("Date.now"))
+        );
+        // A pure global passed anywhere but as a callback is a value the clone never makes.
+        let passed = refused(vec![
+            Instruction::LoadBuiltin(Builtin::Number),
+            Instruction::Return,
+        ]);
+        assert_eq!(passed.reason, Reason::UnsupportedOperation);
+    }
+
+    #[test]
+    fn tier_4_follows_calls_into_the_program() {
+        let constants = &["trim", "n"];
+        // 0: `x => f(x)`, capturing `f`; 1: `f = y => y.trim()`.
+        let caller = || {
+            function(
+                vec![
+                    Instruction::LoadUpvalue(0),
+                    Instruction::LoadLocal(0),
+                    Instruction::Call { argc: 1 },
+                    Instruction::Return,
+                ],
+                1,
+                1,
+            )
+        };
+        let trims = function(
+            vec![
+                Instruction::LoadLocal(0),
+                Instruction::CallMethod { name: 0, argc: 0 },
+                Instruction::Return,
+            ],
+            1,
+            0,
+        );
+        let program = unit(vec![caller(), trims], constants);
+        let shape = tier_4(&program, &[vec![1]]).expect("a pure helper qualifies");
+        assert_eq!(shape.callees, vec![(1, 0)]);
+        assert_eq!(shape.bodies, vec![1]);
+        assert!(shape.calls);
+
+        // A helper that writes refuses, naming it and why.
+        let writes = function(
+            vec![
+                Instruction::LoadLocal(0),
+                Instruction::Const(0),
+                Instruction::SetProperty(1),
+                Instruction::LoadLocal(0),
+                Instruction::Return,
+            ],
+            1,
+            0,
+        );
+        let program = unit(vec![caller(), writes], constants);
+        let refusal = tier_4(&program, &[vec![1]]).unwrap_err();
+        assert_eq!(refusal.reason, Reason::CallsUnproven);
+        assert!(
+            refusal
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("writes-property: n")),
+            "{refusal:?}"
+        );
+
+        // A call the compiler cannot place: no closure known for the capture.
+        let program = unit(
+            vec![
+                caller(),
+                function(vec![Instruction::LoadLocal(0), Instruction::Return], 1, 0),
+            ],
+            constants,
+        );
+        assert_eq!(
+            tier_4(&program, &[]).unwrap_err().reason,
+            Reason::CallsUnknown
+        );
+    }
+
+    #[test]
+    fn tier_4_admits_recursion_when_the_cycle_is_proven_and_bounds_depth() {
+        // 0: `x => f(x)`; 1: `f = k => f(k)` (capturing itself).
+        let recursive = function(
+            vec![
+                Instruction::LoadUpvalue(0),
+                Instruction::LoadLocal(0),
+                Instruction::Call { argc: 1 },
+                Instruction::Return,
+            ],
+            1,
+            1,
+        );
+        let program = unit(vec![recursive.clone(), recursive.clone()], &[]);
+        let shape = tier_4(&program, &[vec![1], vec![1]]).expect("recursion is proven");
+        assert_eq!(shape.callees, vec![(1, 0)]);
+        // A chain of distinct functions past the bound: 0 calls 1 calls 2 ... calls 11.
+        let chain: Vec<FunctionProto> = (0..12).map(|_| recursive.clone()).collect();
+        let closures: Vec<Vec<u32>> = (0..12u32).map(|f| vec![(f + 1).min(11)]).collect();
+        let program = unit(chain, &[]);
+        let refusal = tier_4(&program, &closures).unwrap_err();
+        assert_eq!(refusal.reason, Reason::CallsTooDeep, "{refusal:?}");
+    }
+
+    #[test]
+    fn tier_4_calls_a_closure_written_in_the_callback() {
+        // `l => [l].map(x => x.trim())`
+        let program = unit(
+            vec![
+                function(
+                    vec![
+                        Instruction::LoadLocal(0),
+                        Instruction::NewArray { count: 1 },
+                        Instruction::MakeFunction(1),
+                        Instruction::CallMethod { name: 1, argc: 1 },
+                        Instruction::Return,
+                    ],
+                    1,
+                    0,
+                ),
+                function(
+                    vec![
+                        Instruction::LoadLocal(0),
+                        Instruction::CallMethod { name: 0, argc: 0 },
+                        Instruction::Return,
+                    ],
+                    1,
+                    0,
+                ),
+            ],
+            &["trim", "map"],
+        );
+        let shape = tier_4(&program, &[]).expect("a closure only called qualifies");
+        assert_eq!(shape.callees, vec![(1, 0)]);
+        assert!(
+            shape.bodies.is_empty(),
+            "no closure is made, so none is checked"
+        );
+        // Returned rather than called, it is an allocation the pool does not make.
+        let program = unit(
+            vec![
+                function(
+                    vec![Instruction::MakeFunction(1), Instruction::Return],
+                    1,
+                    0,
+                ),
+                function(vec![Instruction::LoadLocal(0), Instruction::Return], 1, 0),
+            ],
+            &[],
+        );
+        assert_eq!(tier_4(&program, &[]).unwrap_err().reason, Reason::Allocates);
+    }
+
+    #[test]
+    fn every_pure_member_has_a_worker_path_and_every_path_is_marked() {
+        let runtime = include_str!("runtime/boxed.c");
+        for member in kiln_builtin_surface::PURE_MEMBERS {
+            let path =
+                crate::parallel_heap::pure_path(member.owner, member.key).unwrap_or_else(|| {
+                    panic!(
+                        "{}.{} is marked pure with no worker path",
+                        member.owner, member.key
+                    )
+                });
+            let defined = match path {
+                crate::parallel_heap::PurePath::Function(name) => {
+                    format!("static int kiln_c99_par_f_{name}(")
+                }
+                crate::parallel_heap::PurePath::Method(name) => {
+                    format!("static int kiln_c99_par_m_{name}(")
+                }
+                _ => continue,
+            };
+            assert!(runtime.contains(&defined), "{defined} is not in boxed.c");
+        }
+        for key in crate::parallel_heap::PURE_METHODS {
+            assert!(
+                kiln_builtin_surface::pure_methods(key).next().is_some(),
+                "kiln_c99_par_m_{key} serves no member marked pure"
+            );
+        }
+        for (name, _) in PARALLEL_MATH {
+            assert!(
+                kiln_builtin_surface::pure_member("Math", name).is_some(),
+                "Math.{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn tier_4_sites_say_so() {
+        let record = SiteRecord {
+            method: ParallelMethod::Map,
+            line: 3,
+            column: 7,
+            refusal: None,
+            captures: 0,
+            at: None,
+            default_order: false,
+            heap: true,
+            alloc: true,
+            calls: true,
+        };
+        let parsed = SiteRecord::parse_all(&record.marker());
+        assert_eq!(parsed, vec![record.clone()]);
+        assert_eq!(
+            record.render("a.js"),
+            "a.js:3:7  parallelMap  parallel (tier 4: pure calls)\n"
+        );
+        let refused = SiteRecord {
+            refusal: Some(Refusal::with(Reason::CallsImpure, "Math.random")),
+            calls: false,
+            heap: false,
+            alloc: false,
+            ..record
+        };
+        assert_eq!(
+            refused.render("a.js"),
+            "a.js:3:7  parallelMap  sequential\n  calls-impure: calls Math.random, which is not marked pure\n"
+        );
+    }
+
+    #[test]
+    fn tier_4_a_key_comparator_may_call_a_pure_global() {
+        // `(a, b) => parseInt(a) - parseInt(b)`: a key, read from each side the same way.
+        let code = vec![
+            Instruction::LoadBuiltin(Builtin::ParseInt),
+            Instruction::LoadLocal(0),
+            Instruction::Call { argc: 1 },
+            Instruction::LoadBuiltin(Builtin::ParseInt),
+            Instruction::LoadLocal(1),
+            Instruction::Call { argc: 1 },
+            Instruction::Binary(BinaryOp::Subtract),
+            Instruction::Return,
+        ];
+        let comparator = proto(code, 2);
+        let program = program(&comparator);
+        let graph = build_function_graph(&comparator, &program).unwrap();
+        assert!(matches!(
+            key_comparator(&graph, &comparator),
+            Some((SortOrder::Ascending, _))
+        ));
+        // A call to anything else is not a key.
+        let other = proto(
+            vec![
+                Instruction::LoadBuiltin(Builtin::Date),
+                Instruction::LoadLocal(0),
+                Instruction::Call { argc: 1 },
+                Instruction::LoadBuiltin(Builtin::Date),
+                Instruction::LoadLocal(1),
+                Instruction::Call { argc: 1 },
+                Instruction::Binary(BinaryOp::Subtract),
+                Instruction::Return,
+            ],
+            2,
+        );
+        let graph = build_function_graph(&other, &program).unwrap();
+        assert_eq!(key_comparator(&graph, &other), None);
     }
 }
