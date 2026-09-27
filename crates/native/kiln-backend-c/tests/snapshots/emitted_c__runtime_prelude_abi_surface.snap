@@ -1,5 +1,6 @@
 ---
 source: crates/native/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 804
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -1908,7 +1909,7 @@ typedef struct kiln_c99_local_edge {
 #define KILN_GC_PENDING_EDGES 16u
 typedef struct kiln_gc_heap {
 static const kiln_gc_hooks kiln_c99_gc_hooks;
-static kiln_gc_heap kiln_c99_gc_fallback;
+static _Thread_local kiln_gc_heap kiln_c99_gc_fallback;
 #define KILN_C99_PROCESS_LAYOUT (UINT64_C(0x6b696c6e00010000) | (uint64_t)sizeof(struct kiln_shared_state))
 typedef struct kiln_shared_key_table {
 typedef struct kiln_shared_state {
@@ -2724,6 +2725,12 @@ static void kiln_c99_drop_callable_store(void *pointer) {
 typedef char kiln_c99_object_prototype_is_18[KILN_C99_BUILTIN_OBJECT_PROTOTYPE == 18 ? 1 : -1];
 static void kiln_c99_realm_note_builtin_store(uint32_t builtin) {
 static void kiln_c99_realm_note_store(void) {
+static void kiln_c99_stack_release_below(void) {
+#if defined(__linux__)
+#ifndef MADV_DONTNEED
+#define MADV_DONTNEED 4
+#endif
+#endif
 static void kiln_c99_builtin_bootstrap_done(void) {
 static __attribute__((noinline)) KILN_C99_RARE_CALL int kiln_c99_realm_builtins_unmodified_uncached(void) {
 static __attribute__((noinline, pure)) KILN_C99_RARE_CALL int kiln_c99_realm_builtins_unmodified(void) {

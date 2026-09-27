@@ -499,8 +499,12 @@ typedef struct kiln_gc_heap {
 } kiln_gc_heap;
 
 static const kiln_gc_hooks kiln_c99_gc_hooks;
-/* The heap a unit uses when no realm is active: the prelude's own tests. It never collects. */
-static kiln_gc_heap kiln_c99_gc_fallback;
+/* The heap a unit uses when no realm is active: the prelude's own tests, and a launcher turning a
+ * realm's failure into text after the realm has left its thread. It never collects. One per
+ * thread: realms run on several threads at once, and a single process-wide fallback was made and
+ * used by each of them unsynchronized (realms issue 24: one thread zeroed it in `heap_init` while
+ * another laid out its first nursery chunk, and read a chunk size of zero). */
+static _Thread_local kiln_gc_heap kiln_c99_gc_fallback;
 
 /* ---- Process-wide shared state (ADR 0071) --------------------------------------------------
  *
@@ -1068,7 +1072,7 @@ static kiln_gc_heap *kiln_c99_gc_heap(void) {
     generation = *cache->generation_slot;
     if (cache->heap != NULL && cache->generation == generation) return cache->heap;
     heap = kiln_c99_gc_heap_uncached();
-    /* A fallback heap is the answer for a realm that could not attach one; it is per process
+    /* A fallback heap is the answer for a realm that could not attach one; it is this thread's
      * and remembering it is harmless. NULL is not remembered. */
     cache->heap = heap;
     cache->generation = generation;

@@ -511,6 +511,12 @@ impl super::Compiler {
                 property,
                 optional,
             } => {
+                if let Some(method) = self.lone_method_read(object, property) {
+                    // `{ m() {} }.m`: the method and nothing else (see `lone_method_read`).
+                    self.next_is_method = true;
+                    self.expression(method);
+                    return;
+                }
                 self.expression(object);
                 self.short_circuit_if_nullish(*optional, expression.span);
                 let name = self.constant_index(Constant::String(property.clone().into()));
@@ -789,6 +795,51 @@ impl super::Compiler {
         self.declare_hidden(&name, span);
         self.code.push(Instruction::Pop);
         self.load_hidden(&name);
+    }
+
+    /// The method of `{ m() { ... } }.m`, when reading it back is all the literal is for.
+    ///
+    /// That spelling is how a built-in is written to be a method -- no `prototype`, no
+    /// [[Construct]] -- rather than a function declaration (`date.ts`, `typedarray.ts` and the
+    /// rest of the bootstrap: 139 of them ran in every realm's start, each leaving the literal and
+    /// its home-object cell as garbage, realms issue 08). The literal is a fresh ordinary object
+    /// with one own data property, so the read finds exactly the method the definition made and
+    /// runs nothing else; the method's name and kind come from its definition, not the object.
+    /// What the literal could still be observed through is the method's [[HomeObject]], which
+    /// only `super` reads -- written in the body, or reached by a direct `eval` there. So the
+    /// literal is dropped only when the method's text never spells `super` (a keyword cannot be
+    /// written with escapes, so the letters are there whenever the reference is) and its body
+    /// holds no direct `eval`.
+    fn lone_method_read<'e>(
+        &self,
+        object: &'e Expression,
+        property: &str,
+    ) -> Option<&'e Expression> {
+        let ExpressionKind::Object { members } = &object.kind else {
+            return None;
+        };
+        let [ObjectMember::Property(member)] = members.as_slice() else {
+            return None;
+        };
+        if member.form != kiln_hir::PropertyForm::Method {
+            return None;
+        }
+        let ObjectKey::Static(key) = &member.key else {
+            return None;
+        };
+        if *key != StringUnits::from(property) {
+            return None;
+        }
+        let ExpressionKind::Function(function) = &member.value.kind else {
+            return None;
+        };
+        let text = self
+            .source
+            .get(function.span.start as usize..function.span.end as usize)?;
+        if text.is_empty() || text.contains("super") || function_contains_direct_eval(function) {
+            return None;
+        }
+        Some(&member.value)
     }
 
     /// Emit the pending run of key/value pairs as an object, merging it into the accumulator

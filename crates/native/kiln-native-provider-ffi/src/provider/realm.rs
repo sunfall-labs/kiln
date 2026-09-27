@@ -1027,8 +1027,41 @@ fn introspect_if_requested(realm: &NativeRealm) {
         .set(status & INTROSPECT_ARMED == INTROSPECT_ARMED);
 }
 
+/// Makes a heap this thread's current one (`kiln_realm_gc_current_heap`) until dropped, then
+/// puts back whatever was current before. Both changes bump the realm generation, so the
+/// prelude's per-thread caches of "which heap" (`kiln_c99_gc_heap`) ask again.
+struct CurrentHeap {
+    previous: *mut c_void,
+}
+
+impl CurrentHeap {
+    fn set(heap: *mut c_void) -> Self {
+        let previous = ACTIVE_HEAP.with(|slot| slot.replace(heap));
+        bump_generation();
+        Self { previous }
+    }
+}
+
+impl Drop for CurrentHeap {
+    fn drop(&mut self) {
+        ACTIVE_HEAP.with(|slot| slot.set(self.previous));
+        bump_generation();
+    }
+}
+
 impl Drop for NativeRealm {
     fn drop(&mut self) {
+        // Teardown runs prelude code -- the callable stores' and work items' destructors below,
+        // the collector's teardown hooks -- and the prelude finds its heap by asking which one is
+        // current on this thread. A realm is destroyed outside `ActiveRealm`, so nothing is: the
+        // prelude then answered with its fallback heap, a single process static made on first use
+        // (realms issue 24). Each realm thread tearing down at the same moment initialised and
+        // used that one heap at once -- one thread zeroed it while another was laying out its
+        // first nursery chunk, and the collector segfaulted on a zero chunk size -- and every
+        // release below went to a heap that had never held the block. So the realm's own heap is
+        // current for the whole of teardown, and the thread's previous answer comes back after.
+        let heap = self.gc.borrow().heap;
+        let current = (!heap.is_null()).then(|| CurrentHeap::set(heap));
         // Release what the archive holds first, while the heap is still alive: a queued work
         // item or a continuation drops through a C callback that may release its block. Then
         // mark only the roots that must outlive the realm (a borrowed result slot) and free
@@ -1064,6 +1097,8 @@ impl Drop for NativeRealm {
             // SAFETY: the last use of the heap; the prelude frees it here.
             unsafe { end(gc.heap) };
         }
+        // The heap is gone: no answer may name it any more.
+        drop(current);
         for root in &gc.roots {
             // SAFETY: the reset phase receives no heap and touches only unit statics.
             unsafe { (root.roots)(std::ptr::null_mut(), root.context, GC_PHASE_RESET) };

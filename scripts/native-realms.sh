@@ -21,9 +21,19 @@
 # probe that diverges there diverges here only if realms make it worse.
 #
 #   scripts/native-realms.sh [probe ...]      the whole corpus, or just these probes
+#   scripts/native-realms.sh --repeat K [probe ...]
+#                                             the stress mode: every realm count's run K times
+#                                             (default counts: the cores and four times them)
 #   KILN_NATIVE_GC_STRESS=1 ...               every run with the collector stressed on every
 #                                             allocation (name a representative subset: minutes)
 #   KILN_REALMS_COUNTS="1 2 8"                the realm counts to run (default: 1 2 and the cores)
+#
+# WHY REPEAT. A race between realms shows up in some runs and not others: realms issue 24's
+# segfault -- every realm thread tearing down at once used one process-wide fallback heap -- took
+# about one run in a thousand at 16 realms, and one pass over the corpus runs each count once. The
+# stress mode runs each count K times and counts a process that died by a signal as diverged, with
+# the run and the signal named, so `--repeat 1000` on one or two short probes is the check to run
+# after touching anything realms share or anything a realm runs at its start or its teardown.
 #
 # Skipped, and counted as skipped: a probe calling `process.exit`, which ends the whole process
 # and so every realm in it (a realm's own exit is `worker_threads`' business, issue 06); a probe
@@ -51,7 +61,20 @@ cd "$(kiln_repo_root)"
 
 STRESS="${KILN_NATIVE_GC_STRESS:-}"
 CORES="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
-COUNTS="${KILN_REALMS_COUNTS:-1 2 $CORES}"
+REPEAT=1
+if [[ ${1:-} == --repeat ]]; then
+	if [[ ! ${2:-} =~ ^[1-9][0-9]*$ ]]; then
+		echo "native-realms.sh: --repeat needs a positive count of runs" >&2
+		exit 2
+	fi
+	REPEAT="$2"
+	shift 2
+fi
+if ((REPEAT > 1)); then
+	COUNTS="${KILN_REALMS_COUNTS:-$CORES $((CORES * 4))}"
+else
+	COUNTS="${KILN_REALMS_COUNTS:-1 2 $CORES}"
+fi
 
 KILN="${KILN_BIN:-}"
 if [[ -z $KILN ]]; then
@@ -129,28 +152,41 @@ run_probe() {
 	local alone alone_status=0
 	alone="$(env ${probe_env[@]+"${probe_env[@]}"} "$dir/program" 2>&1)" || alone_status=$?
 
-	local count index realm_status
+	local count index realm_status run process_status where
 	for count in $COUNTS; do
 		local out="$dir/realms-$count"
-		mkdir -p "$out"
-		# The process's own streams stay empty unless the host itself fails; they are kept.
-		env ${probe_env[@]+"${probe_env[@]}"} KILN_REALMS="$count" KILN_REALMS_OUT="$out" \
-			"$dir/program" > "$out/process.log" 2>&1 || true
-		for ((index = 0; index < count; index++)); do
-			if [[ ! -f $out/$index.status ]]; then
-				printf '  N=%s realm %s: no status (%s)\n' "$count" "$index" \
+		for ((run = 1; run <= REPEAT; run++)); do
+			rm -rf "$out"
+			mkdir -p "$out"
+			where="N=$count"
+			((REPEAT > 1)) && where="N=$count run $run of $REPEAT"
+			# The process's own streams stay empty unless the host itself fails; they are kept.
+			process_status=0
+			env ${probe_env[@]+"${probe_env[@]}"} KILN_REALMS="$count" KILN_REALMS_OUT="$out" \
+				"$dir/program" > "$out/process.log" 2>&1 || process_status=$?
+			# A process a signal ended is a crash whatever its realms managed to write first.
+			if ((process_status > 128)); then
+				printf '  %s: the process died by signal %s (%s)\n' "$where" \
+					"$(kill -l "$((process_status - 128))" 2>/dev/null || echo "$((process_status - 128))")" \
 					"$(head -3 "$out/process.log" | tr '\n' ' ')" > "$dir/diverged"
 				return 0
 			fi
-			realm_status="$(<"$out/$index.status")"
-			if [[ $(<"$out/$index.out") != "$alone" ]] || ((realm_status != alone_status)); then
-				{
-					printf '  N=%s realm %s exited %s (alone: %s); its output against the lone run:\n' \
-						"$count" "$index" "$realm_status" "$alone_status"
-					diff <(printf '%s\n' "$alone") "$out/$index.out" | head -12 | sed 's/^/    /'
-				} > "$dir/diverged"
-				return 0
-			fi
+			for ((index = 0; index < count; index++)); do
+				if [[ ! -f $out/$index.status ]]; then
+					printf '  %s realm %s: no status (%s)\n' "$where" "$index" \
+						"$(head -3 "$out/process.log" | tr '\n' ' ')" > "$dir/diverged"
+					return 0
+				fi
+				realm_status="$(<"$out/$index.status")"
+				if [[ $(<"$out/$index.out") != "$alone" ]] || ((realm_status != alone_status)); then
+					{
+						printf '  %s realm %s exited %s (alone: %s); its output against the lone run:\n' \
+							"$where" "$index" "$realm_status" "$alone_status"
+						diff <(printf '%s\n' "$alone") "$out/$index.out" | head -12 | sed 's/^/    /'
+					} > "$dir/diverged"
+					return 0
+				fi
+			done
 		done
 	done
 	touch "$dir/matched"
@@ -184,7 +220,9 @@ for probe in "${PROBES[@]}"; do
 	fi
 done
 
-kiln_say "native realms (N = ${COUNTS// /, }${STRESS:+; KILN_GC_STRESS=$STRESS}): $matched matched, ${#SKIPPED[@]} skipped, $((${#DIVERGED[@]} / 2)) diverged"
+RUNS_NOTE=""
+((REPEAT > 1)) && RUNS_NOTE="; $REPEAT runs each"
+kiln_say "native realms (N = ${COUNTS// /, }$RUNS_NOTE${STRESS:+; KILN_GC_STRESS=$STRESS}): $matched matched, ${#SKIPPED[@]} skipped, $((${#DIVERGED[@]} / 2)) diverged"
 if ((${#SKIPPED[@]} > 0)); then
 	kiln_say ""
 	kiln_say "Skipped:"

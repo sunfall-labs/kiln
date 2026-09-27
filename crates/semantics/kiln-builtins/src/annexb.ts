@@ -262,13 +262,14 @@
 
   // Built-in methods are not constructors, so each is a method definition (`{ m() {} }.m`)
   // rather than a function declaration, which would have [[Construct]].
+  // One descriptor for every member, not a literal per call: `defineProperty` reads its fields and
+  // keeps nothing, and a literal per member was the largest share of the garbage every realm's
+  // bootstrap made (realms issue 08).
+  const methodDescriptor: PropertyDescriptor = { value: undefined, writable: true, enumerable: false, configurable: true };
   function defineMethod(target: any, name: string | symbol, fn: any): void {
-    Object.defineProperty(target, name, {
-      value: fn,
-      writable: true,
-      enumerable: false,
-      configurable: true,
-    });
+    methodDescriptor.value = fn;
+    Object.defineProperty(target, name, methodDescriptor);
+    methodDescriptor.value = undefined;
   }
 
   // Install String.prototype Annex B.3 methods

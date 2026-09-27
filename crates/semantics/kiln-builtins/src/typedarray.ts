@@ -943,13 +943,14 @@ delete (globalThis as any).__kilnTypedArraySort;
   // rather than a function declaration. An optional parameter is written with a default
   // (`x: any = undefined`), which stops `length` counting it, as the specification's lengths
   // require; both engines take `length` from the signature.
+  // One descriptor for every member, not a literal per call: `defineProperty` reads its fields and
+  // keeps nothing, and a literal per member was the largest share of the garbage every realm's
+  // bootstrap made (realms issue 08).
+  const methodDescriptor: PropertyDescriptor = { value: undefined, writable: true, enumerable: false, configurable: true };
   function defineMethod(name: string | symbol, fn: any): void {
-    Object.defineProperty(Proto, name, {
-      value: fn,
-      writable: true,
-      enumerable: false,
-      configurable: true,
-    });
+    methodDescriptor.value = fn;
+    Object.defineProperty(Proto, name, methodDescriptor);
+    methodDescriptor.value = undefined;
   }
 
   // In the order node's `Reflect.ownKeys(%TypedArray%.prototype)` reports them: key order is

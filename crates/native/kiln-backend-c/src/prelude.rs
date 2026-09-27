@@ -4597,6 +4597,16 @@ pub fn runtime_prelude_header() -> &'static str {
             text != PRELUDE_HEADER,
             "the built-in store summary's definition moved"
         );
+        // One streak table per thread, not one per unit (realms issue 08): a `static` in a
+        // header every chunk includes gave each unit its own kilobyte of thread-local storage,
+        // and every thread's TLS block is zeroed whole when the thread starts -- ten copies were
+        // ten kilobytes resident in every realm thread, pool thread and runtime thread.
+        let streaks = "static _Thread_local kiln_site_streak kiln_c99_streaks[64];";
+        assert!(text.contains(streaks), "the site streak table's definition moved");
+        text = text.replace(
+            streaks,
+            "extern _Thread_local kiln_site_streak kiln_c99_streaks[64] __attribute__((visibility(\"hidden\")));",
+        );
         let json_document =
             "static int kiln_c99_json_document(const kiln_string *source, kiln_val *out);";
         assert!(
@@ -4665,6 +4675,7 @@ fn build_runtime_prelude_source(src: &str) -> String {
         "kiln_c99_process",
         "kiln_c99_atomics",
         "kiln_c99_builtin_store_epoch",
+        "kiln_c99_streaks[64];",
     ];
 
     for line in src.lines() {

@@ -250,6 +250,34 @@ static void kiln_c99_realm_note_store(void) {
     }
 }
 
+/* Realms issue 08: give back the stack pages below the caller's frame. The bootstrap body is one
+ * C function with a frame of tens of kilobytes, and once it has returned nothing lives below the
+ * launcher's frame that called it -- but the pages it touched stayed resident for the realm's whole
+ * life: 40 KB of every realm, a sixth of what a second realm cost. `MADV_DONTNEED` drops them, and
+ * the next call that reaches that deep finds zeroed pages, as a fresh thread's stack would be. Two
+ * pages are kept below the frame (the red zone and this call's own), and at most a mebibyte is
+ * released, which bounds the call on the main thread's stack, whose mapping grows on demand (a
+ * range beyond what is mapped is skipped by the kernel and reported, and the report is ignored).
+ * Pages are the collector's concern only above the stack pointer, where its scan starts. */
+static void kiln_c99_stack_release_below(void) {
+#if defined(__linux__)
+    /* Not declared under `-std=c11`, as `pthread_getattr_np` is not; 4 is the value on every
+     * architecture this runtime builds for. */
+    extern int madvise(void *, size_t, int);
+#ifndef MADV_DONTNEED
+#define MADV_DONTNEED 4
+#endif
+    uintptr_t page = (uintptr_t)kiln_c99_region_page();
+    uintptr_t here = (uintptr_t)__builtin_frame_address(0);
+    uintptr_t top;
+    uintptr_t bottom;
+    if (page == 0 || here < 4 * page) return;
+    top = (here - 2 * page) & ~(page - 1);
+    bottom = top > ((uintptr_t)1 << 20) ? top - ((uintptr_t)1 << 20) : page;
+    (void)madvise((void *)bottom, (size_t)(top - bottom), MADV_DONTNEED);
+#endif
+}
+
 /* The launcher, once the realm's bootstrap has run: what the bootstrap stored is the built-ins'
  * definition, so the realm takes its share of the summary back. A realm that finishes its
  * bootstrap never undoes what another realm -- or its own program -- stores later. */
@@ -259,6 +287,8 @@ static void kiln_c99_builtin_bootstrap_done(void) {
     /* The realm that built the shared region has made every closure it will hold (realms issue
      * 08): protect it and let every other realm read it. */
     kiln_c99_region_seal(heap);
+    /* The bootstrap's frames are gone; the pages they touched need not stay the realm's. */
+    kiln_c99_stack_release_below();
     __atomic_sub_fetch(&kiln_c99_builtin_store_epoch, heap->builtin_stores, __ATOMIC_RELAXED);
     heap->builtin_stores = 0;
     memset(heap->program_builtins, 0, sizeof heap->program_builtins);

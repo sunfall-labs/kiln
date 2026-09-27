@@ -176,11 +176,21 @@ def http_ok(port):
 # building
 
 
-def build_all(kiln, go_cmd, work):
-    """Build every binary once. Returns {name: path or None} and {name: failure text}."""
+def build_all(kiln, go_cmd, work, selected):
+    """Build the selected workloads' binaries once. Returns paths and failures."""
     binaries, failures = {}, {}
-    kiln_programs = ["kiln-start", "inrealm", "tasks", "pmap", "pmap-parallel", "pmap-parallel-light", "serve",
-                     "start", "messages"]
+    by_workload = {
+        "start": ["kiln-start", "start"],
+        "messages": ["inrealm", "messages"],
+        "shared": [],
+        "tasks": ["tasks"],
+        "pmap": ["pmap", "pmap-parallel", "pmap-parallel-light"],
+        "server": ["serve"],
+    }
+    for names in by_workload.values():
+        binaries.update(dict.fromkeys(names))
+    kiln_programs = [name for workload, names in by_workload.items()
+                     if workload in selected for name in names]
     for name in kiln_programs:
         out = os.path.join(work, f"kiln-{name}")
         argv = [kiln, "--one-shot", "--node", "build", os.path.join(JS, name + ".mjs"),
@@ -808,6 +818,10 @@ def main():
     parser.add_argument("--kiln", default=os.path.join(REPO, "target", "release", "kiln"))
     parser.add_argument("--go", default=os.environ.get("GO_CMD", ""))
     args = parser.parse_args()
+    selected = set(args.only.split(",")) if args.only else {"start", "messages", "shared", "tasks", "pmap", "server"}
+    unknown = selected - {"start", "messages", "shared", "tasks", "pmap", "server"}
+    if unknown:
+        parser.error("unknown workload(s): " + ", ".join(sorted(unknown)))
     cfg = config(args.quick)
     go_cmd = args.go.split() if args.go else None
     if go_cmd is None:
@@ -819,7 +833,7 @@ def main():
     work = os.path.join(REPO, "target", "bench-concurrency", started.replace(":", ""))
     os.makedirs(work, exist_ok=True)
     log(f"bench/concurrency: building into {os.path.relpath(work, REPO)}")
-    bins, failures = build_all(args.kiln, go_cmd, work)
+    bins, failures = build_all(args.kiln, go_cmd, work, selected)
     machine = machine_info(args.kiln, go_cmd)
 
     jobs = jobs_for(cfg, bins)

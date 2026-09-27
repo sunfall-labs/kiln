@@ -462,12 +462,15 @@ if (typeof JSON !== "undefined") {
     const added = ["debug", "dir", "table", "assert", "trace", "clear", "count", "countReset",
                    "group", "groupEnd", "groupCollapsed", "time", "timeEnd", "timeLog", "dirxml",
                    "timeStamp", "profile", "profileEnd"];
+    // One descriptor for every member (realms issue 08: a literal per call was garbage in
+    // every realm's bootstrap); `defineProperty` reads it and keeps nothing.
+    const hidden = { value: undefined, writable: true, configurable: true, enumerable: false };
     for (let i = 0; i < added.length; i++) {
-        Object.defineProperty(c, added[i], { value: proto[added[i]], writable: true,
-                                             configurable: true, enumerable: false });
+        hidden.value = proto[added[i]];
+        Object.defineProperty(c, added[i], hidden);
     }
-    Object.defineProperty(c, "Console", { value: Console, writable: true, configurable: true,
-                                          enumerable: false });
+    hidden.value = Console;
+    Object.defineProperty(c, "Console", hidden);
     Object.setPrototypeOf(c, proto);
 }
 
@@ -479,9 +482,14 @@ if (typeof JSON !== "undefined") {
 // gone they would refuse, and these are the answers. Each is written the way the specification
 // reduces it, to the ordinary method on the same receiver.
 {
-    const data = (target, key, value, writable) =>
-        Object.defineProperty(target, key, { value, writable: writable === true,
-                                             configurable: true, enumerable: false });
+    // One descriptor for every member, as the console's above.
+    const descriptor = { value: undefined, writable: false, configurable: true, enumerable: false };
+    const data = (target, key, value, writable) => {
+        descriptor.value = value;
+        descriptor.writable = writable === true;
+        Object.defineProperty(target, key, descriptor);
+        descriptor.value = undefined;
+    };
     Object.defineProperty(String.prototype, "length", { value: 0, writable: false,
                                                         configurable: false, enumerable: false });
     data(ArrayBuffer.prototype, Symbol.toStringTag, "ArrayBuffer");
@@ -614,9 +622,13 @@ if (typeof JSON !== "undefined") {
             return true;
         },
     };
-    for (const name of Object.keys(methods)) {
-        Object.defineProperty(Set.prototype, name, { value: methods[name], writable: true,
-                                                     configurable: true, enumerable: false });
+    // One descriptor and an index loop: a literal and an iterator result per member were
+    // garbage in every realm's bootstrap (realms issue 08).
+    const names = Object.keys(methods);
+    const hidden = { value: undefined, writable: true, configurable: true, enumerable: false };
+    for (let i = 0; i < names.length; i++) {
+        hidden.value = methods[names[i]];
+        Object.defineProperty(Set.prototype, names[i], hidden);
     }
 }
 
@@ -624,8 +636,12 @@ if (typeof JSON !== "undefined") {
 // name natively until 2026-09-19. Defined into the constructors' stores, which every read of a
 // built-in consults first.
 {
-    const data = (target, key, value) =>
-        Object.defineProperty(target, key, { value, writable: true, configurable: true, enumerable: false });
+    const hidden = { value: undefined, writable: true, configurable: true, enumerable: false };
+    const data = (target, key, value) => {
+        hidden.value = value;
+        Object.defineProperty(target, key, hidden);
+        hidden.value = undefined;
+    };
     data(Object, "groupBy", function groupBy(items, callback) {
         if (typeof callback !== "function") throw new TypeError(String(callback) + " is not a function");
         const out = Object.create(null);

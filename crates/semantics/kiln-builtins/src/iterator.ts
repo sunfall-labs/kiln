@@ -17,13 +17,14 @@
 
     // Built-in methods are not constructors, so each is a method definition (`{ m() {} }.m`); an
     // optional parameter has a default (`x: any = undefined`) so `length` does not count it.
+    // One descriptor for every member, not a literal per call: `defineProperty` reads its fields
+    // and keeps nothing, and a literal per member was the largest share of the garbage every
+    // realm's bootstrap made (realms issue 08).
+    const methodDescriptor: PropertyDescriptor = { value: undefined, writable: true, enumerable: false, configurable: true };
     const defineMethod = (target: any, name: string | symbol, fn: any) => {
-        Object.defineProperty(target, name, {
-            value: fn,
-            writable: true,
-            enumerable: false,
-            configurable: true,
-        });
+        methodDescriptor.value = fn;
+        Object.defineProperty(target, name, methodDescriptor);
+        methodDescriptor.value = undefined;
     };
 
     // --- The iterator protocol, as the specification spells it ---
