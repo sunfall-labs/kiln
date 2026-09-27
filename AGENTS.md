@@ -302,7 +302,12 @@ by name" is a state to leave, in the order the thirdparty corpus and the invento
 Native generated-C, object, runtime and link keys include the content digests of the prelude
 source or header they consume. The backend emitter build fingerprint also participates in the
 generated-module key. Editing `crates/native/kiln-backend-c/src/runtime/` therefore creates cache misses
-for the affected layers; an ordinary build does not require manual cache deletion. The native
+for the affected layers; an ordinary build does not require manual cache deletion.
+Concurrent native object misses coordinate through bounded process mutexes and advisory files in
+`<first-writable-cache-layer>/.compile-locks/v1/` (at most 256 files). After waiting, each caller
+rechecks the full artifact key; only a still-missing object compiles. Warm hits do no lock I/O.
+These files are deliberately outside the artifact records swept by GC; retain them while builds
+are active, because replacing a lock file would let two producers lock different inodes. The native
 tests use a separate cache root under `target/kiln-test-cache`, but it follows the same content
 addressing rules.
 
