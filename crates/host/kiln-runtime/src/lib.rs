@@ -11,6 +11,7 @@
 )]
 
 mod process_wire;
+mod timer_queue;
 pub use process_wire::{
     ProcessWireError, ProcessWireRequest, decode as decode_process_wire,
     encode as encode_process_wire,
@@ -70,13 +71,13 @@ pub use worker_pool::{
     ActorHandler, ActorId, DEFAULT_MAILBOX_CAPACITY, WorkerError, WorkerPool, WorkerRealmHandle,
 };
 
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::time::Duration;
+use timer_queue::{SequenceBuild, TimerEntry, TimerQueue};
 
 pub use kiln_artifact_cache::{CapabilityIdentity, RealmCapabilityIdentity};
 use kiln_host_abi::{
@@ -4061,9 +4062,9 @@ pub struct Realm<M = WorkId, T = WorkId> {
     next_timer_id: u64,
     microtasks: VecDeque<M>,
     next_ticks: VecDeque<M>,
-    timers: BinaryHeap<TimerEntry<T>>,
-    cancelled_timers: HashSet<TimerId>,
-    active_timers: HashSet<TimerId>,
+    timers: TimerQueue<T>,
+    cancelled_timers: HashSet<TimerId, SequenceBuild>,
+    active_timers: HashSet<TimerId, SequenceBuild>,
     _not_send: PhantomData<Rc<()>>,
 }
 
@@ -4094,9 +4095,9 @@ impl<M, T> Realm<M, T> {
             next_timer_id: 1,
             microtasks: VecDeque::new(),
             next_ticks: VecDeque::new(),
-            timers: BinaryHeap::new(),
-            cancelled_timers: HashSet::new(),
-            active_timers: HashSet::new(),
+            timers: TimerQueue::new(),
+            cancelled_timers: HashSet::default(),
+            active_timers: HashSet::default(),
             _not_send: PhantomData,
         }
     }
@@ -4202,13 +4203,16 @@ impl<M, T> Realm<M, T> {
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.wrapping_add(1);
         self.active_timers.insert(id);
-        self.timers.push(TimerEntry {
-            deadline,
-            sequence,
-            id,
-            work,
-            interval,
-        });
+        self.timers.push(
+            delay,
+            TimerEntry {
+                deadline,
+                sequence,
+                id,
+                work,
+                interval,
+            },
+        );
         id
     }
 
@@ -4230,18 +4234,27 @@ impl<M, T> Realm<M, T> {
     /// The earliest armed timer's virtual deadline, discarding cancelled entries.
     pub fn next_timer_deadline(&mut self) -> Option<Duration> {
         self.discard_cancelled_timers();
-        self.timers.peek().map(|timer| timer.deadline)
+        self.timers.peek_key().map(|(deadline, _, _)| deadline)
     }
 
     fn discard_cancelled_timers(&mut self) {
+        if self.cancelled_timers.is_empty() {
+            return;
+        }
         while self
             .timers
-            .peek()
-            .is_some_and(|timer| self.cancelled_timers.contains(&timer.id))
+            .peek_key()
+            .is_some_and(|(_, _, id)| self.cancelled_timers.contains(&TimerId(id)))
         {
             let timer = self.timers.pop().expect("peeked timer exists");
             self.cancelled_timers.remove(&timer.id);
         }
+    }
+
+    /// The work of the timer expected to run `ahead` timers after the next one, for a cache hint
+    /// (see `TimerQueue::upcoming`). Not an ordering promise.
+    pub fn upcoming_timer_work(&self, ahead: usize) -> Option<&T> {
+        self.timers.upcoming(ahead).map(|entry| &entry.work)
     }
 
     /// Advance virtual time to the earliest timer and take it, re-arming an interval.
@@ -4252,58 +4265,33 @@ impl<M, T> Realm<M, T> {
         self.discard_cancelled_timers();
         let timer = self.timers.pop()?;
         self.now = self.now.max(timer.deadline);
-        let work = timer.work.clone();
-        if let Some(interval) = timer.interval {
+        let TimerEntry {
+            deadline,
+            id,
+            work,
+            interval,
+            ..
+        } = timer;
+        if let Some(interval) = interval {
             // Rearm before handing control to the callback. `clear_timeout` can therefore cancel
             // the next occurrence from within the current callback.
             let sequence = self.next_sequence;
             self.next_sequence = self.next_sequence.wrapping_add(1);
-            let deadline = timer.deadline.saturating_add(interval);
-            self.timers.push(TimerEntry {
-                deadline,
-                sequence,
-                id: timer.id,
-                work: timer.work,
-                interval: Some(interval),
-            });
+            let rearmed = work.clone();
+            self.timers.push(
+                interval,
+                TimerEntry {
+                    deadline: deadline.saturating_add(interval),
+                    sequence,
+                    id,
+                    work: rearmed,
+                    interval: Some(interval),
+                },
+            );
         } else {
-            self.active_timers.remove(&timer.id);
+            self.active_timers.remove(&id);
         }
-        Some(WorkItem::Timer { id: timer.id, work })
-    }
-}
-
-struct TimerEntry<T> {
-    deadline: Duration,
-    sequence: u64,
-    id: TimerId,
-    work: T,
-    interval: Option<Duration>,
-}
-
-impl<T> PartialEq for TimerEntry<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.deadline == other.deadline && self.sequence == other.sequence && self.id == other.id
-    }
-}
-
-impl<T> Eq for TimerEntry<T> {}
-
-impl<T> Ord for TimerEntry<T> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // BinaryHeap is a max-heap; reverse the semantic order so the earliest, then oldest,
-        // timer is returned first.
-        other
-            .deadline
-            .cmp(&self.deadline)
-            .then_with(|| other.sequence.cmp(&self.sequence))
-            .then_with(|| other.id.0.cmp(&self.id.0))
-    }
-}
-
-impl<T> PartialOrd for TimerEntry<T> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+        Some(WorkItem::Timer { id, work })
     }
 }
 

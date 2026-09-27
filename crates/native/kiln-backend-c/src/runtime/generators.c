@@ -10,29 +10,27 @@ static kiln_generator *kiln_c99_generator_of(kiln_value value) {
 static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_value receiver,
                                   const kiln_value *args, size_t argc) {
     kiln_closure *closure = kiln_c99_closure_of(function);
-    kiln_generator *frame = (kiln_generator *)kiln_c99_gc_alloc(KILN_GC_GENERATOR, sizeof *frame);
     size_t locals = closure->local_count == 0 ? 1 : closure->local_count;
     size_t depth = closure->stack_size == 0 ? 1 : closure->stack_size;
+    kiln_generator *frame;
     size_t index;
+    if (locals > (((size_t)-1) - sizeof *frame) / sizeof(kiln_val) - depth) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    /* The locals and the operand stack live in the frame's own block, after the header: a
+     * suspended async function is one allocation, found and freed with its frame. They used to
+     * be four more `malloc`s -- two of them handler arrays sized by the body's instruction count
+     * that no emitted body reads, since the graph emitter tracks handlers in `handler_top` -- and
+     * a hundred thousand pending tasks paid about 600 bytes each for them. */
+    frame = (kiln_generator *)kiln_c99_gc_alloc(
+        KILN_GC_GENERATOR, sizeof *frame + (locals + depth) * sizeof(kiln_val));
     if (frame == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
-    frame->locals = (kiln_val *)malloc(locals * sizeof *frame->locals);
-    frame->stack = (kiln_val *)malloc(depth * sizeof *frame->stack);
-    /* One handler slot per instruction is the bound the emitter uses for an automatic frame, and
-     * it is the same bound here: a body cannot register more handlers than it has instructions. */
-    frame->handlers = (size_t *)malloc((closure->handler_depth == 0 ? 1 : closure->handler_depth) *
-                                       sizeof *frame->handlers);
-    frame->handler_stack =
-        (size_t *)malloc((closure->handler_depth == 0 ? 1 : closure->handler_depth) *
-                         sizeof *frame->handler_stack);
-    if (frame->locals == NULL || frame->stack == NULL || frame->handlers == NULL ||
-        frame->handler_stack == NULL) {
-        /* The four buffers are the frame's, so the KILN_GC_GENERATOR finaliser releases the ones
-         * that did allocate; releasing the frame is the whole of the cleanup. */
-        kiln_c99_gc_release(frame);
-        return KILN_C99_OUT_OF_MEMORY;
-    }
+    frame->locals = (kiln_val *)(frame + 1);
+    frame->stack = frame->locals + locals;
+    frame->handlers = NULL;
+    frame->handler_stack = NULL;
     frame->handler_top = 0;
     for (index = 0; index < locals; ++index) {
         frame->locals[index] = KILN_VAL_UNDEFINED;

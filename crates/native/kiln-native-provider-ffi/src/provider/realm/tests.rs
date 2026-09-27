@@ -2425,3 +2425,129 @@ fn thrown_next_tick_drops_its_payload_before_drive_returns() {
     assert_eq!(kiln_realm_destroy(handle), 0);
     assert_eq!(observed.1, 1);
 }
+
+/// What one thread's realm saw while another thread's realm was active at the same moment.
+struct ConcurrentRealmProbe {
+    barrier: std::sync::Arc<std::sync::Barrier>,
+    mark: u64,
+    read_back: u64,
+    generation_slot: usize,
+}
+
+unsafe extern "C" fn holds_its_slot_across_another_realm(context: *mut c_void) -> i32 {
+    // SAFETY: the test passes a live probe for the duration of the entry.
+    let probe = unsafe { &mut *context.cast::<ConcurrentRealmProbe>() };
+    let mut slot = ptr::null_mut();
+    if unsafe { kiln_realm_value_slot(1, &raw mut slot) } != 0 {
+        return RUNTIME_ERROR;
+    }
+    unsafe { slot.cast::<u64>().write(probe.mark) };
+    // Both realms are entered, on their own threads, when either passes this point.
+    probe.barrier.wait();
+    probe.read_back = unsafe { slot.cast::<u64>().read() };
+    probe.generation_slot = kiln_realm_generation_slot() as usize;
+    probe.barrier.wait();
+    0
+}
+
+/// Realms issue 04 step 5: the active-realm registry is per thread, so two threads each run their
+/// own realm at the same time, each sees only its own realm's state, and each has its own
+/// generation word for the prelude's caches.
+#[test]
+fn realms_on_two_threads_are_active_at_once_and_each_sees_only_its_own() {
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let run = |mark: u64| {
+        let barrier = std::sync::Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            let mut handle = 0;
+            assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
+            let mut probe = ConcurrentRealmProbe {
+                barrier,
+                mark,
+                read_back: 0,
+                generation_slot: 0,
+            };
+            let status = unsafe {
+                kiln_realm_enter(
+                    handle,
+                    Some(holds_its_slot_across_another_realm),
+                    (&raw mut probe).cast(),
+                )
+            };
+            assert_eq!(kiln_realm_destroy(handle), 0);
+            (status, probe.read_back, probe.generation_slot)
+        })
+    };
+    let first = run(11);
+    let second = run(22);
+    let first = first.join().expect("first realm thread");
+    let second = second.join().expect("second realm thread");
+    assert_eq!((first.0, first.1), (0, 11));
+    assert_eq!((second.0, second.1), (0, 22));
+    assert_ne!(first.2, second.2, "each thread has its own realm generation");
+}
+
+#[cfg(all(feature = "ffi", any(target_os = "linux", target_os = "macos")))]
+mod realm_ffi {
+    use super::*;
+
+    #[cfg(target_os = "linux")]
+    const LIBRARY: &[u8] = b"libc.so.6";
+    #[cfg(target_os = "macos")]
+    const LIBRARY: &[u8] = b"/usr/lib/libSystem.B.dylib";
+
+    /// Opens the library and records the handle, or closes the handle it is given.
+    struct FfiProbe {
+        close: u64,
+        close_status: i32,
+        opened: u64,
+    }
+
+    unsafe extern "C" fn ffi_probe(context: *mut c_void) -> i32 {
+        // SAFETY: the test passes a live probe for the duration of the entry.
+        let probe = unsafe { &mut *context.cast::<FfiProbe>() };
+        if probe.close != 0 {
+            probe.close_status = crate::ffi::kiln_ffi_close(probe.close);
+        }
+        if probe.opened == 0 {
+            let status = unsafe {
+                crate::ffi::kiln_ffi_open(LIBRARY.as_ptr(), LIBRARY.len() as u64, &mut probe.opened)
+            };
+            if status != 0 {
+                return RUNTIME_ERROR;
+            }
+        }
+        0
+    }
+
+    /// Realms issue 04 step 5: a realm's `node:ffi` libraries are its own. Another realm cannot
+    /// close one, and the handle space starts again in each realm.
+    #[test]
+    fn ffi_libraries_belong_to_the_realm_that_opened_them() {
+        let (mut first, mut second) = (0, 0);
+        assert_eq!(unsafe { kiln_realm_create(&raw mut first) }, 0);
+        assert_eq!(unsafe { kiln_realm_create(&raw mut second) }, 0);
+        let mut in_first = FfiProbe { close: 0, close_status: 0, opened: 0 };
+        assert_eq!(
+            unsafe { kiln_realm_enter(first, Some(ffi_probe), (&raw mut in_first).cast()) },
+            0
+        );
+        assert_ne!(in_first.opened, 0);
+        let mut in_second = FfiProbe { close: in_first.opened, close_status: 0, opened: 0 };
+        assert_eq!(
+            unsafe { kiln_realm_enter(second, Some(ffi_probe), (&raw mut in_second).cast()) },
+            0
+        );
+        assert_ne!(in_second.close_status, 0, "the second realm cannot close the first's library");
+        assert_eq!(in_second.opened, in_first.opened, "handles are numbered per realm");
+        // Tearing the first realm down releases its library and leaves the second's open.
+        assert_eq!(kiln_realm_destroy(first), 0);
+        let mut again = FfiProbe { close: in_second.opened, close_status: -1, opened: 1 };
+        assert_eq!(
+            unsafe { kiln_realm_enter(second, Some(ffi_probe), (&raw mut again).cast()) },
+            0
+        );
+        assert_eq!(again.close_status, 0);
+        assert_eq!(kiln_realm_destroy(second), 0);
+    }
+}

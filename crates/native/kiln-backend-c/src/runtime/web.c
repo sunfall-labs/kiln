@@ -101,7 +101,7 @@ static int kiln_c99_valid_utf8(const char *bytes, size_t len) {
     return 1;
 }
 
-static kiln_node_response *kiln_c99_active_http_response = NULL;
+static _Thread_local kiln_node_response *kiln_c99_active_http_response = NULL;
 
 /* The prototypes the runtime bootstrap's `URL` and `URLSearchParams` classes carry, kept in
  * realm slots so the request fast path below can hand out an object that *is* a `URL` -- one

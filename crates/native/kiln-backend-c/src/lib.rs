@@ -651,6 +651,7 @@ pub mod facts;
 pub mod graph;
 pub mod parallel;
 pub mod regex;
+pub mod state_owners;
 pub mod summary;
 mod tail;
 pub mod verifier;
@@ -1038,6 +1039,7 @@ pub(crate) fn closure_construction(
     defining_receiver: &str,
     captured: &str,
     capture_count: usize,
+    publishes_frame: bool,
 ) -> String {
     let target = &functions[proto as usize];
     let name = target.effective_name_units().map_or_else(
@@ -1056,7 +1058,14 @@ pub(crate) fn closure_construction(
         };
     let generator = i32::from(target.generator || target.asynchronous);
     let asynchronous = i32::from(target.asynchronous);
-    let arrow = i32::from(target.arrow);
+    // An arrow is `1` when it reads the enclosing frame (its own `arguments`/`new.target`, or a
+    // nested arrow's) and `2` when it provably never does: `kiln_c99_make_closure` then skips
+    // materialising the enclosing call's `arguments` object for it.
+    let arrow = match (target.arrow, publishes_frame) {
+        (false, _) => 0,
+        (true, true) => 1,
+        (true, false) => 2,
+    };
     let async_generator = i32::from(target.async_generator);
     let is_method = i32::from(target.is_method);
     let strict = i32::from(
@@ -1417,6 +1426,9 @@ fn render_functions(
             "kiln_c99_new",
             "kiln_c99_alloc",
             "kiln_c99_realm",
+            // Module globals are the realm's block (`emit_graph::body::cache_module_globals`),
+            // found through the realm generation of the thread that asks: a pool thread has none.
+            "kiln_mg",
         ]
         .iter()
         .any(|word| names(body, word));
@@ -1713,7 +1725,7 @@ fn render_functions(
              (m->flags & 2) != 0,\n\
              (m->flags & 4) != 0,\n\
              (m->flags & 8) != 0,\n\
-             (m->flags & 16) != 0,\n\
+             (m->flags & 16) != 0 ? ((m->flags & 64) != 0 ? 1 : 2) : 0,\n\
              (m->flags & 32) != 0,\n\
              receiver,\n\
              kiln_val_from_boundary(kiln_c99_new_target),\n\
@@ -1781,7 +1793,7 @@ fn render_functions(
                         )
                         .unwrap();
                     }
-                    writeln!(target_buf, "static kiln_c99_method_path {pfx}_path;").unwrap();
+                    writeln!(target_buf, "static kiln_c99_method_path {pfx}_path = KILN_C99_UNLEARNED_METHOD_PATH;").unwrap();
                 }
             }
         }
@@ -2992,12 +3004,6 @@ fn render_template_sites(output: &mut String, program: &Program, symbol: &str, s
     let linkage = if should_chunk { "" } else { "static " };
     writeln!(
         output,
-        "{linkage}kiln_val {symbol}_template_sites[{}];",
-        program.template_sites.len()
-    )
-    .unwrap();
-    writeln!(
-        output,
         "{linkage}int {symbol}_materialize_template_site(size_t site) {{"
     )
     .unwrap();
@@ -3093,14 +3099,66 @@ fn render_template_sites(output: &mut String, program: &Program, symbol: &str, s
     writeln!(output, "}}").unwrap();
 }
 
-fn render_unit_roots(
+/// How many module globals a unit keeps in its realm block (ADR 0070, realms issue 04 step 5).
+fn unit_global_count(program: &Program) -> usize {
+    if uses_module_scope(program) {
+        usize::try_from(program.local_count).unwrap().max(1)
+    } else {
+        0
+    }
+}
+
+/// The unit's realm state: its module globals, then its template sites, in one block each realm
+/// allocates on its first entry into the unit, marks through its heap and frees with it (see
+/// `kiln_c99_unit` in `prelude_types.h`). `{symbol}_globals` and `{symbol}_template_sites` name
+/// this realm's block wherever they are written, through a per-thread cache checked against the
+/// realm generation; a function body that reads its module's globals loads the pointer once at
+/// entry instead (`emit_graph::body`).
+///
+/// `unit_linkage` is the descriptor's: external in a chunked unit, whose chunks name it, which is
+/// also where `extern_only` renders a chunk's view of it. Each translation unit keeps its own
+/// cache; the block is the realm's either way.
+fn render_unit_state(
     output: &mut String,
     symbol: &str,
-    module_scope: bool,
-    local_count: u32,
-    keyed: bool,
-    template_sites_count: usize,
+    globals: usize,
+    template_sites: usize,
+    should_chunk: bool,
+    extern_only: bool,
 ) {
+    if globals + template_sites == 0 {
+        return;
+    }
+    if extern_only {
+        writeln!(output, "extern kiln_c99_unit {symbol}_unit;").unwrap();
+    } else {
+        let linkage = if should_chunk { "" } else { "static " };
+        writeln!(
+            output,
+            "{linkage}kiln_c99_unit {symbol}_unit = {{ 0, {} }};",
+            globals + template_sites
+        )
+        .unwrap();
+    }
+    writeln!(
+        output,
+        "static _Thread_local kiln_c99_unit_cache {symbol}_unit_cached;\n\
+         static inline __attribute__((unused)) kiln_val *{symbol}_unit_vals(void) {{ return kiln_c99_unit_vals(&{symbol}_unit, &{symbol}_unit_cached); }}"
+    )
+    .unwrap();
+    if globals > 0 {
+        writeln!(output, "#define {symbol}_globals ({symbol}_unit_vals())").unwrap();
+    }
+    if template_sites > 0 {
+        writeln!(
+            output,
+            "#define {symbol}_template_sites ({symbol}_unit_vals() + {globals})"
+        )
+        .unwrap();
+    }
+}
+
+fn render_unit_roots(output: &mut String, symbol: &str, keyed: bool) {
     writeln!(
         output,
         "static void {symbol}_gc_roots(void *heap, void *context, int phase) {{"
@@ -3115,26 +3173,7 @@ fn render_unit_roots(
         )
         .unwrap();
     }
-    if template_sites_count > 0 {
-        writeln!(
-            output,
-            "    if (phase == KILN_GC_PHASE_MARK) kiln_c99_gc_mark_vals((struct kiln_gc_heap *)heap, {symbol}_template_sites, {template_sites_count});"
-        )
-        .unwrap();
-        writeln!(
-            output,
-            "    if (phase == KILN_GC_PHASE_RESET) memset({symbol}_template_sites, 0, sizeof({symbol}_template_sites));"
-        )
-        .unwrap();
-    }
-    if module_scope {
-        writeln!(
-            output,
-            "    if (phase == KILN_GC_PHASE_MARK) kiln_c99_gc_mark_vals((struct kiln_gc_heap *)heap, {symbol}_globals, {});",
-            usize::try_from(local_count).unwrap().max(1)
-        )
-        .unwrap();
-    }
+    // Module globals and template sites are in the realm's block, which its heap marks.
     output.push_str("    kiln_c99_gc_unit_roots(heap, context, phase);\n}\n");
 }
 
@@ -3852,23 +3891,16 @@ fn render_positioned(
     }
     let keys = property_key_constants(program);
     render_key_table(&mut output, program, symbol, &keys, false);
-    render_template_sites(&mut output, program, symbol, false);
-    if uses_module_scope(program) {
-        writeln!(
-            output,
-            "static kiln_val {symbol}_globals[{}];",
-            usize::try_from(program.local_count).unwrap().max(1)
-        )
-        .unwrap();
-    }
-    render_unit_roots(
+    render_unit_state(
         &mut output,
         symbol,
-        uses_module_scope(program),
-        program.local_count,
-        !keys.is_empty(),
+        unit_global_count(program),
         program.template_sites.len(),
+        false,
+        false,
     );
+    render_template_sites(&mut output, program, symbol, false);
+    render_unit_roots(&mut output, symbol, !keys.is_empty());
     if policy.compact {
         output.push_str("/* KILN_C99_SITES_PLACEHOLDER */\n");
     }
@@ -4145,24 +4177,16 @@ fn render_module_positioned(
     }
     let keys = property_key_constants(program);
     render_key_table(&mut output, program, unit_symbol, &keys, should_chunk);
-    render_template_sites(&mut output, program, unit_symbol, should_chunk);
-    if uses_module_scope(program) {
-        let linkage = if should_chunk { "" } else { "static " };
-        writeln!(
-            output,
-            "{linkage}kiln_val {unit_symbol}_globals[{}];",
-            usize::try_from(program.local_count).unwrap().max(1)
-        )
-        .unwrap();
-    }
-    render_unit_roots(
+    render_unit_state(
         &mut output,
         unit_symbol,
-        uses_module_scope(program),
-        program.local_count,
-        !keys.is_empty(),
+        unit_global_count(program),
         program.template_sites.len(),
+        should_chunk,
+        false,
     );
+    render_template_sites(&mut output, program, unit_symbol, should_chunk);
+    render_unit_roots(&mut output, unit_symbol, !keys.is_empty());
     if policy.compact {
         output.push_str("/* KILN_C99_SITES_PLACEHOLDER */\n");
     }
@@ -4369,9 +4393,15 @@ fn render_module_positioned(
         if policy.should_compile_regex() {
             render_regex_matchers_extern(&mut chunk_header, emitted_program, unit_symbol);
         }
-        if uses_module_scope(emitted_program) {
-            writeln!(chunk_header, "extern kiln_val {unit_symbol}_globals[];").unwrap();
-        }
+        // The block's layout is the whole unit's: the program the descriptor was rendered from.
+        render_unit_state(
+            &mut chunk_header,
+            unit_symbol,
+            unit_global_count(program),
+            program.template_sites.len(),
+            true,
+            true,
+        );
         if total_sites > 0 {
             writeln!(chunk_header, "extern kiln_c99_site {unit_symbol}_sites[];").unwrap();
         }
@@ -4384,11 +4414,6 @@ fn render_module_positioned(
             .unwrap();
         }
         if !emitted_program.template_sites.is_empty() {
-            writeln!(
-                chunk_header,
-                "extern kiln_val {unit_symbol}_template_sites[];"
-            )
-            .unwrap();
             writeln!(
                 chunk_header,
                 "extern int {unit_symbol}_materialize_template_site(size_t site);"

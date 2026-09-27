@@ -441,7 +441,7 @@ fn native_graph_wiring_uses_resolved_star_export_origins() {
     assert_eq!(launcher.matches("kiln_realm_destroy(realm)").count(), 1);
     assert_eq!(
         launcher
-            .matches("kiln_realm_enter(realm, kiln_graph_enter, &graph)")
+            .matches("kiln_realm_enter(realm, kiln_graph_enter, graph)")
             .count(),
         1
     );
@@ -485,7 +485,7 @@ fn native_graph_wiring_uses_resolved_star_export_origins() {
     assert!(
         switch
             < wall
-                .find("kiln_realm_enter(realm, kiln_graph_enter, &graph)")
+                .find("kiln_realm_enter(realm, kiln_graph_enter, graph)")
                 .unwrap()
     );
     let wrapper = graph_shared_wrapper_source(&graph, &modules, "kiln_star_graph")
@@ -586,7 +586,8 @@ fn native_graph_reserves_commonjs_wrapper_bindings_for_the_launcher() {
     let logical_commonjs =
         logical_module_path(graph.project_root(), &modules[commonjs_index].0.path)
             .expect("logical CommonJS path");
-    assert!(launcher.contains("static kiln_value kiln_imports_0[5];"));
+    assert!(launcher.contains("    kiln_value imports_0[5];"));
+    assert!(launcher.contains("#define kiln_imports_0 (graph->imports_0)"));
     assert!(launcher.contains("_commonjs_wrapper(kiln_imports_0, (size_t)5, "));
     assert!(launcher.contains(&format!(
             "{}_commonjs_wrapper(kiln_imports_{commonjs_index}, (size_t)5, {}, (size_t){}, {}, (size_t){}",
@@ -2217,10 +2218,13 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
     let main = launcher
         .find("int main(int argc, char **argv)")
         .expect("launcher has main");
-    assert!(launcher[..main].contains("static kiln_value kiln_exports_"));
-    assert!(launcher[..main].contains("static kiln_value kiln_imports_"));
-    assert!(!launcher[main..].contains("kiln_value kiln_exports_"));
-    assert!(!launcher[main..].contains("kiln_value kiln_imports_"));
+    // The linkage arrays are the realm's graph context's fields (realms issue 04 step 5).
+    assert!(launcher[..main].contains("    kiln_value exports_"));
+    assert!(launcher[..main].contains("    kiln_value imports_"));
+    assert!(!launcher.contains("static kiln_value kiln_exports_"));
+    assert!(!launcher.contains("static kiln_value kiln_imports_"));
+    assert!(!launcher[main..].contains("kiln_value exports_"));
+    assert!(!launcher[main..].contains("kiln_value imports_"));
     let builder = NativeBuilder::new(ArtifactCache::new(root.join("cache")), toolchain);
     let first = builder
         .build_graph(

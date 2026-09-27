@@ -189,6 +189,8 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const kiln_
                 kiln_c99_gc_release(closure);
                 return KILN_C99_OUT_OF_MEMORY;
             }
+            /* The closure owns memory outside its block now (`KILN_GC_FINALIZED_AT_ALLOC`). */
+            kiln_c99_gc_note_finalizable(closure);
         }
         for (index = 0; index < count; ++index) {
             upvalues[index] = captured[index];
@@ -200,7 +202,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const kiln_
     closure->local_count = local_count;
     closure->stack_size = stack_size;
     closure->handler_depth = handler_depth;
-    closure->arrow = arrow;
+    closure->arrow = arrow != 0;
     closure->strict = strict;
     closure->publishes_frame = 1;
     closure->captured_this = arrow ? receiver : KILN_VAL_UNDEFINED;
@@ -210,7 +212,13 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const kiln_
      * closure and the value is a property of *here*. */
     closure->captured_new_target = new_target;
     closure->captured_arguments = kiln_c99_undefined();
-    if (arrow) {
+    /* `arrow` is 1 for an arrow that reads the enclosing frame and 2 for one the compiler proved
+     * never does (neither it nor any arrow nested in it names `arguments` or `new.target`; the
+     * `publishes_frame` fixpoint). Capturing for the second kind built the enclosing call's whole
+     * `arguments` object -- an object, a property array and four keys -- at every arrow's
+     * creation, for nobody to read: `new Promise((resolve) => setTimeout(resolve, ms))` paid it on
+     * every sleep, and it was most of what a pending task cost. */
+    if (arrow == 1) {
         /* Only an arrow, and only at creation: the list belongs to a frame that will be gone
          * before the arrow is called, so it has to be copied out now rather than pointed at. */
         int captured = kiln_c99_visible_arguments(&closure->captured_arguments);

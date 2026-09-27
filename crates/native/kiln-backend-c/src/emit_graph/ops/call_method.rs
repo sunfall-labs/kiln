@@ -1032,10 +1032,18 @@ pub(super) fn emit_call_method(
                     // ADR 0071, issue 04 step 3b: a call answered through the site's cache
                     // teaches the candidate's method path, when the entry that answered is a
                     // shaped prototype one step up and both shapes are shared.
-                    let path_learn = format!(
-                        " kiln_c99_method_path_learn(&{pfx}_path, &site, obj);"
-                    );
-                    let arm = |learn_path: &str| -> String {
+                    // Issue 04 step 3c: only a prototype shape that records the candidate's code
+                    // for the slot is learned.
+                    let path_learn = if needs.row {
+                        format!(
+                            " kiln_c99_method_path_learn(&{pfx}_path, &site, obj, (kiln_body_fn){symbol}_fn_{i}, obj->shape == {shape_var} ? {row_var} : NULL, 1);"
+                        )
+                    } else {
+                        format!(
+                            " kiln_c99_method_path_learn(&{pfx}_path, &site, obj, (kiln_body_fn){symbol}_fn_{i}, NULL, 0);"
+                        )
+                    };
+                    let arm = |learn_path: &str, matched: &str| -> String {
                         if needs.row {
                             // The receiver's shape is the one whose row this site remembered: the
                             // row goes in known, so the callee's own lookup folds away.
@@ -1049,15 +1057,34 @@ pub(super) fn emit_call_method(
                             format!("if ({matched}) {{ {plain_call} handled = 1; }}")
                         }
                     };
-                    // The method path's hit: the receiver's shape, its prototype's shape, one
-                    // slot load, the code check -- no walk of the site's entries.
+                    // The method path's hit (step 3c): the receiver's shape and its prototype's
+                    // shape, whose record says the slot holds a closure of the candidate's code
+                    // -- so the code is called without loading the closure, and the closure is
+                    // read only when the call takes its upvalues. No walk of the site's entries.
+                    // The row, when the candidate takes one, was learned with the path.
+                    let front_closure = if needs.upvalues {
+                        format!(
+                            "kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(kiln_path_level->slots[{pfx}_path.slot]); "
+                        )
+                    } else {
+                        String::new()
+                    };
+                    let front_call = if needs.row {
+                        format!(
+                            "const uint32_t *__row = {pfx}_path.row; if (__row == NULL) __builtin_unreachable(); {}",
+                            invoke("__row", "")
+                        )
+                    } else {
+                        invoke("", "")
+                    };
                     let front = format!(
-                        "if (!handled && obj->shape != NULL && obj->shape == {pfx}_path.recv) {{ kiln_val kiln_path_fn = kiln_c99_method_path_callee(&{pfx}_path, obj); if (KILN_VAL_IS_CLOSURE(kiln_path_fn)) {{ kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(kiln_path_fn); {} }} }} ",
-                        arm("")
+                        "if (!handled && obj->shape == {pfx}_path.recv) {{ const kiln_object *kiln_path_level; if (kiln_c99_method_path_hit(&{pfx}_path, obj, &kiln_path_level) && kiln_typed_ok) {{ {front_closure}{front_call} handled = 1; }} }} "
                     );
-                    (front, format!("{} else ", arm(&path_learn)))
+                    (front, format!("{} else ", arm(&path_learn, &matched)))
                 })
                 .collect();
+    // A path starts with a receiver shape no object has (`KILN_C99_UNLEARNED_METHOD_PATH`) and
+    // learns only shared shapes, so a dictionary-mode receiver's NULL shape never matches.
     let typed_front: String = typed_arms.iter().map(|(front, _)| front.as_str()).collect();
     let typed_chain: String = typed_arms.iter().map(|(_, chain)| chain.as_str()).collect();
     // One dispatch guard for every typed arm of the site: the constructor flag and the depth

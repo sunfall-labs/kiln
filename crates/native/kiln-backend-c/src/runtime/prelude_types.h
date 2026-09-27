@@ -633,16 +633,32 @@ typedef enum kiln_native_prototype_surface {
     KILN_C99_NATIVE_SERVER_RESPONSE
 } kiln_native_prototype_surface;
 
-/* Generated from the checked Rust constructor graph. The prototype value is the only mutable
- * field: constructor identity, parentage, and surface cannot drift from the compiler registry. */
+/* Generated from the checked Rust constructor graph: constructor identity, parentage, and surface
+ * cannot drift from the compiler registry. The table is constant; each prototype is the realm's,
+ * at the same index in `kiln_c99_realm_state.native_prototypes`. */
 typedef struct kiln_native_constructor {
     uint64_t method;
     uint64_t parent;
     kiln_native_prototype_surface surface;
-    kiln_value prototype;
 } kiln_native_constructor;
 
 /* KILN_NATIVE_CONSTRUCTOR_TABLE */
+
+/* A compiled unit's realm state (ADR 0070, realms issue 04 step 5): its module globals, then its
+ * template sites, as one array of machine values each realm allocates the first time it enters
+ * the unit and marks, and frees with its heap. `id` names the unit's row in every realm's table;
+ * it is assigned once per process, the first time any realm asks. The cache is per thread and
+ * trusted only under the realm generation it was filled in, exactly like `kiln_c99_gc_heap`'s. */
+typedef struct kiln_c99_unit {
+    uint32_t id;
+    uint32_t val_count;
+} kiln_c99_unit;
+
+typedef struct kiln_c99_unit_cache {
+    const uint64_t *generation_slot;
+    uint64_t generation;
+    kiln_val *vals;
+} kiln_c99_unit_cache;
 
 /* A shape describes the layout of an object's own properties (ADR 0050):
  * an ordered list of interned keys and slot indices. Objects with the same
@@ -703,6 +719,19 @@ typedef struct kiln_shape {
     uint32_t special_mask;
     uint32_t accessor_mask;
     uint32_t store_mask;
+    /* Issue 04 step 3c, constant-method tracking. `code_mask` is the slots whose value this
+     * shape states: each holds, in every object of this shape, a closure whose code (its
+     * `body`) is recorded by the shape that added the slot -- `code`, NULL when that slot has no
+     * record. A record is code, never a closure, so it means the same in every realm; it is
+     * made only by a method *definition* (`kiln_c99_define_shaped`), and the code is part of the
+     * transition's key with the attributes, so two definitions of one name with different code
+     * are two shapes. A slot with a record is also in `store_mask`: an assignment never simply
+     * overwrites it, and one that stores anything but a closure of the same code moves the
+     * object to the shape without the record (`kiln_c99_shape_store_recorded`). So a shape's
+     * record is true of every object that has the shape, and a call site that has matched the
+     * shape may call the code without loading the closure. */
+    uint32_t code_mask;
+    kiln_body_fn code;
     uint8_t attrs[KILN_SHAPE_MAX_FAST_PROPERTIES];
 } kiln_shape;
 
@@ -780,10 +809,6 @@ typedef struct kiln_object {
     kiln_property *properties;
     size_t count;
     size_t capacity;
-    /* The next object a property read falls through to, or undefined for none.  Undefined and
-     * null are different answers here, exactly as they are to `Object.getPrototypeOf`: one means
-     * nothing was recorded and the other means nothing was wanted. */
-    kiln_value prototype;
     /* `Object.freeze`. A frozen object ignores every write rather than refusing one: modules are
      * strict and a real engine would throw, but the interpreter is silent here and the two have
      * to agree before either can change. */
@@ -819,6 +844,14 @@ typedef struct kiln_object {
      * exactly. A level that never held an accessor or a read-only data property has nothing
      * that could intercept a write from a descendant. */
     int read_only_seen;
+    /* The next object a property read falls through to, or undefined for none.  Undefined and
+     * null are different answers here, exactly as they are to `Object.getPrototypeOf`: one means
+     * nothing was recorded and the other means nothing was wanted.
+     *
+     * Placed directly before `shape` (issue 04 step 3c): a method call through the prototype
+     * reads the receiver's shape, its prototype link and then its slots, and with the link here
+     * the three share the receiver's cache lines instead of the link costing one of its own. */
+    kiln_value prototype;
     /* Shape-based layout (ADR 0050). When non-NULL, properties are stored in
      * the slots array indexed by shape->keys. Appended to preserve member offsets. */
     kiln_shape *shape;
@@ -1139,42 +1172,65 @@ static KILN_ALWAYS_INLINE inline kiln_val kiln_c99_site_cached_callee(const kiln
     }
     return 0;
 }
-/* A typed method-call site's memory of one candidate's path (ADR 0071, issue 04 step 3b): the
- * receiver's shape, its prototype's shape, and the slot there that held a closure with the
- * candidate's code. Layouts only, and both shapes shared -- never freed, the same in every realm
- * -- so the static serves every realm. A hit is the receiver's shape, the prototype's shape and
- * one slot load; the caller checks the loaded closure's code. The receiver's shape is the proof
- * the name is not an own property, and the prototype's shape, which carries its slots'
- * attributes, that the slot holds a data property. */
+/* Issue 04 step 3c. The code `shape` records for `slot`, or NULL: the record lives on the shape
+ * that added the slot, so this walks up to it. Not a hot path -- call sites learn from it once. */
+static inline kiln_body_fn kiln_c99_shape_slot_code(const kiln_shape *shape, uint32_t slot) {
+    if (shape == NULL || slot >= shape->property_count || (shape->code_mask & (1u << slot)) == 0)
+        return NULL;
+    while (shape->property_count > slot + 1) shape = shape->parent;
+    return shape->code;
+}
+
+/* A typed method-call site's memory of one candidate's path (ADR 0071, issue 04 steps 3b and
+ * 3c): the receiver's shape, its prototype's shape, and the slot there whose code the
+ * prototype's shape records as the candidate's. Layouts only, and both shapes shared -- never
+ * freed, the same in every realm -- so the static serves every realm. A hit is the receiver's
+ * shape and the prototype's shape, and then the candidate's code is called with no closure
+ * loaded: the receiver's shape is the proof the name is not an own property, and the
+ * prototype's shape that the slot holds a closure of exactly that code (a shape's code record
+ * is true of every object that has it; see `kiln_shape.code_mask`). The slot is read only for
+ * what the call takes from the closure itself, its upvalues. `row` is the candidate's receiver
+ * row for `recv` (`kiln_c99_recv_row`), learned with it, for a candidate that takes one; a path
+ * is only learned once the row is known, so a hit passes it without another shape check. */
 typedef struct kiln_c99_method_path {
     const kiln_shape *recv;
     const kiln_shape *proto;
+    const uint32_t *row;
     uint32_t slot;
 } kiln_c99_method_path;
 
-/* The value at the end of `path` for `obj`, whose shape the caller has matched to `path->recv`,
- * or 0. */
-static KILN_ALWAYS_INLINE inline kiln_val kiln_c99_method_path_callee(const kiln_c99_method_path *path,
-                                                                     const kiln_object *obj) {
-    const kiln_object *level;
+/* A path nothing has taught: its receiver shape is an address no shape has, so a hit needs no
+ * separate test that the receiver is shaped (a dictionary-mode receiver's NULL never matches). */
+#define KILN_C99_UNLEARNED_METHOD_PATH { (const kiln_shape *)(uintptr_t)1, NULL, NULL, 0 }
+
+/* Whether the prototype at the end of `path` for `obj`, whose shape the caller has matched to
+ * `path->recv`, has the path's shape; `*level` is that prototype. */
+static KILN_ALWAYS_INLINE inline int kiln_c99_method_path_hit(const kiln_c99_method_path *path,
+                                                             const kiln_object *obj,
+                                                             const kiln_object **level) {
     if (KILN_UNLIKELY(obj->prototype.tag != KILN_VALUE_OBJECT)) return 0;
-    level = (const kiln_object *)(uintptr_t)obj->prototype.bits;
-    return KILN_LIKELY(level->shape == path->proto) ? level->slots[path->slot] : 0;
+    *level = (const kiln_object *)(uintptr_t)obj->prototype.bits;
+    return KILN_LIKELY((*level)->shape == path->proto);
 }
 
-/* Teach `path` from the site entry that just answered for `obj`: only an entry that is a shaped
- * prototype one step up, and only shared shapes, since the path is a process-wide static. */
+/* Teach `path` from the site entry that just answered for `obj` with a closure of `code`: only
+ * an entry that is a shaped prototype one step up, only shared shapes, since the path is a
+ * process-wide static, and only a prototype shape that records `code` for the slot. A candidate
+ * that takes a receiver row (`need_row`) learns only with `row`, the row for `obj`'s shape. */
 static inline void kiln_c99_method_path_learn(kiln_c99_method_path *path, const kiln_c99_site *site,
-                                              const kiln_object *obj) {
+                                              const kiln_object *obj, kiln_body_fn code,
+                                              const uint32_t *row, int need_row) {
     const kiln_shape *shape = obj->shape;
     uint32_t p;
-    if (shape == NULL || !shape->shared) return;
+    if (shape == NULL || !shape->shared || (need_row && row == NULL)) return;
     for (p = 0; p < site->pic_count; ++p) {
         const kiln_c99_pic_entry *entry = &site->entries[p];
         if (entry->shape != shape) continue;
-        if (entry->one_step && entry->level_shape[0]->shared) {
+        if (entry->one_step && entry->level_shape[0]->shared &&
+            kiln_c99_shape_slot_code(entry->level_shape[0], entry->proto_slot) == code) {
             path->proto = entry->level_shape[0];
             path->slot = entry->proto_slot;
+            path->row = row;
             path->recv = shape;
         }
         return;
@@ -1522,10 +1578,16 @@ typedef struct kiln_reaction {
 typedef struct kiln_promise {
     int state;
     kiln_value value;
+    /* `inline_reaction` while at most one reaction waits -- the case for nearly every promise,
+     * which one `await` or one `then` watches -- and a malloc'd array only past that. A pending
+     * promise used to cost a 224-byte array the moment anything waited on it; a hundred thousand
+     * sleeping tasks each held one. `kiln_c99_promise_add_reaction` is the one place that grows
+     * it, and only a pointer other than `inline_reaction` is ever freed. */
     kiln_reaction *reactions;
     size_t count;
     size_t capacity;
     kiln_value properties;
+    kiln_reaction inline_reaction;
 } kiln_promise;
 
 #define KILN_C99_PENDING 0

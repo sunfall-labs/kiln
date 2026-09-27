@@ -519,8 +519,28 @@ fn every_mutable_c99_static_has_an_explicit_owner() {
     classified.sort();
     assert_eq!(
         discovered, classified,
-        "mutable generated-C state must say whether the realm, dynamic frame, or test fixture owns it"
+        "mutable generated-C state must say which of the frame, a per-thread cache, the process or \
+         a test fixture owns it: realm state is not a static (ADR 0070; `kiln_c99_realm_state`)"
     );
+    for (name, owner) in C99_MUTABLE_STATE_OWNERS {
+        if !owner.per_thread() {
+            continue;
+        }
+        let declaration = statements
+            .iter()
+            .find(|statement| {
+                statement.split('=').next().is_some_and(|head| {
+                    head.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                        .any(|word| word == *name)
+                })
+            })
+            .unwrap_or_else(|| panic!("`{name}` is declared"));
+        assert!(
+            declaration.contains("_Thread_local"),
+            "`{name}` is owned by {owner:?}, which is per thread, but is declared `{declaration}`: \
+             a plain static would be one copy that every realm thread reads and writes"
+        );
+    }
     assert!(
         !generated
             .source

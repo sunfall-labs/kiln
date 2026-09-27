@@ -64,22 +64,20 @@ static int kiln_c99_json_document(const kiln_string *source, kiln_val *out);
 
 /* Emitted variable declarations */
 extern int kiln_c99_keys_check_mode;
-extern kiln_value kiln_c99_new_target;
-extern int kiln_c99_inheriting_new_target __attribute__((visibility("hidden")));
-extern int kiln_c99_typed_status;
-extern kiln_value kiln_c99_typed_thrown;
+/* The frame registers are per thread (see `builtins.c`). */
+extern _Thread_local kiln_value kiln_c99_new_target;
+extern _Thread_local int kiln_c99_inheriting_new_target __attribute__((visibility("hidden")));
+extern _Thread_local int kiln_c99_typed_status;
+extern _Thread_local kiln_value kiln_c99_typed_thrown;
 extern void kiln_c99_typed_overflow(void);
-extern kiln_value kiln_c99_adopted_this;
-extern const kiln_val *kiln_c99_frame_args;
-extern size_t kiln_c99_frame_argc;
-extern kiln_value kiln_c99_captured_arguments;
-extern int kiln_c99_frame_is_arrow;
-extern kiln_value kiln_c99_frame_arguments_object;
-extern int kiln_c99_frame_mapped_arguments;
-extern kiln_value kiln_c99_frame_callee;
-extern kiln_value *kiln_c99_symbols;
-extern size_t kiln_c99_symbol_count;
-extern size_t kiln_c99_symbol_capacity;
+extern _Thread_local kiln_value kiln_c99_adopted_this;
+extern _Thread_local const kiln_val *kiln_c99_frame_args;
+extern _Thread_local size_t kiln_c99_frame_argc;
+extern _Thread_local kiln_value kiln_c99_captured_arguments;
+extern _Thread_local int kiln_c99_frame_is_arrow;
+extern _Thread_local kiln_value kiln_c99_frame_arguments_object;
+extern _Thread_local int kiln_c99_frame_mapped_arguments;
+extern _Thread_local kiln_value kiln_c99_frame_callee;
 extern const uint16_t kiln_c99_method_codes[];
 
 /* Emitted function prototypes */
@@ -301,6 +299,17 @@ static inline uint64_t kiln_c99_realm_generation(void) {
     static _Thread_local const uint64_t *slot = NULL;
     if (KILN_UNLIKELY(slot == NULL)) slot = kiln_realm_generation_slot();
     return slot != NULL ? *slot : 0;
+}
+#endif
+
+/* A unit's realm block (see `kiln_c99_unit` in `prelude_types.h`). */
+extern kiln_val *kiln_c99_unit_vals_slow(kiln_c99_unit *unit, kiln_c99_unit_cache *cache);
+#ifndef KILN_C99_UNIT_VALS_DEFINED
+#define KILN_C99_UNIT_VALS_DEFINED
+static inline kiln_val *kiln_c99_unit_vals(kiln_c99_unit *unit, kiln_c99_unit_cache *cache) {
+    const uint64_t *slot = cache->generation_slot;
+    if (KILN_LIKELY(slot != NULL && *slot == cache->generation)) return cache->vals;
+    return kiln_c99_unit_vals_slow(unit, cache);
 }
 #endif
 

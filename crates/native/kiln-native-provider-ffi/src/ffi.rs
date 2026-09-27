@@ -186,8 +186,13 @@ impl Drop for Callback {
     }
 }
 
+/// One realm's `node:ffi` resources (ADR 0070, realms issue 04 step 5): its open libraries,
+/// prepared functions and callback closures. It lives in the realm (`NativeRealm::ffi`) and is
+/// dropped with it, so a realm's teardown closes what it opened and frees the closures whose
+/// userdata points into its heap; another realm on the same thread sees none of it. Handles are
+/// numbered per realm.
 #[derive(Default)]
-struct State {
+pub(crate) struct State {
     next: u64,
     libraries: HashMap<u64, Library>,
     functions: HashMap<u64, Rc<Function>>,
@@ -206,15 +211,35 @@ impl State {
 }
 
 thread_local! {
-    static STATE: RefCell<State> = RefCell::new(State::default());
+    /// The state of calls made outside any realm: only this crate's own tests make them.
+    static UNREALMED: RefCell<State> = RefCell::new(State::default());
+    /// The last failure's text, an out-parameter of the call that just failed on this thread.
     static LAST_ERROR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Run `operation` on the active realm's `node:ffi` state.
+fn with_state<R>(operation: impl FnOnce(&mut State) -> R) -> R {
+    #[cfg(feature = "realm")]
+    {
+        let mut operation = Some(operation);
+        if let Some(result) = crate::realm::with_active_ffi_state(|state| {
+            let operation = operation.take().expect("run once");
+            operation(&mut state.borrow_mut())
+        }) {
+            return result;
+        }
+        let operation = operation.take().expect("not yet run");
+        return UNREALMED.with_borrow_mut(operation);
+    }
+    #[cfg(not(feature = "realm"))]
+    UNREALMED.with_borrow_mut(operation)
 }
 
 struct ActiveLibrary(u64);
 
 impl Drop for ActiveLibrary {
     fn drop(&mut self) {
-        STATE.with_borrow_mut(|state| {
+        with_state(|state| {
             let remove = if let Some(count) = state.active_libraries.get_mut(&self.0) {
                 *count = count.saturating_sub(1);
                 *count == 0
@@ -322,7 +347,7 @@ pub unsafe extern "C" fn kiln_ffi_open(
         if pointer.is_null() {
             return Err(loader_error("node:ffi could not open library"));
         }
-        STATE.with_borrow_mut(|state| {
+        with_state(|state| {
             let handle = state.handle()?;
             state.libraries.insert(handle, Library { pointer });
             // SAFETY: checked non-null and owned by the caller.
@@ -336,7 +361,7 @@ pub unsafe extern "C" fn kiln_ffi_open(
 #[unsafe(no_mangle)]
 pub extern "C" fn kiln_ffi_close(library: u64) -> i32 {
     guarded(|| {
-        STATE.with_borrow_mut(|state| {
+        with_state(|state| {
             if !state.libraries.contains_key(&library) {
                 return Err(format!("node:ffi library handle {library} is not open"));
             }
@@ -378,7 +403,7 @@ pub unsafe extern "C" fn kiln_ffi_prepare(
             .map(|kind| ffi_type(*kind, true))
             .collect::<Result<Vec<_>, _>>()?;
         let result_ffi_type = ffi_type(result_type, false)?;
-        STATE.with_borrow_mut(|state| {
+        with_state(|state| {
             let library_pointer = state
                 .libraries
                 .get(&library)
@@ -482,7 +507,7 @@ pub unsafe extern "C" fn kiln_ffi_call(
         }
         // SAFETY: validated by `values` against the C ABI contract.
         let arguments = unsafe { values(arguments, argument_count) }?;
-        let prepared = STATE.with_borrow_mut(|state| {
+        let prepared = with_state(|state| {
             let prepared =
                 Rc::clone(state.functions.get(&function).ok_or_else(|| {
                     format!("node:ffi function handle {function} is not prepared")
@@ -716,7 +741,7 @@ pub unsafe extern "C" fn kiln_ffi_register_callback(
             ));
         }
         let pointer = code.as_ptr() as usize as u64;
-        STATE.with_borrow_mut(|state| {
+        with_state(|state| {
             if state.callbacks.contains_key(&pointer) {
                 // `callback` has not been installed yet, so free its allocation here.
                 // SAFETY: allocation is owned and has not previously been freed.
@@ -742,7 +767,7 @@ pub unsafe extern "C" fn kiln_ffi_register_callback(
 #[unsafe(no_mangle)]
 pub extern "C" fn kiln_ffi_unregister_callback(pointer: u64) -> i32 {
     guarded(|| {
-        STATE.with_borrow_mut(|state| {
+        with_state(|state| {
             let callback = state
                 .callbacks
                 .get(&pointer)

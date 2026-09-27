@@ -1015,8 +1015,18 @@ fn runtime_prelude_size() {
     // accessor and private definitions, the attribute masks every by-key slot path checks, the
     // records dictionary mode materializes) and typed call sites keep a method path (+464,
     // measured as the runtime diff's net lines).
+    // Widened on 2026-09-26, issue 15 (measured at 51,257 lines, 50,863 at e9ea3dba), landed after
+    // step 3b for about 51,950 together: many-task work --
+    // the nursery's mark and finaliser bitmaps and bitmap settle, the prefetching mark queue,
+    // inline promise reactions, direct timer callbacks and `Promise.all`'s bound steps (+394,
+    // about half of it comments). One delta over one base, so nothing is emitted twice.
+    // Step 5 adds its own (measured at 51,760 lines over step 3b, about 52,100 with issue 15): the realm context struct,
+    // the diagnostic fields behind their names, the unit-block API and its marking and freeing
+    // (+~140, most of it the comments saying what is per realm, per thread and per process).
+    // Landed together on 2026-09-27: issue 15, realms issue 04 step 5 and step 3c (shapes record a
+    // method's code) measure 52,312 lines as one tree; the three deltas are listed above.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 51_800;
+    const CEILING_LINES: usize = 52_700;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

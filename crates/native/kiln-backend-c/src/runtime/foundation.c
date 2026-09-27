@@ -564,7 +564,12 @@ static int kiln_c99_run_next_tick(void *work, void *host, void *thrown);
 static void kiln_c99_drop_next_tick(void *work);
 static int kiln_c99_run_timer(void *work, void *host, void *thrown);
 static void kiln_c99_drop_timer(void *work);
+static int (*kiln_c99_timer_direct_run(kiln_value callback, void **work))(void *work, void *host,
+                                                                         void *thrown);
+static void kiln_c99_drop_timer_value(void *work);
 static int kiln_c99_schedule(kiln_promise *promise, const kiln_reaction *reaction);
+static int kiln_c99_promise_add_reaction(kiln_promise *promise, const kiln_reaction *reaction);
+static int kiln_c99_react(kiln_value promise, kiln_value on_fulfilled, kiln_value on_rejected);
 static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value sent,
                                int rejected, int depth, kiln_value *thrown,
                                const kiln_val *args, size_t argc);
@@ -914,6 +919,53 @@ static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t co
 #define KILN_C99_FFI_POINTER 11u
 #define KILN_C99_FFI_BOOL 12u
 
+/* ---- The realm context (ADR 0070, ADR 0071 "What stays per realm", realms issue 04 step 5) ----
+ *
+ * The runtime's realm state: everything here belongs to one realm, is reached from that realm's
+ * heap (`kiln_gc_heap.realm`, found through the generation-checked `kiln_c99_gc_heap`), is marked
+ * by that heap's collector and freed with it. Nothing a realm made is left in a static for the next
+ * realm, or for another realm on another thread, to find. What is *not* here and why:
+ *
+ * - the frame registers (`builtins.c`, the ffi callback in flight, the HTTP response being
+ *   written) and the refusal diagnostic are per thread: they are the running call's, restored or
+ *   reported before the thread runs another realm;
+ * - caches that hold no realm's objects (ADR 0071) are process-wide or per thread;
+ * - a compiled unit's module state is in the unit's own block, `units[id]`, below.
+ */
+struct kiln_ffi_function_meta;
+struct kiln_ffi_callback_meta;
+
+/* One unit's realm block: its module globals and template sites (`kiln_c99_unit`). */
+typedef struct kiln_c99_unit_block {
+    uint32_t val_count;
+    uint32_t reserved;
+    kiln_val vals[];
+} kiln_c99_unit_block;
+
+typedef struct kiln_c99_realm_state {
+    /* The symbol registry (`symbols.c`): every symbol this realm made, which roots them. */
+    kiln_value *symbols;
+    size_t symbol_count;
+    size_t symbol_capacity;
+    /* `node:ffi`: prepared-function and callback metadata, and the next value-slot key a
+     * callback's root takes. The provider's half (libraries, closures) is the realm's too. */
+    struct kiln_ffi_function_meta *ffi_functions;
+    struct kiln_ffi_callback_meta *ffi_callbacks;
+    uint32_t ffi_next_root;
+    /* `Array.prototype[Symbol.unscopables]`, built on first read. */
+    kiln_value array_unscopables;
+    /* The prototype of each native constructor, at its index in `kiln_c99_native_constructors`,
+     * built on first construction. */
+    kiln_value native_prototypes[sizeof kiln_c99_native_constructors /
+                                 sizeof *kiln_c99_native_constructors];
+    /* Every compiled unit's block, by the unit's process-wide id; NULL until the realm enters it. */
+    kiln_c99_unit_block **units;
+    size_t unit_capacity;
+} kiln_c99_realm_state;
+
+/* This thread's realm's context: its heap's, or the fallback heap's outside a realm. */
+static kiln_c99_realm_state *kiln_c99_realm(void);
+
 typedef struct kiln_ffi_function_meta {
     uint64_t handle;
     uint64_t library;
@@ -931,14 +983,11 @@ typedef struct kiln_ffi_callback_meta {
     struct kiln_ffi_callback_meta *next;
 } kiln_ffi_callback_meta;
 
-static kiln_ffi_function_meta *kiln_c99_ffi_functions;
-static kiln_ffi_callback_meta *kiln_c99_ffi_callbacks;
-static uint32_t kiln_c99_ffi_next_root = UINT32_C(0x80000000);
-static int kiln_c99_ffi_callback_status;
-static kiln_host *kiln_c99_ffi_callback_host;
-static kiln_value *kiln_c99_ffi_callback_thrown;
-static int kiln_c99_ffi_callback_depth;
-static uint32_t kiln_c99_ffi_callback_active;
+static _Thread_local int kiln_c99_ffi_callback_status;
+static _Thread_local kiln_host *kiln_c99_ffi_callback_host;
+static _Thread_local kiln_value *kiln_c99_ffi_callback_thrown;
+static _Thread_local int kiln_c99_ffi_callback_depth;
+static _Thread_local uint32_t kiln_c99_ffi_callback_active;
 
 /* The native half of Intl segmentation deliberately returns only a flat scalar tape. Constructor
  * semantics, option reads, record objects and iteration live in the compiled TypeScript bootstrap.
@@ -1224,7 +1273,7 @@ static int kiln_c99_ffi_signature(kiln_host *host, kiln_value definition,
 
 static kiln_ffi_function_meta *kiln_c99_ffi_function_find(uint64_t handle) {
     kiln_ffi_function_meta *entry;
-    for (entry = kiln_c99_ffi_functions; entry != NULL; entry = entry->next)
+    for (entry = kiln_c99_realm()->ffi_functions; entry != NULL; entry = entry->next)
         if (entry->handle == handle) return entry;
     return NULL;
 }
@@ -1404,7 +1453,7 @@ done:
 
 static int kiln_c99_ffi_remove_callbacks(uint64_t library, uint64_t only_pointer,
                                          kiln_value *thrown) {
-    kiln_ffi_callback_meta **link = &kiln_c99_ffi_callbacks;
+    kiln_ffi_callback_meta **link = &kiln_c99_realm()->ffi_callbacks;
     int found = 0;
     while (*link != NULL) {
         kiln_ffi_callback_meta *entry = *link;
@@ -1426,7 +1475,7 @@ static int kiln_c99_ffi_remove_callbacks(uint64_t library, uint64_t only_pointer
 }
 
 static void kiln_c99_ffi_remove_functions(uint64_t library) {
-    kiln_ffi_function_meta **link = &kiln_c99_ffi_functions;
+    kiln_ffi_function_meta **link = &kiln_c99_realm()->ffi_functions;
     while (*link != NULL) {
         kiln_ffi_function_meta *entry = *link;
         if (entry->library == library) {
@@ -1599,8 +1648,8 @@ call_done:
             metadata->result = result_type;
             metadata->argc = type_count;
             metadata->arguments = types;
-            metadata->next = kiln_c99_ffi_functions;
-            kiln_c99_ffi_functions = metadata;
+            metadata->next = kiln_c99_realm()->ffi_functions;
+            kiln_c99_realm()->ffi_functions = metadata;
             status = kiln_c99_put_mode_key(host, functions, (const kiln_string *)key.ptr,
                                                NULL,
                                                kiln_c99_method(KILN_C99_FFI_DYNAMIC_BASE | function_handle),
@@ -1652,7 +1701,7 @@ open_fail:
         if (status != KILN_C99_OK) return status;
         callback = (kiln_ffi_callback_meta *)calloc(1, sizeof *callback);
         if (callback == NULL) { free(types); return KILN_C99_OUT_OF_MEMORY; }
-        status = kiln_realm_value_slot(kiln_c99_ffi_next_root++, &slot);
+        status = kiln_realm_value_slot(kiln_c99_realm()->ffi_next_root++, &slot);
         if (status != KILN_C99_OK || slot == NULL) {
             free(types); free(callback); return status == KILN_C99_OK ? KILN_C99_OUT_OF_MEMORY : status;
         }
@@ -1667,8 +1716,8 @@ open_fail:
             *callback->root = kiln_c99_undefined(); free(callback); return kiln_c99_ffi_raise(thrown);
         }
         callback->pointer = pointer;
-        callback->next = kiln_c99_ffi_callbacks;
-        kiln_c99_ffi_callbacks = callback;
+        callback->next = kiln_c99_realm()->ffi_callbacks;
+        kiln_c99_realm()->ffi_callbacks = callback;
         return kiln_c99_u64_bigint(pointer, 0, out);
     }
     if (code == KILN_C99_METHOD_NODE_FFI_UNREGISTER_CALLBACK) {
