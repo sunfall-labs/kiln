@@ -63,6 +63,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             timezone,
             default_locale,
             source_compiler: execution.source_compiler(),
+            realm_bootstrap: execution.realm_bootstrap(),
             module_loader: execution.module_loader(),
             module_path: None,
             host_realms: execution.host_realms(),

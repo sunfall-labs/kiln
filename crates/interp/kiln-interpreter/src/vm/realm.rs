@@ -21,7 +21,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// could disagree with it.
     pub(crate) fn create_realm(&mut self) -> Result<Value, ExecutionError> {
         let realm = self.allocate_realm()?;
-        Ok(self.global_object_in(realm))
+        self.realize_realm(realm)
     }
 
     /// Extend the machine's realm tables by one and answer the new realm's id.
@@ -53,6 +53,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// is a fresh set of intrinsics, not a fresh set of powers.
     pub(crate) fn construct_shadow_realm(&mut self) -> Result<Value, ExecutionError> {
         let realm = self.allocate_realm()?;
+        // Built now rather than on first use, because building it runs the realm bootstrap,
+        // which is program code and belongs here -- inside the constructor that asked for a
+        // realm -- rather than inside whichever later read first touched its global object.
+        self.realize_realm(realm)?;
         let mut instance = ObjectData {
             shadow_realm: Some(realm),
             ..ObjectData::default()
@@ -609,6 +613,82 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
     }
 
+    /// The realm's global object, built and bootstrapped: the one way a realm comes into use.
+    ///
+    /// [`Vm::global_object_in`] builds the machine's own furniture and nothing else, because it
+    /// is reached lazily from a hundred places that cannot run program code. This is the step
+    /// after it: the embedder's [`RealmBootstrap`] -- the TypeScript built-ins ADR 0060 gives
+    /// one owner -- run to completion in `realm`, once. Every place a realm begins (an
+    /// execution's entry realm, `$262.createRealm`, `new ShadowRealm`) calls this before any
+    /// program code can observe the realm, so a realm with half its built-ins is never seen.
+    ///
+    /// "Once" is decided by whether the global object already existed, which the realm tables
+    /// shared by a module session answer for every machine in the session: the first module to
+    /// run bootstraps the realm and the rest find it built.
+    pub(crate) fn realize_realm(&mut self, realm: RealmId) -> Result<Value, ExecutionError> {
+        if let Some(existing) = self.built_global_object(realm) {
+            return Ok(existing);
+        }
+        let global = self.global_object_in(realm);
+        let Some(bootstrap) = self.realm_bootstrap else {
+            return Ok(global);
+        };
+        let program = bootstrap().map_err(|message| ExecutionError::Host {
+            instruction: 0,
+            message: format!("kiln: the realm bootstrap did not compile: {message}"),
+        })?;
+        let locals = vec![Value::Undefined; program.local_count as usize];
+        // A module that imports itself refreshes its namespace from the *running* locals between
+        // instructions; the bootstrap's locals are not that module's, so the refresh stands aside
+        // until the bootstrap has returned.
+        let self_bindings = std::mem::take(&mut self.self_bindings);
+        let self_namespaces = std::mem::take(&mut self.self_namespaces);
+        let outcome = self.entering(realm, |vm| {
+            vm.drive_module(program, locals, Some(Rc::from(REALM_BOOTSTRAP_PATH)))
+        });
+        self.self_bindings = self_bindings;
+        self.self_namespaces = self_namespaces;
+        let thrown = match outcome {
+            Ok(Ok(_)) => return Ok(global),
+            Ok(Err(thrown)) => thrown,
+            Err(ExecutionError::ThrownAcrossNative) => {
+                self.caught.take().unwrap_or(Value::Undefined)
+            }
+            Err(error) => return Err(error),
+        };
+        let instruction = self.instruction;
+        Err(ExecutionError::Uncaught {
+            instruction,
+            message: format!(
+                "kiln: the realm bootstrap threw: {}",
+                self.describe_uncaught(&thrown, instruction)
+            ),
+            error_constructor: self.error_constructor(&thrown),
+            trace: captured_trace(&thrown),
+        })
+    }
+
+    /// The realm's global object if it has been built, by this machine or another in its session.
+    fn built_global_object(&mut self, realm: RealmId) -> Option<Value> {
+        if let Some(shared) = &self.module_realm {
+            let existing = shared
+                .borrow()
+                .global_objects
+                .get(realm.0 as usize)
+                .cloned()
+                .flatten()?;
+            if self.global_objects.len() <= realm.0 as usize {
+                self.global_objects.resize(realm.0 as usize + 1, None);
+            }
+            self.global_objects[realm.0 as usize] = Some(existing.clone());
+            return Some(existing);
+        }
+        self.global_objects
+            .get(realm.0 as usize)
+            .and_then(|o| o.as_ref())
+            .cloned()
+    }
+
     /// `realm`'s global object, built on first use and shared from then on.
     ///
     /// Every binding it publishes is minted *in that realm*, which is the whole of what makes
@@ -616,20 +696,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// not the same function, so `[] instanceof other.Array` is false while `Array.isArray([])`
     /// stays true.
     pub(crate) fn global_object_in(&mut self, realm: RealmId) -> Value {
-        if let Some(shared) = &self.module_realm {
-            if let Some(Some(existing)) = shared.borrow().global_objects.get(realm.0 as usize) {
-                if self.global_objects.len() <= realm.0 as usize {
-                    self.global_objects.resize(realm.0 as usize + 1, None);
-                }
-                self.global_objects[realm.0 as usize] = Some(existing.clone());
-                return existing.clone();
-            }
-        } else if let Some(existing) = self
-            .global_objects
-            .get(realm.0 as usize)
-            .and_then(|o| o.as_ref())
-        {
-            return existing.clone();
+        if let Some(existing) = self.built_global_object(realm) {
+            return existing;
         }
         // Every one of these is *non-enumerable*, which is what node does and what stops
         // `Object.keys(globalThis)` from being a list of the realm's furniture. A program's own

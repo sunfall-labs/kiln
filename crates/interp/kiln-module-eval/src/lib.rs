@@ -1,3 +1,6 @@
+mod realm_bootstrap;
+pub use realm_bootstrap::realm_bootstrap;
+
 use kiln_host_abi::HostOps;
 use kiln_interpreter::{
     Cell, CommonJsModuleLoader, CommonJsRequire, ExecutionCapabilities, ExecutionError,
@@ -7,7 +10,7 @@ use kiln_interpreter::{
     execute_module_in_runtime_with_loader, execute_node_module_in_session_with_loader,
     ordinary_object, own_data_property, parse_json_module, read_through_cell,
 };
-use kiln_ir::{BYTECODE_VERSION, Instruction, Program, compile_module};
+use kiln_ir::{BYTECODE_VERSION, Instruction, Program};
 use kiln_module_graph::{ModuleGraph, ModuleGraphError, ModuleNode, ModuleSource, ResolvedExport};
 use kiln_module_resolver::NodeBuiltin;
 use kiln_runtime::{ClockCapability, RealmCapabilities, RealmRuntime};
@@ -700,6 +703,9 @@ impl GraphExecutor<'_> {
         capabilities: ExecutionCapabilities,
         node: bool,
     ) -> Result<ExecutionResult, ModuleEvaluationError> {
+        // Every realm this graph runs in -- the one the modules share and any a module makes --
+        // runs the shared built-ins first, in the set this mode has (see `realm_bootstrap`).
+        let capabilities = capabilities.with_realm_bootstrap(realm_bootstrap(node));
         let mut values: HashMap<PathBuf, HashMap<String, Value>> = HashMap::new();
         // One cell per binding that a cycle forces somebody to hold before the module that owns
         // it has run. The cell starts in the dead zone, so reading the binding too early is the
@@ -776,51 +782,9 @@ impl GraphExecutor<'_> {
             ensuring_targets: HashSet::new(),
         };
 
-        {
-            // ECMAScript built-in prototypes in every mode, as the native runtime has it:
-            // Date.prototype, %TypedArray%.prototype, Error subclasses, Annex B, and DisposableStack.
-            let common_ts_builtins = kiln_builtins::common_bootstrap_source();
-            let source = if node {
-                format!(
-                    "{common_ts_builtins}\n{}\n{}",
-                    kiln_builtins::URL_BOOTSTRAP_SOURCE,
-                    kiln_builtins::WEB_BOOTSTRAP_SOURCE
-                )
-            } else {
-                // The Buffer bootstrap (Node mode) captures and deletes this bridge; without
-                // it the bridge would be the one global node does not have -- the native
-                // bootstrap does the same.
-                format!(
-                    "{common_ts_builtins}\n{}\ndelete globalThis.__kilnBufferToString;\n",
-                    kiln_builtins::URL_BOOTSTRAP_SOURCE
-                )
-            };
-            let hir = kiln_frontend_oxc::parse("@kiln/web-bootstrap.ts", &source);
-            let bootstrap_program =
-                compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
-                    path: PathBuf::from("@kiln/web-bootstrap.ts"),
-                    diagnostics,
-                })?;
-            let res = execute_node_module_in_session_with_loader(
-                &bootstrap_program,
-                &[],
-                &[],
-                host,
-                limits,
-                &mut runtime,
-                node_session.as_mut().expect("Node mode owns a session"),
-                capabilities.clone(),
-                false,
-                &mut commonjs_loader,
-                true,
-                Some("@kiln/web-bootstrap.ts"),
-            )
-            .map_err(|error| ModuleEvaluationError::Execution {
-                module: PathBuf::from("@kiln/web-bootstrap.ts"),
-                error,
-            })?;
-            total_steps = total_steps.saturating_add(res.execution.steps);
-        }
+        // The shared TypeScript built-ins are not run here: every machine in the session realizes
+        // the realm before its first instruction, and the first one to run bootstraps it through
+        // the capability installed above.
 
         let static_reachable = self.statically_reachable();
         for path in self.module_order().iter() {

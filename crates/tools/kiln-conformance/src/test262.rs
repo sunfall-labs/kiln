@@ -1271,6 +1271,51 @@ mod tests {
         }
     }
 
+    /// Every realm a script case makes runs the shared TypeScript built-ins before the case does.
+    ///
+    /// The script path used to build bare realms, so Test262 measured the interpreter's leftover
+    /// Rust duplicates instead of the TypeScript that owns the behaviour (ADR 0060) -- invisible
+    /// until a duplicate was deleted: `ArrayBuffer.prototype.transfer`, and with it
+    /// `$262.detachArrayBuffer`, vanished from every case at once. The entry realm, a
+    /// `$262.createRealm` realm and a `ShadowRealm` are each checked, since each is built by a
+    /// different path.
+    #[test]
+    fn every_realm_a_script_case_makes_runs_the_shared_builtins() {
+        let source = r#"
+            function check(g, where) {
+              var transfer = g.ArrayBuffer.prototype.transfer;
+              if (typeof transfer !== "function") throw new Error(where + ": no transfer");
+              if (transfer.length !== 0) throw new Error(where + ": transfer.length");
+              if ("__kilnArrayBufferDetach" in g) throw new Error(where + ": bridge left");
+            }
+            check(globalThis, "entry");
+            var r262 = $262.createRealm();
+            var other = r262.global;
+            // A bare name in a realm's own code is that realm's intrinsic, so its bootstrap
+            // installed onto its own prototypes rather than onto the entry realm's.
+            if (r262.evalScript("ArrayBuffer") !== other.ArrayBuffer) {
+              throw new Error("a bare name in a realm is not that realm's intrinsic");
+            }
+            check(other, "createRealm");
+            if (other.ArrayBuffer.prototype.transfer === ArrayBuffer.prototype.transfer) {
+              throw new Error("two realms share one transfer");
+            }
+            var buffer = new other.ArrayBuffer(8);
+            $262.detachArrayBuffer(buffer);
+            if (buffer.detached !== true) throw new Error("cross-realm detach");
+            var shadow = new ShadowRealm();
+            var seen = shadow.evaluate(
+              "typeof ArrayBuffer.prototype.transfer + ArrayBuffer.prototype.transfer.length"
+            );
+            if (seen !== "function0") throw new Error("ShadowRealm: " + seen);
+        "#;
+        // Raw, with the host object assembled here: the assertion harness is not beside this tree.
+        let mut case = case(&format!("{}{source}", crate::harness::HOST_OBJECT_PRELUDE));
+        case.metadata.flags.push("raw".to_owned());
+        let result = run_case(&case, RunMode::Interpreter);
+        assert_eq!(result.outcome, Outcome::Pass, "{:?}", result.diagnostics);
+    }
+
     #[test]
     fn a_module_case_links_and_runs_its_sibling_fixtures() {
         let corpus = TempCorpus::new("link");

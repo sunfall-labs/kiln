@@ -253,7 +253,8 @@ fn run_with_executor(
             strictness,
             &mut host,
             ExecutionLimits::default(),
-            crate::source_compiler::capabilities(path.parent()),
+            crate::source_compiler::capabilities(path.parent())
+                .with_realm_bootstrap(kiln_module_eval::realm_bootstrap(true)),
         )
         .map(|_| ())
     } else if let Some(worker) = worker {

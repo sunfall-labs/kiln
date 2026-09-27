@@ -1423,8 +1423,9 @@ fn execute_program(
     limits: kiln_interpreter::ExecutionLimits,
     overlay: std::collections::HashMap<std::path::PathBuf, Vec<u8>>,
 ) -> Response {
-    let capabilities =
-        kiln_conformance::source_compiler_capability().with_argv(interpreted_argv(&path, &args));
+    let capabilities = kiln_conformance::source_compiler_capability()
+        .with_argv(interpreted_argv(&path, &args))
+        .with_realm_bootstrap(kiln_module_eval::realm_bootstrap(node));
     let program = match program {
         Ok(program) => program,
         Err(diagnostics) => {
