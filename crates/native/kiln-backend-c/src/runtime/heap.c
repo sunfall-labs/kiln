@@ -408,6 +408,11 @@ typedef struct kiln_gc_heap {
      * one collection and costs nothing else. */
     void *stack_base;
     int mid_turn;
+    /* ADR 0069's paused state: nonzero while a parallel call's worker arenas are open (between
+     * `kiln_c99_par_arenas_open` and `kiln_c99_par_arenas_join`). The arenas' chunks are no part
+     * of the heap yet and objects in them already point into it, so a collection then would sweep
+     * what they reach unmarked; `kiln_c99_gc_collect` stops at the cause instead. */
+    int parallel_paused;
     size_t stress_every;
     size_t stress_countdown;
     /* Call-site caches with an entry that names one of this heap's realm-local shapes (ADR
@@ -639,17 +644,32 @@ static int kiln_c99_gc_stress_checks;
 /* One new region: aligned to its own size, entered in the set of region bases, its header and
  * bitmap laid out at its start and the payload beginning after them. NULL when memory is
  * refused, with nothing entered. */
+static kiln_nursery_chunk *kiln_c99_chunk_lay_out(char *region, size_t bitmap_words);
+
 static kiln_nursery_chunk *kiln_c99_nursery_new_region(kiln_gc_nursery *nursery) {
     char *region = (char *)kiln_c99_gc_aligned_alloc(nursery->capacity, nursery->capacity);
     kiln_nursery_chunk *chunk;
-    size_t bitmap_bytes;
     if (region == NULL) return NULL;
     if (kiln_c99_gc_ptrset_insert(&nursery->regions, region) != KILN_C99_OK) {
         kiln_c99_gc_aligned_free(region);
         return NULL;
     }
+    chunk = kiln_c99_chunk_lay_out(region, nursery->bitmap_words);
+    if (nursery->lo == NULL || region < nursery->lo) nursery->lo = region;
+    if (nursery->hi == NULL || region + nursery->capacity > nursery->hi) {
+        nursery->hi = region + nursery->capacity;
+    }
+    return chunk;
+}
+
+/* A region's header and its three bitmaps, laid out at its start, the payload after them, and
+ * nothing allocated: what every chunk of the nursery's kind looks like when it is made, whichever
+ * thread makes it (a worker arena's are made on pool threads, `kiln_c99_arena_chunk`). */
+static kiln_nursery_chunk *kiln_c99_chunk_lay_out(char *region, size_t bitmap_words) {
+    kiln_nursery_chunk *chunk;
+    size_t bitmap_bytes;
     chunk = (kiln_nursery_chunk *)region;
-    chunk->bitmap_words = nursery->bitmap_words;
+    chunk->bitmap_words = bitmap_words;
     bitmap_bytes = (chunk->bitmap_words * sizeof(uint64_t) + 15) & ~(size_t)15;
     chunk->bitmap = (uint64_t *)(region + KILN_NURSERY_HEADER);
     chunk->marks = (uint64_t *)(region + KILN_NURSERY_HEADER + bitmap_bytes);
@@ -664,10 +684,6 @@ static kiln_nursery_chunk *kiln_c99_nursery_new_region(kiln_gc_nursery *nursery)
     chunk->marked_bytes = 0;
     chunk->mark_epoch = 0;
     chunk->next = NULL;
-    if (nursery->lo == NULL || region < nursery->lo) nursery->lo = region;
-    if (nursery->hi == NULL || region + nursery->capacity > nursery->hi) {
-        nursery->hi = region + nursery->capacity;
-    }
     return chunk;
 }
 
@@ -2939,6 +2955,310 @@ static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
     return payload;
 }
 
+/* ---- Ownership transfer: chunks built off the heap, adopted in one step ---------------------
+ *
+ * ADR 0070's primitive C moves a group of blocks into a heap by relinking them, never by copying.
+ * Its second user, and the first built (realms issue 10 step 2), is ADR 0069's worker arenas: a
+ * parallel call's workers allocate into private chunks of the nursery's own kind, and when the
+ * call returns the realm thread makes every one of them the heap's at once.
+ *
+ * The unit moved is a *chunk*, not a block. A chunk of the nursery's kind already carries
+ * everything the collector needs to know about its blocks -- the allocation bitmap, the
+ * finaliser bitmap, the fill and the counts -- in its own header, and the heap finds it by
+ * masking an address to the chunk size and asking its set of region bases. So adopting a chunk
+ * is: enter its base in that set, widen the heap's address bounds over it, queue it on the
+ * nursery's filled list (where the next collection resets it when nothing in it lives and
+ * promotes it whole when something does, like any chunk the realm filled itself), and add its
+ * counts to the heap's. Nothing is read or written per block: a million objects adopt in the time
+ * of the handful of chunks that hold them.
+ *
+ *   kiln_c99_arena_chunk(capacity, words)   a chunk of the heap's kind for no heap yet, on any
+ *                                           thread (it is `malloc`'s)
+ *   kiln_c99_heap_adopt_chunks(heap, list)  on the heap's own realm thread, with no collection
+ *                                           running: every sealed chunk of `list` is the heap's
+ *                                           (1), or none is and the list is the caller's (0,
+ *                                           the region set could not grow)
+ *   kiln_c99_arena_chunks_free(list)        a list nothing will ever reference, returned
+ *
+ * What makes it sound is who can see a chunk before the step. Its builder alone: the chunk is in
+ * no heap's set, so a collection of the heap -- which the builder's protocol must rule out anyway
+ * while objects in the chunk point into the heap unmarked -- would neither find nor free it. The
+ * parallel section's protocol is the paused state (`parallel_paused`): a collection due while an
+ * arena is open aborts rather than run. A sealed chunk's `limit` is its fill and `alloc_count`/
+ * `alloc_bytes` its blocks, exactly what `kiln_c99_nursery_seal` leaves for a chunk of the realm's
+ * own, and every block in it has its header, its bitmap bit and, for a kind finalised from birth,
+ * its finaliser bit (`kiln_c99_par_alloc`). */
+static kiln_nursery_chunk *kiln_c99_arena_chunk(size_t capacity, size_t bitmap_words) {
+    char *region = (char *)kiln_c99_gc_aligned_alloc(capacity, capacity);
+    if (region == NULL) return NULL;
+    return kiln_c99_chunk_lay_out(region, bitmap_words);
+}
+
+static void kiln_c99_arena_chunks_free(kiln_nursery_chunk *chunks) {
+    while (chunks != NULL) {
+        kiln_nursery_chunk *next = chunks->next;
+        kiln_c99_gc_aligned_free(chunks);
+        chunks = next;
+    }
+}
+
+static int kiln_c99_heap_adopt_chunks(kiln_gc_heap *heap, kiln_nursery_chunk *chunks) {
+    kiln_gc_nursery *nursery = &heap->nursery;
+    kiln_nursery_chunk *chunk;
+    size_t count = 0;
+    for (chunk = chunks; chunk != NULL; chunk = chunk->next) count += 1;
+    if (count == 0) return 1;
+    /* Room for every base first, so no insert below can fail half way through the list. */
+    if ((nursery->regions.count + count) * 2 > nursery->regions.capacity &&
+        kiln_c99_gc_ptrset_grow(&nursery->regions, nursery->regions.count + count) != KILN_C99_OK) {
+        return 0;
+    }
+    while (chunks != NULL) {
+        char *region = (char *)chunks;
+        chunk = chunks;
+        chunks = chunk->next;
+        (void)kiln_c99_gc_ptrset_insert(&nursery->regions, region);
+        if (nursery->lo == NULL || region < nursery->lo) nursery->lo = region;
+        if (nursery->hi == NULL || region + nursery->capacity > nursery->hi) {
+            nursery->hi = region + nursery->capacity;
+        }
+        kiln_c99_gc_bound(heap, region, nursery->capacity);
+        chunk->next = nursery->full;
+        nursery->full = chunk;
+        nursery->full_bytes += (size_t)(chunk->limit - chunk->base);
+        heap->count += chunk->alloc_count;
+        heap->bytes += chunk->alloc_bytes;
+        heap->since_collection += chunk->alloc_bytes;
+    }
+    return 1;
+}
+
+/* ---- Worker arenas (ADR 0069; parallel issue 08) --------------------------------------------
+ *
+ * A tier-3 callback allocates: an object literal, `{ ...r, total }`, an array literal, a string
+ * built with `+` or a template. Its clone runs on the pool's threads while the realm thread is
+ * blocked in the call, and the realm's allocator is the realm's -- its nursery pointers, its
+ * counters, its collector -- so a worker never touches it. Each thread that runs a chunk of the
+ * call claims an *arena* instead (`kiln_c99_par_arena_claim`, one per thread per call, found again
+ * for the thread's next chunk), and bumps through chunks of the nursery's kind that it makes for
+ * itself (`kiln_c99_par_alloc`). Every block it writes is laid out exactly as the nursery lays
+ * one out; nothing in the realm's heap changes while the call runs.
+ *
+ * The collector is paused from `kiln_c99_par_arenas_open` to `kiln_c99_par_arenas_join` (the
+ * call's own thread does not allocate in between, and a pool thread cannot reach the realm's
+ * allocator at all; `kiln_c99_gc_collect` aborts if either were ever wrong). The join, on the
+ * realm thread, seals each arena's last chunk and adopts every chunk into the heap in one step
+ * (above). When the call is answered sequentially instead -- a worker declined, or an arena ran
+ * out of its budget -- nothing the arenas hold is reachable from anything, and they are freed
+ * without being adopted.
+ *
+ * An arena's budget (`KILN_PARALLEL_ARENA_KIB`, 256 MiB by default) bounds the chunks one thread
+ * may take in one call. A worker that would pass it declines like any other worker, and the call
+ * then runs the sequential method from its first element: memory pressure is never a failure,
+ * and the answer is `map`'s by the same argument as every other decline (nothing the pool did is
+ * observable). */
+struct kiln_c99_par_arena {
+    /* The claiming thread's anchor (the address of its `kiln_c99_no_write_depth`), NULL until
+     * the slot is claimed. */
+    const void *owner;
+    /* The frozen heap: only its chunk size and bitmap width are read. */
+    const kiln_gc_heap *heap;
+    /* Sealed chunks, newest first, and the one being filled. */
+    kiln_nursery_chunk *filled;
+    kiln_nursery_chunk *current;
+    char *bump;
+    char *limit;
+    size_t count;
+    size_t bytes;
+    /* Region bytes taken, against `budget`. */
+    size_t taken;
+    size_t budget;
+};
+
+/* Read once per process: `KILN_PARALLEL_ARENA_KIB`, else 256 MiB. 0 not yet read. */
+static size_t kiln_c99_par_arena_budget_bytes;
+
+static size_t kiln_c99_par_arena_budget(void) {
+    size_t budget = __atomic_load_n(&kiln_c99_par_arena_budget_bytes, __ATOMIC_RELAXED);
+    if (KILN_UNLIKELY(budget == 0)) {
+        const char *setting = getenv("KILN_PARALLEL_ARENA_KIB");
+        budget = (size_t)256 * 1024 * 1024;
+        if (setting != NULL && setting[0] >= '0' && setting[0] <= '9') {
+            size_t kib = (size_t)strtoul(setting, NULL, 10);
+            if (kib > 0 && kib <= (size_t)64 * 1024 * 1024) budget = kib * 1024;
+        }
+        __atomic_store_n(&kiln_c99_par_arena_budget_bytes, budget, __ATOMIC_RELAXED);
+    }
+    return budget;
+}
+
+/* Seal the chunk being filled onto `filled` (an empty one is simply freed). */
+static void kiln_c99_par_arena_seal(kiln_c99_par_arena *arena) {
+    kiln_nursery_chunk *chunk = arena->current;
+    if (chunk == NULL) return;
+    arena->current = NULL;
+    if (arena->bump == chunk->base) {
+        kiln_c99_gc_aligned_free(chunk);
+        return;
+    }
+    chunk->limit = arena->bump;
+    chunk->live_count = 0;
+    chunk->alloc_count = arena->count;
+    chunk->alloc_bytes = arena->bytes;
+    chunk->next = arena->filled;
+    arena->filled = chunk;
+}
+
+/* A new chunk to bump through, or 0 when the budget or memory says no. */
+static int kiln_c99_par_arena_refill(kiln_c99_par_arena *arena) {
+    size_t capacity = arena->heap->nursery.capacity;
+    kiln_nursery_chunk *chunk;
+    kiln_c99_par_arena_seal(arena);
+    if (arena->taken + capacity > arena->budget) return 0;
+    chunk = kiln_c99_arena_chunk(capacity, arena->heap->nursery.bitmap_words);
+    if (chunk == NULL) return 0;
+    arena->taken += capacity;
+    arena->current = chunk;
+    arena->bump = chunk->base;
+    arena->limit = (char *)chunk + capacity;
+    arena->count = 0;
+    arena->bytes = 0;
+    return 1;
+}
+
+/* A block of `kind` with room for `size` payload bytes, laid out as the nursery's bump lays one
+ * out -- header, allocation bit, the finaliser bit a kind finalised from birth gets -- or NULL:
+ * a block the nursery would not take (a quarter of a chunk or more), or the budget spent. The
+ * payload is not zeroed; no collection can run before the builder has filled it. */
+static void *kiln_c99_par_alloc(kiln_c99_par_arena *arena, uint32_t kind, size_t size) {
+    size_t payload = size == 0 ? 1 : size;
+    size_t total = (sizeof(kiln_gc_block) + payload + 15) & ~((size_t)15);
+    kiln_nursery_chunk *chunk;
+    kiln_gc_block *block;
+    size_t bit_idx;
+    if (arena == NULL || sizeof(kiln_gc_block) + payload > (arena->heap->nursery.capacity >> 2)) {
+        return NULL;
+    }
+    if (KILN_UNLIKELY(arena->current == NULL || arena->bump + total > arena->limit)) {
+        if (!kiln_c99_par_arena_refill(arena)) return NULL;
+    }
+    chunk = arena->current;
+    block = (kiln_gc_block *)arena->bump;
+    bit_idx = (size_t)(arena->bump - chunk->base) >> 4;
+    chunk->bitmap[bit_idx >> 6] |= ((uint64_t)1 << (bit_idx & 63));
+    if (kiln_c99_gc_kind_finalized_at_alloc(kind)) {
+        chunk->finals[bit_idx >> 6] |= ((uint64_t)1 << (bit_idx & 63));
+    }
+    arena->bump += total;
+    block->kind = kind | KILN_GC_FLAG_NURSERY;
+    block->mark = 0;
+    block->size = size;
+    block->prev = NULL;
+    block->next = NULL;
+    arena->count += 1;
+    arena->bytes += size;
+    return block + 1;
+}
+
+/* On the realm thread, just before the pool: a slot per thread that can run a chunk (the pool's
+ * and the calling thread, which runs the cost model's probe), and the heap paused. 0 when the heap
+ * has no nursery to take chunks of its kind, or no memory: the site then runs sequentially. */
+static int kiln_c99_par_arenas_open(kiln_c99_par_env *env, size_t threads) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)env->heap;
+    size_t capacity = threads + 1;
+    if (heap == NULL || heap->nursery.capacity == 0 ||
+        heap->nursery.bitmap_words == 0) {
+        return 0;
+    }
+    if (capacity < 2) capacity = 2;
+    if (capacity > 4096) capacity = 4096;
+    env->arenas = (struct kiln_c99_par_arena *)calloc(capacity, sizeof(struct kiln_c99_par_arena));
+    if (env->arenas == NULL) return 0;
+    env->arena_capacity = (uint32_t)capacity;
+    env->arena_count = 0;
+    heap->parallel_paused += 1;
+    return 1;
+}
+
+/* On a pool thread, at the start of each chunk: this thread's arena for the call -- the one it
+ * claimed at an earlier chunk, else a fresh slot. NULL when the site gave its workers no arenas,
+ * or every slot is taken (a thread the table was not sized for); the worker then declines at its
+ * first allocation. */
+static kiln_c99_par_arena *kiln_c99_par_arena_claim(kiln_c99_par_env *env) {
+    const void *me = (const void *)&kiln_c99_no_write_depth;
+    uint32_t seen;
+    uint32_t index;
+    kiln_c99_par_arena *arena;
+    if (env->arenas == NULL) return NULL;
+    seen = __atomic_load_n(&env->arena_count, __ATOMIC_ACQUIRE);
+    if (seen > env->arena_capacity) seen = env->arena_capacity;
+    for (index = 0; index < seen; ++index) {
+        if (__atomic_load_n(&env->arenas[index].owner, __ATOMIC_ACQUIRE) == me) {
+            return &env->arenas[index];
+        }
+    }
+    index = __atomic_fetch_add(&env->arena_count, 1, __ATOMIC_ACQ_REL);
+    if (index >= env->arena_capacity) return NULL;
+    arena = &env->arenas[index];
+    arena->heap = (const kiln_gc_heap *)env->heap;
+    arena->budget = kiln_c99_par_arena_budget();
+    __atomic_store_n(&arena->owner, me, __ATOMIC_RELEASE);
+    return arena;
+}
+
+/* `KILN_PARALLEL_TRACE=1`: one line on stderr per join -- how many arenas the call claimed, how
+ * many chunks and bytes they held, whether the heap adopted them -- so a probe or a benchmark can
+ * see which calls really ran in arenas. Read once: 0 not yet read, 1 off, 2 on. */
+static int kiln_c99_par_trace_state;
+
+static void kiln_c99_par_trace(uint32_t arenas, size_t chunks, size_t bytes, int kept, int adopted) {
+    int state = __atomic_load_n(&kiln_c99_par_trace_state, __ATOMIC_RELAXED);
+    if (KILN_UNLIKELY(state == 0)) {
+        const char *setting = getenv("KILN_PARALLEL_TRACE");
+        state = setting != NULL && setting[0] == '1' ? 2 : 1;
+        __atomic_store_n(&kiln_c99_par_trace_state, state, __ATOMIC_RELAXED);
+    }
+    if (KILN_LIKELY(state != 2)) return;
+    fprintf(stderr, "kiln parallel: arenas %u chunks %zu bytes %zu %s\n", (unsigned)arenas, chunks,
+            bytes, adopted ? "adopted" : kept ? "adoption refused" : "freed (sequential)");
+}
+
+/* On the realm thread, once the pool has returned: every arena sealed, the heap unpaused, and
+ * with `keep` every chunk adopted (1) -- the answer the workers built is the heap's. Without
+ * `keep`, or when adoption cannot get memory, the chunks are freed and 0 says the site must not
+ * publish what the workers wrote. */
+static int kiln_c99_par_arenas_join(kiln_c99_par_env *env, int keep) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)env->heap;
+    kiln_nursery_chunk *chunks = NULL;
+    uint32_t count;
+    uint32_t index;
+    size_t chunk_count = 0;
+    size_t bytes = 0;
+    int adopted;
+    if (env->arenas == NULL) return keep;
+    count = env->arena_count < env->arena_capacity ? env->arena_count : env->arena_capacity;
+    for (index = 0; index < count; ++index) {
+        kiln_c99_par_arena *arena = &env->arenas[index];
+        kiln_c99_par_arena_seal(arena);
+        while (arena->filled != NULL) {
+            kiln_nursery_chunk *chunk = arena->filled;
+            arena->filled = chunk->next;
+            chunk->next = chunks;
+            chunks = chunk;
+            chunk_count += 1;
+            bytes += chunk->alloc_bytes;
+        }
+    }
+    free(env->arenas);
+    env->arenas = NULL;
+    heap->parallel_paused -= 1;
+    adopted = keep && kiln_c99_heap_adopt_chunks(heap, chunks);
+    kiln_c99_par_trace(count, chunk_count, bytes, keep, adopted);
+    if (adopted) return 1;
+    kiln_c99_arena_chunks_free(chunks);
+    return 0;
+}
+
 /* ---- Interned keys ------------------------------------------------------------------------
  *
  * Three entry points, and the difference between them is the whole design:
@@ -4539,6 +4859,11 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
     int tenured_due;
     if (heap == NULL || heap->collecting || heap->fallback) return;
     if (!heap->enabled && !heap->stress) return;
+    if (KILN_UNLIKELY(heap->parallel_paused != 0)) {
+        fputs("kiln: a collection was due while a parallel call's worker arenas were open\n",
+              stderr);
+        abort();
+    }
 
     nursery_has_allocs = heap->nursery.full != NULL ||
                          (heap->nursery.active && heap->nursery.bump > heap->nursery.base);

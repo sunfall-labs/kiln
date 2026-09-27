@@ -452,27 +452,20 @@ static int kiln_c99_shape_add(kiln_shape *current, const kiln_string *ikey, int 
     return 1;
 }
 
-static int kiln_c99_shape_transition_code(kiln_shape *current, const kiln_string *ikey,
-                                          int is_double, uint32_t attrs, kiln_body_fn code,
-                                          int unbounded, kiln_shape **out_shape) {
-    uint32_t bit;
-    uint32_t expected_bit;
+/* The edge out of `current` a definition of `ikey` takes -- its own edges, then this realm's
+ * side table -- or NULL when there is none yet. Only reads: every edge it can find was published
+ * complete (see `kiln_c99_shape_link`), so a pool thread may ask too (`kiln_c99_par_shape_step`). */
+static kiln_shape *kiln_c99_shape_edge_find(kiln_shape *current, const kiln_string *ikey,
+                                            uint32_t bit, uint32_t expected_bit, uint32_t attrs,
+                                            kiln_body_fn code) {
     kiln_shape *next_shape;
-    if (current == NULL || ikey == NULL || current->property_count >= KILN_SHAPE_MAX_FAST_PROPERTIES) {
-        return 0;
-    }
-    bit = 1u << current->property_count;
-    expected_bit = is_double ? bit : 0;
     {
         const kiln_shape_edge_table *table = __atomic_load_n(&current->edge_table, __ATOMIC_ACQUIRE);
         if (table != NULL) {
             /* The index covers every own edge it was published with; one it has not seen yet is
              * found again by `kiln_c99_shape_add`'s rescan under the lock. */
             next_shape = kiln_c99_shape_table_edge(table, ikey, bit, expected_bit, attrs, code);
-            if (next_shape != NULL) {
-                *out_shape = next_shape;
-                return 1;
-            }
+            if (next_shape != NULL) return next_shape;
         } else {
             next_shape = kiln_c99_shape_inline_edge(
                 current, __atomic_load_n(&current->num_transitions, __ATOMIC_ACQUIRE), ikey, bit,
@@ -489,11 +482,54 @@ static int kiln_c99_shape_transition_code(kiln_shape *current, const kiln_string
     }
     if (next_shape == NULL && current->edge_table == NULL)
         next_shape = kiln_c99_shape_list_edge(current, ikey, bit, expected_bit, attrs, code);
+    return next_shape;
+}
+
+static int kiln_c99_shape_transition_code(kiln_shape *current, const kiln_string *ikey,
+                                          int is_double, uint32_t attrs, kiln_body_fn code,
+                                          int unbounded, kiln_shape **out_shape) {
+    uint32_t bit;
+    uint32_t expected_bit;
+    kiln_shape *next_shape;
+    if (current == NULL || ikey == NULL || current->property_count >= KILN_SHAPE_MAX_FAST_PROPERTIES) {
+        return 0;
+    }
+    bit = 1u << current->property_count;
+    expected_bit = is_double ? bit : 0;
+    next_shape = kiln_c99_shape_edge_find(current, ikey, bit, expected_bit, attrs, code);
     if (next_shape != NULL) {
         *out_shape = next_shape;
         return 1;
     }
     return kiln_c99_shape_add(current, ikey, is_double, attrs, code, unbounded, out_shape);
+}
+
+/* Tier 3 of the parallel built-ins (parallel issue 08): the transition a definition takes on a
+ * pool thread, while the realm thread is blocked in the call. The edge is found as the realm
+ * thread finds it. A missing edge between shared shapes by a shared key is made the way any
+ * realm's thread makes one -- under the process lock, published complete (ADR 0071) -- because
+ * that is exactly the concurrency the shared tree was built for. A missing realm-local edge (a key
+ * of the realm's own, or a parent the realm owns) is not: the side table and the realm's shape
+ * list are the realm thread's alone, so the worker declines, the call runs sequentially and makes
+ * the edge, and every later call finds it here. Either way the object ends with the shape the
+ * sequential definition gives it. */
+static int kiln_c99_par_shape_step(kiln_shape *current, const kiln_string *ikey, int is_double,
+                                   kiln_shape **out_shape) {
+    uint32_t bit;
+    uint32_t expected_bit;
+    kiln_shape *next_shape;
+    if (current == NULL || ikey == NULL || current->property_count >= KILN_SHAPE_MAX_FAST_PROPERTIES) {
+        return 0;
+    }
+    bit = 1u << current->property_count;
+    expected_bit = is_double ? bit : 0;
+    next_shape = kiln_c99_shape_edge_find(current, ikey, bit, expected_bit, 0, NULL);
+    if (next_shape != NULL) {
+        *out_shape = next_shape;
+        return 1;
+    }
+    if (!current->shared || !kiln_c99_key_is_shared(ikey)) return 0;
+    return kiln_c99_shape_add(current, ikey, is_double, 0, NULL, 0, out_shape);
 }
 
 static int kiln_c99_shape_transition_ex(kiln_shape *current, const kiln_string *ikey,

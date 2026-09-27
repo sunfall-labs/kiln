@@ -4744,6 +4744,10 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_gc_stress_checks", C99StateOwner::Process),
     // Parallel issue 06's write detector (`KILN_PARALLEL_PROTECT`), read from the environment once.
     ("kiln_c99_par_protect_state", C99StateOwner::Process),
+    // Parallel issue 08's worker arena budget (`KILN_PARALLEL_ARENA_KIB`), read once.
+    ("kiln_c99_par_arena_budget_bytes", C99StateOwner::Process),
+    // `KILN_PARALLEL_TRACE`: whether each arena join says what it adopted, read once.
+    ("kiln_c99_par_trace_state", C99StateOwner::Process),
     ("kiln_c99_introspect_pending", C99StateOwner::Process),
     ("kiln_c99_introspect_armed", C99StateOwner::Process),
     // The process-shared block (ADR 0071): shared keys and the shape root, one per process.

@@ -147,6 +147,15 @@ impl Job {
     }
 }
 
+/// How many threads [`kiln_parallel_map`] splits a call across: the pool's size, 1 when there is
+/// no pool. A call site asks before it takes its pooled lowering -- one thread cannot win
+/// anything, so the sequential method's own loop runs instead (parallel issue 22) -- and a tier-3
+/// site sizes its worker-arena table by it (one per pool thread, one for the calling thread).
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_parallel_threads() -> usize {
+    parallelism()
+}
+
 /// Run `chunk` over `[0, count)` of `in_` into `out`, split across the pool.
 ///
 /// Returns 0 when every chunk ran, -1 for a null worker, and -2 when a worker panicked, in
@@ -390,6 +399,9 @@ macro_rules! assert_provider_export {
         };
         (parallel, kiln_parallel_sort, parallel_sort) => {
             const _: unsafe extern "C" fn(*mut c_void, usize, i32, i32) -> i32 = kiln_parallel_sort;
+        };
+        (parallel, kiln_parallel_threads, parallel_threads) => {
+            const _: extern "C" fn() -> usize = kiln_parallel_threads;
         };
         ($group:ident, $name:ident, $signature:ident) => {};
     }

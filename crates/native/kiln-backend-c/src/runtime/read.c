@@ -2234,3 +2234,10 @@ static struct kiln_gc_heap *kiln_c99_par_prepare(void) {
     (void)kiln_c99_surface_method(KILN_C99_BUILTIN_OBJECT_PROTOTYPE, NULL, 0, &owned);
     return (struct kiln_gc_heap *)kiln_c99_gc_heap();
 }
+
+/* On the realm thread, before the pool starts (tier 3): the canonical key of a member a tier-3
+ * callback defines, interned now as the sequential definition would intern it, so a worker never
+ * has to. NULL only when memory is refused; the site then runs sequentially. */
+static const kiln_string *kiln_c99_par_intern(const kiln_string *key) {
+    return kiln_c99_intern_key(key);
+}

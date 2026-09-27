@@ -333,6 +333,11 @@ typedef void (*kiln_parallel_chunk_fn)(const void * restrict in, void * restrict
                                        void *ctx);
 int32_t kiln_parallel_map(const void *in, size_t count, void *out, kiln_parallel_chunk_fn chunk,
                           void *ctx);
+/* How many threads `kiln_parallel_map` splits a call across: the pool's size, or 1 when there is
+ * no pool (`KILN_PARALLELISM=1`, one core, a `KILN_WORKERS` share of one). A site asks before it
+ * takes its pooled lowering: one thread cannot win anything, so the sequential method's own loop
+ * runs instead (parallel issue 22); a tier-3 site also sizes its arena table by it. */
+size_t kiln_parallel_threads(void);
 /* `parallelSort` (ADR 0069): a stable in-place sort of `count` elements -- a `kiln_typed_kind`
  * (0..8), or 100 for an array's own numeric elements -- by 0 (the typed-array default order), 1
  * (`(a, b) => a - b`) or 2 (`(a, b) => b - a`), on the same pool. 0 sorted; 1 a comparator order
@@ -1980,6 +1985,17 @@ typedef struct kiln_c99_par_env {
     const kiln_string *const *keys;
     /* The string literals it compares with. */
     const kiln_val *strs;
+    /* Tier 3 (parallel issue 08): the worker arenas of this call, one per thread that ran a chunk
+     * (`kiln_c99_par_arena_claim`), opened on the realm thread before the pool starts
+     * (`kiln_c99_par_arenas_open`) and joined to the heap after it returns
+     * (`kiln_c99_par_arenas_join`). NULL for a site whose workers must not allocate -- a typed
+     * array's, `parallelReduce`'s, a key comparator's -- and every allocation there declines. */
+    struct kiln_c99_par_arena *arenas;
+    uint32_t arena_capacity;
+    uint32_t arena_count;
+    /* The interned keys the callback defines (object literal members, `{ ...r, k: v }`), in
+     * `HeapShape::defines` order, interned on the realm thread before the pool starts. */
+    const kiln_string *const *defines;
 } kiln_c99_par_env;
 
 /* A worker's own cache for one named read of the clone: the shape it last met there and the own
@@ -1988,7 +2004,15 @@ typedef struct kiln_c99_par_env {
 typedef struct kiln_c99_par_site {
     const kiln_shape *shape;
     uint32_t slot;
+    /* Tier 3: at a definition site, whether the value last defined was a number (the edge's
+     * double bit), and the shape the definition moved `shape` to. */
+    uint32_t number;
+    const kiln_shape *to;
 } kiln_c99_par_site;
+
+/* A worker's arena (tier 3, ADR 0069): private chunks of the kind the nursery uses. Opaque here;
+ * `heap.c` owns the layout. */
+typedef struct kiln_c99_par_arena kiln_c99_par_arena;
 
 /* Where `kiln_c99_par_enter` keeps what `kiln_c99_par_leave` restores (a no-write frame). */
 typedef struct kiln_c99_par_frame {
@@ -2004,6 +2028,21 @@ extern int kiln_c99_par_index_slow(const kiln_c99_par_env *env, kiln_val object,
                                    kiln_val *out);
 extern struct kiln_gc_heap *kiln_c99_par_prepare(void);
 extern void kiln_c99_par_section(int frozen);
+extern int kiln_c99_par_arenas_open(kiln_c99_par_env *env, size_t threads);
+extern int kiln_c99_par_arenas_join(kiln_c99_par_env *env, int keep);
+extern kiln_c99_par_arena *kiln_c99_par_arena_claim(kiln_c99_par_env *env);
+extern const kiln_string *kiln_c99_par_intern(const kiln_string *key);
+extern int kiln_c99_par_object(kiln_c99_par_arena *arena, kiln_val *out);
+extern int kiln_c99_par_define(kiln_c99_par_arena *arena, kiln_c99_par_site *site, kiln_val target,
+                               const kiln_string *ikey, kiln_val value);
+extern int kiln_c99_par_define_computed(kiln_c99_par_arena *arena, kiln_val target, kiln_val key,
+                                        kiln_val value);
+extern int kiln_c99_par_spread(kiln_c99_par_arena *arena, kiln_val target, kiln_val source);
+extern int kiln_c99_par_array(kiln_c99_par_arena *arena, const kiln_val *elements, size_t count,
+                              kiln_val *out);
+extern int kiln_c99_par_to_string(kiln_c99_par_arena *arena, kiln_val value, kiln_val *out);
+extern int kiln_c99_par_concat(kiln_c99_par_arena *arena, kiln_val a, kiln_val b, kiln_val *out);
+extern int kiln_c99_par_flatten(kiln_val mapped, size_t count, kiln_val *out);
 #else
 static void kiln_c99_par_enter(const kiln_c99_par_env *env, kiln_c99_par_frame *frame);
 static void kiln_c99_par_leave(kiln_c99_par_frame *frame);
@@ -2013,7 +2052,24 @@ static int kiln_c99_par_index_slow(const kiln_c99_par_env *env, kiln_val object,
                                    kiln_val *out);
 static struct kiln_gc_heap *kiln_c99_par_prepare(void);
 static void kiln_c99_par_section(int frozen);
+static int kiln_c99_par_arenas_open(kiln_c99_par_env *env, size_t threads);
+static int kiln_c99_par_arenas_join(kiln_c99_par_env *env, int keep);
+static kiln_c99_par_arena *kiln_c99_par_arena_claim(kiln_c99_par_env *env);
+static const kiln_string *kiln_c99_par_intern(const kiln_string *key);
+static int kiln_c99_par_object(kiln_c99_par_arena *arena, kiln_val *out);
+static int kiln_c99_par_define(kiln_c99_par_arena *arena, kiln_c99_par_site *site, kiln_val target,
+                               const kiln_string *ikey, kiln_val value);
+static int kiln_c99_par_define_computed(kiln_c99_par_arena *arena, kiln_val target, kiln_val key,
+                                        kiln_val value);
+static int kiln_c99_par_spread(kiln_c99_par_arena *arena, kiln_val target, kiln_val source);
+static int kiln_c99_par_array(kiln_c99_par_arena *arena, const kiln_val *elements, size_t count,
+                              kiln_val *out);
+static int kiln_c99_par_to_string(kiln_c99_par_arena *arena, kiln_val value, kiln_val *out);
+static int kiln_c99_par_concat(kiln_c99_par_arena *arena, kiln_val a, kiln_val b, kiln_val *out);
+static int kiln_c99_par_flatten(kiln_val mapped, size_t count, kiln_val *out);
 #endif
+
+
 
 /* `ToNumber` of a value whose conversion runs no code and allocates nothing: a number, undefined
  * (NaN), null and false (0), true (1). A string would parse and an object would call `valueOf`,
@@ -2201,6 +2257,28 @@ static KILN_ALWAYS_INLINE inline int kiln_c99_par_char_code_at(kiln_val s, kiln_
         return 1;
     }
     *out = kiln_c99_val_from_double((double)kiln_string_unit_at(str, (size_t)d));
+    return 1;
+}
+
+/* `a + b` on a pool thread (tier 3): two numbers (or what converts to one silently) add; when
+ * either side is a string, the other is converted as `ToString` converts a primitive and the two
+ * are joined in the worker's arena (`kiln_c99_par_concat`); an object, a symbol or a BigInt
+ * declines -- converting one could run code. With no arena (a site whose workers must not
+ * allocate), a string declines. */
+static KILN_ALWAYS_INLINE inline int kiln_c99_par_add(kiln_c99_par_arena *arena, kiln_val a,
+                                                      kiln_val b, kiln_val *out) {
+    double x, y;
+    if (KILN_LIKELY(KILN_VAL_IS_NUMBER(a) && KILN_VAL_IS_NUMBER(b))) {
+        memcpy(&x, &a, sizeof x);
+        memcpy(&y, &b, sizeof y);
+        *out = kiln_c99_val_from_double(x + y);
+        return 1;
+    }
+    if (KILN_VAL_IS_STRING(a) || KILN_VAL_IS_STRING(b)) {
+        return arena != NULL && kiln_c99_par_concat(arena, a, b, out);
+    }
+    if (!kiln_c99_par_number(a, &x) || !kiln_c99_par_number(b, &y)) return 0;
+    *out = kiln_c99_val_from_double(x + y);
     return 1;
 }
 

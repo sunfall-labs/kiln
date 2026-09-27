@@ -394,6 +394,13 @@ pub unsafe extern "C" fn kiln_parallel_map(
 }
 
 #[cfg(not(feature = "parallel"))]
+/// Without the pool every call runs on the calling thread.
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_parallel_threads() -> usize {
+    1
+}
+
+#[cfg(not(feature = "parallel"))]
 /// # Safety
 ///
 /// This disabled feature stub does not dereference its arguments.
