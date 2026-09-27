@@ -1829,6 +1829,129 @@ fn executable_fast_clone_exit_boxes_a_speculated_value_it_never_boxed() {
     );
 }
 
+/// Issue 27: a branch on an *arithmetic* value of two proven numbers (`i % 2 ? a : b`) tests the
+/// value's truthiness through its box, so the box must be written. `boxed_uses` treated every
+/// twin-only operator as a branch that reads no box -- only comparisons are inlined -- so the
+/// fast clone and the typed entry dropped the box and branched on an unwritten `v`.
+#[test]
+fn executable_branch_on_a_number_remainder_reads_a_written_box() {
+    let mut callee = function(vec![
+        Instruction::LoadLocal(0),
+        Instruction::Const(1), // 2
+        Instruction::Binary(BinaryOp::Remainder),
+        Instruction::JumpIfFalse(6),
+        Instruction::Const(2), // 7
+        Instruction::Return,
+        Instruction::Const(3), // 11
+        Instruction::Return,
+    ]);
+    callee.name = Some("f".into());
+    callee.parameter_count = 1;
+    callee.declared_length = 1;
+    callee.local_count = 1;
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: vec![
+            Constant::Number(0.0f64.to_bits()),   // 0
+            Constant::Number(2.0f64.to_bits()),   // 1
+            Constant::Number(7.0f64.to_bits()),   // 2
+            Constant::Number(11.0f64.to_bits()),  // 3
+            Constant::Number(100.0f64.to_bits()), // 4
+            Constant::Number(1.0f64.to_bits()),   // 5
+        ],
+        code: vec![
+            // f(0) * 100 + f(1): 11 * 100 + 7
+            Instruction::MakeFunction(0),
+            Instruction::Const(0),
+            Instruction::Call { argc: 1 },
+            Instruction::Const(4),
+            Instruction::Binary(BinaryOp::Multiply),
+            Instruction::MakeFunction(0),
+            Instruction::Const(5),
+            Instruction::Call { argc: 1 },
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::Return,
+        ],
+        local_count: 0,
+        functions: vec![callee],
+        template_sites: Vec::new(),
+    };
+    let generated = emit(&program).expect("program emits");
+    assert!(
+        generated
+            .source
+            .contains("/* Clone A: guarded fast path */"),
+        "the callee must be versioned for this test to mean anything"
+    );
+    let wrapper = format!(
+        "int main(void) {{ kiln_value result; int status = {}(NULL, &result); if (status != 0) return 2; if (result.tag != KILN_VALUE_NUMBER) return 3; double d; memcpy(&d, &result.bits, sizeof d); return d == 1107.0 ? 0 : 4; }}\n",
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "branch-on-remainder");
+    assert!(
+        run.status.success(),
+        "the branch on `i % 2` read a box the fast clone never wrote ({:?}):\nstdout: {}\nstderr: {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+/// The same contract for `+x`: a unary plus of a proven number copies `x`'s box into its own,
+/// so when the result is read boxed, `x` is too. It was treated as twin-only, and `+(a * 2)`
+/// copied an unwritten box.
+#[test]
+fn executable_unary_plus_of_a_product_copies_a_written_box() {
+    let mut callee = function(vec![
+        Instruction::LoadLocal(0),
+        Instruction::Const(1), // 2
+        Instruction::Binary(BinaryOp::Multiply),
+        Instruction::Unary(UnaryOp::Plus),
+        Instruction::Return,
+    ]);
+    callee.name = Some("g".into());
+    callee.parameter_count = 1;
+    callee.declared_length = 1;
+    callee.local_count = 1;
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        constants: vec![
+            Constant::Number(2.5f64.to_bits()), // 0
+            Constant::Number(2.0f64.to_bits()), // 1
+            Constant::Number(0.0f64.to_bits()), // 2
+        ],
+        code: vec![
+            // g([2.5][0]): an argument read from an array is not proven a number, so the call
+            // takes the boxed entry and its guarded fast clone rather than the typed entry.
+            Instruction::MakeFunction(0),
+            Instruction::Const(0),
+            Instruction::NewArray { count: 1 },
+            Instruction::Const(2),
+            Instruction::GetComputed,
+            Instruction::Call { argc: 1 },
+            Instruction::Return,
+        ],
+        local_count: 0,
+        functions: vec![callee],
+        template_sites: Vec::new(),
+    };
+    let generated = emit(&program).expect("program emits");
+    let wrapper = format!(
+        "int main(void) {{ kiln_value result; int status = {}(NULL, &result); if (status != 0) return 2; if (result.tag != KILN_VALUE_NUMBER) return 3; double d; memcpy(&d, &result.bits, sizeof d); return d == 5.0 ? 0 : 4; }}\n",
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "unary-plus-of-product");
+    assert!(
+        run.status.success(),
+        "`+(a * 2)` copied a box the product never wrote ({:?}):\nstdout: {}\nstderr: {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
 #[test]
 fn executable_length_specialization() {
     let constants = vec![

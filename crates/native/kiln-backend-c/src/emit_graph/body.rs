@@ -2404,6 +2404,19 @@ fn boxed_uses(
                 | BinaryOp::GreaterThanOrEqual
         )
     };
+    let is_comparison = |op: &BinaryOp| {
+        matches!(
+            op,
+            BinaryOp::StrictEqual
+                | BinaryOp::StrictNotEqual
+                | BinaryOp::LooseEqual
+                | BinaryOp::LooseNotEqual
+                | BinaryOp::LessThan
+                | BinaryOp::LessThanOrEqual
+                | BinaryOp::GreaterThan
+                | BinaryOp::GreaterThanOrEqual
+        )
+    };
     let defs: std::collections::HashMap<ValueId, &GraphOp> = graph
         .blocks
         .iter()
@@ -2428,9 +2441,17 @@ fn boxed_uses(
                 GraphOp::CheckTdz { value, .. } if numbers.contains(value) => {
                     phis.push((*vid, vec![*value]));
                 }
+                // `+x` of a proven number is a copy: its emitters write the result's box as
+                // `v = vx`, so it reads `x` boxed exactly when something reads it boxed.
+                // Treating it as twin-only dropped `x`'s box and copied an unwritten one.
                 GraphOp::Unary { op, value }
-                    if (matches!(op, UnaryOp::Plus | UnaryOp::ToNumeric | UnaryOp::Negate)
-                        && numbers.contains(value))
+                    if matches!(op, UnaryOp::Plus | UnaryOp::ToNumeric)
+                        && numbers.contains(value) =>
+                {
+                    phis.push((*vid, vec![*value]));
+                }
+                GraphOp::Unary { op, value }
+                    if (*op == UnaryOp::Negate && numbers.contains(value))
                         || (*op == UnaryOp::BitwiseNot && ints.contains(value)) => {}
                 GraphOp::Binary { op, left, right }
                     if (twin_only(op) && numbers.contains(left) && numbers.contains(right))
@@ -2512,10 +2533,15 @@ fn boxed_uses(
         }
         match &block.terminator {
             Terminator::Branch { condition, .. } => {
+                // Only a *comparison* of two proven numbers is inlined by the branch (see
+                // `emit_terminator`); an arithmetic condition (`i % 2 ? a : b`, `n - 1 ? ..`)
+                // is tested for truthiness through its box, so it must keep that box. Using
+                // `twin_only` here dropped the box of every arithmetic condition, and the
+                // branch then read an unwritten `v` (issue 27).
                 let compares_twins = matches!(
                     defs.get(condition),
                     Some(GraphOp::Binary { op, left, right })
-                        if twin_only(op) && numbers.contains(left) && numbers.contains(right)
+                        if is_comparison(op) && numbers.contains(left) && numbers.contains(right)
                 );
                 if !compares_twins && !booleans.contains(condition) {
                     used.insert(*condition);
