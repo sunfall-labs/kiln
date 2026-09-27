@@ -273,6 +273,7 @@ server.listen(0, "127.0.0.1", () => {
 "#,
         )
         .expect("write native Node entry");
+        share_native_semantic_cache(&fixture);
 
         let output = {
             let mut session = OneShot::start().expect("start an in-process engine");
