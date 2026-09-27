@@ -2113,3 +2113,21 @@ console.log(viaArgument(-10), viaArgument(10));
     };
     assert_eq!(output, "true,true,false\n-Infinity Infinity\n");
 }
+
+#[test]
+fn release_typed_method_call_takes_the_boxed_call_for_a_receiver_without_a_row() {
+    // Issue 21: a receiver of the right class whose `v` is a string has no double row, so the
+    // typed entry could only refuse; the call site now asks first and takes the boxed call.
+    let Some(output) = run_native_release_fixture(
+        "release-typed-method-receiver-without-row",
+        r#"
+class V { constructor(v) { this.v = v; } val() { return this.v; } }
+const objs = [new V(1), new V("x"), new V(3)];
+function sumVals() { let s = 0; for (let i = 0; i < objs.length; i++) s += objs[i].val(); return s; }
+console.log(sumVals());
+"#,
+    ) else {
+        return;
+    };
+    assert_eq!(output, "1x3\n");
+}

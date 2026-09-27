@@ -1806,6 +1806,17 @@ fn render_functions(
                 )
                 .unwrap();
             }
+            // Issue 21: the entry's receiver-row lookup, asked by a method call site before it
+            // enters the entry (defined beside the entry, `emit_graph/body.rs`).
+            if direct.entry.typed_needs[index].row {
+                let declaration = format!(
+                    "const uint32_t *{symbol}_fn_{index}_t_row(const kiln_object *recv_obj);"
+                );
+                writeln!(output, "{static_kw}{declaration}").unwrap();
+                if should_chunk {
+                    writeln!(fn_declarations[index], "{declaration}").unwrap();
+                }
+            }
             if direct.parallel_chunk(index as u32) {
                 // Issue 14: with a worker unit, the chunk workers are defined there, under the
                 // module's link-visible symbol, and this unit only declares them. A compact

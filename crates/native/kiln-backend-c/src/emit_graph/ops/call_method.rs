@@ -1777,17 +1777,12 @@ pub(super) fn emit_call_method(
                     if needs.receiver {
                         call_args.push_str(&format!(", v{}", object.0));
                     }
-                    // The callee's row for this receiver's shape, looked up here in the callee's
-                    // own table (write-once rows, ADR 0071), so the callee does no lookup.
-                    let row_lookup = if needs.row {
-                        let columns = plan.receiver_columns.get(i as usize).copied().unwrap_or(0);
+                    // The callee's row for this receiver's shape, looked up (or claimed) here in
+                    // the callee's own table (write-once rows, ADR 0071) by `_t_row`, so the
+                    // callee does no lookup.
+                    if needs.row {
                         call_args.push_str(", {ROW}");
-                        format!(
-                            "const uint32_t *__row = kiln_c99_recv_row({symbol}_fn_{i}_typed_recv_shape, &{symbol}_fn_{i}_typed_recv_slot[0][0], {columns}, obj->shape); "
-                        )
-                    } else {
-                        String::new()
-                    };
+                    }
                     if needs.runtime {
                         call_args.push_str(", host, thrown");
                     }
@@ -1846,12 +1841,16 @@ pub(super) fn emit_call_method(
                     };
                     let arm = |learn_path: &str, matched: &str| -> String {
                         if needs.row {
-                            // A receiver whose shape has a row: the row goes in known, so the
-                            // callee's own lookup folds away. Otherwise the callee claims one.
+                            // The row for the receiver's shape is found -- or claimed -- here,
+                            // before the entry is entered, so the callee's own lookup folds
+                            // away. Issue 21: a receiver whose shape cannot take a row (its
+                            // `this` fields are not the doubles the entry reads) is not handed
+                            // to an entry that could only refuse at its door; the condition
+                            // fails before anything has run and the boxed call below answers,
+                            // as it would for a callee with no typed entry.
                             let known = invoke("__row", learn_path);
-                            let learning = invoke("NULL", "");
                             format!(
-                                "if ({matched}) {{ {row_lookup}if (__row != NULL) {{ {known} }} else {{ {learning} }} handled = 1; }}"
+                                "if ({matched} && (__row = {symbol}_fn_{i}_t_row(obj)) != NULL) {{ {known} handled = 1; }}"
                             )
                         } else {
                             let plain_call = invoke("", learn_path);
@@ -1893,7 +1892,7 @@ pub(super) fn emit_call_method(
     let typed_guard_decl = if typed_candidates.is_empty() {
         String::new()
     } else {
-        "int kiln_typed_ok = !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH; (void)kiln_typed_ok; ".to_owned()
+        "int kiln_typed_ok = !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH; (void)kiln_typed_ok; const uint32_t *__row = NULL; (void)__row; ".to_owned()
     };
     let typed_remembered = typed_guard_decl;
     let by_name: String = candidates

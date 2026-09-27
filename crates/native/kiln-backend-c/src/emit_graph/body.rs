@@ -1,6 +1,6 @@
 use super::clones::{RESTART, bail_out, route_typed_failures, typed_fail};
 use super::ops::emit_graph_op;
-use super::sites::{self, receiver_prologue, share_sites, this_columns};
+use super::sites::{self, receiver_prologue, share_sites, this_columns, typed_row_claimer};
 use super::{EntryKind, Site, Speculation, this_site_count, typed_signature};
 use crate::direct::{CallPlan, direct_callable};
 use crate::graph::{
@@ -414,6 +414,24 @@ pub fn emit_function_from_graph_with_profile(
                 "static inline "
             };
             let suffix = if super::parallel_clone() { "_p" } else { "_t" };
+            // Issue 21: the entry's row lookup, callable by a method call site before it
+            // enters the entry. Emitted wherever the entry has a receiver prologue; declared
+            // (in `lib.rs`) and called only where the entry reads the row.
+            if !super::parallel_clone() && !plan.generic_only && this_site_count(graph) > 0 {
+                let (this_col_map, this_col_names) = this_columns(graph);
+                let linkage = if plan.should_chunk {
+                    ""
+                } else {
+                    "static inline __attribute__((unused)) "
+                };
+                output.push_str(&typed_row_claimer(
+                    symbol,
+                    index,
+                    &this_col_names,
+                    typed_double_mask(&this_col_map, plan),
+                    linkage,
+                ));
+            }
             writeln!(
                 output,
                 "{inline}{result} {symbol}_fn_{index}{suffix}({params}) {{"
@@ -428,13 +446,7 @@ pub fn emit_function_from_graph_with_profile(
     let receiver_cache = if !plan.generic_only && this_site_count(graph) > 0 {
         let (this_col_map, this_col_names) = this_columns(graph);
         let double_mask = if matches!(kind, EntryKind::Typed { .. }) {
-            let mut mask = 0u32;
-            for (vid, col_idx) in &this_col_map {
-                if plan.numbers.contains(vid) && *col_idx < 32 {
-                    mask |= 1u32 << col_idx;
-                }
-            }
-            mask
+            typed_double_mask(&this_col_map, plan)
         } else {
             0u32
         };
@@ -3793,6 +3805,18 @@ fn emit_phi_assignments(
         }
     }
     output.push_str(" }\n");
+}
+
+/// The `this` columns a typed entry reads as doubles: the representation a receiver's row must
+/// have for the entry to claim it.
+fn typed_double_mask(this_col_map: &HashMap<ValueId, usize>, plan: &CallPlan) -> u32 {
+    let mut mask = 0u32;
+    for (vid, col_idx) in this_col_map {
+        if plan.numbers.contains(vid) && *col_idx < 32 {
+            mask |= 1u32 << col_idx;
+        }
+    }
+    mask
 }
 
 #[cfg(test)]
