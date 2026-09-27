@@ -227,19 +227,10 @@ fn hard_link_or_copy_fallback(
 }
 
 fn hard_link_unavailable(error: &io::Error) -> bool {
-    if error.kind() == io::ErrorKind::Unsupported {
-        return true;
-    }
-    #[cfg(unix)]
-    {
-        error.raw_os_error().is_some_and(|code| {
-            code == libc::EXDEV || code == libc::EPERM || code == libc::EOPNOTSUPP
-        })
-    }
-    #[cfg(not(unix))]
-    {
-        false
-    }
+    matches!(
+        error.kind(),
+        io::ErrorKind::CrossesDevices | io::ErrorKind::Unsupported
+    )
 }
 
 fn archive_path(pool: &Path, digest: Digest) -> PathBuf {

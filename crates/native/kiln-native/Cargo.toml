@@ -7,7 +7,6 @@ repository.workspace = true
 
 [dependencies]
 kiln-artifact-cache = { workspace = true }
-libc = { workspace = true }
 kiln-backend-c = { workspace = true }
 kiln-builtins = { workspace = true }
 kiln-builtin-surface = { workspace = true }
