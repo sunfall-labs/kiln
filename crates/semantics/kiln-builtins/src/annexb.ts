@@ -14,73 +14,73 @@
   }
 
   // String.prototype Annex B.3 HTML methods:
-  function anchor(this: any, name: any): string {
+  const anchor = { anchor(this: any, name: any): string {
     requireObjectCoercible(this);
     return `<a name="${escapeQuotes(name)}">${String(this)}</a>`;
-  }
+  } }.anchor;
 
-  function big(this: any): string {
+  const big = { big(this: any): string {
     requireObjectCoercible(this);
     return `<big>${String(this)}</big>`;
-  }
+  } }.big;
 
-  function blink(this: any): string {
+  const blink = { blink(this: any): string {
     requireObjectCoercible(this);
     return `<blink>${String(this)}</blink>`;
-  }
+  } }.blink;
 
-  function bold(this: any): string {
+  const bold = { bold(this: any): string {
     requireObjectCoercible(this);
     return `<b>${String(this)}</b>`;
-  }
+  } }.bold;
 
-  function fixed(this: any): string {
+  const fixed = { fixed(this: any): string {
     requireObjectCoercible(this);
     return `<tt>${String(this)}</tt>`;
-  }
+  } }.fixed;
 
-  function fontcolor(this: any, color: any): string {
+  const fontcolor = { fontcolor(this: any, color: any): string {
     requireObjectCoercible(this);
     return `<font color="${escapeQuotes(color)}">${String(this)}</font>`;
-  }
+  } }.fontcolor;
 
-  function fontsize(this: any, size: any): string {
+  const fontsize = { fontsize(this: any, size: any): string {
     requireObjectCoercible(this);
     return `<font size="${escapeQuotes(size)}">${String(this)}</font>`;
-  }
+  } }.fontsize;
 
-  function italics(this: any): string {
+  const italics = { italics(this: any): string {
     requireObjectCoercible(this);
     return `<i>${String(this)}</i>`;
-  }
+  } }.italics;
 
-  function link(this: any, url: any): string {
+  const link = { link(this: any, url: any): string {
     requireObjectCoercible(this);
     return `<a href="${escapeQuotes(url)}">${String(this)}</a>`;
-  }
+  } }.link;
 
-  function small(this: any): string {
+  const small = { small(this: any): string {
     requireObjectCoercible(this);
     return `<small>${String(this)}</small>`;
-  }
+  } }.small;
 
-  function strike(this: any): string {
+  const strike = { strike(this: any): string {
     requireObjectCoercible(this);
     return `<strike>${String(this)}</strike>`;
-  }
+  } }.strike;
 
-  function sub(this: any): string {
+  const sub = { sub(this: any): string {
     requireObjectCoercible(this);
     return `<sub>${String(this)}</sub>`;
-  }
+  } }.sub;
 
-  function sup(this: any): string {
+  const sup = { sup(this: any): string {
     requireObjectCoercible(this);
     return `<sup>${String(this)}</sup>`;
-  }
+  } }.sup;
 
   // Object.prototype Annex B.2 methods:
-  function __defineGetter__(this: any, prop: any, getter: any): void {
+  const __defineGetter__ = { __defineGetter__(this: any, prop: any, getter: any): void {
     if (typeof getter !== "function") {
       throw new TypeError("Object.prototype.__defineGetter__: Expecting function");
     }
@@ -89,9 +89,9 @@
       enumerable: true,
       configurable: true,
     });
-  }
+  } }.__defineGetter__;
 
-  function __defineSetter__(this: any, prop: any, setter: any): void {
+  const __defineSetter__ = { __defineSetter__(this: any, prop: any, setter: any): void {
     if (typeof setter !== "function") {
       throw new TypeError("Object.prototype.__defineSetter__: Expecting function");
     }
@@ -100,9 +100,9 @@
       enumerable: true,
       configurable: true,
     });
-  }
+  } }.__defineSetter__;
 
-  function __lookupGetter__(this: any, prop: any): any {
+  const __lookupGetter__ = { __lookupGetter__(this: any, prop: any): any {
     requireObjectCoercible(this);
     let O = Object(this);
     while (O !== null) {
@@ -113,9 +113,9 @@
       O = Object.getPrototypeOf(O);
     }
     return undefined;
-  }
+  } }.__lookupGetter__;
 
-  function __lookupSetter__(this: any, prop: any): any {
+  const __lookupSetter__ = { __lookupSetter__(this: any, prop: any): any {
     requireObjectCoercible(this);
     let O = Object(this);
     while (O !== null) {
@@ -126,10 +126,25 @@
       O = Object.getPrototypeOf(O);
     }
     return undefined;
+  } }.__lookupSetter__;
+
+  // `CreateDataPropertyOrThrow`: a define, not a `Set` -- a setter on the target is not called, and
+  // a property that cannot be redefined (non-configurable, or the target not extensible) is a
+  // TypeError rather than a write that silently lands or is dropped. With an iterator that never
+  // ends, the write that cannot land is the only thing that stops the loop.
+  function createDataPropertyOrThrow(target: any, key: number, value: any): void {
+    Object.defineProperty(target, key, { value, writable: true, enumerable: true, configurable: true });
   }
 
   // Array.fromAsync (ES2024)
-  async function fromAsync(this: any, asyncItems: any, mapfn?: any, thisArg?: any): Promise<any[]> {
+  // `Array.fromAsync` is an ordinary built-in function -- its prototype is `Function.prototype`,
+  // not `AsyncFunction.prototype`, and it has no [[Construct]] -- whose body runs as an async
+  // function, so every abrupt completion becomes a rejection.
+  const fromAsync = { fromAsync(this: any, asyncItems: any, mapfn: any = undefined, thisArg: any = undefined): Promise<any[]> {
+    return fromAsyncBody.call(this, asyncItems, mapfn, thisArg);
+  } }.fromAsync;
+
+  async function fromAsyncBody(this: any, asyncItems: any, mapfn?: any, thisArg?: any): Promise<any[]> {
     const C = this;
     const mapping = mapfn !== undefined;
     if (mapping && typeof mapfn !== "function") {
@@ -192,11 +207,13 @@
           if (nextResult.done) {
             break;
           }
-          let value = await nextResult.value;
+          // A sync iterator is wrapped as `CreateAsyncFromSyncIterator`, which awaits each
+          // value; an async iterator's values are taken as they are.
+          let value = usingAsyncIterator !== undefined ? nextResult.value : await nextResult.value;
           if (mapping) {
             value = await mapfn.call(thisArg, value, k);
           }
-          A[k] = value;
+          createDataPropertyOrThrow(A, k, value);
           k++;
         }
       } catch (err) {
@@ -216,7 +233,8 @@
 
     // Array-like fallback
     const arrayLike = Object(asyncItems);
-    const rawLen = Number(arrayLike.length);
+    // `ToLength`, whose `ToNumber` refuses a BigInt -- which `Number()` would convert.
+    const rawLen = +arrayLike.length;
     const len = Number.isNaN(rawLen) ? 0 : Math.min(Math.max(Math.trunc(rawLen), 0), Number.MAX_SAFE_INTEGER);
 
     let A: any;
@@ -235,13 +253,15 @@
       if (mapping) {
         value = await mapfn.call(thisArg, value, k);
       }
-      A[k] = value;
+      createDataPropertyOrThrow(A, k, value);
     }
 
     A.length = len;
     return A;
   }
 
+  // Built-in methods are not constructors, so each is a method definition (`{ m() {} }.m`)
+  // rather than a function declaration, which would have [[Construct]].
   function defineMethod(target: any, name: string | symbol, fn: any): void {
     Object.defineProperty(target, name, {
       value: fn,

@@ -15,6 +15,8 @@
 
     const Proto = Iterator.prototype;
 
+    // Built-in methods are not constructors, so each is a method definition (`{ m() {} }.m`); an
+    // optional parameter has a default (`x: any = undefined`) so `length` does not count it.
     const defineMethod = (target: any, name: string | symbol, fn: any) => {
         Object.defineProperty(target, name, {
             value: fn,
@@ -24,492 +26,540 @@
         });
     };
 
-    function getIterator(obj: any): { iterator: any; nextMethod: any } {
-        if (obj === null || (typeof obj !== "object" && typeof obj !== "function")) {
-            throw new TypeError("Value is not iterable");
-        }
-        let method = typeof Symbol !== "undefined" && Symbol.iterator ? obj[Symbol.iterator] : undefined;
-        if (typeof method !== "function") {
-            method = obj["@@iterator"];
-        }
-        if (typeof method !== "function") {
-            throw new TypeError("Value is not iterable");
-        }
-        const iterator = method.call(obj);
-        if (iterator === null || (typeof iterator !== "object" && typeof iterator !== "function")) {
-            throw new TypeError("Iterator result is not an object");
-        }
-        const nextMethod = iterator.next;
-        if (typeof nextMethod !== "function") {
-            throw new TypeError("Iterator has no next method");
-        }
-        return { iterator, nextMethod };
+    // --- The iterator protocol, as the specification spells it ---
+    //
+    // `step` reads a record's `next` result (`IteratorStepValue`): a throw from `next`, a result
+    // that is not an object, or a throw from its `done` or `value` getter marks the source done
+    // and propagates -- the source failed on its own terms and is never closed for it.
+    // `closeIterator` is `IteratorClose` with a normal completion (its errors are the caller's),
+    // `closeDiscarding` the one with a throw already in flight (the in-flight throw wins).
+    const DONE: any = {};
+
+    function isObject(value: any): boolean {
+        return value !== null && (typeof value === "object" || typeof value === "function");
     }
 
-    function closeIterator(iter: any) {
-        if (iter && typeof iter.return === "function") {
-            try {
-                iter.return();
-            } catch {
-                // ignore errors during cleanup
+    // `GetIteratorDirect`: `next` is read once, here, and never again.
+    function iteratorDirect(obj: any): { iterator: any; next: any; done: boolean } {
+        return { iterator: obj, next: obj.next, done: false };
+    }
+
+    function step(record: { iterator: any; next: any; done: boolean }): any {
+        let result: any;
+        try {
+            result = record.next.call(record.iterator);
+        } catch (error) {
+            record.done = true;
+            throw error;
+        }
+        if (!isObject(result)) {
+            record.done = true;
+            throw new TypeError("Iterator result " + String(result) + " is not an object");
+        }
+        let done: any;
+        let value: any;
+        try {
+            done = result.done;
+            if (done) {
+                record.done = true;
+                return DONE;
             }
+            value = result.value;
+        } catch (error) {
+            record.done = true;
+            throw error;
+        }
+        return value;
+    }
+
+    function closeIterator(iterator: any): void {
+        const method = iterator.return;
+        if (method === undefined || method === null) return;
+        if (typeof method !== "function") {
+            throw new TypeError("Iterator return method is not callable");
+        }
+        const result = method.call(iterator);
+        if (!isObject(result)) {
+            throw new TypeError("Iterator return result " + String(result) + " is not an object");
         }
     }
 
-    function createHelper(nextFn: () => { done: boolean; value: any }, returnFn?: () => void) {
-        const helper: any = {
-            next: nextFn,
-            return: () => {
-                if (returnFn) returnFn();
-                return { done: true, value: undefined };
+    function closeDiscarding(iterator: any): void {
+        try {
+            const method = iterator.return;
+            if (method !== undefined && method !== null) method.call(iterator);
+        } catch {
+            // The throw already in flight is the one the caller sees.
+        }
+    }
+
+    // An iterator helper object: `resume` runs the helper's closure to its next yield and
+    // answers the value or `DONE`; `close` releases what the helper holds when `return` is
+    // called before the closure finished. The four states are a generator's, which is what the
+    // specification builds a helper from: a `next` re-entered while the closure is running is a
+    // TypeError, and a helper that has completed answers done without touching anything.
+    function makeHelper(resume: () => any, close: () => void): any {
+        const SUSPENDED = 0;
+        const RUNNING = 1;
+        const COMPLETED = 2;
+        let state = SUSPENDED;
+        const methods = {
+            next(): any {
+                if (state === RUNNING) throw new TypeError("Iterator helper is already running");
+                if (state === COMPLETED) return { value: undefined, done: true };
+                state = RUNNING;
+                let value: any;
+                try {
+                    value = resume();
+                } catch (error) {
+                    state = COMPLETED;
+                    throw error;
+                }
+                if (value === DONE) {
+                    state = COMPLETED;
+                    return { value: undefined, done: true };
+                }
+                state = SUSPENDED;
+                return { value, done: false };
+            },
+            return(): any {
+                if (state === RUNNING) throw new TypeError("Iterator helper is already running");
+                if (state === COMPLETED) return { value: undefined, done: true };
+                state = COMPLETED;
+                close();
+                return { value: undefined, done: true };
             },
         };
-        if (typeof Symbol !== "undefined" && Symbol.iterator) {
-            helper[Symbol.iterator] = function () {
-                return this;
-            };
-        }
-        helper["@@iterator"] = function () {
-            return this;
-        };
-        try {
-            Object.setPrototypeOf(helper, Proto);
-        } catch {
-            // ignore if setPrototypeOf fails
-        }
+        const helper = Object.create(Proto);
+        Object.defineProperty(helper, "next", { value: methods.next, writable: true, configurable: true });
+        Object.defineProperty(helper, "return", { value: methods.return, writable: true, configurable: true });
         return helper;
     }
 
-    // Iterator.concat(...iterables)
-    function concat(...iterables: any[]) {
-        let currentIndex = 0;
-        let currentIter: any = null;
-        let done = false;
-
-        return createHelper(
+    // Iterator.concat(...iterables): each argument is checked -- an object with a callable
+    // `@@iterator` -- before the next is looked at, and each source is opened only when the one
+    // before it is exhausted. A value is handed on in a fresh result object, never the source's.
+    const concat = { concat(...items: any[]) {
+        const sources: { iterable: any; method: any }[] = [];
+        for (let i = 0; i < items.length; i++) {
+            const item = items[i];
+            if (!isObject(item)) {
+                throw new TypeError("Iterator.concat: every argument must be an object");
+            }
+            const method = item[Symbol.iterator];
+            if (typeof method !== "function") {
+                throw new TypeError("Iterator.concat: every argument must be iterable");
+            }
+            sources.push({ iterable: item, method });
+        }
+        let index = 0;
+        let open: { iterator: any; next: any; done: boolean } | null = null;
+        return makeHelper(
             () => {
-                if (done) return { done: true, value: undefined };
-                while (currentIndex < iterables.length || currentIter !== null) {
-                    if (currentIter === null) {
-                        if (currentIndex >= iterables.length) {
-                            done = true;
-                            return { done: true, value: undefined };
+                while (true) {
+                    if (open === null) {
+                        if (index >= sources.length) return DONE;
+                        const source = sources[index++];
+                        const iterator = source.method.call(source.iterable);
+                        if (!isObject(iterator)) {
+                            throw new TypeError("Iterator.concat: @@iterator did not return an object");
                         }
-                        const item = iterables[currentIndex++];
-                        const opened = getIterator(item);
-                        currentIter = opened;
+                        open = iteratorDirect(iterator);
                     }
-                    const res = currentIter.nextMethod.call(currentIter.iterator);
-                    if (res && res.done) {
-                        currentIter = null;
-                        continue;
-                    }
-                    return res;
+                    const value = step(open);
+                    if (value !== DONE) return value;
+                    open = null;
                 }
-                done = true;
-                return { done: true, value: undefined };
             },
             () => {
-                done = true;
-                if (currentIter) {
-                    closeIterator(currentIter.iterator);
-                    currentIter = null;
+                const current = open;
+                open = null;
+                if (current !== null) closeIterator(current.iterator);
+            }
+        );
+    } }.concat;
+
+    // `GetIteratorFlattenable(value, reject-strings)`: an iterable or a bare iterator, never a
+    // string primitive.
+    function flattenable(value: any): { iterator: any; next: any; done: boolean } {
+        if (!isObject(value)) throw new TypeError("Iterator.zip: every iterable must be an object");
+        const method = value[Symbol.iterator];
+        let iterator: any;
+        if (method === undefined || method === null) {
+            iterator = value;
+        } else if (typeof method === "function") {
+            iterator = method.call(value);
+        } else {
+            throw new TypeError("Iterator.zip: @@iterator is not callable");
+        }
+        if (!isObject(iterator)) throw new TypeError("Iterator.zip: iterator is not an object");
+        return iteratorDirect(iterator);
+    }
+
+    // `GetIterator(value, sync)`: the stricter opening, which requires a callable `@@iterator`.
+    function opened(value: any): { iterator: any; next: any; done: boolean } {
+        const method = value[Symbol.iterator];
+        if (typeof method !== "function") throw new TypeError("Iterator.zip: value is not iterable");
+        const iterator = method.call(value);
+        if (!isObject(iterator)) throw new TypeError("Iterator.zip: iterator is not an object");
+        return iteratorDirect(iterator);
+    }
+
+    // `IteratorStep` without reading `value`: only whether there is another element.
+    function stepDone(record: { iterator: any; next: any; done: boolean }): boolean {
+        let result: any;
+        try {
+            result = record.next.call(record.iterator);
+        } catch (error) {
+            record.done = true;
+            throw error;
+        }
+        if (!isObject(result)) {
+            record.done = true;
+            throw new TypeError("Iterator result " + String(result) + " is not an object");
+        }
+        let done: any;
+        try {
+            done = result.done;
+        } catch (error) {
+            record.done = true;
+            throw error;
+        }
+        if (done) record.done = true;
+        return !!done;
+    }
+
+    // `IteratorCloseAll`: last opened first; with a normal completion the first error is the
+    // one reported after every source has been told, with a throw in flight none is.
+    function closeAll(records: { iterator: any }[], discarding: boolean): void {
+        let failed = false;
+        let first: any = undefined;
+        for (let i = records.length - 1; i >= 0; i--) {
+            try {
+                closeIterator(records[i].iterator);
+            } catch (error) {
+                if (!failed) {
+                    failed = true;
+                    first = error;
                 }
+            }
+        }
+        if (failed && !discarding) throw first;
+    }
+
+    // `Iterator.zip` and `Iterator.zipKeyed`: every source is opened by the call -- a zipped step
+    // needs one element from each -- so `return()` before the first `next()` closes them all.
+    // The two differ only in where the sources come from and what a step is shaped like.
+    function zipWith(keyed: boolean, iterables: any, options: any): any {
+        if (!isObject(iterables)) throw new TypeError("Iterator.zip: iterables must be an object");
+        if (options !== undefined && !isObject(options)) {
+            throw new TypeError("Iterator.zip: options must be an object");
+        }
+        const modeOption = options === undefined ? undefined : options.mode;
+        let mode: string;
+        if (modeOption === undefined) {
+            mode = "shortest";
+        } else if (modeOption === "shortest" || modeOption === "longest" || modeOption === "strict") {
+            mode = modeOption;
+        } else {
+            throw new TypeError('Iterator.zip: mode must be "shortest", "longest" or "strict"');
+        }
+        // Read only in the one mode that pads.
+        let paddingOption: any = undefined;
+        if (mode === "longest") {
+            paddingOption = options === undefined ? undefined : options.padding;
+            if (paddingOption !== undefined && !isObject(paddingOption)) {
+                throw new TypeError("Iterator.zip: padding must be an object");
+            }
+        }
+
+        const sources: { iterator: any; next: any; done: boolean }[] = [];
+        const keys: any[] = [];
+        if (keyed) {
+            const allKeys = Reflect.ownKeys(iterables);
+            for (let i = 0; i < allKeys.length; i++) {
+                const key = allKeys[i];
+                let value: any;
+                try {
+                    const desc = Reflect.getOwnPropertyDescriptor(iterables, key);
+                    if (desc === undefined || !desc.enumerable) continue;
+                    value = iterables[key];
+                    // `undefined` reads as "not one of the sources"; anything else must iterate.
+                    if (value === undefined) continue;
+                    sources.push(flattenable(value));
+                } catch (error) {
+                    closeAll(sources, true);
+                    throw error;
+                }
+                keys.push(key);
+            }
+        } else {
+            const outer = opened(iterables);
+            while (true) {
+                let element: any;
+                try {
+                    element = step(outer);
+                } catch (error) {
+                    // The outer iterator failed on its own terms; only what this walk opened
+                    // is closed.
+                    closeAll(sources, true);
+                    throw error;
+                }
+                if (element === DONE) break;
+                try {
+                    sources.push(flattenable(element));
+                } catch (error) {
+                    // A bad element is this walk's fault, so the outer iterator is closed too,
+                    // last, after everything it produced.
+                    closeAll([outer].concat(sources), true);
+                    throw error;
+                }
+            }
+        }
+
+        const count = sources.length;
+        const padding: any[] = [];
+        try {
+            if (paddingOption === undefined) {
+                for (let i = 0; i < count; i++) padding.push(undefined);
+            } else if (keyed) {
+                for (let i = 0; i < count; i++) padding.push(paddingOption[keys[i]]);
+            } else {
+                const pad = opened(paddingOption);
+                let alive = true;
+                for (let i = 0; i < count; i++) {
+                    if (alive) {
+                        const value = step(pad);
+                        if (value !== DONE) {
+                            padding.push(value);
+                            continue;
+                        }
+                        alive = false;
+                    }
+                    padding.push(undefined);
+                }
+                // Closed only if it had more to give: one that ran out closed itself.
+                if (alive) closeIterator(pad.iterator);
+            }
+        } catch (error) {
+            closeAll(sources, true);
+            throw error;
+        }
+
+        // `iters` is indexed by position and holds null once a source has ended; `open` is what
+        // a close sweeps.
+        const iters: ({ iterator: any; next: any; done: boolean } | null)[] = sources.slice();
+        let open = sources.slice();
+        const removeOpen = (record: any) => {
+            const at = open.indexOf(record);
+            if (at >= 0) open.splice(at, 1);
+        };
+        const mismatch = () => new TypeError("Iterator.zip: strict mode requires every iterator to have the same length");
+        // Strict mode's check that every other source ended on this round too.
+        const strictTail = (): any => {
+            for (let i = 1; i < count; i++) {
+                const record = iters[i];
+                if (record === null) continue;
+                let ended: boolean;
+                try {
+                    ended = stepDone(record);
+                } catch (error) {
+                    removeOpen(record);
+                    closeAll(open, true);
+                    throw error;
+                }
+                if (!ended) {
+                    closeAll(open, true);
+                    throw mismatch();
+                }
+                removeOpen(record);
+            }
+            return DONE;
+        };
+        return makeHelper(
+            () => {
+                if (count === 0) return DONE;
+                const results: any[] = [];
+                for (let i = 0; i < count; i++) {
+                    const record = iters[i];
+                    if (record === null) {
+                        results.push(padding[i]);
+                        continue;
+                    }
+                    let value: any;
+                    try {
+                        value = step(record);
+                    } catch (error) {
+                        // The failing source is not told to close: it failed on its own terms.
+                        removeOpen(record);
+                        closeAll(open, true);
+                        throw error;
+                    }
+                    if (value === DONE) {
+                        removeOpen(record);
+                        if (mode === "shortest") {
+                            closeAll(open, false);
+                            return DONE;
+                        }
+                        if (mode === "strict") {
+                            if (i !== 0) {
+                                closeAll(open, true);
+                                throw mismatch();
+                            }
+                            return strictTail();
+                        }
+                        if (open.length === 0) return DONE;
+                        iters[i] = null;
+                        results.push(padding[i]);
+                        continue;
+                    }
+                    results.push(value);
+                }
+                if (!keyed) return results;
+                // A null prototype: a key named `toString` is the source's value and nothing else.
+                const out = Object.create(null);
+                for (let i = 0; i < count; i++) {
+                    Object.defineProperty(out, keys[i], { value: results[i], writable: true, enumerable: true, configurable: true });
+                }
+                return out;
+            },
+            () => {
+                const remaining = open;
+                open = [];
+                closeAll(remaining, false);
             }
         );
     }
 
     // Iterator.zip(iterables, options?)
-    function zip(iterables: any, options?: any) {
-        if (iterables === null || (typeof iterables !== "object" && typeof iterables !== "function")) {
-            throw new TypeError("Iterator.zip: iterables must be an object");
+    const zip = { zip(iterables: any, options: any = undefined) {
+        return zipWith(false, iterables, options);
+    } }.zip;
+
+    // Iterator.zipKeyed(iterables, options?)
+    const zipKeyed = { zipKeyed(iterables: any, options: any = undefined) {
+        return zipWith(true, iterables, options);
+    } }.zipKeyed;
+
+    // The size `chunks` and `windows` take: not coerced -- `chunks("2")` is a TypeError, not a
+    // size of two -- an integral Number, then in range. A bad one closes the receiver.
+    function sizeArgument(receiver: any, size: any, name: string): number {
+        if (typeof size !== "number") {
+            closeDiscarding(receiver);
+            throw new TypeError(name + " size must be a Number");
         }
-        if (options !== undefined && (options === null || (typeof options !== "object" && typeof options !== "function"))) {
-            throw new TypeError("Iterator.zip: options must be an object");
+        if (!Number.isFinite(size) || size % 1 !== 0) {
+            closeDiscarding(receiver);
+            throw new TypeError(name + " size must be an integral Number");
         }
-        const mode = options?.mode ?? "shortest";
-        if (mode !== "shortest" && mode !== "longest" && mode !== "strict") {
-            throw new TypeError('Iterator.zip: mode must be "shortest", "longest" or "strict"');
+        if (size < 1 || size > 4294967295) {
+            closeDiscarding(receiver);
+            throw new RangeError(name + " size out of range");
         }
-        let paddingOption = options?.padding;
-        if (mode === "longest") {
-            if (paddingOption !== undefined && (paddingOption === null || (typeof paddingOption !== "object" && typeof paddingOption !== "function"))) {
-                throw new TypeError("Iterator.zip: padding must be an object");
-            }
-        }
-
-        // Open positional sources
-        const sources: { iterator: any; nextMethod: any }[] = [];
-        try {
-            const outer = getIterator(iterables);
-            while (true) {
-                const step = outer.nextMethod.call(outer.iterator);
-                if (step && step.done) break;
-                const inner = getIterator(step.value);
-                sources.push(inner);
-            }
-        } catch (err) {
-            for (const s of sources) closeIterator(s.iterator);
-            throw err;
-        }
-
-        const count = sources.length;
-        const padding: any[] = [];
-        if (mode === "longest") {
-            if (paddingOption !== undefined) {
-                try {
-                    const padIter = getIterator(paddingOption);
-                    for (let i = 0; i < count; i++) {
-                        const step = padIter.nextMethod.call(padIter.iterator);
-                        if (step && !step.done) {
-                            padding.push(step.value);
-                        } else {
-                            padding.push(undefined);
-                        }
-                    }
-                    closeIterator(padIter.iterator);
-                } catch (err) {
-                    for (const s of sources) closeIterator(s.iterator);
-                    throw err;
-                }
-            } else {
-                for (let i = 0; i < count; i++) padding.push(undefined);
-            }
-        }
-
-        let done = count === 0;
-        const ended: boolean[] = new Array(count).fill(false);
-        let endedCount = 0;
-
-        return createHelper(
-            () => {
-                if (done) return { done: true, value: undefined };
-                const result = new Array(count);
-                let firstEndedThisRound = false;
-
-                for (let i = 0; i < count; i++) {
-                    if (ended[i]) {
-                        result[i] = padding[i];
-                        continue;
-                    }
-                    let step;
-                    try {
-                        step = sources[i].nextMethod.call(sources[i].iterator);
-                    } catch (err) {
-                        done = true;
-                        for (let j = 0; j < count; j++) {
-                            if (!ended[j]) closeIterator(sources[j].iterator);
-                        }
-                        throw err;
-                    }
-                    if (step && step.done) {
-                        ended[i] = true;
-                        endedCount++;
-                        if (mode === "shortest") {
-                            done = true;
-                            for (let j = 0; j < count; j++) {
-                                if (!ended[j]) closeIterator(sources[j].iterator);
-                            }
-                            return { done: true, value: undefined };
-                        }
-                        if (mode === "strict") {
-                            done = true;
-                            for (let j = 0; j < count; j++) {
-                                if (!ended[j]) closeIterator(sources[j].iterator);
-                            }
-                            if (i > 0 || firstEndedThisRound) {
-                                throw new RangeError("Iterator.zip: iterators have different lengths");
-                            }
-                            firstEndedThisRound = true;
-                        }
-                        result[i] = padding[i];
-                    } else {
-                        if (mode === "strict" && firstEndedThisRound) {
-                            done = true;
-                            for (let j = 0; j < count; j++) {
-                                if (!ended[j]) closeIterator(sources[j].iterator);
-                            }
-                            throw new RangeError("Iterator.zip: iterators have different lengths");
-                        }
-                        result[i] = step ? step.value : undefined;
-                    }
-                }
-
-                if (mode === "strict" && firstEndedThisRound) {
-                    return { done: true, value: undefined };
-                }
-
-                if (mode === "longest" && endedCount === count) {
-                    done = true;
-                    return { done: true, value: undefined };
-                }
-
-                return { done: false, value: result };
-            },
-            () => {
-                done = true;
-                for (let i = 0; i < count; i++) {
-                    if (!ended[i]) closeIterator(sources[i].iterator);
-                }
-            }
-        );
-    }
-
-    // Iterator.zipKeyed(obj, options?)
-    function zipKeyed(obj: any, options?: any) {
-        if (obj === null || (typeof obj !== "object" && typeof obj !== "function")) {
-            throw new TypeError("Iterator.zip: iterables must be an object");
-        }
-        if (options !== undefined && (options === null || (typeof options !== "object" && typeof options !== "function"))) {
-            throw new TypeError("Iterator.zip: options must be an object");
-        }
-        const mode = options?.mode ?? "shortest";
-        if (mode !== "shortest" && mode !== "longest" && mode !== "strict") {
-            throw new TypeError('Iterator.zip: mode must be "shortest", "longest" or "strict"');
-        }
-        let paddingOption = options?.padding;
-        if (mode === "longest") {
-            if (paddingOption !== undefined && (paddingOption === null || (typeof paddingOption !== "object" && typeof paddingOption !== "function"))) {
-                throw new TypeError("Iterator.zip: padding must be an object");
-            }
-        }
-
-        const keys: (string | symbol)[] = [];
-        const sources: { iterator: any; nextMethod: any }[] = [];
-        try {
-            const ownKeys = Reflect.ownKeys(obj);
-            for (const key of ownKeys) {
-                const desc = Object.getOwnPropertyDescriptor(obj, key);
-                if (!desc || !desc.enumerable) continue;
-                const val = obj[key];
-                if (val === undefined) continue;
-                const inner = getIterator(val);
-                keys.push(key);
-                sources.push(inner);
-            }
-        } catch (err) {
-            for (const s of sources) closeIterator(s.iterator);
-            throw err;
-        }
-
-        const count = sources.length;
-        const padding: any[] = [];
-        if (mode === "longest") {
-            for (let i = 0; i < count; i++) {
-                padding.push(paddingOption !== undefined ? paddingOption[keys[i]] : undefined);
-            }
-        }
-
-        let done = count === 0;
-        const ended: boolean[] = new Array(count).fill(false);
-        let endedCount = 0;
-
-        return createHelper(
-            () => {
-                if (done) return { done: true, value: undefined };
-                const result = Object.create(null);
-                let firstEndedThisRound = false;
-
-                for (let i = 0; i < count; i++) {
-                    const key = keys[i];
-                    if (ended[i]) {
-                        result[key] = padding[i];
-                        continue;
-                    }
-                    let step;
-                    try {
-                        step = sources[i].nextMethod.call(sources[i].iterator);
-                    } catch (err) {
-                        done = true;
-                        for (let j = 0; j < count; j++) {
-                            if (!ended[j]) closeIterator(sources[j].iterator);
-                        }
-                        throw err;
-                    }
-                    if (step && step.done) {
-                        ended[i] = true;
-                        endedCount++;
-                        if (mode === "shortest") {
-                            done = true;
-                            for (let j = 0; j < count; j++) {
-                                if (!ended[j]) closeIterator(sources[j].iterator);
-                            }
-                            return { done: true, value: undefined };
-                        }
-                        if (mode === "strict") {
-                            done = true;
-                            for (let j = 0; j < count; j++) {
-                                if (!ended[j]) closeIterator(sources[j].iterator);
-                            }
-                            if (i > 0 || firstEndedThisRound) {
-                                throw new RangeError("Iterator.zip: iterators have different lengths");
-                            }
-                            firstEndedThisRound = true;
-                        }
-                        result[key] = padding[i];
-                    } else {
-                        if (mode === "strict" && firstEndedThisRound) {
-                            done = true;
-                            for (let j = 0; j < count; j++) {
-                                if (!ended[j]) closeIterator(sources[j].iterator);
-                            }
-                            throw new RangeError("Iterator.zip: iterators have different lengths");
-                        }
-                        result[key] = step ? step.value : undefined;
-                    }
-                }
-
-                if (mode === "strict" && firstEndedThisRound) {
-                    return { done: true, value: undefined };
-                }
-
-                if (mode === "longest" && endedCount === count) {
-                    done = true;
-                    return { done: true, value: undefined };
-                }
-
-                return { done: false, value: result };
-            },
-            () => {
-                done = true;
-                for (let i = 0; i < count; i++) {
-                    if (!ended[i]) closeIterator(sources[i].iterator);
-                }
-            }
-        );
+        return size;
     }
 
     // Iterator.prototype.chunks(size)
-    function chunks(this: any, size: any) {
-        if (typeof size !== "number") {
-            closeIterator(this);
-            throw new TypeError("chunks size must be a Number");
-        }
-        if (!Number.isFinite(size) || Math.trunc(size) !== size) {
-            closeIterator(this);
-            throw new TypeError("chunks size must be an integral Number");
-        }
-        if (size < 1 || size > 4294967295) {
-            closeIterator(this);
-            throw new RangeError("Iterator limit out of range");
-        }
-
-        const self = this;
-        let done = false;
-
-        return createHelper(
+    const chunks = { chunks(this: any, size: any) {
+        if (!isObject(this)) throw new TypeError("Iterator.prototype.chunks called on a non-object");
+        const chunkSize = sizeArgument(this, size, "chunks");
+        const record = iteratorDirect(this);
+        return makeHelper(
             () => {
-                if (done) return { done: true, value: undefined };
-                const chunk: any[] = [];
-                for (let i = 0; i < size; i++) {
-                    const step = self.next();
-                    if (step && step.done) {
-                        done = true;
-                        if (chunk.length > 0) {
-                            return { done: false, value: chunk };
-                        }
-                        return { done: true, value: undefined };
-                    }
-                    chunk.push(step ? step.value : undefined);
+                if (record.done) return DONE;
+                const buffer: any[] = [];
+                while (true) {
+                    const value = step(record);
+                    // A source that runs out mid-chunk still hands on what it produced.
+                    if (value === DONE) return buffer.length > 0 ? buffer : DONE;
+                    buffer.push(value);
+                    if (buffer.length === chunkSize) return buffer;
                 }
-                return { done: false, value: chunk };
             },
-            () => {
-                done = true;
-                closeIterator(self);
-            }
+            () => closeIterator(record.iterator)
         );
-    }
+    } }.chunks;
 
     // Iterator.prototype.windows(size, undersized?)
-    function windows(this: any, size: any, undersized?: any) {
-        if (typeof size !== "number") {
-            closeIterator(this);
-            throw new TypeError("windows size must be a Number");
-        }
-        if (!Number.isFinite(size) || Math.trunc(size) !== size) {
-            closeIterator(this);
-            throw new TypeError("windows size must be an integral Number");
-        }
-        if (size < 1 || size > 4294967295) {
-            closeIterator(this);
-            throw new RangeError("Iterator limit out of range");
-        }
-
+    const windows = { windows(this: any, size: any, undersized: any = undefined) {
+        if (!isObject(this)) throw new TypeError("Iterator.prototype.windows called on a non-object");
+        const windowSize = sizeArgument(this, size, "windows");
+        // Two spellings and nothing else -- not a value that would stringify to one of them.
         let allowPartial = false;
-        if (undersized !== undefined) {
-            if (undersized === "allow-partial") {
-                allowPartial = true;
-            } else if (undersized !== "only-full") {
-                closeIterator(this);
-                throw new TypeError('windows undersized must be "only-full" or "allow-partial"');
-            }
+        if (undersized === "allow-partial") {
+            allowPartial = true;
+        } else if (undersized !== undefined && undersized !== "only-full") {
+            closeDiscarding(this);
+            throw new TypeError('windows undersized must be "only-full" or "allow-partial"');
         }
-
-        const self = this;
+        const record = iteratorDirect(this);
         const buffer: any[] = [];
-        let done = false;
-        let filledOnce = false;
-
-        return createHelper(
+        return makeHelper(
             () => {
-                if (done) return { done: true, value: undefined };
-
-                if (!filledOnce) {
-                    while (buffer.length < size) {
-                        const step = self.next();
-                        if (step && step.done) {
-                            done = true;
-                            if (allowPartial && buffer.length > 0 && buffer.length < size) {
-                                const result = buffer.slice();
-                                buffer.length = 0;
-                                return { done: false, value: result };
-                            }
-                            return { done: true, value: undefined };
+                while (true) {
+                    if (record.done) return DONE;
+                    const value = step(record);
+                    if (value === DONE) {
+                        // A short window only when the whole source was shorter than one window:
+                        // a buffer that ever filled is never drained.
+                        if (allowPartial && buffer.length > 0 && buffer.length < windowSize) {
+                            const partial = buffer.slice();
+                            buffer.length = 0;
+                            return partial;
                         }
-                        buffer.push(step ? step.value : undefined);
+                        return DONE;
                     }
-                    filledOnce = true;
-                    return { done: false, value: buffer.slice() };
+                    if (buffer.length === windowSize) buffer.shift();
+                    buffer.push(value);
+                    if (buffer.length === windowSize) return buffer.slice();
                 }
-
-                const step = self.next();
-                if (step && step.done) {
-                    done = true;
-                    return { done: true, value: undefined };
-                }
-                buffer.shift();
-                buffer.push(step ? step.value : undefined);
-                return { done: false, value: buffer.slice() };
             },
-            () => {
-                done = true;
-                closeIterator(self);
-            }
+            () => closeIterator(record.iterator)
         );
-    }
+    } }.windows;
 
-    // Iterator.prototype.join(separator?)
-    function join(this: any, separator?: any) {
-        const sep = separator === undefined ? "," : String(separator);
-        const parts: string[] = [];
-        while (true) {
-            const step = this.next();
-            if (step && step.done) break;
-            const val = step ? step.value : undefined;
-            if (val === null || val === undefined) {
-                parts.push("");
-            } else {
-                parts.push(String(val));
+    // Iterator.prototype.join(separator): the separator is converted before `next` is read, and
+    // the source is closed for the errors `join` causes itself -- a throwing `toString` on the
+    // separator or an element -- and for nothing else.
+    const join = { join(this: any, separator: any) {
+        if (!isObject(this)) throw new TypeError("Iterator.prototype.join called on a non-object");
+        let sep = ",";
+        if (separator !== undefined) {
+            try {
+                sep = `${separator}`;
+            } catch (error) {
+                closeDiscarding(this);
+                throw error;
             }
         }
-        return parts.join(sep);
-    }
+        const record = iteratorDirect(this);
+        let joined = "";
+        let first = true;
+        while (true) {
+            const value = step(record);
+            if (value === DONE) return joined;
+            if (!first) joined += sep;
+            first = false;
+            // A nullish element contributes nothing but still gets its separator.
+            if (value === null || value === undefined) continue;
+            try {
+                joined += `${value}`;
+            } catch (error) {
+                closeDiscarding(this);
+                throw error;
+            }
+        }
+    } }.join;
 
-    // Iterator.prototype[Symbol.dispose]()
-    function dispose(this: any) {
-        closeIterator(this);
-    }
+    // Iterator.prototype[Symbol.dispose](): `return`, if there is one, and its errors are the
+    // caller's.
+    const dispose = { [Symbol.dispose](this: any) {
+        const method = this.return;
+        if (method !== undefined && method !== null) {
+            if (typeof method !== "function") throw new TypeError("Iterator return method is not callable");
+            method.call(this);
+        }
+    } }[Symbol.dispose];
 
     defineMethod(Iterator, "concat", concat);
     defineMethod(Iterator, "zip", zip);

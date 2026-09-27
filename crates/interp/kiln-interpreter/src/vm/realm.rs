@@ -746,6 +746,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             ("__kilnUrlAdopt", Native::UrlAdoptRaw),
             // The transfer primitive `arraybuffer.ts` captures and deletes (every realm).
             ("__kilnArrayBufferDetach", Native::ArrayBufferDetachRaw),
+            // The in-place length move `resize` and `grow` make (`arraybuffer.ts`, every realm).
+            ("__kilnArrayBufferResize", Native::ArrayBufferResizeRaw),
+            // Whether a view has left its buffer (`typedarray.ts`, every realm).
+            (
+                "__kilnTypedArrayOutOfBounds",
+                Native::TypedArrayOutOfBoundsRaw,
+            ),
+            // `[[SetPrototypeOf]]` and `[[PreventExtensions]]` answering their boolean, which the
+            // shared `Reflect` methods (`object_reflect.ts`) cannot read off `Object`'s spellings:
+            // those turn `false` into a TypeError indistinguishable from a proxy trap's own.
+            ("__kilnSetPrototypeOf", Native::ReflectSetPrototypeOf),
+            ("__kilnPreventExtensions", Native::ReflectPreventExtensions),
             // The structured clone's plain-data fast path: measured for the native backend
             // only, so here it always answers "not handled" and the shared TypeScript clone runs.
             ("__kilnCloneData", Native::CloneDataRaw),

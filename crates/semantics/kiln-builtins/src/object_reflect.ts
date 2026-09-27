@@ -6,7 +6,20 @@
 // - Reflect.preventExtensions(target)
 // - Reflect.setPrototypeOf(target, proto)
 
+// `[[SetPrototypeOf]]` and `[[PreventExtensions]]` with their boolean result (ADR 0065,
+// representation): `Object.setPrototypeOf` and `Object.preventExtensions` report `false` as a
+// TypeError, which cannot be told apart from a TypeError a proxy trap threw or an invariant check
+// raised -- and those must propagate. An engine that publishes neither leaves the fallback below.
+const __kilnSetPrototypeOf: ((target: any, proto: any) => boolean) | undefined =
+    (globalThis as any).__kilnSetPrototypeOf;
+const __kilnPreventExtensions: ((target: any) => boolean) | undefined =
+    (globalThis as any).__kilnPreventExtensions;
+delete (globalThis as any).__kilnSetPrototypeOf;
+delete (globalThis as any).__kilnPreventExtensions;
+
 (function installObjectReflectBuiltins() {
+    // Built-in methods are not constructors, so each is a method definition (`{ m() {} }.m`)
+    // rather than a function declaration, which would have [[Construct]].
     const defineMethod = (target: any, name: string | symbol, fn: any) => {
         Object.defineProperty(target, name, {
             value: fn,
@@ -17,39 +30,47 @@
     };
 
     if (typeof Reflect !== "undefined") {
-        function isExtensible(target: any) {
+        const isExtensible = { isExtensible(target: any) {
             if (target === null || (typeof target !== "object" && typeof target !== "function")) {
                 throw new TypeError("Reflect.isExtensible called on non-object");
             }
             return Object.isExtensible(target);
-        }
+        } }.isExtensible;
 
-        function preventExtensions(target: any) {
+        const preventExtensions = { preventExtensions(target: any) {
             if (target === null || (typeof target !== "object" && typeof target !== "function")) {
                 throw new TypeError("Reflect.preventExtensions called on non-object");
             }
+            if (__kilnPreventExtensions !== undefined) return __kilnPreventExtensions(target);
+            // Without the primitive: `Object.preventExtensions` reports a refusal as a TypeError,
+            // and anything else -- a proxy trap's own throw -- is the program's and propagates.
+            // A trap's own TypeError is misread as a refusal here; the primitive has no such gap.
             try {
                 Object.preventExtensions(target);
                 return !Object.isExtensible(target);
-            } catch {
-                return false;
+            } catch (error) {
+                if (error instanceof TypeError) return false;
+                throw error;
             }
-        }
+        } }.preventExtensions;
 
-        function setPrototypeOf(target: any, proto: any) {
+        const setPrototypeOf = { setPrototypeOf(target: any, proto: any) {
             if (target === null || (typeof target !== "object" && typeof target !== "function")) {
                 throw new TypeError("Reflect.setPrototypeOf called on non-object");
             }
             if (proto !== null && typeof proto !== "object" && typeof proto !== "function") {
                 throw new TypeError("Object prototype may only be an Object or null: " + String(proto));
             }
+            if (__kilnSetPrototypeOf !== undefined) return __kilnSetPrototypeOf(target, proto);
+            // As above: a refusal is a TypeError, and any other throw is the program's.
             try {
                 Object.setPrototypeOf(target, proto);
                 return true;
-            } catch {
-                return false;
+            } catch (error) {
+                if (error instanceof TypeError) return false;
+                throw error;
             }
-        }
+        } }.setPrototypeOf;
 
         defineMethod(Reflect, "isExtensible", isExtensible);
         defineMethod(Reflect, "preventExtensions", preventExtensions);
@@ -57,7 +78,7 @@
     }
 
     if (typeof Object !== "undefined") {
-        function seal(o: any) {
+        const seal = { seal(o: any) {
             if (o === null || (typeof o !== "object" && typeof o !== "function")) {
                 return o;
             }
@@ -81,9 +102,9 @@
                 }
             }
             return o;
-        }
+        } }.seal;
 
-        function isSealed(o: any) {
+        const isSealed = { isSealed(o: any) {
             if (o === null || (typeof o !== "object" && typeof o !== "function")) {
                 return true;
             }
@@ -107,7 +128,7 @@
                 }
             }
             return true;
-        }
+        } }.isSealed;
 
         defineMethod(Object, "seal", seal);
         defineMethod(Object, "isSealed", isSealed);

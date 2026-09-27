@@ -6,12 +6,12 @@
   const Proto = RegExp.prototype as any;
 
   // Annex B.3 method `compile(pattern, flags?)`:
-  function compile(this: any, pattern: any, flags?: any): RegExp {
+  const compile = { compile(this: any, pattern: any, flags?: any): RegExp {
     if (!(this instanceof RegExp)) {
       throw new TypeError("RegExp.prototype.compile called on incompatible receiver");
     }
     return new RegExp(pattern, flags);
-  }
+  } }.compile;
 
   Object.defineProperty(Proto, "compile", {
     value: compile,
@@ -21,7 +21,7 @@
   });
 
   // Static `RegExp.escape(text)` (ES2025):
-  function escape(text: any): string {
+  const escape = { escape(text: any): string {
     if (typeof text !== "string") {
       throw new TypeError("RegExp.escape requires a string");
     }
@@ -73,7 +73,7 @@
       escaped += ch;
     }
     return escaped;
-  }
+  } }.escape;
 
   Object.defineProperty(RegExp, "escape", {
     value: escape,

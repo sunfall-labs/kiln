@@ -18,7 +18,10 @@
   // Howard Hinnant's proleptic Gregorian calendar algorithm
   function civilFromDays(days: number): [number, number, number] {
     const shifted = days + 719468;
-    const era = Math.floor((shifted >= 0 ? shifted : shifted - 146096) / 146097);
+    // `Math.floor` already rounds toward negative infinity; the `- 146096` of Hinnant's C
+    // original corrects a *truncating* division, and applied here it moved every exact era
+    // boundary back an era (`new Date(-8.64e15)` printed a day late).
+    const era = Math.floor(shifted / 146097);
     const dayOfEra = shifted - era * 146097;
     const yearOfEra = Math.floor(
       (dayOfEra - Math.floor(dayOfEra / 1460) + Math.floor(dayOfEra / 36524) - Math.floor(dayOfEra / 146096)) / 365
@@ -34,7 +37,7 @@
 
   function daysFromCivil(year: number, month: number, day: number): number {
     const y = year - (month <= 2 ? 1 : 0);
-    const era = Math.floor((y >= 0 ? y : y - 399) / 400);
+    const era = Math.floor(y / 400);
     const yearOfEra = y - era * 400;
     const shiftedMonth = month > 2 ? month - 3 : month + 9;
     const dayOfYear = Math.floor((153 * shiftedMonth + 2) / 5) + day - 1;
@@ -121,163 +124,174 @@
   }
 
   // --- Getters ---
-  function getTime(this: Date): number {
+  const getTime = { getTime(this: Date): number {
     return rawGetTime.call(this);
-  }
+  } }.getTime;
 
-  function valueOf(this: Date): number {
+  const valueOf = { valueOf(this: Date): number {
     return rawGetTime.call(this);
-  }
+  } }.valueOf;
 
-  function getUTCFullYear(this: Date): number {
+  const getUTCFullYear = { getUTCFullYear(this: Date): number {
     const t = rawGetTime.call(this);
     const p = dateParts(t);
     return p ? p.year : NaN;
-  }
+  } }.getUTCFullYear;
 
-  function getUTCMonth(this: Date): number {
+  const getUTCMonth = { getUTCMonth(this: Date): number {
     const t = rawGetTime.call(this);
     const p = dateParts(t);
     return p ? p.month : NaN;
-  }
+  } }.getUTCMonth;
 
-  function getUTCDate(this: Date): number {
+  const getUTCDate = { getUTCDate(this: Date): number {
     const t = rawGetTime.call(this);
     const p = dateParts(t);
     return p ? p.date : NaN;
-  }
+  } }.getUTCDate;
 
-  function getUTCDay(this: Date): number {
+  const getUTCDay = { getUTCDay(this: Date): number {
     const t = rawGetTime.call(this);
     const p = dateParts(t);
     return p ? p.day : NaN;
-  }
+  } }.getUTCDay;
 
-  function getUTCHours(this: Date): number {
+  const getUTCHours = { getUTCHours(this: Date): number {
     const t = rawGetTime.call(this);
     const p = dateParts(t);
     return p ? p.hour : NaN;
-  }
+  } }.getUTCHours;
 
-  function getUTCMinutes(this: Date): number {
+  const getUTCMinutes = { getUTCMinutes(this: Date): number {
     const t = rawGetTime.call(this);
     const p = dateParts(t);
     return p ? p.minute : NaN;
-  }
+  } }.getUTCMinutes;
 
-  function getUTCSeconds(this: Date): number {
+  const getUTCSeconds = { getUTCSeconds(this: Date): number {
     const t = rawGetTime.call(this);
     const p = dateParts(t);
     return p ? p.second : NaN;
-  }
+  } }.getUTCSeconds;
 
-  function getUTCMilliseconds(this: Date): number {
+  const getUTCMilliseconds = { getUTCMilliseconds(this: Date): number {
     const t = rawGetTime.call(this);
     const p = dateParts(t);
     return p ? p.millisecond : NaN;
-  }
+  } }.getUTCMilliseconds;
 
-  function getTimezoneOffset(this: Date): number {
-    rawGetTime.call(this);
-    return 0;
-  }
+  const getTimezoneOffset = { getTimezoneOffset(this: Date): number {
+    // The realm's zone is UTC (ADR 0015), so the offset is 0 -- of a valid time. An invalid
+    // date has no offset at all.
+    return Number.isNaN(rawGetTime.call(this)) ? NaN : 0;
+  } }.getTimezoneOffset;
 
-  function getYear(this: Date): number {
+  const getYear = { getYear(this: Date): number {
     const t = rawGetTime.call(this);
     const p = dateParts(t);
     return p ? p.year - 1900 : NaN;
-  }
+  } }.getYear;
 
-  function getFullYear(this: Date): number { return getUTCFullYear.call(this); }
-  function getMonth(this: Date): number { return getUTCMonth.call(this); }
-  function getDate(this: Date): number { return getUTCDate.call(this); }
-  function getDay(this: Date): number { return getUTCDay.call(this); }
-  function getHours(this: Date): number { return getUTCHours.call(this); }
-  function getMinutes(this: Date): number { return getUTCMinutes.call(this); }
-  function getSeconds(this: Date): number { return getUTCSeconds.call(this); }
-  function getMilliseconds(this: Date): number { return getUTCMilliseconds.call(this); }
+  const getFullYear = { getFullYear(this: Date): number { return getUTCFullYear.call(this); } }.getFullYear;
+  const getMonth = { getMonth(this: Date): number { return getUTCMonth.call(this); } }.getMonth;
+  const getDate = { getDate(this: Date): number { return getUTCDate.call(this); } }.getDate;
+  const getDay = { getDay(this: Date): number { return getUTCDay.call(this); } }.getDay;
+  const getHours = { getHours(this: Date): number { return getUTCHours.call(this); } }.getHours;
+  const getMinutes = { getMinutes(this: Date): number { return getUTCMinutes.call(this); } }.getMinutes;
+  const getSeconds = { getSeconds(this: Date): number { return getUTCSeconds.call(this); } }.getSeconds;
+  const getMilliseconds = { getMilliseconds(this: Date): number { return getUTCMilliseconds.call(this); } }.getMilliseconds;
 
   // --- Setters ---
-  function setTime(this: Date, time: any): number {
+  const setTime = { setTime(this: Date, time: any): number {
     rawGetTime.call(this);
     const t = Number(time);
     const clipped = timeClip(t);
     return rawSetTime.call(this, clipped);
-  }
+  } }.setTime;
 
-  function setUTCFullYear(this: Date, year: any, month?: any, date?: any): number {
+  // Every setter converts each argument that is *present* -- counted by `arguments.length`, so
+  // an explicit `undefined` is present and converts to NaN -- in order, and only then consults
+  // the time value; a setter on an invalid date still runs every `valueOf` it was handed.
+  const setUTCFullYear = { setUTCFullYear(this: Date, year: any, month?: any, date?: any): number {
     const t = rawGetTime.call(this);
     const y = Number(year);
     const base = Number.isNaN(t) ? 0 : t;
     const p = dateParts(base)!;
-    const m = month !== undefined ? Number(month) : p.month;
-    const d = date !== undefined ? Number(date) : p.date;
+    const m = arguments.length > 1 ? Number(month) : p.month;
+    const d = arguments.length > 2 ? Number(date) : p.date;
     const newTime = partsToInstant(y, m, d, p.hour, p.minute, p.second, p.millisecond);
     return rawSetTime.call(this, newTime);
-  }
+  } }.setUTCFullYear;
 
-  function setUTCMonth(this: Date, month: any, date?: any): number {
+  const setUTCMonth = { setUTCMonth(this: Date, month: any, date?: any): number {
     const t = rawGetTime.call(this);
     const m = Number(month);
+    const dt = arguments.length > 1 ? Number(date) : undefined;
     if (Number.isNaN(t)) return NaN;
     const p = dateParts(t)!;
-    const d = date !== undefined ? Number(date) : p.date;
+    const d = dt !== undefined ? dt : p.date;
     const newTime = partsToInstant(p.year, m, d, p.hour, p.minute, p.second, p.millisecond);
     return rawSetTime.call(this, newTime);
-  }
+  } }.setUTCMonth;
 
-  function setUTCDate(this: Date, date: any): number {
+  const setUTCDate = { setUTCDate(this: Date, date: any): number {
     const t = rawGetTime.call(this);
     const d = Number(date);
     if (Number.isNaN(t)) return NaN;
     const p = dateParts(t)!;
     const newTime = partsToInstant(p.year, p.month, d, p.hour, p.minute, p.second, p.millisecond);
     return rawSetTime.call(this, newTime);
-  }
+  } }.setUTCDate;
 
-  function setUTCHours(this: Date, hours: any, min?: any, sec?: any, ms?: any): number {
+  const setUTCHours = { setUTCHours(this: Date, hours: any, min?: any, sec?: any, ms?: any): number {
     const t = rawGetTime.call(this);
     const h = Number(hours);
+    const mi = arguments.length > 1 ? Number(min) : undefined;
+    const se = arguments.length > 2 ? Number(sec) : undefined;
+    const mil = arguments.length > 3 ? Number(ms) : undefined;
     if (Number.isNaN(t)) return NaN;
     const p = dateParts(t)!;
-    const newMin = min !== undefined ? Number(min) : p.minute;
-    const newSec = sec !== undefined ? Number(sec) : p.second;
-    const newMs = ms !== undefined ? Number(ms) : p.millisecond;
+    const newMin = mi !== undefined ? mi : p.minute;
+    const newSec = se !== undefined ? se : p.second;
+    const newMs = mil !== undefined ? mil : p.millisecond;
     const newTime = partsToInstant(p.year, p.month, p.date, h, newMin, newSec, newMs);
     return rawSetTime.call(this, newTime);
-  }
+  } }.setUTCHours;
 
-  function setUTCMinutes(this: Date, min: any, sec?: any, ms?: any): number {
+  const setUTCMinutes = { setUTCMinutes(this: Date, min: any, sec?: any, ms?: any): number {
     const t = rawGetTime.call(this);
     const m = Number(min);
+    const se = arguments.length > 1 ? Number(sec) : undefined;
+    const mil = arguments.length > 2 ? Number(ms) : undefined;
     if (Number.isNaN(t)) return NaN;
     const p = dateParts(t)!;
-    const newSec = sec !== undefined ? Number(sec) : p.second;
-    const newMs = ms !== undefined ? Number(ms) : p.millisecond;
+    const newSec = se !== undefined ? se : p.second;
+    const newMs = mil !== undefined ? mil : p.millisecond;
     const newTime = partsToInstant(p.year, p.month, p.date, p.hour, m, newSec, newMs);
     return rawSetTime.call(this, newTime);
-  }
+  } }.setUTCMinutes;
 
-  function setUTCSeconds(this: Date, sec: any, ms?: any): number {
+  const setUTCSeconds = { setUTCSeconds(this: Date, sec: any, ms?: any): number {
     const t = rawGetTime.call(this);
     const s = Number(sec);
+    const mil = arguments.length > 1 ? Number(ms) : undefined;
     if (Number.isNaN(t)) return NaN;
     const p = dateParts(t)!;
-    const newMs = ms !== undefined ? Number(ms) : p.millisecond;
+    const newMs = mil !== undefined ? mil : p.millisecond;
     const newTime = partsToInstant(p.year, p.month, p.date, p.hour, p.minute, s, newMs);
     return rawSetTime.call(this, newTime);
-  }
+  } }.setUTCSeconds;
 
-  function setUTCMilliseconds(this: Date, ms: any): number {
+  const setUTCMilliseconds = { setUTCMilliseconds(this: Date, ms: any): number {
     const t = rawGetTime.call(this);
     const m = Number(ms);
     if (Number.isNaN(t)) return NaN;
     const p = dateParts(t)!;
     const newTime = partsToInstant(p.year, p.month, p.date, p.hour, p.minute, p.second, m);
     return rawSetTime.call(this, newTime);
-  }
+  } }.setUTCMilliseconds;
 
-  function setYear(this: Date, year: any): number {
+  const setYear = { setYear(this: Date, year: any): number {
     const t = rawGetTime.call(this);
     let y = Number(year);
     if (Number.isNaN(y)) {
@@ -291,29 +305,29 @@
     const p = dateParts(base)!;
     const newTime = partsToInstant(y, p.month, p.date, p.hour, p.minute, p.second, p.millisecond);
     return rawSetTime.call(this, newTime);
-  }
+  } }.setYear;
 
-  function setFullYear(this: Date, year: any, month?: any, date?: any): number {
+  const setFullYear = { setFullYear(this: Date, year: any, month?: any, date?: any): number {
     return setUTCFullYear.apply(this, arguments as any);
-  }
-  function setMonth(this: Date, month: any, date?: any): number {
+  } }.setFullYear;
+  const setMonth = { setMonth(this: Date, month: any, date?: any): number {
     return setUTCMonth.apply(this, arguments as any);
-  }
-  function setDate(this: Date, date: any): number {
+  } }.setMonth;
+  const setDate = { setDate(this: Date, date: any): number {
     return setUTCDate.apply(this, arguments as any);
-  }
-  function setHours(this: Date, hours: any, min?: any, sec?: any, ms?: any): number {
+  } }.setDate;
+  const setHours = { setHours(this: Date, hours: any, min?: any, sec?: any, ms?: any): number {
     return setUTCHours.apply(this, arguments as any);
-  }
-  function setMinutes(this: Date, min: any, sec?: any, ms?: any): number {
+  } }.setHours;
+  const setMinutes = { setMinutes(this: Date, min: any, sec?: any, ms?: any): number {
     return setUTCMinutes.apply(this, arguments as any);
-  }
-  function setSeconds(this: Date, sec: any, ms?: any): number {
+  } }.setMinutes;
+  const setSeconds = { setSeconds(this: Date, sec: any, ms?: any): number {
     return setUTCSeconds.apply(this, arguments as any);
-  }
-  function setMilliseconds(this: Date, ms: any): number {
+  } }.setSeconds;
+  const setMilliseconds = { setMilliseconds(this: Date, ms: any): number {
     return setUTCMilliseconds.apply(this, arguments as any);
-  }
+  } }.setMilliseconds;
 
   // --- Formatters ---
   const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -323,35 +337,35 @@
   const three = (n: number) => String(n).padStart(3, "0");
   const yearStr4 = (y: number) => (y < 0 ? "-" + String(-y).padStart(4, "0") : String(y).padStart(4, "0"));
 
-  function toDateString(this: Date): string {
+  const toDateString = { toDateString(this: Date): string {
     const t = rawGetTime.call(this);
     const p = dateParts(t);
     if (!p) return "Invalid Date";
     return `${DAYS[p.day]} ${MONTHS[p.month]} ${two(p.date)} ${yearStr4(p.year)}`;
-  }
+  } }.toDateString;
 
-  function toTimeString(this: Date): string {
+  const toTimeString = { toTimeString(this: Date): string {
     const t = rawGetTime.call(this);
     const p = dateParts(t);
     if (!p) return "Invalid Date";
     return `${two(p.hour)}:${two(p.minute)}:${two(p.second)} GMT+0000 (Coordinated Universal Time)`;
-  }
+  } }.toTimeString;
 
-  function toString(this: Date): string {
+  const toString = { toString(this: Date): string {
     const t = rawGetTime.call(this);
     const p = dateParts(t);
     if (!p) return "Invalid Date";
     return `${DAYS[p.day]} ${MONTHS[p.month]} ${two(p.date)} ${yearStr4(p.year)} ${two(p.hour)}:${two(p.minute)}:${two(p.second)} GMT+0000 (Coordinated Universal Time)`;
-  }
+  } }.toString;
 
-  function toUTCString(this: Date): string {
+  const toUTCString = { toUTCString(this: Date): string {
     const t = rawGetTime.call(this);
     const p = dateParts(t);
     if (!p) return "Invalid Date";
     return `${DAYS[p.day]}, ${two(p.date)} ${MONTHS[p.month]} ${yearStr4(p.year)} ${two(p.hour)}:${two(p.minute)}:${two(p.second)} GMT`;
-  }
+  } }.toUTCString;
 
-  function toISOString(this: Date): string {
+  const toISOString = { toISOString(this: Date): string {
     const t = rawGetTime.call(this);
     const p = dateParts(t);
     if (!p) throw new RangeError("Invalid time value");
@@ -359,40 +373,108 @@
       ? String(p.year).padStart(4, "0")
       : (p.year < 0 ? "-" + String(-p.year).padStart(6, "0") : "+" + String(p.year).padStart(6, "0"));
     return `${y}-${two(p.month + 1)}-${two(p.date)}T${two(p.hour)}:${two(p.minute)}:${two(p.second)}.${three(p.millisecond)}Z`;
-  }
+  } }.toISOString;
 
-  function toJSON(this: any, key?: any): any {
-    const tv = Number(this.valueOf());
-    if (!Number.isFinite(tv)) return null;
-    const toISO = this.toISOString;
+  // `Date.prototype.toJSON`: generic -- any object with a `toISOString` will do -- so it asks the
+  // receiver's own `ToPrimitive` with the number hint rather than its time value.
+  const toJSON = { toJSON(this: any, key: any): any {
+    if (this === null || this === undefined) {
+      throw new TypeError("Date.prototype.toJSON called on null or undefined");
+    }
+    const O = Object(this);
+    const tv = toPrimitiveNumber(O);
+    if (typeof tv === "number" && !Number.isFinite(tv)) return null;
+    const toISO = O.toISOString;
     if (typeof toISO !== "function") {
       throw new TypeError("toISOString is not a function");
     }
-    return toISO.call(this);
-  }
+    return toISO.call(O);
+  } }.toJSON;
 
-  function toLocaleString(this: Date): string {
-    if (typeof Intl !== "undefined" && typeof (Intl as any).DateTimeFormat === "function") {
-      return new (Intl as any).DateTimeFormat(arguments[0], arguments[1]).format(this);
+  // `ToPrimitive(input, number)` for an object.
+  function toPrimitiveNumber(input: any): any {
+    const exotic = input[Symbol.toPrimitive];
+    if (exotic !== undefined && exotic !== null) {
+      if (typeof exotic !== "function") throw new TypeError("Symbol.toPrimitive is not a function");
+      const result = exotic.call(input, "number");
+      if (result !== null && (typeof result === "object" || typeof result === "function")) {
+        throw new TypeError("Cannot convert object to primitive value");
+      }
+      return result;
     }
-    return toString.call(this);
-  }
-
-  function toLocaleDateString(this: Date): string {
-    if (typeof Intl !== "undefined" && typeof (Intl as any).DateTimeFormat === "function") {
-      return new (Intl as any).DateTimeFormat(arguments[0], arguments[1]).format(this);
+    for (const name of ["valueOf", "toString"]) {
+      const method = input[name];
+      if (typeof method === "function") {
+        const result = method.call(input);
+        if (result === null || (typeof result !== "object" && typeof result !== "function")) {
+          return result;
+        }
+      }
     }
-    return toDateString.call(this);
+    throw new TypeError("Cannot convert object to primitive value");
   }
 
-  function toLocaleTimeString(this: Date): string {
-    if (typeof Intl !== "undefined" && typeof (Intl as any).DateTimeFormat === "function") {
-      return new (Intl as any).DateTimeFormat(arguments[0], arguments[1]).format(this);
+  // `ToDateTimeOptions` (ECMA-402): a formatter asked for by `toLocale*String` has the fields
+  // its method implies unless the caller named some of its own -- all of them for
+  // `toLocaleString`, the date for `toLocaleDateString`, the time for `toLocaleTimeString`. The
+  // caller's options are the prototype of the object handed on, so nothing is copied.
+  function localeOptions(options: any, required: string, defaults: string): any {
+    const o = Object.create(options === undefined ? null : Object(options));
+    let needDefaults = true;
+    if (required === "date" || required === "any") {
+      for (const name of ["weekday", "year", "month", "day"]) {
+        if (o[name] !== undefined) needDefaults = false;
+      }
     }
-    return toTimeString.call(this);
+    if (required === "time" || required === "any") {
+      for (const name of ["dayPeriod", "hour", "minute", "second", "fractionalSecondDigits"]) {
+        if (o[name] !== undefined) needDefaults = false;
+      }
+    }
+    if (o.dateStyle !== undefined || o.timeStyle !== undefined) needDefaults = false;
+    if (required === "date" && o.timeStyle !== undefined) {
+      throw new TypeError("toLocaleDateString does not accept timeStyle");
+    }
+    if (required === "time" && o.dateStyle !== undefined) {
+      throw new TypeError("toLocaleTimeString does not accept dateStyle");
+    }
+    if (needDefaults && (defaults === "date" || defaults === "all")) {
+      o.year = "numeric";
+      o.month = "numeric";
+      o.day = "numeric";
+    }
+    if (needDefaults && (defaults === "time" || defaults === "all")) {
+      o.hour = "numeric";
+      o.minute = "numeric";
+      o.second = "numeric";
+    }
+    return o;
   }
 
-  function toPrimitive(this: any, hint: string): any {
+  // Each takes the time value first -- a TypeError for anything that is not a Date -- and an
+  // invalid date is "Invalid Date" whatever the locale.
+  function toLocaleWith(date: Date, locales: any, options: any, required: string, defaults: string, fallback: (this: Date) => string): string {
+    const t = rawGetTime.call(date);
+    if (Number.isNaN(t)) return "Invalid Date";
+    if (typeof Intl !== "undefined" && typeof (Intl as any).DateTimeFormat === "function") {
+      return new (Intl as any).DateTimeFormat(locales, localeOptions(options, required, defaults)).format(t);
+    }
+    return fallback.call(date);
+  }
+
+  const toLocaleString = { toLocaleString(this: Date, locales: any = undefined, options: any = undefined): string {
+    return toLocaleWith(this, locales, options, "any", "all", toString);
+  } }.toLocaleString;
+
+  const toLocaleDateString = { toLocaleDateString(this: Date, locales: any = undefined, options: any = undefined): string {
+    return toLocaleWith(this, locales, options, "date", "date", toDateString);
+  } }.toLocaleDateString;
+
+  const toLocaleTimeString = { toLocaleTimeString(this: Date, locales: any = undefined, options: any = undefined): string {
+    return toLocaleWith(this, locales, options, "time", "time", toTimeString);
+  } }.toLocaleTimeString;
+
+  const toPrimitive = { [Symbol.toPrimitive](this: any, hint: string): any {
     if (typeof this !== "object" || this === null) {
       throw new TypeError("Date.prototype[Symbol.toPrimitive] called on a non-object");
     }
@@ -422,8 +504,10 @@
       throw new TypeError("Cannot convert object to primitive value");
     }
     throw new TypeError("Invalid hint: " + String(hint));
-  }
+  } }[Symbol.toPrimitive];
 
+  // Built-in methods are not constructors, so each is a method definition (`{ m() {} }.m`)
+  // rather than a function declaration, which would have [[Construct]].
   const defineMethod = (name: string | symbol, fn: any) => {
     Object.defineProperty(Date.prototype, name, {
       value: fn,
@@ -481,5 +565,11 @@
   defineMethod("toLocaleString", toLocaleString);
   defineMethod("toLocaleDateString", toLocaleDateString);
   defineMethod("toLocaleTimeString", toLocaleTimeString);
-  defineMethod(Symbol.toPrimitive, toPrimitive);
+  // The one method the specification makes read-only: `{ writable: false, configurable: true }`.
+  Object.defineProperty(Date.prototype, Symbol.toPrimitive, {
+    value: toPrimitive,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
 })();

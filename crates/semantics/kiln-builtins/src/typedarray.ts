@@ -3,6 +3,15 @@
 // Shared by both interpreter and native execution.
 // Implements the complete %TypedArray%.prototype specification in TypeScript.
 
+// `IsTypedArrayOutOfBounds` (ADR 0065, representation): whether a view's window has left its
+// buffer -- detached, or a resizable buffer shrunk under it. It reads the view's own offset and
+// length, which no public accessor reports once the view is out of bounds (both answer 0). The
+// native backend has no resizable buffers, so there a view is out of bounds exactly when it is
+// detached, and it publishes none.
+const __kilnTypedArrayOutOfBounds: ((view: any) => boolean) | undefined =
+  (globalThis as any).__kilnTypedArrayOutOfBounds;
+delete (globalThis as any).__kilnTypedArrayOutOfBounds;
+
 (function installTypedArrayPrototype() {
   if (typeof Uint8Array === "undefined" || !Uint8Array.prototype) {
     return;
@@ -11,6 +20,17 @@
   const Proto = Object.getPrototypeOf(Uint8Array.prototype);
   if (!Proto) {
     return;
+  }
+
+  // `[[ArrayLength]]`, read through the realm's own `length` getter so that a `length` a program
+  // defines on an instance or a subclass prototype cannot change what a method walks. The native
+  // backend publishes no accessor there -- its `.length` on a view is already the element count --
+  // so it reads the property.
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(Proto, "length");
+  const lengthGetter: ((this: any) => number) | undefined =
+    lengthDescriptor && typeof lengthDescriptor.get === "function" ? lengthDescriptor.get : undefined;
+  function lengthOf(ta: any): number {
+    return lengthGetter !== undefined ? lengthGetter.call(ta) : ta.length;
   }
 
   function requireTypedArray(thisArg: any, methodName: string): any {
@@ -39,10 +59,15 @@
     return false;
   }
 
+  function isOutOfBounds(ta: any): boolean {
+    return __kilnTypedArrayOutOfBounds !== undefined ? __kilnTypedArrayOutOfBounds(ta) : isDetached(ta);
+  }
+
+  // `ValidateTypedArray`: a view, and one whose window is still inside its buffer.
   function validateTypedArray(thisArg: any, methodName: string): any {
     requireTypedArray(thisArg, methodName);
-    if (isDetached(thisArg)) {
-      throw new TypeError(`Method %TypedArray%.prototype.${methodName} called on detached ArrayBuffer`);
+    if (isOutOfBounds(thisArg)) {
+      throw new TypeError(`Method %TypedArray%.prototype.${methodName} called on a detached or out-of-bounds ArrayBuffer`);
     }
     return thisArg;
   }
@@ -120,9 +145,9 @@
 
   // --- Search ---
 
-  function indexOf(this: any, searchElement: any, fromIndex?: any): number {
+  const indexOf = { indexOf(this: any, searchElement: any, fromIndex: any = undefined): number {
     validateTypedArray(this, "indexOf");
-    const len = this.length;
+    const len = lengthOf(this);
     if (len === 0) return -1;
     const n = fromIndex === undefined ? 0 : toIntegerOrInfinity(fromIndex);
     if (n === Infinity) return -1;
@@ -148,13 +173,14 @@
       k++;
     }
     return -1;
-  }
+  } }.indexOf;
 
-  function lastIndexOf(this: any, searchElement: any, fromIndex?: any): number {
+  const lastIndexOf = { lastIndexOf(this: any, searchElement: any, fromIndex: any = undefined): number {
     validateTypedArray(this, "lastIndexOf");
-    const len = this.length;
+    const len = lengthOf(this);
     if (len === 0) return -1;
-    const n = fromIndex === undefined ? len - 1 : toIntegerOrInfinity(fromIndex);
+    // "If fromIndex is present": an explicit `undefined` is present, and converts to 0.
+    const n = arguments.length < 2 ? len - 1 : toIntegerOrInfinity(fromIndex);
     if (n === -Infinity) return -1;
 
     let k: number;
@@ -175,11 +201,11 @@
       k--;
     }
     return -1;
-  }
+  } }.lastIndexOf;
 
-  function includes(this: any, searchElement: any, fromIndex?: any): boolean {
+  const includes = { includes(this: any, searchElement: any, fromIndex: any = undefined): boolean {
     validateTypedArray(this, "includes");
-    const len = this.length;
+    const len = lengthOf(this);
     if (len === 0) return false;
     const n = fromIndex === undefined ? 0 : toIntegerOrInfinity(fromIndex);
     if (n === Infinity) return false;
@@ -212,16 +238,16 @@
       k++;
     }
     return false;
-  }
+  } }.includes;
 
   // --- Predicates / Searchers ---
 
-  function find(this: any, predicate: any, thisArg?: any): any {
+  const find = { find(this: any, predicate: any, thisArg: any = undefined): any {
     validateTypedArray(this, "find");
     if (typeof predicate !== "function") {
       throw new TypeError(predicate + " is not a function");
     }
-    const len = this.length;
+    const len = lengthOf(this);
     for (let k = 0; k < len; k++) {
       const kValue = this[k];
       if (predicate.call(thisArg, kValue, k, this)) {
@@ -229,14 +255,14 @@
       }
     }
     return undefined;
-  }
+  } }.find;
 
-  function findIndex(this: any, predicate: any, thisArg?: any): number {
+  const findIndex = { findIndex(this: any, predicate: any, thisArg: any = undefined): number {
     validateTypedArray(this, "findIndex");
     if (typeof predicate !== "function") {
       throw new TypeError(predicate + " is not a function");
     }
-    const len = this.length;
+    const len = lengthOf(this);
     for (let k = 0; k < len; k++) {
       const kValue = this[k];
       if (predicate.call(thisArg, kValue, k, this)) {
@@ -244,14 +270,14 @@
       }
     }
     return -1;
-  }
+  } }.findIndex;
 
-  function findLast(this: any, predicate: any, thisArg?: any): any {
+  const findLast = { findLast(this: any, predicate: any, thisArg: any = undefined): any {
     validateTypedArray(this, "findLast");
     if (typeof predicate !== "function") {
       throw new TypeError(predicate + " is not a function");
     }
-    const len = this.length;
+    const len = lengthOf(this);
     for (let k = len - 1; k >= 0; k--) {
       const kValue = this[k];
       if (predicate.call(thisArg, kValue, k, this)) {
@@ -259,14 +285,14 @@
       }
     }
     return undefined;
-  }
+  } }.findLast;
 
-  function findLastIndex(this: any, predicate: any, thisArg?: any): number {
+  const findLastIndex = { findLastIndex(this: any, predicate: any, thisArg: any = undefined): number {
     validateTypedArray(this, "findLastIndex");
     if (typeof predicate !== "function") {
       throw new TypeError(predicate + " is not a function");
     }
-    const len = this.length;
+    const len = lengthOf(this);
     for (let k = len - 1; k >= 0; k--) {
       const kValue = this[k];
       if (predicate.call(thisArg, kValue, k, this)) {
@@ -274,68 +300,68 @@
       }
     }
     return -1;
-  }
+  } }.findLastIndex;
 
-  function some(this: any, predicate: any, thisArg?: any): boolean {
+  const some = { some(this: any, predicate: any, thisArg: any = undefined): boolean {
     validateTypedArray(this, "some");
     if (typeof predicate !== "function") {
       throw new TypeError(predicate + " is not a function");
     }
-    const len = this.length;
+    const len = lengthOf(this);
     for (let k = 0; k < len; k++) {
       if (predicate.call(thisArg, this[k], k, this)) {
         return true;
       }
     }
     return false;
-  }
+  } }.some;
 
-  function every(this: any, predicate: any, thisArg?: any): boolean {
+  const every = { every(this: any, predicate: any, thisArg: any = undefined): boolean {
     validateTypedArray(this, "every");
     if (typeof predicate !== "function") {
       throw new TypeError(predicate + " is not a function");
     }
-    const len = this.length;
+    const len = lengthOf(this);
     for (let k = 0; k < len; k++) {
       if (!predicate.call(thisArg, this[k], k, this)) {
         return false;
       }
     }
     return true;
-  }
+  } }.every;
 
   // --- Reducers / Iterators ---
 
-  function forEach(this: any, callback: any, thisArg?: any): void {
+  const forEach = { forEach(this: any, callback: any, thisArg: any = undefined): void {
     validateTypedArray(this, "forEach");
     if (typeof callback !== "function") {
       throw new TypeError(callback + " is not a function");
     }
-    const len = this.length;
+    const len = lengthOf(this);
     for (let k = 0; k < len; k++) {
       callback.call(thisArg, this[k], k, this);
     }
-  }
+  } }.forEach;
 
-  function map(this: any, callback: any, thisArg?: any): any {
+  const map = { map(this: any, callback: any, thisArg: any = undefined): any {
     validateTypedArray(this, "map");
     if (typeof callback !== "function") {
       throw new TypeError(callback + " is not a function");
     }
-    const len = this.length;
+    const len = lengthOf(this);
     const result = typedArraySpeciesCreate(this, len, "map");
     for (let k = 0; k < len; k++) {
       result[k] = callback.call(thisArg, this[k], k, this);
     }
     return result;
-  }
+  } }.map;
 
-  function filter(this: any, callback: any, thisArg?: any): any {
+  const filter = { filter(this: any, callback: any, thisArg: any = undefined): any {
     validateTypedArray(this, "filter");
     if (typeof callback !== "function") {
       throw new TypeError(callback + " is not a function");
     }
-    const len = this.length;
+    const len = lengthOf(this);
     const kept: any[] = [];
     for (let k = 0; k < len; k++) {
       const val = this[k];
@@ -348,14 +374,14 @@
       result[n] = kept[n];
     }
     return result;
-  }
+  } }.filter;
 
-  function reduce(this: any, callback: any, initialValue?: any): any {
+  const reduce = { reduce(this: any, callback: any, initialValue: any = undefined): any {
     validateTypedArray(this, "reduce");
     if (typeof callback !== "function") {
       throw new TypeError(callback + " is not a function");
     }
-    const len = this.length;
+    const len = lengthOf(this);
     if (len === 0 && arguments.length < 2) {
       throw new TypeError("Reduce of empty array with no initial value");
     }
@@ -372,14 +398,14 @@
       k++;
     }
     return accumulator;
-  }
+  } }.reduce;
 
-  function reduceRight(this: any, callback: any, initialValue?: any): any {
+  const reduceRight = { reduceRight(this: any, callback: any, initialValue: any = undefined): any {
     validateTypedArray(this, "reduceRight");
     if (typeof callback !== "function") {
       throw new TypeError(callback + " is not a function");
     }
-    const len = this.length;
+    const len = lengthOf(this);
     if (len === 0 && arguments.length < 2) {
       throw new TypeError("Reduce of empty array with no initial value");
     }
@@ -396,11 +422,11 @@
       k--;
     }
     return accumulator;
-  }
+  } }.reduceRight;
 
-  function join(this: any, separator?: any): string {
+  const join = { join(this: any, separator?: any): string {
     validateTypedArray(this, "join");
-    const len = this.length;
+    const len = lengthOf(this);
     const sep = separator === undefined ? "," : String(separator);
     let res = "";
     for (let k = 0; k < len; k++) {
@@ -411,7 +437,7 @@
       }
     }
     return res;
-  }
+  } }.join;
 
   function createTypedArrayIterator(ta: any, kind: "entries" | "keys" | "values"): any {
     let index = 0;
@@ -420,7 +446,7 @@
         if (isDetached(ta)) {
           throw new TypeError("Cannot iterate over detached ArrayBuffer");
         }
-        if (index >= ta.length) {
+        if (index >= lengthOf(ta)) {
           return { value: undefined, done: true };
         }
         const i = index++;
@@ -449,26 +475,33 @@
     return iterator;
   }
 
-  function entries(this: any): any {
+  // `CreateArrayIterator` over a view: the realm's own Array Iterator, whose prototype is
+  // %ArrayIteratorPrototype% and whose `next` already knows a view's length -- and that it throws
+  // once the view is out of bounds -- so the view gets the object an array gets.
+  const arrayEntries = Array.prototype.entries;
+  const arrayKeys = Array.prototype.keys;
+  const arrayValues = Array.prototype.values;
+
+  const entries = { entries(this: any): any {
     validateTypedArray(this, "entries");
-    return createTypedArrayIterator(this, "entries");
-  }
+    return typeof arrayEntries === "function" ? arrayEntries.call(this) : createTypedArrayIterator(this, "entries");
+  } }.entries;
 
-  function keys(this: any): any {
+  const keys = { keys(this: any): any {
     validateTypedArray(this, "keys");
-    return createTypedArrayIterator(this, "keys");
-  }
+    return typeof arrayKeys === "function" ? arrayKeys.call(this) : createTypedArrayIterator(this, "keys");
+  } }.keys;
 
-  function values(this: any): any {
+  const values = { values(this: any): any {
     validateTypedArray(this, "values");
-    return createTypedArrayIterator(this, "values");
-  }
+    return typeof arrayValues === "function" ? arrayValues.call(this) : createTypedArrayIterator(this, "values");
+  } }.values;
 
   // --- Mutators / Copiers ---
 
-  function slice(this: any, start: any, end: any): any {
+  const slice = { slice(this: any, start: any, end: any): any {
     validateTypedArray(this, "slice");
-    const len = this.length;
+    const len = lengthOf(this);
     const relativeStart = start === undefined ? 0 : toIntegerOrInfinity(start);
     let k: number;
     if (relativeStart === -Infinity) {
@@ -500,12 +533,12 @@
       }
     }
     return result;
-  }
+  } }.slice;
 
-  function subarray(this: any, begin: any, end: any): any {
+  const subarray = { subarray(this: any, begin: any, end: any): any {
     requireTypedArray(this, "subarray");
     const buffer = this.buffer;
-    const srcLength = this.length;
+    const srcLength = lengthOf(this);
     const relativeBegin = begin === undefined ? 0 : toIntegerOrInfinity(begin);
     let startIndex: number;
     if (relativeBegin === -Infinity) {
@@ -533,9 +566,9 @@
     const srcByteOffset = this.byteOffset;
     const beginByteOffset = srcByteOffset + startIndex * elementSize;
     return new constructor(buffer, beginByteOffset, newLength);
-  }
+  } }.subarray;
 
-  function set(this: any, source: any, offset?: any): void {
+  const set = { set(this: any, source: any, offset: any = undefined): void {
     requireTypedArray(this, "set");
     const targetOffset = offset === undefined ? 0 : toIntegerOrInfinity(offset);
     if (targetOffset < 0) {
@@ -548,14 +581,14 @@
       throw new TypeError("Cannot convert undefined or null to object");
     }
 
-    const targetLength = this.length;
+    const targetLength = lengthOf(this);
     const isView = ArrayBuffer.isView(source) && !(typeof DataView === "function" && source instanceof DataView);
 
     if (isView) {
       if (isDetached(source)) {
         throw new TypeError("Source ArrayBuffer is detached");
       }
-      const srcLength = (source as any).length;
+      const srcLength = lengthOf(source);
       if (targetOffset + srcLength > targetLength || targetOffset > targetLength) {
         throw new RangeError("offset is out of bounds");
       }
@@ -582,11 +615,11 @@
         this[targetOffset + i] = src[i];
       }
     }
-  }
+  } }.set;
 
-  function copyWithin(this: any, target: any, start: any, end?: any): any {
+  const copyWithin = { copyWithin(this: any, target: any, start: any, end: any = undefined): any {
     validateTypedArray(this, "copyWithin");
-    const len = this.length;
+    const len = lengthOf(this);
     const relativeTarget = toIntegerOrInfinity(target);
     let to: number;
     if (relativeTarget === -Infinity) {
@@ -633,11 +666,11 @@
       }
     }
     return this;
-  }
+  } }.copyWithin;
 
-  function fill(this: any, value: any, start?: any, end?: any): any {
+  const fill = { fill(this: any, value: any, start: any = undefined, end: any = undefined): any {
     validateTypedArray(this, "fill");
-    const len = this.length;
+    const len = lengthOf(this);
     const isBigInt = isBigIntArray(this);
     const numericValue = isBigInt ? BigInt(value) : Number(value);
 
@@ -670,11 +703,11 @@
       k++;
     }
     return this;
-  }
+  } }.fill;
 
-  function reverse(this: any): any {
+  const reverse = { reverse(this: any): any {
     validateTypedArray(this, "reverse");
-    const len = this.length;
+    const len = lengthOf(this);
     const middle = Math.floor(len / 2);
     let lower = 0;
     while (lower !== middle) {
@@ -686,15 +719,15 @@
       lower++;
     }
     return this;
-  }
+  } }.reverse;
 
-  function sort(this: any, compareFn?: any): any {
+  const sort = { sort(this: any, compareFn?: any): any {
     validateTypedArray(this, "sort");
     if (compareFn !== undefined && typeof compareFn !== "function") {
       throw new TypeError("The comparison function must be either a function or undefined");
     }
 
-    const len = this.length;
+    const len = lengthOf(this);
     if (len <= 1) return this;
 
     const items: any[] = [];
@@ -745,38 +778,38 @@
     }
 
     return this;
-  }
+  } }.sort;
 
   // --- ES2023 change-by-copy ---
 
-  function at(this: any, index: any): any {
+  const at = { at(this: any, index: any): any {
     validateTypedArray(this, "at");
-    const len = this.length;
+    const len = lengthOf(this);
     const relativeIndex = toIntegerOrInfinity(index);
     const k = relativeIndex >= 0 ? relativeIndex : len + relativeIndex;
     if (k < 0 || k >= len) {
       return undefined;
     }
     return this[k];
-  }
+  } }.at;
 
-  function toReversed(this: any): any {
+  const toReversed = { toReversed(this: any): any {
     validateTypedArray(this, "toReversed");
-    const len = this.length;
+    const len = lengthOf(this);
     const result = typedArrayCreateSameType(this, len);
     for (let i = 0; i < len; i++) {
       result[i] = this[len - 1 - i];
     }
     return result;
-  }
+  } }.toReversed;
 
-  function toSorted(this: any, compareFn?: any): any {
+  const toSorted = { toSorted(this: any, compareFn?: any): any {
     validateTypedArray(this, "toSorted");
     if (compareFn !== undefined && typeof compareFn !== "function") {
       throw new TypeError("The comparison function must be either a function or undefined");
     }
 
-    const len = this.length;
+    const len = lengthOf(this);
     const items: any[] = [];
     for (let i = 0; i < len; i++) {
       items.push(this[i]);
@@ -821,11 +854,11 @@
       result[i] = items[i];
     }
     return result;
-  }
+  } }.toSorted;
 
-  function withMethod(this: any, index: any, value: any): any {
+  const withMethod = { with(this: any, index: any, value: any): any {
     validateTypedArray(this, "with");
-    const len = this.length;
+    const len = lengthOf(this);
     const relativeIndex = toIntegerOrInfinity(index);
     const actualIndex = relativeIndex >= 0 ? relativeIndex : len + relativeIndex;
 
@@ -841,7 +874,7 @@
       result[k] = k === actualIndex ? numericValue : this[k];
     }
     return result;
-  }
+  } }.with;
   Object.defineProperty(withMethod, "name", { value: "with", configurable: true });
 
   // --- String conversions and extensions ---
@@ -853,9 +886,9 @@
     return Object.prototype.toString.call(this);
   }
 
-  function toLocaleString(this: any, locales?: any, options?: any): string {
+  const toLocaleString = { toLocaleString(this: any, locales: any = undefined, options: any = undefined): string {
     validateTypedArray(this, "toLocaleString");
-    const len = this.length;
+    const len = lengthOf(this);
     let res = "";
     for (let k = 0; k < len; k++) {
       if (k > 0) res += ",";
@@ -869,7 +902,7 @@
       }
     }
     return res;
-  }
+  } }.toLocaleString;
 
   function parallelMap(this: any, callback: any, thisArg?: any): any {
     requireTypedArray(this, "parallelMap");
@@ -878,6 +911,10 @@
 
   // --- Method installation ---
 
+  // Built-in methods are not constructors, so every one is a method definition (`{ m() {} }.m`)
+  // rather than a function declaration. An optional parameter is written with a default
+  // (`x: any = undefined`), which stops `length` counting it, as the specification's lengths
+  // require; both engines take `length` from the signature.
   function defineMethod(name: string | symbol, fn: any): void {
     Object.defineProperty(Proto, name, {
       value: fn,

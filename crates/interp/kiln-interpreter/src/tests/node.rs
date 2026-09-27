@@ -1232,6 +1232,45 @@ fn array_buffer_transfer_preserves_or_drops_resizability_and_checks_constraints(
     ));
 }
 
+/// `__kilnArrayBufferResize` moves the length in place, and `__kilnTypedArrayOutOfBounds` sees
+/// a fixed-length view fall out of the window when the buffer shrinks under it -- the two
+/// representation primitives the shared `resize` and `ValidateTypedArray` are written over.
+#[test]
+fn array_buffer_resize_moves_the_length_and_views_report_out_of_bounds() {
+    let rab = test_buffer(&[1, 2, 3, 4], Some(8), false);
+    let view = construct_typed_array(
+        TypedKind::Uint8,
+        &[rab.clone(), Value::Number(2.0), Value::Number(2.0)],
+    )
+    .expect("view");
+    let resize = |length: f64| {
+        call_native(
+            &Intrinsics::default(),
+            Native::ArrayBufferResizeRaw,
+            &Value::Undefined,
+            &[rab.clone(), Value::Number(length)],
+        )
+    };
+    let out_of_bounds = || {
+        call_native(
+            &Intrinsics::default(),
+            Native::TypedArrayOutOfBoundsRaw,
+            &Value::Undefined,
+            std::slice::from_ref(&view),
+        )
+        .expect("answers")
+    };
+    resize(6.0).expect("grows within the ceiling");
+    let Value::ArrayBuffer(data) = &rab else {
+        unreachable!()
+    };
+    assert_eq!(data.byte_length(), 6);
+    assert!(matches!(out_of_bounds(), Value::Boolean(false)));
+    resize(3.0).expect("shrinks");
+    assert!(matches!(out_of_bounds(), Value::Boolean(true)));
+    assert!(resize(9.0).is_err(), "past the ceiling is refused");
+}
+
 #[test]
 fn views_observe_array_buffer_detachment() {
     let source = test_buffer(&[9, 10, 11, 12], None, false);

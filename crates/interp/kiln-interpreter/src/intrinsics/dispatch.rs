@@ -877,6 +877,31 @@ pub(crate) fn call_native(
                 .and_then(|value| clone_plain_data(value, &mut seen, 0))
                 .unwrap_or(Value::Undefined)
         }
+        // `__kilnArrayBufferResize(buffer, length)`: the storage half of `resize` and `grow`. The
+        // receiver, the conversion of the length, detachment and the ceiling are all checked
+        // above it in `kiln-builtins/src/arraybuffer.ts`; the buffer's own checks here only keep a
+        // caller that skipped them from corrupting it.
+        // `__kilnTypedArrayOutOfBounds(view)`: `IsTypedArrayOutOfBounds`, for a view the shared
+        // TypeScript has already brand-checked. Anything else is not a view with a window.
+        Native::TypedArrayOutOfBoundsRaw => match arguments.first() {
+            Some(Value::TypedArray(view)) => Value::Boolean(view.out_of_bounds()),
+            _ => Value::Boolean(false),
+        },
+        Native::ArrayBufferResizeRaw => {
+            let Some(Value::ArrayBuffer(buffer)) = arguments.first() else {
+                return Err(ExecutionError::NotABuffer);
+            };
+            let length = match arguments.get(1) {
+                Some(Value::Number(length)) => bounded_buffer(to_index_number(*length)?, 1)?,
+                _ => return Err(ExecutionError::NotABuffer),
+            };
+            if buffer.shared {
+                buffer.grow(length)?;
+            } else {
+                buffer.resize(length)?;
+            }
+            Value::Undefined
+        }
         Native::ArrayBufferDetachRaw => {
             let Some(Value::ArrayBuffer(buffer)) = arguments.first() else {
                 return Err(ExecutionError::NotABuffer);

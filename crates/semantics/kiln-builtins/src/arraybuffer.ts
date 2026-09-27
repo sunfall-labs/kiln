@@ -12,11 +12,21 @@ const __kilnDetachBuffer: (buffer: ArrayBuffer, length: number, preserveResizabi
   (globalThis as any).__kilnArrayBufferDetach;
 delete (globalThis as any).__kilnArrayBufferDetach;
 
+// The primitive under `resize` and `grow` (ADR 0065, representation): move a resizable buffer's
+// length, or grow a growable shared one, in place. Every check a program can observe is made
+// above it. The native backend has no resizable buffers -- `resizable` and `growable` are never
+// true there, so both methods refuse before reaching it -- and publishes none.
+const __kilnResizeBuffer: ((buffer: any, length: number) => void) | undefined =
+  (globalThis as any).__kilnArrayBufferResize;
+delete (globalThis as any).__kilnArrayBufferResize;
+
 (function installArrayBufferExtensions() {
   if (typeof ArrayBuffer === "undefined" || !ArrayBuffer.prototype) {
     return;
   }
 
+  // Built-in methods are not constructors, so each is a method definition (`{ m() {} }.m`)
+  // rather than a function declaration, which would have [[Construct]].
   function defineMethod(target: any, name: string | symbol, fn: any): void {
     Object.defineProperty(target, name, {
       value: fn,
@@ -46,7 +56,10 @@ delete (globalThis as any).__kilnArrayBufferDetach;
   // never copied -- a transfer of 16 MB costs what a transfer of 1 KB does -- and every view
   // over the source sees it empty.
   function doTransfer(thisArg: any, newByteLength: any, preserveResizability: boolean, methodName: string): ArrayBuffer {
-    if (!(thisArg instanceof ArrayBuffer)) {
+    // An ArrayBuffer of any realm -- `instanceof` would refuse one from another realm, which is
+    // what `$262.detachArrayBuffer` hands over -- and never a SharedArrayBuffer: `detached` is an
+    // ArrayBuffer accessor, and reading it on anything that is not one throws or misses.
+    if (thisArg === null || typeof thisArg !== "object" || typeof thisArg.detached !== "boolean") {
       throw new TypeError(`Method ArrayBuffer.prototype.${methodName} called on incompatible receiver ${receiverName(thisArg)}`);
     }
     let newLen: number;
@@ -67,30 +80,41 @@ delete (globalThis as any).__kilnArrayBufferDetach;
     return __kilnDetachBuffer(thisArg, newLen, keepCeiling);
   }
 
-  function transfer(this: any, newByteLength?: number): ArrayBuffer {
-    return doTransfer(this, newByteLength, true, "transfer");
+  // `newLength` is optional in the specification, so both report `length` 0: a parameter with a
+  // default is not counted, where a TypeScript optional one is.
+  const transfer = { transfer(this: any, newLength: any = undefined): ArrayBuffer {
+    return doTransfer(this, newLength, true, "transfer");
+  } }.transfer;
+
+  const transferToFixedLength = { transferToFixedLength(this: any, newLength: any = undefined): ArrayBuffer {
+    return doTransfer(this, newLength, false, "transferToFixedLength");
+  } }.transferToFixedLength;
+
+  // `ToIndex`: the conversion every length argument takes, which may run the program's own
+  // `valueOf` -- and that may detach or resize the buffer, which is why each caller checks the
+  // buffer's state only after it.
+  function toIndex(value: any): number {
+    if (value === undefined) return 0;
+    const number = Number(value);
+    const integer = Number.isNaN(number) ? 0 : Math.trunc(number);
+    if (integer < 0 || integer > 9007199254740991) throw new RangeError("Invalid array buffer length");
+    return integer;
   }
 
-  function transferToFixedLength(this: any, newByteLength?: number): ArrayBuffer {
-    return doTransfer(this, newByteLength, false, "transferToFixedLength");
-  }
-
-  function resize(this: any, newByteLength: number): void {
-    if (!(this instanceof ArrayBuffer)) {
-      throw new TypeError("Method ArrayBuffer.prototype.resize called on incompatible receiver");
+  // `ArrayBuffer.prototype.resize`: only a resizable, non-shared buffer has a length to move.
+  const resize = { resize(this: any, newLength: any): void {
+    if (this === null || typeof this !== "object" || this.resizable !== true) {
+      throw new TypeError("Method ArrayBuffer.prototype.resize called on incompatible receiver " + receiverName(this));
     }
+    const newByteLength = toIndex(newLength);
     if (isDetachedBuffer(this)) {
-      throw new TypeError("Cannot resize detached ArrayBuffer");
+      throw new TypeError("Cannot perform ArrayBuffer.prototype.resize on a detached ArrayBuffer");
     }
-    if (!(this as any).resizable) {
-      throw new TypeError("ArrayBuffer is not resizable");
+    if (newByteLength > this.maxByteLength) {
+      throw new RangeError("ArrayBuffer.prototype.resize: Invalid length parameter");
     }
-    const newLen = Math.trunc(Number(newByteLength));
-    if (Number.isNaN(newLen) || newLen < 0 || newLen > ((this as any).maxByteLength || 0)) {
-      throw new RangeError("Invalid length");
-    }
-    (this as any).byteLength = newLen;
-  }
+    (__kilnResizeBuffer as (buffer: any, length: number) => void)(this, newByteLength);
+  } }.resize;
 
   defineMethod(Proto, "transfer", transfer);
   defineMethod(Proto, "transferToFixedLength", transferToFixedLength);
@@ -127,26 +151,19 @@ delete (globalThis as any).__kilnArrayBufferDetach;
       return defaultConstructor;
     }
 
-    function grow(this: any, newByteLength: number): void {
-      if (!(this instanceof SharedArrayBuffer)) {
-        throw new TypeError("Method SharedArrayBuffer.prototype.grow called on incompatible receiver");
+    // `SharedArrayBuffer.prototype.grow`: a growable shared buffer's length only moves up.
+    const grow = { grow(this: any, newLength: any): void {
+      if (this === null || typeof this !== "object" || this.growable !== true) {
+        throw new TypeError("Method SharedArrayBuffer.prototype.grow called on incompatible receiver " + receiverName(this));
       }
-      if (!(this as any).growable) {
-        throw new TypeError("SharedArrayBuffer is not growable");
+      const newByteLength = toIndex(newLength);
+      if (newByteLength < this.byteLength || newByteLength > this.maxByteLength) {
+        throw new RangeError("SharedArrayBuffer.prototype.grow: Invalid length parameter");
       }
-      const newLen = Math.trunc(Number(newByteLength));
-      if (Number.isNaN(newLen) || newLen < 0) {
-        throw new RangeError("Invalid length");
-      }
-      const currentLen = (this as any).byteLength || 0;
-      const maxLen = (this as any).maxByteLength || currentLen;
-      if (newLen < currentLen || newLen > maxLen) {
-        throw new RangeError("Invalid length");
-      }
-      (this as any).byteLength = newLen;
-    }
+      (__kilnResizeBuffer as (buffer: any, length: number) => void)(this, newByteLength);
+    } }.grow;
 
-    function slice(this: any, begin?: number, end?: number): any {
+    const slice = { slice(this: any, begin?: number, end?: number): any {
       if (!(this instanceof SharedArrayBuffer)) {
         throw new TypeError("Method SharedArrayBuffer.prototype.slice called on incompatible receiver");
       }
@@ -168,12 +185,18 @@ delete (globalThis as any).__kilnArrayBufferDetach;
       }
 
       const newLen = Math.max(final - first, 0);
+      // `SpeciesConstructor`, then the three checks on what it built: a shared buffer, not this
+      // one, and at least as long as asked -- each a TypeError, in that order.
       const Ctor = getSpeciesConstructor(this, SharedArrayBuffer);
-      let newBuffer: any;
-      try {
-        newBuffer = new Ctor(newLen);
-      } catch {
-        newBuffer = new SharedArrayBuffer(newLen);
+      const newBuffer: any = new Ctor(newLen);
+      if (newBuffer === null || typeof newBuffer !== "object" || typeof newBuffer.growable !== "boolean") {
+        throw new TypeError("Species constructor did not return a SharedArrayBuffer");
+      }
+      if (newBuffer === this) {
+        throw new TypeError("SharedArrayBuffer subclass returned this from species constructor");
+      }
+      if (newBuffer.byteLength < newLen) {
+        throw new TypeError("Species constructor returned a SharedArrayBuffer that is too small");
       }
 
       if (newLen > 0) {
@@ -183,7 +206,7 @@ delete (globalThis as any).__kilnArrayBufferDetach;
       }
 
       return newBuffer;
-    }
+    } }.slice;
 
     defineMethod(SProto, "grow", grow);
     defineMethod(SProto, "slice", slice);
