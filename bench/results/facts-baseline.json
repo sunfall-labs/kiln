@@ -41,17 +41,17 @@
                 {
                   "id": 4,
                   "kind": "MakeFunction",
-                  "detail": "proto #10"
+                  "detail": "proto #11"
                 },
                 {
                   "id": 5,
                   "kind": "MakeFunction",
-                  "detail": "proto #12"
+                  "detail": "proto #13"
                 },
                 {
                   "id": 6,
                   "kind": "MakeFunction",
-                  "detail": "proto #14"
+                  "detail": "proto #15"
                 }
               ]
             },
@@ -161,6 +161,15 @@
               ]
             },
             {
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": true,
+              "can_throw": false,
+              "reads_arguments": false
+            },
+            {
               "name": "done",
               "parameter_types": [
                 "Unknown"
@@ -170,7 +179,7 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                2
+                3
               ],
               "sites": [
                 {
@@ -178,7 +187,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 2,
+                  "id": 1,
+                  "kind": "Call"
+                },
+                {
+                  "id": 3,
                   "kind": "Call"
                 }
               ]
@@ -266,10 +279,10 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                14,
-                15,
-                20,
-                22
+                16,
+                17,
+                22,
+                24
               ],
               "sites": [
                 {
@@ -284,7 +297,8 @@
                 },
                 {
                   "id": 3,
-                  "kind": "Call"
+                  "kind": "GetProperty",
+                  "detail": "\"checksum\""
                 },
                 {
                   "id": 4,
@@ -293,13 +307,12 @@
                 },
                 {
                   "id": 5,
-                  "kind": "MakeFunction",
-                  "detail": "proto #5"
+                  "kind": "Call"
                 },
                 {
                   "id": 6,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
+                  "kind": "MakeFunction",
+                  "detail": "proto #5"
                 },
                 {
                   "id": 7,
@@ -313,21 +326,21 @@
                 },
                 {
                   "id": 9,
-                  "kind": "Call"
-                },
-                {
-                  "id": 10,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 11,
                   "kind": "MakeFunction",
                   "detail": "proto #7"
                 },
                 {
-                  "id": 12,
+                  "id": 10,
                   "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 11,
+                  "kind": "Call"
+                },
+                {
+                  "id": 12,
+                  "kind": "GetProperty",
                   "detail": "\"then\""
                 },
                 {
@@ -342,12 +355,13 @@
                 },
                 {
                   "id": 15,
-                  "kind": "Call"
+                  "kind": "MakeFunction",
+                  "detail": "proto #9"
                 },
                 {
                   "id": 16,
                   "kind": "CallMethod",
-                  "detail": "\"now\""
+                  "detail": "\"then\""
                 },
                 {
                   "id": 17,
@@ -355,26 +369,35 @@
                 },
                 {
                   "id": 18,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 19,
-                  "kind": "MakeFunction",
-                  "detail": "proto #9"
-                },
-                {
-                  "id": 20,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 21,
                   "kind": "CallMethod",
                   "detail": "\"now\""
                 },
                 {
+                  "id": 19,
+                  "kind": "Call"
+                },
+                {
+                  "id": 20,
+                  "kind": "GetProperty",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 21,
+                  "kind": "MakeFunction",
+                  "detail": "proto #10"
+                },
+                {
                   "id": 22,
+                  "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 23,
+                  "kind": "CallMethod",
+                  "detail": "\"now\""
+                },
+                {
+                  "id": 24,
                   "kind": "Call"
                 }
               ]
@@ -396,6 +419,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -453,7 +477,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #11"
+                  "detail": "proto #12"
                 },
                 {
                   "id": 11,
@@ -478,7 +502,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -500,6 +528,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -557,7 +586,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #13"
+                  "detail": "proto #14"
                 },
                 {
                   "id": 11,
@@ -582,7 +611,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -729,17 +762,17 @@
                 {
                   "id": 4,
                   "kind": "MakeFunction",
-                  "detail": "proto #10"
+                  "detail": "proto #11"
                 },
                 {
                   "id": 5,
                   "kind": "MakeFunction",
-                  "detail": "proto #12"
+                  "detail": "proto #13"
                 },
                 {
                   "id": 6,
                   "kind": "MakeFunction",
-                  "detail": "proto #14"
+                  "detail": "proto #15"
                 }
               ]
             },
@@ -849,6 +882,15 @@
               ]
             },
             {
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": true,
+              "can_throw": false,
+              "reads_arguments": false
+            },
+            {
               "name": "done",
               "parameter_types": [
                 "Unknown"
@@ -858,7 +900,7 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                2
+                3
               ],
               "sites": [
                 {
@@ -866,7 +908,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 2,
+                  "id": 1,
+                  "kind": "Call"
+                },
+                {
+                  "id": 3,
                   "kind": "Call"
                 }
               ]
@@ -954,10 +1000,10 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                14,
-                15,
-                20,
-                22
+                16,
+                17,
+                22,
+                24
               ],
               "sites": [
                 {
@@ -972,7 +1018,8 @@
                 },
                 {
                   "id": 3,
-                  "kind": "Call"
+                  "kind": "GetProperty",
+                  "detail": "\"checksum\""
                 },
                 {
                   "id": 4,
@@ -981,13 +1028,12 @@
                 },
                 {
                   "id": 5,
-                  "kind": "MakeFunction",
-                  "detail": "proto #5"
+                  "kind": "Call"
                 },
                 {
                   "id": 6,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
+                  "kind": "MakeFunction",
+                  "detail": "proto #5"
                 },
                 {
                   "id": 7,
@@ -1001,21 +1047,21 @@
                 },
                 {
                   "id": 9,
-                  "kind": "Call"
-                },
-                {
-                  "id": 10,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 11,
                   "kind": "MakeFunction",
                   "detail": "proto #7"
                 },
                 {
-                  "id": 12,
+                  "id": 10,
                   "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 11,
+                  "kind": "Call"
+                },
+                {
+                  "id": 12,
+                  "kind": "GetProperty",
                   "detail": "\"then\""
                 },
                 {
@@ -1030,12 +1076,13 @@
                 },
                 {
                   "id": 15,
-                  "kind": "Call"
+                  "kind": "MakeFunction",
+                  "detail": "proto #9"
                 },
                 {
                   "id": 16,
                   "kind": "CallMethod",
-                  "detail": "\"now\""
+                  "detail": "\"then\""
                 },
                 {
                   "id": 17,
@@ -1043,26 +1090,35 @@
                 },
                 {
                   "id": 18,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 19,
-                  "kind": "MakeFunction",
-                  "detail": "proto #9"
-                },
-                {
-                  "id": 20,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 21,
                   "kind": "CallMethod",
                   "detail": "\"now\""
                 },
                 {
+                  "id": 19,
+                  "kind": "Call"
+                },
+                {
+                  "id": 20,
+                  "kind": "GetProperty",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 21,
+                  "kind": "MakeFunction",
+                  "detail": "proto #10"
+                },
+                {
                   "id": 22,
+                  "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 23,
+                  "kind": "CallMethod",
+                  "detail": "\"now\""
+                },
+                {
+                  "id": 24,
                   "kind": "Call"
                 }
               ]
@@ -1084,6 +1140,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -1141,7 +1198,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #11"
+                  "detail": "proto #12"
                 },
                 {
                   "id": 11,
@@ -1166,7 +1223,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -1188,6 +1249,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -1245,7 +1307,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #13"
+                  "detail": "proto #14"
                 },
                 {
                   "id": 11,
@@ -1270,7 +1332,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -1392,17 +1458,17 @@
                 {
                   "id": 4,
                   "kind": "MakeFunction",
-                  "detail": "proto #10"
+                  "detail": "proto #11"
                 },
                 {
                   "id": 5,
                   "kind": "MakeFunction",
-                  "detail": "proto #12"
+                  "detail": "proto #13"
                 },
                 {
                   "id": 6,
                   "kind": "MakeFunction",
-                  "detail": "proto #14"
+                  "detail": "proto #15"
                 }
               ]
             },
@@ -1512,6 +1578,15 @@
               ]
             },
             {
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": true,
+              "can_throw": false,
+              "reads_arguments": false
+            },
+            {
               "name": "done",
               "parameter_types": [
                 "Unknown"
@@ -1521,7 +1596,7 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                2
+                3
               ],
               "sites": [
                 {
@@ -1529,7 +1604,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 2,
+                  "id": 1,
+                  "kind": "Call"
+                },
+                {
+                  "id": 3,
                   "kind": "Call"
                 }
               ]
@@ -1617,10 +1696,10 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                14,
-                15,
-                20,
-                22
+                16,
+                17,
+                22,
+                24
               ],
               "sites": [
                 {
@@ -1635,7 +1714,8 @@
                 },
                 {
                   "id": 3,
-                  "kind": "Call"
+                  "kind": "GetProperty",
+                  "detail": "\"checksum\""
                 },
                 {
                   "id": 4,
@@ -1644,13 +1724,12 @@
                 },
                 {
                   "id": 5,
-                  "kind": "MakeFunction",
-                  "detail": "proto #5"
+                  "kind": "Call"
                 },
                 {
                   "id": 6,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
+                  "kind": "MakeFunction",
+                  "detail": "proto #5"
                 },
                 {
                   "id": 7,
@@ -1664,21 +1743,21 @@
                 },
                 {
                   "id": 9,
-                  "kind": "Call"
-                },
-                {
-                  "id": 10,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 11,
                   "kind": "MakeFunction",
                   "detail": "proto #7"
                 },
                 {
-                  "id": 12,
+                  "id": 10,
                   "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 11,
+                  "kind": "Call"
+                },
+                {
+                  "id": 12,
+                  "kind": "GetProperty",
                   "detail": "\"then\""
                 },
                 {
@@ -1693,12 +1772,13 @@
                 },
                 {
                   "id": 15,
-                  "kind": "Call"
+                  "kind": "MakeFunction",
+                  "detail": "proto #9"
                 },
                 {
                   "id": 16,
                   "kind": "CallMethod",
-                  "detail": "\"now\""
+                  "detail": "\"then\""
                 },
                 {
                   "id": 17,
@@ -1706,26 +1786,35 @@
                 },
                 {
                   "id": 18,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 19,
-                  "kind": "MakeFunction",
-                  "detail": "proto #9"
-                },
-                {
-                  "id": 20,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 21,
                   "kind": "CallMethod",
                   "detail": "\"now\""
                 },
                 {
+                  "id": 19,
+                  "kind": "Call"
+                },
+                {
+                  "id": 20,
+                  "kind": "GetProperty",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 21,
+                  "kind": "MakeFunction",
+                  "detail": "proto #10"
+                },
+                {
                   "id": 22,
+                  "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 23,
+                  "kind": "CallMethod",
+                  "detail": "\"now\""
+                },
+                {
+                  "id": 24,
                   "kind": "Call"
                 }
               ]
@@ -1747,6 +1836,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -1804,7 +1894,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #11"
+                  "detail": "proto #12"
                 },
                 {
                   "id": 11,
@@ -1829,7 +1919,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -1851,6 +1945,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -1908,7 +2003,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #13"
+                  "detail": "proto #14"
                 },
                 {
                   "id": 11,
@@ -1933,7 +2028,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -2275,17 +2374,17 @@
                 {
                   "id": 4,
                   "kind": "MakeFunction",
-                  "detail": "proto #10"
+                  "detail": "proto #11"
                 },
                 {
                   "id": 5,
                   "kind": "MakeFunction",
-                  "detail": "proto #12"
+                  "detail": "proto #13"
                 },
                 {
                   "id": 6,
                   "kind": "MakeFunction",
-                  "detail": "proto #14"
+                  "detail": "proto #15"
                 }
               ]
             },
@@ -2395,6 +2494,15 @@
               ]
             },
             {
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": true,
+              "can_throw": false,
+              "reads_arguments": false
+            },
+            {
               "name": "done",
               "parameter_types": [
                 "Unknown"
@@ -2404,7 +2512,7 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                2
+                3
               ],
               "sites": [
                 {
@@ -2412,7 +2520,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 2,
+                  "id": 1,
+                  "kind": "Call"
+                },
+                {
+                  "id": 3,
                   "kind": "Call"
                 }
               ]
@@ -2500,10 +2612,10 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                14,
-                15,
-                20,
-                22
+                16,
+                17,
+                22,
+                24
               ],
               "sites": [
                 {
@@ -2518,7 +2630,8 @@
                 },
                 {
                   "id": 3,
-                  "kind": "Call"
+                  "kind": "GetProperty",
+                  "detail": "\"checksum\""
                 },
                 {
                   "id": 4,
@@ -2527,13 +2640,12 @@
                 },
                 {
                   "id": 5,
-                  "kind": "MakeFunction",
-                  "detail": "proto #5"
+                  "kind": "Call"
                 },
                 {
                   "id": 6,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
+                  "kind": "MakeFunction",
+                  "detail": "proto #5"
                 },
                 {
                   "id": 7,
@@ -2547,21 +2659,21 @@
                 },
                 {
                   "id": 9,
-                  "kind": "Call"
-                },
-                {
-                  "id": 10,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 11,
                   "kind": "MakeFunction",
                   "detail": "proto #7"
                 },
                 {
-                  "id": 12,
+                  "id": 10,
                   "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 11,
+                  "kind": "Call"
+                },
+                {
+                  "id": 12,
+                  "kind": "GetProperty",
                   "detail": "\"then\""
                 },
                 {
@@ -2576,12 +2688,13 @@
                 },
                 {
                   "id": 15,
-                  "kind": "Call"
+                  "kind": "MakeFunction",
+                  "detail": "proto #9"
                 },
                 {
                   "id": 16,
                   "kind": "CallMethod",
-                  "detail": "\"now\""
+                  "detail": "\"then\""
                 },
                 {
                   "id": 17,
@@ -2589,26 +2702,35 @@
                 },
                 {
                   "id": 18,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 19,
-                  "kind": "MakeFunction",
-                  "detail": "proto #9"
-                },
-                {
-                  "id": 20,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 21,
                   "kind": "CallMethod",
                   "detail": "\"now\""
                 },
                 {
+                  "id": 19,
+                  "kind": "Call"
+                },
+                {
+                  "id": 20,
+                  "kind": "GetProperty",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 21,
+                  "kind": "MakeFunction",
+                  "detail": "proto #10"
+                },
+                {
                   "id": 22,
+                  "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 23,
+                  "kind": "CallMethod",
+                  "detail": "\"now\""
+                },
+                {
+                  "id": 24,
                   "kind": "Call"
                 }
               ]
@@ -2630,6 +2752,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -2687,7 +2810,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #11"
+                  "detail": "proto #12"
                 },
                 {
                   "id": 11,
@@ -2712,7 +2835,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -2734,6 +2861,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -2791,7 +2919,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #13"
+                  "detail": "proto #14"
                 },
                 {
                   "id": 11,
@@ -2816,7 +2944,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -2865,17 +2997,17 @@
                 {
                   "id": 4,
                   "kind": "MakeFunction",
-                  "detail": "proto #10"
+                  "detail": "proto #11"
                 },
                 {
                   "id": 5,
                   "kind": "MakeFunction",
-                  "detail": "proto #12"
+                  "detail": "proto #13"
                 },
                 {
                   "id": 6,
                   "kind": "MakeFunction",
-                  "detail": "proto #14"
+                  "detail": "proto #15"
                 }
               ]
             },
@@ -2985,6 +3117,15 @@
               ]
             },
             {
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": true,
+              "can_throw": false,
+              "reads_arguments": false
+            },
+            {
               "name": "done",
               "parameter_types": [
                 "Unknown"
@@ -2994,7 +3135,7 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                2
+                3
               ],
               "sites": [
                 {
@@ -3002,7 +3143,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 2,
+                  "id": 1,
+                  "kind": "Call"
+                },
+                {
+                  "id": 3,
                   "kind": "Call"
                 }
               ]
@@ -3090,10 +3235,10 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                14,
-                15,
-                20,
-                22
+                16,
+                17,
+                22,
+                24
               ],
               "sites": [
                 {
@@ -3108,7 +3253,8 @@
                 },
                 {
                   "id": 3,
-                  "kind": "Call"
+                  "kind": "GetProperty",
+                  "detail": "\"checksum\""
                 },
                 {
                   "id": 4,
@@ -3117,13 +3263,12 @@
                 },
                 {
                   "id": 5,
-                  "kind": "MakeFunction",
-                  "detail": "proto #5"
+                  "kind": "Call"
                 },
                 {
                   "id": 6,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
+                  "kind": "MakeFunction",
+                  "detail": "proto #5"
                 },
                 {
                   "id": 7,
@@ -3137,21 +3282,21 @@
                 },
                 {
                   "id": 9,
-                  "kind": "Call"
-                },
-                {
-                  "id": 10,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 11,
                   "kind": "MakeFunction",
                   "detail": "proto #7"
                 },
                 {
-                  "id": 12,
+                  "id": 10,
                   "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 11,
+                  "kind": "Call"
+                },
+                {
+                  "id": 12,
+                  "kind": "GetProperty",
                   "detail": "\"then\""
                 },
                 {
@@ -3166,12 +3311,13 @@
                 },
                 {
                   "id": 15,
-                  "kind": "Call"
+                  "kind": "MakeFunction",
+                  "detail": "proto #9"
                 },
                 {
                   "id": 16,
                   "kind": "CallMethod",
-                  "detail": "\"now\""
+                  "detail": "\"then\""
                 },
                 {
                   "id": 17,
@@ -3179,26 +3325,35 @@
                 },
                 {
                   "id": 18,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 19,
-                  "kind": "MakeFunction",
-                  "detail": "proto #9"
-                },
-                {
-                  "id": 20,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 21,
                   "kind": "CallMethod",
                   "detail": "\"now\""
                 },
                 {
+                  "id": 19,
+                  "kind": "Call"
+                },
+                {
+                  "id": 20,
+                  "kind": "GetProperty",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 21,
+                  "kind": "MakeFunction",
+                  "detail": "proto #10"
+                },
+                {
                   "id": 22,
+                  "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 23,
+                  "kind": "CallMethod",
+                  "detail": "\"now\""
+                },
+                {
+                  "id": 24,
                   "kind": "Call"
                 }
               ]
@@ -3220,6 +3375,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -3277,7 +3433,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #11"
+                  "detail": "proto #12"
                 },
                 {
                   "id": 11,
@@ -3302,7 +3458,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -3324,6 +3484,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -3381,7 +3542,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #13"
+                  "detail": "proto #14"
                 },
                 {
                   "id": 11,
@@ -3406,7 +3567,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -3566,17 +3731,17 @@
                 {
                   "id": 4,
                   "kind": "MakeFunction",
-                  "detail": "proto #10"
+                  "detail": "proto #11"
                 },
                 {
                   "id": 5,
                   "kind": "MakeFunction",
-                  "detail": "proto #12"
+                  "detail": "proto #13"
                 },
                 {
                   "id": 6,
                   "kind": "MakeFunction",
-                  "detail": "proto #14"
+                  "detail": "proto #15"
                 }
               ]
             },
@@ -3686,6 +3851,15 @@
               ]
             },
             {
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": true,
+              "can_throw": false,
+              "reads_arguments": false
+            },
+            {
               "name": "done",
               "parameter_types": [
                 "Unknown"
@@ -3695,7 +3869,7 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                2
+                3
               ],
               "sites": [
                 {
@@ -3703,7 +3877,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 2,
+                  "id": 1,
+                  "kind": "Call"
+                },
+                {
+                  "id": 3,
                   "kind": "Call"
                 }
               ]
@@ -3791,10 +3969,10 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                14,
-                15,
-                20,
-                22
+                16,
+                17,
+                22,
+                24
               ],
               "sites": [
                 {
@@ -3809,7 +3987,8 @@
                 },
                 {
                   "id": 3,
-                  "kind": "Call"
+                  "kind": "GetProperty",
+                  "detail": "\"checksum\""
                 },
                 {
                   "id": 4,
@@ -3818,13 +3997,12 @@
                 },
                 {
                   "id": 5,
-                  "kind": "MakeFunction",
-                  "detail": "proto #5"
+                  "kind": "Call"
                 },
                 {
                   "id": 6,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
+                  "kind": "MakeFunction",
+                  "detail": "proto #5"
                 },
                 {
                   "id": 7,
@@ -3838,21 +4016,21 @@
                 },
                 {
                   "id": 9,
-                  "kind": "Call"
-                },
-                {
-                  "id": 10,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 11,
                   "kind": "MakeFunction",
                   "detail": "proto #7"
                 },
                 {
-                  "id": 12,
+                  "id": 10,
                   "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 11,
+                  "kind": "Call"
+                },
+                {
+                  "id": 12,
+                  "kind": "GetProperty",
                   "detail": "\"then\""
                 },
                 {
@@ -3867,12 +4045,13 @@
                 },
                 {
                   "id": 15,
-                  "kind": "Call"
+                  "kind": "MakeFunction",
+                  "detail": "proto #9"
                 },
                 {
                   "id": 16,
                   "kind": "CallMethod",
-                  "detail": "\"now\""
+                  "detail": "\"then\""
                 },
                 {
                   "id": 17,
@@ -3880,26 +4059,35 @@
                 },
                 {
                   "id": 18,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 19,
-                  "kind": "MakeFunction",
-                  "detail": "proto #9"
-                },
-                {
-                  "id": 20,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 21,
                   "kind": "CallMethod",
                   "detail": "\"now\""
                 },
                 {
+                  "id": 19,
+                  "kind": "Call"
+                },
+                {
+                  "id": 20,
+                  "kind": "GetProperty",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 21,
+                  "kind": "MakeFunction",
+                  "detail": "proto #10"
+                },
+                {
                   "id": 22,
+                  "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 23,
+                  "kind": "CallMethod",
+                  "detail": "\"now\""
+                },
+                {
+                  "id": 24,
                   "kind": "Call"
                 }
               ]
@@ -3921,6 +4109,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -3978,7 +4167,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #11"
+                  "detail": "proto #12"
                 },
                 {
                   "id": 11,
@@ -4003,7 +4192,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -4025,6 +4218,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -4082,7 +4276,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #13"
+                  "detail": "proto #14"
                 },
                 {
                   "id": 11,
@@ -4107,7 +4301,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -4396,17 +4594,17 @@
                 {
                   "id": 4,
                   "kind": "MakeFunction",
-                  "detail": "proto #10"
+                  "detail": "proto #11"
                 },
                 {
                   "id": 5,
                   "kind": "MakeFunction",
-                  "detail": "proto #12"
+                  "detail": "proto #13"
                 },
                 {
                   "id": 6,
                   "kind": "MakeFunction",
-                  "detail": "proto #14"
+                  "detail": "proto #15"
                 }
               ]
             },
@@ -4516,6 +4714,15 @@
               ]
             },
             {
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": true,
+              "can_throw": false,
+              "reads_arguments": false
+            },
+            {
               "name": "done",
               "parameter_types": [
                 "Unknown"
@@ -4525,7 +4732,7 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                2
+                3
               ],
               "sites": [
                 {
@@ -4533,7 +4740,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 2,
+                  "id": 1,
+                  "kind": "Call"
+                },
+                {
+                  "id": 3,
                   "kind": "Call"
                 }
               ]
@@ -4621,10 +4832,10 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                14,
-                15,
-                20,
-                22
+                16,
+                17,
+                22,
+                24
               ],
               "sites": [
                 {
@@ -4639,7 +4850,8 @@
                 },
                 {
                   "id": 3,
-                  "kind": "Call"
+                  "kind": "GetProperty",
+                  "detail": "\"checksum\""
                 },
                 {
                   "id": 4,
@@ -4648,13 +4860,12 @@
                 },
                 {
                   "id": 5,
-                  "kind": "MakeFunction",
-                  "detail": "proto #5"
+                  "kind": "Call"
                 },
                 {
                   "id": 6,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
+                  "kind": "MakeFunction",
+                  "detail": "proto #5"
                 },
                 {
                   "id": 7,
@@ -4668,21 +4879,21 @@
                 },
                 {
                   "id": 9,
-                  "kind": "Call"
-                },
-                {
-                  "id": 10,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 11,
                   "kind": "MakeFunction",
                   "detail": "proto #7"
                 },
                 {
-                  "id": 12,
+                  "id": 10,
                   "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 11,
+                  "kind": "Call"
+                },
+                {
+                  "id": 12,
+                  "kind": "GetProperty",
                   "detail": "\"then\""
                 },
                 {
@@ -4697,12 +4908,13 @@
                 },
                 {
                   "id": 15,
-                  "kind": "Call"
+                  "kind": "MakeFunction",
+                  "detail": "proto #9"
                 },
                 {
                   "id": 16,
                   "kind": "CallMethod",
-                  "detail": "\"now\""
+                  "detail": "\"then\""
                 },
                 {
                   "id": 17,
@@ -4710,26 +4922,35 @@
                 },
                 {
                   "id": 18,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 19,
-                  "kind": "MakeFunction",
-                  "detail": "proto #9"
-                },
-                {
-                  "id": 20,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 21,
                   "kind": "CallMethod",
                   "detail": "\"now\""
                 },
                 {
+                  "id": 19,
+                  "kind": "Call"
+                },
+                {
+                  "id": 20,
+                  "kind": "GetProperty",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 21,
+                  "kind": "MakeFunction",
+                  "detail": "proto #10"
+                },
+                {
                   "id": 22,
+                  "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 23,
+                  "kind": "CallMethod",
+                  "detail": "\"now\""
+                },
+                {
+                  "id": 24,
                   "kind": "Call"
                 }
               ]
@@ -4751,6 +4972,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -4808,7 +5030,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #11"
+                  "detail": "proto #12"
                 },
                 {
                   "id": 11,
@@ -4833,7 +5055,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -4855,6 +5081,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -4912,7 +5139,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #13"
+                  "detail": "proto #14"
                 },
                 {
                   "id": 11,
@@ -4937,7 +5164,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -4986,17 +5217,17 @@
                 {
                   "id": 4,
                   "kind": "MakeFunction",
-                  "detail": "proto #10"
+                  "detail": "proto #11"
                 },
                 {
                   "id": 5,
                   "kind": "MakeFunction",
-                  "detail": "proto #12"
+                  "detail": "proto #13"
                 },
                 {
                   "id": 6,
                   "kind": "MakeFunction",
-                  "detail": "proto #14"
+                  "detail": "proto #15"
                 }
               ]
             },
@@ -5106,6 +5337,15 @@
               ]
             },
             {
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": true,
+              "can_throw": false,
+              "reads_arguments": false
+            },
+            {
               "name": "done",
               "parameter_types": [
                 "Unknown"
@@ -5115,7 +5355,7 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                2
+                3
               ],
               "sites": [
                 {
@@ -5123,7 +5363,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 2,
+                  "id": 1,
+                  "kind": "Call"
+                },
+                {
+                  "id": 3,
                   "kind": "Call"
                 }
               ]
@@ -5211,10 +5455,10 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                14,
-                15,
-                20,
-                22
+                16,
+                17,
+                22,
+                24
               ],
               "sites": [
                 {
@@ -5229,7 +5473,8 @@
                 },
                 {
                   "id": 3,
-                  "kind": "Call"
+                  "kind": "GetProperty",
+                  "detail": "\"checksum\""
                 },
                 {
                   "id": 4,
@@ -5238,13 +5483,12 @@
                 },
                 {
                   "id": 5,
-                  "kind": "MakeFunction",
-                  "detail": "proto #5"
+                  "kind": "Call"
                 },
                 {
                   "id": 6,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
+                  "kind": "MakeFunction",
+                  "detail": "proto #5"
                 },
                 {
                   "id": 7,
@@ -5258,21 +5502,21 @@
                 },
                 {
                   "id": 9,
-                  "kind": "Call"
-                },
-                {
-                  "id": 10,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 11,
                   "kind": "MakeFunction",
                   "detail": "proto #7"
                 },
                 {
-                  "id": 12,
+                  "id": 10,
                   "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 11,
+                  "kind": "Call"
+                },
+                {
+                  "id": 12,
+                  "kind": "GetProperty",
                   "detail": "\"then\""
                 },
                 {
@@ -5287,12 +5531,13 @@
                 },
                 {
                   "id": 15,
-                  "kind": "Call"
+                  "kind": "MakeFunction",
+                  "detail": "proto #9"
                 },
                 {
                   "id": 16,
                   "kind": "CallMethod",
-                  "detail": "\"now\""
+                  "detail": "\"then\""
                 },
                 {
                   "id": 17,
@@ -5300,26 +5545,35 @@
                 },
                 {
                   "id": 18,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 19,
-                  "kind": "MakeFunction",
-                  "detail": "proto #9"
-                },
-                {
-                  "id": 20,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 21,
                   "kind": "CallMethod",
                   "detail": "\"now\""
                 },
                 {
+                  "id": 19,
+                  "kind": "Call"
+                },
+                {
+                  "id": 20,
+                  "kind": "GetProperty",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 21,
+                  "kind": "MakeFunction",
+                  "detail": "proto #10"
+                },
+                {
                   "id": 22,
+                  "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 23,
+                  "kind": "CallMethod",
+                  "detail": "\"now\""
+                },
+                {
+                  "id": 24,
                   "kind": "Call"
                 }
               ]
@@ -5341,6 +5595,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -5398,7 +5653,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #11"
+                  "detail": "proto #12"
                 },
                 {
                   "id": 11,
@@ -5423,7 +5678,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -5445,6 +5704,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -5502,7 +5762,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #13"
+                  "detail": "proto #14"
                 },
                 {
                   "id": 11,
@@ -5527,7 +5787,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -5664,17 +5928,17 @@
                 {
                   "id": 4,
                   "kind": "MakeFunction",
-                  "detail": "proto #10"
+                  "detail": "proto #11"
                 },
                 {
                   "id": 5,
                   "kind": "MakeFunction",
-                  "detail": "proto #12"
+                  "detail": "proto #13"
                 },
                 {
                   "id": 6,
                   "kind": "MakeFunction",
-                  "detail": "proto #14"
+                  "detail": "proto #15"
                 }
               ]
             },
@@ -5784,6 +6048,15 @@
               ]
             },
             {
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": true,
+              "can_throw": false,
+              "reads_arguments": false
+            },
+            {
               "name": "done",
               "parameter_types": [
                 "Unknown"
@@ -5793,7 +6066,7 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                2
+                3
               ],
               "sites": [
                 {
@@ -5801,7 +6074,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 2,
+                  "id": 1,
+                  "kind": "Call"
+                },
+                {
+                  "id": 3,
                   "kind": "Call"
                 }
               ]
@@ -5889,10 +6166,10 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                14,
-                15,
-                20,
-                22
+                16,
+                17,
+                22,
+                24
               ],
               "sites": [
                 {
@@ -5907,7 +6184,8 @@
                 },
                 {
                   "id": 3,
-                  "kind": "Call"
+                  "kind": "GetProperty",
+                  "detail": "\"checksum\""
                 },
                 {
                   "id": 4,
@@ -5916,13 +6194,12 @@
                 },
                 {
                   "id": 5,
-                  "kind": "MakeFunction",
-                  "detail": "proto #5"
+                  "kind": "Call"
                 },
                 {
                   "id": 6,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
+                  "kind": "MakeFunction",
+                  "detail": "proto #5"
                 },
                 {
                   "id": 7,
@@ -5936,21 +6213,21 @@
                 },
                 {
                   "id": 9,
-                  "kind": "Call"
-                },
-                {
-                  "id": 10,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 11,
                   "kind": "MakeFunction",
                   "detail": "proto #7"
                 },
                 {
-                  "id": 12,
+                  "id": 10,
                   "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 11,
+                  "kind": "Call"
+                },
+                {
+                  "id": 12,
+                  "kind": "GetProperty",
                   "detail": "\"then\""
                 },
                 {
@@ -5965,12 +6242,13 @@
                 },
                 {
                   "id": 15,
-                  "kind": "Call"
+                  "kind": "MakeFunction",
+                  "detail": "proto #9"
                 },
                 {
                   "id": 16,
                   "kind": "CallMethod",
-                  "detail": "\"now\""
+                  "detail": "\"then\""
                 },
                 {
                   "id": 17,
@@ -5978,26 +6256,35 @@
                 },
                 {
                   "id": 18,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 19,
-                  "kind": "MakeFunction",
-                  "detail": "proto #9"
-                },
-                {
-                  "id": 20,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 21,
                   "kind": "CallMethod",
                   "detail": "\"now\""
                 },
                 {
+                  "id": 19,
+                  "kind": "Call"
+                },
+                {
+                  "id": 20,
+                  "kind": "GetProperty",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 21,
+                  "kind": "MakeFunction",
+                  "detail": "proto #10"
+                },
+                {
                   "id": 22,
+                  "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 23,
+                  "kind": "CallMethod",
+                  "detail": "\"now\""
+                },
+                {
+                  "id": 24,
                   "kind": "Call"
                 }
               ]
@@ -6019,6 +6306,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -6076,7 +6364,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #11"
+                  "detail": "proto #12"
                 },
                 {
                   "id": 11,
@@ -6101,7 +6389,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -6123,6 +6415,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -6180,7 +6473,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #13"
+                  "detail": "proto #14"
                 },
                 {
                   "id": 11,
@@ -6205,7 +6498,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -6284,17 +6581,17 @@
                 {
                   "id": 4,
                   "kind": "MakeFunction",
-                  "detail": "proto #10"
+                  "detail": "proto #11"
                 },
                 {
                   "id": 5,
                   "kind": "MakeFunction",
-                  "detail": "proto #12"
+                  "detail": "proto #13"
                 },
                 {
                   "id": 6,
                   "kind": "MakeFunction",
-                  "detail": "proto #14"
+                  "detail": "proto #15"
                 }
               ]
             },
@@ -6404,6 +6701,15 @@
               ]
             },
             {
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": true,
+              "can_throw": false,
+              "reads_arguments": false
+            },
+            {
               "name": "done",
               "parameter_types": [
                 "Unknown"
@@ -6413,7 +6719,7 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                2
+                3
               ],
               "sites": [
                 {
@@ -6421,7 +6727,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 2,
+                  "id": 1,
+                  "kind": "Call"
+                },
+                {
+                  "id": 3,
                   "kind": "Call"
                 }
               ]
@@ -6509,10 +6819,10 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                14,
-                15,
-                20,
-                22
+                16,
+                17,
+                22,
+                24
               ],
               "sites": [
                 {
@@ -6527,7 +6837,8 @@
                 },
                 {
                   "id": 3,
-                  "kind": "Call"
+                  "kind": "GetProperty",
+                  "detail": "\"checksum\""
                 },
                 {
                   "id": 4,
@@ -6536,13 +6847,12 @@
                 },
                 {
                   "id": 5,
-                  "kind": "MakeFunction",
-                  "detail": "proto #5"
+                  "kind": "Call"
                 },
                 {
                   "id": 6,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
+                  "kind": "MakeFunction",
+                  "detail": "proto #5"
                 },
                 {
                   "id": 7,
@@ -6556,21 +6866,21 @@
                 },
                 {
                   "id": 9,
-                  "kind": "Call"
-                },
-                {
-                  "id": 10,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 11,
                   "kind": "MakeFunction",
                   "detail": "proto #7"
                 },
                 {
-                  "id": 12,
+                  "id": 10,
                   "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 11,
+                  "kind": "Call"
+                },
+                {
+                  "id": 12,
+                  "kind": "GetProperty",
                   "detail": "\"then\""
                 },
                 {
@@ -6585,12 +6895,13 @@
                 },
                 {
                   "id": 15,
-                  "kind": "Call"
+                  "kind": "MakeFunction",
+                  "detail": "proto #9"
                 },
                 {
                   "id": 16,
                   "kind": "CallMethod",
-                  "detail": "\"now\""
+                  "detail": "\"then\""
                 },
                 {
                   "id": 17,
@@ -6598,26 +6909,35 @@
                 },
                 {
                   "id": 18,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 19,
-                  "kind": "MakeFunction",
-                  "detail": "proto #9"
-                },
-                {
-                  "id": 20,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 21,
                   "kind": "CallMethod",
                   "detail": "\"now\""
                 },
                 {
+                  "id": 19,
+                  "kind": "Call"
+                },
+                {
+                  "id": 20,
+                  "kind": "GetProperty",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 21,
+                  "kind": "MakeFunction",
+                  "detail": "proto #10"
+                },
+                {
                   "id": 22,
+                  "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 23,
+                  "kind": "CallMethod",
+                  "detail": "\"now\""
+                },
+                {
+                  "id": 24,
                   "kind": "Call"
                 }
               ]
@@ -6639,6 +6959,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -6696,7 +7017,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #11"
+                  "detail": "proto #12"
                 },
                 {
                   "id": 11,
@@ -6721,7 +7042,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -6743,6 +7068,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -6800,7 +7126,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #13"
+                  "detail": "proto #14"
                 },
                 {
                   "id": 11,
@@ -6825,7 +7151,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -6932,17 +7262,17 @@
                 {
                   "id": 4,
                   "kind": "MakeFunction",
-                  "detail": "proto #10"
+                  "detail": "proto #11"
                 },
                 {
                   "id": 5,
                   "kind": "MakeFunction",
-                  "detail": "proto #12"
+                  "detail": "proto #13"
                 },
                 {
                   "id": 6,
                   "kind": "MakeFunction",
-                  "detail": "proto #14"
+                  "detail": "proto #15"
                 }
               ]
             },
@@ -7052,6 +7382,15 @@
               ]
             },
             {
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": true,
+              "can_throw": false,
+              "reads_arguments": false
+            },
+            {
               "name": "done",
               "parameter_types": [
                 "Unknown"
@@ -7061,7 +7400,7 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                2
+                3
               ],
               "sites": [
                 {
@@ -7069,7 +7408,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 2,
+                  "id": 1,
+                  "kind": "Call"
+                },
+                {
+                  "id": 3,
                   "kind": "Call"
                 }
               ]
@@ -7157,10 +7500,10 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                14,
-                15,
-                20,
-                22
+                16,
+                17,
+                22,
+                24
               ],
               "sites": [
                 {
@@ -7175,7 +7518,8 @@
                 },
                 {
                   "id": 3,
-                  "kind": "Call"
+                  "kind": "GetProperty",
+                  "detail": "\"checksum\""
                 },
                 {
                   "id": 4,
@@ -7184,13 +7528,12 @@
                 },
                 {
                   "id": 5,
-                  "kind": "MakeFunction",
-                  "detail": "proto #5"
+                  "kind": "Call"
                 },
                 {
                   "id": 6,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
+                  "kind": "MakeFunction",
+                  "detail": "proto #5"
                 },
                 {
                   "id": 7,
@@ -7204,21 +7547,21 @@
                 },
                 {
                   "id": 9,
-                  "kind": "Call"
-                },
-                {
-                  "id": 10,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 11,
                   "kind": "MakeFunction",
                   "detail": "proto #7"
                 },
                 {
-                  "id": 12,
+                  "id": 10,
                   "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 11,
+                  "kind": "Call"
+                },
+                {
+                  "id": 12,
+                  "kind": "GetProperty",
                   "detail": "\"then\""
                 },
                 {
@@ -7233,12 +7576,13 @@
                 },
                 {
                   "id": 15,
-                  "kind": "Call"
+                  "kind": "MakeFunction",
+                  "detail": "proto #9"
                 },
                 {
                   "id": 16,
                   "kind": "CallMethod",
-                  "detail": "\"now\""
+                  "detail": "\"then\""
                 },
                 {
                   "id": 17,
@@ -7246,26 +7590,35 @@
                 },
                 {
                   "id": 18,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 19,
-                  "kind": "MakeFunction",
-                  "detail": "proto #9"
-                },
-                {
-                  "id": 20,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 21,
                   "kind": "CallMethod",
                   "detail": "\"now\""
                 },
                 {
+                  "id": 19,
+                  "kind": "Call"
+                },
+                {
+                  "id": 20,
+                  "kind": "GetProperty",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 21,
+                  "kind": "MakeFunction",
+                  "detail": "proto #10"
+                },
+                {
                   "id": 22,
+                  "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 23,
+                  "kind": "CallMethod",
+                  "detail": "\"now\""
+                },
+                {
+                  "id": 24,
                   "kind": "Call"
                 }
               ]
@@ -7287,6 +7640,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -7344,7 +7698,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #11"
+                  "detail": "proto #12"
                 },
                 {
                   "id": 11,
@@ -7369,7 +7723,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -7391,6 +7749,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -7448,7 +7807,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #13"
+                  "detail": "proto #14"
                 },
                 {
                   "id": 11,
@@ -7473,7 +7832,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -7522,17 +7885,17 @@
                 {
                   "id": 4,
                   "kind": "MakeFunction",
-                  "detail": "proto #10"
+                  "detail": "proto #11"
                 },
                 {
                   "id": 5,
                   "kind": "MakeFunction",
-                  "detail": "proto #12"
+                  "detail": "proto #13"
                 },
                 {
                   "id": 6,
                   "kind": "MakeFunction",
-                  "detail": "proto #14"
+                  "detail": "proto #15"
                 }
               ]
             },
@@ -7642,6 +8005,15 @@
               ]
             },
             {
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": true,
+              "can_throw": false,
+              "reads_arguments": false
+            },
+            {
               "name": "done",
               "parameter_types": [
                 "Unknown"
@@ -7651,7 +8023,7 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                2
+                3
               ],
               "sites": [
                 {
@@ -7659,7 +8031,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 2,
+                  "id": 1,
+                  "kind": "Call"
+                },
+                {
+                  "id": 3,
                   "kind": "Call"
                 }
               ]
@@ -7747,10 +8123,10 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                14,
-                15,
-                20,
-                22
+                16,
+                17,
+                22,
+                24
               ],
               "sites": [
                 {
@@ -7765,7 +8141,8 @@
                 },
                 {
                   "id": 3,
-                  "kind": "Call"
+                  "kind": "GetProperty",
+                  "detail": "\"checksum\""
                 },
                 {
                   "id": 4,
@@ -7774,13 +8151,12 @@
                 },
                 {
                   "id": 5,
-                  "kind": "MakeFunction",
-                  "detail": "proto #5"
+                  "kind": "Call"
                 },
                 {
                   "id": 6,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
+                  "kind": "MakeFunction",
+                  "detail": "proto #5"
                 },
                 {
                   "id": 7,
@@ -7794,21 +8170,21 @@
                 },
                 {
                   "id": 9,
-                  "kind": "Call"
-                },
-                {
-                  "id": 10,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 11,
                   "kind": "MakeFunction",
                   "detail": "proto #7"
                 },
                 {
-                  "id": 12,
+                  "id": 10,
                   "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 11,
+                  "kind": "Call"
+                },
+                {
+                  "id": 12,
+                  "kind": "GetProperty",
                   "detail": "\"then\""
                 },
                 {
@@ -7823,12 +8199,13 @@
                 },
                 {
                   "id": 15,
-                  "kind": "Call"
+                  "kind": "MakeFunction",
+                  "detail": "proto #9"
                 },
                 {
                   "id": 16,
                   "kind": "CallMethod",
-                  "detail": "\"now\""
+                  "detail": "\"then\""
                 },
                 {
                   "id": 17,
@@ -7836,26 +8213,35 @@
                 },
                 {
                   "id": 18,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 19,
-                  "kind": "MakeFunction",
-                  "detail": "proto #9"
-                },
-                {
-                  "id": 20,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 21,
                   "kind": "CallMethod",
                   "detail": "\"now\""
                 },
                 {
+                  "id": 19,
+                  "kind": "Call"
+                },
+                {
+                  "id": 20,
+                  "kind": "GetProperty",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 21,
+                  "kind": "MakeFunction",
+                  "detail": "proto #10"
+                },
+                {
                   "id": 22,
+                  "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 23,
+                  "kind": "CallMethod",
+                  "detail": "\"now\""
+                },
+                {
+                  "id": 24,
                   "kind": "Call"
                 }
               ]
@@ -7877,6 +8263,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -7934,7 +8321,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #11"
+                  "detail": "proto #12"
                 },
                 {
                   "id": 11,
@@ -7959,7 +8346,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -7981,6 +8372,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -8038,7 +8430,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #13"
+                  "detail": "proto #14"
                 },
                 {
                   "id": 11,
@@ -8063,7 +8455,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -8157,17 +8553,17 @@
                 {
                   "id": 4,
                   "kind": "MakeFunction",
-                  "detail": "proto #10"
+                  "detail": "proto #11"
                 },
                 {
                   "id": 5,
                   "kind": "MakeFunction",
-                  "detail": "proto #12"
+                  "detail": "proto #13"
                 },
                 {
                   "id": 6,
                   "kind": "MakeFunction",
-                  "detail": "proto #14"
+                  "detail": "proto #15"
                 }
               ]
             },
@@ -8277,6 +8673,15 @@
               ]
             },
             {
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": true,
+              "can_throw": false,
+              "reads_arguments": false
+            },
+            {
               "name": "done",
               "parameter_types": [
                 "Unknown"
@@ -8286,7 +8691,7 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                2
+                3
               ],
               "sites": [
                 {
@@ -8294,7 +8699,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 2,
+                  "id": 1,
+                  "kind": "Call"
+                },
+                {
+                  "id": 3,
                   "kind": "Call"
                 }
               ]
@@ -8382,10 +8791,10 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                14,
-                15,
-                20,
-                22
+                16,
+                17,
+                22,
+                24
               ],
               "sites": [
                 {
@@ -8400,7 +8809,8 @@
                 },
                 {
                   "id": 3,
-                  "kind": "Call"
+                  "kind": "GetProperty",
+                  "detail": "\"checksum\""
                 },
                 {
                   "id": 4,
@@ -8409,13 +8819,12 @@
                 },
                 {
                   "id": 5,
-                  "kind": "MakeFunction",
-                  "detail": "proto #5"
+                  "kind": "Call"
                 },
                 {
                   "id": 6,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
+                  "kind": "MakeFunction",
+                  "detail": "proto #5"
                 },
                 {
                   "id": 7,
@@ -8429,21 +8838,21 @@
                 },
                 {
                   "id": 9,
-                  "kind": "Call"
-                },
-                {
-                  "id": 10,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 11,
                   "kind": "MakeFunction",
                   "detail": "proto #7"
                 },
                 {
-                  "id": 12,
+                  "id": 10,
                   "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 11,
+                  "kind": "Call"
+                },
+                {
+                  "id": 12,
+                  "kind": "GetProperty",
                   "detail": "\"then\""
                 },
                 {
@@ -8458,12 +8867,13 @@
                 },
                 {
                   "id": 15,
-                  "kind": "Call"
+                  "kind": "MakeFunction",
+                  "detail": "proto #9"
                 },
                 {
                   "id": 16,
                   "kind": "CallMethod",
-                  "detail": "\"now\""
+                  "detail": "\"then\""
                 },
                 {
                   "id": 17,
@@ -8471,26 +8881,35 @@
                 },
                 {
                   "id": 18,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 19,
-                  "kind": "MakeFunction",
-                  "detail": "proto #9"
-                },
-                {
-                  "id": 20,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 21,
                   "kind": "CallMethod",
                   "detail": "\"now\""
                 },
                 {
+                  "id": 19,
+                  "kind": "Call"
+                },
+                {
+                  "id": 20,
+                  "kind": "GetProperty",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 21,
+                  "kind": "MakeFunction",
+                  "detail": "proto #10"
+                },
+                {
                   "id": 22,
+                  "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 23,
+                  "kind": "CallMethod",
+                  "detail": "\"now\""
+                },
+                {
+                  "id": 24,
                   "kind": "Call"
                 }
               ]
@@ -8512,6 +8931,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -8569,7 +8989,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #11"
+                  "detail": "proto #12"
                 },
                 {
                   "id": 11,
@@ -8594,7 +9014,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -8616,6 +9040,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -8673,7 +9098,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #13"
+                  "detail": "proto #14"
                 },
                 {
                   "id": 11,
@@ -8698,7 +9123,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -8787,17 +9216,17 @@
                 {
                   "id": 4,
                   "kind": "MakeFunction",
-                  "detail": "proto #10"
+                  "detail": "proto #11"
                 },
                 {
                   "id": 5,
                   "kind": "MakeFunction",
-                  "detail": "proto #12"
+                  "detail": "proto #13"
                 },
                 {
                   "id": 6,
                   "kind": "MakeFunction",
-                  "detail": "proto #14"
+                  "detail": "proto #15"
                 }
               ]
             },
@@ -8907,6 +9336,15 @@
               ]
             },
             {
+              "parameter_types": [
+                "Unknown"
+              ],
+              "return_type": "Unknown",
+              "pure": true,
+              "can_throw": false,
+              "reads_arguments": false
+            },
+            {
               "name": "done",
               "parameter_types": [
                 "Unknown"
@@ -8916,7 +9354,7 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                2
+                3
               ],
               "sites": [
                 {
@@ -8924,7 +9362,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 2,
+                  "id": 1,
+                  "kind": "Call"
+                },
+                {
+                  "id": 3,
                   "kind": "Call"
                 }
               ]
@@ -9012,10 +9454,10 @@
               "can_throw": true,
               "reads_arguments": false,
               "returned_sites": [
-                14,
-                15,
-                20,
-                22
+                16,
+                17,
+                22,
+                24
               ],
               "sites": [
                 {
@@ -9030,7 +9472,8 @@
                 },
                 {
                   "id": 3,
-                  "kind": "Call"
+                  "kind": "GetProperty",
+                  "detail": "\"checksum\""
                 },
                 {
                   "id": 4,
@@ -9039,13 +9482,12 @@
                 },
                 {
                   "id": 5,
-                  "kind": "MakeFunction",
-                  "detail": "proto #5"
+                  "kind": "Call"
                 },
                 {
                   "id": 6,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
+                  "kind": "MakeFunction",
+                  "detail": "proto #5"
                 },
                 {
                   "id": 7,
@@ -9059,21 +9501,21 @@
                 },
                 {
                   "id": 9,
-                  "kind": "Call"
-                },
-                {
-                  "id": 10,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 11,
                   "kind": "MakeFunction",
                   "detail": "proto #7"
                 },
                 {
-                  "id": 12,
+                  "id": 10,
                   "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 11,
+                  "kind": "Call"
+                },
+                {
+                  "id": 12,
+                  "kind": "GetProperty",
                   "detail": "\"then\""
                 },
                 {
@@ -9088,12 +9530,13 @@
                 },
                 {
                   "id": 15,
-                  "kind": "Call"
+                  "kind": "MakeFunction",
+                  "detail": "proto #9"
                 },
                 {
                   "id": 16,
                   "kind": "CallMethod",
-                  "detail": "\"now\""
+                  "detail": "\"then\""
                 },
                 {
                   "id": 17,
@@ -9101,26 +9544,35 @@
                 },
                 {
                   "id": 18,
-                  "kind": "GetProperty",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 19,
-                  "kind": "MakeFunction",
-                  "detail": "proto #9"
-                },
-                {
-                  "id": 20,
-                  "kind": "CallMethod",
-                  "detail": "\"then\""
-                },
-                {
-                  "id": 21,
                   "kind": "CallMethod",
                   "detail": "\"now\""
                 },
                 {
+                  "id": 19,
+                  "kind": "Call"
+                },
+                {
+                  "id": 20,
+                  "kind": "GetProperty",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 21,
+                  "kind": "MakeFunction",
+                  "detail": "proto #10"
+                },
+                {
                   "id": 22,
+                  "kind": "CallMethod",
+                  "detail": "\"then\""
+                },
+                {
+                  "id": 23,
+                  "kind": "CallMethod",
+                  "detail": "\"now\""
+                },
+                {
+                  "id": 24,
                   "kind": "Call"
                 }
               ]
@@ -9142,6 +9594,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -9199,7 +9652,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #11"
+                  "detail": "proto #12"
                 },
                 {
                   "id": 11,
@@ -9224,7 +9677,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
@@ -9246,6 +9703,7 @@
                 "Unknown",
                 "Unknown",
                 "Unknown",
+                "Unknown",
                 "Unknown"
               ],
               "return_type": "Undefined",
@@ -9303,7 +9761,7 @@
                 {
                   "id": 10,
                   "kind": "MakeFunction",
-                  "detail": "proto #13"
+                  "detail": "proto #14"
                 },
                 {
                   "id": 11,
@@ -9328,7 +9786,11 @@
                   "kind": "Call"
                 },
                 {
-                  "id": 17,
+                  "id": 16,
+                  "kind": "Call"
+                },
+                {
+                  "id": 18,
                   "kind": "Call"
                 }
               ]
