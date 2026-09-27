@@ -3043,10 +3043,14 @@ macro_rules! header_rest {
     } while (0)
 
 /* Recursion runs on the C stack, where exhausting it aborts the process instead of reporting
- * anything.  The interpreter's own limit is 10000 frames, but its frames are heap-allocated and
- * these are not: a generated body holds its stack and locals as automatic arrays, so the safe
- * bound is far lower and has to be enforced rather than hoped for. */
-#define KILN_C99_MAX_CALL_DEPTH 2048
+ * anything. The limit is the interpreter's own, 10,000 calls (parallel issue 30: 2,048 threw at
+ * a recursion node and the interpreter finish), which every thread a realm runs on has the stack
+ * for: 64 MiB, the launcher's main thread (`kiln_cli_grow_main_stack`, `main_stack_flags`), a
+ * worker's and a pinned realm's. A call that goes through the runtime also asks how much of the
+ * stack is left (`kiln_c99_stack_exhausted`), since its frames are as big as the C it passes
+ * through, so a thread with less stack than that answers the same `RangeError` rather than a
+ * segfault. */
+#define KILN_C99_MAX_CALL_DEPTH 10000
 
 
 enum kiln_value_tag {
@@ -4744,6 +4748,8 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_builtin_store_epoch", C99StateOwner::Process),
     // Recycled byte blocks: plain memory that names no realm's value.
     ("kiln_c99_bytes_cache", C99StateOwner::ThreadCache),
+    // Parallel issue 30: the lowest address this thread's calls may start at, found once.
+    ("kiln_c99_stack_floor", C99StateOwner::ThreadCache),
     // Per thread, and trusted only for the heap serial it was built under: the `node:http` layouts.
     ("kiln_c99_node_http_layouts", C99StateOwner::ThreadCache),
     ("kiln_c99_gc_stress_checks", C99StateOwner::Process),

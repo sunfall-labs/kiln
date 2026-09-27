@@ -508,6 +508,10 @@ static inline int kiln_c99_invoke_closure(kiln_host *host, kiln_val *result,
                                           const kiln_val *args, size_t argc, int depth,
                                           kiln_value *thrown, kiln_generator *frame,
                                           int inherit_new_target) {
+    if (KILN_UNLIKELY(kiln_c99_stack_exhausted())) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                    "Maximum call stack size exceeded");
+    }
     if (!closure->publishes_frame && !inherit_new_target) {
         int saved_depth = kiln_c99_diagnostic_active_depth;
         int quick;
@@ -577,7 +581,7 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
     if (!kiln_c99_is_callable(callee)) {
         return kiln_c99_throw_not_a(thrown, callee, "function");
     }
-    if (depth >= KILN_C99_MAX_CALL_DEPTH) {
+    if (depth >= KILN_C99_MAX_CALL_DEPTH || kiln_c99_stack_exhausted()) {
         /* A `RangeError` the program can catch, which is what a real engine raises when the
          * stack runs out -- and what a recursive descent parser catches to report a nesting
          * limit rather than dying. */

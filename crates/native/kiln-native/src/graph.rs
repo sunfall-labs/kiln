@@ -2607,6 +2607,7 @@ pub(super) fn graph_launcher_source_with_imports(
 #include <strings.h>
 #if defined(__linux__)
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #endif
 #endif
 
@@ -4793,8 +4794,25 @@ static int kiln_cli_workers_use_threads(void) {
 }
 #endif
 
+/* Parallel issue 30: compiled code recurses on the C stack, as deeply as the interpreter's
+ * 10,000 calls, so the main thread gets the 64 MiB a `node:worker_threads` realm's thread gets.
+ * Linux grows the main stack on demand up to the soft `RLIMIT_STACK` read at each fault, so
+ * raising the soft limit (never past the hard one, never lowering it) is enough; macOS fixes the
+ * main stack at link time instead (`main_stack_flags` in kiln-native-toolchain). */
+static void kiln_cli_grow_main_stack(void) {
+#if defined(__linux__)
+    const rlim_t wanted = (rlim_t)64 * 1024 * 1024;
+    struct rlimit limit;
+    if (getrlimit(RLIMIT_STACK, &limit) != 0) return;
+    if (limit.rlim_cur == RLIM_INFINITY || limit.rlim_cur >= wanted) return;
+    limit.rlim_cur = limit.rlim_max == RLIM_INFINITY || limit.rlim_max >= wanted ? wanted : limit.rlim_max;
+    (void)setrlimit(RLIMIT_STACK, &limit);
+#endif
+}
+
 int main(int argc, char **argv) {
     long workers, realms;
+    kiln_cli_grow_main_stack();
     if (setlocale(LC_NUMERIC, "C") == NULL) return 1;
     if (kiln_cli_http3_enabled(argc, argv)) {
 #ifndef _WIN32

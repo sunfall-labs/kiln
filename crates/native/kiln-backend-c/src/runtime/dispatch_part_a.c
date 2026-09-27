@@ -1035,6 +1035,10 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     kiln_value *coerced = NULL;
     size_t index;
     int status = KILN_C99_OK;
+    if (KILN_UNLIKELY(kiln_c99_stack_exhausted())) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                    "Maximum call stack size exceeded");
+    }
     if ((numeric | textual) == 0 || argc == 0) {
         return kiln_c99_invoke_method_dispatch(host, result, code, metadata, receiver, args, argc, depth,
                                                thrown);

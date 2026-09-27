@@ -1850,7 +1850,7 @@ static int kiln_c99_val_write_symbol(kiln_host *host, kiln_val target, kiln_val 
 static int kiln_c99_val_invoke_cached_method(kiln_host *host, uint64_t method_code, kiln_val receiver,
                                             const kiln_val *args, size_t argc, int depth,
                                             kiln_value *thrown, kiln_val *out) {
-    if (depth >= KILN_C99_MAX_CALL_DEPTH) {
+    if (depth >= KILN_C99_MAX_CALL_DEPTH || kiln_c99_stack_exhausted()) {
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
                                     "Maximum call stack size exceeded");
     }

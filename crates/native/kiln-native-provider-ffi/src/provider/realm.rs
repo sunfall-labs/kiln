@@ -4286,7 +4286,9 @@ unsafe fn run_realms(
         let shared = SharedContext(context);
         let realms: Vec<_> = (0..count as u64)
             .map(|index| {
-                pool.spawn_pinned(move || {
+                // As deep a C stack as a main thread or a worker realm's (parallel issue 30):
+                // compiled code recurses on it, up to the interpreter's 10,000 calls.
+                pool.spawn_pinned_with_stack(kiln_runtime::workers::WORKER_STACK, move || {
                     let shared = shared;
                     if listen_group {
                         kiln_runtime::join_listen_group();

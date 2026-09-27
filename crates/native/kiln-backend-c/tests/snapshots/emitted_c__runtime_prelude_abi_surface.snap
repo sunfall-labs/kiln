@@ -153,7 +153,7 @@ typedef struct kiln_c99_method_metadata {
 static kiln_c99_method_metadata kiln_c99_method_metadata_for(uint64_t code);
 static inline void kiln_c99_reset_diagnostics(void) {
 #define KILN_C99_ABSENT(why, out)      \
-#define KILN_C99_MAX_CALL_DEPTH 2048
+#define KILN_C99_MAX_CALL_DEPTH 10000
 enum kiln_value_tag {
 KILN_VALUE_UNDEFINED = 0,
 KILN_VALUE_NULL = 1,
@@ -1841,6 +1841,17 @@ static kiln_array *kiln_c99_array_of(kiln_value value) {
 static kiln_typed_buffer *kiln_c99_typed_buffer_of(kiln_value value) {
 static kiln_typed_array *kiln_c99_typed_array_of(kiln_value value) {
 static kiln_data_view *kiln_c99_data_view_of(kiln_value value) {
+#include <pthread.h>
+static _Thread_local uintptr_t kiln_c99_stack_floor;
+static __attribute__((noinline, cold)) uintptr_t kiln_c99_stack_floor_find(void) {
+#if defined(__APPLE__)
+#else
+#endif
+static KILN_ALWAYS_INLINE inline int kiln_c99_stack_exhausted(void) {
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__)
+#elif (defined(__GNUC__) || defined(__clang__)) && defined(__aarch64__)
+#else
+#endif
 #define KILN_GC_PHASE_MARK 0
 #define KILN_GC_PHASE_TEARDOWN 1
 #define KILN_GC_PHASE_RESET 2

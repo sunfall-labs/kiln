@@ -473,8 +473,10 @@ pub const WORKER_LIMIT: usize = 1024;
 
 /// A worker's thread stack. An interpreter recurses in Rust when a built-in calls back into
 /// JavaScript, and a native realm's generated code recurses on the C stack, so a worker gets
-/// what a main thread has rather than a thread's default two megabytes.
-const WORKER_STACK: usize = 64 * 1024 * 1024;
+/// what a main thread has rather than a thread's default two megabytes. Every thread a native
+/// realm runs on gets the same (parallel issue 30): the realms of `kiln_realm_run_pinned`, and the
+/// launcher's main thread.
+pub const WORKER_STACK: usize = 64 * 1024 * 1024;
 
 static NEXT_KEY: AtomicU64 = AtomicU64::new(1);
 static RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
