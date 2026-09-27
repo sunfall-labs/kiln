@@ -131,6 +131,9 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// Runtime source compilation is explicit realm authority, absent unless the caller selects
     /// a compiler. It is copied into each short-lived module VM from the graph session policy.
     pub(super) source_compiler: Option<SourceCompiler>,
+    /// The shared TypeScript built-ins every realm runs once its global object exists
+    /// ([`RealmBootstrap`]). Run by [`Vm::realize_realm`], never by the lazy global builder.
+    pub(super) realm_bootstrap: Option<RealmBootstrap>,
     /// Whether this execution's host allows a second realm, and therefore publishes the hook
     /// that makes one. False for every ordinary run.
     pub(super) host_realms: bool,

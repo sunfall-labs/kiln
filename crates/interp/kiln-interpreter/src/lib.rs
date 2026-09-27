@@ -1550,6 +1550,26 @@ pub enum EvalCompileError {
 /// function pointer over owned data -- and a host that installs none simply has no `eval`.
 pub type SourceCompiler = fn(&EvalSource<'_>) -> Result<(Program, Strictness), EvalCompileError>;
 
+/// The program every realm an execution makes runs once its global object exists.
+///
+/// The built-ins ADR 0060 gives to shared TypeScript (`kiln-builtins`: `Date.prototype`,
+/// `%TypedArray%.prototype`, `ArrayBuffer.prototype.transfer`, `structuredClone`, ...) are
+/// installed by running that TypeScript, so a realm that skipped it would answer with whatever
+/// Rust duplicate happened to remain -- or with nothing, once the duplicate is deleted. That is
+/// exactly how Test262 lost `transfer`: its script path built realms that never ran it.
+///
+/// Compiled by the embedder and handed over as a function pointer, the shape [`SourceCompiler`]
+/// has and for the same reason: the interpreter owns no frontend. The function answers the same
+/// immutable program every time -- an embedder caches it, so it is compiled once, not once per
+/// realm -- and the machine runs it in every realm it initialises: the entry realm, each
+/// `$262.createRealm` realm and each `ShadowRealm`. Only code is shared; every object the
+/// bootstrap builds is built afresh in the realm that runs it (ADR 0038, ADR 0071).
+pub type RealmBootstrap = fn() -> Result<Rc<Program>, String>;
+
+/// The module path a realm bootstrap runs under: what its stack frames and its compile
+/// diagnostics name. Public so an embedder compiles it under the same name the machine runs it.
+pub const REALM_BOOTSTRAP_PATH: &str = "@kiln/realm-bootstrap.ts";
+
 /// Language-engine capabilities selected explicitly for one execution realm.
 ///
 /// Environmental values remain [`RealmCapabilities`] owned by `kiln-runtime`. This companion
@@ -1558,6 +1578,7 @@ pub type SourceCompiler = fn(&EvalSource<'_>) -> Result<(Program, Strictness), E
 #[derive(Clone, Default)]
 pub struct ExecutionCapabilities {
     source_compiler: Option<SourceCompiler>,
+    realm_bootstrap: Option<RealmBootstrap>,
     module_loader: Option<Arc<dyn ModuleLoaderService + Send + Sync>>,
     host_realms: bool,
     host_agents: Option<&'static str>,
@@ -1578,6 +1599,18 @@ impl ExecutionCapabilities {
 
     pub const fn source_compiler(&self) -> Option<SourceCompiler> {
         self.source_compiler
+    }
+
+    /// Run `bootstrap`'s program in every realm this execution initialises. See
+    /// [`RealmBootstrap`]. Without one a realm has only the machine's own intrinsics, which is
+    /// what an embedder testing the bare machine asks for.
+    pub const fn with_realm_bootstrap(mut self, bootstrap: RealmBootstrap) -> Self {
+        self.realm_bootstrap = Some(bootstrap);
+        self
+    }
+
+    pub const fn realm_bootstrap(&self) -> Option<RealmBootstrap> {
+        self.realm_bootstrap
     }
 
     pub fn with_module_loader_service(

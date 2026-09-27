@@ -748,6 +748,15 @@ pub enum Native {
     /// buffer and detach this one -- the primitive under `transfer`, `transferToFixedLength` and
     /// every transfer list, which are the shared bootstrap's.
     ArrayBufferDetachRaw,
+    /// `__kilnArrayBufferResize(buffer, length)`: move a resizable buffer's length, or grow a
+    /// growable shared one, in place (ADR 0065, representation). `resize` and `grow` are the
+    /// shared TypeScript over it (`kiln-builtins/src/arraybuffer.ts`), which makes every check a
+    /// program can observe first.
+    ArrayBufferResizeRaw,
+    /// `__kilnTypedArrayOutOfBounds(view)`: `IsTypedArrayOutOfBounds` (ADR 0065, representation)
+    /// -- detached, or a resizable buffer shrunk under the window. The shared `%TypedArray%`
+    /// methods ask it in `ValidateTypedArray` (`kiln-builtins/src/typedarray.ts`).
+    TypedArrayOutOfBoundsRaw,
     /// `__kilnCloneData(value)`: the structured clone's plain-data fast path, which this engine
     /// never takes (it answers `undefined`, "not handled").
     CloneDataRaw,

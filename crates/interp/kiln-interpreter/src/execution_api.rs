@@ -121,11 +121,14 @@ pub fn execute_in_runtime_with_strictness<H: HostOps + ?Sized>(
     // Only a module gets `undefined`, and `execute_module` builds its own machine -- the comment
     // on `Vm::this_value` says exactly that, and this path was reading it as though every program
     // were a module. Setting it here also forces the realm's global object into existence before
-    // the program runs, which is what makes `this.x = 1` and a later bare `x` name one binding.
-    vm.this_value = vm.global_object();
+    // the program runs, which is what makes `this.x = 1` and a later bare `x` name one binding --
+    // and runs the realm bootstrap, so the program never sees a realm without its built-ins.
     // The program is not finished when its last statement is: anything it scheduled still has
     // to run, which is what makes a `setTimeout` observable at all.
-    let execution = runtime.enter(|| vm.run())?;
+    let execution = runtime.enter(|| {
+        vm.this_value = vm.realize_realm(RealmId::PRIMARY)?;
+        vm.run()
+    })?;
     vm.run_event_loop(runtime)?;
     Ok(ExecutionResult {
         steps: vm.steps,
@@ -198,7 +201,10 @@ pub fn execute_node_in_runtime_with_strictness<H: HostOps + ?Sized>(
     )?;
     vm.async_host = Some(runtime as *mut RealmRuntime as *mut dyn ActiveAsyncHostOps);
     vm.http_runtime = Some(runtime as *mut RealmRuntime as *mut dyn ActiveHttpRuntime);
-    let execution = runtime.enter(|| vm.run())?;
+    let execution = runtime.enter(|| {
+        vm.realize_realm(RealmId::PRIMARY)?;
+        vm.run()
+    })?;
     vm.run_node_event_loop(runtime)?;
     Ok(ExecutionResult {
         steps: vm.steps,
@@ -278,10 +284,13 @@ pub fn execute_reclaiming_in_runtime_with_strictness<H: HostOps + ?Sized>(
     // Only a module gets `undefined`, and `execute_module` builds its own machine -- the comment
     // on `Vm::this_value` says exactly that, and this path was reading it as though every program
     // were a module. Setting it here also forces the realm's global object into existence before
-    // the program runs, which is what makes `this.x = 1` and a later bare `x` name one binding.
-    vm.this_value = vm.global_object();
+    // the program runs, which is what makes `this.x = 1` and a later bare `x` name one binding --
+    // and runs the realm bootstrap, so the program never sees a realm without its built-ins.
     let outcome = runtime
-        .enter(|| vm.run())
+        .enter(|| {
+            vm.this_value = vm.realize_realm(RealmId::PRIMARY)?;
+            vm.run()
+        })
         .and_then(|_| vm.run_event_loop(runtime));
     // Unconditionally, and before the `?`: a program that threw still defined every function it
     // evaluated on the way to throwing, and those cycles are no less permanent.
@@ -836,10 +845,16 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
         vm.intrinsics = Rc::clone(&session.shared.borrow().intrinsics);
         vm.global_objects = session.shared.borrow().global_objects.clone();
     }
+    // The realm is built and bootstrapped before the body's first instruction: by this machine
+    // if it is the first of its session to run, and found already built otherwise.
+    let realm = vm.current_realm;
     let execution = match if enter_runtime {
-        runtime.enter(|| vm.run_module_body())
+        runtime.enter(|| {
+            vm.realize_realm(realm)?;
+            vm.run_module_body()
+        })
     } else {
-        vm.run_module_body()
+        vm.realize_realm(realm).and_then(|_| vm.run_module_body())
     } {
         Ok(execution) => execution,
         Err(error) => {

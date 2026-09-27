@@ -5,7 +5,7 @@
   if (typeof Map === "undefined" || !Map.prototype) return;
   const Proto = Map.prototype;
 
-  function getOrInsert(this: any, key: any, value: any): any {
+  const getOrInsert = { getOrInsert(this: any, key: any, value: any): any {
     if (!(this instanceof Map)) {
       throw new TypeError("Method Map.prototype.getOrInsert called on incompatible receiver");
     }
@@ -14,9 +14,9 @@
     }
     this.set(key, value);
     return value;
-  }
+  } }.getOrInsert;
 
-  function getOrInsertComputed(this: any, key: any, callback: (key: any) => any): any {
+  const getOrInsertComputed = { getOrInsertComputed(this: any, key: any, callback: (key: any) => any): any {
     if (!(this instanceof Map)) {
       throw new TypeError("Method Map.prototype.getOrInsertComputed called on incompatible receiver");
     }
@@ -26,10 +26,12 @@
     if (this.has(key)) {
       return this.get(key);
     }
+    // `CanonicalizeKeyedCollectionKey`: the callback sees the key the map will hold, +0 for -0.
+    if (key === 0) key = 0;
     const value = callback.call(undefined, key);
     this.set(key, value);
     return value;
-  }
+  } }.getOrInsertComputed;
 
   Object.defineProperty(Proto, "getOrInsert", {
     value: getOrInsert,

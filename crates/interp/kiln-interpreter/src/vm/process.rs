@@ -13,8 +13,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         ));
         process.node_events = Some(Vec::new());
         let mut env_obj = ObjectData::default();
+        // Appended rather than `set`, with the duplicate check a hash lookup: `set` searches the
+        // store for each name, which made building `process` -- every realm does -- quadratic in
+        // the size of the environment (225 names here, a quarter of a bare realm's cost). An
+        // environment can hold a name twice; the first one is kept, as `getenv` does.
+        let mut seen = std::collections::HashSet::new();
         for (key, val) in std::env::vars() {
-            env_obj.set(&key, Value::String(val.into()));
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            env_obj.insert_key(
+                PropertyKeyRef::Utf8(&key),
+                Property::Value(Value::String(val.into())),
+                Attributes::DEFAULT,
+            );
         }
         process.set("env", Value::Object(Rc::new(RefCell::new(env_obj))));
         // Whatever the host said, verbatim -- including the two leading entries, which node

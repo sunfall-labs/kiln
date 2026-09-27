@@ -18,6 +18,11 @@ use std::path::{Path, PathBuf};
 pub(crate) fn capabilities(base: Option<&Path>) -> ExecutionCapabilities {
     ExecutionCapabilities::default()
         .with_source_compiler(compile_source)
+        // Every realm a case makes runs the shared TypeScript built-ins first, as `kiln run`'s
+        // realms do: without them Test262 measured the interpreter's leftover Rust duplicates
+        // rather than the implementation that owns the behaviour (ADR 0060). The plain set;
+        // a Node-mode run swaps in the Node one.
+        .with_realm_bootstrap(kiln_module_eval::realm_bootstrap(false))
         .with_module_loader_service(std::sync::Arc::new(
             crate::module_loader::ConformanceModuleLoader::new(base.map(PathBuf::from)),
         ))

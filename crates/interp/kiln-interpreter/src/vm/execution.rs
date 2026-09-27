@@ -894,7 +894,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                 }
                 Instruction::LoadBuiltin(builtin) => {
-                    let value = self.builtin_value(*builtin, RealmId::PRIMARY);
+                    // The running code's realm, not the primary one: a bare `ArrayBuffer` in code
+                    // a second realm runs names *that* realm's intrinsic (ADR 0038), which is what
+                    // makes its bootstrap install onto its own prototypes, and what makes
+                    // `other.evalScript("Array") === other.global.Array`.
+                    let value = self.builtin_value(*builtin, self.current_realm);
                     self.stack.push(value);
                 }
                 Instruction::New { argc } => {

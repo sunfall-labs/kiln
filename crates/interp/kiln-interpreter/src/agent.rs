@@ -939,9 +939,11 @@ fn run_agent_realm(group: &Arc<AgentGroup>, id: usize, source: &str) -> Result<(
     vm.agents = Some(Arc::clone(group));
     vm.agent_owner = None;
     vm.agent_id = id;
-    vm.this_value = vm.global_object();
     let outcome = runtime
-        .enter(|| vm.run())
+        .enter(|| {
+            vm.this_value = vm.realize_realm(crate::RealmId::PRIMARY)?;
+            vm.run()
+        })
         .and_then(|_| vm.run_event_loop(&mut runtime));
     vm.release_cycles();
     outcome
