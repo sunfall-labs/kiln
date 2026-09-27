@@ -167,8 +167,9 @@ pub(super) fn typed_array_map(site: &LoopSite, typed: Option<&TypedCallback>) ->
                      {write_boxed}"
                 )
             };
+            let relies = &c.relies;
             format!(
-                "if (plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
+                "if (plain->body == (kiln_body_fn){symbol}_fn_{target}{relies}) {{ \
                      for (size_t idx = 0; idx < count0; ++idx) {{ \
                          double d_elem = kiln_typed_load(view, idx); \
                          {answer} \
@@ -254,8 +255,9 @@ pub(super) fn typed_array_filter(site: &LoopSite, typed: Option<&TypedCallback>)
                     "kiln_c99_val_truthy(r_elem)",
                 )
             };
+            let relies = &c.relies;
             format!(
-                "if (plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
+                "if (plain->body == (kiln_body_fn){symbol}_fn_{target}{relies}) {{ \
                      const uint8_t *src = view->buffer->bytes + view->byte_offset; \
                      for (size_t idx = 0; idx < count0; ++idx) {{ \
                          double d_elem = kiln_typed_load(view, idx); \
@@ -332,8 +334,9 @@ pub(super) fn typed_array_reduce(
         Some((c, init_dacc)) => {
             let target = c.target;
             let call_args = typed_call_args_for(c.needs, "plain", "vrecv", &["dacc", "d_elem"]);
+            let relies = &c.relies;
             format!(
-                "if (plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
+                "if (plain->body == (kiln_body_fn){symbol}_fn_{target}{relies}) {{ \
                      double dacc = {init_dacc}; \
                      for (size_t idx = 0; idx < count0; ++idx) {{ \
                          double d_elem = kiln_typed_load(view, idx); \
@@ -444,6 +447,7 @@ pub(super) fn reduce_tree(
     }) {
         Some((f, c)) => {
             let (fold, comb) = (f.target, c.target);
+            let (fold_relies, comb_relies) = (&f.relies, &c.relies);
             let mut fold_params = vec!["dacc", "d_elem"];
             if f.arity == 3 {
                 fold_params.push("(double)idx");
@@ -452,7 +456,7 @@ pub(super) fn reduce_tree(
             let comb_args =
                 typed_call_args_for(c.needs, "pcomb", "crecv", &["lvl[2 * i]", "lvl[2 * i + 1]"]);
             format!(
-                "if (plain->body == (kiln_body_fn){symbol}_fn_{fold} && pcomb->body == (kiln_body_fn){symbol}_fn_{comb} && KILN_VAL_IS_NUMBER(v{initial}) && (arr == NULL || arr->is_numeric)) {{ \
+                "if (plain->body == (kiln_body_fn){symbol}_fn_{fold}{fold_relies} && pcomb->body == (kiln_body_fn){symbol}_fn_{comb}{comb_relies} && KILN_VAL_IS_NUMBER(v{initial}) && (arr == NULL || arr->is_numeric)) {{ \
                      kiln_value level_val; \
                      int status = kiln_c99_typed_alloc_ex(&level_val, KILN_TYPED_FLOAT64, leaves, 0); \
                      if (status != KILN_C99_OK) return status; \

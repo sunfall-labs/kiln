@@ -8,6 +8,43 @@ use crate::prelude::lookup_speculation_invariant;
 use kiln_ir::Constant;
 use std::fmt::Write;
 
+/// The guard of a speculation on own members of built-ins (issue 20): each `(builtin, member)`
+/// pair names the built-in by its `KILN_C99_BUILTIN_` suffix and the member it relies on. It holds
+/// while the realm's program has written none of them, so a store onto another member or another
+/// built-in leaves the speculation fast.
+pub(crate) fn static_member_guard(members: &[(&str, &str)]) -> String {
+    members
+        .iter()
+        .map(|(builtin, member)| {
+            format!("kiln_c99_builtin_member_unmodified(KILN_C99_BUILTIN_{builtin}, \"{member}\")")
+        })
+        .collect::<Vec<_>>()
+        .join(" && ")
+}
+
+/// ` && (guard)` for a call site about to enter proto `target`'s typed entry, when that entry
+/// relies on built-ins it cannot fall back from ([`crate::direct::CallPlan::typed_guards`]);
+/// empty otherwise.
+pub(crate) fn typed_entry_guard(plan: &crate::direct::CallPlan, target: u32) -> String {
+    match plan.typed_guards.get(target as usize) {
+        Some(guard) if !guard.is_empty() => format!(" && ({guard})"),
+        _ => String::new(),
+    }
+}
+
+/// Marks a speculation in a typed entry whose failure can only refuse; see
+/// [`crate::emit_graph::typed_relies`].
+pub(crate) const TYPED_RELIES_MARK: &str = "/* kiln: typed entry relies on */";
+
+/// An array method's fast path relies on Array.prototype (the method) and Array (its species),
+/// with the prototypes every lookup falls through to folded in by the runtime.
+pub(crate) const ARRAY_METHOD_GUARD: &str =
+    "kiln_c99_builtin_pair_unmodified(KILN_C99_BUILTIN_ARRAY, KILN_C99_BUILTIN_ARRAY_PROTOTYPE)";
+
+/// A string method's fast path relies on String.prototype (the method) and String.
+pub(crate) const STRING_METHOD_GUARD: &str =
+    "kiln_c99_builtin_pair_unmodified(KILN_C99_BUILTIN_STRING, KILN_C99_BUILTIN_STRING_PROTOTYPE)";
+
 /// A callback argument of an intrinsic array loop (`map`, `filter`, `reduce`) whose proto this
 /// compile *proves* -- `plan.known`, not a cache -- and whose declared arity the loop can call
 /// typed. `arity` is the proto's own declared parameter count (1 or 2 for map/filter's element
@@ -18,6 +55,9 @@ pub(super) struct TypedCallback {
     pub(super) needs: TypedNeeds,
     pub(super) returns_double: bool,
     pub(super) arity: u32,
+    /// ` && (guard)` over the built-ins the callback's typed entry relies on (issue 20), for the
+    /// loop's choice of its typed form; empty when there are none.
+    pub(super) relies: String,
 }
 
 /// The callback argument's typed entry, when this callsite may call it typed: known by proto,
@@ -47,6 +87,7 @@ fn typed_callback(
         needs: plan.typed_needs[target as usize],
         returns_double: plan.typed_returns[target as usize],
         arity,
+        relies: typed_entry_guard(plan, target),
     })
 }
 
@@ -766,12 +807,13 @@ fn emit_map_typed(
             "} }",
         )
     };
+    let relies = &c.relies;
     format!(
         "{header} \
-             if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
+             if (KILN_LIKELY({ARRAY_METHOD_GUARD} && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
                  kiln_val vrecv = plain->arrow ? plain->captured_this : {this_arg}; \
                  if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
-                 if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
+                 if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}{relies}) {{ \
                      size_t count0 = arr->count; \
                      kiln_value built_val; \
                      int status = kiln_c99_new_array_with_capacity(&built_val, count0, 1); \
@@ -889,12 +931,13 @@ fn emit_filter_typed(
             "} }",
         )
     };
+    let relies = &c.relies;
     format!(
         "{header} \
-             if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
+             if (KILN_LIKELY({ARRAY_METHOD_GUARD} && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
                  kiln_val vrecv = plain->arrow ? plain->captured_this : {this_arg}; \
                  if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
-                 if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
+                 if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}{relies}) {{ \
                      size_t count0 = arr->count; \
                      kiln_value built_val; \
                      int status = kiln_c99_new_array_with_capacity(&built_val, count0, 1); \
@@ -982,12 +1025,13 @@ fn emit_reduce_typed(
             "} }",
         )
     };
+    let relies = &c.relies;
     format!(
         "{header} \
-             if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
+             if (KILN_LIKELY({ARRAY_METHOD_GUARD} && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
                  kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
                  if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
-                 if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}) {{ \
+                 if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}{relies}) {{ \
                      double dacc = {init_dacc}; \
                      for (size_t idx = 0; idx < arr->count; ++idx) {{ \
                          double d_elem; memcpy(&d_elem, &arr->elements[idx], sizeof(d_elem)); \
@@ -1413,8 +1457,12 @@ pub(super) fn emit_call_method(
                     // object -- the site just read the callee live from where the method lives,
                     // and its body pointer says which function it is; the upvalues are that
                     // closure's own.
+                    // Issue 20: the built-ins the entry relies on are asked about before it is
+                    // entered; a no takes the boxed call below, as a callee without a typed
+                    // entry would.
+                    let relies = typed_entry_guard(plan, i);
                     let matched = format!(
-                        "plain->body == (kiln_body_fn){symbol}_fn_{i} && kiln_typed_ok"
+                        "plain->body == (kiln_body_fn){symbol}_fn_{i} && kiln_typed_ok{relies}"
                     );
                     let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
                     let box_stmt = if need_box { format!(" v{v} = kiln_c99_val_from_double(kiln_typed_d);") } else { String::new() };
@@ -1481,7 +1529,7 @@ pub(super) fn emit_call_method(
                         invoke("", "")
                     };
                     let front = format!(
-                        "if (!handled && obj->shape == kiln_c99_slot_key(&{pfx}_path.recv)) {{ const kiln_object *kiln_path_level; if (kiln_c99_method_path_hit(&{pfx}_path, obj, &kiln_path_level) && kiln_typed_ok) {{ {front_closure}{front_call} handled = 1; }} }} "
+                        "if (!handled && obj->shape == kiln_c99_slot_key(&{pfx}_path.recv)) {{ const kiln_object *kiln_path_level; if (kiln_c99_method_path_hit(&{pfx}_path, obj, &kiln_path_level) && kiln_typed_ok{relies}) {{ {front_closure}{front_call} handled = 1; }} }} "
                     );
                     (front, format!("{} else ", arm(&path_learn, &matched)))
                 })
@@ -1543,7 +1591,11 @@ pub(super) fn emit_call_method(
         && argc == 1
     {
         Some(format!(
-            "if (KILN_LIKELY(kiln_c99_builtins_unmodified() && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_PROMISE && KILN_VAL_IS_NUMBER(v{a0}))) {{ v{v} = v{a0}; handled = 1; }}",
+            "if (KILN_LIKELY({guard} && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_PROMISE && KILN_VAL_IS_NUMBER(v{a0}))) {{ v{v} = v{a0}; handled = 1; }}",
+            guard = static_member_guard(&[
+                ("PROMISE", "resolve"),
+                ("PROMISE_PROTOTYPE", "constructor")
+            ]),
             o = object.0,
             a0 = args[0].0,
             v = v,
@@ -1860,11 +1912,19 @@ pub(super) fn emit_call_method(
     } else {
         None
     };
-    // A builtin's static method is what the table says only while no own property has been
-    // written onto any builtin: `Math.max = f` and `Promise.resolve = f` move the store epoch,
-    // and every intrinsic above then takes the general call, which finds the override.
-    let math_intrinsic = math_intrinsic
-        .map(|text| format!("if (KILN_LIKELY(kiln_c99_builtins_unmodified())) {{ {text} }}"));
+    // A builtin's static method is what the table says only while the realm's program has not
+    // written that member: `Math.max = f` and `Promise.resolve = f` are stores onto the member,
+    // and the intrinsic above then takes the general call, which finds the override. A store onto
+    // another member or another built-in (`Math.foo = 1`) leaves it alone (issue 20).
+    let math_guard = if key_str == "resolve" {
+        // `Promise.resolve(x)` is the member; the promise it makes answers `constructor` from
+        // Promise.prototype when it is awaited or resolved with.
+        static_member_guard(&[("PROMISE", "resolve"), ("PROMISE_PROTOTYPE", "constructor")])
+    } else {
+        static_member_guard(&[("MATH", key_str.as_str())])
+    };
+    let math_guarded = format!("if (KILN_LIKELY({math_guard})) {{ ");
+    let math_intrinsic = math_intrinsic.map(|text| format!("{math_guarded}{text} }}"));
 
     // 1b. Array.isArray static predicate
     let array_is_array_intrinsic = if key_str == "isArray" {
@@ -1887,7 +1947,7 @@ pub(super) fn emit_call_method(
             }
         };
         Some(format!(
-            "if (KILN_LIKELY(kiln_c99_builtins_unmodified() && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_ARRAY)) {{ \
+            "if (KILN_LIKELY(kiln_c99_builtin_member_unmodified(KILN_C99_BUILTIN_ARRAY, \"isArray\") && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_ARRAY)) {{ \
                  {arg_check} \
              }}",
             o = object.0,
@@ -1898,9 +1958,10 @@ pub(super) fn emit_call_method(
     };
 
     // 1c. Number.* static predicates (isFinite, isNaN, isInteger, isSafeInteger)
+    let nguard = static_member_guard(&[("NUMBER", key_str.as_str())]);
     let number_predicate_intrinsic = match (key_str.as_str(), argc) {
         ("isFinite" | "isNaN" | "isInteger" | "isSafeInteger", 0) => Some(format!(
-            "if (KILN_LIKELY(kiln_c99_builtins_unmodified() && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
+            "if (KILN_LIKELY({nguard} && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
                  v{v} = KILN_VAL_FALSE; \
                  handled = 1; \
              }}",
@@ -1924,7 +1985,7 @@ pub(super) fn emit_call_method(
                 )
             };
             Some(format!(
-                "if (KILN_LIKELY(kiln_c99_builtins_unmodified() && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
+                "if (KILN_LIKELY({nguard} && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
                      {check} \
                  }}",
                 o = object.0,
@@ -1948,7 +2009,7 @@ pub(super) fn emit_call_method(
                 )
             };
             Some(format!(
-                "if (KILN_LIKELY(kiln_c99_builtins_unmodified() && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
+                "if (KILN_LIKELY({nguard} && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
                      {check} \
                  }}",
                 o = object.0,
@@ -1974,7 +2035,7 @@ pub(super) fn emit_call_method(
                 )
             };
             Some(format!(
-                "if (KILN_LIKELY(kiln_c99_builtins_unmodified() && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
+                "if (KILN_LIKELY({nguard} && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
                      {check} \
                  }}",
                 o = object.0,
@@ -2000,7 +2061,7 @@ pub(super) fn emit_call_method(
                 )
             };
             Some(format!(
-                "if (KILN_LIKELY(kiln_c99_builtins_unmodified() && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
+                "if (KILN_LIKELY({nguard} && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_NUMBER)) {{ \
                      {check} \
                  }}",
                 o = object.0,
@@ -2265,7 +2326,7 @@ pub(super) fn emit_call_method(
                 let (header, footer) = array_header(args[0].0);
                 format!(
                     "{header} \
-                         if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
+                         if (KILN_LIKELY({ARRAY_METHOD_GUARD} && arr->properties.tag == KILN_VALUE_UNDEFINED && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
                              /* `map`, element for element: the length read once, each element \
                               * read when it is visited (a callback may grow, shrink or \
                               * reallocate the array), and the result's length kept current so \
@@ -2350,7 +2411,7 @@ pub(super) fn emit_call_method(
                 let (header, footer) = array_header(args[0].0);
                 format!(
                     "{header} \
-                         if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
+                         if (KILN_LIKELY({ARRAY_METHOD_GUARD} && arr->properties.tag == KILN_VALUE_UNDEFINED && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
                              kiln_value built_val; \
                              int status = kiln_c99_new_array_with_capacity(&built_val, arr->count, 1); \
                              if (status != KILN_C99_OK) return status; \
@@ -2414,7 +2475,7 @@ pub(super) fn emit_call_method(
                 let (header, footer) = array_header(args[0].0);
                 format!(
                     "{header} \
-                         if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
+                         if (KILN_LIKELY({ARRAY_METHOD_GUARD} && arr->properties.tag == KILN_VALUE_UNDEFINED && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
                              kiln_val vacc = v{a1}; \
                              kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
                              if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
@@ -2551,7 +2612,7 @@ pub(super) fn emit_call_method(
             Some(format!(
                 "if (!handled{guard}) {{ \
                      kiln_array *arr = (kiln_array *)KILN_VAL_PTR(v{o}); \
-                     if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED)) {{ \
+                     if (KILN_LIKELY({ARRAY_METHOD_GUARD} && arr->properties.tag == KILN_VALUE_UNDEFINED)) {{ \
                          {array_body} \
                      }} \
                  }}",
@@ -2562,7 +2623,7 @@ pub(super) fn emit_call_method(
         } else if known_str {
             Some(format!(
                 "if (!handled{guard}) {{ \
-                     if (KILN_LIKELY(kiln_c99_builtins_unmodified())) {{ \
+                     if (KILN_LIKELY({STRING_METHOD_GUARD})) {{ \
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                          if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
                              {string_body} \
@@ -2579,12 +2640,12 @@ pub(super) fn emit_call_method(
                      void *ptr = KILN_VAL_PTR(v{o}); \
                      if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
                          kiln_array *arr = (kiln_array *)ptr; \
-                         if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED)) {{ \
+                         if (KILN_LIKELY({ARRAY_METHOD_GUARD} && arr->properties.tag == KILN_VALUE_UNDEFINED)) {{ \
                              {array_body} \
                          }} \
                      }} \
                  }} else if (!handled && KILN_VAL_IS_STRING(v{o}){guard}) {{ \
-                     if (KILN_LIKELY(kiln_c99_builtins_unmodified())) {{ \
+                     if (KILN_LIKELY({STRING_METHOD_GUARD})) {{ \
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                          if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
                              {string_body} \
@@ -2627,7 +2688,7 @@ pub(super) fn emit_call_method(
         };
         Some(format!(
             "{header} \
-                 if (KILN_LIKELY(kiln_c99_builtins_unmodified() && arr->properties.tag == KILN_VALUE_UNDEFINED)) {{ \
+                 if (KILN_LIKELY({ARRAY_METHOD_GUARD} && arr->properties.tag == KILN_VALUE_UNDEFINED)) {{ \
                      const kiln_string *sep = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
                      size_t total_bytes = 0; \
                      int can_fast = (sep != NULL && !kiln_string_is_utf16(sep)); \
@@ -2679,7 +2740,7 @@ pub(super) fn emit_call_method(
             format!("KILN_VAL_IS_STRING(v{o}) && ", o = object.0)
         };
         Some(format!(
-            "if (!handled && KILN_LIKELY(kiln_c99_builtins_unmodified()) && {str_check}KILN_VAL_IS_STRING(v{a0})) {{ \
+            "if (!handled && KILN_LIKELY({STRING_METHOD_GUARD}) && {str_check}KILN_VAL_IS_STRING(v{a0})) {{ \
                          const kiln_string *src = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                          const kiln_string *sep = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
                          if (src != NULL && sep != NULL && !kiln_string_is_utf16(src) && !kiln_string_is_utf16(sep) && sep->unit_len == 1) {{ \
@@ -2737,7 +2798,7 @@ pub(super) fn emit_call_method(
             format!("KILN_VAL_IS_STRING(v{o}) && ", o = object.0)
         };
         Some(format!(
-            "if (!handled && KILN_LIKELY(kiln_c99_builtins_unmodified()) && {str_check}KILN_VAL_IS_STRING(v{a0})) {{ \
+            "if (!handled && KILN_LIKELY({STRING_METHOD_GUARD}) && {str_check}KILN_VAL_IS_STRING(v{a0})) {{ \
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                          const kiln_string *s_ndl = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
                          if (s_recv != NULL && s_ndl != NULL && !kiln_string_is_utf16(s_recv) && !kiln_string_is_utf16(s_ndl)) {{ \
@@ -2800,7 +2861,7 @@ pub(super) fn emit_call_method(
             format!(" && KILN_VAL_IS_STRING(v{o})", o = object.0)
         };
         Some(format!(
-            "if (!handled && KILN_LIKELY(kiln_c99_builtins_unmodified()){str_check}{guard}) {{ \
+            "if (!handled && KILN_LIKELY({STRING_METHOD_GUARD}){str_check}{guard}) {{ \
                          const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                          if (s_recv != NULL && !kiln_string_is_utf16(s_recv)) {{ \
                              {check_and_extract} \
@@ -3563,13 +3624,59 @@ pub(super) fn emit_call_method(
 
     let in_typed = matches!(ctx.kind, crate::emit_graph::EntryKind::Typed { .. });
     if in_typed && math_intrinsic.is_some() {
-        writeln!(
-            output,
-            "    {{ int handled = 0; int kiln_twin = 0; (void)kiln_twin; \
-            {math_s} \
-            if (KILN_UNLIKELY(!handled)) {{ goto kiln_refusal; }} {typed_sync} }}"
-        )
-        .unwrap();
+        // A typed entry's `Math.*`. Its guard's members are what the entry's callers check before
+        // entering it (`CallPlan::typed_guards`, read back from the mark by `typed_relies`), so
+        // past that check the guard can fail only if the call itself -- this body or one it
+        // called -- modified the member (issue 20). Re-entering boxed cannot undo that: effects
+        // have happened.
+        //
+        // Modifying a built-in is a store through the runtime, so a body in which that can
+        // happen reaches the runtime already and has `host` and `thrown`: it makes the general
+        // call from here, which finds the override, and goes on with its answer -- an answer
+        // that is not a number breaks what the entry was compiled for and refuses by name. A
+        // body that reaches nothing cannot have modified anything since its caller checked, so
+        // its failure edge stays a refusal that does not happen; giving it the runtime for that
+        // would cost every such entry its inlining and every typed loop its fast form.
+        let body_reaches_runtime = ctx.self_index.is_some_and(|index| {
+            plan.typed_needs
+                .get(index as usize)
+                .is_some_and(|needs| needs.runtime)
+        });
+        if body_reaches_runtime {
+            let not_number = format!(
+                "if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"a built-in this typed entry relies on was modified during the call, and it answered a non-number\"; kiln_c99_note_refusal({diagnostic_source}, (size_t){pc}, \"{label}\", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal;"
+            );
+            writeln!(
+                output,
+                "    {{ static kiln_c99_site site = {{0}}; kiln_val call_args[{n}]; int call_args_ready = 0; (void)call_args_ready; int handled = 0; int kiln_twin = 0; (void)kiln_twin; \
+                {TYPED_RELIES_MARK} {math_s} \
+                if (KILN_UNLIKELY(!handled)) {{ \
+                    {prep_args}int status = kiln_c99_val_call_method_key(host, v{o}, call_args, (size_t){argc}, {symbol}_key_{name}, depth, thrown, &site, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); \
+                    {check} \
+                    if (KILN_UNLIKELY(!KILN_VAL_IS_NUMBER(v{v}))) {{ {not_number} }} \
+                }} {typed_sync} }}",
+                o = object.0,
+            )
+            .unwrap();
+        } else {
+            // Nothing in this body can have modified the member since its caller checked, so the
+            // guard is that caller's and is not asked again here: in a realm that has stored
+            // onto some other built-in, asking would be a call per entry. A build with
+            // `KILN_IC_CHECK` asks anyway and traps if a call site entered without checking.
+            // What is left of the failure edge -- an argument that is not a number -- refuses.
+            let unguarded = math_s.replacen(
+                &math_guarded,
+                &format!("KILN_C99_TYPED_RELIES_CHECK({math_guard}) {{ "),
+                1,
+            );
+            writeln!(
+                output,
+                "    {{ int handled = 0; int kiln_twin = 0; (void)kiln_twin; \
+                {TYPED_RELIES_MARK} {unguarded} \
+                if (KILN_UNLIKELY(!handled)) {{ goto kiln_refusal; }} {typed_sync} }}"
+            )
+            .unwrap();
+        }
         return;
     }
 

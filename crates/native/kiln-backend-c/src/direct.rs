@@ -104,6 +104,14 @@ pub struct CallPlan {
     pub typed_returns: Vec<bool>,
     /// Per proto: what its typed entry takes beyond its parameters.
     pub typed_needs: Vec<TypedNeeds>,
+    /// Per proto: the built-in guard a caller evaluates before entering its typed entry, or
+    /// empty when the entry relies on no built-in it cannot fall back from (issue 20). A typed
+    /// entry has no generic path of its own: an inlined `Math.sqrt` whose guard fails inside it
+    /// can only refuse, and by then the body may have had effects. So the entry's call sites ask
+    /// first -- about every member the entry and its typed callees speculate on -- and when the
+    /// answer is no they take the boxed call they would have made without a typed entry. Past
+    /// that check the guard inside the entry fails only if the call itself modified the built-in.
+    pub typed_guards: Vec<String>,
     /// Per proto: whether its typed entry exists in the unit.
     pub typed_entries: Vec<bool>,
     /// Per proto: its body passes [`crate::parallel::parallel_safe`] and its typed entry returns
@@ -480,6 +488,7 @@ impl DirectPlan {
                 invariant: known.invariant.clone(),
                 typed_returns: typed_returns.clone(),
                 typed_needs: vec![TypedNeeds::default(); graphs.len()],
+                typed_guards: vec![String::new(); graphs.len()],
                 typed_entries: vec![false; graphs.len()],
                 parallel_safe: parallel_safe.clone(),
                 parallel: parallel_verdicts.clone(),
@@ -1107,6 +1116,18 @@ impl DirectPlan {
             .chain(std::iter::once(&mut self.entry))
         {
             plan.typed_needs = needs.to_vec();
+        }
+    }
+
+    pub fn set_typed_guards(&mut self, guards: &[String]) {
+        for plan in self
+            .functions
+            .iter_mut()
+            .chain(self.typed.iter_mut().flatten())
+            .chain(self.parallel.iter_mut().flatten())
+            .chain(std::iter::once(&mut self.entry))
+        {
+            plan.typed_guards = guards.to_vec();
         }
     }
 

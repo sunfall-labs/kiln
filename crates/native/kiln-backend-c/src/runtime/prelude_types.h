@@ -1011,6 +1011,55 @@ static KILN_ALWAYS_INLINE inline int kiln_c99_builtins_unmodified(void) {
     return KILN_LIKELY(kiln_c99_builtin_store_epoch == 0) || kiln_c99_realm_builtins_unmodified();
 }
 
+/* The narrow forms (issue 20): a speculation names what it relies on, and a store onto some other
+ * built-in leaves it alone. The hot side is the same one compare; the cold side asks the current
+ * realm's program record. `kiln_c99_builtins_unmodified_mask` is object-granular (an array
+ * method's fast path relies on Array and Array.prototype as a whole); the member form is for a
+ * speculation on one own member of one built-in (`Math.sqrt`), so `Math.foo = 1` leaves it fast. */
+#ifdef KILN_SEPARATE_PRELUDE
+extern int kiln_c99_realm_builtins_untouched(uint64_t mask0, uint64_t mask1, int beyond)
+    __attribute__((pure)) KILN_C99_RARE_CALL;
+extern int kiln_c99_realm_builtin_member_untouched(uint32_t builtin, const char *member, size_t len)
+    __attribute__((pure)) KILN_C99_RARE_CALL;
+#else
+static int kiln_c99_realm_builtins_untouched(uint64_t mask0, uint64_t mask1, int beyond)
+    __attribute__((pure)) KILN_C99_RARE_CALL;
+static int kiln_c99_realm_builtin_member_untouched(uint32_t builtin, const char *member, size_t len)
+    __attribute__((pure)) KILN_C99_RARE_CALL;
+#endif
+/* Bit `id` of the bitmap's word `word`: a compile-time constant for a named built-in. */
+#define KILN_C99_BIT_OF_BUILTIN(id, word) \
+    (((uint32_t)(id) >> 6) == (uint32_t)(word) ? (UINT64_C(1) << ((uint32_t)(id) & 63u)) : UINT64_C(0))
+static KILN_ALWAYS_INLINE inline int kiln_c99_builtins_unmodified_mask(uint64_t mask0, uint64_t mask1,
+                                                                        int beyond) {
+    return KILN_LIKELY(kiln_c99_builtin_store_epoch == 0) ||
+           kiln_c99_realm_builtins_untouched(mask0, mask1, beyond);
+}
+/* Two built-ins, object-granular: an array method relies on Array (its species) and
+ * Array.prototype (the method itself), a string method on String and String.prototype. */
+#define kiln_c99_builtin_pair_unmodified(a, b)                                                     \
+    kiln_c99_builtins_unmodified_mask(KILN_C99_BIT_OF_BUILTIN(a, 0) | KILN_C99_BIT_OF_BUILTIN(b, 0),     \
+                                      KILN_C99_BIT_OF_BUILTIN(a, 1) | KILN_C99_BIT_OF_BUILTIN(b, 1),     \
+                                      (a) >= 128 || (b) >= 128)
+/* A typed entry whose body reaches nothing relies on its callers to have asked about the members
+ * it inlines (the emitter's `CallPlan::typed_guards`), and does not ask again. Under
+ * `KILN_IC_CHECK` it asks, and traps when a call site entered it without checking. */
+#ifdef KILN_IC_CHECK
+#define KILN_C99_TYPED_RELIES_CHECK(guard)                                                        \
+    if (KILN_UNLIKELY(!(guard))) {                                                                \
+        fputs("kiln: typed-entry oracle: entered with a built-in it relies on modified; a call "  \
+              "site skipped CallPlan::typed_guards\n",                                             \
+              stderr);                                                                             \
+        __builtin_trap();                                                                          \
+    }
+#else
+#define KILN_C99_TYPED_RELIES_CHECK(guard)
+#endif
+/* One own member of one built-in, spelt by a string literal. */
+#define kiln_c99_builtin_member_unmodified(id, member)                                             \
+    (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0) ||                                              \
+     kiln_c99_realm_builtin_member_untouched((uint32_t)(id), (member), sizeof(member) - 1))
+
 #ifdef KILN_SEPARATE_PRELUDE
 extern int kiln_c99_realm_builtin_modified(uint32_t builtin);
 #else

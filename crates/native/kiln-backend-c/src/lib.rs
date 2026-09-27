@@ -1339,6 +1339,12 @@ fn render_functions(
     // What each typed entry needs is what its emitted body names, and what its typed callees
     // need. Emit the typed bodies to find out, until nothing more is needed.
     let mut needs = vec![direct::TypedNeeds::default(); program.functions.len()];
+    // Issue 20: what each typed body speculates on with no way back (its own guards), and which
+    // typed entries it calls, read from the same text.
+    let mut relies: Vec<std::collections::BTreeSet<String>> =
+        vec![std::collections::BTreeSet::new(); program.functions.len()];
+    let mut typed_callees: Vec<std::collections::BTreeSet<usize>> =
+        vec![std::collections::BTreeSet::new(); program.functions.len()];
     loop {
         direct.set_typed_needs(&needs);
         let mut changed = false;
@@ -1351,6 +1357,14 @@ fn render_functions(
             let body = scratch
                 .find("kiln_block_0:;")
                 .map_or("", |at| &scratch[at..]);
+            // A restartable body leaves through its boxed entry on any failed guard, so it
+            // relies on nothing a caller must check.
+            relies[index] = if typed_restartable[index] {
+                Default::default()
+            } else {
+                emit_graph::typed_relies(body)
+            };
+            typed_callees[index] = typed_entry_calls(body, symbol);
             let found = direct::TypedNeeds {
                 runtime: names(body, "host") || names(body, "thrown"),
                 upvalues: names(body, "upvalues"),
@@ -1372,6 +1386,31 @@ fn render_functions(
             break;
         }
     }
+    // A typed callee's speculations are its caller's: a typed caller has no boxed call to take
+    // when the callee's guard fails, so the caller's own call site asks for both.
+    loop {
+        let mut changed = false;
+        for index in 0..relies.len() {
+            let mut merged = relies[index].clone();
+            for &callee in &typed_callees[index] {
+                if callee < relies.len() {
+                    merged.extend(relies[callee].iter().cloned());
+                }
+            }
+            if merged.len() != relies[index].len() {
+                relies[index] = merged;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let guards: Vec<String> = relies
+        .iter()
+        .map(|terms| terms.iter().cloned().collect::<Vec<_>>().join(" && "))
+        .collect();
+    direct.set_typed_guards(&guards);
     // A restartable body gets a fast clone: decided by emitting it, once, before any caller.
     // The parallel clones (ADR 0058, application 2): for every proto whose body passes
     // `parallel::parallel_safe` and whose typed entry returns a number, emit the typed body once
@@ -2031,6 +2070,25 @@ fn entry_proto(program: &Program) -> FunctionProto {
         span: kiln_ir::Span::default(),
         type_annotations: None,
     }
+}
+
+/// The typed entries of this unit that `body` calls: every `{symbol}_fn_{index}_t(`.
+fn typed_entry_calls(body: &str, symbol: &str) -> std::collections::BTreeSet<usize> {
+    let prefix = format!("{symbol}_fn_");
+    let mut found = std::collections::BTreeSet::new();
+    let mut from = 0;
+    while let Some(at) = body[from..].find(&prefix) {
+        let start = from + at + prefix.len();
+        let digits = body[start..].bytes().take_while(u8::is_ascii_digit).count();
+        if digits > 0
+            && body[start + digits..].starts_with("_t(")
+            && let Ok(index) = body[start..start + digits].parse()
+        {
+            found.insert(index);
+        }
+        from = start;
+    }
+    found
 }
 
 /// Whether emitted C names `word` as an identifier of its own: not as part of a longer name,

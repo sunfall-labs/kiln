@@ -623,3 +623,29 @@ pub(crate) use crate::graph::array_slots;
 pub fn can_lower(graph: &FunctionGraph) -> bool {
     first_unlowerable(graph).is_none()
 }
+
+/// The built-in member guards a typed body's refusing speculations rely on (issue 20): every
+/// `kiln_c99_builtin_member_unmodified(..)` term between a relies mark and the refusal that
+/// follows it. What the typed entry's callers check before entering it.
+pub fn typed_relies(body: &str) -> std::collections::BTreeSet<String> {
+    const TERM: &str = "kiln_c99_builtin_member_unmodified(";
+    let mut found = std::collections::BTreeSet::new();
+    let mut rest = body;
+    while let Some(at) = rest.find(ops::call_method::TYPED_RELIES_MARK) {
+        rest = &rest[at + ops::call_method::TYPED_RELIES_MARK.len()..];
+        let end = rest.find("goto kiln_refusal;").unwrap_or(rest.len());
+        let mut segment = &rest[..end];
+        while let Some(start) = segment.find(TERM) {
+            let term = &segment[start..];
+            match term.find(')') {
+                Some(close) => {
+                    found.insert(term[..=close].to_owned());
+                    segment = &term[close + 1..];
+                }
+                None => break,
+            }
+        }
+        rest = &rest[end..];
+    }
+    found
+}
