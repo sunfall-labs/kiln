@@ -538,7 +538,8 @@ pub fn emit_function_from_graph_with_profile(
                     if let Some((_, _, exit_pc)) = delegate {
                         writeln!(
                             output,
-                            "        case {exit_pc}: goto kiln_resume_{exit_pc};"
+                            "        case {}: goto kiln_resume_exit_{exit_pc};",
+                            delegate_exit_id(*exit_pc)
                         )
                         .unwrap();
                     }
@@ -787,7 +788,8 @@ pub fn emit_async_entry_body(
             if let Some((_, _, exit_pc)) = delegate {
                 writeln!(
                     output,
-                    "        case {exit_pc}: goto kiln_resume_{exit_pc};"
+                    "        case {}: goto kiln_resume_exit_{exit_pc};",
+                    delegate_exit_id(*exit_pc)
                 )
                 .unwrap();
             }
@@ -1296,7 +1298,7 @@ fn emit_block_sequence(
                     .filter(|(_, op)| matches!(op, GraphOp::Phi { .. }))
                     .map(|(v, _)| v.0)
                     .collect();
-                writeln!(output, "kiln_resume_{exit_pc}:;").unwrap();
+                writeln!(output, "kiln_resume_exit_{exit_pc}:;").unwrap();
                 writeln!(
                     output,
                     "    frame->delegate = kiln_c99_undefined(); frame->delegate_exit = 0;"
@@ -1499,6 +1501,16 @@ fn emit_block_sequence(
             live_ints,
         );
     }
+}
+
+/// The resume id of a `yield*`'s completion: its target pc, in a space of its own. A suspension
+/// resumes by its own pc and a delegate's completion by the pc of the instruction after the
+/// `yield*`, so `yield yield* inner()` -- whose `yield` *is* that instruction -- gave both the
+/// same id: a duplicate `case` and a redefined label, and the module did not compile (the
+/// release source DCE writes exactly that from `const r = yield* inner(); yield r;`;
+/// parallel-builtins issue 18). `frame->resume` is a `size_t`, and bytecode stays far below it.
+fn delegate_exit_id(exit_pc: u32) -> u64 {
+    (1u64 << 31) | u64::from(exit_pc)
 }
 
 /// Send each exit of a fast clone's text into the generic clone through a stub that first
@@ -3607,7 +3619,8 @@ fn emit_terminator(
                 Some((iter, _, exit_pc)) => {
                     format!(
                         " frame->delegate = kiln_val_to_boundary(v{}); frame->delegate_exit = {};",
-                        iter.0, exit_pc
+                        iter.0,
+                        delegate_exit_id(*exit_pc)
                     )
                 }
                 None => {
