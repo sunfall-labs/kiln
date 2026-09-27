@@ -1494,10 +1494,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 ));
             }
             let key = entry.property_key_units_checked()?;
-            if keys.contains(&key) {
+            keys.push(key);
+        }
+        // Finish CreateListFromArrayLike before checking duplicates: later indexed getters
+        // are observable even when an earlier pair repeats. Keep order in `keys`, but use a
+        // membership index so reversing a large target's key list does not take quadratic time.
+        let mut key_set = HashSet::with_capacity(keys.len());
+        for key in &keys {
+            if !key_set.insert(key) {
                 return Err(Self::proxy_invariant("ownKeys must not repeat a key"));
             }
-            keys.push(key);
         }
         // A proxy target has its own `[[OwnPropertyKeys]]` operation. Calling the ordinary
         // store helper on it would lose keys hidden behind an inner proxy, and would make the
@@ -1515,20 +1521,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // A non-configurable key cannot be taken away, so a list that leaves it out is
             // describing an object the target is not. On a target that cannot grow or shrink
             // either, the same is true of *every* key it has.
-            if (locked || !extensible) && !keys.contains(key) {
+            if (locked || !extensible) && !key_set.contains(key) {
                 return Err(Self::proxy_invariant(
                     "ownKeys must report every own key the target cannot lose",
                 ));
             }
         }
-        if !extensible {
-            for key in &keys {
-                if !held.contains(key) {
-                    return Err(Self::proxy_invariant(
-                        "ownKeys cannot report a key a non-extensible target does not have",
-                    ));
-                }
-            }
+        // Both lists are unique, and every held key was checked above. A size mismatch is
+        // therefore exactly an extra reported key; no second membership scan is needed.
+        if !extensible && keys.len() != held.len() {
+            return Err(Self::proxy_invariant(
+                "ownKeys cannot report a key a non-extensible target does not have",
+            ));
         }
         Ok(keys)
     }

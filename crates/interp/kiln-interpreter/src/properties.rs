@@ -3090,8 +3090,9 @@ pub(super) fn own_property_keys_including_symbols_units(
     // own-key operation cannot return duplicates, so preserve the first occurrence from the
     // specification order and discard later copies.
     let mut stable = Vec::with_capacity(keys.len());
+    let mut seen = HashSet::with_capacity(keys.len());
     for key in keys {
-        if !stable.iter().any(|listed| listed == &key) {
+        if seen.insert(key.clone()) {
             stable.push(key);
         }
     }
