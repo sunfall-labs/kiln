@@ -1330,7 +1330,7 @@ fn lower_parsed_in_context(
     let mut lowerer = Lowerer { text: source, path };
     let body = lowerer.statements(&parsed.program.body);
 
-    let mut module = Module {
+    let module = Module {
         // The one copy of the text every span in this module points into.
         source: Arc::from(source),
         source_kind: source_kind(source_type),
@@ -1357,7 +1357,6 @@ fn lower_parsed_in_context(
         panicked: parsed.panicked,
         node_runtime_requests: Vec::new(),
     };
-    module.check_isolate_escapes();
     module
 }
 
@@ -3815,6 +3814,24 @@ fn name_anonymous_default(inner: &kiln_hir::Pattern, default: &mut kiln_hir::Exp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ordinary_isolate_calls_do_not_claim_graph_ownership() {
+        // Neither the spelling of a callee nor a local alias proves that a JS object graph
+        // can leave its realm. In particular, a user function and an arbitrary object's
+        // method named `isolate` have no relationship to the future transfer built-in.
+        for source in [
+            "function isolate(value) { return value; } const value = {}; const alias = value; isolate(value); alias.x = 1;",
+            "const helper = { isolate(value) { return value; } }; const value = {}; const alias = value; helper.isolate(value); alias.x = 1;",
+        ] {
+            let module = parse("isolate.js", source);
+            assert!(
+                module.diagnostics.is_empty(),
+                "{source}: {:?}",
+                module.diagnostics
+            );
+        }
+    }
 
     #[test]
     fn commonjs_uses_script_grammar_and_preserves_wrapper_references() {
