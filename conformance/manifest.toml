@@ -1569,9 +1569,12 @@ group = "regress"
 source = "regress/proxy-ownkeys-membership.js"
 status = "runnable"
 features = ["Proxy", "Reflect", "Symbol"]
-catches = "Proxy ownKeys membership indexing preserves trap order, lone-surrogate strings, symbol identity, nonextensible target invariants and complete array-like reads before duplicate validation."
+catches = "Proxy ownKeys membership indexing preserves trap order, lone-surrogate strings, symbol identity, extensibility invariants, target mutation during trap-result reads and complete array-like reads before duplicate validation."
 expected_stdout = """
 4 true
 true true true
+0
+true
+true
 012 true
 """

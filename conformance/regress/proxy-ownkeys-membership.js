@@ -20,6 +20,32 @@ function rejected(keys) {
 }
 console.log(rejected(order.concat('extra')), rejected(order.slice(1)), rejected(order.concat(symbol)));
 
+// A configurable own key may be omitted while the ordinary target is extensible, while a
+// non-extensible target must report every key. The invariant snapshot must follow trap-result
+// getters, which can mutate the target before CreateListFromArrayLike finishes.
+const extensibleTarget = { configurable: 1 };
+console.log(Reflect.ownKeys(new Proxy(extensibleTarget, { ownKeys() { return []; } })).length);
+Object.preventExtensions(extensibleTarget);
+try {
+  Reflect.ownKeys(new Proxy(extensibleTarget, { ownKeys() { return []; } }));
+  console.log(false);
+} catch (error) {
+  console.log(error instanceof TypeError);
+}
+
+const changingTarget = {};
+try {
+  Reflect.ownKeys(new Proxy(changingTarget, { ownKeys() {
+    return { length: 1, get 0() {
+      Object.defineProperty(changingTarget, 'added', { value: 1, configurable: false });
+      return 'reported';
+    } };
+  } }));
+  console.log(false);
+} catch (error) {
+  console.log(error instanceof TypeError);
+}
+
 // CreateListFromArrayLike reads all entries before duplicate-key validation.
 const sentinel = {};
 let reads = '';

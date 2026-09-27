@@ -1513,11 +1513,37 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         } else {
             own_property_keys_including_symbols_units(&self.intrinsics, &inner)
         };
+        // Ordinary object slots are stable while this invariant check runs: after the trap and
+        // CreateListFromArrayLike have finished, the remaining operations below cannot call
+        // program code for this target. Snapshot their flags once so a large ownKeys result does
+        // not linearly rescan the target's property vector for every held key. Keep wrappers,
+        // proxies, and every exotic receiver on the operation-based path below.
+        let ordinary_configurability = match &inner {
+            Value::Object(object) if wrapped_primitive(&inner).is_none() => {
+                let data = object.borrow();
+                let mut configurability =
+                    std::collections::HashMap::with_capacity(data.properties.len());
+                for slot in &data.properties {
+                    // `own_state` finds the first matching slot, so retain that answer even if
+                    // an internal caller ever constructs duplicate keys.
+                    configurability
+                        .entry(slot.key.clone())
+                        .or_insert(slot.attributes.configurable);
+                }
+                Some(configurability)
+            }
+            _ => None,
+        };
         let extensible = self.target_extensible(&inner, instruction)?;
         for key in &held {
-            let locked = self
-                .own_state(&inner, &Value::String(key.clone()), instruction)?
-                .is_some_and(|(_, attributes)| !attributes.configurable);
+            let locked = if let Some(configurability) = &ordinary_configurability {
+                configurability
+                    .get(key)
+                    .is_some_and(|configurable| !configurable)
+            } else {
+                self.own_state(&inner, &Value::String(key.clone()), instruction)?
+                    .is_some_and(|(_, attributes)| !attributes.configurable)
+            };
             // A non-configurable key cannot be taken away, so a list that leaves it out is
             // describing an object the target is not. On a target that cannot grow or shrink
             // either, the same is true of *every* key it has.
