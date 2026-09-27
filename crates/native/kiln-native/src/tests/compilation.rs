@@ -1897,3 +1897,60 @@ fn provider_capability_demand_is_typed_and_conservative() {
         );
     }
 }
+
+/// Realms issue 08: `{ m() {} }.m` -- how the bootstrap writes a built-in that is a method -- is
+/// the method alone, with no literal and no home-object cell to become garbage, unless the
+/// method could reach the literal as its [[HomeObject]]: through `super` (in its body or an arrow
+/// inside it) or a direct `eval`. A read of another key keeps the literal too.
+#[test]
+fn a_lone_method_read_back_from_its_literal_makes_no_object() {
+    let count_objects = |source: &str| {
+        let module =
+            kiln_ir::compile_module(&kiln_frontend_oxc::parse("main.mjs", source)).unwrap();
+        let literals = module
+            .program
+            .code
+            .iter()
+            .filter(|instruction| matches!(instruction, kiln_ir::Instruction::NewObject { .. }))
+            .count();
+        let methods = module
+            .program
+            .functions
+            .iter()
+            .filter(|function| function.is_method)
+            .count();
+        (literals, methods)
+    };
+    assert_eq!(
+        count_objects("export const f = { getTime(x) { return x; } }.getTime;"),
+        (0, 1)
+    );
+    assert_eq!(
+        count_objects("export const f = { *g() { yield 1; } }.g;"),
+        (0, 1)
+    );
+    assert_eq!(
+        count_objects("export const f = { m() { return super.x; } }.m;"),
+        (1, 1)
+    );
+    assert_eq!(
+        count_objects("export const f = { m() { return () => super.x; } }.m;"),
+        (1, 1)
+    );
+    assert_eq!(
+        count_objects("export const f = { m() { return eval(\"1\"); } }.m;"),
+        (1, 1)
+    );
+    assert_eq!(
+        count_objects("export const f = { m() { return 1; } }.n;"),
+        (1, 1)
+    );
+    assert_eq!(
+        count_objects("export const f = { m() {}, n() {} }.m;"),
+        (1, 2)
+    );
+    assert_eq!(
+        count_objects("export const f = { m: function () {} }.m;"),
+        (1, 0)
+    );
+}
