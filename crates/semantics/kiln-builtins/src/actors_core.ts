@@ -11,6 +11,8 @@ const isolatedMark = Symbol.for("kiln.actor.isolated");
 const ticketMark = Symbol.for("kiln.actor.ticket");
 const ISOLATE = 26;
 const ISOLATED_HAS = 27;
+const CANDIDATE_BEGIN = 28;
+const CANDIDATE_END = 29;
 
 function isolatedOp(operation: number, ...args: any[]): any {
   const port = (globalThis as any).MessagePort;
@@ -38,7 +40,20 @@ function dataCloneError(message: string): Error {
 export function isolate<T>(factory: () => T): Isolated<T> {
   if (typeof factory !== "function") throw new TypeError("isolate requires a factory");
   const handle: any = { __uncloneable: () => {} };
-  const value = factory();
+  // Native realms put this synchronous factory's nursery allocations into fresh, tagged
+  // chunks. A nested factory or a realm without a nursery still works, but cannot claim an
+  // independently movable graph. The engine seals the chunks even when the factory throws.
+  const candidate = isolatedOp(CANDIDATE_BEGIN) === true;
+  let value!: T;
+  let completed = false;
+  try {
+    value = factory();
+    completed = true;
+  } finally {
+    if (candidate && isolatedOp(CANDIDATE_END, completed) !== true) {
+      throw new Error("could not seal isolated graph candidate");
+    }
+  }
   if (isolatedOp(ISOLATE, handle, value) !== true) throw new Error("could not retain isolated graph");
   // Dynamic import plans may evaluate this module separately in one realm. This marker only
   // identifies a handle for fail-closed graph transfer; it must never expose the graph itself.

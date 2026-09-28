@@ -56,6 +56,9 @@
  * collections and 7.4 ms, against 6.6 ms for the single-region nursery before 9d96e4a8. */
 #define KILN_NURSERY_BUDGET_GROWTH 2
 #define KILN_NURSERY_BUDGET_CAP 8
+/* A long-running `isolate` factory must not suppress collection without a memory ceiling.
+ * Above this much filled nursery storage, collect normally and invalidate move provenance. */
+#define KILN_ACTOR_CANDIDATE_GC_DEFER_BYTES ((size_t)64 * 1024 * 1024)
 /* What the `introspect` hook reports back, as a bitmask. `ARMED` is what tells the drive to keep
  * its park short enough to notice a signal; `DUMPED` says a request was pending and was served. */
 #define KILN_C99_INTROSPECT_ARMED 1
@@ -368,6 +371,12 @@ typedef struct kiln_gc_heap {
     int stress;
     int trace;
     int collecting;
+    /* Nonzero only while one synchronous actor `isolate` factory owns fresh nursery chunks.
+     * The factory's allocations are still ordinary heap objects, but no unrelated allocation
+     * can enter a chunk tagged with this ID. Nested factories use the outer scope and cannot
+     * claim an independent movable candidate. */
+    uint64_t actor_candidate_id;
+    int actor_candidate_collected;
     int mark_failed;
     int fallback;
     kiln_gc_ptrset large_table;
@@ -744,6 +753,8 @@ static void kiln_c99_nursery_use(kiln_gc_nursery *nursery, kiln_nursery_chunk *c
     nursery->finals = chunk->finals;
     nursery->count = 0;
     nursery->bytes = 0;
+    chunk->candidate_id = 0;
+    chunk->candidate_epoch = 0;
 }
 
 /* Write the current region's fill into its header, ready for one of the lists. */
@@ -2733,6 +2744,7 @@ static int kiln_c99_nursery_fresh_chunk(kiln_gc_heap *heap) {
         }
     }
     kiln_c99_nursery_use(nursery, chunk);
+    if (heap->actor_candidate_id != 0) chunk->candidate_id = heap->actor_candidate_id;
     kiln_c99_gc_bound(heap, nursery->region, nursery->capacity);
     return 1;
 }
@@ -2743,6 +2755,7 @@ static void kiln_c99_nursery_turn_chunk(kiln_gc_heap *heap) {
     kiln_nursery_chunk *filled;
     if (nursery->bump == nursery->base) return;
     filled = kiln_c99_nursery_seal(nursery);
+    if (filled->candidate_id != 0) filled->candidate_epoch = heap->epoch;
     filled->next = nursery->full;
     nursery->full = filled;
     nursery->full_bytes += (size_t)(nursery->bump - nursery->base);
@@ -2779,12 +2792,23 @@ static inline int kiln_c99_nursery_pressure_due(const kiln_gc_heap *heap) {
            heap->survived <= heap->nursery.budget * KILN_NURSERY_SMALL_LIVE_BUDGETS;
 }
 
+static inline int kiln_c99_actor_candidate_defer_gc(const kiln_gc_heap *heap) {
+    return heap->actor_candidate_id != 0 && !heap->actor_candidate_collected &&
+           heap->nursery.active &&
+           heap->nursery.full_bytes < KILN_ACTOR_CANDIDATE_GC_DEFER_BYTES;
+}
+
 /* The collection an allocation may owe before it hands anything out.
  *
  * Its own function because a caller taking a run of blocks at once -- `kiln_c99_gc_alloc_text_run`
  * below -- owes it once for the run rather than once per block, and the two must not drift: this
  * is where "is a mid-turn collection due" is decided for both. */
 static inline void kiln_c99_gc_alloc_due(kiln_gc_heap *heap) {
+    /* A candidate's current and sealed chunks are in this heap, but a collection could
+     * promote/reuse them before the factory publishes its result. Defer collection while its
+     * nursery stays active and the filled allocation is under its 64 MiB ceiling. Beyond
+     * either limit, collection resumes and invalidates candidate provenance. */
+    if (KILN_UNLIKELY(kiln_c99_actor_candidate_defer_gc(heap))) return;
     if (KILN_UNLIKELY(!heap->collecting && heap->enabled && !heap->fallback)) {
         /* A mid-turn collection scans the whole stack and sweeps every slab, so it earns its
          * keep only after a few megabytes, or after allocation has matched twice what
@@ -3812,23 +3836,91 @@ struct kiln_c99_par_arena {
 
 static uint64_t kiln_c99_graph_candidate_next_id;
 
-/* A dedicated candidate allocation stream. Its caller must keep collection paused while
- * building and publishing the graph into the sender heap. Nothing in this helper claims the
- * graph is closed or excludes sender roots; those checks precede a future move call. */
-static int kiln_c99_graph_candidate_open(kiln_c99_par_arena *arena, const kiln_gc_heap *heap,
-                                         size_t budget) {
-    uint64_t previous;
-    if (arena == NULL || heap == NULL || heap->nursery.capacity == 0 || budget == 0) return 0;
-    previous = __atomic_load_n(&kiln_c99_graph_candidate_next_id, __ATOMIC_RELAXED);
+static uint64_t kiln_c99_graph_candidate_new_id(void) {
+    uint64_t previous = __atomic_load_n(&kiln_c99_graph_candidate_next_id, __ATOMIC_RELAXED);
     do {
         /* Never recycle an ID while an older candidate may still be live. */
         if (previous == UINT64_MAX) return 0;
     } while (!__atomic_compare_exchange_n(&kiln_c99_graph_candidate_next_id, &previous,
                                           previous + 1, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+    return previous + 1;
+}
+
+/* A dedicated candidate allocation stream. Its caller must keep collection paused while
+ * building and publishing the graph into the sender heap. Nothing in this helper claims the
+ * graph is closed or excludes sender roots; those checks precede a future move call. */
+static int kiln_c99_graph_candidate_open(kiln_c99_par_arena *arena, const kiln_gc_heap *heap,
+                                         size_t budget) {
+    uint64_t id;
+    if (arena == NULL || heap == NULL || heap->nursery.capacity == 0 || budget == 0) return 0;
+    id = kiln_c99_graph_candidate_new_id();
+    if (id == 0) return 0;
     memset(arena, 0, sizeof *arena);
     arena->heap = heap;
     arena->budget = budget;
-    arena->candidate_id = previous + 1;
+    arena->candidate_id = id;
+    return 1;
+}
+
+/* A source-language factory can allocate through every C path, including the inlined hot bump
+ * and the multi-string run. Give it the ordinary nursery's current chunk, but only after
+ * sealing the preceding turn's allocations. This tags exact allocation provenance without
+ * treating any escaped object as movable. An allocation that goes to a slab, a large block or
+ * a tenured kind remains outside this candidate; outgoing closure will reject its edge.
+ * A nested factory keeps working as JavaScript but cannot make a separate candidate. */
+static int kiln_c99_actor_candidate_begin(kiln_gc_heap *heap) {
+    uint64_t id;
+    if (heap == NULL || heap->fallback || !heap->nursery.active || heap->nursery.region == NULL ||
+        heap->actor_candidate_id != 0) return 0;
+    id = kiln_c99_graph_candidate_new_id();
+    if (id == 0) return 0;
+    heap->actor_candidate_id = id;
+    heap->actor_candidate_collected = 0;
+    if (heap->nursery.bump > heap->nursery.base) kiln_c99_nursery_turn_chunk(heap);
+    if (!heap->nursery.active || heap->nursery.region == NULL) {
+        heap->actor_candidate_id = 0;
+        heap->actor_candidate_collected = 0;
+        return 0;
+    }
+    ((kiln_nursery_chunk *)heap->nursery.region)->candidate_id = id;
+    return 1;
+}
+
+/* Seal the factory's final chunk before any subsequent actor-registry allocation can enter it.
+ * A throw abandons transfer eligibility, but cannot discard the blocks: user callbacks may
+ * already have exposed some of them outside the factory. Collection may run during the scope
+ * after the nursery runs out of chunks or exceeds its 64 MiB defer ceiling. Such a collection
+ * invalidates the whole candidate ID, including promoted chunks, at this boundary. */
+static int kiln_c99_actor_candidate_end(kiln_gc_heap *heap, int completed) {
+    uint64_t id;
+    kiln_nursery_chunk *chunk;
+    if (heap == NULL || heap->actor_candidate_id == 0) return 0;
+    id = heap->actor_candidate_id;
+    if (heap->nursery.active && heap->nursery.bump > heap->nursery.base)
+        kiln_c99_nursery_turn_chunk(heap);
+    if (heap->nursery.region != NULL) {
+        chunk = (kiln_nursery_chunk *)heap->nursery.region;
+        if (chunk->candidate_id == id) {
+            chunk->candidate_id = 0;
+            chunk->candidate_epoch = 0;
+        }
+    }
+    heap->actor_candidate_id = 0;
+    if (!completed || heap->actor_candidate_collected) {
+        for (chunk = heap->nursery.full; chunk != NULL; chunk = chunk->next) {
+            if (chunk->candidate_id == id) {
+                chunk->candidate_id = 0;
+                chunk->candidate_epoch = 0;
+            }
+        }
+        for (chunk = heap->nursery.promoted; chunk != NULL; chunk = chunk->next) {
+            if (chunk->candidate_id == id) {
+                chunk->candidate_id = 0;
+                chunk->candidate_epoch = 0;
+            }
+        }
+    }
+    heap->actor_candidate_collected = 0;
     return 1;
 }
 
@@ -5702,6 +5794,8 @@ static void kiln_c99_nursery_spare(kiln_gc_heap *heap, kiln_nursery_chunk *chunk
     chunk->marked_count = 0;
     chunk->marked_bytes = 0;
     chunk->mark_epoch = 0;
+    chunk->candidate_id = 0;
+    chunk->candidate_epoch = 0;
     chunk->next = nursery->spare;
     nursery->spare = chunk;
     nursery->spare_count += 1;
@@ -5791,7 +5885,9 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
     int nursery_due;
     int tenured_due;
     if (heap == NULL || heap->collecting || heap->fallback) return;
+    if (kiln_c99_actor_candidate_defer_gc(heap)) return;
     if (!heap->enabled && !heap->stress) return;
+    if (heap->actor_candidate_id != 0) heap->actor_candidate_collected = 1;
     if (KILN_UNLIKELY(heap->parallel_paused != 0)) {
         fputs("kiln: a collection was due while a parallel call's worker arenas were open\n",
               stderr);

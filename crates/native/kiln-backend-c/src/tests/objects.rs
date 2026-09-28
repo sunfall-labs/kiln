@@ -2309,6 +2309,75 @@ int main(void) {
 }
 
 #[test]
+fn executable_actor_factory_allocations_have_dedicated_candidate_chunks() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int actor_candidate_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_value args[2], result, thrown;
+    kiln_val *old, *root, *aborted;
+    kiln_nursery_chunk *candidate, *batch[1], *discarded;
+    uint32_t epoch;
+    (void)context;
+    if (heap == NULL) return 1;
+    old = (kiln_val *)kiln_c99_gc_alloc(KILN_GC_CELL, sizeof *old);
+    if (old == NULL) return 2;
+    *old = KILN_VAL_UNDEFINED;
+    args[0] = kiln_c99_number(28);
+    if (kiln_c99_worker_op_raw(&result, args, 1, &thrown) != KILN_C99_OK ||
+        !kiln_c99_truthy(result)) return 3;
+    if (kiln_c99_actor_candidate_begin(heap)) return 4; /* nested scopes do not claim chunks */
+    root = (kiln_val *)kiln_c99_gc_alloc(KILN_GC_CELL, sizeof *root);
+    if (root == NULL) return 5;
+    *root = KILN_VAL_UNDEFINED;
+    candidate = kiln_c99_nursery_chunk_of(heap, (kiln_gc_block *)root - 1);
+    if (candidate == kiln_c99_nursery_chunk_of(heap, (kiln_gc_block *)old - 1) ||
+        candidate->candidate_id == 0 || candidate->candidate_id != heap->actor_candidate_id)
+        return 6;
+    epoch = heap->epoch;
+    kiln_c99_gc_collect(heap, 1); /* collection is deferred until the candidate is sealed */
+    if (heap->epoch != epoch) return 7;
+    args[0] = kiln_c99_number(29);
+    args[1] = kiln_c99_boolean(1);
+    if (kiln_c99_worker_op_raw(&result, args, 2, &thrown) != KILN_C99_OK ||
+        !kiln_c99_truthy(result)) return 8;
+    if (candidate->candidate_epoch != heap->epoch || heap->actor_candidate_id != 0 ||
+        ((kiln_nursery_chunk *)heap->nursery.region)->candidate_id != 0) return 9;
+    batch[0] = candidate;
+    if (!kiln_c99_graph_candidate_closed(heap, batch, 1, root)) return 10;
+    args[0] = kiln_c99_number(28);
+    if (kiln_c99_worker_op_raw(&result, args, 1, &thrown) != KILN_C99_OK ||
+        !kiln_c99_truthy(result)) return 11;
+    aborted = (kiln_val *)kiln_c99_gc_alloc(KILN_GC_CELL, sizeof *aborted);
+    if (aborted == NULL) return 12;
+    *aborted = KILN_VAL_UNDEFINED;
+    discarded = kiln_c99_nursery_chunk_of(heap, (kiln_gc_block *)aborted - 1);
+    args[0] = kiln_c99_number(29);
+    args[1] = kiln_c99_boolean(0);
+    if (kiln_c99_worker_op_raw(&result, args, 2, &thrown) != KILN_C99_OK ||
+        !kiln_c99_truthy(result) || discarded->candidate_id != 0) return 13;
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int result;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 14;
+    result = kiln_realm_enter(realm, actor_candidate_entry, NULL);
+    if (result != KILN_C99_OK) return result;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 15;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "actor-factory-candidates");
+    assert!(
+        run.status.success(),
+        "actor factory candidate check failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_actor_isolated_registry_escrow_rolls_back_without_allocation() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");

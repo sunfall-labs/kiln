@@ -51,6 +51,19 @@ for (let attempt = 0; attempt < 2; attempt++) {
     throw new Error('failed graph handoff consumed its ticket');
   }
 }
+let factoryFailed = false;
+try { isolate(() => { throw new Error('factory failed'); }); }
+catch (error) { factoryFailed = error.message === 'factory failed'; }
+if (!factoryFailed) throw new Error('failed isolate factory did not unwind');
+const nested = isolate(() => isolate(() => ({ nested: true })));
+const nestedTicket = transfer(nested);
+let nestedRefused = false;
+try { await owner.ref.call('echo', [nestedTicket]); }
+catch (error) {
+  if (error.name !== 'DataCloneError') throw error;
+  nestedRefused = true;
+}
+if (!nestedRefused) throw new Error('nested isolated graph escaped');
 await owner.stop();
 try { await second.call('increment', [1]); }
 catch (error) { console.log(error.name); }

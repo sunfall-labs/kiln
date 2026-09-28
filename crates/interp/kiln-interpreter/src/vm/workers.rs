@@ -142,6 +142,8 @@ const OP_ACTOR_CLOSE: u32 = 24;
 const OP_ACTOR_REQUEST_ID: u32 = 25;
 const OP_ACTOR_ISOLATE: u32 = 26;
 const OP_ACTOR_ISOLATED_HAS: u32 = 27;
+const OP_ACTOR_CANDIDATE_BEGIN: u32 = 28;
+const OP_ACTOR_CANDIDATE_END: u32 = 29;
 
 /// A moved `ArrayBuffer`'s store, as this engine boxes it into a [`Token::Moved`].
 struct MovedBytes(Vec<u8>);
@@ -259,6 +261,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 };
                 Value::Boolean(found)
             }
+            // Only the native collector owns movable candidate chunks. The interpreter
+            // retains actor graphs in its private realm table without claiming provenance.
+            OP_ACTOR_CANDIDATE_BEGIN | OP_ACTOR_CANDIDATE_END => Value::Boolean(false),
             OP_TAKE => match workers::take(endpoint_of(first)) {
                 Some(message) => {
                     let realm = self.current_realm;

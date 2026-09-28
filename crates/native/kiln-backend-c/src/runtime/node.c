@@ -2276,6 +2276,8 @@ int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code
 #define KILN_C99_WORKER_OP_ACTOR_REQUEST_ID 25
 #define KILN_C99_WORKER_OP_ACTOR_ISOLATE 26
 #define KILN_C99_WORKER_OP_ACTOR_ISOLATED_HAS 27
+#define KILN_C99_WORKER_OP_ACTOR_CANDIDATE_BEGIN 28
+#define KILN_C99_WORKER_OP_ACTOR_CANDIDATE_END 29
 
 static uint64_t kiln_c99_worker_word(const kiln_value *args, size_t argc, size_t at) {
     double number;
@@ -2619,6 +2621,13 @@ static int kiln_c99_worker_op_raw(kiln_value *result, const kiln_value *args, si
         *result = kiln_c99_boolean(found);
         return KILN_C99_OK;
     }
+    case KILN_C99_WORKER_OP_ACTOR_CANDIDATE_BEGIN:
+        *result = kiln_c99_boolean(kiln_c99_actor_candidate_begin(kiln_c99_gc_heap()));
+        return KILN_C99_OK;
+    case KILN_C99_WORKER_OP_ACTOR_CANDIDATE_END:
+        *result = kiln_c99_boolean(kiln_c99_actor_candidate_end(
+            kiln_c99_gc_heap(), argc > 1 && kiln_c99_truthy(args[1])));
+        return KILN_C99_OK;
     case KILN_C99_WORKER_OP_ACTOR_REGISTER:
     case KILN_C99_WORKER_OP_ACTOR_LOOKUP:
     case KILN_C99_WORKER_OP_ACTOR_CLOSE: {
