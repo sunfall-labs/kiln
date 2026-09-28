@@ -3299,7 +3299,6 @@ static int kiln_c99_graph_add_array_side(kiln_c99_graph_walk *walk,
     const kiln_nursery_chunk *chunk = kiln_c99_nursery_chunk_of(walk->heap, block);
     uintptr_t base = (uintptr_t)header;
     size_t bytes;
-    size_t index;
     kiln_c99_graph_side_span *grown;
     if (chunk == NULL || header->candidate_id != chunk->candidate_id ||
         header->owner != array || header->capacity != array->capacity ||
@@ -3309,10 +3308,6 @@ static int kiln_c99_graph_add_array_side(kiln_c99_graph_walk *walk,
     if (base > UINTPTR_MAX - bytes ||
         kiln_c99_gc_lookup_interior(walk->heap, base) != NULL ||
         kiln_c99_gc_lookup_interior(walk->heap, base + bytes - 1) != NULL) return 0;
-    for (index = 0; index < walk->sides.count; ++index) {
-        const kiln_c99_graph_side_span *other = &walk->sides.spans[index];
-        if (base < other->limit && other->base < base + bytes) return 0;
-    }
     if (walk->sides.count == walk->sides.capacity) {
         size_t capacity = walk->sides.capacity == 0 ? 4 : walk->sides.capacity * 2;
         if (capacity < walk->sides.capacity ||
@@ -3328,6 +3323,12 @@ static int kiln_c99_graph_add_array_side(kiln_c99_graph_walk *walk,
     if (walk->sides.count == 1 || base < walk->sides.lo) walk->sides.lo = base;
     if (base + bytes > walk->sides.hi) walk->sides.hi = base + bytes;
     return 1;
+}
+
+static int kiln_c99_graph_side_span_compare(const void *left, const void *right) {
+    uintptr_t a = ((const kiln_c99_graph_side_span *)left)->base;
+    uintptr_t b = ((const kiln_c99_graph_side_span *)right)->base;
+    return a < b ? -1 : a > b ? 1 : 0;
 }
 
 /* Every reference must name the start of a block in the same candidate. A static or process-wide
@@ -3557,7 +3558,16 @@ static int kiln_c99_graph_candidate_closed_with_sides(
             cursor += (sizeof(kiln_gc_block) + payload + 15) & ~(size_t)15;
         }
     }
-    result = walk.queued + inert_orphans == seen;
+    if (walk.queued + inert_orphans != seen) goto done;
+    /* A valid malloc allocation cannot overlap another live allocation. Check the complete
+     * certificate once, then retain this order for binary searches in the incoming proof. */
+    if (walk.sides.count > 1)
+        qsort(walk.sides.spans, walk.sides.count, sizeof *walk.sides.spans,
+              kiln_c99_graph_side_span_compare);
+    for (index = 1; index < walk.sides.count; ++index) {
+        if (walk.sides.spans[index - 1].limit > walk.sides.spans[index].base) goto done;
+    }
+    result = 1;
 done:
     if (result && sides != NULL) {
         *sides = walk.sides;
@@ -3601,10 +3611,13 @@ static int kiln_c99_graph_in_batch(const kiln_gc_heap *heap,
     size_t index;
     if (sides != NULL && sides->count != 0 &&
         address >= sides->lo && address < sides->hi) {
-        for (index = 0; index < sides->count; ++index) {
-            if (address >= sides->spans[index].base &&
-                address < sides->spans[index].limit) return 1;
+        size_t low = 0, high = sides->count;
+        while (low < high) {
+            size_t middle = low + (high - low) / 2;
+            if (sides->spans[middle].base <= address) low = middle + 1;
+            else high = middle;
         }
+        if (low != 0 && address < sides->spans[low - 1].limit) return 1;
     }
     if (address < heap->lo || address >= heap->hi) return 0;
     block = kiln_c99_gc_lookup_interior(heap, address);

@@ -3149,9 +3149,10 @@ fn executable_actor_candidate_array_side_storage_tracks_ownership() {
     let wrapper = r#"
 static int candidate_array_entry(void *context) {
     kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
-    kiln_value ordinary, candidate;
+    kiln_value ordinary, candidate, second;
     kiln_array *array;
     kiln_array *ordinary_array;
+    kiln_array *second_array;
     kiln_c99_candidate_array_elements *header;
     kiln_c99_graph_side_set sides = {0};
     kiln_nursery_chunk *batch[1];
@@ -3184,6 +3185,11 @@ static int candidate_array_entry(void *context) {
     if (header->candidate_id != candidate_id || header->owner != array ||
         header->capacity != 256 || header->generation != 2 ||
         array->elements[127] != kiln_val_from_boundary(kiln_c99_number(127))) return 9;
+    if (kiln_c99_new_array_with_capacity(&second, 256, 1) != KILN_C99_OK) return 19;
+    second_array = kiln_c99_array_of(second);
+    second_array->elements[0] = kiln_val_from_boundary(kiln_c99_number(11));
+    second_array->count = 1;
+    array->elements[1] = KILN_VAL_TAG_PTR(KILN_TAG_BUFFER_PREFIX, second_array);
     if (!kiln_c99_actor_candidate_end(heap, 1)) return 10;
     if (kiln_c99_array_reserve(array, 512) != KILN_C99_OK) return 11;
     header = kiln_c99_array_candidate_header(array);
@@ -3191,13 +3197,17 @@ static int candidate_array_entry(void *context) {
         array->elements[127] != kiln_val_from_boundary(kiln_c99_number(127))) return 12;
     batch[0] = kiln_c99_nursery_chunk_of(heap, (kiln_gc_block *)array - 1);
     if (!kiln_c99_graph_candidate_closed_with_sides(heap, batch, 1, array, &sides) ||
-        sides.count != 1 || sides.spans[0].owner != array ||
-        sides.spans[0].base != (uintptr_t)header ||
-        sides.spans[0].limit != (uintptr_t)(array->elements + array->capacity)) return 15;
+        sides.count != 2 || sides.spans[0].base >= sides.spans[1].base ||
+        sides.spans[0].limit > sides.spans[1].base ||
+        !((sides.spans[0].owner == array && sides.spans[1].owner == second_array) ||
+          (sides.spans[0].owner == second_array && sides.spans[1].owner == array))) return 15;
     heap->graph_proof_sides = &sides;
     side_word = (uintptr_t)(array->elements + 127);
     if (!kiln_c99_graph_in_batch(heap, batch, 1, (void *)side_word) ||
         !kiln_c99_graph_machine_words_alias(heap, batch, 1, &side_word, 1)) return 16;
+    side_word = (uintptr_t)second_array->elements;
+    if (!kiln_c99_graph_in_batch(heap, batch, 1, (void *)side_word) ||
+        !kiln_c99_graph_machine_words_alias(heap, batch, 1, &side_word, 1)) return 20;
     ordinary_array->elements = array->elements;
     if (kiln_c99_graph_outside_block(heap, batch, 1,
             (kiln_gc_block *)ordinary_array - 1) != KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS)
