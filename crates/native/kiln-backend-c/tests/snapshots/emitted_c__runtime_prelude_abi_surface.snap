@@ -2157,6 +2157,7 @@ static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
 static kiln_nursery_chunk *kiln_c99_arena_chunk(size_t capacity, size_t bitmap_words) {
 static void kiln_c99_arena_chunks_free(kiln_nursery_chunk *chunks) {
 static int kiln_c99_heap_adopt_chunks(kiln_gc_heap *heap, kiln_nursery_chunk *chunks) {
+static int kiln_c99_chunk_sealed_for_move(const kiln_gc_nursery *nursery,
 static int kiln_c99_heap_move_chunks(kiln_gc_heap *from, kiln_gc_heap *to,
 struct kiln_c99_par_arena {
 static size_t kiln_c99_par_arena_budget_bytes;

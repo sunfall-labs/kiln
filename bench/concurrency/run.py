@@ -644,7 +644,9 @@ class Report:
             return "excluded (divergence)"
         if c["errors"] and metric not in c:
             reason = c["errors"][0].splitlines()[0][:80].replace("|", "/")
-            return reason if reason.startswith("skipped:") else "failed: " + reason
+            if reason.startswith("skipped:"):
+                return reason if metric == "wall_ms" else "--"
+            return "failed: " + reason
         if metric not in c:
             return "--"
         mid, spread, n = c[metric]
