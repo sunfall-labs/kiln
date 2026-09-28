@@ -9,10 +9,10 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::task::Waker;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::Reactor;
 use crate::turn_queue::{ReadyQueue, TurnLease, TurnOutcome, TurnTicket};
@@ -139,14 +139,204 @@ impl TurnStatus {
     }
 }
 
+/// A cross-thread ticket for a realm whose body is owned by this scheduler. It contains no
+/// realm pointer and can be used to request a pair pause from outside either turn body.
+#[derive(Clone)]
+pub struct TurnPauseTarget {
+    ticket: Arc<TurnTicket>,
+    status: Arc<AtomicU8>,
+    coordinator: Arc<TurnPauseCoordinator>,
+}
+
+impl TurnPauseTarget {
+    pub fn id(&self) -> u64 {
+        self.ticket.realm_id()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnClaimError {
+    SameRealm,
+    ForeignScheduler,
+    Unavailable,
+    Busy,
+}
+
+struct TurnPauseEntry {
+    claim: u64,
+    acknowledged: bool,
+    deferred_cancel: Option<Box<dyn FnOnce() + Send>>,
+}
+
+struct TurnPauseState {
+    next_claim: u64,
+    entries: HashMap<u64, TurnPauseEntry>,
+}
+
+struct TurnPauseCoordinator {
+    queue_identity: usize,
+    pending: AtomicUsize,
+    state: Mutex<TurnPauseState>,
+    changed: Condvar,
+}
+
+impl TurnPauseCoordinator {
+    fn new(queue: &Arc<ReadyQueue>) -> Self {
+        Self {
+            queue_identity: Arc::as_ptr(queue) as usize,
+            pending: AtomicUsize::new(0),
+            state: Mutex::new(TurnPauseState {
+                next_claim: 1,
+                entries: HashMap::new(),
+            }),
+            changed: Condvar::new(),
+        }
+    }
+
+    /// This is called only after a ticket is leased and before its body runs. A running body
+    /// must return first; the queued wake then brings it here with every generated frame gone.
+    fn acknowledge_boundary(&self, id: u64) -> bool {
+        if self.pending.load(Ordering::Acquire) == 0 {
+            return false;
+        }
+        let mut state = self.state.lock().expect("turn pause lock poisoned");
+        let Some(entry) = state.entries.get_mut(&id) else {
+            return false;
+        };
+        entry.acknowledged = true;
+        self.changed.notify_all();
+        true
+    }
+
+    /// A cancellation may retire the ticket immediately, but dropping a claimed body would
+    /// invalidate its paused heap. Defer only the body removal until the claim releases it.
+    fn defer_cancel(
+        &self,
+        id: u64,
+        action: Box<dyn FnOnce() + Send>,
+    ) -> Result<(), Box<dyn FnOnce() + Send>> {
+        let mut state = self.state.lock().expect("turn pause lock poisoned");
+        let Some(entry) = state.entries.get_mut(&id) else {
+            return Err(action);
+        };
+        entry.deferred_cancel = Some(action);
+        self.changed.notify_all();
+        Ok(())
+    }
+}
+
+/// A pair of scheduler bodies paused at their turn boundaries. The owner must release this
+/// before waiting for either realm to run again. It is deliberately independent of graph
+/// tickets: a successful wait is a scheduling fact, not an ownership certificate.
+pub struct TurnPairClaim {
+    _scheduler: Arc<PinnedTurnScheduler>,
+    coordinator: Arc<TurnPauseCoordinator>,
+    claim: u64,
+    targets: [TurnPauseTarget; 2],
+}
+
+impl TurnPairClaim {
+    /// Wait only from a coordinator thread, never from a scheduler lane: a lane could own
+    /// either claimed realm and cannot acknowledge while its OS thread is blocked here.
+    pub fn wait(&self, timeout: Duration) -> bool {
+        let on_lane = ACTIVE_LANE.with(|slot| {
+            slot.get()
+                .is_some_and(|(queue, _)| queue == self.coordinator.queue_identity)
+        });
+        if on_lane {
+            return false;
+        }
+        let Some(deadline) = Instant::now().checked_add(timeout) else {
+            return false;
+        };
+        let mut state = self
+            .coordinator
+            .state
+            .lock()
+            .expect("turn pause lock poisoned");
+        loop {
+            if self.targets.iter().any(|target| {
+                TurnStatus::read(target.status.load(Ordering::Acquire)) != TurnStatus::Active
+            }) {
+                return false;
+            }
+            if self.targets.iter().all(|target| {
+                state
+                    .entries
+                    .get(&target.id())
+                    .is_some_and(|entry| entry.claim == self.claim && entry.acknowledged)
+            }) {
+                return true;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let (next, _) = self
+                .coordinator
+                .changed
+                .wait_timeout(state, (deadline - now).min(Duration::from_millis(10)))
+                .expect("turn pause wait poisoned");
+            state = next;
+        }
+    }
+}
+
+impl Drop for TurnPairClaim {
+    fn drop(&mut self) {
+        let actions = {
+            let mut state = self
+                .coordinator
+                .state
+                .lock()
+                .expect("turn pause lock poisoned");
+            let mut actions = Vec::new();
+            for target in &self.targets {
+                if state
+                    .entries
+                    .get(&target.id())
+                    .is_some_and(|entry| entry.claim == self.claim)
+                {
+                    let entry = state
+                        .entries
+                        .remove(&target.id())
+                        .expect("claimed entry exists");
+                    if let Some(action) = entry.deferred_cancel {
+                        actions.push(action);
+                    }
+                }
+            }
+            self.coordinator
+                .pending
+                .store(state.entries.len(), Ordering::Release);
+            self.coordinator.changed.notify_all();
+            actions
+        };
+        for target in &self.targets {
+            target.ticket.wake();
+        }
+        for action in actions {
+            action();
+        }
+    }
+}
+
 /// The cross-thread name of a realm hosted on one scheduler lane.
 pub struct PinnedTurnHandle {
     ticket: Arc<TurnTicket>,
     lane: Arc<LaneControl>,
     status: Arc<AtomicU8>,
+    pause: Arc<TurnPauseCoordinator>,
 }
 
 impl PinnedTurnHandle {
+    pub fn pause_target(&self) -> TurnPauseTarget {
+        TurnPauseTarget {
+            ticket: Arc::clone(&self.ticket),
+            status: Arc::clone(&self.status),
+            coordinator: Arc::clone(&self.pause),
+        }
+    }
     pub fn id(&self) -> u64 {
         self.ticket.realm_id()
     }
@@ -173,7 +363,13 @@ impl PinnedTurnHandle {
             .is_ok()
         {
             self.ticket.cancel();
-            self.lane.command(Command::Remove(self.id()));
+            let id = self.id();
+            let lane = Arc::clone(&self.lane);
+            let action: Box<dyn FnOnce() + Send> =
+                Box::new(move || lane.command(Command::Remove(id)));
+            if let Err(action) = self.pause.defer_cancel(id, action) {
+                action();
+            }
         }
     }
 }
@@ -189,9 +385,17 @@ pub struct MovableTurnHandle {
     entry: Arc<MovableEntry>,
     realms: MovableRealms,
     lanes: Arc<Vec<Arc<LaneControl>>>,
+    pause: Arc<TurnPauseCoordinator>,
 }
 
 impl MovableTurnHandle {
+    pub fn pause_target(&self) -> TurnPauseTarget {
+        TurnPauseTarget {
+            ticket: Arc::clone(&self.entry.ticket),
+            status: Arc::clone(&self.entry.status),
+            coordinator: Arc::clone(&self.pause),
+        }
+    }
     pub fn id(&self) -> u64 {
         self.entry.ticket.realm_id()
     }
@@ -217,23 +421,30 @@ impl MovableTurnHandle {
             .is_ok()
         {
             self.entry.ticket.cancel();
-            if let Some(lane) = self.entry.ticket.pinned_lane() {
-                self.lanes[lane].command(Command::Remove(self.id()));
-            } else {
-                // A running movable turn can put its body back just before it observes this
-                // cancellation. Both paths use the body lock, so either cancellation takes the
-                // returned body here or the turn sees Cancelled and drops it on its own lane.
-                let body = self
-                    .entry
-                    .body
-                    .lock()
-                    .expect("movable body lock poisoned")
-                    .take();
-                drop(body);
-                self.realms
-                    .lock()
-                    .expect("movable realm lock poisoned")
-                    .remove(&self.id());
+            let entry = Arc::clone(&self.entry);
+            let realms = Arc::clone(&self.realms);
+            let lanes = Arc::clone(&self.lanes);
+            let id = self.id();
+            let action: Box<dyn FnOnce() + Send> = Box::new(move || {
+                if let Some(lane) = entry.ticket.pinned_lane() {
+                    lanes[lane].command(Command::Remove(id));
+                } else {
+                    // A running turn can return its body just before cancellation. Both paths
+                    // use the body lock, so either path takes the sole remaining owner.
+                    let body = entry
+                        .body
+                        .lock()
+                        .expect("movable body lock poisoned")
+                        .take();
+                    drop(body);
+                    realms
+                        .lock()
+                        .expect("movable realm lock poisoned")
+                        .remove(&id);
+                }
+            });
+            if let Err(action) = self.pause.defer_cancel(id, action) {
+                action();
             }
         }
     }
@@ -252,6 +463,7 @@ pub struct PinnedTurnScheduler {
     reactor: Arc<Reactor>,
     movable: MovableRealms,
     lanes: Arc<Vec<Arc<LaneControl>>>,
+    pause: Arc<TurnPauseCoordinator>,
     base_lanes: usize,
     deterministic: bool,
     threads: Vec<std::thread::JoinHandle<()>>,
@@ -315,6 +527,7 @@ impl PinnedTurnScheduler {
         let mut scheduler = Self {
             reactor,
             movable: Arc::new(Mutex::new(HashMap::new())),
+            pause: Arc::new(TurnPauseCoordinator::new(&queue)),
             lanes,
             base_lanes: lane_count,
             deterministic: false,
@@ -327,6 +540,7 @@ impl PinnedTurnScheduler {
             let lane_for_thread = Arc::clone(&lane);
             let reactor_for_thread = Arc::clone(&scheduler.reactor);
             let movable_for_thread = Arc::clone(&scheduler.movable);
+            let pause_for_thread = Arc::clone(&scheduler.pause);
             let thread = std::thread::Builder::new()
                 .name(format!("kiln-turn-{index}"))
                 .stack_size(crate::workers::WORKER_STACK)
@@ -335,6 +549,7 @@ impl PinnedTurnScheduler {
                         lane_for_thread,
                         reactor_for_thread,
                         movable_for_thread,
+                        pause_for_thread,
                         None,
                     )
                 })?;
@@ -349,6 +564,66 @@ impl PinnedTurnScheduler {
 
     pub fn is_deterministic(&self) -> bool {
         self.deterministic
+    }
+
+    /// Claim two live scheduler bodies in ascending realm-ID order. `wait` must run outside a
+    /// lane after the requesting language turn has returned. The claim cannot authorize a graph
+    /// move by itself: caller must still prove roots and reserve the receiver mailbox.
+    pub fn claim_pair(
+        self: &Arc<Self>,
+        a: &TurnPauseTarget,
+        b: &TurnPauseTarget,
+    ) -> Result<TurnPairClaim, TurnClaimError> {
+        if a.id() == b.id() {
+            return Err(TurnClaimError::SameRealm);
+        }
+        if !Arc::ptr_eq(&self.pause, &a.coordinator) || !Arc::ptr_eq(&self.pause, &b.coordinator) {
+            return Err(TurnClaimError::ForeignScheduler);
+        }
+        let mut targets = [a.clone(), b.clone()];
+        targets.sort_by_key(TurnPauseTarget::id);
+        let claim = {
+            let mut state = self.pause.state.lock().expect("turn pause lock poisoned");
+            if targets.iter().any(|target| {
+                TurnStatus::read(target.status.load(Ordering::Acquire)) != TurnStatus::Active
+            }) {
+                return Err(TurnClaimError::Unavailable);
+            }
+            if targets
+                .iter()
+                .any(|target| state.entries.contains_key(&target.id()))
+            {
+                return Err(TurnClaimError::Busy);
+            }
+            let claim = state.next_claim;
+            state.next_claim = state
+                .next_claim
+                .checked_add(1)
+                .ok_or(TurnClaimError::Unavailable)?;
+            for target in &targets {
+                state.entries.insert(
+                    target.id(),
+                    TurnPauseEntry {
+                        claim,
+                        acknowledged: false,
+                        deferred_cancel: None,
+                    },
+                );
+            }
+            self.pause
+                .pending
+                .store(state.entries.len(), Ordering::Release);
+            claim
+        };
+        for target in &targets {
+            target.ticket.wake();
+        }
+        Ok(TurnPairClaim {
+            _scheduler: Arc::clone(self),
+            coordinator: Arc::clone(&self.pause),
+            claim,
+            targets,
+        })
     }
 
     /// Supply one temporary lane for movable work while a scheduled turn blocks its OS thread.
@@ -376,6 +651,7 @@ impl PinnedTurnScheduler {
         let lane_for_thread = Arc::clone(&lane);
         let reactor = Arc::clone(&self.reactor);
         let movable = Arc::clone(&self.movable);
+        let pause = Arc::clone(&self.pause);
         let queue_identity = Arc::as_ptr(&self.lanes[0].queue) as usize;
         let owner = ACTIVE_LANE.with(|slot| {
             slot.get()
@@ -386,7 +662,7 @@ impl PinnedTurnScheduler {
         let thread = std::thread::Builder::new()
             .name(format!("kiln-turn-replacement-{slot}"))
             .stack_size(crate::workers::WORKER_STACK)
-            .spawn(move || run_lane(lane_for_thread, reactor, movable, Some(handoff)))?;
+            .spawn(move || run_lane(lane_for_thread, reactor, movable, pause, Some(handoff)))?;
         *place = Some(thread);
         Ok(BlockingTurnGuard {
             _scheduler: Arc::clone(self),
@@ -415,6 +691,7 @@ impl PinnedTurnScheduler {
             ticket,
             lane,
             status,
+            pause: Arc::clone(&self.pause),
         }
     }
 
@@ -441,6 +718,7 @@ impl PinnedTurnScheduler {
             entry,
             realms: Arc::clone(&self.movable),
             lanes: Arc::clone(&self.lanes),
+            pause: Arc::clone(&self.pause),
         }
     }
 
@@ -469,6 +747,7 @@ impl PinnedTurnScheduler {
             entry,
             realms: Arc::clone(&self.movable),
             lanes: Arc::clone(&self.lanes),
+            pause: Arc::clone(&self.pause),
         }
     }
 }
@@ -501,6 +780,7 @@ fn run_lane(
     lane: Arc<LaneControl>,
     reactor: Arc<Reactor>,
     movable: MovableRealms,
+    pause: Arc<TurnPauseCoordinator>,
     handoff: Option<Arc<LaneControl>>,
 ) {
     let _active_lane = ActiveLaneGuard::enter(&lane.queue, lane.index);
@@ -648,9 +928,20 @@ fn run_lane(
             continue;
         }
         let Some(realm) = realms.get_mut(&realm_id) else {
-            run_movable(lease, lane.index, &movable, &mut realms, &mut deadlines);
+            run_movable(
+                lease,
+                lane.index,
+                &movable,
+                &pause,
+                &mut realms,
+                &mut deadlines,
+            );
             continue;
         };
+        if pause.acknowledge_boundary(realm_id) {
+            lease.finish(TurnOutcome::Parked);
+            continue;
+        }
         let waker = Waker::from(lease.ticket());
         let result = catch_unwind(AssertUnwindSafe(|| {
             realm.body.run_turn_on(&waker, lane.index)
@@ -691,6 +982,7 @@ fn run_movable(
     lease: TurnLease,
     lane: usize,
     movable: &MovableRealms,
+    pause: &TurnPauseCoordinator,
     pinned: &mut HashMap<u64, RealmEntry>,
     deadlines: &mut BinaryHeap<Reverse<(Instant, u64, u64)>>,
 ) {
@@ -706,6 +998,10 @@ fn run_movable(
     };
     if entry.status.load(Ordering::Acquire) != TurnStatus::Active as u8 {
         lease.finish(TurnOutcome::Done);
+        return;
+    }
+    if pause.acknowledge_boundary(id) {
+        lease.finish(TurnOutcome::Parked);
         return;
     }
     let Some(mut body) = entry
@@ -790,7 +1086,114 @@ fn run_movable(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn pair_claim_waits_for_turn_boundaries_and_defers_cancelled_body_drop() {
+        struct ParkedBody {
+            runs: Arc<AtomicUsize>,
+            drops: Arc<AtomicUsize>,
+        }
+        impl PinnedTurn for ParkedBody {
+            fn run_turn(&mut self, _waker: &Waker) -> TurnOutcome {
+                self.runs.fetch_add(1, Ordering::SeqCst);
+                TurnOutcome::Parked
+            }
+        }
+        impl Drop for ParkedBody {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let scheduler =
+            Arc::new(PinnedTurnScheduler::deterministic().expect("one deterministic lane"));
+        let (entered, entered_rx) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let first_runs = Arc::new(AtomicUsize::new(0));
+        let first = scheduler.spawn_pinned({
+            let runs = Arc::clone(&first_runs);
+            move |_, _| {
+                let mut initial = true;
+                move |_: &Waker| {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    if initial {
+                        initial = false;
+                        entered.send(()).unwrap();
+                        release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                    }
+                    TurnOutcome::Parked
+                }
+            }
+        });
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let second_runs = Arc::new(AtomicUsize::new(0));
+        let second_drops = Arc::new(AtomicUsize::new(0));
+        let second = scheduler.spawn_movable(ParkedBody {
+            runs: Arc::clone(&second_runs),
+            drops: Arc::clone(&second_drops),
+        });
+        let first_target = first.pause_target();
+        let second_target = second.pause_target();
+        assert_eq!(
+            scheduler.claim_pair(&first_target, &first_target).err(),
+            Some(TurnClaimError::SameRealm)
+        );
+        let claim = scheduler
+            .claim_pair(&second_target, &first_target)
+            .expect("pair claimed");
+        assert!(claim.targets[0].id() < claim.targets[1].id());
+        assert!(
+            !claim.wait(Duration::from_millis(10)),
+            "running turn cannot acknowledge before returning"
+        );
+        assert_eq!(
+            scheduler.claim_pair(&first_target, &second_target).err(),
+            Some(TurnClaimError::Busy)
+        );
+        release.send(()).unwrap();
+        assert!(
+            claim.wait(Duration::from_secs(1)),
+            "both realms reached a boundary"
+        );
+        let before = (
+            first_runs.load(Ordering::SeqCst),
+            second_runs.load(Ordering::SeqCst),
+        );
+        assert!(first.wake() && second.wake());
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            before,
+            (
+                first_runs.load(Ordering::SeqCst),
+                second_runs.load(Ordering::SeqCst)
+            ),
+            "claimed bodies cannot run another turn"
+        );
+        second.cancel();
+        assert!(
+            !claim.wait(Duration::ZERO),
+            "cancellation invalidates the pair"
+        );
+        assert_eq!(
+            second_drops.load(Ordering::SeqCst),
+            0,
+            "a claimed body cannot be torn down"
+        );
+        drop(claim);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while first_runs.load(Ordering::SeqCst) == before.0
+            || second_drops.load(Ordering::SeqCst) == 0
+        {
+            assert!(
+                Instant::now() < deadline,
+                "release did not resume and retire realms"
+            );
+            std::thread::yield_now();
+        }
+        first.cancel();
+    }
 
     struct CountedTurn {
         first_lane: std::thread::ThreadId,
