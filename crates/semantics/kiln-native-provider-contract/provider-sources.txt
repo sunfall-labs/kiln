@@ -10,6 +10,7 @@ crates/foundation/kiln-host-abi/Cargo.toml
 crates/foundation/kiln-host-abi/src/lib.rs
 crates/foundation/kiln-number-core/Cargo.toml
 crates/foundation/kiln-number-core/src/lib.rs
+crates/foundation/kiln-number-core/src/typed_order.rs
 crates/foundation/kiln-string/Cargo.toml
 crates/foundation/kiln-string/src/lib.rs
 crates/native/kiln-native-provider-ffi/Cargo.toml
@@ -43,12 +44,17 @@ crates/host/kiln-runtime/src/http_body.rs
 crates/host/kiln-runtime/src/http_client.rs
 crates/host/kiln-runtime/src/http_engine.rs
 crates/host/kiln-runtime/src/lib.rs
+crates/host/kiln-runtime/src/listen_group.rs
 crates/host/kiln-runtime/src/process_wire.rs
 crates/host/kiln-runtime/src/node_http.rs
 crates/host/kiln-runtime/src/node_http_agent.rs
 crates/host/kiln-runtime/src/node_net.rs
 crates/host/kiln-runtime/src/node_stream.rs
 crates/host/kiln-runtime/src/scripted_transport.rs
+crates/host/kiln-runtime/src/signals.rs
+crates/host/kiln-runtime/src/timer_queue.rs
+crates/host/kiln-runtime/src/turn_queue.rs
+crates/host/kiln-runtime/src/turn_scheduler.rs
 crates/host/kiln-runtime/src/worker_pool.rs
 crates/host/kiln-runtime/src/workers.rs
 crates/host/kiln-runtime/src/uring.rs
@@ -69,6 +75,8 @@ crates/native/kiln-native-provider-ffi/src/provider/intl.rs
 crates/native/kiln-native-provider-ffi/src/provider/json.rs
 crates/native/kiln-native-provider-ffi/src/provider/parallel.rs
 crates/native/kiln-native-provider-ffi/src/provider/realm.rs
+crates/native/kiln-native-provider-ffi/src/provider/realm/reclaim.rs
+crates/native/kiln-native-provider-ffi/src/provider/realm/shared_graph.rs
 crates/native/kiln-native-provider-ffi/src/provider/regexp.rs
 crates/native/kiln-native-provider-ffi/src/provider/regexp_stubs.rs
 crates/native/kiln-native-provider-ffi/src/provider/temporal.rs

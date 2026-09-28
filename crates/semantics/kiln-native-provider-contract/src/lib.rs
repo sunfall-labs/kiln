@@ -461,6 +461,45 @@ mod tests {
     }
 
     #[test]
+    fn provider_source_list_covers_dependency_modules() {
+        // A missing entry silently reuses an old staticlib after its Rust source changes.
+        // Test-only modules are intentionally absent: they do not enter the production archive.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap();
+        let listed: std::collections::HashSet<&str> = source_paths().collect();
+        let mut missing = Vec::new();
+        let mut pending = vec![
+            root.join("crates/foundation/kiln-number-core/src"),
+            root.join("crates/host/kiln-runtime/src"),
+            root.join("crates/native/kiln-native-provider-ffi/src"),
+        ];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|name| name != "tests") {
+                        pending.push(path);
+                    }
+                } else if path.extension().is_some_and(|ext| ext == "rs")
+                    && path.file_name().is_none_or(|name| name != "tests.rs")
+                {
+                    let relative = path.strip_prefix(root).unwrap().to_str().unwrap();
+                    if !listed.contains(relative) {
+                        missing.push(relative.to_owned());
+                    }
+                }
+            }
+        }
+        missing.sort();
+        assert!(
+            missing.is_empty(),
+            "provider source digest omits {missing:?}"
+        );
+    }
+
+    #[test]
     fn contract_keeps_full_and_common_variants_distinct() {
         let value = contract();
         assert_ne!(value.full_archive, value.slim_archive);
