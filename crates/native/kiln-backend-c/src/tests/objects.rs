@@ -2513,6 +2513,91 @@ int main(void) {
 }
 
 #[test]
+fn executable_actor_request_machine_boundary_sees_older_frame_alias() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int actor_boundary_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_value handle, graph, args[3], result, thrown;
+    kiln_string *text;
+    kiln_collection *registry;
+    volatile uintptr_t older_frame_alias;
+    uint64_t id = 0;
+    (void)context;
+    if (heap == NULL || kiln_c99_new_object(&handle) != KILN_C99_OK) return 1;
+    heap->fallback = 0;
+    heap->enabled = 1;
+    if (!kiln_c99_actor_candidate_begin(heap)) return 2;
+    text = (kiln_string *)kiln_c99_gc_alloc(KILN_GC_STRING, sizeof *text + 4);
+    if (text == NULL) return 3;
+    text->unit_len = 4;
+    text->flags = KILN_STRING_LATIN1;
+    text->data = text + 1;
+    memcpy((void *)text->data, "root", 4);
+    if (!kiln_c99_actor_candidate_end(heap, 1)) return 4;
+    {
+        kiln_nursery_chunk *batch[1] = {
+            kiln_c99_nursery_chunk_of(heap, (kiln_gc_block *)text - 1)
+        };
+        if (!kiln_c99_graph_candidate_closed(heap, batch, 1, text)) return 11;
+    }
+    graph = kiln_c99_value(KILN_VALUE_STRING, (uint64_t)(uintptr_t)text,
+                           text->data, text->unit_len);
+    args[0] = kiln_c99_number(26);
+    args[1] = handle;
+    args[2] = graph;
+    if (kiln_c99_worker_op_raw(&result, args, 3, &thrown) != KILN_C99_OK ||
+        !kiln_c99_truthy(result) ||
+        !kiln_c99_actor_isolated_request_begin(heap, handle, &id)) return 5;
+    {
+        kiln_nursery_chunk *batch[1] = {
+            kiln_c99_nursery_chunk_of(heap, (kiln_gc_block *)text - 1)
+        };
+        if (!kiln_c99_graph_candidate_closed(heap, batch, 1, text)) return 12;
+    }
+    registry = kiln_c99_collection_of(heap->realm.isolated_graphs);
+    {
+        double at = kiln_c99_collection_find(registry, handle);
+        if (at < 0.0 || registry->entries[(size_t)at].value.bits != graph.bits) return 13;
+    }
+    older_frame_alias = (uintptr_t)text;
+    {
+        int probe = kiln_c99_graph_incoming_request_probe(heap, id);
+        if (probe != KILN_C99_GRAPH_MACHINE_ALIAS) {
+            fprintf(stderr, "graph probe: %d\n", probe);
+            return 6;
+        }
+    }
+    if (older_frame_alias != (uintptr_t)text) return 7;
+    registry = kiln_c99_collection_of(heap->realm.isolated_graphs);
+    {
+        double at = kiln_c99_collection_find(registry, handle);
+        if (at < 0.0 || registry->entries[(size_t)at].value.bits != graph.bits ||
+            heap->realm.isolated_request_id != 0 ||
+            heap->realm.isolated_escrow_entry != NULL) return 8;
+    }
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int result;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 9;
+    result = kiln_realm_enter(realm, actor_boundary_entry, NULL);
+    if (result != KILN_C99_OK) return result;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 10;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "actor-request-machine-boundary");
+    assert!(
+        run.status.success(),
+        "actor machine boundary check failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_actor_isolated_registry_escrow_rolls_back_without_allocation() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");

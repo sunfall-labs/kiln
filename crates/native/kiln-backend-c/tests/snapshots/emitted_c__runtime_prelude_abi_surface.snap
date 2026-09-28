@@ -2194,6 +2194,15 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_scan_outside_heap(
 typedef struct kiln_c99_graph_provider_visit {
 static int kiln_c99_graph_visit_provider_root(void *opaque, const void *pointer,
 static kiln_c99_graph_incoming_result kiln_c99_graph_incoming_probe(
+__attribute__((noinline)) static kiln_c99_graph_incoming_result
+kiln_c99_graph_incoming_request_probe(kiln_gc_heap *heap, uint64_t request_id);
+__attribute__((noinline)) static kiln_c99_graph_incoming_result
+kiln_c99_graph_incoming_request_below_boundary(kiln_gc_heap *heap, uint64_t request_id,
+done:
+__attribute__((noinline)) static kiln_c99_graph_incoming_result
+kiln_c99_graph_incoming_request_probe(kiln_gc_heap *heap, uint64_t request_id) {
+#if defined(__GNUC__) || defined(__clang__)
+#endif
 static int kiln_c99_heap_move_chunks(kiln_gc_heap *from, kiln_gc_heap *to,
 enum {
 static int kiln_c99_graph_receiver_reserve(kiln_gc_heap *to, size_t chunk_count,

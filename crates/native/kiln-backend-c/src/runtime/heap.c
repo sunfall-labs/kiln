@@ -3350,7 +3350,9 @@ typedef enum kiln_c99_graph_incoming_result {
     KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED = 3,
     KILN_C99_GRAPH_ROOTS_UNENUMERATED = 4,
     KILN_C99_GRAPH_PROVIDER_ROOT_ALIAS = 5,
-    KILN_C99_GRAPH_PROVIDER_ROOTS_UNENUMERATED = 6
+    KILN_C99_GRAPH_PROVIDER_ROOTS_UNENUMERATED = 6,
+    KILN_C99_GRAPH_MACHINE_ALIAS = 7,
+    KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE = 8
 } kiln_c99_graph_incoming_result;
 
 /* A root can hold an interior address, including a string's inline bytes. The collector accepts
@@ -3764,6 +3766,104 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_incoming_probe(
         if (status != KILN_C99_OK) return KILN_C99_GRAPH_PROVIDER_ROOTS_UNENUMERATED;
     }
     return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+}
+
+/* The outer frame captures the machine before the opaque request ID is resolved into a graph
+ * pointer. Its anchor stays live while the younger proof frames run; scanning from the anchor
+ * through this thread's stack base therefore includes all older generated and scheduler frames,
+ * but never treats the proof's own candidate pointers as sender aliases. A missing stack bound
+ * refuses. The register image is taken at the same boundary, before escrow loads the root. */
+__attribute__((noinline)) static kiln_c99_graph_incoming_result
+kiln_c99_graph_incoming_request_probe(kiln_gc_heap *heap, uint64_t request_id);
+
+__attribute__((noinline)) static kiln_c99_graph_incoming_result
+kiln_c99_graph_incoming_request_below_boundary(kiln_gc_heap *heap, uint64_t request_id,
+                                                const uintptr_t *stack_low,
+                                                const uintptr_t *stack_high,
+                                                const jmp_buf *registers) {
+    kiln_c99_realm_state *realm = &heap->realm;
+    kiln_nursery_chunk *chunk;
+    kiln_nursery_chunk **chunks = NULL;
+    kiln_gc_block *block;
+    kiln_c99_graph_incoming_result result = KILN_C99_GRAPH_OUTGOING_UNPROVEN;
+    uint64_t candidate_id;
+    size_t count = 0, index = 0, offset;
+    uintptr_t word;
+    if (!kiln_c99_actor_isolated_request_escrow(heap, request_id)) {
+        kiln_c99_actor_isolated_request_rollback(heap, request_id);
+        return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    }
+    if (realm->isolated_escrow_value.tag < KILN_VALUE_STRING ||
+        realm->isolated_escrow_value.bits == 0) goto done;
+    block = kiln_c99_gc_lookup_interior(heap, (uintptr_t)realm->isolated_escrow_value.bits);
+    if (block == NULL || (block->kind & KILN_GC_FLAG_NURSERY) == 0) goto done;
+    chunk = kiln_c99_nursery_chunk_of(heap, block);
+    candidate_id = chunk->candidate_id;
+    if (candidate_id == 0) goto done;
+    for (chunk = heap->nursery.full; chunk != NULL; chunk = chunk->next)
+        if (chunk->candidate_id == candidate_id) ++count;
+    if (count == 0 || count > SIZE_MAX / sizeof *chunks) goto done;
+    chunks = (kiln_nursery_chunk **)malloc(count * sizeof *chunks);
+    if (chunks == NULL) goto done;
+    for (chunk = heap->nursery.full; chunk != NULL; chunk = chunk->next)
+        if (chunk->candidate_id == candidate_id) chunks[index++] = chunk;
+    if (index != count || !kiln_c99_graph_candidate_closed(heap, chunks, count, block + 1))
+        goto done;
+    if (kiln_c99_graph_has_c_root_alias_for_request(heap, chunks, count, request_id)) {
+        result = KILN_C99_GRAPH_C_ROOT_ALIAS;
+        goto done;
+    }
+    if (kiln_c99_graph_machine_words_alias(heap, chunks, count, stack_low,
+                                           ((uintptr_t)stack_high - (uintptr_t)stack_low) /
+                                               sizeof(uintptr_t))) {
+        result = KILN_C99_GRAPH_MACHINE_ALIAS;
+        goto done;
+    }
+    for (offset = 0; offset + sizeof word <= sizeof *registers; offset += sizeof word) {
+        memcpy(&word, (const char *)registers + offset, sizeof word);
+        if (kiln_c99_graph_machine_words_alias(heap, chunks, count, &word, 1)) {
+            result = KILN_C99_GRAPH_MACHINE_ALIAS;
+            goto done;
+        }
+    }
+    result = kiln_c99_graph_scan_outside_heap(heap, chunks, count);
+    if (result != KILN_C99_GRAPH_ROOTS_UNENUMERATED) goto done;
+    {
+        kiln_c99_graph_provider_visit visit = { heap, chunks, count, 0 };
+        int status = kiln_realm_gc_visit_provider_roots((void *)heap,
+                                                        kiln_c99_graph_visit_provider_root,
+                                                        &visit);
+        if (visit.alias) result = KILN_C99_GRAPH_PROVIDER_ROOT_ALIAS;
+        else if (status != KILN_C99_OK) result = KILN_C99_GRAPH_PROVIDER_ROOTS_UNENUMERATED;
+        else result = KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    }
+done:
+    free(chunks);
+    /* This is a negative-witness probe, never an accepting certificate. Rollback retains the
+     * graph in the sender even when every currently enumerable root appears clear. */
+    if (!kiln_c99_actor_isolated_request_rollback(heap, request_id))
+        return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    return result;
+}
+
+__attribute__((noinline)) static kiln_c99_graph_incoming_result
+kiln_c99_graph_incoming_request_probe(kiln_gc_heap *heap, uint64_t request_id) {
+    volatile uintptr_t anchor = 0;
+    uintptr_t *low = (uintptr_t *)((uintptr_t)&anchor & ~(uintptr_t)7);
+    uintptr_t *high = (uintptr_t *)kiln_c99_gc_stack_base();
+    jmp_buf registers;
+    if (heap == NULL || request_id == 0 || high == NULL || (uintptr_t)high <= (uintptr_t)low) {
+        if (heap != NULL) kiln_c99_actor_isolated_request_rollback(heap, request_id);
+        return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
+    }
+#if defined(__GNUC__) || defined(__clang__)
+    __builtin_unwind_init();
+#endif
+    if (setjmp(registers) != 0) {
+        kiln_c99_actor_isolated_request_rollback(heap, request_id);
+        return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
+    }
+    return kiln_c99_graph_incoming_request_below_boundary(heap, request_id, low, high, &registers);
 }
 
 /* The inverse of adoption for chunks whose entire contents have already passed an ownership
