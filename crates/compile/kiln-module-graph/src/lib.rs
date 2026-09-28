@@ -179,6 +179,9 @@ pub enum ModulePayload {
 pub struct ModuleGraph {
     entry: PathBuf,
     project_root: PathBuf,
+    /// Modules named by the project's closed-world include declaration. They are compiled and
+    /// retained as possible runtime entries, but are never evaluated at program startup.
+    declared_includes: Arc<BTreeSet<PathBuf>>,
     modules: Arc<BTreeMap<PathBuf, ModuleNode>>,
     /// Dependencies-first, deterministic (source-occurrence ordered) module order. CommonJS
     /// cycles appear once in the order, with the back-edge omitted from traversal.
@@ -563,6 +566,23 @@ impl ModuleGraph {
         Self::build_with_typed_policy_provider(entry, resolver, provider)
     }
 
+    /// Build with extra lazy roots resolved by the caller's Node package policy. The caller
+    /// supplies canonical paths and source kinds so the same pinned resolution snapshot can be
+    /// used by the CLI and daemon. An include is linked like a module request, but execution
+    /// still begins only at `entry`.
+    pub fn build_with_typed_policy_includes<P, R>(
+        entry: impl AsRef<Path>,
+        resolver: R,
+        provider: P,
+        includes: Vec<(PathBuf, ModuleSource)>,
+    ) -> Result<Self, ModuleGraphError>
+    where
+        P: FnMut(&Path, ModuleSource) -> Result<ModulePayload, ModuleGraphError>,
+        R: ResolutionPolicy,
+    {
+        Self::build_with_policy_provider_entry(entry, resolver, provider, true, false, includes)
+    }
+
     /// Build a Node-format graph directly from source.
     ///
     /// This is the canonical non-incremental adapter: the resolver chooses format, the frontend
@@ -581,6 +601,27 @@ impl ModuleGraph {
         R: ResolutionPolicy,
     {
         Self::build_with_typed_policy(entry, resolver, Self::node_provider(loader, frontend))
+    }
+
+    /// Node-format graph with already-resolved declared modules that may be loaded at runtime.
+    pub fn build_node_with_includes<L, F, R>(
+        entry: impl AsRef<Path>,
+        resolver: R,
+        loader: L,
+        frontend: F,
+        includes: Vec<(PathBuf, ModuleSource)>,
+    ) -> Result<Self, ModuleGraphError>
+    where
+        L: SourceLoader,
+        F: Frontend,
+        R: ResolutionPolicy,
+    {
+        Self::build_with_typed_policy_includes(
+            entry,
+            resolver,
+            Self::node_provider(loader, frontend),
+            includes,
+        )
     }
 
     /// [`Self::build_node`] for an entry that is not a file: `source` is its text, and `entry`
@@ -614,6 +655,7 @@ impl ModuleGraph {
             Self::node_provider(loader, frontend),
             true,
             true,
+            Vec::new(),
         )
     }
 
@@ -740,7 +782,14 @@ impl ModuleGraph {
         P: FnMut(&Path, ModuleSource) -> Result<ModulePayload, ModuleGraphError>,
         R: ResolutionPolicy,
     {
-        Self::build_with_policy_provider_entry(entry, resolver, provider, typed_sources, false)
+        Self::build_with_policy_provider_entry(
+            entry,
+            resolver,
+            provider,
+            typed_sources,
+            false,
+            Vec::new(),
+        )
     }
 
     fn build_with_policy_provider_entry<P, R>(
@@ -749,6 +798,7 @@ impl ModuleGraph {
         provider: P,
         typed_sources: bool,
         virtual_entry: bool,
+        includes: Vec<(PathBuf, ModuleSource)>,
     ) -> Result<Self, ModuleGraphError>
     where
         P: FnMut(&Path, ModuleSource) -> Result<ModulePayload, ModuleGraphError>,
@@ -817,12 +867,27 @@ impl ModuleGraph {
             runtime_work: Vec::new(),
             dynamic_journal: None,
         };
-        builder.visit(entry_path.clone())?;
+        let mut declared_includes = BTreeSet::new();
+        for (path, _) in &includes {
+            if !path.is_absolute() || !path.starts_with(&root) {
+                return Err(ModuleGraphError::Resolve {
+                    importer: entry_path.clone(),
+                    specifier: path.display().to_string(),
+                    error: ResolveError::OutsideProject {
+                        path: path.clone(),
+                        project_root: root.clone(),
+                    },
+                });
+            }
+            declared_includes.insert(path.clone());
+        }
+        builder.visit_with_includes(entry_path.clone(), includes)?;
         let export_resolutions = resolve_exports(&builder.modules, &builder.order)?;
         validate_links(&builder.modules, &builder.order, &export_resolutions)?;
         Ok(Self {
             entry: entry_path,
             project_root: builder.resolver.project_root().to_path_buf(),
+            declared_includes: Arc::new(declared_includes),
             modules: Arc::new(builder.modules),
             order: Arc::new(builder.order),
             export_resolutions: Arc::new(export_resolutions),
@@ -855,6 +920,22 @@ impl ModuleGraph {
 
     pub fn project_root(&self) -> &Path {
         &self.project_root
+    }
+
+    pub fn declared_includes(&self) -> &BTreeSet<PathBuf> {
+        &self.declared_includes
+    }
+
+    /// Resolve only an absolute path or file URL that names a declared module. This is the
+    /// runtime half of `kiln.include`: a computed loader cannot gain access to an arbitrary
+    /// source merely because it happens to be present elsewhere in the graph.
+    pub fn declared_target_for_runtime_specifier(&self, specifier: &str) -> Option<PathBuf> {
+        let path = if specifier.starts_with("file:") {
+            url::Url::parse(specifier).ok()?.to_file_path().ok()?
+        } else {
+            PathBuf::from(specifier)
+        };
+        (path.is_absolute() && self.declared_includes.contains(&path)).then_some(path)
     }
 
     pub fn module_count(&self) -> usize {
@@ -999,6 +1080,7 @@ impl ModuleGraph {
         Ok(Self {
             entry: self.entry.clone(),
             project_root: self.project_root.clone(),
+            declared_includes: Arc::clone(&self.declared_includes),
             modules: Arc::new(modules),
             order: Arc::clone(&self.order),
             export_resolutions: Arc::new(export_resolutions),
@@ -1203,6 +1285,13 @@ impl ModuleGraph {
             Self {
                 entry: self.entry.clone(),
                 project_root: self.project_root.clone(),
+                declared_includes: Arc::new(
+                    self.declared_includes
+                        .iter()
+                        .filter(|path| demand.live.contains(*path))
+                        .cloned()
+                        .collect(),
+                ),
                 modules: Arc::new(modules),
                 order: Arc::new(order),
                 export_resolutions: Arc::new(export_resolutions),
@@ -1433,8 +1522,15 @@ where
     P: FnMut(&Path, ModuleSource) -> Result<ModulePayload, ModuleGraphError>,
     R: ResolutionPolicy,
 {
-    fn visit(&mut self, path: PathBuf) -> Result<(), ModuleGraphError> {
+    fn visit_with_includes(
+        &mut self,
+        path: PathBuf,
+        includes: Vec<(PathBuf, ModuleSource)>,
+    ) -> Result<(), ModuleGraphError> {
         self.visit_static(path, None)?;
+        for (path, source) in includes {
+            self.visit_static(path, Some(source))?;
+        }
         let export_resolutions = resolve_exports(&self.modules, &self.order)?;
         validate_links(&self.modules, &self.order, &export_resolutions)?;
         loop {
