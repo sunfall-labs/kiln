@@ -47,10 +47,15 @@ function dataCloneError(message: string): Error {
 export function isolate<T>(factory: () => T): Isolated<T> {
   if (typeof factory !== "function") throw new TypeError("isolate requires a factory");
   const handle: any = { __uncloneable: () => {} };
+  // Resolve the native operation before opening the candidate allocation stream. Looking
+  // up this symbol, and the rest/spread bridge in `isolatedOp`, allocate unrelated blocks.
+  const port = (globalThis as any).MessagePort;
+  const candidateWorkerOp = port?.[Symbol.for("kiln.messagePort")]?.workerOp;
+  if (typeof candidateWorkerOp !== "function") throw new Error("kiln:actors requires enabled worker messaging");
   // Native realms put this synchronous factory's nursery allocations into fresh, tagged
   // chunks. A nested factory or a realm without a nursery still works, but cannot claim an
   // independently movable graph. The engine seals the chunks even when the factory throws.
-  const candidate = isolatedOp(CANDIDATE_BEGIN) === true;
+  const candidate = candidateWorkerOp(CANDIDATE_BEGIN) === true;
   let value!: T;
   try {
     value = factory();
@@ -58,14 +63,14 @@ export function isolate<T>(factory: () => T): Isolated<T> {
     if (candidate) {
       // Cleanup must not replace the factory's original exception. The engine may already
       // have invalidated candidate provenance after a collection or failed allocation.
-      try { isolatedOp(CANDIDATE_END, false); } catch {}
+      try { candidateWorkerOp(CANDIDATE_END, false); } catch {}
     }
     throw error;
   }
-  if (candidate && isolatedOp(CANDIDATE_END, true) !== true) {
+  if (candidate && candidateWorkerOp(CANDIDATE_END, true) !== true) {
     throw new Error("could not seal isolated graph candidate");
   }
-  if (isolatedOp(ISOLATE, handle, value) !== true) throw new Error("could not retain isolated graph");
+  if (candidateWorkerOp(ISOLATE, handle, value) !== true) throw new Error("could not retain isolated graph");
   // Dynamic import plans may evaluate this module separately in one realm. This marker only
   // identifies a handle for fail-closed graph transfer; it must never expose the graph itself.
   Object.defineProperty(handle, isolatedMark, { value: true });

@@ -2980,7 +2980,9 @@ fn executable_actor_factory_allocations_have_dedicated_candidate_chunks() {
 static int actor_candidate_entry(void *context) {
     kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
     kiln_value args[2], result, thrown;
-    kiln_val *old, *root, *aborted;
+    kiln_val *old, *root, *aborted, *side_elements;
+    kiln_array *orphan;
+    kiln_value orphan_value;
     kiln_nursery_chunk *candidate, *batch[1], *discarded;
     uint32_t epoch;
     (void)context;
@@ -2999,6 +3001,13 @@ static int actor_candidate_entry(void *context) {
     root = (kiln_val *)kiln_c99_gc_alloc(KILN_GC_CELL, sizeof *root);
     if (root == NULL) return 5;
     *root = KILN_VAL_UNDEFINED;
+    if (kiln_c99_new_array(&orphan_value) != KILN_C99_OK) return 16;
+    orphan = (kiln_array *)(uintptr_t)orphan_value.bits;
+    orphan->elements = orphan->inline_elements;
+    orphan->capacity = 8;
+    orphan->count = 2;
+    orphan->elements[0] = kiln_val_from_boundary(kiln_c99_number(29));
+    orphan->elements[1] = KILN_VAL_TRUE;
     candidate = kiln_c99_nursery_chunk_of(heap, (kiln_gc_block *)root - 1);
     if (candidate == kiln_c99_nursery_chunk_of(heap, (kiln_gc_block *)old - 1) ||
         candidate->candidate_id == 0 || candidate->candidate_id != heap->actor_candidate_id)
@@ -3014,6 +3023,19 @@ static int actor_candidate_entry(void *context) {
         ((kiln_nursery_chunk *)heap->nursery.region)->candidate_id != 0) return 9;
     batch[0] = candidate;
     if (!kiln_c99_graph_candidate_closed(heap, batch, 1, root)) return 10;
+    /* The orphan may move as garbage only while its layout has no pointer or side allocation. */
+    orphan->elements[1] = KILN_VAL_TAG_PTR(KILN_TAG_CELL_PREFIX, old);
+    if (kiln_c99_graph_candidate_closed(heap, batch, 1, root)) return 17;
+    orphan->elements[1] = KILN_VAL_TRUE;
+    side_elements = (kiln_val *)malloc(2 * sizeof *side_elements);
+    if (side_elements == NULL) return 18;
+    side_elements[0] = orphan->elements[0];
+    side_elements[1] = orphan->elements[1];
+    orphan->elements = side_elements;
+    if (kiln_c99_graph_candidate_closed(heap, batch, 1, root)) return 19;
+    orphan->elements = orphan->inline_elements;
+    free(side_elements);
+    if (!kiln_c99_graph_candidate_closed(heap, batch, 1, root)) return 20;
     args[0] = kiln_c99_number(28);
     if (kiln_c99_worker_op_raw(&result, args, 1, &thrown) != KILN_C99_OK ||
         !kiln_c99_truthy(result)) return 11;

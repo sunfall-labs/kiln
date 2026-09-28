@@ -3376,17 +3376,36 @@ static int kiln_c99_graph_walk_block(kiln_c99_graph_walk *walk, kiln_gc_block *b
     }
 }
 
-/* Prove the candidate's exact *outgoing* closure without changing GC marks. Every allocated
- * block in the candidate must be reachable from `root`, and every pointer edge must stay inside
- * those blocks. This says nothing about sender roots or outside-to-inside edges, so its success
- * is not permission to move. The caller must hold the sender at a safepoint throughout proof
- * and transfer; graph tickets remain disabled until the incoming proof and transaction exist. */
+/* Generated calls around CANDIDATE_END can leave argument arrays in the candidate chunk. Such
+ * an array is movable garbage only if its entire inline payload has no edges or side ownership.
+ * A pointer-bearing or otherwise unsupported unreachable block still refuses the whole chunk. */
+static int kiln_c99_graph_inert_orphan_array(const kiln_gc_block *block) {
+    const kiln_array *array;
+    size_t index;
+    if ((block->kind & KILN_GC_KIND_MASK) != KILN_GC_ARRAY ||
+        !kiln_c99_graph_inert_finalizer_block(block)) return 0;
+    array = (const kiln_array *)(block + 1);
+    for (index = 0; index < array->count; ++index) {
+        kiln_val value = array->elements[index];
+        if (!KILN_VAL_IS_NUMBER(value) && value != KILN_VAL_UNDEFINED &&
+            value != KILN_VAL_NULL && value != KILN_VAL_FALSE &&
+            value != KILN_VAL_TRUE && value != KILN_VAL_HOLE) return 0;
+    }
+    return 1;
+}
+
+/* Prove the candidate's exact *outgoing* closure without changing GC marks. Every block is
+ * either reachable from `root` with all edges inside the candidate, or an inert orphan array
+ * with only immediate values. Incoming C/provider/machine/outside scans still cover the entire
+ * chunk. This proof alone never grants permission to move. */
 static int kiln_c99_graph_candidate_closed(const kiln_gc_heap *heap,
                                            kiln_nursery_chunk *const *chunks, size_t count,
                                            const void *root) {
     kiln_c99_graph_walk walk = {0};
     size_t index;
     size_t seen = 0;
+    size_t enumerated = 0;
+    size_t inert_orphans = 0;
     uint64_t id = 0;
     int result = 0;
     if (heap == NULL || chunks == NULL || count == 0 || root == NULL || heap->collecting) return 0;
@@ -3412,6 +3431,7 @@ static int kiln_c99_graph_candidate_closed(const kiln_gc_heap *heap,
             kiln_gc_block *block = (kiln_gc_block *)cursor;
             size_t payload = block->size == 0 ? 1 : block->size;
             size_t total = (sizeof(kiln_gc_block) + payload + 15) & ~(size_t)15;
+            ++enumerated;
             if (kiln_c99_gc_ptrset_insert(&walk.members, block) != KILN_C99_OK) goto done;
             cursor += total;
         }
@@ -3432,7 +3452,21 @@ static int kiln_c99_graph_candidate_closed(const kiln_gc_heap *heap,
     for (index = 0; index < walk.queued; ++index) {
         if (!kiln_c99_graph_walk_block(&walk, walk.queue[index])) goto done;
     }
-    result = walk.queued == seen;
+    if (enumerated != seen) goto done;
+    for (index = 0; index < count; ++index) {
+        const kiln_nursery_chunk *chunk = chunks[index];
+        const char *cursor;
+        for (cursor = chunk->base; cursor < chunk->limit;) {
+            const kiln_gc_block *block = (const kiln_gc_block *)cursor;
+            size_t payload = block->size == 0 ? 1 : block->size;
+            if (!kiln_c99_gc_ptrset_contains(&walk.reached, block)) {
+                if (!kiln_c99_graph_inert_orphan_array(block)) goto done;
+                ++inert_orphans;
+            }
+            cursor += (sizeof(kiln_gc_block) + payload + 15) & ~(size_t)15;
+        }
+    }
+    result = walk.queued + inert_orphans == seen;
 done:
     free(walk.queue);
     free(walk.members.table);
@@ -3685,7 +3719,9 @@ static int kiln_c99_graph_has_c_root_alias_except(const kiln_gc_heap *heap,
     for (index = 0; index < KILN_C99_HOT_KEY_COUNT; ++index) {
         if (kiln_c99_graph_in_batch(heap, chunks, count, heap->hot_keys[index])) return 1;
     }
-    return kiln_c99_graph_in_batch(heap, chunks, count, heap->object_prototype_store);
+    return kiln_c99_graph_in_batch(heap, chunks, count, heap->object_prototype_store) ||
+           kiln_c99_graph_in_batch(heap, chunks, count, heap->shared_facades) ||
+           kiln_c99_graph_in_batch(heap, chunks, count, heap->weak_collections);
 }
 
 static int kiln_c99_graph_has_c_root_alias(const kiln_gc_heap *heap,
@@ -3738,6 +3774,189 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
         return kiln_c99_graph_val_in_batch(heap, chunks, count,
                                            *(const kiln_val *)(block + 1))
                    ? KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS : KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    case KILN_GC_SHARED_FACADE: {
+        const kiln_shared_facade *facade = (const kiln_shared_facade *)(block + 1);
+        if (block->size < sizeof *facade) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        /* The Rust graph lease and node IDs are numeric. The owner and identity-chain links
+         * are the complete realm-local pointer layout, including finalizer side ownership. */
+        if (kiln_c99_graph_in_batch(heap, chunks, count, facade->owner) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, facade->previous) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, facade->next))
+            return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    }
+    case KILN_GC_SYMBOL: {
+        const kiln_symbol *symbol = (const kiln_symbol *)(block + 1);
+        if (block->size < sizeof *symbol) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        /* The serial/registry ID and description length are numeric. These are exactly the
+         * three pointers traced for a symbol by the collector. */
+        if (kiln_c99_graph_in_batch(heap, chunks, count, symbol->key) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, symbol->description) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &symbol->description_value))
+            return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    }
+    case KILN_GC_CLOSURE: {
+        const kiln_closure *closure = (const kiln_closure *)(block + 1);
+        if (block->size < sizeof *closure || closure->region ||
+            (closure->upvalue_count != 0 && closure->upvalues == NULL) ||
+            (closure->upvalues == closure->inline_upvalues &&
+             closure->upvalue_count > sizeof closure->inline_upvalues /
+                                      sizeof *closure->inline_upvalues))
+            return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        /* Match the GC tracer's values and inspect its side allocation and immutable source
+         * pointers too. The generated body points to executable code, not a heap block. */
+        if (kiln_c99_graph_in_batch(heap, chunks, count, closure->upvalues) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, closure->name) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, closure->source) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, closure->diagnostic_source) ||
+            kiln_c99_graph_val_in_batch(heap, chunks, count, closure->captured_this) ||
+            kiln_c99_graph_val_in_batch(heap, chunks, count, closure->captured_new_target) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &closure->captured_arguments) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &closure->own_prototype) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &closure->own_store) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &closure->source_value))
+            return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        for (index = 0; index < closure->upvalue_count; ++index) {
+            if (kiln_c99_graph_val_in_batch(heap, chunks, count, closure->upvalues[index]))
+                return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        }
+        return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    }
+    case KILN_GC_PROMISE: {
+        const kiln_promise *promise = (const kiln_promise *)(block + 1);
+        if (block->size < sizeof *promise || promise->count > promise->capacity ||
+            (promise->count != 0 && promise->reactions == NULL) ||
+            (promise->reactions == &promise->inline_reaction && promise->count > 1))
+            return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        if (kiln_c99_graph_in_batch(heap, chunks, count, promise->reactions) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &promise->value) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &promise->properties))
+            return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        for (index = 0; index < promise->count; ++index) {
+            const kiln_reaction *reaction = &promise->reactions[index];
+            if (kiln_c99_graph_value_in_batch(heap, chunks, count, &reaction->on_fulfilled) ||
+                kiln_c99_graph_value_in_batch(heap, chunks, count, &reaction->on_rejected) ||
+                kiln_c99_graph_value_in_batch(heap, chunks, count, &reaction->derived))
+                return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        }
+        return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    }
+    case KILN_GC_SETTLER: {
+        const kiln_settler *settler = (const kiln_settler *)(block + 1);
+        if (block->size < sizeof *settler) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        return kiln_c99_graph_value_in_batch(heap, chunks, count, &settler->promise)
+                   ? KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS : KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    }
+    case KILN_GC_GENERATOR: {
+        const kiln_generator *frame = (const kiln_generator *)(block + 1);
+        const kiln_closure *closure;
+        if (block->size < sizeof *frame || frame->queue_count > frame->queue_capacity ||
+            (frame->queue_count != 0 &&
+             (frame->queue_promises == NULL || frame->queue_sent == NULL)))
+            return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        if (kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->function) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->receiver) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->promise) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->sent) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->delegate) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, frame->locals) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, frame->stack) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, frame->handlers) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, frame->handler_stack) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, frame->queue_promises) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, frame->queue_sent))
+            return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        if (frame->function.tag != KILN_VALUE_FUNCTION)
+            return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        closure = (const kiln_closure *)(uintptr_t)frame->function.bits;
+        if (closure == NULL || (closure->local_count != 0 && frame->locals == NULL) ||
+            (closure->stack_size != 0 && frame->stack == NULL))
+            return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        for (index = 0; index < closure->local_count; ++index) {
+            if (kiln_c99_graph_val_in_batch(heap, chunks, count, frame->locals[index]))
+                return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        }
+        for (index = 0; index < closure->stack_size; ++index) {
+            if (kiln_c99_graph_val_in_batch(heap, chunks, count, frame->stack[index]))
+                return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        }
+        for (index = 0; index < frame->queue_count; ++index) {
+            if (kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->queue_promises[index]) ||
+                kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->queue_sent[index]))
+                return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        }
+        return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    }
+    case KILN_GC_BOUND: {
+        const kiln_bound *bound = (const kiln_bound *)(block + 1);
+        if (block->size < sizeof *bound || (bound->count != 0 && bound->arguments == NULL))
+            return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        if (kiln_c99_graph_value_in_batch(heap, chunks, count, &bound->target) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &bound->receiver) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &bound->properties) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, bound->arguments))
+            return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        for (index = 0; index < bound->count; ++index) {
+            if (kiln_c99_graph_value_in_batch(heap, chunks, count, &bound->arguments[index]))
+                return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        }
+        return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    }
+    case KILN_GC_NODE_PROCESS_COMPLETION: {
+        const kiln_node_process_completion *completion =
+            (const kiln_node_process_completion *)(block + 1);
+        if (block->size < sizeof *completion) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        return kiln_c99_graph_value_in_batch(heap, chunks, count, &completion->promise) ||
+               kiln_c99_graph_value_in_batch(heap, chunks, count, &completion->result) ||
+               kiln_c99_graph_value_in_batch(heap, chunks, count, &completion->stdout_value) ||
+               kiln_c99_graph_value_in_batch(heap, chunks, count, &completion->stderr_value)
+                   ? KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS : KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    }
+    case KILN_GC_METHOD_STORE: {
+        const kiln_method_store *store = (const kiln_method_store *)(block + 1);
+        if (block->size < sizeof *store) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        return kiln_c99_graph_value_in_batch(heap, chunks, count, &store->properties) ||
+               kiln_c99_graph_in_batch(heap, chunks, count, store->next)
+                   ? KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS : KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    }
+    case KILN_GC_DATE:
+        return block->size >= sizeof(double) ? KILN_C99_GRAPH_ROOTS_UNENUMERATED
+                                             : KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+    case KILN_GC_REGEXP: {
+        const kiln_regexp *regexp = (const kiln_regexp *)(block + 1);
+        if (block->size < sizeof *regexp || regexp->cached_group_count > 32)
+            return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        if (kiln_c99_graph_in_batch(heap, chunks, count, regexp->handle) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, regexp->source) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, regexp->flags) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, regexp->cached_subject_ptr))
+            return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        for (index = 0; index < regexp->cached_group_count; ++index) {
+            if (kiln_c99_graph_val_in_batch(heap, chunks, count, regexp->cached_elements[index]))
+                return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        }
+        return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    }
+    case KILN_GC_TYPED_BUFFER: {
+        const kiln_typed_buffer *buffer = (const kiln_typed_buffer *)(block + 1);
+        if (block->size < sizeof *buffer) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        return kiln_c99_graph_in_batch(heap, chunks, count, buffer->bytes) ||
+               kiln_c99_graph_in_batch(heap, chunks, count, buffer->shared)
+                   ? KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS : KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    }
+    case KILN_GC_TYPED_ARRAY: {
+        const kiln_typed_array *array = (const kiln_typed_array *)(block + 1);
+        if (block->size < sizeof *array) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        return kiln_c99_graph_in_batch(heap, chunks, count, array->buffer)
+                   ? KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS : KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    }
+    case KILN_GC_DATA_VIEW: {
+        const kiln_data_view *view = (const kiln_data_view *)(block + 1);
+        if (block->size < sizeof *view) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        return kiln_c99_graph_in_batch(heap, chunks, count, view->buffer)
+                   ? KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS : KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    }
     case KILN_GC_COLLECTION: {
         const kiln_collection *collection = (const kiln_collection *)(block + 1);
         if (block->size < sizeof *collection) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
@@ -3797,10 +4016,8 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
             return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
         if (object->shape != NULL) {
             const kiln_shape *shape = object->shape;
-            /* A process-shared shape cannot hold realm-owned transition keys. Its current
-             * keys and the object's slots are the two edge arrays the GC traces. Local
-             * shapes have separate realm-owned transition state and still refuse. */
-            if ((shape->shared & 1u) == 0 || object->sealed != NULL ||
+            /* The realm-local transition side table is scanned separately before heap blocks. */
+            if (object->sealed != NULL ||
                 shape->property_count > KILN_SHAPE_MAX_FAST_PROPERTIES ||
                 (object->slots == object->inline_slots &&
                  shape->property_count > KILN_C99_INLINE_SLOTS) ||
@@ -3870,12 +4087,84 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_scan_nursery_chunk(
     return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
 }
 
+/* Realm-local shapes and the edge table out of shared shapes are malloc-owned side indexes,
+ * not GC blocks. They can retain canonical keys even when no ordinary object uses a shape.
+ * Inspect every published pointer before allowing an object/string candidate to leave. */
+static kiln_c99_graph_incoming_result kiln_c99_graph_scan_local_shapes(
+    const kiln_gc_heap *heap, kiln_nursery_chunk *const *chunks, size_t count) {
+    const kiln_shape *shape;
+    size_t seen_shapes = 0, index, seen_rows = 0;
+    if (kiln_c99_graph_in_batch(heap, chunks, count, heap->local_shapes) ||
+        kiln_c99_graph_in_batch(heap, chunks, count, heap->local_edges))
+        return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+    if ((heap->local_shape_count != 0 && heap->local_shapes == NULL) ||
+        (heap->local_edge_capacity != 0 && heap->local_edges == NULL) ||
+        heap->local_edge_count > heap->local_edge_capacity)
+        return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+    for (shape = heap->local_shapes; shape != NULL; shape = shape->owned_next) {
+        const kiln_shape_transition *edge;
+        size_t seen_edges = 0;
+        if (++seen_shapes > heap->local_shape_count || shape->shared ||
+            shape->property_count > KILN_SHAPE_MAX_FAST_PROPERTIES ||
+            shape->num_transitions > 65536u)
+            return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        if (kiln_c99_graph_in_batch(heap, chunks, count, shape->parent) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, shape->ikey) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, shape->owned_next) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, shape->transitions) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, shape->edge_table))
+            return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        for (index = 0; index < shape->property_count; ++index) {
+            if (kiln_c99_graph_in_batch(heap, chunks, count, shape->keys[index]))
+                return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        }
+        for (index = 0; index < shape->num_transitions && index < 2; ++index) {
+            if (kiln_c99_graph_in_batch(heap, chunks, count, shape->inline_trans_ikey[index]) ||
+                kiln_c99_graph_in_batch(heap, chunks, count, shape->inline_trans_next[index]))
+                return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        }
+        for (edge = shape->transitions; edge != NULL; edge = edge->next_transition) {
+            if (++seen_edges > shape->num_transitions)
+                return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+            if (kiln_c99_graph_in_batch(heap, chunks, count, edge->ikey) ||
+                kiln_c99_graph_in_batch(heap, chunks, count, edge->next) ||
+                kiln_c99_graph_in_batch(heap, chunks, count, edge->next_transition))
+                return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        }
+        if (seen_edges != (shape->num_transitions > 2 ? shape->num_transitions - 2 : 0))
+            return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        if (shape->edge_table != NULL) {
+            const kiln_shape_edge_table *table = shape->edge_table;
+            if (table->mask > (1u << 20))
+                return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+            for (index = 0; index <= table->mask; ++index) {
+                if (kiln_c99_graph_in_batch(heap, chunks, count, table->edges[index]))
+                    return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+            }
+        }
+    }
+    if (seen_shapes != heap->local_shape_count) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+    for (index = 0; index < heap->local_edge_capacity; ++index) {
+        const kiln_c99_local_edge *edge = &heap->local_edges[index];
+        if (edge->parent == NULL) continue;
+        ++seen_rows;
+        if (kiln_c99_graph_in_batch(heap, chunks, count, edge->parent) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, edge->key) ||
+            (edge->key != NULL && kiln_c99_graph_in_batch(heap, chunks, count, edge->child)))
+            return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+    }
+    return seen_rows == heap->local_edge_count ? KILN_C99_GRAPH_ROOTS_UNENUMERATED
+                                               : KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+}
+
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_outside_heap(
     const kiln_gc_heap *heap, kiln_nursery_chunk *const *chunks, size_t count) {
     const kiln_gc_block *block;
     const kiln_gc_slab *slab;
     const kiln_nursery_chunk *chunk;
     kiln_c99_graph_incoming_result result;
+    result = kiln_c99_graph_scan_local_shapes(heap, chunks, count);
+    if (result != KILN_C99_GRAPH_ROOTS_UNENUMERATED) return result;
     for (block = heap->head; block != NULL; block = block->next) {
         result = kiln_c99_graph_outside_block(heap, chunks, count, block);
         if (result != KILN_C99_GRAPH_ROOTS_UNENUMERATED) return result;
@@ -3895,11 +4184,13 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_scan_outside_heap(
         if (result != KILN_C99_GRAPH_ROOTS_UNENUMERATED) return result;
     }
     for (chunk = heap->nursery.full; chunk != NULL; chunk = chunk->next) {
-        result = kiln_c99_graph_scan_nursery_chunk(heap, chunks, count, chunk, chunk->limit);
+        result = kiln_c99_graph_scan_nursery_chunk(heap, chunks, count,
+                                                   chunk, chunk->limit);
         if (result != KILN_C99_GRAPH_ROOTS_UNENUMERATED) return result;
     }
     for (chunk = heap->nursery.promoted; chunk != NULL; chunk = chunk->next) {
-        result = kiln_c99_graph_scan_nursery_chunk(heap, chunks, count, chunk, chunk->limit);
+        result = kiln_c99_graph_scan_nursery_chunk(heap, chunks, count,
+                                                   chunk, chunk->limit);
         if (result != KILN_C99_GRAPH_ROOTS_UNENUMERATED) return result;
     }
     return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
