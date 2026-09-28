@@ -5,12 +5,18 @@ import { prepareActorMessage, consumeActorTickets } from "kiln:actors/core";
 
 export const actorWorkerEntry = "kiln:actors/worker";
 const BIND_RECEIVER = 33;
+const GRAPH_RESERVE = 34;
+const GRAPH_RECEIVE = 35;
+const GRAPH_RELEASE = 36;
+const graphMarker = "__kilnActorGraphReservation";
 
 type Reservation = {
   id: number;
   reply: MessagePort;
   granted: boolean;
   payload: any;
+  graphReservation: number;
+  graphWaiting: boolean;
 };
 
 let control: any;
@@ -39,6 +45,39 @@ function remoteError(error: any): any {
   };
 }
 
+function matchingGraphMarker(value: any, id: number): boolean {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    && Object.getPrototypeOf(value) === Object.prototype
+    && Object.keys(value).length === 1 && value[graphMarker] === id;
+}
+
+function countGraphMarkers(value: any, id: number, seen = new Set<any>()): number {
+  if (value === null || typeof value !== "object" || seen.has(value)) return 0;
+  if (matchingGraphMarker(value, id)) return 1;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    let count = 0;
+    for (let i = 0; i < value.length; i++) if (i in value) count += countGraphMarkers(value[i], id, seen);
+    return count;
+  }
+  if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return 0;
+  let count = 0;
+  for (const key of Object.keys(value)) count += countGraphMarkers(value[key], id, seen);
+  return count;
+}
+
+function replaceGraphMarker(value: any, id: number, graph: any, seen = new Set<any>()): any {
+  if (value === null || typeof value !== "object" || seen.has(value)) return value;
+  if (matchingGraphMarker(value, id)) return graph;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) if (i in value) value[i] = replaceGraphMarker(value[i], id, graph, seen);
+  } else if (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null) {
+    for (const key of Object.keys(value)) value[key] = replaceGraphMarker(value[key], id, graph, seen);
+  }
+  return value;
+}
+
 function serve(): void {
   control = parentPort;
   const init: any = workerData;
@@ -49,6 +88,45 @@ function serve(): void {
   try { if (internals) internals.workerOp(BIND_RECEIVER, internals.portEndpoint(inbox)); }
   catch { /* An interpreter or unscheduled realm has no pair-claim coordinator. */ }
   capacity = init.capacity;
+
+  function releaseGraphReservation(request: Reservation): void {
+    if (!request.graphReservation) return;
+    try { internals.workerOp(GRAPH_RELEASE, request.graphReservation); } catch {}
+    request.graphReservation = 0;
+  }
+
+  function refuseGraph(request: Reservation): void {
+    if (byId.get(request.id) !== request) return;
+    byId.delete(request.id);
+    pending.splice(pending.indexOf(request), 1);
+    if (request.granted) accepted--;
+    releaseGraphReservation(request);
+    answer(request, "cloneError", { message: "graph transfer needs ownership proof" });
+    grant();
+    dispatch();
+    stopped();
+  }
+
+  function receiveGraph(request: Reservation): void {
+    if (byId.get(request.id) !== request || !request.graphWaiting) return;
+    try {
+      const answer = internals.workerOp(
+        GRAPH_RECEIVE, request.graphReservation, request.id, internals.portEndpoint(request.reply),
+      );
+      if (!Array.isArray(answer) || answer.length !== 2) throw new Error("invalid graph receive result");
+      if (answer[0] === 0) {
+        setTimeout(() => receiveGraph(request), 0);
+        return;
+      }
+      if (answer[0] !== 1) throw new Error("graph handoff refused");
+      request.payload.args = replaceGraphMarker(request.payload.args, request.graphReservation, answer[1]);
+      request.graphReservation = 0;
+      request.graphWaiting = false;
+      dispatch();
+    } catch {
+      refuseGraph(request);
+    }
+  }
 
   function answer(request: Reservation, kind: string, value?: any): void {
     try {
@@ -67,6 +145,7 @@ function serve(): void {
         catch { /* The caller may have aborted after acceptance. */ }
       }
     }
+    releaseGraphReservation(request);
     request.reply.close();
   }
 
@@ -84,13 +163,19 @@ function serve(): void {
       if (!request.granted) {
         request.granted = true;
         accepted++;
-        request.reply.postMessage({ kind: "grant" });
+        try {
+          const reservation = internals.workerOp(
+            GRAPH_RESERVE, internals.portEndpoint(inbox), request.id, internals.portEndpoint(request.reply),
+          );
+          if (Number.isSafeInteger(reservation) && reservation > 0) request.graphReservation = reservation;
+        } catch { /* Ordinary cloned calls remain available without graph support. */ }
+        request.reply.postMessage({ kind: "grant", graphReservation: request.graphReservation });
       }
     }
   }
 
   function dispatch(): void {
-    while (pending.length > 0 && pending[0].granted && pending[0].payload !== undefined) {
+    while (pending.length > 0 && pending[0].granted && pending[0].payload !== undefined && !pending[0].graphWaiting) {
       const request = pending.shift()!;
       byId.delete(request.id);
       accepted--;
@@ -132,14 +217,31 @@ function serve(): void {
   inbox.on("message", (message: any) => {
     if (!message || typeof message !== "object") return;
     if (message.kind === "reserve") {
-      const request: Reservation = { id: message.id, reply: message.reply, granted: false, payload: undefined };
-      if (closing) answer(request, "closed");
+      if (!Number.isSafeInteger(message.id) || message.id <= 0
+        || typeof message.reply?.postMessage !== "function" || typeof message.reply?.close !== "function") return;
+      const request: Reservation = {
+        id: message.id, reply: message.reply, granted: false, payload: undefined,
+        graphReservation: 0, graphWaiting: false,
+      };
+      if (closing || byId.has(request.id)) answer(request, "closed");
       else { pending.push(request); byId.set(request.id, request); grant(); }
     } else if (message.kind === "invoke") {
       const request = byId.get(message.id);
       if (request && request.granted && request.payload === undefined) {
+        const graphReservation = message.graphReservation;
+        if (graphReservation !== undefined) {
+          if (!request.graphReservation || graphReservation !== request.graphReservation
+            || countGraphMarkers(message.args, graphReservation) !== 1) {
+            refuseGraph(request);
+            return;
+          }
+          request.graphWaiting = true;
+        } else {
+          releaseGraphReservation(request);
+        }
         request.payload = message;
-        dispatch();
+        if (request.graphWaiting) receiveGraph(request);
+        else dispatch();
       }
     } else if (message.kind === "cancel") {
       const request = byId.get(message.id);
@@ -147,6 +249,7 @@ function serve(): void {
         byId.delete(request.id);
         pending.splice(pending.indexOf(request), 1);
         if (request.granted) accepted--;
+        releaseGraphReservation(request);
         request.reply.close();
         grant();
         stopped();
