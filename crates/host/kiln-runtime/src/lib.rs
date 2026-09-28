@@ -857,6 +857,9 @@ impl Executor {
     }
 }
 
+/// Wake signal a realm drive may hold across a turn boundary.
+pub type DriveSignal = Rc<tokio::sync::Notify>;
+
 /// What ended a drive's wait.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DriveWake {

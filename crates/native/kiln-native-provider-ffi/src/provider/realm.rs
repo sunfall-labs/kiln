@@ -5,7 +5,6 @@ use kiln_host_abi::{
 };
 use kiln_runtime::{
     Executor, Realm, RealmCapabilities, RealmState, RuntimeTurn, TimerId, TokioHost, WorkItem,
-    duration_from_milliseconds,
 };
 #[cfg(feature = "realm-http")]
 use kiln_runtime::{
@@ -1447,157 +1446,189 @@ fn drive(realm: &NativeRealm, host: *mut c_void, thrown: *mut c_void) -> i32 {
 
 async fn drive_async(realm: &NativeRealm) -> i32 {
     loop {
-        // A turn boundary: no generated frame is on this thread's stack.
-        reclaim::quiescent();
-        // A worker whose parent called `terminate()` ends here (realms issue 06); the launcher
-        // reads the exit it asked for.
-        if kiln_runtime::workers::terminate_requested() {
-            kiln_runtime::workers::request_exit(1);
-            return WORKER_EXIT;
-        }
-        // So does one whose `process.exit` a callback's caller did not unwind with (a close
-        // callback's status is not every dispatcher's to return): the realm is over the moment
-        // it asked, not when its loop next runs dry (realms issue 23).
-        if kiln_runtime::workers::exit_requested() {
-            return WORKER_EXIT;
-        }
-        tick_clock(realm);
-        collect_if_due(realm);
-        introspect_if_requested(realm);
-        let status = drain_realm_queues(realm);
-        if status != 0 {
-            return status;
-        }
-        if matches!(realm.clock.get(), NativeClock::Virtual) {
-            realm.runtime.executor.pause_time();
-        }
-        let turn = realm
-            .runtime
-            .state
-            .borrow_mut()
-            .ready_turn::<NativeMicrotask, NativeWork>();
-        match turn {
-            Some(RuntimeTurn::Completion(completion)) => {
-                if let Some(status) = route_completion(realm, completion) {
-                    return status;
+        match drive_one_ready_turn(realm) {
+            DriveStep::Ready => continue,
+            DriveStep::Done(status) => return status,
+            DriveStep::Parked {
+                signal,
+                delay,
+                yield_first,
+            } => {
+                if yield_first {
+                    // A task woken by the previous turn gets to publish its completion before
+                    // this realm parks. This was the order of the original continuous drive.
+                    kiln_runtime::yield_to_tasks().await;
                 }
-                while let Some(RuntimeTurn::Completion(next)) = {
-                    let mut runtime = realm.runtime.state.borrow_mut();
-                    runtime.ready_turn::<NativeMicrotask, NativeWork>()
-                } {
-                    if let Some(status) = route_completion(realm, next) {
+                let delay = introspect_park(realm, delay);
+                let parked = reclaim::park();
+                let wake = kiln_runtime::wait_for_turn(signal, delay).await;
+                drop(parked);
+                if yield_first
+                    && wake == kiln_runtime::DriveWake::Timer
+                    && matches!(realm.clock.get(), NativeClock::Virtual)
+                {
+                    let status = run_one_timer(realm);
+                    if status != 0 {
                         return status;
                     }
                 }
-                continue;
             }
-            Some(RuntimeTurn::Failure(_)) => return RUNTIME_ERROR,
-            Some(RuntimeTurn::Timer(WorkItem::Timer { work, .. })) => {
-                let (host, thrown) = realm.drive_context.get();
-                let status = work.run(host, thrown);
-                if status != 0 {
-                    return status;
-                }
-                continue;
-            }
-            Some(RuntimeTurn::Timer(WorkItem::Microtask(_))) => {
-                unreachable!("the native drive drains microtasks before selecting a turn")
-            }
-            // The native dispatch calls the language directly; nothing is ever queued for
-            // this drive, so a ready turn never reports it.
-            Some(RuntimeTurn::Protocol) | None => {}
         }
-        let (referenced, pending, in_flight, deadline, now, signal) = {
-            let runtime = realm.runtime.state.borrow();
-            let mut work = realm.work.borrow_mut();
-            (
-                runtime.has_referenced_host_work(),
-                runtime.has_pending_host_work(),
-                runtime.requests_in_flight(),
-                work.next_timer_deadline(),
-                work.now(),
-                runtime.completion_signal(),
-            )
+    }
+}
+
+/// One synchronous language turn, ending before the executor waits. The scheduler can later
+/// lease a realm for exactly this call; the continuous drive keeps the existing wait policy
+/// around it while the launcher and executor are split into schedulable pieces.
+enum DriveStep {
+    Ready,
+    Parked {
+        signal: kiln_runtime::DriveSignal,
+        delay: Option<std::time::Duration>,
+        yield_first: bool,
+    },
+    Done(i32),
+}
+
+fn run_one_timer(realm: &NativeRealm) -> i32 {
+    let timer = take_next_timer(realm);
+    if let Some(WorkItem::Timer { work, .. }) = timer {
+        let (host, thrown) = realm.drive_context.get();
+        work.run(host, thrown)
+    } else {
+        0
+    }
+}
+
+fn drive_one_ready_turn(realm: &NativeRealm) -> DriveStep {
+    // A turn boundary: no generated frame is on this thread's stack.
+    reclaim::quiescent();
+    // A worker whose parent called `terminate()` ends here (realms issue 06); the launcher
+    // reads the exit it asked for.
+    if kiln_runtime::workers::terminate_requested() {
+        kiln_runtime::workers::request_exit(1);
+        return DriveStep::Done(WORKER_EXIT);
+    }
+    // So does one whose `process.exit` a callback's caller did not unwind with (a close
+    // callback's status is not every dispatcher's to return): the realm is over the moment
+    // it asked, not when its loop next runs dry (realms issue 23).
+    if kiln_runtime::workers::exit_requested() {
+        return DriveStep::Done(WORKER_EXIT);
+    }
+    tick_clock(realm);
+    collect_if_due(realm);
+    introspect_if_requested(realm);
+    let status = drain_realm_queues(realm);
+    if status != 0 {
+        return DriveStep::Done(status);
+    }
+    if matches!(realm.clock.get(), NativeClock::Virtual) {
+        realm.runtime.executor.pause_time();
+    }
+    let turn = realm
+        .runtime
+        .state
+        .borrow_mut()
+        .ready_turn::<NativeMicrotask, NativeWork>();
+    match turn {
+        Some(RuntimeTurn::Completion(completion)) => {
+            if let Some(status) = route_completion(realm, completion) {
+                return DriveStep::Done(status);
+            }
+            while let Some(RuntimeTurn::Completion(next)) = {
+                let mut runtime = realm.runtime.state.borrow_mut();
+                runtime.ready_turn::<NativeMicrotask, NativeWork>()
+            } {
+                if let Some(status) = route_completion(realm, next) {
+                    return DriveStep::Done(status);
+                }
+            }
+            return DriveStep::Ready;
+        }
+        Some(RuntimeTurn::Failure(_)) => return DriveStep::Done(RUNTIME_ERROR),
+        Some(RuntimeTurn::Timer(WorkItem::Timer { work, .. })) => {
+            let (host, thrown) = realm.drive_context.get();
+            let status = work.run(host, thrown);
+            if status != 0 {
+                return DriveStep::Done(status);
+            }
+            return DriveStep::Ready;
+        }
+        Some(RuntimeTurn::Timer(WorkItem::Microtask(_))) => {
+            unreachable!("the native drive drains microtasks before selecting a turn")
+        }
+        // The native dispatch calls the language directly; nothing is ever queued for
+        // this drive, so a ready turn never reports it.
+        Some(RuntimeTurn::Protocol) | None => {}
+    }
+    let (referenced, pending, in_flight, deadline, now, signal) = {
+        let runtime = realm.runtime.state.borrow();
+        let mut work = realm.work.borrow_mut();
+        (
+            runtime.has_referenced_host_work(),
+            runtime.has_pending_host_work(),
+            runtime.requests_in_flight(),
+            work.next_timer_deadline(),
+            work.now(),
+            runtime.completion_signal(),
+        )
+    };
+    if http_trace_enabled() {
+        eprintln!(
+            "[kiln-drive] referenced={referenced} pending={pending} in_flight={in_flight} deadline={deadline:?} host={}",
+            realm.runtime.state.borrow().describe_host_work(),
+        );
+    }
+    // A timer that is already due runs now. It is not a wait case: under load the
+    // completion signal always has a permit, and a select that prefers it would let a
+    // due timer wait forever (measured: setTimeout(0) at 13 ms median on a saturated
+    // server while every other route took 0.13 ms).
+    if let Some(due) = deadline
+        && due <= now
+    {
+        let status = run_one_timer(realm);
+        return if status == 0 {
+            DriveStep::Ready
+        } else {
+            DriveStep::Done(status)
         };
-        if http_trace_enabled() {
-            eprintln!(
-                "[kiln-drive] referenced={referenced} pending={pending} in_flight={in_flight} deadline={deadline:?} host={}",
-                realm.runtime.state.borrow().describe_host_work(),
-            );
-        }
-        // A timer that is already due runs now. It is not a wait case: under load the
-        // completion signal always has a permit, and a select that prefers it would let a
-        // due timer wait forever (measured: setTimeout(0) at 13 ms median on a saturated
-        // server while every other route took 0.13 ms).
-        if let Some(due) = deadline
-            && due <= now
-        {
-            let timer = take_next_timer(realm);
-            if let Some(WorkItem::Timer { work, .. }) = timer {
-                let (host, thrown) = realm.drive_context.get();
-                let status = work.run(host, thrown);
-                if status != 0 {
-                    return status;
-                }
-            }
-            continue;
-        }
-        // A completion can arrive only while an operation is pending, and it matters only
-        // while something referenced keeps the realm alive; a direct connection with a
-        // response outstanding is alive on its own. Otherwise only virtual timers remain.
-        let completions_possible = referenced && pending;
-        if !completions_possible && in_flight == 0 {
-            let Some(deadline) = deadline else {
-                return 0;
+    }
+    // A completion can arrive only while an operation is pending, and it matters only
+    // while something referenced keeps the realm alive; a direct connection with a
+    // response outstanding is alive on its own. Otherwise only virtual timers remain.
+    let completions_possible = referenced && pending;
+    if !completions_possible && in_flight == 0 {
+        let Some(deadline) = deadline else {
+            return DriveStep::Done(0);
+        };
+        // A wall-clock realm (ADR 0044) waits the real interval; the next turn finds the
+        // timer due. A virtual realm jumps its clock to the deadline instead.
+        if matches!(realm.clock.get(), NativeClock::Wall { .. }) {
+            let Some(signal) = signal else {
+                return DriveStep::Done(RUNTIME_ERROR);
             };
-            // A wall-clock realm (ADR 0044) waits the real interval; the next turn finds the
-            // timer due. A virtual realm jumps its clock to the deadline instead.
-            if matches!(realm.clock.get(), NativeClock::Wall { .. }) {
-                let Some(signal) = signal else {
-                    return RUNTIME_ERROR;
-                };
-                let delay = introspect_park(realm, Some(deadline.saturating_sub(now)));
-                let parked = reclaim::park();
-                kiln_runtime::wait_for_turn(signal, delay).await;
-                drop(parked);
-                continue;
-            }
-            let timer = take_next_timer(realm);
-            if let Some(WorkItem::Timer { work, .. }) = timer {
-                let (host, thrown) = realm.drive_context.get();
-                let status = work.run(host, thrown);
-                if status != 0 {
-                    return status;
-                }
-            }
-            continue;
+            return DriveStep::Parked {
+                signal,
+                delay: Some(deadline.saturating_sub(now)),
+                yield_first: false,
+            };
         }
-        let Some(signal) = signal else {
-            return RUNTIME_ERROR;
+        let status = run_one_timer(realm);
+        return if status == 0 {
+            DriveStep::Ready
+        } else {
+            DriveStep::Done(status)
         };
-        // Yield first: a task woken by the last turn (a Hyper connection with a request to
-        // dispatch, a completion about to land) runs now, before anything parks.
-        kiln_runtime::yield_to_tasks().await;
-        let delay = introspect_park(realm, deadline.map(|deadline| deadline.saturating_sub(now)));
-        // A wall-clock timer wake can be the introspection poll rather than the realm
-        // deadline. The poll only brings us back around to observe signals; it must not
-        // consume the next language timer early. Virtual realms use Tokio's timer wake to
-        // advance their deterministic `RealmWork::now`, so they still consume it here.
-        let parked = reclaim::park();
-        let wake = kiln_runtime::wait_for_turn(signal, delay).await;
-        drop(parked);
-        if wake == kiln_runtime::DriveWake::Timer
-            && matches!(realm.clock.get(), NativeClock::Virtual)
-        {
-            let timer = take_next_timer(realm);
-            if let Some(WorkItem::Timer { work, .. }) = timer {
-                let (host, thrown) = realm.drive_context.get();
-                let status = work.run(host, thrown);
-                if status != 0 {
-                    return status;
-                }
-            }
-        }
+    }
+    let Some(signal) = signal else {
+        return DriveStep::Done(RUNTIME_ERROR);
+    };
+    // A wall-clock timer wake may be an introspection poll rather than the deadline. A
+    // virtual timer wake consumes one timer after the executor returns from its wait.
+    DriveStep::Parked {
+        signal,
+        delay: deadline.map(|deadline| deadline.saturating_sub(now)),
+        yield_first: true,
     }
 }
 
