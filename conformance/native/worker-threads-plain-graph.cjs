@@ -9,6 +9,8 @@ if (isMainThread) {
   const graph = JSON.parse('{"__proto__":7,"name":"𝄞"}');
   graph.self = graph;
   graph.items = [, graph];
+  graph.rows = [];
+  for (let i = 0; i < 64; i++) graph.rows.push({ i, text: String(i) });
   worker.postMessage({ kind: "graph", graph });
 
   let reads = 0;
@@ -35,7 +37,8 @@ if (isMainThread) {
     if (message.kind === "graph") {
       const value = message.graph;
       parentPort.postMessage([value.self === value, value.items[1] === value,
-        0 in value.items, value.name, Object.hasOwn(value, "__proto__"), value.__proto__].join(" "));
+        0 in value.items, value.name, Object.hasOwn(value, "__proto__"), value.__proto__,
+        value.rows.length, value.rows[0].i, value.rows[63].text].join(" "));
     } else if (message.kind === "getter") {
       parentPort.postMessage("getter " + message.accessor.answer);
     } else if (message.kind === "transfer") {

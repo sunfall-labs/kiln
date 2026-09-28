@@ -989,6 +989,9 @@ static int kiln_c99_message_decode_val(kiln_c99_message_decode *state, kiln_valu
         status = kiln_c99_array_push(state->refs, *out);
         if (status != KILN_C99_OK) return status;
         array = kiln_c99_array_of(*out);
+        /* The collector scans every element below count. Capacity comes from an unzeroed
+         * allocation, and the recursive walk may collect before filling the next slot. */
+        for (index = 0; index < length; ++index) array->elements[index] = KILN_VAL_HOLE;
         array->count = length;
         for (index = 0; index < length; ++index) {
             kiln_value item;
