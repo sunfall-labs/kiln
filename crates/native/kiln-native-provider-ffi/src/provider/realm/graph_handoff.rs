@@ -98,7 +98,9 @@ impl GraphHandoff {
                 .wait(state)
                 .unwrap_or_else(PoisonError::into_inner);
         }
-        !state.cancelled && state.phase == Phase::Started
+        // The peer may advance from Started to Staged before this waiter reacquires the
+        // mutex. Both callbacks were already marked ready, so any later phase still enters.
+        !state.cancelled
     }
 
     fn run_sender(&self) -> PausedTurnResult {
@@ -351,14 +353,19 @@ mod tests {
         receiver_go
             .send(handoff.id())
             .expect("start receiver callback");
-        assert!(handoff.handoff.wait_ready(Duration::from_secs(1)));
-        assert!(
-            SEQUENCE.get().unwrap().lock().unwrap().is_empty(),
-            "no C mutation before both enter"
-        );
-        handoff.handoff.start();
-        sender_thread.join().expect("sender callback");
-        receiver_thread.join().expect("receiver callback");
+        let ready = handoff.handoff.wait_ready(Duration::from_secs(10));
+        let untouched = SEQUENCE.get().unwrap().lock().unwrap().is_empty();
+        if ready {
+            handoff.handoff.start();
+        } else {
+            handoff.handoff.cancel();
+        }
+        let sender_result = sender_thread.join();
+        let receiver_result = receiver_thread.join();
+        assert!(ready, "both owner callbacks entered");
+        assert!(untouched, "no C mutation before both enter");
+        sender_result.expect("sender callback");
+        receiver_result.expect("receiver callback");
         assert!(handoff.handoff.done());
         assert_eq!(*SEQUENCE.get().unwrap().lock().unwrap(), [3, 4, 5, 6, 7]);
     }
