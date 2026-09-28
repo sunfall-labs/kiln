@@ -576,6 +576,13 @@ typedef struct kiln_shared_state {
     uint32_t shared_shapes;
     /* The root of the shape tree. */
     kiln_shape root;
+    /* First active final layout: keyed by callable kind and code, never by a realm object's
+     * address. More stable built-in stores can join this table after their consumers are audited. */
+    struct {
+        uint32_t tag;
+        uint64_t code;
+        kiln_shape *shape;
+    } final_builtin_layout;
     /* The shared immutable region (ADR 0070 primitive B; see "The shared immutable region"
      * below). `region_state` is one of `KILN_C99_REGION_*`; the rest is written by the one realm
      * that builds the region, before the release store that seals it. */

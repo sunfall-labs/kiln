@@ -489,7 +489,8 @@ static int kiln_c99_shape_transition_code(kiln_shape *current, const kiln_string
     uint32_t bit;
     uint32_t expected_bit;
     kiln_shape *next_shape;
-    if (current == NULL || ikey == NULL || current->property_count >= KILN_SHAPE_MAX_FAST_PROPERTIES) {
+    if (current == NULL || ikey == NULL || (current->shared & KILN_C99_SHAPE_FINAL) != 0 ||
+        current->property_count >= KILN_SHAPE_MAX_FAST_PROPERTIES) {
         return 0;
     }
     bit = 1u << current->property_count;
@@ -516,7 +517,8 @@ static int kiln_c99_par_shape_step(kiln_shape *current, const kiln_string *ikey,
     uint32_t bit;
     uint32_t expected_bit;
     kiln_shape *next_shape;
-    if (current == NULL || ikey == NULL || current->property_count >= KILN_SHAPE_MAX_FAST_PROPERTIES) {
+    if (current == NULL || ikey == NULL || (current->shared & KILN_C99_SHAPE_FINAL) != 0 ||
+        current->property_count >= KILN_SHAPE_MAX_FAST_PROPERTIES) {
         return 0;
     }
     bit = 1u << current->property_count;
@@ -771,6 +773,110 @@ static const kiln_property *kiln_c99_property_view(const kiln_object *object, si
     if (object->shape == NULL) return &object->properties[index];
     kiln_c99_shape_property(object, (uint32_t)index, scratch);
     return scratch;
+}
+
+/* The first complete, prefix-free built-in layout. Keep this activation deliberately narrow:
+ * Object.prototype's bootstrap store has four ordinary data properties and a stable BUILTIN
+ * code. Every reader already understands a shaped object, and every value stays in this realm's
+ * inline slots. Wider stores need a representation whose masks exceed 32 bits. */
+static int kiln_c99_final_builtin_attrs(const kiln_property *property, uint8_t *attrs,
+                                         int *number) {
+    const kiln_string *key = property->key;
+    uint8_t bits = 0;
+    if (key == NULL || !kiln_c99_key_is_shared(key) || property->refused || property->accessor)
+        return 0;
+    if (kiln_c99_key_is_reserved(key)) {
+        if (property->enumerable) return 0;
+        if (!kiln_c99_key_is_symbol(key) && property->symbol_hidden) return 0;
+        if (kiln_c99_key_is_symbol(key) && property->symbol_hidden)
+            bits |= KILN_C99_ATTR_ENUM_FLIP;
+    } else {
+        if (property->symbol_hidden) return 0;
+        if (!property->enumerable) bits |= KILN_C99_ATTR_ENUM_FLIP;
+    }
+    if (!property->writable) bits |= KILN_C99_ATTR_READONLY;
+    if (!property->configurable) bits |= KILN_C99_ATTR_FIXED;
+    *attrs = bits;
+    *number = bits == 0 && property->value.tag == KILN_VALUE_NUMBER;
+    return 1;
+}
+
+static int kiln_c99_final_builtin_matches(const kiln_shape *shape, const kiln_object *object) {
+    size_t i;
+    if (shape->property_count != object->count) return 0;
+    for (i = 0; i < object->count; ++i) {
+        uint8_t attrs;
+        int number;
+        if (!kiln_c99_final_builtin_attrs(&object->properties[i], &attrs, &number) ||
+            shape->keys[i] != object->properties[i].key || shape->attrs[i] != attrs ||
+            ((shape->double_slots_mask >> i) & 1u) != (uint32_t)number) return 0;
+    }
+    return 1;
+}
+
+static void kiln_c99_final_builtin_store(uint32_t tag, uint64_t code, kiln_object *object) {
+    kiln_shared_state *process = kiln_c99_process();
+    kiln_shape *shape;
+    kiln_shape *candidate = NULL;
+    size_t i;
+    if (tag != KILN_VALUE_BUILTIN || code != KILN_C99_BUILTIN_OBJECT_PROTOTYPE ||
+        object == NULL || object->shape != NULL || object->elements != NULL ||
+        object->count == 0 || object->count > KILN_C99_INLINE_SLOTS ||
+        object->slots != NULL) return;
+    shape = __atomic_load_n(&process->final_builtin_layout.shape, __ATOMIC_ACQUIRE);
+    if (shape == NULL) {
+        candidate = (kiln_shape *)calloc(1, sizeof *candidate);
+        if (candidate == NULL) return;
+        candidate->property_count = (uint32_t)object->count;
+        candidate->slot_index = (uint32_t)(object->count - 1);
+        candidate->ikey = object->properties[object->count - 1].key;
+        candidate->shared = 1 | KILN_C99_SHAPE_FINAL;
+        for (i = 0; i < object->count; ++i) {
+            uint8_t attrs;
+            int number;
+            const kiln_property *property = &object->properties[i];
+            if (!kiln_c99_final_builtin_attrs(property, &attrs, &number)) {
+                free(candidate);
+                return;
+            }
+            uint32_t bit = 1u << i;
+            candidate->keys[i] = property->key;
+            candidate->attrs[i] = attrs;
+            if (kiln_c99_key_is_reserved(property->key)) candidate->has_symbol_key = 1;
+            if (number) candidate->double_slots_mask |= bit;
+            if (attrs != 0) candidate->special_mask |= bit;
+            if (attrs & KILN_C99_ATTR_READONLY) candidate->store_mask |= bit;
+        }
+        kiln_c99_process_lock(process);
+        shape = process->final_builtin_layout.shape;
+        if (shape == NULL) {
+            process->final_builtin_layout.tag = tag;
+            process->final_builtin_layout.code = code;
+            __atomic_store_n(&process->final_builtin_layout.shape, candidate, __ATOMIC_RELEASE);
+            shape = candidate;
+            candidate = NULL;
+        }
+        kiln_c99_process_unlock(process);
+        free(candidate);
+    }
+    if (process->final_builtin_layout.tag != tag ||
+        process->final_builtin_layout.code != code ||
+        !kiln_c99_final_builtin_matches(shape, object)) return;
+    /* No frame may hold a pointer to these list records after bootstrap. A later mutation
+     * converts this one object back to a realm-owned dictionary; the shared shape never grows
+     * an edge. The collector already traces shaped values through the object's own slots. */
+    kiln_c99_prototype_touched(object);
+    object->slots = object->inline_slots;
+    object->slot_capacity = KILN_C99_INLINE_SLOTS;
+    for (i = 0; i < KILN_C99_INLINE_SLOTS; ++i)
+        object->inline_slots[i] = KILN_VAL_UNDEFINED;
+    for (i = 0; i < object->count; ++i)
+        object->inline_slots[i] = kiln_val_from_boundary(object->properties[i].value);
+    free(object->properties);
+    object->properties = NULL;
+    object->capacity = 0;
+    object->count = 0;
+    object->shape = shape;
 }
 
 static int kiln_c99_new_object(kiln_value *out) {

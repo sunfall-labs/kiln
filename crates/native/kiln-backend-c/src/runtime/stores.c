@@ -287,6 +287,14 @@ static void kiln_c99_builtin_bootstrap_done(void) {
     /* The realm that built the shared region has made every closure it will hold (realms issue
      * 08): protect it and let every other realm read it. */
     kiln_c99_region_seal(heap);
+    {
+        kiln_value store;
+        if (kiln_c99_callable_store(kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE),
+                                    &store, 0) == KILN_C99_OK && store.tag == KILN_VALUE_OBJECT)
+            kiln_c99_final_builtin_store(KILN_VALUE_BUILTIN,
+                                         KILN_C99_BUILTIN_OBJECT_PROTOTYPE,
+                                         kiln_c99_object_of(store));
+    }
     /* The bootstrap's frames are gone; the pages they touched need not stay the realm's. */
     kiln_c99_stack_release_below();
     __atomic_sub_fetch(&kiln_c99_builtin_store_epoch, heap->builtin_stores, __ATOMIC_RELAXED);

@@ -899,6 +899,9 @@ typedef struct kiln_shape {
      * heap's own side table -- never through the shared shape's edges, which another realm reads.
      * `retained` marks a realm-local shape a teardown survivor still uses, which teardown then
      * leaks rather than frees. */
+    /* Bit 0 means process-shared; bit 1 marks a complete built-in layout with no prefix
+     * chain. A new property materializes this realm's dictionary. This uses the existing word
+     * so the thousands of ordinary shapes do not grow for one final layout. */
     uint32_t shared;
     uint32_t retained;
     struct kiln_shape *owned_next;
@@ -938,6 +941,8 @@ typedef struct kiln_shape {
     kiln_body_fn code;
     uint8_t attrs[KILN_SHAPE_MAX_FAST_PROPERTIES];
 } kiln_shape;
+
+#define KILN_C99_SHAPE_FINAL 2u
 
 /* The mask lives with the slots it describes, so one pointer load gives a reader both. A slot is
  * one word -- the child shape, whose `ikey` is the edge's key -- so a slot is claimed with a

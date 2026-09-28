@@ -1,6 +1,72 @@
 use super::*;
 
 #[test]
+fn final_builtin_layout_shares_descriptors_but_not_values_or_mutations() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    static const char *names[] = {"aa", "bb", "cc", "dd"};
+    kiln_gc_heap *heap = (kiln_gc_heap *)malloc(sizeof *heap);
+    kiln_value first, second, read, descriptor, keys;
+    kiln_object *a, *b;
+    int deleted, found;
+    if (heap == NULL) return 1;
+    kiln_c99_gc_heap_init(heap);
+    heap->enabled = 0;
+    kiln_c99_gc_heap_register(heap);
+    kiln_test_heap = heap;
+    kiln_test_generation += 1;
+    for (size_t i = 0; i < 4; ++i)
+        if (kiln_c99_intern_static(names[i], 2) == NULL) return 2;
+    if (kiln_c99_new_object(&first) != KILN_C99_OK ||
+        kiln_c99_new_object(&second) != KILN_C99_OK) return 3;
+    a = kiln_c99_object_of(first);
+    b = kiln_c99_object_of(second);
+    for (size_t i = 0; i < 4; ++i) {
+        if (kiln_c99_define_method(first, names[i], 2, kiln_c99_number((double)i)) != KILN_C99_OK ||
+            kiln_c99_define_method(second, names[i], 2, kiln_c99_number((double)(i + 10))) !=
+                KILN_C99_OK) return 4;
+    }
+    if (kiln_c99_ensure_dictionary(a) != KILN_C99_OK ||
+        kiln_c99_ensure_dictionary(b) != KILN_C99_OK) return 5;
+    kiln_c99_final_builtin_store(KILN_VALUE_BUILTIN, KILN_C99_BUILTIN_OBJECT_PROTOTYPE, a);
+    kiln_c99_final_builtin_store(KILN_VALUE_BUILTIN, KILN_C99_BUILTIN_OBJECT_PROTOTYPE, b);
+    if (a->shape == NULL || a->shape != b->shape ||
+        (a->shape->shared & KILN_C99_SHAPE_FINAL) == 0 ||
+        a->properties != NULL || b->properties != NULL || a->shape->parent != NULL) return 6;
+    if (kiln_c99_get(NULL, first, "aa", 2, &read, 0, NULL) != KILN_C99_OK ||
+        kiln_c99_as_number(read) != 0.0 ||
+        kiln_c99_get(NULL, second, "aa", 2, &read, 0, NULL) != KILN_C99_OK ||
+        kiln_c99_as_number(read) != 10.0) return 7;
+    if (kiln_c99_describe_property(NULL, second, "aa", 2, &descriptor, &found, 0, NULL) !=
+            KILN_C99_OK || !found ||
+        kiln_c99_get(NULL, descriptor, "value", 5, &read, 0, NULL) != KILN_C99_OK ||
+        kiln_c99_as_number(read) != 10.0 ||
+        kiln_c99_get(NULL, descriptor, "enumerable", 10, &read, 0, NULL) != KILN_C99_OK ||
+        kiln_c99_truthy(read) || b->shape != a->shape) return 11;
+    if (kiln_c99_all_own_keys(NULL, second, &keys, 0, NULL) != KILN_C99_OK ||
+        kiln_c99_array_of(keys)->count != 4 || b->shape != a->shape) return 12;
+    if (kiln_c99_put(NULL, first, "aa", 2, kiln_c99_number(99.0), 0, NULL) != KILN_C99_OK ||
+        kiln_c99_get(NULL, second, "aa", 2, &read, 0, NULL) != KILN_C99_OK ||
+        kiln_c99_as_number(read) != 10.0) return 8;
+    if (kiln_c99_define_method(first, "extra", 5, kiln_c99_number(5.0)) != KILN_C99_OK ||
+        a->shape != NULL || b->shape == NULL || a->count != 5) return 9;
+    if (kiln_c99_delete(NULL, second, "bb", 2, &deleted, 0, NULL) != KILN_C99_OK ||
+        !deleted || b->shape != NULL || b->count != 3 || a->count != 5) return 10;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "final-builtin-layout");
+    assert!(
+        run.status.success(),
+        "final built-in layout failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn compact_property_records_trace_the_live_data_or_accessor_arm() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0)).expect("unit emits");
     let wrapper = r#"
