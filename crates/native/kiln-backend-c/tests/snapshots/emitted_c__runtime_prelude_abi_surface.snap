@@ -2160,6 +2160,8 @@ static int kiln_c99_heap_adopt_chunks(kiln_gc_heap *heap, kiln_nursery_chunk *ch
 static int kiln_c99_chunk_sealed_for_move(const kiln_gc_nursery *nursery,
 static int kiln_c99_heap_move_chunks(kiln_gc_heap *from, kiln_gc_heap *to,
 struct kiln_c99_par_arena {
+static uint64_t kiln_c99_graph_candidate_next_id;
+static int kiln_c99_graph_candidate_open(kiln_c99_par_arena *arena, const kiln_gc_heap *heap,
 static size_t kiln_c99_par_arena_budget_bytes;
 static size_t kiln_c99_par_arena_budget(void) {
 static void kiln_c99_par_arena_seal(kiln_c99_par_arena *arena) {
