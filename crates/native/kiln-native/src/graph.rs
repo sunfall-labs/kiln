@@ -2828,6 +2828,11 @@ extern void kiln_c99_realm_capture_output(int fd) __attribute__((visibility("hid
 typedef int (*kiln_worker_runner_fn)(const uint8_t *entry, uint64_t entry_len, int32_t eval,
                                      uint64_t argc, const char *const *argv);
 extern int kiln_worker_set_runner(kiln_worker_runner_fn runner);
+extern int kiln_worker_set_turn_runner(void *(*begin)(const uint8_t *, uint64_t, int32_t,
+                                                     uint64_t, const char *const *),
+                                        uint64_t (*identify)(void *),
+                                        int (*advance)(void *, uint64_t *),
+                                        int (*finish)(void *));
 extern int kiln_worker_exit_code(int32_t *out);
 /* The runtime's scalar port and signal operations; the thread-mode signal thread hands a signal to
  * the realms listening for it through op 20 (`kiln_runtime::signals::deliver`, realms issue 23). */
@@ -4364,6 +4369,12 @@ static void *kiln_cli_worker_begin(const uint8_t *entry, uint64_t entry_len, int
     return session;
 }
 
+static void *kiln_cli_worker_begin_scheduled(const uint8_t *entry, uint64_t entry_len,
+                                              int32_t eval, uint64_t argc,
+                                              const char *const *argv) {
+    return kiln_cli_worker_begin(entry, entry_len, eval, argc, argv, 1);
+}
+
 static uint64_t kiln_cli_worker_identify(void *opaque) {
     kiln_cli_worker_session *session = (kiln_cli_worker_session *)opaque;
     return session->run == NULL ? 0 : session->run->realm;
@@ -5274,6 +5285,9 @@ int main(int argc, char **argv) {
 #endif
     }
     (void)kiln_worker_set_runner(kiln_cli_run_worker);
+    (void)kiln_worker_set_turn_runner(kiln_cli_worker_begin_scheduled,
+                                      kiln_cli_worker_identify, kiln_cli_worker_advance,
+                                      kiln_cli_worker_finish);
     realms = kiln_cli_realm_count();
     if (realms > 0) return kiln_cli_run_realms(argc, argv, realms);
     workers = kiln_cli_worker_count();

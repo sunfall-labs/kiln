@@ -1369,10 +1369,10 @@ pub(crate) fn enter_blocking_scheduler()
     }
 }
 
-struct ScheduledPoolGuard(Option<Weak<PinnedTurnScheduler>>);
+pub(crate) struct ScheduledPoolGuard(Option<Weak<PinnedTurnScheduler>>);
 
 impl ScheduledPoolGuard {
-    fn enter(pool: Option<Weak<PinnedTurnScheduler>>) -> Self {
+    pub(crate) fn enter(pool: Option<Weak<PinnedTurnScheduler>>) -> Self {
         Self(SCHEDULED_POOL.with(|slot| slot.replace(pool)))
     }
 }
@@ -1385,10 +1385,10 @@ impl Drop for ScheduledPoolGuard {
     }
 }
 
-struct ScheduledReactorGuard(Option<Arc<kiln_runtime::Reactor>>);
+pub(crate) struct ScheduledReactorGuard(Option<Arc<kiln_runtime::Reactor>>);
 
 impl ScheduledReactorGuard {
-    fn enter(reactor: Arc<kiln_runtime::Reactor>) -> Self {
+    pub(crate) fn enter(reactor: Arc<kiln_runtime::Reactor>) -> Self {
         Self(SCHEDULED_REACTOR.with(|slot| slot.replace(Some(reactor))))
     }
 }
@@ -1401,10 +1401,10 @@ impl Drop for ScheduledReactorGuard {
     }
 }
 
-struct ScheduledWakerGuard(Option<Waker>);
+pub(crate) struct ScheduledWakerGuard(Option<Waker>);
 
 impl ScheduledWakerGuard {
-    fn enter(waker: Waker) -> Self {
+    pub(crate) fn enter(waker: Waker) -> Self {
         Self(SCHEDULED_WAKER.with(|slot| slot.replace(Some(waker))))
     }
 }

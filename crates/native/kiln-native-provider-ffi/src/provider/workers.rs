@@ -15,11 +15,17 @@
 use super::{INVALID_ARGUMENT, KilnString, validate_string};
 use core::ffi::{c_char, c_void};
 use kiln_runtime::signals;
-use kiln_runtime::workers::{self, Message, Token, WorkerEntry, WorkerSpec};
+use kiln_runtime::turn_queue::TurnOutcome;
+use kiln_runtime::turn_scheduler::PinnedTurnScheduler;
+use kiln_runtime::workers::{
+    self, Message, ScheduledWorkerBody, Token, WorkerContext, WorkerEntry, WorkerSpec,
+};
 use kiln_shared_graph::{Handle, OpaqueHandle};
 use kiln_string::{StringUnits, StringView};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicPtr, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock, Weak};
+use std::task::Waker;
+use std::time::{Duration, Instant};
 
 unsafe extern "C" {
     fn calloc(count: usize, size: usize) -> *mut c_void;
@@ -670,6 +676,123 @@ pub type WorkerRunner = unsafe extern "C" fn(
     argv: *const *const c_char,
 ) -> i32;
 
+type WorkerTurnBegin = unsafe extern "C" fn(
+    entry: *const u8,
+    entry_len: u64,
+    eval: i32,
+    argc: u64,
+    argv: *const *const c_char,
+) -> *mut c_void;
+type WorkerTurnIdentify = unsafe extern "C" fn(session: *mut c_void) -> u64;
+type WorkerTurnAdvance = unsafe extern "C" fn(session: *mut c_void, delay_ns: *mut u64) -> i32;
+type WorkerTurnFinish = unsafe extern "C" fn(session: *mut c_void) -> i32;
+
+#[derive(Clone, Copy)]
+struct WorkerTurnRunner {
+    begin: WorkerTurnBegin,
+    identify: WorkerTurnIdentify,
+    advance: WorkerTurnAdvance,
+    finish: WorkerTurnFinish,
+}
+
+static TURN_RUNNER: OnceLock<WorkerTurnRunner> = OnceLock::new();
+
+/// Register the graph launcher's one-turn worker callbacks before any worker is spawned.
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_worker_set_turn_runner(
+    begin: Option<WorkerTurnBegin>,
+    identify: Option<WorkerTurnIdentify>,
+    advance: Option<WorkerTurnAdvance>,
+    finish: Option<WorkerTurnFinish>,
+) -> i32 {
+    let (Some(begin), Some(identify), Some(advance), Some(finish)) =
+        (begin, identify, advance, finish)
+    else {
+        return INVALID_ARGUMENT;
+    };
+    if TURN_RUNNER
+        .set(WorkerTurnRunner {
+            begin,
+            identify,
+            advance,
+            finish,
+        })
+        .is_err()
+    {
+        return INVALID_ARGUMENT;
+    }
+    0
+}
+
+struct WorkerTurnSession {
+    session: *mut c_void,
+    runner: WorkerTurnRunner,
+    pool: Weak<PinnedTurnScheduler>,
+    failed_advance: bool,
+}
+
+impl ScheduledWorkerBody for WorkerTurnSession {
+    fn advance(&mut self, waker: &Waker) -> TurnOutcome {
+        if self.session.is_null() {
+            return TurnOutcome::Done;
+        }
+        let _pool = super::realm::ScheduledPoolGuard::enter(Some(self.pool.clone()));
+        let _waker = super::realm::ScheduledWakerGuard::enter(waker.clone());
+        let mut delay_ns = 0;
+        // SAFETY: the launcher owns this session until finish and the scheduler lease gives this
+        // lane exclusive access. The delay slot is writable for the duration of the call.
+        let kind = unsafe { (self.runner.advance)(self.session, &mut delay_ns) };
+        match kind {
+            0 => TurnOutcome::Done,
+            1 => TurnOutcome::Ready,
+            2 => TurnOutcome::Parked,
+            3 => TurnOutcome::ParkedUntil(Instant::now() + Duration::from_nanos(delay_ns)),
+            _ => {
+                self.failed_advance = true;
+                TurnOutcome::Done
+            }
+        }
+    }
+
+    fn finish(&mut self) -> i32 {
+        let session = std::mem::replace(&mut self.session, std::ptr::null_mut());
+        if session.is_null() {
+            return super::RUNTIME_ERROR;
+        }
+        let _pool = super::realm::ScheduledPoolGuard::enter(Some(self.pool.clone()));
+        // SAFETY: the same scheduler lane that began this session calls finish after every
+        // generated C frame has returned from advance.
+        let status = unsafe { (self.runner.finish)(session) };
+        if self.failed_advance {
+            super::RUNTIME_ERROR
+        } else {
+            status
+        }
+    }
+}
+
+impl Drop for WorkerTurnSession {
+    fn drop(&mut self) {
+        if !self.session.is_null() {
+            let _ = self.finish();
+        }
+    }
+}
+
+fn worker_arguments(worker: &WorkerContext) -> (&str, i32, Vec<std::ffi::CString>) {
+    let (text, eval) = match &worker.spec.entry {
+        WorkerEntry::File(path) => (path.as_str(), 0),
+        WorkerEntry::Eval(source) => (source.as_str(), 1),
+    };
+    let argv = worker
+        .spec
+        .argv
+        .iter()
+        .map(|argument| std::ffi::CString::new(argument.replace('\0', "")).unwrap_or_default())
+        .collect();
+    (text, eval, argv)
+}
+
 static RUNNER: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Register the launcher's [`WorkerRunner`]. A program without one cannot start workers.
@@ -743,33 +866,63 @@ pub unsafe extern "C" fn kiln_worker_spawn(
             control,
             pipe_stdio: true,
         };
-        let started = workers::spawn(spec, move |worker| {
-            let (text, eval) = match &worker.spec.entry {
-                WorkerEntry::File(path) => (path.clone(), 0),
-                WorkerEntry::Eval(source) => (source.clone(), 1),
-            };
-            let argv: Vec<std::ffi::CString> = worker
-                .spec
-                .argv
-                .iter()
-                .map(|argument| {
-                    std::ffi::CString::new(argument.replace('\0', "")).unwrap_or_default()
-                })
-                .collect();
-            let pointers: Vec<*const c_char> =
-                argv.iter().map(|argument| argument.as_ptr()).collect();
-            // SAFETY: the launcher's runner, called on the worker's own thread with buffers that
-            // outlive the call.
-            unsafe {
-                runner(
-                    text.as_ptr(),
-                    text.len() as u64,
-                    eval,
-                    pointers.len() as u64,
-                    pointers.as_ptr(),
-                )
-            }
-        });
+        let scheduled = std::env::var("KILN_WORKER_SCHEDULER")
+            .is_ok_and(|value| !value.is_empty() && value != "0")
+            .then(|| Some((super::realm::current_scheduler()?, *TURN_RUNNER.get()?)))
+            .flatten();
+        let started = if let Some((scheduler, turn_runner)) = scheduled {
+            let pool = Arc::downgrade(&scheduler);
+            Ok(workers::spawn_scheduled(
+                spec,
+                scheduler,
+                move |worker, reactor, _ticket| {
+                    let _reactor = super::realm::ScheduledReactorGuard::enter(reactor);
+                    let _pool = super::realm::ScheduledPoolGuard::enter(Some(pool.clone()));
+                    let (text, eval, argv) = worker_arguments(&worker);
+                    let pointers: Vec<*const c_char> =
+                        argv.iter().map(|argument| argument.as_ptr()).collect();
+                    // SAFETY: the callback copies argv while the C strings are live, and the
+                    // worker's per-turn protocol scope is installed by spawn_scheduled.
+                    let session = unsafe {
+                        (turn_runner.begin)(
+                            text.as_ptr(),
+                            text.len() as u64,
+                            eval,
+                            pointers.len() as u64,
+                            pointers.as_ptr(),
+                        )
+                    };
+                    if !session.is_null() {
+                        // SAFETY: the graph launcher returned a live session. The realm ID is
+                        // currently used only for the future migration handoff.
+                        let _ = unsafe { (turn_runner.identify)(session) };
+                    }
+                    WorkerTurnSession {
+                        session,
+                        runner: turn_runner,
+                        pool,
+                        failed_advance: false,
+                    }
+                },
+            ))
+        } else {
+            workers::spawn(spec, move |worker| {
+                let (text, eval, argv) = worker_arguments(&worker);
+                let pointers: Vec<*const c_char> =
+                    argv.iter().map(|argument| argument.as_ptr()).collect();
+                // SAFETY: the launcher's runner, called on the worker's own thread with buffers that
+                // outlive the call.
+                unsafe {
+                    runner(
+                        text.as_ptr(),
+                        text.len() as u64,
+                        eval,
+                        pointers.len() as u64,
+                        pointers.as_ptr(),
+                    )
+                }
+            })
+        };
         match started {
             Ok((key, thread)) => {
                 // SAFETY: checked above.
@@ -1078,6 +1231,9 @@ macro_rules! assert_worker_export {
     };
     (realm, kiln_worker_set_runner, worker_set_runner) => {
         const _: extern "C" fn(Option<WorkerRunner>) -> i32 = kiln_worker_set_runner;
+    };
+    (realm, kiln_worker_set_turn_runner, worker_set_turn_runner) => {
+        const _: extern "C" fn(Option<WorkerTurnBegin>, Option<WorkerTurnIdentify>, Option<WorkerTurnAdvance>, Option<WorkerTurnFinish>) -> i32 = kiln_worker_set_turn_runner;
     };
     (realm, kiln_worker_spawn, worker_spawn) => {
         const _: unsafe extern "C" fn(*const KilnString, i32, *const KilnString, u64, u64, u64, *const KilnString, *mut u64, *mut u64) -> i32 = kiln_worker_spawn;
