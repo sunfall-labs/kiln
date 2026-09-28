@@ -4016,10 +4016,19 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
             return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
         if (object->shape != NULL) {
             const kiln_shape *shape = object->shape;
-            /* The side table scan catches aliases in published local shapes. A local shape
-             * reached only through this object is not certified by that scan, so keep the
-             * outside-object path limited to process-shared shapes. */
-            if ((shape->shared & 1u) == 0 || object->sealed != NULL ||
+            /* The side table scan covers published local shapes. A shape reached only
+             * through this object is outside that proof and must still refuse. */
+            if ((shape->shared & 1u) == 0) {
+                const kiln_shape *published = heap->local_shapes;
+                size_t visited = 0;
+                while (published != NULL && visited < heap->local_shape_count &&
+                       published != shape) {
+                    published = published->owned_next;
+                    ++visited;
+                }
+                if (published != shape) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+            }
+            if (object->sealed != NULL ||
                 shape->property_count > KILN_SHAPE_MAX_FAST_PROPERTIES ||
                 (object->slots == object->inline_slots &&
                  shape->property_count > KILN_C99_INLINE_SLOTS) ||
