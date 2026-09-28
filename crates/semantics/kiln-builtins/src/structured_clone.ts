@@ -32,7 +32,6 @@ const __kilnStructuredClone = (function installStructuredClone() {
   const isArray = Array.isArray;
   const valuesOf = Object.values;
   const symbolsOf = Object.getOwnPropertySymbols;
-  const arraySlice = Array.prototype.slice;
   const defineProperty = Object.defineProperty;
   const objectToString = Object.prototype.toString;
   const hasOwn = Object.prototype.hasOwnProperty;
@@ -167,40 +166,42 @@ const __kilnStructuredClone = (function installStructuredClone() {
     return out;
   }
 
-  // A dense copy first (`slice` keeps holes as holes), then the same walk as a record's.
+  // Visit own indices only. `slice` reads inherited numeric getters and turns their answers
+  // into own elements, while a structured clone leaves an absent index absent.
   function cloneArray(value: any[], seen: Map<any, any>, state: TransferState | null): any[] {
-    const out = arraySlice.call(value);
+    const out = new Array(value.length);
     seen.set(value, out);
     for (let i = 0; i < out.length; i++) {
-      const item = out[i];
+      if (!hasOwn.call(value, i)) continue;
+      const item = value[i];
       if (typeof item !== "object" || item === null) {
         if (typeof item === "function" || typeof item === "symbol") throw notCloneable(item);
+        defineProperty(out, i, { value: item, writable: true, enumerable: true, configurable: true });
         continue;
       }
       const copy = cloneValue(item, seen, state);
       if (isPending(state, copy)) (state as TransferState).fixups.push(out, i);
-      out[i] = copy;
+      defineProperty(out, i, { value: copy, writable: true, enumerable: true, configurable: true });
     }
     return out;
   }
 
-  // An array whose prototype is not `Array.prototype` (a subclass instance) copies as a plain
-  // array, element by element.
+  // A subclass also becomes a plain array and copies only its own elements.
   function cloneArrayLike(value: any[], seen: Map<any, any>, state: TransferState | null): any[] {
     const length = value.length;
     const out = new Array(length);
     seen.set(value, out);
     for (let i = 0; i < length; i++) {
-      if (!(i in value)) continue;
+      if (!hasOwn.call(value, i)) continue;
       const item = value[i];
       if (typeof item !== "object" || item === null) {
         if (typeof item === "function" || typeof item === "symbol") throw notCloneable(item);
-        out[i] = item;
+        defineProperty(out, i, { value: item, writable: true, enumerable: true, configurable: true });
         continue;
       }
       const copy = cloneValue(item, seen, state);
       if (isPending(state, copy)) (state as TransferState).fixups.push(out, i);
-      out[i] = copy;
+      defineProperty(out, i, { value: copy, writable: true, enumerable: true, configurable: true });
     }
     return out;
   }
@@ -415,9 +416,6 @@ const __kilnStructuredClone = (function installStructuredClone() {
 
   const internal = {
     serialize,
-    // Mode 1 asks the heap adapter for the existing message wire, with no transfer effects.
-    // An adapter without this specialization answers undefined and encodeMessage uses serialize.
-    encodeMessageData(value: any): any[] | undefined { return __kilnCloneData(value, 1); },
     transferOption,
     sequence,
     dataCloneError,

@@ -314,9 +314,8 @@ static int kiln_c99_clone_table_get(const kiln_c99_clone_table *table, kiln_val 
     return 0;
 }
 
-/* Exactly the representation whose reads cannot invoke program code. The clone and message
- * encoder share this guard so the latter can write the wire directly from the original graph:
- * there is no need to allocate an intermediate copy before sending it. */
+/* Exactly the representation whose reads cannot invoke program code. The clone and the Rust
+ * message encoder's native descriptor callback share this guard. */
 static int kiln_c99_clone_safe_object(const kiln_object *source) {
     kiln_shape *shape = source->shape;
     size_t index;
@@ -335,7 +334,12 @@ static int kiln_c99_clone_safe_object(const kiln_object *source) {
 }
 
 static int kiln_c99_clone_safe_array(const kiln_array *source) {
-    return source->properties.tag == KILN_VALUE_UNDEFINED && source->match_index == -1;
+    size_t index;
+    if (source->properties.tag != KILN_VALUE_UNDEFINED || source->match_index != -1) return 0;
+    if (source->is_numeric) return 1; /* Dense numeric storage has no holes. */
+    for (index = 0; index < source->count; ++index)
+        if (source->elements[index] == KILN_VAL_HOLE) return 0;
+    return 1;
 }
 
 /* The shape of a copy of the list-mode `source`: the transition walk from `root`, the fresh
@@ -513,7 +517,7 @@ static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size
     if (argc == 0) return KILN_C99_OK;
     if (argc > 1 && args[1].tag == KILN_VALUE_NUMBER &&
         kiln_c99_as_number(args[1]) == 1.0)
-        return kiln_c99_encode_message_data_raw(out, args, argc);
+        return KILN_C99_OK; /* The shared Rust worker codec handles plain messages. */
     memset(table.inline_keys, 0, sizeof table.inline_keys);
     table.keys = table.inline_keys;
     table.values = table.inline_values;
@@ -530,109 +534,86 @@ static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size
     return KILN_C99_OK;
 }
 
-/* Representation adapter for the plain-data clone above. Its answer is the shared message
- * format in web_events_streams.ts, starting with zero transferred ports. Each container must
- * pass the same safe-read guard as `kiln_c99_clone_data_raw`: getters, proxies, special property
- * attributes and host objects still use the authoritative TypeScript algorithm. Bailouts here
- * return there before a message or a transfer is committed. */
-static int kiln_c99_encode_data_val(kiln_value value, kiln_c99_clone_table *seen,
-                                    kiln_value tokens, int depth) {
-    kiln_value known;
-    kiln_val identity;
-    size_t index, count;
-    int status;
-    if (depth > KILN_C99_CLONE_MAX_DEPTH) return KILN_C99_CLONE_BAIL;
+/* Representation callbacks for the provider's shared Rust encoder. They only inspect own
+ * plain-data storage; no JavaScript getter, proxy trap, or heap allocation runs here. Values
+ * stay rooted in the invoking generated frame for this synchronous walk. */
+static int kiln_c99_worker_plain_describe(void *context, uint64_t handle,
+                                           kiln_worker_plain_node *out) {
+    kiln_value value = kiln_val_to_boundary((kiln_val)handle);
+    (void)context;
+    memset(out, 0, sizeof *out);
     switch (value.tag) {
-    case KILN_VALUE_UNDEFINED: return kiln_c99_array_push(tokens, kiln_c99_number(0));
-    case KILN_VALUE_NULL: return kiln_c99_array_push(tokens, kiln_c99_number(1));
-    case KILN_VALUE_BOOLEAN: return kiln_c99_array_push(tokens, kiln_c99_number(value.bits ? 3 : 2));
-    case KILN_VALUE_NUMBER:
+    case KILN_VALUE_UNDEFINED: out->kind = 0; return 1;
+    case KILN_VALUE_NULL: out->kind = 1; return 1;
+    case KILN_VALUE_BOOLEAN: out->kind = value.bits ? 3 : 2; return 1;
+    case KILN_VALUE_NUMBER: out->kind = 4; out->number = kiln_c99_as_number(value); return 1;
     case KILN_VALUE_STRING:
-        status = kiln_c99_array_push(tokens, kiln_c99_number(value.tag == KILN_VALUE_NUMBER ? 4 : 5));
-        return status == KILN_C99_OK ? kiln_c99_array_push(tokens, value) : status;
+        if (value.ptr == NULL) return 0;
+        out->kind = 5;
+        out->text = (const kiln_string *)value.ptr;
+        return 1;
     case KILN_VALUE_OBJECT:
     case KILN_VALUE_ARRAY:
-        break;
-    default:
-        return KILN_C99_CLONE_BAIL;
-    }
-    if (value.ptr == NULL ||
-        kiln_c99_gc_payload_kind(value.ptr) !=
-            (value.tag == KILN_VALUE_OBJECT ? KILN_GC_OBJECT : KILN_GC_ARRAY))
-        return KILN_C99_CLONE_BAIL;
-    if (value.tag == KILN_VALUE_OBJECT &&
-        !kiln_c99_clone_safe_object(kiln_c99_object_of(value))) return KILN_C99_CLONE_BAIL;
-    if (value.tag == KILN_VALUE_ARRAY &&
-        !kiln_c99_clone_safe_array(kiln_c99_array_of(value))) return KILN_C99_CLONE_BAIL;
-    identity = kiln_val_from_boundary(value);
-    if (kiln_c99_clone_table_get(seen, identity, &identity)) {
-        known = kiln_val_to_boundary(identity);
-        status = kiln_c99_array_push(tokens, kiln_c99_number(7));
-        return status == KILN_C99_OK ? kiln_c99_array_push(tokens, known) : status;
-    }
-    status = kiln_c99_clone_table_put(seen, kiln_val_from_boundary(value),
-                                      kiln_val_from_boundary(kiln_c99_number((double)seen->count)));
-    if (status != KILN_C99_OK) return status;
-    if (value.tag == KILN_VALUE_ARRAY) {
-        kiln_array *array = kiln_c99_array_of(value);
-        count = array->count;
-        status = kiln_c99_array_push(tokens, kiln_c99_number(9));
-        if (status == KILN_C99_OK) status = kiln_c99_array_push(tokens, kiln_c99_number((double)count));
-        for (index = 0; status == KILN_C99_OK && index < count; ++index) {
-            kiln_value item = kiln_val_to_boundary(array->elements[index]);
-            status = item.tag == KILN_VALUE_HOLE
-                         ? kiln_c99_array_push(tokens, kiln_c99_number(10))
-                         : kiln_c99_encode_data_val(item, seen, tokens, depth + 1);
+        if (value.ptr == NULL || kiln_c99_gc_payload_kind(value.ptr) !=
+            (value.tag == KILN_VALUE_OBJECT ? KILN_GC_OBJECT : KILN_GC_ARRAY)) return 0;
+        if (value.tag == KILN_VALUE_OBJECT) {
+            kiln_object *object = kiln_c99_object_of(value);
+            if (!kiln_c99_clone_safe_object(object)) return 0;
+            out->kind = 8;
+            out->length = object->shape == NULL ? object->count : object->shape->property_count;
+        } else {
+            kiln_array *array = kiln_c99_array_of(value);
+            if (!kiln_c99_clone_safe_array(array)) return 0;
+            out->kind = 9;
+            out->length = array->count;
         }
-        return status;
-    }
-    {
-        kiln_object *object = kiln_c99_object_of(value);
-        kiln_shape *shape = object->shape;
-        count = shape == NULL ? object->count : shape->property_count;
-        /* Object.keys orders integer names before other strings. Leave those uncommon shapes
-         * to TypeScript rather than duplicating its enumeration rule here. */
-        for (index = 0; index < count; ++index) {
-            const kiln_string *key = shape == NULL ? object->properties[index].key : shape->keys[index];
-            if (key == NULL || kiln_c99_key_index_key(key) >= 0.0) return KILN_C99_CLONE_BAIL;
-        }
-        status = kiln_c99_array_push(tokens, kiln_c99_number(8));
-        if (status == KILN_C99_OK) status = kiln_c99_array_push(tokens, kiln_c99_number((double)count));
-        for (index = 0; status == KILN_C99_OK && index < count; ++index) {
-            const kiln_string *key = shape == NULL ? object->properties[index].key : shape->keys[index];
-            kiln_value item = shape == NULL ? object->properties[index].value
-                                            : kiln_val_to_boundary(object->slots[index]);
-            status = kiln_c99_array_push(tokens,
-                kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)key, key->unit_len));
-            if (status == KILN_C99_OK) status = kiln_c99_encode_data_val(item, seen, tokens, depth + 1);
-        }
-        return status;
+        if (out->length > 9007199254740991ull) return 0;
+        out->identity = (size_t)(uintptr_t)value.ptr;
+        return 1;
+    default: return 0;
     }
 }
 
-static int kiln_c99_encode_message_data_raw(kiln_value *out, const kiln_value *args, size_t argc) {
-    kiln_c99_clone_table seen;
-    kiln_value tokens = kiln_c99_undefined();
+static int kiln_c99_worker_plain_field(void *context, uint64_t handle, size_t index,
+                                        kiln_worker_plain_child *out) {
+    kiln_value value = kiln_val_to_boundary((kiln_val)handle);
+    (void)context;
+    memset(out, 0, sizeof *out);
+    if (value.tag == KILN_VALUE_ARRAY) {
+        kiln_array *array = kiln_c99_array_of(value);
+        kiln_value item;
+        if (index >= array->count) return 0;
+        item = kiln_val_to_boundary(array->elements[index]);
+        if (item.tag == KILN_VALUE_HOLE) out->hole = 1;
+        else out->value = (uint64_t)kiln_val_from_boundary(item);
+        return 1;
+    }
+    if (value.tag == KILN_VALUE_OBJECT) {
+        kiln_object *object = kiln_c99_object_of(value);
+        kiln_shape *shape = object->shape;
+        const kiln_string *key;
+        kiln_value item;
+        if (index >= (shape == NULL ? object->count : shape->property_count)) return 0;
+        key = shape == NULL ? object->properties[index].key : shape->keys[index];
+        if (key == NULL || kiln_c99_key_index_key(key) >= 0.0) return 0;
+        item = shape == NULL ? object->properties[index].value
+                             : kiln_val_to_boundary(object->slots[index]);
+        out->key = key;
+        out->value = (uint64_t)kiln_val_from_boundary(item);
+        return 1;
+    }
+    return 0;
+}
+
+static int kiln_c99_worker_post_plain(uint64_t port, kiln_value value, kiln_value *out) {
     int status;
     *out = kiln_c99_undefined();
-    if (argc == 0 || (args[0].tag != KILN_VALUE_OBJECT && args[0].tag != KILN_VALUE_ARRAY))
-        return KILN_C99_OK;
-    status = kiln_c99_new_array(&tokens);
-    if (status != KILN_C99_OK) return status;
-    status = kiln_c99_array_push(tokens, kiln_c99_number(0));
-    memset(seen.inline_keys, 0, sizeof seen.inline_keys);
-    seen.keys = seen.inline_keys;
-    seen.values = seen.inline_values;
-    seen.capacity = KILN_C99_CLONE_INLINE;
-    seen.count = 0;
-    if (status == KILN_C99_OK) status = kiln_c99_encode_data_val(args[0], &seen, tokens, 0);
-    if (seen.keys != seen.inline_keys) {
-        free(seen.keys);
-        free(seen.values);
-    }
-    if (status == KILN_C99_CLONE_BAIL) return KILN_C99_OK;
-    if (status == KILN_C99_OK) *out = tokens;
-    return status;
+    if (value.tag != KILN_VALUE_OBJECT && value.tag != KILN_VALUE_ARRAY) return KILN_C99_OK;
+    status = kiln_worker_post_plain(port, (uint64_t)kiln_val_from_boundary(value), NULL,
+                                    kiln_c99_worker_plain_describe, kiln_c99_worker_plain_field);
+    if (status < 0) return KILN_C99_INVALID_ARGUMENT;
+    if (status > 0) *out = kiln_c99_boolean(1);
+    return KILN_C99_OK;
 }
 
 static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value source,

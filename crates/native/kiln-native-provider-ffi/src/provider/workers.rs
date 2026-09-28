@@ -69,6 +69,91 @@ const OP_KILL: u32 = 19;
 /// realms that listen for it.
 const OP_SIGNAL_DELIVER: u32 = 20;
 
+/// Borrowed, read-only description of one native heap value. The callback may reuse its
+/// scratch on the next call; the provider copies strings before asking for another field.
+#[repr(C)]
+#[derive(Default)]
+pub struct WorkerPlainNode {
+    pub kind: u32,
+    pub number: f64,
+    pub text: *const KilnString,
+    pub identity: usize,
+    pub length: usize,
+}
+
+#[repr(C)]
+#[derive(Default)]
+pub struct WorkerPlainChild {
+    pub key: *const KilnString,
+    pub value: u64,
+    pub hole: u32,
+}
+
+pub type WorkerPlainDescribe = unsafe extern "C" fn(*mut c_void, u64, *mut WorkerPlainNode) -> i32;
+pub type WorkerPlainField =
+    unsafe extern "C" fn(*mut c_void, u64, usize, *mut WorkerPlainChild) -> i32;
+
+struct NativePlainSource {
+    context: *mut c_void,
+    describe: WorkerPlainDescribe,
+    field: WorkerPlainField,
+}
+
+impl workers::PlainSource for NativePlainSource {
+    type Handle = u64;
+
+    fn describe(&mut self, handle: u64) -> Option<workers::PlainNode> {
+        let mut node = WorkerPlainNode::default();
+        // SAFETY: the C callback is live for this synchronous call and writes one descriptor.
+        if unsafe { (self.describe)(self.context, handle, &mut node) } != 1 {
+            return None;
+        }
+        Some(match node.kind {
+            0 => workers::PlainNode::Undefined,
+            1 => workers::PlainNode::Null,
+            2 => workers::PlainNode::Bool(false),
+            3 => workers::PlainNode::Bool(true),
+            4 => workers::PlainNode::Number(node.number),
+            5 => {
+                if node.text.is_null() {
+                    return None;
+                }
+                // SAFETY: callback lends a live kiln_string through this call.
+                let view = unsafe { validate_string(&*node.text) }?;
+                workers::PlainNode::String(StringUnits::from_view(view))
+            }
+            8 => workers::PlainNode::Object {
+                identity: node.identity,
+                length: node.length,
+            },
+            9 => workers::PlainNode::Array {
+                identity: node.identity,
+                length: node.length,
+            },
+            _ => return None,
+        })
+    }
+
+    fn child(&mut self, handle: u64, index: usize) -> Option<workers::PlainChild<u64>> {
+        let mut child = WorkerPlainChild::default();
+        // SAFETY: the callback borrows one field from the live, guarded container.
+        if unsafe { (self.field)(self.context, handle, index, &mut child) } != 1 {
+            return None;
+        }
+        let key = if child.key.is_null() {
+            None
+        } else {
+            // SAFETY: copy before the next callback can reuse its scratch.
+            let view = unsafe { validate_string(&*child.key) }?;
+            Some(StringUnits::from_view(view))
+        };
+        Some(workers::PlainChild {
+            key,
+            value: (child.hole == 0).then_some(child.value),
+        })
+    }
+}
+
 /// A transferred `ArrayBuffer`'s block, owned by the message until a realm adopts it.
 struct NativeBlock {
     pointer: *mut u8,
@@ -162,7 +247,9 @@ unsafe fn tokens_from_c(tokens: *mut WorkerToken, count: u64) -> Option<Vec<Toke
                     return None;
                 } else {
                     // SAFETY: the C runtime passes `length` live bytes for this call.
-                    Arc::from(unsafe { std::slice::from_raw_parts(token.data.cast::<u8>(), length) })
+                    Arc::from(unsafe {
+                        std::slice::from_raw_parts(token.data.cast::<u8>(), length)
+                    })
                 };
                 Token::Bytes(bytes)
             }
@@ -291,6 +378,36 @@ pub unsafe extern "C" fn kiln_worker_post(
     })
 }
 
+/// Encode and post a guarded plain graph through the shared Rust token builder. A zero answer
+/// means the representation adapter declined the graph and the caller must use the full clone.
+/// One means the graph was encoded (including when the endpoint has closed and drops it).
+///
+/// # Safety
+///
+/// `describe` and `field` must remain callable throughout this call, lend live descriptors, and
+/// perform no JavaScript-visible effects. `root` and every child handle must remain rooted.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_worker_post_plain(
+    port: u64,
+    root: u64,
+    context: *mut c_void,
+    describe: WorkerPlainDescribe,
+    field: WorkerPlainField,
+) -> i32 {
+    ffi(|| {
+        let mut source = NativePlainSource {
+            context,
+            describe,
+            field,
+        };
+        let Some(tokens) = workers::encode_plain(&mut source, root) else {
+            return 0;
+        };
+        let _ = workers::post(port, Message::new(workers::kind::USER, tokens));
+        1
+    })
+}
+
 /// Take the oldest message queued for `port`: 1 with its kind and tokens, 0 when there is none.
 /// The tokens stay valid until `kiln_worker_message_free(*out_message)`; a moved block or shared
 /// store the C runtime adopts, it clears from its token first.
@@ -307,7 +424,10 @@ pub unsafe extern "C" fn kiln_worker_take(
     out_message: *mut *mut c_void,
 ) -> i32 {
     ffi(|| {
-        if out_kind.is_null() || out_tokens.is_null() || out_count.is_null() || out_message.is_null()
+        if out_kind.is_null()
+            || out_tokens.is_null()
+            || out_count.is_null()
+            || out_message.is_null()
         {
             return INVALID_ARGUMENT;
         }
@@ -351,7 +471,9 @@ pub unsafe extern "C" fn kiln_worker_message_free(message: *mut c_void) {
             TOKEN_MOVED => unsafe { free(token.handle) },
             // SAFETY: the strong reference `token_to_c` made and nobody adopted.
             TOKEN_SHARED => unsafe {
-                drop(Arc::from_raw(token.handle.cast::<NativeShared>().cast_const()))
+                drop(Arc::from_raw(
+                    token.handle.cast::<NativeShared>().cast_const(),
+                ))
             },
             _ => {}
         }
@@ -442,8 +564,13 @@ pub unsafe extern "C" fn kiln_worker_broadcast_join(name: *const KilnString, out
 /// What runs a module of the program as a worker's realm: the graph launcher's, on the worker's
 /// thread. `entry` is the module's path, or source text when `eval` is nonzero; answers the exit
 /// code.
-pub type WorkerRunner =
-    unsafe extern "C" fn(entry: *const u8, entry_len: u64, eval: i32, argc: u64, argv: *const *const c_char) -> i32;
+pub type WorkerRunner = unsafe extern "C" fn(
+    entry: *const u8,
+    entry_len: u64,
+    eval: i32,
+    argc: u64,
+    argv: *const *const c_char,
+) -> i32;
 
 static RUNNER: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
@@ -488,8 +615,10 @@ pub unsafe extern "C" fn kiln_worker_spawn(
             return -2;
         }
         // SAFETY: registered by `kiln_worker_set_runner` from a `WorkerRunner`.
-        let runner: WorkerRunner = unsafe { std::mem::transmute::<*mut c_void, WorkerRunner>(runner) };
-        let (Some(entry), Some(info), Ok(argc)) = (string_of(entry), string_of(info), usize::try_from(argc))
+        let runner: WorkerRunner =
+            unsafe { std::mem::transmute::<*mut c_void, WorkerRunner>(runner) };
+        let (Some(entry), Some(info), Ok(argc)) =
+            (string_of(entry), string_of(info), usize::try_from(argc))
         else {
             return INVALID_ARGUMENT;
         };
@@ -525,9 +654,12 @@ pub unsafe extern "C" fn kiln_worker_spawn(
                 .spec
                 .argv
                 .iter()
-                .map(|argument| std::ffi::CString::new(argument.replace('\0', "")).unwrap_or_default())
+                .map(|argument| {
+                    std::ffi::CString::new(argument.replace('\0', "")).unwrap_or_default()
+                })
                 .collect();
-            let pointers: Vec<*const c_char> = argv.iter().map(|argument| argument.as_ptr()).collect();
+            let pointers: Vec<*const c_char> =
+                argv.iter().map(|argument| argument.as_ptr()).collect();
             // SAFETY: the launcher's runner, called on the worker's own thread with buffers that
             // outlive the call.
             unsafe {
@@ -670,7 +802,8 @@ pub unsafe extern "C" fn kiln_shared_create(
     ffi(|| {
         let growable = capacity != u64::MAX;
         let capacity = if growable { capacity } else { length };
-        let (Ok(length), Ok(capacity)) = (usize::try_from(length), usize::try_from(capacity)) else {
+        let (Ok(length), Ok(capacity)) = (usize::try_from(length), usize::try_from(capacity))
+        else {
             return INVALID_ARGUMENT;
         };
         let capacity = capacity.max(length);
@@ -761,7 +894,11 @@ pub unsafe extern "C" fn kiln_atomics_wait(
             return INVALID_ARGUMENT;
         };
         let size = if width == 8 { 8 } else { 4 };
-        if offset.checked_add(size).is_none_or(|end| end > store.capacity) || offset % size != 0 {
+        if offset
+            .checked_add(size)
+            .is_none_or(|end| end > store.capacity)
+            || offset % size != 0
+        {
             return INVALID_ARGUMENT;
         }
         // SAFETY: in bounds and aligned (the view's elements are), checked above.
@@ -772,7 +909,8 @@ pub unsafe extern "C" fn kiln_atomics_wait(
                 unsafe { AtomicI64::from_ptr(cell.cast()) }.load(Ordering::SeqCst) == expected
             } else {
                 // SAFETY: an aligned, in-bounds 4-byte cell of shared memory.
-                i64::from(unsafe { AtomicI32::from_ptr(cell.cast()) }.load(Ordering::SeqCst)) == expected
+                i64::from(unsafe { AtomicI32::from_ptr(cell.cast()) }.load(Ordering::SeqCst))
+                    == expected
             }
         };
         let limit = (timeout.is_finite() && timeout >= 0.0)
@@ -810,6 +948,9 @@ macro_rules! assert_worker_export {
     };
     (realm, kiln_worker_post, worker_post) => {
         const _: unsafe extern "C" fn(u32, u64, u32, *mut WorkerToken, u64) -> i32 = kiln_worker_post;
+    };
+    (realm, kiln_worker_post_plain, worker_post_plain) => {
+        const _: unsafe extern "C" fn(u64, u64, *mut c_void, WorkerPlainDescribe, WorkerPlainField) -> i32 = kiln_worker_post_plain;
     };
     (realm, kiln_worker_take, worker_take) => {
         const _: unsafe extern "C" fn(u64, *mut u32, *mut *mut WorkerToken, *mut u64, *mut *mut c_void) -> i32 = kiln_worker_take;
@@ -870,34 +1011,83 @@ mod tests {
     fn a_moved_block_and_a_shared_store_cross_a_channel_without_copying() {
         let mut ports = [0u64; 2];
         // SAFETY: room for two words.
-        assert_eq!(unsafe { kiln_worker_op(OP_CHANNEL, 0, ports.as_mut_ptr()) }, 0);
+        assert_eq!(
+            unsafe { kiln_worker_op(OP_CHANNEL, 0, ports.as_mut_ptr()) },
+            0
+        );
         // SAFETY: plain allocations for the test.
         let block = unsafe { calloc(4, 1) }.cast::<u8>();
         let mut bytes = std::ptr::null_mut();
         let mut handle = std::ptr::null_mut();
         // SAFETY: writable out-pointers.
-        assert_eq!(unsafe { kiln_shared_create(8, 8, &mut bytes, &mut handle) }, 0);
+        assert_eq!(
+            unsafe { kiln_shared_create(8, 8, &mut bytes, &mut handle) },
+            0
+        );
         let text = "héllo";
         let units: Vec<u16> = text.encode_utf16().collect();
         let mut tokens = [
-            WorkerToken { kind: TOKEN_NUMBER, flag: 0, number: 4.5, data: std::ptr::null(), len: 0, handle: std::ptr::null_mut() },
-            WorkerToken { kind: TOKEN_STRING, flag: 1, number: 0.0, data: units.as_ptr().cast(), len: units.len() as u64, handle: std::ptr::null_mut() },
-            WorkerToken { kind: TOKEN_MOVED, flag: 0, number: 0.0, data: std::ptr::null(), len: 4, handle: block.cast() },
-            WorkerToken { kind: TOKEN_SHARED, flag: 0, number: 0.0, data: std::ptr::null(), len: 8, handle },
+            WorkerToken {
+                kind: TOKEN_NUMBER,
+                flag: 0,
+                number: 4.5,
+                data: std::ptr::null(),
+                len: 0,
+                handle: std::ptr::null_mut(),
+            },
+            WorkerToken {
+                kind: TOKEN_STRING,
+                flag: 1,
+                number: 0.0,
+                data: units.as_ptr().cast(),
+                len: units.len() as u64,
+                handle: std::ptr::null_mut(),
+            },
+            WorkerToken {
+                kind: TOKEN_MOVED,
+                flag: 0,
+                number: 0.0,
+                data: std::ptr::null(),
+                len: 4,
+                handle: block.cast(),
+            },
+            WorkerToken {
+                kind: TOKEN_SHARED,
+                flag: 0,
+                number: 0.0,
+                data: std::ptr::null(),
+                len: 8,
+                handle,
+            },
         ];
         // SAFETY: four writable tokens.
-        assert_eq!(unsafe { kiln_worker_post(OP_POST, ports[0], 0, tokens.as_mut_ptr(), 4) }, 1);
+        assert_eq!(
+            unsafe { kiln_worker_post(OP_POST, ports[0], 0, tokens.as_mut_ptr(), 4) },
+            1
+        );
         assert!(tokens[2].handle.is_null(), "the message took the block");
-        let (mut kind, mut out, mut count, mut message) = (9u32, std::ptr::null_mut(), 0u64, std::ptr::null_mut());
+        let (mut kind, mut out, mut count, mut message) =
+            (9u32, std::ptr::null_mut(), 0u64, std::ptr::null_mut());
         // SAFETY: writable out-pointers.
-        assert_eq!(unsafe { kiln_worker_take(ports[1], &mut kind, &mut out, &mut count, &mut message) }, 1);
+        assert_eq!(
+            unsafe { kiln_worker_take(ports[1], &mut kind, &mut out, &mut count, &mut message) },
+            1
+        );
         assert_eq!((kind, count), (0, 4));
         // SAFETY: `count` tokens valid until the free below.
         let received = unsafe { std::slice::from_raw_parts_mut(out, 4) };
         assert_eq!(received[0].number, 4.5);
         assert_eq!(received[1].flag, 1);
-        assert_eq!(received[2].handle, block.cast(), "the same block, not a copy");
-        assert_eq!(received[3].data, bytes.cast_const().cast(), "the same shared bytes");
+        assert_eq!(
+            received[2].handle,
+            block.cast(),
+            "the same block, not a copy"
+        );
+        assert_eq!(
+            received[3].data,
+            bytes.cast_const().cast(),
+            "the same shared bytes"
+        );
         // SAFETY: from `kiln_worker_take`; the block and shared reference go back with it.
         unsafe { kiln_worker_message_free(message) };
         // SAFETY: the buffer's own reference.

@@ -5,9 +5,9 @@
 //!
 //! Everything here is process-wide and `Send`, and nothing here is a JavaScript value. A realm's
 //! heap never leaves its thread; what crosses is a [`Message`]: a kind and a flat list of
-//! [`Token`]s that the shared TypeScript (`kiln-builtins/src/web_events_streams.ts`) wrote from
-//! a structured clone and that the receiving realm's TypeScript reads back into one. The engines
-//! only translate tokens to and from their own values, which is why one runtime serves both.
+//! [`Token`]s written either by the shared Rust plain-graph encoder below or by the shared
+//! TypeScript clone (`kiln-builtins/src/web_events_streams.ts`) for observable and special
+//! values. The receiving realm builds its own values from those tokens; no heap pointer crosses.
 //!
 //! # Ports
 //!
@@ -91,6 +91,91 @@ pub enum Token {
     Bytes(Arc<[u8]>),
     /// A `SharedArrayBuffer`'s store, shared: every realm that receives it sees the same bytes.
     Shared(Arc<dyn Any + Send + Sync>),
+}
+
+/// The guarded, side-effect-free view of a value used by the message encoder. Engines only
+/// describe their representation; this module owns traversal, references and wire tags.
+pub enum PlainNode {
+    Undefined,
+    Null,
+    Bool(bool),
+    Number(f64),
+    String(StringUnits),
+    Object { identity: usize, length: usize },
+    Array { identity: usize, length: usize },
+}
+
+/// One own data field or dense array element. An absent value is an array hole.
+pub struct PlainChild<H> {
+    pub key: Option<StringUnits>,
+    pub value: Option<H>,
+}
+
+/// A representation adapter for the common plain-graph message encoder. `describe` and
+/// `child` must neither invoke user code nor mutate or allocate in the engine's heap. They
+/// return `None` when a node needs the full structured-clone algorithm instead.
+pub trait PlainSource {
+    type Handle: Copy;
+
+    fn describe(&mut self, handle: Self::Handle) -> Option<PlainNode>;
+    fn child(&mut self, handle: Self::Handle, index: usize) -> Option<PlainChild<Self::Handle>>;
+}
+
+/// Encode a plain graph in the same token language as the shared TypeScript clone. No message is
+/// posted until the entire walk succeeds, so an unsupported descendant falls back intact.
+pub fn encode_plain<S: PlainSource>(source: &mut S, root: S::Handle) -> Option<Vec<Token>> {
+    fn walk<S: PlainSource>(
+        source: &mut S,
+        handle: S::Handle,
+        seen: &mut HashMap<usize, usize>,
+        tokens: &mut Vec<Token>,
+        depth: usize,
+    ) -> Option<()> {
+        if depth > 512 {
+            return None;
+        }
+        match source.describe(handle)? {
+            PlainNode::Undefined => tokens.push(Token::Number(0.0)),
+            PlainNode::Null => tokens.push(Token::Number(1.0)),
+            PlainNode::Bool(value) => tokens.push(Token::Number(if value { 3.0 } else { 2.0 })),
+            PlainNode::Number(value) => {
+                tokens.push(Token::Number(4.0));
+                tokens.push(Token::Number(value));
+            }
+            PlainNode::String(value) => {
+                tokens.push(Token::Number(5.0));
+                tokens.push(Token::String(value));
+            }
+            node @ (PlainNode::Object { identity, length }
+            | PlainNode::Array { identity, length }) => {
+                if let Some(&reference) = seen.get(&identity) {
+                    tokens.push(Token::Number(7.0));
+                    tokens.push(Token::Number(reference as f64));
+                    return Some(());
+                }
+                seen.insert(identity, seen.len());
+                let object = matches!(node, PlainNode::Object { .. });
+                tokens.push(Token::Number(if object { 8.0 } else { 9.0 }));
+                tokens.push(Token::Number(length as f64));
+                for index in 0..length {
+                    let child = source.child(handle, index)?;
+                    if object {
+                        tokens.push(Token::String(child.key?));
+                    }
+                    match child.value {
+                        Some(value) => walk(source, value, seen, tokens, depth + 1)?,
+                        None if !object => tokens.push(Token::Number(10.0)),
+                        None => return None,
+                    }
+                }
+            }
+        }
+        Some(())
+    }
+
+    let mut tokens = vec![Token::Number(0.0)];
+    walk(source, root, &mut HashMap::new(), &mut tokens, 0)?;
+    Some(tokens)
 }
 
 impl Token {
@@ -895,6 +980,81 @@ fn interrupt_waits(key: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct PlainFixture;
+
+    impl PlainSource for PlainFixture {
+        type Handle = usize;
+
+        fn describe(&mut self, handle: usize) -> Option<PlainNode> {
+            Some(match handle {
+                0 => PlainNode::Object {
+                    identity: 1,
+                    length: 2,
+                },
+                1 => PlainNode::Array {
+                    identity: 2,
+                    length: 3,
+                },
+                2 => PlainNode::Number(17.0),
+                3 => PlainNode::Object {
+                    identity: 1,
+                    length: 2,
+                },
+                _ => return None,
+            })
+        }
+
+        fn child(&mut self, handle: usize, index: usize) -> Option<PlainChild<usize>> {
+            match (handle, index) {
+                (0, 0) => Some(PlainChild {
+                    key: Some("items".into()),
+                    value: Some(1),
+                }),
+                (0, 1) => Some(PlainChild {
+                    key: Some("self".into()),
+                    value: Some(3),
+                }),
+                (1, 0) => Some(PlainChild {
+                    key: None,
+                    value: Some(2),
+                }),
+                (1, 1) => Some(PlainChild {
+                    key: None,
+                    value: None,
+                }),
+                (1, 2) => Some(PlainChild {
+                    key: None,
+                    value: Some(3),
+                }),
+                _ => None,
+            }
+        }
+    }
+
+    #[test]
+    fn plain_encoder_owns_wire_order_references_and_holes() {
+        let tokens = encode_plain(&mut PlainFixture, 0).unwrap();
+        let numbers: Vec<_> = tokens
+            .iter()
+            .filter_map(|token| match token {
+                Token::Number(value) => Some(*value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            numbers,
+            [0.0, 8.0, 2.0, 9.0, 3.0, 4.0, 17.0, 10.0, 7.0, 0.0, 7.0, 0.0]
+        );
+        let keys: Vec<_> = tokens
+            .iter()
+            .filter_map(|token| match token {
+                Token::String(value) => Some(value.to_lossy_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(keys, ["items", "self"]);
+    }
 
     #[test]
     fn a_message_reaches_the_peer_and_a_close_follows_it() {
