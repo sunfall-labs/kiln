@@ -966,6 +966,7 @@ typedef struct kiln_c99_unit_cache {
 struct kiln_shape;
 typedef struct kiln_shape_transition {
 typedef struct kiln_shape {
+#define KILN_C99_SHAPE_FINAL 2u
 typedef struct kiln_shape_edge_table {
 #define KILN_C99_ATTR_ENUM_FLIP 1u
 #define KILN_C99_ATTR_READONLY 2u    /* not writable (an accessor always carries it) */
@@ -2158,6 +2159,19 @@ static kiln_nursery_chunk *kiln_c99_arena_chunk(size_t capacity, size_t bitmap_w
 static void kiln_c99_arena_chunks_free(kiln_nursery_chunk *chunks) {
 static int kiln_c99_heap_adopt_chunks(kiln_gc_heap *heap, kiln_nursery_chunk *chunks) {
 static int kiln_c99_chunk_sealed_for_move(const kiln_gc_nursery *nursery,
+typedef struct kiln_c99_graph_walk {
+static int kiln_c99_graph_follow(kiln_c99_graph_walk *walk, const void *payload) {
+static int kiln_c99_graph_follow_val(kiln_c99_graph_walk *walk, kiln_val value) {
+static int kiln_c99_graph_inline_string(const kiln_gc_block *block) {
+static int kiln_c99_graph_walk_block(kiln_c99_graph_walk *walk, kiln_gc_block *block) {
+static int kiln_c99_graph_candidate_closed(const kiln_gc_heap *heap,
+done:
+typedef enum kiln_c99_graph_incoming_result {
+static int kiln_c99_graph_in_batch(const kiln_gc_heap *heap,
+static int kiln_c99_graph_val_in_batch(const kiln_gc_heap *heap,
+static int kiln_c99_graph_value_in_batch(const kiln_gc_heap *heap,
+static int kiln_c99_graph_has_c_root_alias(const kiln_gc_heap *heap,
+static kiln_c99_graph_incoming_result kiln_c99_graph_incoming_probe(
 static int kiln_c99_heap_move_chunks(kiln_gc_heap *from, kiln_gc_heap *to,
 struct kiln_c99_par_arena {
 static uint64_t kiln_c99_graph_candidate_next_id;
@@ -2295,7 +2309,13 @@ static int kiln_c99_shape_define_new(kiln_object *object, const kiln_string *ike
 static inline kiln_body_fn kiln_c99_val_code(kiln_val value) {
 static int kiln_c99_ensure_dictionary(kiln_object *object);
 static int kiln_c99_shape_store_recorded(kiln_object *object, uint32_t slot, kiln_val value) {
+static void kiln_c99_shape_property(const kiln_object *object, uint32_t slot,
 static int kiln_c99_ensure_dictionary(kiln_object *object) {
+static int kiln_c99_property_walk(kiln_object *object, size_t *count) {
+static const kiln_property *kiln_c99_property_view(const kiln_object *object, size_t index,
+static int kiln_c99_final_builtin_attrs(const kiln_property *property, uint8_t *attrs,
+static int kiln_c99_final_builtin_matches(const kiln_shape *shape, const kiln_object *object) {
+static void kiln_c99_final_builtin_store(uint32_t tag, uint64_t code, kiln_object *object) {
 static int kiln_c99_new_object(kiln_value *out) {
 static int kiln_c99_new_shared_facade(uint32_t graph, uint32_t generation, uint32_t node,
 static int kiln_c99_shared_field_key(uint64_t lease, uint64_t index, kiln_value *out,
