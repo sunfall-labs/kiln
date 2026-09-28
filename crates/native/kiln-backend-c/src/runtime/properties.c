@@ -92,7 +92,7 @@ static int kiln_c99_is_node_hidden_key_key(const kiln_string *key) {
 static int kiln_c99_same_key_view(const kiln_property *property, const kiln_string *key) {
     return property != NULL && key != NULL &&
            (property->key == key ||
-            (kiln_c99_key_is_symbol(property->key) == kiln_c99_key_is_symbol(key) &&
+            (kiln_c99_key_domain(property->key) == kiln_c99_key_domain(key) &&
              kiln_string_equal(property->key, key)));
 }
 
@@ -909,13 +909,9 @@ static int kiln_c99_own_slot_key(kiln_value target, const kiln_string *key,
         }
         object->properties[position].key = ikey;
         object->properties[position].key_len = ikey == NULL ? key_len : ikey->unit_len;
-        /* A `@@` key is the machine's, not the program's: a private member, an error's kind, a
-         * combinator's bookkeeping. Nothing that enumerates own string properties may see one, and
-         * marking it here is one place rather than at each of the seven walks. The program cannot
-         * spell such a key -- `obj["@@x"]` is a different property only because nothing in the
-         * language produces this prefix. */
-        object->properties[position].enumerable = !kiln_c99_key_is_symbol(ikey) &&
-                                                   !kiln_c99_key_is_reserved(ikey);
+        /* The key's domain, rather than its text, says whether it is an internal slot. A
+         * program string that happens to begin with `@@` remains an ordinary enumerable key. */
+        object->properties[position].enumerable = !kiln_c99_key_is_reserved(ikey);
         object->properties[position].writable = 1;
         object->properties[position].configurable = 1;
         object->properties[position].symbol_hidden = 0;

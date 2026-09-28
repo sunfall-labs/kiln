@@ -262,6 +262,7 @@ macro_rules! kiln_string_abi_declaration {
 /* Property-key identity, never a character in the string. A Symbol's private key and a user
  * string with identical UTF-16 units must occupy different canonical-key domains. */
 #define KILN_STRING_SYMBOL_KEY UINT32_C(4)
+#define KILN_STRING_PRIVATE_KEY UINT32_C(8)
 typedef struct kiln_string {
     uint32_t unit_len;
     uint32_t flags;
@@ -356,7 +357,7 @@ static inline size_t kiln_string_unit_width(const kiln_string *string) {
 static inline int kiln_string_storage_size(uint32_t unit_len, uint32_t flags, size_t *out) {
     size_t width;
     uint32_t enc = flags & (KILN_STRING_LATIN1 | KILN_STRING_UTF16);
-    if ((flags & ~(KILN_STRING_LATIN1 | KILN_STRING_UTF16 | KILN_STRING_SLICED | KILN_STRING_SYMBOL_KEY)) != 0) return 0;
+    if ((flags & ~(KILN_STRING_LATIN1 | KILN_STRING_UTF16 | KILN_STRING_SLICED | KILN_STRING_SYMBOL_KEY | KILN_STRING_PRIVATE_KEY)) != 0) return 0;
     width = enc == KILN_STRING_UTF16 ? sizeof(uint16_t) : sizeof(uint8_t);
     size_t units = (size_t)unit_len;
     if (units > (SIZE_MAX - sizeof(kiln_string)) / width) return 0;

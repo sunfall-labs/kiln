@@ -1,11 +1,15 @@
 
 static inline int kiln_c99_key_is_reserved(const kiln_string *key) {
-    return key != NULL && key->unit_len >= 2 && kiln_string_unit_at(key, 0) == '@' &&
-           kiln_string_unit_at(key, 1) == '@';
+    return key != NULL &&
+           (key->flags & (KILN_STRING_SYMBOL_KEY | KILN_STRING_PRIVATE_KEY)) != 0;
 }
 
 static inline int kiln_c99_key_is_symbol(const kiln_string *key) {
     return key != NULL && (key->flags & KILN_STRING_SYMBOL_KEY) != 0;
+}
+
+static inline uint32_t kiln_c99_key_domain(const kiln_string *key) {
+    return key == NULL ? 0 : key->flags & (KILN_STRING_SYMBOL_KEY | KILN_STRING_PRIVATE_KEY);
 }
 
 /* A symbol the program made -- `Symbol()` is stored as `@@symbol:<n>`, `Symbol.for(k)` as

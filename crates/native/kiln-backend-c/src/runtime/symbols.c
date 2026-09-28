@@ -85,7 +85,7 @@ static int kiln_c99_remember_symbol(kiln_value symbol) {
 static int kiln_c99_symbol_of_key_view(const kiln_string *key, kiln_value *out) {
     size_t index;
     size_t known = sizeof kiln_c99_well_known / sizeof *kiln_c99_well_known;
-    if (key == NULL || out == NULL) return 0;
+    if (key == NULL || out == NULL || !kiln_c99_key_is_symbol(key)) return 0;
     for (index = 0; index < known; ++index) {
         if (kiln_string_equal(kiln_c99_well_known[index].key, key)) {
             *out = kiln_c99_value(KILN_VALUE_SYMBOL,
