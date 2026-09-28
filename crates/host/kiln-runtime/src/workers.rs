@@ -46,6 +46,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use std::task::Waker;
 use std::time::{Duration, Instant};
 
 use kiln_shared_graph::{Handle as SharedHandle, OpaqueHandle};
@@ -679,7 +680,15 @@ impl WorkerContext {
 struct WorkerRecord {
     terminate: Arc<AtomicBool>,
     control: u64,
-    thread: Option<crate::worker_pool::PinnedRealm<()>>,
+    task: Option<WorkerTask>,
+}
+
+enum WorkerTask {
+    Dedicated(crate::worker_pool::PinnedRealm<()>),
+    Scheduled {
+        handle: crate::turn_scheduler::PinnedTurnHandle,
+        _scheduler: Arc<crate::turn_scheduler::PinnedTurnScheduler>,
+    },
 }
 
 fn workers() -> MutexGuard<'static, HashMap<u64, WorkerRecord>> {
@@ -939,10 +948,7 @@ pub fn terminate_requested() -> bool {
 
 /// Start a worker: a thread of the realm host that runs `run` with the worker's context and
 /// posts its exit code. Answers the worker's key and the id node calls its `threadId`.
-pub fn spawn<F>(spec: WorkerSpec, run: F) -> Result<(u64, u64), String>
-where
-    F: FnOnce(Arc<WorkerContext>) -> i32 + Send + 'static,
-{
+fn prepare_worker(spec: WorkerSpec) -> Arc<WorkerContext> {
     let program = program();
     let thread_id = program.thread_ids.fetch_add(1, Ordering::Relaxed);
     let key = NEXT_KEY.fetch_add(1, Ordering::Relaxed);
@@ -972,9 +978,22 @@ where
         WorkerRecord {
             terminate: Arc::clone(&terminate),
             control,
-            thread: None,
+            task: None,
         },
     );
+    RUNNING.fetch_add(1, Ordering::AcqRel);
+    context
+}
+
+/// Start a worker: a thread of the realm host that runs `run` with the worker's context and
+/// posts its exit code. Answers the worker's key and the id node calls its `threadId`.
+pub fn spawn<F>(spec: WorkerSpec, run: F) -> Result<(u64, u64), String>
+where
+    F: FnOnce(Arc<WorkerContext>) -> i32 + Send + 'static,
+{
+    let context = prepare_worker(spec);
+    let key = context.key;
+    let thread_id = context.thread_id;
     let body = {
         let context = Arc::clone(&context);
         // A worker belongs to its parent's program: the same `process.pid`, and a signal it
@@ -982,11 +1001,10 @@ where
         let program = crate::signals::current_program();
         move || run_worker(context, program, run)
     };
-    RUNNING.fetch_add(1, Ordering::AcqRel);
     match realm_host().spawn_pinned_with_stack(WORKER_STACK, body) {
         Ok(thread) => {
             if let Some(record) = workers().get_mut(&key) {
-                record.thread = Some(thread);
+                record.task = Some(WorkerTask::Dedicated(thread));
             } else {
                 // Already finished and forgotten; nothing to join but the thread itself.
                 drop(thread.join());
@@ -1002,6 +1020,147 @@ where
     }
 }
 
+/// A worker graph that advances one language turn per scheduler lease. `finish` releases the
+/// graph's session on its owner lane and returns the worker's exit code. The runtime installs
+/// the worker protocol scope around construction, each advance, and finish.
+pub trait ScheduledWorkerBody {
+    fn advance(&mut self, waker: &Waker) -> crate::turn_queue::TurnOutcome;
+    fn finish(&mut self) -> i32;
+}
+
+struct ScheduledWorker<T: ScheduledWorkerBody> {
+    scope: Rc<RefCell<RealmScopeState>>,
+    body: Option<T>,
+    completion: WorkerCompletion,
+}
+
+/// Moves with the scheduler's factory command and then its lane-owned body. If cancellation
+/// discards the factory before it runs, dropping this guard still reports one worker exit.
+struct WorkerCompletion {
+    context: Arc<WorkerContext>,
+    signal_program: Option<Arc<crate::signals::Program>>,
+    completed: bool,
+}
+
+impl WorkerCompletion {
+    fn finish(&mut self, code: i32) {
+        if !self.completed {
+            self.completed = true;
+            complete_worker(&self.context, code);
+        }
+    }
+}
+
+impl Drop for WorkerCompletion {
+    fn drop(&mut self) {
+        if !self.completed {
+            let scope = Rc::new(RefCell::new(RealmScopeState::for_worker(
+                Arc::clone(&self.context),
+                self.signal_program.clone(),
+            )));
+            let _scope = RealmScopeGuard::enter(scope);
+            self.finish(1);
+        }
+    }
+}
+
+impl<T: ScheduledWorkerBody> ScheduledWorker<T> {
+    fn complete(&mut self, cancelled: bool) {
+        if self.completion.completed {
+            return;
+        }
+        let _scope = RealmScopeGuard::enter(Rc::clone(&self.scope));
+        let code = self.body.take().map_or(1, |mut body| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body.finish())).unwrap_or(1)
+        });
+        self.completion.finish(if cancelled { 1 } else { code });
+    }
+}
+
+impl<T: ScheduledWorkerBody> crate::turn_scheduler::PinnedTurn for ScheduledWorker<T> {
+    fn run_turn(&mut self, waker: &Waker) -> crate::turn_queue::TurnOutcome {
+        if self.completion.context.terminate_requested() {
+            self.complete(true);
+            return crate::turn_queue::TurnOutcome::Done;
+        }
+        if self.body.is_none() {
+            self.complete(true);
+            return crate::turn_queue::TurnOutcome::Done;
+        }
+        let outcome = {
+            let _scope = RealmScopeGuard::enter(Rc::clone(&self.scope));
+            self.body
+                .as_mut()
+                .expect("scheduled worker is live")
+                .advance(waker)
+        };
+        if matches!(outcome, crate::turn_queue::TurnOutcome::Done) {
+            self.complete(false);
+        }
+        outcome
+    }
+}
+
+impl<T: ScheduledWorkerBody> Drop for ScheduledWorker<T> {
+    fn drop(&mut self) {
+        self.complete(true);
+    }
+}
+
+/// Start a worker's one-turn body on a scheduler lane. Its factory and all later turns run under
+/// the same worker protocol identity, even though other realms use that OS thread between turns.
+pub fn spawn_scheduled<F, T>(
+    spec: WorkerSpec,
+    scheduler: Arc<crate::turn_scheduler::PinnedTurnScheduler>,
+    factory: F,
+) -> (u64, u64)
+where
+    F: FnOnce(Arc<WorkerContext>, Arc<crate::Reactor>, Arc<crate::turn_queue::TurnTicket>) -> T
+        + Send
+        + 'static,
+    T: ScheduledWorkerBody + 'static,
+{
+    let context = prepare_worker(spec);
+    let key = context.key;
+    let thread_id = context.thread_id;
+    let signal_program = crate::signals::current_program();
+    let completion = WorkerCompletion {
+        context: Arc::clone(&context),
+        signal_program: signal_program.clone(),
+        completed: false,
+    };
+    let handle = scheduler.spawn_pinned(move |reactor, ticket| {
+        let scope = Rc::new(RefCell::new(RealmScopeState::for_worker(
+            Arc::clone(&context),
+            signal_program,
+        )));
+        let body = {
+            let _scope = RealmScopeGuard::enter(Rc::clone(&scope));
+            enqueue(
+                context.parent,
+                Message::new(kind::ONLINE, value_tokens(Token::Undefined)),
+            );
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                factory(Arc::clone(&context), reactor, ticket)
+            }))
+            .ok()
+        };
+        ScheduledWorker {
+            scope,
+            body,
+            completion,
+        }
+    });
+    if let Some(record) = workers().get_mut(&key) {
+        record.task = Some(WorkerTask::Scheduled {
+            handle,
+            _scheduler: scheduler,
+        });
+    }
+    CHILDREN.with(|children| children.borrow_mut().push(key));
+    (key, thread_id)
+}
+
 fn run_worker<F>(
     context: Arc<WorkerContext>,
     signal_program: Option<Arc<crate::signals::Program>>,
@@ -1014,13 +1173,16 @@ fn run_worker<F>(
         signal_program,
     )));
     let _turn = RealmScopeGuard::enter(scope);
-    let port = context.spec.port;
     enqueue(
         context.parent,
         Message::new(kind::ONLINE, value_tokens(Token::Undefined)),
     );
     let code = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(Arc::clone(&context))))
         .unwrap_or(1);
+    complete_worker(&context, code);
+}
+
+fn complete_worker(context: &WorkerContext, code: i32) {
     // Node reports 1 for a worker it stopped, whatever the worker was doing when it stopped.
     let code = if context.terminate_requested() {
         1
@@ -1028,11 +1190,12 @@ fn run_worker<F>(
         code
     };
     finish_children();
+    RUNNING.fetch_sub(1, Ordering::AcqRel);
     enqueue(
         context.parent,
         Message::new(kind::EXIT, value_tokens(Token::Number(f64::from(code)))),
     );
-    close(port);
+    close(context.spec.port);
     {
         let mut ports = ports();
         if let Some(endpoint) = ports.endpoints.get_mut(&context.parent) {
@@ -1042,7 +1205,6 @@ fn run_worker<F>(
         }
     }
     close(context.spec.control);
-    RUNNING.fetch_sub(1, Ordering::AcqRel);
 }
 
 /// Ask worker `key` to stop: raise its flag, wake it where it may be waiting, and tell its
@@ -1056,6 +1218,14 @@ pub fn terminate(key: u64) -> bool {
         (Arc::clone(&record.terminate), record.control)
     };
     terminate.store(true, Ordering::Release);
+    {
+        let workers = workers();
+        if let Some(WorkerTask::Scheduled { handle, .. }) =
+            workers.get(&key).and_then(|record| record.task.as_ref())
+        {
+            handle.wake();
+        }
+    }
     enqueue(
         control,
         Message::new(kind::TERMINATE, value_tokens(Token::Undefined)),
@@ -1064,19 +1234,21 @@ pub fn terminate(key: u64) -> bool {
     true
 }
 
-/// End every worker this thread's realm started and wait for their threads: the realm is
-/// ending, and so do they. A worker that was still running is terminated.
+/// End every worker this realm started. Dedicated threads are joined; scheduled workers are
+/// cancelled on their owning lane without blocking the parent on that same lane.
 pub fn finish_children() {
     let children = CHILDREN.with(|children| std::mem::take(&mut *children.borrow_mut()));
     for &child in &children {
         terminate(child);
     }
     for child in children {
-        let thread = workers()
+        let task = workers()
             .get_mut(&child)
-            .and_then(|record| record.thread.take());
-        if let Some(thread) = thread {
-            drop(thread.join());
+            .and_then(|record| record.task.take());
+        match task {
+            Some(WorkerTask::Dedicated(thread)) => drop(thread.join()),
+            Some(WorkerTask::Scheduled { handle, .. }) => handle.cancel(),
+            None => {}
         }
         workers().remove(&child);
     }
@@ -1085,11 +1257,13 @@ pub fn finish_children() {
 /// Forget workers that have finished, joining their threads: called when a realm learns that one
 /// of its workers has exited, so a long-running program does not accumulate joined threads.
 pub fn reap(key: u64) {
-    let thread = workers()
+    let task = workers()
         .get_mut(&key)
-        .and_then(|record| record.thread.take());
-    if let Some(thread) = thread {
-        drop(thread.join());
+        .and_then(|record| record.task.take());
+    match task {
+        Some(WorkerTask::Dedicated(thread)) => drop(thread.join()),
+        Some(WorkerTask::Scheduled { handle, .. }) => handle.cancel(),
+        None => {}
     }
     workers().remove(&key);
     CHILDREN.with(|children| children.borrow_mut().retain(|child| *child != key));
@@ -1216,6 +1390,232 @@ fn interrupt_waits(key: u64) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    struct TwoTurnWorker {
+        context: Arc<WorkerContext>,
+        turns: usize,
+        ready: Option<std::sync::mpsc::Sender<()>>,
+    }
+
+    impl ScheduledWorkerBody for TwoTurnWorker {
+        fn advance(&mut self, _: &Waker) -> crate::turn_queue::TurnOutcome {
+            assert_eq!(thread_id(), self.context.thread_id);
+            self.turns += 1;
+            if self.turns == 1 {
+                if let Some(ready) = self.ready.take() {
+                    ready.send(()).expect("parent awaits first turn");
+                    crate::turn_queue::TurnOutcome::Parked
+                } else {
+                    crate::turn_queue::TurnOutcome::Ready
+                }
+            } else {
+                crate::turn_queue::TurnOutcome::Done
+            }
+        }
+
+        fn finish(&mut self) -> i32 {
+            assert_eq!(thread_id(), self.context.thread_id);
+            assert_eq!(self.turns, 2);
+            7
+        }
+    }
+
+    struct AlwaysParkWorker {
+        advances: Arc<std::sync::atomic::AtomicUsize>,
+        finished: Arc<std::sync::atomic::AtomicUsize>,
+        ready: Option<std::sync::mpsc::Sender<()>>,
+    }
+
+    impl ScheduledWorkerBody for AlwaysParkWorker {
+        fn advance(&mut self, _: &Waker) -> crate::turn_queue::TurnOutcome {
+            self.advances.fetch_add(1, Ordering::AcqRel);
+            if let Some(ready) = self.ready.take() {
+                ready.send(()).unwrap();
+            }
+            crate::turn_queue::TurnOutcome::Parked
+        }
+
+        fn finish(&mut self) -> i32 {
+            self.finished.fetch_add(1, Ordering::AcqRel);
+            7
+        }
+    }
+
+    #[test]
+    fn scheduled_worker_finishes_two_turns_and_wakes_for_termination() {
+        use super::*;
+
+        let scheduler = Arc::new(crate::turn_scheduler::PinnedTurnScheduler::new(1).unwrap());
+        let spec = |port, control| WorkerSpec {
+            entry: WorkerEntry::Eval(String::new()),
+            argv: Vec::new(),
+            info: String::new(),
+            port,
+            control,
+            pipe_stdio: true,
+        };
+        let (parent, port) = channel();
+        let (control, control_peer) = channel();
+        let (id, _) = spawn_scheduled(
+            spec(port, control),
+            Arc::clone(&scheduler),
+            |context, _, _| TwoTurnWorker {
+                context,
+                turns: 0,
+                ready: None,
+            },
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut messages = Vec::new();
+        while messages.len() < 2 && Instant::now() < deadline {
+            if let Some(message) = take(parent) {
+                messages.push(message);
+            } else {
+                std::thread::yield_now();
+            }
+        }
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].kind, kind::ONLINE);
+        assert_eq!(messages[1].kind, kind::EXIT);
+        assert!(matches!(messages[1].tokens[..], [_, _, Token::Number(n)] if n == 7.0));
+        reap(id);
+        close(parent);
+        close(control_peer);
+
+        let (parent, port) = channel();
+        let (control, control_peer) = channel();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (id, _) = spawn_scheduled(
+            spec(port, control),
+            Arc::clone(&scheduler),
+            move |context, _, _| TwoTurnWorker {
+                context,
+                turns: 0,
+                ready: Some(ready_tx),
+            },
+        );
+        ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(terminate(id));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut messages = Vec::new();
+        while messages.len() < 2 && Instant::now() < deadline {
+            if let Some(message) = take(parent) {
+                messages.push(message);
+            } else {
+                std::thread::yield_now();
+            }
+        }
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].kind, kind::ONLINE);
+        assert_eq!(messages[1].kind, kind::EXIT);
+        assert!(matches!(messages[1].tokens[..], [_, _, Token::Number(n)] if n == 1.0));
+        reap(id);
+        close(parent);
+        close(control_peer);
+    }
+
+    #[test]
+    fn terminated_scheduled_worker_does_not_park_again() {
+        let scheduler = Arc::new(crate::turn_scheduler::PinnedTurnScheduler::new(1).unwrap());
+        let (parent, port) = channel();
+        let (control, control_peer) = channel();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let advances = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let finished = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (id, _) = spawn_scheduled(
+            WorkerSpec {
+                entry: WorkerEntry::Eval(String::new()),
+                argv: Vec::new(),
+                info: String::new(),
+                port,
+                control,
+                pipe_stdio: true,
+            },
+            scheduler,
+            {
+                let advances = Arc::clone(&advances);
+                let finished = Arc::clone(&finished);
+                move |_, _, _| AlwaysParkWorker {
+                    advances,
+                    finished,
+                    ready: Some(ready_tx),
+                }
+            },
+        );
+        ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(terminate(id));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut messages = Vec::new();
+        while messages.len() < 2 && Instant::now() < deadline {
+            if let Some(message) = take(parent) {
+                messages.push(message);
+            } else {
+                std::thread::yield_now();
+            }
+        }
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].kind, kind::ONLINE);
+        assert_eq!(messages[1].kind, kind::EXIT);
+        assert!(matches!(messages[1].tokens[..], [_, _, Token::Number(n)] if n == 1.0));
+        assert_eq!(advances.load(Ordering::Acquire), 1);
+        assert_eq!(finished.load(Ordering::Acquire), 1);
+        reap(id);
+        close(parent);
+        close(control_peer);
+    }
+
+    #[test]
+    fn cancelled_before_factory_still_reports_exit_and_releases_running_count() {
+        let scheduler = Arc::new(crate::turn_scheduler::PinnedTurnScheduler::new(1).unwrap());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker = scheduler.spawn_pinned(move |_, _| {
+            move |_: &Waker| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                crate::turn_queue::TurnOutcome::Done
+            }
+        });
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let before = running();
+        let (parent, port) = channel();
+        let (control, control_peer) = channel();
+        let (id, _) = spawn_scheduled(
+            WorkerSpec {
+                entry: WorkerEntry::Eval(String::new()),
+                argv: Vec::new(),
+                info: String::new(),
+                port,
+                control,
+                pipe_stdio: true,
+            },
+            Arc::clone(&scheduler),
+            |_, _, _| -> AlwaysParkWorker { panic!("cancelled factory must not execute") },
+        );
+        assert!(terminate(id));
+        reap(id);
+        release_tx.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut exits = 0;
+        while exits == 0 && Instant::now() < deadline {
+            if let Some(message) = take(parent) {
+                if message.kind == kind::EXIT {
+                    assert!(matches!(message.tokens[..], [_, _, Token::Number(n)] if n == 1.0));
+                    exits += 1;
+                }
+            } else {
+                std::thread::yield_now();
+            }
+        }
+        assert_eq!(exits, 1);
+        assert!(take(parent).is_none());
+        assert_eq!(running(), before);
+        drop(blocker);
+        close(parent);
+        close(control_peer);
+    }
+
     #[test]
     fn worker_identity_and_signals_follow_a_realm_between_turns() {
         use super::*;
@@ -1308,7 +1708,6 @@ mod tests {
         close(first_port);
         close(second_port);
     }
-    use super::*;
     use kiln_shared_graph::{Handle, InputValue, Inspector, Snapshot, SourceId, SourceNode, share};
 
     struct EmptySharedRecord;
