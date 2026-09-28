@@ -584,14 +584,18 @@ pub(crate) fn call_native(
         Native::ObjectGetOwnPropertyDescriptors => {
             let target = arguments.first().unwrap_or(&Value::Undefined);
             let mut data = ObjectData::default();
-            // Symbol keys too: this is how a faithful copy is made, and one that quietly leaves
-            // them out is the bug this whole family had. The result object holds them under the
-            // same reserved key the source did, so it needs no registry to build.
-            for key in own_property_keys_with_symbols_units(intrinsics, target) {
+            for key in own_property_keys_units(intrinsics, target) {
                 if let Some(descriptor) =
                     own_descriptor_key(intrinsics, target, PropertyKeyRef::Units(&key))
                 {
                     data.set_units(&key, descriptor);
+                }
+            }
+            for key in own_symbol_keys_units(intrinsics, target) {
+                if let Some(descriptor) =
+                    own_descriptor_key(intrinsics, target, PropertyKeyRef::SymbolUnits(&key))
+                {
+                    data.set_key(PropertyKeyRef::SymbolUnits(&key), descriptor);
                 }
             }
             Value::Object(Rc::new(RefCell::new(data)))
