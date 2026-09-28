@@ -3619,7 +3619,10 @@ static const kiln_string *kiln_c99_interned(const char *bytes, size_t len) {
 
 static const kiln_string *kiln_c99_intern_static(const char *bytes, size_t len) {
     if (len > UINT32_MAX) return NULL;
-    kiln_string view = {(uint32_t)len, KILN_STRING_LATIN1, bytes};
+    /* Fixed runtime names use the same key domain when stored and when cached. In particular,
+     * the HTTP listener fast path caches @@node:events and must find the private property that
+     * EventEmitter.on created, or it will silently drop response end events. */
+    kiln_string view = {(uint32_t)len, kiln_c99_fixed_key_flags(bytes, len), bytes};
     return kiln_c99_intern_static_key(&view);
 }
 
