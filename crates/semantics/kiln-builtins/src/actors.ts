@@ -94,7 +94,12 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
               const snapshot = prepareActorMessage(args, buffers, consumed, new Map(), (handle: any): never => {
                 try {
                   const endpoint = internals.portEndpoint(sender);
-                  const request = internals.workerOp(GRAPH_REQUEST, endpoint, handle);
+                  const reservation = message.graphReservation;
+                  const bound = Number.isSafeInteger(reservation) && reservation > 0;
+                  const request = bound
+                    ? internals.workerOp(GRAPH_REQUEST, endpoint, handle, reservation, id,
+                      internals.portEndpoint(reply.port1))
+                    : internals.workerOp(GRAPH_REQUEST, endpoint, handle);
                   if (Number.isSafeInteger(request) && request > 0) pendingGraphRequest = request;
                 } catch { /* A runtime without a graph coordinator retains the refusal. */ }
                 throw namedError("DataCloneError", "graph transfer needs ownership proof");

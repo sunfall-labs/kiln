@@ -245,13 +245,17 @@ function serve(): void {
       }
     } else if (message.kind === "cancel") {
       const request = byId.get(message.id);
-      if (request && request.payload === undefined) {
+      // A graph placeholder is posted before the sender asks the coordinator to move its
+      // candidate. If that later request refuses, cancel must also release this held invoke.
+      if (request && (request.payload === undefined || request.graphWaiting)) {
         byId.delete(request.id);
         pending.splice(pending.indexOf(request), 1);
         if (request.granted) accepted--;
+        request.graphWaiting = false;
         releaseGraphReservation(request);
         request.reply.close();
         grant();
+        dispatch();
         stopped();
       }
     }
