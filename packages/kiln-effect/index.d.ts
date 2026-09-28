@@ -29,7 +29,8 @@ export function isolate<A>(factory: () => A): Effect.Effect<Isolated<A>>;
  * Creates a one-use transfer ticket. Object graph handoff remains fail-closed until
  * Kiln's runtime can prove sole ownership; ArrayBuffer tickets are supported.
  */
-export function transfer<A>(value: Isolated<A> | ArrayBuffer): TransferTicket<A>;
+export function transfer<A>(value: Isolated<A>): TransferTicket<A>;
+export function transfer(value: ArrayBuffer): TransferTicket<ArrayBuffer>;
 
 /**
  * `Effect.forEach` with unbounded concurrency; `"native"` is a spelling of unbounded.
