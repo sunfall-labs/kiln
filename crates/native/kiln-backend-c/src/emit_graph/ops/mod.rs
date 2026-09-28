@@ -340,7 +340,7 @@ pub(super) fn emit_graph_op(
             }
             Constant::WellKnownSymbol(symbol_key) => {
                 let key = symbol_key.property_key();
-                writeln!(output, "    {{ kiln_value tmp; kiln_c99_symbol_of_key({}, {}, &tmp); v{v} = kiln_val_from_boundary(tmp); }}", crate::c_string(key), key.len()).unwrap();
+                writeln!(output, "    {{ kiln_value tmp; if (!kiln_c99_symbol_of_key({}, {}, &tmp)) return KILN_C99_HOST_ERROR; v{v} = kiln_val_from_boundary(tmp); }}", crate::c_string(key), key.len()).unwrap();
             }
             Constant::BigInt(_) => {
                 writeln!(
