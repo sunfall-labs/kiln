@@ -929,14 +929,13 @@ kiln_value kiln_cli_describe_error(kiln_value value) {
     if (value.tag == 9 /* KILN_VALUE_OBJECT */ && value.bits != 0) {
         typedef struct kiln_runtime_prop_view {
             const kiln_string *key;
-            size_t key_len;
-            int enumerable;
-            int symbol_hidden;
-            int writable;
-            int configurable;
-            int accessor;
-            int refused;
+            /* The six one-bit descriptor flags in kiln_property share one unsigned word.
+             * Keep the complete stride: an Error may have several own properties, and the
+             * launcher needs to find message or stack without calling back into the heap. */
+            unsigned int attributes;
             kiln_value val;
+            kiln_value getter;
+            kiln_value setter;
         } kiln_runtime_prop_view;
         typedef struct kiln_runtime_obj_view {
             kiln_runtime_prop_view *properties;

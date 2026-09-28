@@ -3933,7 +3933,8 @@ namespace_failure:
 namespace_failure_without_order:
     if (data != NULL) {{
         for (index = 0; index < data->count; ++index) {{
-            if (kiln_c99_same_name_key(data->properties[index].key, "@@toStringTag") &&
+            if (data->properties[index].key != NULL &&
+                kiln_string_equals_ascii(data->properties[index].key, "@@toStringTag", 13) &&
                 data->properties[index].value.tag == KILN_VALUE_STRING)
                 kiln_c99_gc_release((void *)data->properties[index].value.ptr);
         }}
