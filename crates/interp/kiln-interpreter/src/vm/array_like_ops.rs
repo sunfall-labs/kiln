@@ -209,7 +209,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return self.set_array_index(target, items, *index as usize, value, instruction);
         }
         let units = key.property_key_units_checked()?;
-        if !self.write_accepted_key(target, PropertyKeyRef::Units(&units)) {
+        if !self.write_accepted_key(target, PropertyKeyRef::from_value(key, &units)) {
             return Err(Self::write_refused(key));
         }
         self.set_computed(target, key, value, instruction)

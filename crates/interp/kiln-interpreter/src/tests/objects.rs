@@ -1,6 +1,53 @@
 use super::*;
 
 #[test]
+fn strict_symbol_writes_check_the_symbol_descriptor() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: Default::default(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let key = Value::Symbol(Symbol::WellKnown(WellKnown::Iterator));
+    let other = Value::Symbol(Symbol::WellKnown(WellKnown::ToStringTag));
+    let units = key.property_key_units_checked().unwrap();
+    let mut writable = ObjectData::default();
+    writable.define_value_key(
+        PropertyKeyRef::SymbolUnits(&units),
+        Value::Number(1.0),
+        Attributes::DEFAULT,
+    );
+    writable.prevent_extensions();
+    let writable = Value::Object(Rc::new(RefCell::new(writable)));
+    vm.assign_with_strict(&writable, &key, Value::Number(2.0), 0, true)
+        .unwrap();
+    assert_eq!(vm.read_computed(&writable, &key, 0), Ok(Value::Number(2.0)));
+    assert!(
+        vm.assign_with_strict(&writable, &other, Value::Number(3.0), 0, true)
+            .is_err()
+    );
+
+    let mut readonly = ObjectData::default();
+    readonly.define_value_key(
+        PropertyKeyRef::SymbolUnits(&units),
+        Value::Number(1.0),
+        Attributes {
+            writable: false,
+            ..Attributes::DEFAULT
+        },
+    );
+    let readonly = Value::Object(Rc::new(RefCell::new(readonly)));
+    assert!(
+        vm.assign_with_strict(&readonly, &key, Value::Number(2.0), 0, true)
+            .is_err()
+    );
+    assert_eq!(vm.read_computed(&readonly, &key, 0), Ok(Value::Number(1.0)));
+}
+
+#[test]
 fn numeric_array_writes_preserve_property_key_boundaries_and_refusals() {
     let program = no_program();
     let mut host = TestHost {
