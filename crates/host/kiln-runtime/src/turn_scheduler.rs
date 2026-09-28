@@ -405,4 +405,59 @@ mod tests {
         assert_eq!(bad.status(), PinnedTurnStatus::Panicked);
         assert_eq!(good.status(), PinnedTurnStatus::Complete);
     }
+
+    #[test]
+    fn parked_local_timers_wake_many_realms_on_two_lanes() {
+        struct TimerTurn {
+            executor: crate::Executor,
+            fired: std::rc::Rc<std::cell::Cell<bool>>,
+            owner: std::thread::ThreadId,
+        }
+        impl PinnedTurn for TimerTurn {
+            fn run_turn(&mut self, waker: &Waker) -> TurnOutcome {
+                assert_eq!(std::thread::current().id(), self.owner);
+                self.executor.poll_local_once(waker);
+                if self.fired.get() {
+                    TurnOutcome::Done
+                } else {
+                    TurnOutcome::Parked
+                }
+            }
+        }
+
+        let scheduler = PinnedTurnScheduler::new(2).expect("lanes start");
+        let realms = (0..100)
+            .map(|_| {
+                scheduler.spawn_pinned(|reactor, _| {
+                    let executor = crate::Executor::on_reactor(reactor);
+                    let fired = std::rc::Rc::new(std::cell::Cell::new(false));
+                    executor.scope(|| {
+                        let fired = std::rc::Rc::clone(&fired);
+                        tokio::task::spawn_local(async move {
+                            tokio::time::sleep(Duration::from_millis(2)).await;
+                            fired.set(true);
+                        });
+                    });
+                    TimerTurn {
+                        executor,
+                        fired,
+                        owner: std::thread::current().id(),
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while realms
+            .iter()
+            .any(|realm| realm.status() == PinnedTurnStatus::Active)
+        {
+            assert!(Instant::now() < deadline, "all parked timers wake");
+            std::thread::yield_now();
+        }
+        assert!(
+            realms
+                .iter()
+                .all(|realm| realm.status() == PinnedTurnStatus::Complete)
+        );
+    }
 }
