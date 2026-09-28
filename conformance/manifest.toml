@@ -2233,3 +2233,16 @@ expected_stdout = """
 1 ["end"]
 [1,2,3] [1,2,3,4]
 """
+
+[[test]]
+id = "regress/r47-proxy-iterator-key"
+group = "regress"
+source = "regress/r47-proxy-iterator-key.js"
+status = "runnable"
+features = ["proxy", "symbols", "iterator", "spread"]
+catches = """
+An implicit iterator read must hand a Proxy get trap the Symbol.iterator symbol. The interpreter's named read passed the internal string spelling instead, so collection proxies such as Vue's returned an unbound native method and failed when spread called it.\
+"""
+expected_stdout = """
+1,2 symbol
+"""

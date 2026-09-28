@@ -1039,7 +1039,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         if matches!(target, Value::Proxy(_)) {
-            return self.proxy_get(target, &Value::String(key.owned()), instruction);
+            let trap_key = key
+                .is_symbol()
+                .then(|| key.known_ascii())
+                .flatten()
+                .and_then(|spelling| self.symbol_of_key(spelling.as_ref()))
+                .map(Value::Symbol)
+                .unwrap_or_else(|| Value::String(key.owned()));
+            return self.proxy_get(target, &trap_key, instruction);
         }
         // A namespace names the exporting module's bindings, so it is caught up before it is
         // read: the module may have assigned to an export since the link ran. The shared borrow
