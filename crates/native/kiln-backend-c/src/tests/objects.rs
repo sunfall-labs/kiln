@@ -1998,6 +1998,8 @@ int main(void) {
     if (another_sender.count != 0 || another_receiver.count != 2) return 44;
     kiln_c99_nursery_destroy(&another_sender.nursery);
     kiln_c99_nursery_destroy(&another_receiver.nursery);
+    kiln_c99_graph_candidate_next_id = UINT64_MAX;
+    if (kiln_c99_graph_candidate_open(&graph_a, &sender, sender.nursery.capacity)) return 45;
     return 0;
 }
 "#;

@@ -3294,14 +3294,18 @@ static uint64_t kiln_c99_graph_candidate_next_id;
  * graph is closed or excludes sender roots; those checks precede a future move call. */
 static int kiln_c99_graph_candidate_open(kiln_c99_par_arena *arena, const kiln_gc_heap *heap,
                                          size_t budget) {
-    uint64_t id;
+    uint64_t previous;
     if (arena == NULL || heap == NULL || heap->nursery.capacity == 0 || budget == 0) return 0;
-    id = __atomic_add_fetch(&kiln_c99_graph_candidate_next_id, 1, __ATOMIC_RELAXED);
-    if (id == 0) return 0;
+    previous = __atomic_load_n(&kiln_c99_graph_candidate_next_id, __ATOMIC_RELAXED);
+    do {
+        /* Never recycle an ID while an older candidate may still be live. */
+        if (previous == UINT64_MAX) return 0;
+    } while (!__atomic_compare_exchange_n(&kiln_c99_graph_candidate_next_id, &previous,
+                                          previous + 1, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
     memset(arena, 0, sizeof *arena);
     arena->heap = heap;
     arena->budget = budget;
-    arena->candidate_id = id;
+    arena->candidate_id = previous + 1;
     return 1;
 }
 
