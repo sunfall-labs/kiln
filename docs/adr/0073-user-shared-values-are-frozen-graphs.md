@@ -3,7 +3,8 @@
 ## Status
 
 Accepted, 2026-09-27, under the project owner's delegation to adjust or approve the API
-contracts and implement them. This is an API and storage contract, not an implemented feature.
+contracts and implement them. The `kiln:shared` implementation subsequently landed in both
+engines; the final program-wide gate remains due.
 
 Specifies user data in ADR 0070's shared immutable region (realms issues 08 and 11). Follows ADR
 0068 for kiln extensions, ADR 0060 for one semantic owner, ADR 0059 for realm intrinsics, and ADR
@@ -196,8 +197,8 @@ standard can be implemented independently, without treating this API as its poly
    and native output, run the affected native realm probes with several realm counts, and run
    `mise run native-stress` because rooting and collection change.
 
-The feature is unavailable until these steps pass. Neither the existing region nor
-`Object.freeze` implements it.
+These implementation steps landed in `7dcb12c7` through `07a2478c`. Neither the bootstrap
+region alone nor `Object.freeze` implements this contract.
 
 ## Rejected alternatives
 
