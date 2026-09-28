@@ -86,6 +86,9 @@ const OP_ACTOR_GRAPH_REQUEST: u32 = 30;
 const OP_ACTOR_GRAPH_STATUS: u32 = 31;
 const OP_ACTOR_GRAPH_REMOVE: u32 = 32;
 const OP_ACTOR_BIND_RECEIVER: u32 = 33;
+const OP_ACTOR_GRAPH_RESERVE: u32 = 34;
+const OP_ACTOR_GRAPH_RECEIVE: u32 = 35;
+const OP_ACTOR_GRAPH_RELEASE: u32 = 36;
 
 /// Borrowed, read-only description of one native heap value. The callback may reuse its
 /// scratch on the next call; the provider copies strings before asking for another field.
@@ -646,9 +649,23 @@ pub unsafe extern "C" fn kiln_worker_op(op: u32, a: u64, out: *mut u64) -> i32 {
                     return INVALID_ARGUMENT;
                 }
                 let request = unsafe { out.read() };
-                let queued = workers::actor_receiver_for_sender(a).is_some_and(|receiver| {
+                let reservation = unsafe { out.add(1).read() };
+                let call = unsafe { out.add(2).read() };
+                let reply = unsafe { out.add(3).read() };
+                let sender = super::realm::active_realm_id();
+                let receiver = if reservation == 0 {
+                    // The old actor bridge may still ask for a refusal-only pair claim while
+                    // the JavaScript grant switches to reservation tokens.
+                    workers::actor_receiver_for_sender(a)
+                } else {
+                    workers::actor_claim_reservation(a, reservation, call, reply, sender, request)
+                };
+                let queued = receiver.is_some_and(|receiver| {
                     super::realm::submit_graph_claim_request(receiver, request)
                 });
+                if !queued && reservation != 0 {
+                    workers::actor_unclaim_reservation(reservation, sender, request);
+                }
                 write(0, u64::from(queued));
             }
             OP_ACTOR_GRAPH_STATUS => {
@@ -658,6 +675,39 @@ pub unsafe extern "C" fn kiln_worker_op(op: u32, a: u64, out: *mut u64) -> i32 {
             OP_ACTOR_BIND_RECEIVER => write(
                 0,
                 u64::from(workers::actor_bind_receiver(
+                    a,
+                    super::realm::active_realm_id(),
+                )),
+            ),
+            OP_ACTOR_GRAPH_RESERVE => {
+                if out.is_null() {
+                    return INVALID_ARGUMENT;
+                }
+                let request = unsafe { out.read() };
+                let reply = unsafe { out.add(1).read() };
+                write(
+                    0,
+                    workers::actor_reserve(a, super::realm::active_realm_id(), request, reply)
+                        .unwrap_or(0),
+                );
+            }
+            OP_ACTOR_GRAPH_RECEIVE => {
+                if out.is_null() {
+                    return INVALID_ARGUMENT;
+                }
+                let request = unsafe { out.read() };
+                let reply = unsafe { out.add(1).read() };
+                let status = workers::actor_reservation_status(
+                    a,
+                    request,
+                    reply,
+                    super::realm::active_realm_id(),
+                );
+                write(0, status as u64);
+            }
+            OP_ACTOR_GRAPH_RELEASE => write(
+                0,
+                u64::from(workers::actor_release_reservation(
                     a,
                     super::realm::active_realm_id(),
                 )),

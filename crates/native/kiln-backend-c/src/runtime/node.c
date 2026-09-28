@@ -2282,6 +2282,9 @@ int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code
 #define KILN_C99_WORKER_OP_ACTOR_GRAPH_STATUS 31
 #define KILN_C99_WORKER_OP_ACTOR_GRAPH_CANCEL 32
 #define KILN_C99_WORKER_OP_ACTOR_BIND_RECEIVER 33
+#define KILN_C99_WORKER_OP_ACTOR_GRAPH_RESERVE 34
+#define KILN_C99_WORKER_OP_ACTOR_GRAPH_RECEIVE 35
+#define KILN_C99_WORKER_OP_ACTOR_GRAPH_RELEASE 36
 
 static uint64_t kiln_c99_worker_word(const kiln_value *args, size_t argc, size_t at) {
     double number;
@@ -2640,6 +2643,42 @@ static int kiln_c99_worker_op_raw(kiln_value *result, const kiln_value *args, si
         if (kiln_worker_op((uint32_t)op, first, words) != 0) return KILN_C99_INVALID_ARGUMENT;
         *result = kiln_c99_boolean(words[0] != 0);
         return KILN_C99_OK;
+    case KILN_C99_WORKER_OP_ACTOR_GRAPH_RESERVE:
+        words[0] = kiln_c99_worker_word(args, argc, 2);
+        words[1] = kiln_c99_worker_word(args, argc, 3);
+        if (first == 0 || words[0] == 0 || words[1] == 0 ||
+            kiln_worker_op((uint32_t)op, first, words) != 0) {
+            *result = kiln_c99_number(0);
+            return KILN_C99_OK;
+        }
+        *result = kiln_c99_number((double)words[0]);
+        return KILN_C99_OK;
+    case KILN_C99_WORKER_OP_ACTOR_GRAPH_RECEIVE: {
+        uint64_t call = kiln_c99_worker_word(args, argc, 2);
+        uint64_t reply = kiln_c99_worker_word(args, argc, 3);
+        int state = -1;
+        if (first != 0 && call != 0 && reply != 0) {
+            words[0] = call;
+            words[1] = reply;
+            if (kiln_worker_op((uint32_t)op, first, words) == 0)
+                state = words[0] == 0 ? 0 : -1;
+        }
+        status = kiln_c99_new_array(&built);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_number((double)state));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_undefined());
+        if (status == KILN_C99_OK) *result = built;
+        return status;
+    }
+    case KILN_C99_WORKER_OP_ACTOR_GRAPH_RELEASE:
+        words[0] = 0;
+        if (first == 0 || kiln_worker_op((uint32_t)op, first, words) != 0) {
+            *result = kiln_c99_boolean(0);
+            return KILN_C99_OK;
+        }
+        *result = kiln_c99_boolean(words[0] != 0);
+        return KILN_C99_OK;
     case KILN_C99_WORKER_OP_ACTOR_GRAPH_REQUEST: {
         uint64_t request = 0;
         kiln_gc_heap *heap = kiln_c99_gc_heap();
@@ -2651,6 +2690,9 @@ static int kiln_c99_worker_op_raw(kiln_value *result, const kiln_value *args, si
         /* JavaScript will poll this opaque ID as a Number; a rounded ID could cancel a newer
          * request, so refuse before posting it to the scheduler. */
         words[0] = request;
+        words[1] = kiln_c99_worker_word(args, argc, 3);
+        words[2] = kiln_c99_worker_word(args, argc, 4);
+        words[3] = kiln_c99_worker_word(args, argc, 5);
         if (request > 9007199254740991ULL ||
             kiln_worker_op((uint32_t)op, first, words) != 0 || words[0] == 0) {
             (void)kiln_c99_actor_isolated_request_rollback(heap, request);

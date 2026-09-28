@@ -148,6 +148,9 @@ const OP_ACTOR_GRAPH_REQUEST: u32 = 30;
 const OP_ACTOR_GRAPH_STATUS: u32 = 31;
 const OP_ACTOR_GRAPH_CANCEL: u32 = 32;
 const OP_ACTOR_BIND_RECEIVER: u32 = 33;
+const OP_ACTOR_GRAPH_RESERVE: u32 = 34;
+const OP_ACTOR_GRAPH_RECEIVE: u32 = 35;
+const OP_ACTOR_GRAPH_RELEASE: u32 = 36;
 
 /// A moved `ArrayBuffer`'s store, as this engine boxes it into a [`Token::Moved`].
 struct MovedBytes(Vec<u8>);
@@ -273,7 +276,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // DataCloneError and unconsumed-ticket behavior.
             OP_ACTOR_GRAPH_REQUEST => Value::Number(0.0),
             OP_ACTOR_GRAPH_STATUS => Value::Number(1.0),
-            OP_ACTOR_GRAPH_CANCEL | OP_ACTOR_BIND_RECEIVER => Value::Boolean(false),
+            OP_ACTOR_GRAPH_RESERVE => Value::Number(0.0),
+            OP_ACTOR_GRAPH_RECEIVE => {
+                Value::Array(ArrayData::new(vec![Value::Number(-1.0), Value::Undefined]))
+            }
+            OP_ACTOR_GRAPH_CANCEL | OP_ACTOR_BIND_RECEIVER | OP_ACTOR_GRAPH_RELEASE => {
+                Value::Boolean(false)
+            }
             OP_TAKE => match workers::take(endpoint_of(first)) {
                 Some(message) => {
                     let realm = self.current_realm;

@@ -357,11 +357,186 @@ struct ActorRoute {
     sender: u64,
 }
 
-static NEXT_ACTOR_REQUEST: AtomicU64 = AtomicU64::new(1);
+const MAX_JS_SAFE_INTEGER: u64 = (1 << 53) - 1;
 
-/// One request namespace is shared by every realm that can call a delegated actor address.
+fn random_actor_id() -> Option<u64> {
+    for _ in 0..16 {
+        let mut bytes = [0u8; 8];
+        getrandom::fill(&mut bytes).ok()?;
+        let id = u64::from_le_bytes(bytes) & MAX_JS_SAFE_INTEGER;
+        if id != 0 {
+            return Some(id);
+        }
+    }
+    None
+}
+
+/// Request IDs are wire-visible. Random IDs prevent one actor caller from guessing and
+/// cancelling another caller's pending reservation; the receiver rejects duplicates.
 pub fn actor_request_id() -> u64 {
-    NEXT_ACTOR_REQUEST.fetch_add(1, Ordering::Relaxed)
+    random_actor_id().unwrap_or(0)
+}
+
+struct ActorReservation {
+    receiver: u64,
+    receiver_realm: u64,
+    reader: u64,
+    request: u64,
+    reply: u64,
+    sender_realm: Option<u64>,
+    sender_request: Option<u64>,
+}
+
+static ACTOR_RESERVATIONS: OnceLock<Mutex<HashMap<u64, ActorReservation>>> = OnceLock::new();
+
+fn actor_reservations() -> &'static Mutex<HashMap<u64, ActorReservation>> {
+    ACTOR_RESERVATIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Reserve a one-use inbox identity. Only the host worker that owns this bound actor inbox
+/// may mint it; the token is unpredictable and carries no C or JavaScript heap pointer.
+pub fn actor_reserve(receiver: u64, realm: u64, request: u64, reply: u64) -> Option<u64> {
+    let worker = current()?;
+    if worker.spec.entry != WorkerEntry::File("kiln:actors/worker".into())
+        || worker.spec.port != receiver
+    {
+        return None;
+    }
+    actor_reserve_for_worker(receiver, realm, worker.key, request, reply)
+}
+
+fn actor_reserve_for_worker(
+    receiver: u64,
+    realm: u64,
+    reader: u64,
+    request: u64,
+    reply: u64,
+) -> Option<u64> {
+    if receiver == 0
+        || realm == 0
+        || reader == 0
+        || request == 0
+        || reply == 0
+        || request > MAX_JS_SAFE_INTEGER
+        || receiver == reply
+    {
+        return None;
+    }
+    {
+        let ports = ports();
+        let inbox = ports.endpoints.get(&receiver)?;
+        let reply_port = ports.endpoints.get(&reply)?;
+        if inbox.actor_realm != Some(realm)
+            || inbox.actor_reader != Some(reader)
+            || inbox.peer == 0
+            || reply_port.peer == 0
+        {
+            return None;
+        }
+    }
+    let mut reservations = lock(actor_reservations());
+    if reservations.values().any(|entry| {
+        entry.receiver == receiver && (entry.request == request || entry.reply == reply)
+    }) {
+        return None;
+    }
+    for _ in 0..16 {
+        let id = random_actor_id()?;
+        if let std::collections::hash_map::Entry::Vacant(slot) = reservations.entry(id) {
+            slot.insert(ActorReservation {
+                receiver,
+                receiver_realm: realm,
+                reader,
+                request,
+                reply,
+                sender_realm: None,
+                sender_request: None,
+            });
+            return Some(id);
+        }
+    }
+    None
+}
+
+/// Claim a matching granted call before enqueueing the sender's opaque C request. A forged
+/// numeric reservation, reply endpoint or request ID cannot redirect the destination realm.
+pub fn actor_claim_reservation(
+    sender: u64,
+    reservation: u64,
+    request: u64,
+    reply: u64,
+    sender_realm: u64,
+    sender_request: u64,
+) -> Option<u64> {
+    if sender_realm == 0 || sender_request == 0 || reservation == 0 {
+        return None;
+    }
+    let receiver_realm = actor_receiver_for_sender(sender)?;
+    let receiver = {
+        let ports = ports();
+        ports.endpoints.get(&sender)?.peer
+    };
+    let mut reservations = lock(actor_reservations());
+    let entry = reservations.get_mut(&reservation)?;
+    if entry.receiver != receiver
+        || entry.receiver_realm != receiver_realm
+        || entry.request != request
+        || entry.reply != reply
+        || entry.sender_realm.is_some()
+    {
+        return None;
+    }
+    entry.sender_realm = Some(sender_realm);
+    entry.sender_request = Some(sender_request);
+    Some(receiver_realm)
+}
+
+/// Undo a failed coordinator submission without consuming the receiver's grant.
+pub fn actor_unclaim_reservation(reservation: u64, sender_realm: u64, sender_request: u64) {
+    let mut reservations = lock(actor_reservations());
+    if let Some(entry) = reservations.get_mut(&reservation)
+        && entry.sender_realm == Some(sender_realm)
+        && entry.sender_request == Some(sender_request)
+    {
+        entry.sender_realm = None;
+        entry.sender_request = None;
+    }
+}
+
+/// A receiver can release only its own grant. The pending move still fails closed; positive
+/// root publication will add a ready state to this same one-use entry.
+pub fn actor_release_reservation(reservation: u64, realm: u64) -> bool {
+    let Some(worker) = current() else {
+        return false;
+    };
+    let mut reservations = lock(actor_reservations());
+    if reservations
+        .get(&reservation)
+        .is_none_or(|entry| entry.reader != worker.key || entry.receiver_realm != realm)
+    {
+        return false;
+    }
+    reservations.remove(&reservation);
+    true
+}
+
+/// The receiver may poll a held invoke, but no root is ready until the C transaction commits.
+pub fn actor_reservation_status(reservation: u64, request: u64, reply: u64, realm: u64) -> i32 {
+    let Some(worker) = current() else {
+        return -1;
+    };
+    let reservations = lock(actor_reservations());
+    match reservations.get(&reservation) {
+        Some(entry)
+            if entry.reader == worker.key
+                && entry.receiver_realm == realm
+                && entry.request == request
+                && entry.reply == reply =>
+        {
+            0
+        }
+        _ => -1,
+    }
 }
 
 #[derive(Default)]
@@ -623,8 +798,17 @@ pub fn close(port: u64) {
     }
     // A wait still parked on this port ends, and finds it gone.
     endpoint.wake();
+    let peer = endpoint.peer;
     drop(ports);
     drop(endpoint);
+    if let Some(reservations) = ACTOR_RESERVATIONS.get() {
+        lock(reservations).retain(|_, entry| {
+            entry.receiver != port
+                && entry.receiver != peer
+                && entry.reply != port
+                && entry.reply != peer
+        });
+    }
 }
 
 /// Join the broadcast group `name` of this thread's program with a new endpoint.
@@ -1943,6 +2127,50 @@ mod tests {
         assert_eq!(actor_receiver_for_sender(sender), Some(71));
         assert!(post(sender, Message::new(kind::USER, Vec::new())));
         assert!(take(receiver).is_none()); // A realm without the worker key cannot drain it.
+        let (reply_sender, reply_receiver) = channel();
+        assert!((1..=MAX_JS_SAFE_INTEGER).contains(&actor_request_id()));
+        assert!(actor_reserve_for_worker(receiver, 71, 92, 42, reply_receiver).is_none());
+        assert!(actor_reserve_for_worker(sender, 71, 91, 42, reply_receiver).is_none());
+        let reservation = actor_reserve_for_worker(receiver, 71, 91, 42, reply_receiver)
+            .expect("bound actor worker can reserve its inbox");
+        assert!((1..=MAX_JS_SAFE_INTEGER).contains(&reservation));
+        assert!(actor_reserve_for_worker(receiver, 71, 91, 42, reply_receiver).is_none());
+        assert_eq!(
+            actor_claim_reservation(sender, reservation, 43, reply_receiver, 81, 1),
+            None
+        );
+        assert_eq!(
+            actor_claim_reservation(sender, reservation, 42, reply_sender, 81, 1),
+            None
+        );
+        assert_eq!(
+            actor_claim_reservation(sender, reservation, 42, reply_receiver, 81, 1),
+            Some(71)
+        );
+        assert_eq!(
+            actor_claim_reservation(sender, reservation, 42, reply_receiver, 82, 2),
+            None
+        );
+        actor_unclaim_reservation(reservation, 82, 2);
+        assert_eq!(
+            lock(actor_reservations())
+                .get(&reservation)
+                .unwrap()
+                .sender_realm,
+            Some(81)
+        );
+        actor_unclaim_reservation(reservation, 81, 1);
+        assert_eq!(
+            lock(actor_reservations())
+                .get(&reservation)
+                .unwrap()
+                .sender_realm,
+            None
+        );
+        assert!(!actor_release_reservation(reservation, 71)); // No worker scope.
+        close(reply_sender);
+        assert!(!lock(actor_reservations()).contains_key(&reservation));
+        close(reply_receiver);
         assert_eq!(actor_sender(&impostor), None);
         let token = address.opaque();
         drop(address);
