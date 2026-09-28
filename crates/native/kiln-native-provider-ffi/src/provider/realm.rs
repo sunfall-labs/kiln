@@ -5057,6 +5057,7 @@ const GRAPH_REQUEST_PENDING: u8 = 0;
 const GRAPH_REQUEST_REFUSED: u8 = 1;
 const GRAPH_REQUEST_CANCELLED: u8 = 2;
 const GRAPH_REQUEST_REFUSED_AFTER_PAUSE: u8 = 3;
+const GRAPH_REQUEST_PUBLISHED: u8 = 4;
 
 pub(crate) enum ScheduledEvent {
     Complete(usize, i32),
@@ -5166,42 +5167,24 @@ fn refuse_graph_claim_request(
     if status.load(Ordering::Acquire) != GRAPH_REQUEST_PENDING {
         return;
     }
-    let paused = if let Ok(claim) = claim_scheduled_realm_pair(sender, receiver) {
+    let result = if let Ok(claim) = claim_scheduled_realm_pair(sender, receiver) {
         if claim.wait(Duration::from_secs(1)) {
-            if reservation != 0 {
-                // This receiver callback reserves and rolls back in one lane-local operation.
-                // A separate rollback could time out behind unrelated work and strand the slot.
-                let _ = claim.control(
-                    receiver,
-                    PausedTurnCommand {
-                        kind: 2,
-                        ids: [reservation, 0, 0],
-                    },
-                );
-                // The sender probe is a negative witness only. It always restores its escrow;
-                // even a clear root walk cannot authorize a transfer here.
-                let _ = claim.control(
-                    sender,
-                    PausedTurnCommand {
-                        kind: 1,
-                        ids: [request, 0, 0],
-                    },
-                );
-            }
-            true
+            coordinate_claimed_graph_request(
+                sender,
+                receiver,
+                request,
+                reservation,
+                |realm, command| claim.control(realm, command),
+            )
         } else {
-            false
+            GRAPH_REQUEST_REFUSED
         }
     } else {
-        false
+        GRAPH_REQUEST_REFUSED
     };
     let _ = status.compare_exchange(
         GRAPH_REQUEST_PENDING,
-        if paused {
-            GRAPH_REQUEST_REFUSED_AFTER_PAUSE
-        } else {
-            GRAPH_REQUEST_REFUSED
-        },
+        result,
         Ordering::Release,
         Ordering::Relaxed,
     );
@@ -5253,39 +5236,66 @@ fn refuse_dedicated_graph_claim_request(
     if status.load(Ordering::Acquire) != GRAPH_REQUEST_PENDING {
         return;
     }
-    let paused = if let Some(claim) =
+    let result = if let Some(claim) =
         dedicated_claim::claim_pair(sender, receiver, Duration::from_secs(1))
     {
-        if reservation != 0 {
-            let _ = claim.control(
-                receiver,
-                PausedTurnCommand {
-                    kind: 2,
-                    ids: [reservation, 0, 0],
-                },
-            );
-            let _ = claim.control(
-                sender,
-                PausedTurnCommand {
-                    kind: 1,
-                    ids: [request, 0, 0],
-                },
-            );
-        }
-        true
+        coordinate_claimed_graph_request(
+            sender,
+            receiver,
+            request,
+            reservation,
+            |realm, command| claim.control(realm, command),
+        )
     } else {
-        false
+        GRAPH_REQUEST_REFUSED
     };
     let _ = status.compare_exchange(
         GRAPH_REQUEST_PENDING,
-        if paused {
-            GRAPH_REQUEST_REFUSED_AFTER_PAUSE
-        } else {
-            GRAPH_REQUEST_REFUSED
-        },
+        result,
         Ordering::Release,
         Ordering::Relaxed,
     );
+}
+
+/// All C operations are lane-local and carry IDs only. The host lease pins the authenticated
+/// reservation through both native publication and sender escrow consumption. The control
+/// callback must make every step after detach infallible or abort the process: rolling back an
+/// unlinked chunk would otherwise let either mutator observe a lost graph.
+fn coordinate_claimed_graph_request(
+    sender: u64,
+    receiver: u64,
+    request: u64,
+    reservation: u64,
+    mut control: impl FnMut(u64, PausedTurnCommand) -> PausedTurnResult,
+) -> u8 {
+    if reservation == 0 {
+        return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
+    }
+    let Some(lease) =
+        kiln_runtime::workers::actor_begin_publish(reservation, sender, request, receiver)
+    else {
+        return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
+    };
+    let command = |kind, ids| PausedTurnCommand { kind, ids };
+    if control(sender, command(3, [request, reservation, receiver])) != PausedTurnResult::Ready {
+        return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
+    }
+    if control(receiver, command(4, [reservation, sender, request])) != PausedTurnResult::Ready {
+        let _ = control(sender, command(9, [request, reservation, 0]));
+        return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
+    }
+    if control(sender, command(5, [reservation, sender, request])) != PausedTurnResult::Ready {
+        let _ = control(receiver, command(8, [reservation, 0, 0]));
+        let _ = control(sender, command(9, [request, reservation, 0]));
+        return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
+    }
+    if control(receiver, command(6, [reservation, sender, request])) != PausedTurnResult::Ready
+        || control(sender, command(7, [request, reservation, 0])) != PausedTurnResult::Ready
+    {
+        std::process::abort();
+    }
+    lease.finish();
+    GRAPH_REQUEST_PUBLISHED
 }
 
 /// Host realm IDs are process-unique; scheduler IDs are local to one scheduler. This registry
