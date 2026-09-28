@@ -1340,6 +1340,55 @@ mod tests {
     }
 
     #[test]
+    fn panicking_pair_control_defers_body_drop_until_claim_release() {
+        struct PanicBody(Arc<AtomicUsize>);
+        impl PinnedTurn for PanicBody {
+            fn run_turn(&mut self, _waker: &Waker) -> TurnOutcome {
+                TurnOutcome::Parked
+            }
+
+            fn paused_control(&mut self, _command: PausedTurnCommand) -> PausedTurnResult {
+                panic!("control failed");
+            }
+        }
+        impl Drop for PanicBody {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let scheduler = Arc::new(PinnedTurnScheduler::new(2).expect("lanes start"));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let first = scheduler.spawn_pinned({
+            let drops = Arc::clone(&drops);
+            move |_, _| PanicBody(drops)
+        });
+        let second = scheduler.spawn_movable(|_: &Waker| TurnOutcome::Parked);
+        let claim = scheduler
+            .claim_pair(&first.pause_target(), &second.pause_target())
+            .expect("pair claimed");
+        assert!(claim.wait(Duration::from_secs(1)));
+        assert_eq!(
+            claim.control(
+                first.id(),
+                PausedTurnCommand {
+                    kind: 1,
+                    ids: [0; 3]
+                }
+            ),
+            PausedTurnResult::Unavailable
+        );
+        assert_eq!(first.status(), TurnStatus::Panicked);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(claim);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while drops.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline, "panicked body was not removed");
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
     fn pair_claim_waits_for_turn_boundaries_and_defers_cancelled_body_drop() {
         struct ParkedBody {
             runs: Arc<AtomicUsize>,
