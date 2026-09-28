@@ -5,7 +5,7 @@ export abstract class Actor {}
 // A global symbol marks the prototype chain across those plans without sharing mutable state.
 Object.defineProperty(Actor.prototype, Symbol.for("kiln.actor.base"), { value: true });
 
-export type Ticket = { value: any; consumed: boolean; graph: boolean };
+export type Ticket = { readonly value: any; readonly consumed: boolean; readonly graph: boolean; consume(): void };
 const isolated = new WeakMap<object, any>();
 const tickets = new WeakMap<object, Ticket>();
 const isolatedMark = Symbol.for("kiln.actor.isolated");
@@ -41,15 +41,17 @@ export function transfer<T>(value: Isolated<T> | ArrayBuffer): TransferTicket<T>
     throw new TypeError("transfer requires an isolated handle or ArrayBuffer");
   }
   const ticket: any = { __uncloneable: () => {} };
-  const entry: Ticket = {
+  let used = false;
+  const entry: Ticket = Object.freeze({
     // Retain the handle, not its graph. The consuming runtime will need to remove this root
     // before any ownership proof; until then every graph ticket is refused below.
     value,
-    consumed: false,
     graph,
-  };
+    get consumed() { return used; },
+    consume() { used = true; },
+  });
   tickets.set(ticket, entry);
-  Object.defineProperty(ticket, ticketMark, { value: graph ? Object.freeze({ graph: true }) : entry });
+  Object.defineProperty(ticket, ticketMark, { value: entry });
   return ticket;
 }
 
@@ -88,5 +90,5 @@ export function prepareActorMessage(value: any, buffers: ArrayBuffer[], consumed
 }
 
 export function consumeActorTickets(consumed: Ticket[]): void {
-  for (const ticket of consumed) ticket.consumed = true;
+  for (const ticket of consumed) ticket.consume();
 }

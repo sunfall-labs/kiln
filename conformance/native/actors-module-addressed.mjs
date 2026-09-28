@@ -14,7 +14,17 @@ try { await second.call('fail', []); }
 catch (error) { console.log(error.name, error.remoteName, error.message); }
 const data = new ArrayBuffer(4);
 new Uint8Array(data)[0] = 23;
-const result = await owner.ref.call('echo', [transfer(data)]);
+const bufferTicket = transfer(data);
+const ticketState = Reflect.ownKeys(bufferTicket)
+  .map(key => Object.getOwnPropertyDescriptor(bufferTicket, key)?.value)
+  .find(value => value && typeof value === 'object' && 'consumed' in value);
+if (!ticketState) throw new Error('buffer ticket has no state');
+try { ticketState.value = new ArrayBuffer(4); } catch {}
+if (ticketState.value !== data) throw new Error('buffer ticket payload was replaced');
+const result = await owner.ref.call('echo', [bufferTicket]);
+if (!ticketState.consumed) throw new Error('accepted buffer ticket was not consumed');
+try { ticketState.consumed = false; } catch {}
+if (!ticketState.consumed) throw new Error('buffer ticket consumption was reset');
 console.log(data.byteLength, new Uint8Array(result)[0]);
 const isolated = isolate(() => ({ answer: 42 }));
 for (const key of Reflect.ownKeys(isolated)) {
