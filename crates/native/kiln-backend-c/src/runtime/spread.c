@@ -1137,6 +1137,7 @@ static int kiln_c99_par_array(kiln_c99_par_arena *arena, const kiln_val *element
     array->match_input = kiln_c99_undefined();
     array->match_groups = kiln_c99_undefined();
     array->is_numeric = numeric;
+    array->candidate_elements = 0;
     if (in_block > 0) {
         array->elements = (kiln_val *)(array + 1);
         array->capacity = in_block;

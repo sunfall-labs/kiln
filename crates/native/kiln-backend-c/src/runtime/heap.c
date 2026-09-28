@@ -6291,7 +6291,8 @@ static void kiln_c99_gc_finalize(kiln_gc_heap *heap, kiln_gc_block *block) {
     case KILN_GC_ARRAY: {
         kiln_array *arr = (kiln_array *)payload;
         if (kiln_c99_array_elements_owned(arr)) {
-            free(arr->elements);
+            free(arr->candidate_elements ? (void *)kiln_c99_array_candidate_header(arr)
+                                         : (void *)arr->elements);
         }
         break;
     }

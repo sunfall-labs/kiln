@@ -24,8 +24,21 @@ static int kiln_c99_new_array(kiln_value *out) {
     array->match_input = kiln_c99_undefined();
     array->match_groups = kiln_c99_undefined();
     array->is_numeric = 1;
+    array->candidate_elements = 0;
     *out = kiln_c99_value(KILN_VALUE_ARRAY, (uint64_t)(uintptr_t)array, NULL, 0);
     return KILN_C99_OK;
+}
+
+/* Only the active isolate factory gives a new side allocation graph provenance. The common
+ * array-growth path returns before consulting the block table. */
+static uint64_t kiln_c99_array_candidate_id(const kiln_array *array) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    kiln_gc_block *block;
+    if (heap == NULL || heap->actor_candidate_id == 0) return 0;
+    block = kiln_c99_gc_lookup(heap, array);
+    if (block == NULL || (block->kind & KILN_GC_FLAG_NURSERY) == 0) return 0;
+    return kiln_c99_nursery_chunk_of(heap, block)->candidate_id == heap->actor_candidate_id
+               ? heap->actor_candidate_id : 0;
 }
 
 /* A capacity of eight or fewer fits the array's own `inline_elements` -- the shape
@@ -51,6 +64,8 @@ static int kiln_c99_new_array(kiln_value *out) {
 static int kiln_c99_array_reserve(kiln_array *array, size_t needed) {
     size_t grown;
     kiln_val *moved;
+    kiln_c99_candidate_array_elements *header = NULL;
+    uint64_t candidate_id = 0;
     if (needed <= array->capacity) {
         return KILN_C99_OK;
     }
@@ -68,7 +83,33 @@ static int kiln_c99_array_reserve(kiln_array *array, size_t needed) {
         }
         grown *= 2;
     }
-    if (array->elements != NULL && !kiln_c99_array_elements_owned(array)) {
+    if (!array->candidate_elements) candidate_id = kiln_c99_array_candidate_id(array);
+    if (array->candidate_elements) {
+        header = kiln_c99_array_candidate_header(array);
+        if (header->owner != array || header->capacity != array->capacity ||
+            header->generation == UINT64_MAX ||
+            grown > (SIZE_MAX - sizeof *header) / sizeof(kiln_val)) return KILN_C99_OUT_OF_MEMORY;
+        header = (kiln_c99_candidate_array_elements *)realloc(
+            header, sizeof *header + grown * sizeof(kiln_val));
+        if (header == NULL) return KILN_C99_OUT_OF_MEMORY;
+        header->capacity = grown;
+        header->generation += 1;
+        moved = (kiln_val *)(header + 1);
+    } else if (candidate_id != 0) {
+        if (grown > (SIZE_MAX - sizeof *header) / sizeof(kiln_val))
+            return KILN_C99_OUT_OF_MEMORY;
+        header = (kiln_c99_candidate_array_elements *)malloc(
+            sizeof *header + grown * sizeof(kiln_val));
+        if (header == NULL) return KILN_C99_OUT_OF_MEMORY;
+        header->candidate_id = candidate_id;
+        header->owner = array;
+        header->capacity = grown;
+        header->generation = 1;
+        moved = (kiln_val *)(header + 1);
+        if (array->elements != NULL) memcpy(moved, array->elements, array->count * sizeof(kiln_val));
+        if (kiln_c99_array_elements_owned(array)) free(array->elements);
+        array->candidate_elements = 1;
+    } else if (array->elements != NULL && !kiln_c99_array_elements_owned(array)) {
         moved = (kiln_val *)malloc(grown * sizeof(kiln_val));
         if (moved == NULL) {
             return KILN_C99_OUT_OF_MEMORY;
@@ -114,6 +155,7 @@ static int kiln_c99_new_array_with_capacity(kiln_value *out, size_t capacity, in
     array->match_input = kiln_c99_undefined();
     array->match_groups = kiln_c99_undefined();
     array->is_numeric = is_numeric;
+    array->candidate_elements = 0;
     if (in_block > 0) {
         array->elements = (kiln_val *)(array + 1);
         array->capacity = in_block;

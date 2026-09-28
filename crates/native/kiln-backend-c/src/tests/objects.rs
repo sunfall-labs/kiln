@@ -3143,6 +3143,66 @@ int main(void) {
 }
 
 #[test]
+fn executable_actor_candidate_array_side_storage_tracks_ownership() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int candidate_array_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_value ordinary, candidate;
+    kiln_array *array;
+    kiln_c99_candidate_array_elements *header;
+    uint64_t candidate_id;
+    (void)context;
+    if (heap == NULL) return 1;
+    heap->fallback = 0;
+    heap->enabled = 1;
+    if (kiln_c99_new_array_with_capacity(&ordinary, 128, 1) != KILN_C99_OK) return 2;
+    array = kiln_c99_array_of(ordinary);
+    if (array->candidate_elements || kiln_c99_array_reserve(array, 256) != KILN_C99_OK ||
+        array->candidate_elements) return 3;
+    if (!kiln_c99_actor_candidate_begin(heap)) return 4;
+    candidate_id = heap->actor_candidate_id;
+    if (kiln_c99_new_array_with_capacity(&candidate, 128, 1) != KILN_C99_OK) return 5;
+    array = kiln_c99_array_of(candidate);
+    if (!array->candidate_elements || array->capacity != 128) return 6;
+    header = kiln_c99_array_candidate_header(array);
+    if (header->candidate_id != candidate_id || header->owner != array ||
+        header->capacity != 128 || header->generation != 1 ||
+        array->elements != (kiln_val *)(header + 1)) return 7;
+    for (size_t i = 0; i < 128; ++i) array->elements[i] = kiln_val_from_boundary(kiln_c99_number(i));
+    array->count = 128;
+    if (kiln_c99_array_reserve(array, 256) != KILN_C99_OK) return 8;
+    header = kiln_c99_array_candidate_header(array);
+    if (header->candidate_id != candidate_id || header->owner != array ||
+        header->capacity != 256 || header->generation != 2 ||
+        array->elements[127] != kiln_val_from_boundary(kiln_c99_number(127))) return 9;
+    if (!kiln_c99_actor_candidate_end(heap, 0)) return 10;
+    if (kiln_c99_array_reserve(array, 512) != KILN_C99_OK) return 11;
+    header = kiln_c99_array_candidate_header(array);
+    if (header->generation != 3 || header->capacity != 512 ||
+        array->elements[127] != kiln_val_from_boundary(kiln_c99_number(127))) return 12;
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int result;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 13;
+    result = kiln_realm_enter(realm, candidate_array_entry, NULL);
+    if (result != KILN_C99_OK) return result;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 14;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "candidate-array-side-storage");
+    assert!(
+        run.status.success(),
+        "candidate array storage failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_actor_factory_allocations_have_dedicated_candidate_chunks() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");

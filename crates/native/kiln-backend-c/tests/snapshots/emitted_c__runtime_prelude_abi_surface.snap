@@ -1141,6 +1141,8 @@ static inline const uint32_t *kiln_c99_recv_row(const kiln_shape **shapes, const
 static inline int kiln_c99_recv_refused(const kiln_shape *const *refused, const kiln_shape *shape) {
 static inline const uint32_t *kiln_c99_recv_claim(const kiln_shape **shapes,
 typedef struct kiln_array {
+typedef struct kiln_c99_candidate_array_elements {
+static inline kiln_c99_candidate_array_elements *kiln_c99_array_candidate_header(
 static inline int kiln_c99_array_elements_owned(const kiln_array *array) {
 typedef struct kiln_c99_par_env {
 #define KILN_C99_PAR_CALL_DEPTH 128u
@@ -2438,6 +2440,7 @@ int kiln_c99_buffer_prototype(kiln_host *host, kiln_value *out, int depth, kiln_
 static kiln_typed_array *kiln_c99_val_typed_array(kiln_val value) {
 static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value receiver,
 static int kiln_c99_new_array(kiln_value *out) {
+static uint64_t kiln_c99_array_candidate_id(const kiln_array *array) {
 static int kiln_c99_array_reserve(kiln_array *array, size_t needed) {
 #define KILN_C99_ARRAY_INBLOCK_MAX ((size_t)64)
 static int kiln_c99_new_array_with_capacity(kiln_value *out, size_t capacity, int is_numeric) {

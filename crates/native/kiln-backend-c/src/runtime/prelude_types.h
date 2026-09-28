@@ -2185,7 +2185,22 @@ typedef struct kiln_array {
     kiln_val inline_elements[8];
     /* Whether this array is proven to contain only numbers (dense double backing, no holes). */
     int is_numeric;
+    /* A separately allocated element run made in an actor candidate carries its provenance
+     * immediately before the elements. Other arrays use the ordinary malloc layout. */
+    uint32_t candidate_elements;
 } kiln_array;
+
+typedef struct kiln_c99_candidate_array_elements {
+    uint64_t candidate_id;
+    kiln_array *owner;
+    size_t capacity;
+    uint64_t generation;
+} kiln_c99_candidate_array_elements;
+
+static inline kiln_c99_candidate_array_elements *kiln_c99_array_candidate_header(
+    const kiln_array *array) {
+    return ((kiln_c99_candidate_array_elements *)array->elements) - 1;
+}
 
 /* Elements the array did not take from `malloc`, and so must never hand back to `free` or to
  * `realloc`.
