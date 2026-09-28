@@ -6,8 +6,16 @@ expression: body(&unit)
 static void kiln_module_cc63ac731604078bde44d2124ac359e2_gc_roots(void *heap, void *context, int phase) {
     kiln_c99_gc_unit_roots(heap, context, phase);
 }
+static int kiln_module_cc63ac731604078bde44d2124ac359e2_gc_visit_roots(void *context, kiln_gc_visit_root_fn visit, void *visit_context) {
+    const kiln_value *roots[] = { &kiln_c99_new_target, &kiln_c99_adopted_this, &kiln_c99_captured_arguments, &kiln_c99_frame_arguments_object, &kiln_c99_frame_callee };
+    size_t index;
+    (void)context;
+    for (index = 0; index < sizeof roots / sizeof roots[0]; ++index)
+        if (visit(visit_context, roots[index], KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;
+    return KILN_C99_OK;
+}
 int kiln_module_cc63ac731604078bde44d2124ac359e2(kiln_host *host, kiln_value *result) {
-    (void)kiln_realm_gc_register_roots(kiln_module_cc63ac731604078bde44d2124ac359e2_gc_roots, NULL, 0);
+    (void)kiln_realm_gc_register_roots_with_visitor(kiln_module_cc63ac731604078bde44d2124ac359e2_gc_roots, kiln_module_cc63ac731604078bde44d2124ac359e2_gc_visit_roots, NULL, 0);
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
     int64_t i1 = 0, i2 = 0;

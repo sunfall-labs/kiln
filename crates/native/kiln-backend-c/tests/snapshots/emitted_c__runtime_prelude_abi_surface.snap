@@ -951,6 +951,12 @@ extern int kiln_shared_graph_build(uint64_t root, kiln_shared_source_inspect_fn 
 extern int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap);
 extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
 extern int kiln_realm_gc_mark_roots(void *heap);
+typedef int (*kiln_gc_visit_root_fn)(void *context, const void *pointer, uint32_t kind);
+#define KILN_GC_VISIT_BLOCK 1u
+#define KILN_GC_VISIT_VALUE 2u
+extern int kiln_realm_gc_visit_provider_roots(void *heap, kiln_gc_visit_root_fn visit,
+typedef int (*kiln_gc_visit_roots_fn)(void *context, kiln_gc_visit_root_fn visit,
+extern int kiln_realm_gc_register_roots_with_visitor(kiln_gc_roots_fn roots,
 struct kiln_closure;
 struct kiln_generator;
 typedef struct kiln_call_context {
@@ -1819,7 +1825,7 @@ static int kiln_c99_node_stdin_resume(void *host, kiln_value receiver);
 static void kiln_c99_node_stdin_pause(kiln_value receiver);
 static int kiln_c99_node_set_raw_mode(int mode);
 static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, size_t len) {
-static int kiln_c99_realm_output(int fd);
+static void kiln_c99_realm_stream_write(int fd, const void *bytes, size_t length);
 static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t code,
 #define KILN_C99_FFI_DYNAMIC_BASE UINT64_C(0x80000000)
 #define KILN_C99_FFI_DYNAMIC_MASK UINT64_C(0x7fffffff)
@@ -1842,8 +1848,8 @@ typedef struct kiln_c99_unit_block {
 typedef struct kiln_c99_realm_state {
 typedef struct kiln_c99_region_own {
 static kiln_c99_realm_state *kiln_c99_realm(void);
-static void kiln_c99_realm_capture_output(int fd) {
-static int kiln_c99_realm_output(int fd) {
+static void kiln_c99_realm_capture_output(FILE *output, FILE *error) {
+static void kiln_c99_realm_stream_write(int fd, const void *bytes, size_t length) {
 typedef struct kiln_ffi_function_meta {
 typedef struct kiln_ffi_callback_meta {
 static _Thread_local int kiln_c99_ffi_callback_status;
@@ -2171,6 +2177,11 @@ static int kiln_c99_graph_in_batch(const kiln_gc_heap *heap,
 static int kiln_c99_graph_val_in_batch(const kiln_gc_heap *heap,
 static int kiln_c99_graph_value_in_batch(const kiln_gc_heap *heap,
 static int kiln_c99_graph_has_c_root_alias(const kiln_gc_heap *heap,
+static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
+static kiln_c99_graph_incoming_result kiln_c99_graph_scan_nursery_chunk(
+static kiln_c99_graph_incoming_result kiln_c99_graph_scan_outside_heap(
+typedef struct kiln_c99_graph_provider_visit {
+static int kiln_c99_graph_visit_provider_root(void *opaque, const void *pointer,
 static kiln_c99_graph_incoming_result kiln_c99_graph_incoming_probe(
 static int kiln_c99_heap_move_chunks(kiln_gc_heap *from, kiln_gc_heap *to,
 struct kiln_c99_par_arena {
