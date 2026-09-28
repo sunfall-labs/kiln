@@ -926,6 +926,10 @@ typedef struct kiln_gc_hooks {
 extern void *kiln_realm_gc_current_heap(void);
 extern const uint64_t *kiln_realm_generation_slot(void);
 extern void *kiln_realm_process_shared(uint64_t size);
+extern int kiln_realm_graph_capsule_stage(uint64_t reservation, uint64_t receiver,
+extern int kiln_realm_graph_capsule_detached(uint64_t reservation, uint64_t request);
+extern int kiln_realm_graph_capsule_cancel(uint64_t reservation, uint64_t request);
+extern int kiln_realm_graph_capsule_take(uint64_t reservation, uint64_t sender,
 extern uint64_t kiln_realm_retire_tag(void);
 extern int kiln_realm_retired_safe(uint64_t tag);
 extern int kiln_realm_retire(void *record);
