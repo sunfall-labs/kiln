@@ -1,5 +1,5 @@
 import { Worker, MessageChannel, MessagePort } from "node:worker_threads";
-import { Actor, prepareActorMessage, consumeActorTickets } from "kiln:actors/core";
+import { Actor, prepareActorMessage, consumeActorTickets, type Ticket } from "kiln:actors/core";
 import { actorWorkerEntry } from "kiln:actors/worker";
 
 export { Actor, isolate, transfer } from "kiln:actors/core";

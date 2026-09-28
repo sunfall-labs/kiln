@@ -5,7 +5,7 @@ export abstract class Actor {}
 // A global symbol marks the prototype chain across those plans without sharing mutable state.
 Object.defineProperty(Actor.prototype, Symbol.for("kiln.actor.base"), { value: true });
 
-type Ticket = { value: any; consumed: boolean; graph: boolean };
+export type Ticket = { value: any; consumed: boolean; graph: boolean };
 const isolated = new WeakMap<object, any>();
 const tickets = new WeakMap<object, Ticket>();
 const isolatedMark = Symbol.for("kiln.actor.isolated");
