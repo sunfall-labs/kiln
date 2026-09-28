@@ -27,7 +27,11 @@ if (ticketState.value !== undefined) throw new Error('consumed ticket retained i
 try { ticketState.consumed = false; } catch {}
 if (!ticketState.consumed) throw new Error('buffer ticket consumption was reset');
 console.log(data.byteLength, new Uint8Array(result)[0]);
-const isolated = isolate(() => ({ answer: 42 }));
+let retainedGraphAlias;
+const isolated = isolate(() => {
+  retainedGraphAlias = { answer: 42 };
+  return retainedGraphAlias;
+});
 for (const key of Reflect.ownKeys(isolated)) {
   const value = Object.getOwnPropertyDescriptor(isolated, key)?.value;
   if (value?.answer === 42 || value?.value?.answer === 42) throw new Error('isolated graph leaked through handle');
@@ -72,7 +76,7 @@ try {
       refused = error.name === 'DataCloneError' && error.message === 'graph transfer needs ownership proof';
       if (attempt === 0) console.log(error.name, error.message);
     }
-    if (!refused || graphTicketState.consumed) {
+    if (!refused || graphTicketState.consumed || retainedGraphAlias.answer !== 42) {
       throw new Error('failed graph handoff consumed its ticket');
     }
   }
