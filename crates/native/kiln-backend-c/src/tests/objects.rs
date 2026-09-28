@@ -1899,16 +1899,26 @@ fn executable_gc_chunk_handoff_validates_membership_and_preserves_payload() {
     let generated = emit(&program).expect("program emits");
     let wrapper = r#"
 int main(void) {
-    kiln_gc_heap sender, receiver;
-    kiln_c99_par_arena arena;
+    kiln_gc_heap sender, receiver, ordinary;
+    kiln_c99_par_arena arena, worker;
     kiln_nursery_chunk *first, *second;
     kiln_nursery_chunk *batch[2];
     void *first_value, *second_value;
     kiln_c99_gc_heap_init(&sender);
     kiln_c99_gc_heap_init(&receiver);
-    memset(&arena, 0, sizeof arena);
-    arena.heap = &sender;
-    arena.budget = 2 * sender.nursery.capacity;
+    kiln_c99_gc_heap_init(&ordinary);
+    memset(&worker, 0, sizeof worker);
+    worker.heap = &ordinary;
+    worker.budget = ordinary.nursery.capacity;
+    if (kiln_c99_par_alloc(&worker, KILN_GC_BYTES, 8) == NULL) return 31;
+    kiln_c99_par_arena_seal(&worker);
+    if (!kiln_c99_heap_adopt_chunks(&ordinary, worker.filled)) return 32;
+    batch[0] = worker.filled;
+    if (kiln_c99_heap_move_chunks(&ordinary, &receiver, batch, 1)) return 33;
+    if (ordinary.count != 1 || receiver.count != 0) return 34;
+    kiln_c99_nursery_destroy(&ordinary.nursery);
+
+    if (!kiln_c99_graph_candidate_open(&arena, &sender, 2 * sender.nursery.capacity)) return 35;
     first_value = kiln_c99_par_alloc(&arena, KILN_GC_BYTES, 8);
     if (first_value == NULL) return 1;
     memset(first_value, 0x51, 8);
@@ -1955,6 +1965,39 @@ int main(void) {
     if (kiln_c99_heap_move_chunks(&sender, &receiver, batch, 2)) return 14;
     kiln_c99_nursery_destroy(&sender.nursery);
     kiln_c99_nursery_destroy(&receiver.nursery);
+
+    /* Separate factory candidates cannot be smuggled into one move. A collection epoch change
+     * also invalidates the candidate even if its chunk still looks sealed. */
+    kiln_gc_heap another_sender, another_receiver;
+    kiln_c99_par_arena graph_a, graph_b;
+    kiln_nursery_chunk *a, *b;
+    kiln_c99_gc_heap_init(&another_sender);
+    kiln_c99_gc_heap_init(&another_receiver);
+    if (!kiln_c99_graph_candidate_open(&graph_a, &another_sender,
+                                        another_sender.nursery.capacity) ||
+        !kiln_c99_graph_candidate_open(&graph_b, &another_sender,
+                                        another_sender.nursery.capacity)) return 36;
+    if (kiln_c99_par_alloc(&graph_a, KILN_GC_BYTES, 8) == NULL ||
+        kiln_c99_par_alloc(&graph_b, KILN_GC_BYTES, 8) == NULL) return 37;
+    kiln_c99_par_arena_seal(&graph_a);
+    kiln_c99_par_arena_seal(&graph_b);
+    a = graph_a.filled;
+    b = graph_b.filled;
+    a->next = b;
+    if (!kiln_c99_heap_adopt_chunks(&another_sender, a)) return 38;
+    batch[0] = a;
+    batch[1] = b;
+    if (kiln_c99_heap_move_chunks(&another_sender, &another_receiver, batch, 2)) return 39;
+    if (another_sender.count != 2 || another_receiver.count != 0) return 40;
+    another_sender.epoch += 1;
+    if (kiln_c99_heap_move_chunks(&another_sender, &another_receiver, batch, 1)) return 41;
+    another_sender.epoch -= 1;
+    if (!kiln_c99_heap_move_chunks(&another_sender, &another_receiver, batch, 1)) return 42;
+    batch[0] = b;
+    if (!kiln_c99_heap_move_chunks(&another_sender, &another_receiver, batch, 1)) return 43;
+    if (another_sender.count != 0 || another_receiver.count != 2) return 44;
+    kiln_c99_nursery_destroy(&another_sender.nursery);
+    kiln_c99_nursery_destroy(&another_receiver.nursery);
     return 0;
 }
 "#;

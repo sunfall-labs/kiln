@@ -280,6 +280,11 @@ typedef struct kiln_nursery_chunk {
      * first mark in a collection clears what an earlier one left; a chunk nothing marked has
      * stale marks, and a stale epoch is read as none marked. */
     uint32_t mark_epoch;
+    /* Nonzero only for a graph candidate built in its own arena. A move may use it only in the
+     * collection epoch in which the chunk entered the sender heap. This records allocation
+     * provenance, not a graph or incoming-root proof. */
+    uint32_t candidate_epoch;
+    uint64_t candidate_id;
     struct kiln_nursery_chunk *next;
 } kiln_nursery_chunk;
 
@@ -711,6 +716,8 @@ static kiln_nursery_chunk *kiln_c99_chunk_lay_out(char *region, size_t bitmap_wo
     chunk->marked_count = 0;
     chunk->marked_bytes = 0;
     chunk->mark_epoch = 0;
+    chunk->candidate_epoch = 0;
+    chunk->candidate_id = 0;
     chunk->next = NULL;
     return chunk;
 }
@@ -3074,6 +3081,7 @@ static int kiln_c99_heap_adopt_chunks(kiln_gc_heap *heap, kiln_nursery_chunk *ch
             nursery->hi = region + nursery->capacity;
         }
         kiln_c99_gc_bound(heap, region, nursery->capacity);
+        if (chunk->candidate_id != 0) chunk->candidate_epoch = heap->epoch;
         chunk->next = nursery->full;
         nursery->full = chunk;
         nursery->full_bytes += (size_t)(chunk->limit - chunk->base);
@@ -3155,6 +3163,7 @@ static int kiln_c99_heap_move_chunks(kiln_gc_heap *from, kiln_gc_heap *to,
     size_t moved_bytes = 0;
     size_t moved_filled = 0;
     size_t sender_full_bytes = 0;
+    uint64_t candidate_id = 0;
     if (from == NULL || to == NULL || from == to || (count != 0 && chunks == NULL) ||
         from->collecting || to->collecting || from->parallel_paused || to->parallel_paused ||
         from->nursery.capacity != to->nursery.capacity ||
@@ -3172,6 +3181,9 @@ static int kiln_c99_heap_move_chunks(kiln_gc_heap *from, kiln_gc_heap *to,
             chunk->bitmap_words != from->nursery.bitmap_words ||
             chunk->limit < chunk->base ||
             chunk->limit > (char *)chunk + from->nursery.capacity) return 0;
+        if (chunk->candidate_id == 0 || chunk->candidate_epoch != from->epoch) return 0;
+        if (candidate_id != 0 && candidate_id != chunk->candidate_id) return 0;
+        candidate_id = chunk->candidate_id;
         for (it = from->nursery.full; it != NULL; it = it->next) {
             if (it == chunk) { found = 1; break; }
         }
@@ -3215,6 +3227,8 @@ static int kiln_c99_heap_move_chunks(kiln_gc_heap *from, kiln_gc_heap *to,
             to->nursery.hi = (char *)chunk + to->nursery.capacity;
         kiln_c99_gc_bound(to, chunk, to->nursery.capacity);
         chunk->mark_epoch = 0;
+        chunk->candidate_epoch = 0;
+        chunk->candidate_id = 0;
         chunk->marked_count = 0;
         chunk->marked_bytes = 0;
         chunk->next = to->nursery.full;
@@ -3269,7 +3283,27 @@ struct kiln_c99_par_arena {
     /* Region bytes taken, against `budget`. */
     size_t taken;
     size_t budget;
+    /* Zero for the parallel worker arena; otherwise all its chunks are one graph candidate. */
+    uint64_t candidate_id;
 };
+
+static uint64_t kiln_c99_graph_candidate_next_id;
+
+/* A dedicated candidate allocation stream. Its caller must keep collection paused while
+ * building and publishing the graph into the sender heap. Nothing in this helper claims the
+ * graph is closed or excludes sender roots; those checks precede a future move call. */
+static int kiln_c99_graph_candidate_open(kiln_c99_par_arena *arena, const kiln_gc_heap *heap,
+                                         size_t budget) {
+    uint64_t id;
+    if (arena == NULL || heap == NULL || heap->nursery.capacity == 0 || budget == 0) return 0;
+    id = __atomic_add_fetch(&kiln_c99_graph_candidate_next_id, 1, __ATOMIC_RELAXED);
+    if (id == 0) return 0;
+    memset(arena, 0, sizeof *arena);
+    arena->heap = heap;
+    arena->budget = budget;
+    arena->candidate_id = id;
+    return 1;
+}
 
 /* Read once per process: `KILN_PARALLEL_ARENA_KIB`, else 256 MiB. 0 not yet read. */
 static size_t kiln_c99_par_arena_budget_bytes;
@@ -3313,6 +3347,7 @@ static int kiln_c99_par_arena_refill(kiln_c99_par_arena *arena) {
     if (arena->taken + capacity > arena->budget) return 0;
     chunk = kiln_c99_arena_chunk(capacity, arena->heap->nursery.bitmap_words);
     if (chunk == NULL) return 0;
+    chunk->candidate_id = arena->candidate_id;
     arena->taken += capacity;
     arena->current = chunk;
     arena->bump = chunk->base;
