@@ -4786,6 +4786,9 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     // Per thread, and trusted only for the heap serial it was built under: the `node:http` layouts.
     ("kiln_c99_node_http_layouts", C99StateOwner::ThreadCache),
     ("kiln_c99_gc_stress_checks", C99StateOwner::Process),
+    // Monotonic ID for candidate-only chunks; the arena uses an atomic increment, and no
+    // realm object or graph pointer is stored in this process-wide counter.
+    ("kiln_c99_graph_candidate_next_id", C99StateOwner::Process),
     // Parallel issue 06's write detector (`KILN_PARALLEL_PROTECT`), read from the environment once.
     ("kiln_c99_par_protect_state", C99StateOwner::Process),
     // Parallel issue 08's worker arena budget (`KILN_PARALLEL_ARENA_KIB`), read once.
