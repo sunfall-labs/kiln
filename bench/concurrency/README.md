@@ -6,6 +6,7 @@ One command reproduces the table:
 bench/concurrency/run.sh            # 3 interleaved rounds, about 8-10 minutes
 bench/concurrency/run.sh --quick    # 1 round, fewer sizes, about 3 minutes
 bench/concurrency/run.sh --only messages,server
+bench/concurrency/run.sh --only realms --quick
 ```
 
 The separate one-realm-per-connection scheduler probe is
@@ -69,6 +70,7 @@ below is about the native runtime.
 | 4 | **Many tasks**: 10, 1,000, 100,000 concurrent tasks, each waking 10 times on a 10 ms timer | async functions + `setTimeout` in one realm (`js/tasks.mjs`) | goroutines + `time.Sleep` | async tasks **in one realm**, labelled (a realm per task comes with issues 05 and 09) |
 | 5 | **Data-parallel map** over 10M numbers: a compute-heavy callback, and a light one | `Array.prototype.map`; a `worker_threads` pool of one worker per core that copies each slice in and transfers it back (`js/pmap-pool.mjs`) | a loop; goroutines over sub-slices | `map`, and `parallelMap` (ADR 0058) natively, plus `parallelMap` with `KILN_PARALLELISM=1` to show whether the parallel lowering ran |
 | 6 | **Server at all cores**: hello-world HTTP under `oha` | node `cluster` (`js/cluster.mjs`); bun `Bun.serve({ reusePort })` in one process per core (`js/bun-serve.mjs`) | `net/http` | `KILN_WORKERS=auto` in process and thread mode (`js/serve.mjs`); `KILN_WORKERS=1` for scale |
+| 7 | **Separate scheduled realms**: 10, 1,000 and (when memory allows) 100,000 realms each waking ten times | The one-realm async task comparison is workload 4; isolate workers have a different memory budget | Goroutine comparison is workload 4 | `KILN_REALMS=N` with `KILN_REALM_SCHEDULER=1` (`js/realm-periodic.mjs`); every realm's output and status checked |
 
 Details that matter when reading the numbers:
 
@@ -93,6 +95,12 @@ Details that matter when reading the numbers:
   has to pay. kiln's `parallelMap` accepts only callbacks its typed pool can prove numeric (ADR
   0058); others fall back to the sequential lowering and the `KILN_PARALLELISM=1` row then matches
   the default one.
+- **7.** This is an end-to-end native launcher measurement: wall time includes the process launch,
+  realm setup and teardown, timer turns, and two result files per realm. The runner checks all
+  output files and statuses before accepting a timing. Before trying 100,000 realms, it projects
+  RSS from the 10 and 1,000 realm runs and skips the row if that would exceed 70% of available
+  host or cgroup memory with a 1.5× margin. A skipped row is a capacity limit, not a passing
+  100,000-realm result.
 - **6.** `oha` runs on the same machine and competes for the same cores, so absolute rps is a
   property of this box; the columns are comparable with each other. Requests `oha` cancels at the
   deadline are not counted as errors.
@@ -100,9 +108,10 @@ Details that matter when reading the numbers:
 ## What "not available" means
 
 It means the runtime has no way to express that workload yet, rather than a failed run. Workloads
-1-3 now use `worker_threads` in kiln, and workload 6 has process and thread modes. A user object
-graph shared by immutable reference awaits issue 11; one realm per timer task awaits the M:N
-scheduler (09). A failed build or run is reported as a failure, and a checksum mismatch is excluded.
+1-3 use `worker_threads` in kiln, workload 6 has process and thread modes, and workload 7 uses
+the opt-in turn scheduler. A user frozen-value graph has its own API but is not part of the
+shared-byte table in workload 3. A failed build or run is reported as a failure, and a checksum
+mismatch is excluded.
 
 A kiln build that fails is reported as a failure with the compiler's first error, not as "not
 available".

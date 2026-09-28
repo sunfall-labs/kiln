@@ -2,7 +2,7 @@
 #
 # The concurrency benchmarks: kiln against node, bun and Go, one results table. See README.md.
 #
-# usage: bench/concurrency/run.sh [--quick] [--only start,messages,shared,tasks,pmap,server]
+# usage: bench/concurrency/run.sh [--quick] [--only start,messages,shared,tasks,pmap,server,realms]
 #                                 [--out results.md] [--kiln path/to/kiln] [--go "go"]
 #
 # Refreshes the release `kiln` (mbx, never bare cargo), then hands over to run.py,
@@ -17,7 +17,15 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd -- "$HERE/../.." && pwd)"
 cd "$ROOT"
 
-for tool in node bun oha python3; do
+required=(node bun oha python3)
+previous=""
+for argument in "$@"; do
+	if [[ $argument == --only=realms || ( $previous == --only && $argument == realms ) ]]; then
+		required=(python3)
+	fi
+	previous="$argument"
+done
+for tool in "${required[@]}"; do
 	command -v "$tool" >/dev/null || {
 		echo "bench/concurrency: $tool is not on PATH" >&2
 		exit 1

@@ -43,13 +43,15 @@ def config(quick):
         return dict(
             rounds=1, start_warm=10, mem_ns=[1, 10, 100], kiln_ns=[1, 2, 10, 100], kiln_reps=5,
             msg_budget=300, oneway=100000, inrealm_oneway=10000, shared_ns=[4], queries=2000000,
-            task_ns=[10, 1000, 100000], ticks=10, interval=10, pmap_n=10000000, pmap_reps=2,
+            task_ns=[10, 1000, 100000], realm_ns=[10, 1000], ticks=10, interval=10,
+            pmap_n=10000000, pmap_reps=2,
             server_s=3, server_c=128,
         )
     return dict(
         rounds=3, start_warm=20, mem_ns=[1, 10, 100], kiln_ns=[1, 2, 10, 100], kiln_reps=10,
         msg_budget=800, oneway=100000, inrealm_oneway=10000, shared_ns=[4, 16], queries=2000000,
-        task_ns=[10, 1000, 100000], ticks=10, interval=10, pmap_n=10000000, pmap_reps=3,
+        task_ns=[10, 1000, 100000], realm_ns=[10, 1000, 100000], ticks=10, interval=10,
+        pmap_n=10000000, pmap_reps=3,
         server_s=5, server_c=128,
     )
 
@@ -184,6 +186,7 @@ def build_all(kiln, go_cmd, work, selected):
         "messages": ["inrealm", "messages"],
         "shared": ["shared"],
         "tasks": ["tasks"],
+        "realms": ["realm-periodic"],
         "pmap": ["pmap", "pmap-parallel", "pmap-parallel-light"],
         "server": ["serve"],
     }
@@ -193,8 +196,11 @@ def build_all(kiln, go_cmd, work, selected):
                      if workload in selected for name in names]
     for name in kiln_programs:
         out = os.path.join(work, f"kiln-{name}")
-        argv = [kiln, "--one-shot", "--node", "build", os.path.join(JS, name + ".mjs"),
-                "--profile", "native-release", "--output", out]
+        argv = [kiln, "--one-shot"]
+        if name != "realm-periodic":
+            argv.append("--node")
+        argv.extend(["build", os.path.join(JS, name + ".mjs"),
+                     "--profile", "native-release", "--output", out])
         log(f"  kiln build {name}.mjs")
         done = subprocess.run(argv, capture_output=True, text=True, cwd=REPO)
         if done.returncode == 0 and os.path.exists(out):
@@ -205,16 +211,17 @@ def build_all(kiln, go_cmd, work, selected):
             failures[name] = first.strip()[:300]
             binaries[name] = None
             log(f"    refused: {failures[name]}")
-    out = os.path.join(work, "concurrency-go")
-    log("  go build")
-    done = subprocess.run(go_cmd + ["build", "-o", out, "."], capture_output=True, text=True,
-                          cwd=os.path.join(HERE, "go"))
-    if done.returncode == 0:
-        binaries["go"] = out
-    else:
-        failures["go"] = done.stderr.strip()[:300]
-        binaries["go"] = None
-        log(f"    go build failed: {failures['go']}")
+    if selected - {"realms"}:
+        out = os.path.join(work, "concurrency-go")
+        log("  go build")
+        done = subprocess.run(go_cmd + ["build", "-o", out, "."], capture_output=True, text=True,
+                              cwd=os.path.join(HERE, "go"))
+        if done.returncode == 0:
+            binaries["go"] = out
+        else:
+            failures["go"] = done.stderr.strip()[:300]
+            binaries["go"] = None
+            log(f"    go build failed: {failures['go']}")
     return binaries, failures
 
 
@@ -244,6 +251,79 @@ def simple(runtime, argv, env=None, timeout=240, maxrss_field=None):
         record["maxrss_kib"] = maxrss
         record["wall_ms_outside"] = wall
     return tag(records, runtime)
+
+
+def available_memory_kib():
+    """Use the smaller of host availability and the remaining cgroup allowance."""
+    candidates = []
+    try:
+        with open("/proc/meminfo") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    candidates.append(int(line.split()[1]))
+                    break
+    except OSError:
+        pass
+    try:
+        with open("/sys/fs/cgroup/memory.max") as handle:
+            limit = handle.read().strip()
+        if limit != "max":
+            with open("/sys/fs/cgroup/memory.current") as handle:
+                used = int(handle.read())
+            candidates.append(max(0, (int(limit) - used) // 1024))
+    except OSError:
+        pass
+    return min(candidates) if candidates else None
+
+
+def realm_scaling(binary, counts):
+    """End-to-end native realm turns, including the launcher's per-realm result files."""
+    records = []
+    observed = []
+    for n in counts:
+        case = f"realms-{n}"
+        if n >= 100000 and len(observed) < 2:
+            records.append({"case": case, "runtime": "kiln", "error":
+                            "skipped: smaller realm counts did not establish a memory slope"})
+            continue
+        if n >= 100000:
+            (low_n, low_rss), (high_n, high_rss) = observed[-2:]
+            slope = max(0, (high_rss - low_rss) / (high_n - low_n))
+            need = high_rss + slope * (n - high_n)
+            available = available_memory_kib()
+            if available is not None and need * 1.5 > available * 0.7:
+                records.append({"case": case, "runtime": "kiln", "error":
+                                f"skipped: estimated {need / 1024 / 1024:.1f} GiB needs more than "
+                                f"70% of {available / 1024 / 1024:.1f} GiB available"})
+                continue
+        with tempfile.TemporaryDirectory(prefix="kiln-realm-scale-") as out:
+            env = dict(os.environ, KILN_REALM_SCHEDULER="1", KILN_REALMS=str(n),
+                       KILN_REALMS_OUT=out)
+            _, wall, rss, code, stdout, err = run_program([binary], env=env, timeout=600)
+            failure = None
+            if code != 0:
+                failure = f"exit {code}: {err or stdout[-200:]}"
+            else:
+                for index in range(n):
+                    try:
+                        with open(os.path.join(out, f"{index}.status")) as handle:
+                            status = handle.read().strip()
+                        with open(os.path.join(out, f"{index}.out")) as handle:
+                            answer = handle.read()
+                    except OSError as error:
+                        failure = f"realm {index}: {error}"
+                        break
+                    if status != "0" or answer != "10\n":
+                        failure = f"realm {index}: status {status}, output {answer[:80]!r}"
+                        break
+            if failure:
+                records.append({"case": case, "runtime": "kiln", "error": failure})
+            else:
+                observed.append((n, rss))
+                records.append({"case": case, "runtime": "kiln", "wall_ms": wall,
+                                "maxrss_kib": rss, "turns_per_s": n * 10 / (wall / 1000),
+                                "checksum": str(n * 10)})
+    return records
 
 
 def kiln_process_start(binary, n, reps):
@@ -419,6 +499,12 @@ def jobs_for(cfg, bins):
         add("tasks", "go", lambda targs=targs: simple("go", [go, "tasks", *map(str, targs)]), go)
         add("tasks", "kiln", lambda targs=targs: simple("kiln", [k["tasks"], *map(str, targs)]), k["tasks"])
 
+    # Each task is a separate native realm. This is intentionally distinct from the one-realm
+    # async-task rows above; the launcher records one result per realm and the runner verifies all
+    # of them. Large counts are omitted when their measured memory slope exceeds the host budget.
+    add("realms", "kiln", lambda: realm_scaling(k["realm-periodic"], cfg["realm_ns"]),
+        k["realm-periodic"])
+
     # 5. data-parallel map
     pargs = (cfg["pmap_n"], cfg["pmap_reps"])
     for rt in ("node", "bun"):
@@ -557,7 +643,8 @@ class Report:
         if k in self.diverged:
             return "excluded (divergence)"
         if c["errors"] and metric not in c:
-            return "failed: " + c["errors"][0].splitlines()[0][:80].replace("|", "/")
+            reason = c["errors"][0].splitlines()[0][:80].replace("|", "/")
+            return reason if reason.startswith("skipped:") else "failed: " + reason
         if metric not in c:
             return "--"
         mid, spread, n = c[metric]
@@ -673,7 +760,7 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
     w(f"Each worker does {cfg['queries']:,} pseudo-random lookups. Setup: from the first send until every "
       "worker holds the table (workers already started). Query: all workers' lookups, median of 3. RSS: the "
       "whole process after setup. The SharedArrayBuffer row shares bytes across workers; "
-      "user object graphs cannot yet be frozen into kiln's shared immutable region (issue 11).")
+      "this row measures shared bytes; the frozen-value API (issue 11) has its own semantics.")
     w("")
     w("| N | runtime / mode | setup | query | RSS |")
     w("| --- | --- | --- | --- | --- |")
@@ -695,7 +782,7 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
     w("")
     w(f"N tasks each wake {cfg['ticks']} times on a {cfg['interval']} ms timer and add to a counter (floor: "
       f"{cfg['ticks'] * cfg['interval']} ms). JavaScript: async functions in one realm, kiln included (one realm; "
-      "one realm per task awaits issue 09). Go: goroutines. Peak RSS is the process's maximum resident set.")
+      "the separate native-realm workload is section 7). Go: goroutines. Peak RSS is the process's maximum resident set.")
     w("")
     w("| N | metric | node | bun | Go | kiln (async tasks, one realm) |")
     w("| --- | --- | --- | --- | --- | --- |")
@@ -705,9 +792,8 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
         w(rep.row(f"{n:,}", ["ticks/s"] + [rep.cell(case, rt, "ticks_per_s", "/s") for rt in ("node", "bun", "go", "kiln")]))
         w(rep.row(f"{n:,}", ["peak RSS"] + [rep.cell(case, rt, "maxrss_kib", " MB", scale=mb) for rt in ("node", "bun", "go", "kiln")]))
     w("")
-    w("The separate 10, 1,000 and 100,000 **realm** workload remains unmeasured until the M:N "
-      "scheduler (issue 09); the table above measures tasks sharing one realm and must not be "
-      "read as a per-realm scaling result.")
+    w("These JavaScript tasks share one realm. Section 7 measures separate native realms and "
+      "includes the launcher's result-file cost.")
     w("")
 
     # 5. pmap
@@ -766,10 +852,33 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
       "process mode's crash isolation; process remains the default (issue 07).")
     w("")
 
-    w("## Divergences and failures")
+    # 7. one native realm per task
+    w("## 7. Separate native realms on the turn scheduler")
+    w("")
+    w("Each realm wakes on a timer 10 times and prints `10`; every output and exit status is "
+      "checked. Wall time includes process launch, realm setup, timer turns, and the native "
+      "launcher's two result files per realm. Peak RSS is for the whole process. The 100,000 "
+      "realm row runs only if the RSS slope measured at smaller counts fits within 70% of "
+      "available memory with a 1.5× margin. This row has no Node/Bun equivalent: their "
+      "one-realm async tasks appear in section 4, and spawning 100,000 worker isolates is "
+      "a different resource budget.")
+    w("")
+    w("| realms | wall | turns/s | peak RSS |")
+    w("| ---: | ---: | ---: | ---: |")
+    for n in cfg["realm_ns"]:
+        case = f"realms-{n}"
+        w(rep.row(f"{n:,}", [rep.cell(case, "kiln", "wall_ms", " ms"),
+                              rep.cell(case, "kiln", "turns_per_s", "/s"),
+                              rep.cell(case, "kiln", "maxrss_kib", " MB", scale=mb)]))
+    w("")
+
+    w("## Divergences, failures and skips")
     w("")
     if not diverged and not failures and not any(c["errors"] for c in table.values()):
-        w("None: every answer matched the reference runtime (Go where it runs the case, else node).")
+        if ran == {"realms"}:
+            w("None: every native realm produced the expected output and exit status.")
+        else:
+            w("None: every comparable answer matched the reference runtime (Go where it runs the case, else node).")
     for (case, scope, runtime), why in sorted(diverged.items()):
         w(f"- **excluded** {runtime} `{case}`{' (' + scope + ')' if scope else ''}: {why}")
     for name, why in sorted(failures.items()):
@@ -777,11 +886,12 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
         w(f"- **{what}**: `{why.splitlines()[0] if why else '?'}`")
     for (case, scope, runtime), cell in sorted(table.items(), key=lambda kv: str(kv[0])):
         for err in [e for e in cell["errors"] if isinstance(e, str)][:1]:
-            w(f"- **{runtime} `{case}` failed** in {len(cell['errors'])} round(s): `{err.splitlines()[0][:200]}`")
+            outcome = "skipped" if err.startswith("skipped:") else "failed"
+            w(f"- **{runtime} `{case}` {outcome}** in {len(cell['errors'])} round(s): `{err.splitlines()[0][:200]}`")
     w("")
     w(f"Noisy cells (rounds spread > {int(NOISY * 100)}%): {rep.noisy_cells}.")
     # Leave out the sections of workloads this run did not include (--only).
-    numbered = {"1": "start", "2": "messages", "3": "shared", "4": "tasks", "5": "pmap", "6": "server"}
+    numbered = {"1": "start", "2": "messages", "3": "shared", "4": "tasks", "5": "pmap", "6": "server", "7": "realms"}
     sections = "\n".join(L).split("\n## ")
     kept = [sections[0]] + [sec for sec in sections[1:] if numbered.get(sec.split(".", 1)[0], "") in ran or not sec[0].isdigit()]
     return "\n## ".join(kept) + "\n"
@@ -823,7 +933,7 @@ def machine_info(kiln, go_cmd):
                 + sh(["clang", "--version"]).splitlines()[0],
         "node": sh(["node", "--version"]),
         "bun": sh(["bun", "--version"]),
-        "go": sh(go_cmd + ["version"]).replace("go version ", ""),
+        "go": sh(go_cmd + ["version"]).replace("go version ", "") if go_cmd else "not used",
         "oha": sh(["oha", "--version"]),
     }
 
@@ -832,20 +942,23 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--out", help="results markdown (default: bench/concurrency/results-<date>.md)")
-    parser.add_argument("--only", help="comma-separated workloads: start,messages,shared,tasks,pmap,server")
+    parser.add_argument("--only", help="comma-separated workloads: start,messages,shared,tasks,pmap,server,realms")
     parser.add_argument("--kiln", default=os.path.join(REPO, "target", "release", "kiln"))
     parser.add_argument("--go", default=os.environ.get("GO_CMD", ""))
     args = parser.parse_args()
-    selected = set(args.only.split(",")) if args.only else {"start", "messages", "shared", "tasks", "pmap", "server"}
-    unknown = selected - {"start", "messages", "shared", "tasks", "pmap", "server"}
+    selected = set(args.only.split(",")) if args.only else {"start", "messages", "shared", "tasks", "pmap", "server", "realms"}
+    unknown = selected - {"start", "messages", "shared", "tasks", "pmap", "server", "realms"}
     if unknown:
         parser.error("unknown workload(s): " + ", ".join(sorted(unknown)))
     cfg = config(args.quick)
     go_cmd = args.go.split() if args.go else None
     if go_cmd is None:
-        # A mise shim can be on PATH and still refuse to run (no version set), so ask it.
-        works = shutil.which("go") and subprocess.run(["go", "version"], capture_output=True).returncode == 0
-        go_cmd = ["go"] if works else ["mise", "exec", "go@latest", "--", "go"]
+        if selected == {"realms"}:
+            go_cmd = []
+        else:
+            # A mise shim can be on PATH and still refuse to run (no version set), so ask it.
+            works = shutil.which("go") and subprocess.run(["go", "version"], capture_output=True).returncode == 0
+            go_cmd = ["go"] if works else ["mise", "exec", "go@latest", "--", "go"]
 
     started = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
     work = os.path.join(REPO, "target", "bench-concurrency", started.replace(":", ""))
