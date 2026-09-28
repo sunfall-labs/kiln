@@ -27,14 +27,11 @@ export function spawnActorLayer(service, factory) {
   );
 }
 
-export function isolate(val) {
-  return Effect.sync(() => baseIsolate(val));
+export function isolate(factory) {
+  return Effect.sync(() => baseIsolate(factory));
 }
 
 export function transfer(val) {
-  if (typeof globalThis.__kiln_transfer_region === "function") {
-    return globalThis.__kiln_transfer_region(val);
-  }
   return baseTransfer(val);
 }
 

@@ -706,13 +706,14 @@ source = "effect/src/14-zero-copy-queue.ts"
 bundle = "effect/bundle/14-zero-copy-queue.js"
 bundle_inputs = ["effect/package.json", "effect/package-lock.json", "effect/build.sh"]
 status = "needs-bundle"
-features = ["modules", "regions", "zero-copy", "event-loop", "promises"]
+features = ["modules", "regions", "transfer-ticket", "event-loop", "promises"]
 effect_api = ["isolate", "transfer", "Effect.gen", "Effect.runPromise"]
 notes = """
-Zero-copy isolated region transfer across realm boundaries.
+An isolated graph ticket cannot be cloned as an ordinary value while runtime ownership
+proof and handoff remain pending. The historical filename is retained for corpus IDs.
 """
 expected_stdout = """
-QUEUE transfer 42 ok
+QUEUE DataCloneError ok
 """
 
 [[test]]

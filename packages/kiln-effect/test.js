@@ -45,20 +45,10 @@ async function run() {
 
   // Test isolate and transfer
   const data = { vertices: 100 };
-  const iso = await Effect.runPromise(isolate(data));
+  const iso = await Effect.runPromise(isolate(() => data));
   const transferred = transfer(iso);
-  assert.deepStrictEqual(transferred, { vertices: 100 });
-
-  // Test transfer with native hook mock
-  let nativeTransferCalled = false;
-  globalThis.__kiln_transfer_region = (v) => {
-    nativeTransferCalled = true;
-    return v;
-  };
-  const nativeTransferred = transfer(iso);
-  assert.strictEqual(nativeTransferCalled, true);
-  assert.deepStrictEqual(nativeTransferred, { vertices: 100 });
-  delete globalThis.__kiln_transfer_region;
+  assert.notStrictEqual(iso, data);
+  assert.notStrictEqual(transferred, data);
 
   // Test forEachParallel
   const items = [10, 20, 30];
@@ -79,4 +69,3 @@ async function run() {
 }
 
 run();
-

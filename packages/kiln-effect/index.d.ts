@@ -4,7 +4,7 @@
  */
 
 import type { Context, Effect, Layer, Scope, Scheduler } from "effect";
-import type { Isolated } from "@kiln/concurrency";
+import type { Isolated, TransferTicket } from "@kiln/concurrency";
 
 export type { Isolated };
 
@@ -21,14 +21,15 @@ export function spawnActorLayer<Id, Shape, Error = never, In = never>(
 ): Layer.Layer<Id, Error, In | Scope.Scope>;
 
 /**
- * Marks data as an isolated region within an Effect pipeline.
+ * Evaluates a factory and returns an isolated handle within an Effect pipeline.
  */
-export function isolate<A>(value: A): Effect.Effect<Isolated<A>>;
+export function isolate<A>(factory: () => A): Effect.Effect<Isolated<A>>;
 
 /**
- * Consumes an isolated value. Identity on every engine today.
+ * Creates a one-use transfer ticket. Object graph handoff remains fail-closed until
+ * Kiln's runtime can prove sole ownership; ArrayBuffer tickets are supported.
  */
-export function transfer<A>(value: Isolated<A>): A;
+export function transfer<A>(value: Isolated<A> | ArrayBuffer): TransferTicket<A>;
 
 /**
  * `Effect.forEach` with unbounded concurrency; `"native"` is a spelling of unbounded.

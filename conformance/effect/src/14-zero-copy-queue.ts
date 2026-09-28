@@ -1,5 +1,6 @@
-// Zero-copy isolated region transfer across boundaries
-// expect: QUEUE transfer 42 ok
+// An isolated graph produces an opaque ticket; graph handoff remains fail-closed until
+// the runtime proves sole ownership at a safepoint.
+// expect: QUEUE DataCloneError ok
 import { Effect } from "effect";
 import { isolate, transfer } from "@kiln/effect";
 
@@ -9,11 +10,16 @@ const data = {
 };
 
 const program = Effect.gen(function* () {
-  const isolated = yield* isolate(data);
-  const received = transfer(isolated);
-  return received.count;
+  const isolated = yield* isolate(() => data);
+  const ticket = transfer(isolated);
+  try {
+    structuredClone(ticket);
+    return "unexpected clone";
+  } catch (error) {
+    return (error as Error).name;
+  }
 });
 
 Effect.runPromise(program).then((val) => {
-  console.log(`QUEUE transfer ${val} ok`);
+  console.log(`QUEUE ${val} ok`);
 });
