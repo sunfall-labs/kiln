@@ -4227,14 +4227,16 @@ static int kiln_c99_graph_receiver_rollback(kiln_gc_heap *to, uint64_t id) {
     return 1;
 }
 
-/* Called only through the claimed scheduler lane's control callback. The sender probe is a
- * negative witness: even a clear scan returns Incomplete and rolls its escrow back. One-chunk
- * receiver reservation is the first supported transfer subset; publication stays disabled. */
+/* Implemented in graph_capsule.c after the heap's closure and reservation primitives. */
+static int kiln_c99_graph_capsule_paused_control(uint32_t kind, uint64_t first,
+                                                 uint64_t second, uint64_t third);
+
+/* Called only through the claimed scheduler lane's control callback. Kinds 1 and 2 remain
+ * refusal probes. Positive commands are host-only and carry authenticated numeric IDs; the
+ * pair coordinator keeps both mutators stopped through sender unlink and receiver adoption. */
 int kiln_c99_graph_paused_control(uint32_t kind, uint64_t first,
                                   uint64_t second, uint64_t third) {
     kiln_gc_heap *heap = kiln_c99_gc_heap();
-    (void)second;
-    (void)third;
     if (heap == NULL || first == 0) return 3;
     switch (kind) {
     case 1: {
@@ -4255,7 +4257,7 @@ int kiln_c99_graph_paused_control(uint32_t kind, uint64_t first,
         if (!kiln_c99_graph_receiver_reserve_id(heap, 1, first)) return 3;
         return kiln_c99_graph_receiver_rollback(heap, first) ? 0 : 3;
     default:
-        return 3;
+        return kiln_c99_graph_capsule_paused_control(kind, first, second, third);
     }
 }
 

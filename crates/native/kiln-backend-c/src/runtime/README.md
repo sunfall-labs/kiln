@@ -26,7 +26,7 @@ split.
 | --- | --- |
 | `foundation.c` | provider bridges, forward prototypes, node path and stream answers, the value accessors |
 | `heap.c` | the collector: blocks, slabs, the nursery, interned keys, marking, sweeping, mid-turn collection, introspection |
-| `graph_capsule.c` | internal one-chunk actor graph certificate, sender detachment and receiver adoption primitives for the unfinished actor transaction |
+| `graph_capsule.c` | internal one-chunk actor graph certificate and claimed owner-lane transaction controls; public graph tickets remain gated on host and actor publication |
 | `shapes.c` | shapes, transitions, dictionary mode, and object creation |
 | `platform.c` | AbortSignal, AbortController, TextEncoder, TextDecoder, AsyncLocalStorage |
 | `node_support.c` | Buffer, dns, diagnostics_channel, util |

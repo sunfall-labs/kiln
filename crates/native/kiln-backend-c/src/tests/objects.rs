@@ -2201,6 +2201,7 @@ static int paused_receiver_entry(void *context) {
     if (heap->realm.graph_inbox_state != KILN_C99_GRAPH_INBOX_EMPTY) return 5;
     return 0;
 }
+
 int main(void) {
     uint64_t realm = 0;
     int status;
@@ -2214,6 +2215,211 @@ int main(void) {
     assert!(
         run.status.success(),
         "actor paused receiver probe failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_actor_paused_capsule_controls_publish_and_consume() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+typedef struct graph_control_probe {
+    uint64_t sender;
+    uint64_t receiver;
+    uint64_t request;
+    uint64_t reservation;
+    kiln_value root;
+    kiln_gc_heap *sender_heap;
+    int stage_status;
+} graph_control_probe;
+
+static void graph_control_enter(kiln_gc_heap *heap, uint64_t realm) {
+    kiln_test_heap = heap;
+    kiln_test_generation++;
+    kiln_test_realm_active = 1;
+    graph_active_realm = realm;
+}
+
+__attribute__((noinline)) static uint64_t graph_control_request(kiln_gc_heap *heap) {
+    kiln_c99_par_arena arena;
+    kiln_nursery_chunk *chunk;
+    kiln_object *handle;
+    kiln_collection *registry;
+    kiln_string *string;
+    kiln_value handle_value;
+    uint64_t request = 0;
+    handle = (kiln_object *)kiln_c99_gc_alloc(KILN_GC_OBJECT, sizeof *handle);
+    registry = (kiln_collection *)kiln_c99_gc_alloc(KILN_GC_COLLECTION, sizeof *registry);
+    if (handle == NULL || registry == NULL) return 0;
+    memset(handle, 0, sizeof *handle);
+    handle->prototype = kiln_c99_undefined();
+    memset(registry, 0, sizeof *registry);
+    registry->is_weak = 1;
+    registry->properties = kiln_c99_undefined();
+    registry->entries = (kiln_entry *)calloc(1, sizeof(kiln_entry));
+    if (registry->entries == NULL) return 0;
+    registry->capacity = registry->count = registry->live = 1;
+    if (!kiln_c99_graph_candidate_open(&arena, heap, heap->nursery.capacity)) return 0;
+    string = (kiln_string *)kiln_c99_par_alloc(&arena, KILN_GC_STRING, sizeof *string + 4);
+    if (string == NULL) return 0;
+    string->unit_len = 4;
+    string->flags = KILN_STRING_LATIN1;
+    string->data = string + 1;
+    memcpy((void *)string->data, "root", 4);
+    kiln_c99_par_arena_seal(&arena);
+    chunk = arena.filled;
+    if (chunk == NULL || !kiln_c99_heap_adopt_chunks(heap, chunk)) return 0;
+    handle_value = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)handle, NULL, 0);
+    registry->entries[0].key = handle_value;
+    registry->entries[0].value = kiln_c99_value(KILN_VALUE_STRING,
+        (uint64_t)(uintptr_t)string->data, string->data, string->unit_len);
+    heap->realm.isolated_graphs = kiln_c99_value(KILN_VALUE_COLLECTION,
+        (uint64_t)(uintptr_t)registry, NULL, 0);
+    if (!kiln_c99_actor_isolated_request_begin(heap, handle_value, &request)) return 0;
+    return request;
+}
+
+static int graph_control_make(void *context) {
+    graph_control_probe *probe = (graph_control_probe *)context;
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    if (heap == NULL) return 1;
+    heap->fallback = 0;
+    heap->enabled = 1;
+    probe->request = graph_control_request(heap);
+    return probe->request != 0 ? 0 : 2;
+}
+static int graph_control_sender(void *context) {
+    graph_control_probe *probe = (graph_control_probe *)context;
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    if (heap == NULL) return 3;
+    if (kiln_c99_graph_paused_control(3, probe->request, probe->reservation,
+                                      probe->receiver) != 0) return 4;
+    probe->root = heap->realm.isolated_escrow_value;
+    if (heap->realm.graph_outgoing_capsule == NULL) return 5;
+    return 0;
+}
+static void *graph_control_sender_lane(void *context) {
+    graph_control_probe *probe = (graph_control_probe *)context;
+    graph_control_enter(probe->sender_heap, probe->sender);
+    probe->stage_status = graph_control_sender(context);
+    return NULL;
+}
+static int graph_control_preflight(void *context) {
+    graph_control_probe *probe = (graph_control_probe *)context;
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    if (heap == NULL || kiln_c99_graph_paused_control(4, probe->reservation,
+                   probe->sender, probe->request) != 0) return 6;
+    return heap->realm.graph_inbox_state == KILN_C99_GRAPH_INBOX_RESERVED ? 0 : 7;
+}
+static int graph_control_receiver_rollback(void *context) {
+    graph_control_probe *probe = (graph_control_probe *)context;
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    if (kiln_c99_graph_paused_control(8, probe->reservation, 0, 0) != 0 ||
+        heap->realm.graph_inbox_state != KILN_C99_GRAPH_INBOX_EMPTY) return 17;
+    return 0;
+}
+static int graph_control_sender_cancel(void *context) {
+    graph_control_probe *probe = (graph_control_probe *)context;
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_collection *registry = kiln_c99_collection_of(heap->realm.isolated_graphs);
+    uint64_t next = 0;
+    if (kiln_c99_graph_paused_control(9, probe->request, probe->reservation, 0) != 0 ||
+        heap->realm.graph_outgoing_capsule != NULL ||
+        heap->realm.isolated_request_id != 0 ||
+        registry->entries[0].value.bits != probe->root.bits ||
+        !kiln_c99_actor_isolated_request_begin(heap, registry->entries[0].key, &next) ||
+        next == probe->request) return 18;
+    probe->request = next;
+    probe->root = kiln_c99_undefined();
+    return 0;
+}
+static int graph_control_detach(void *context) {
+    graph_control_probe *probe = (graph_control_probe *)context;
+    return kiln_c99_graph_paused_control(5, probe->reservation, probe->sender,
+                                          probe->request) == 0 ? 0 : 8;
+}
+static int graph_control_adopt(void *context) {
+    graph_control_probe *probe = (graph_control_probe *)context;
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    if (kiln_c99_graph_paused_control(6, probe->reservation, probe->sender,
+                                      probe->request) != 0) return 9;
+    if (heap->realm.graph_inbox_state != KILN_C99_GRAPH_INBOX_PUBLISHED ||
+        heap->realm.graph_inbox_root.bits != probe->root.bits ||
+        kiln_c99_gc_lookup_interior(heap, (uintptr_t)probe->root.bits) == NULL) return 10;
+    return 0;
+}
+static int graph_control_commit(void *context) {
+    graph_control_probe *probe = (graph_control_probe *)context;
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_collection *registry = kiln_c99_collection_of(heap->realm.isolated_graphs);
+    if (kiln_c99_graph_paused_control(7, probe->request, probe->reservation, 0) != 0) return 11;
+    if (heap->realm.graph_outgoing_capsule != NULL ||
+        heap->realm.isolated_request_id != 0 || registry->live != 0 ||
+        !registry->entries[0].dead) return 12;
+    return 0;
+}
+int main(void) {
+    graph_control_probe probe = {0};
+    kiln_gc_heap sender, receiver;
+    pthread_t sender_lane;
+    int status;
+    kiln_c99_gc_heap_init(&sender);
+    kiln_c99_gc_heap_init(&receiver);
+    probe.sender = 1;
+    probe.receiver = 2;
+    probe.reservation = 83;
+    probe.sender_heap = &sender;
+    graph_control_enter(&sender, probe.sender);
+    status = graph_control_make(&probe);
+    /* A turn-boundary control can migrate to a clean owner lane. The factory's C stack on
+     * this thread retains dead candidate pointer bytes, which the conservative scan must
+     * reject if it runs here. */
+    if (status == 0 && pthread_create(&sender_lane, NULL,
+                                      graph_control_sender_lane, &probe) != 0) status = 15;
+    if (status == 0 && pthread_join(sender_lane, NULL) != 0) status = 16;
+    if (status == 0) status = probe.stage_status;
+    if (status == 0) {
+        graph_control_enter(&receiver, probe.receiver);
+        status = graph_control_preflight(&probe);
+    }
+    if (status == 0) status = graph_control_receiver_rollback(&probe);
+    if (status == 0) {
+        graph_control_enter(&sender, probe.sender);
+        status = graph_control_sender_cancel(&probe);
+    }
+    if (status == 0 && pthread_create(&sender_lane, NULL,
+                                      graph_control_sender_lane, &probe) != 0) status = 19;
+    if (status == 0 && pthread_join(sender_lane, NULL) != 0) status = 20;
+    if (status == 0) status = probe.stage_status;
+    if (status == 0) {
+        graph_control_enter(&receiver, probe.receiver);
+        status = graph_control_preflight(&probe);
+    }
+    if (status == 0) {
+        graph_control_enter(&sender, probe.sender);
+        status = graph_control_detach(&probe);
+    }
+    if (status == 0) {
+        graph_control_enter(&receiver, probe.receiver);
+        status = graph_control_adopt(&probe);
+    }
+    if (status == 0) {
+        graph_control_enter(&sender, probe.sender);
+        status = graph_control_commit(&probe);
+    }
+    kiln_test_heap = NULL;
+    kiln_test_realm_active = 0;
+    kiln_c99_nursery_destroy(&sender.nursery);
+    kiln_c99_nursery_destroy(&receiver.nursery);
+    return status;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "actor-paused-capsule-controls");
+    assert!(
+        run.status.success(),
+        "actor paused capsule control failed ({:?}):\n{}",
         run.status.code(),
         String::from_utf8_lossy(&run.stderr)
     );

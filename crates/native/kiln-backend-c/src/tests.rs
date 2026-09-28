@@ -543,6 +543,57 @@ static void *kiln_test_heap;
 static uint64_t kiln_test_generation = 1;
 void *kiln_realm_gc_current_heap(void) { return kiln_test_heap; }
 const uint64_t *kiln_realm_generation_slot(void) { return &kiln_test_generation; }
+/* The backend fixture links no Rust provider. Its registry mock enforces the same exact
+ * identities and phase gate; the real provider registry has its own Rust tests. */
+static uint64_t graph_active_realm;
+static uint64_t graph_staged_reservation;
+static uint64_t graph_staged_request;
+static uint64_t graph_staged_receiver;
+static void *graph_staged_capsule;
+static int graph_staged_phase;
+int kiln_realm_graph_capsule_stage(uint64_t reservation, uint64_t receiver,
+                                   uint64_t request, void *capsule) {
+    if (graph_active_realm != 1 || receiver != 2 || reservation == 0 || request == 0 ||
+        capsule == NULL || graph_staged_phase != 0) return -1;
+    graph_staged_reservation = reservation;
+    graph_staged_receiver = receiver;
+    graph_staged_request = request;
+    graph_staged_capsule = capsule;
+    graph_staged_phase = 1;
+    return 0;
+}
+int kiln_realm_graph_capsule_peek(uint64_t reservation, uint64_t sender,
+                                  uint64_t request, void **out) {
+    *out = NULL;
+    if (sender != 1 || (graph_active_realm != sender &&
+        graph_active_realm != graph_staged_receiver) || graph_staged_phase != 1 ||
+        graph_staged_reservation != reservation || graph_staged_request != request) return -1;
+    *out = graph_staged_capsule;
+    return 0;
+}
+int kiln_realm_graph_capsule_detached(uint64_t reservation, uint64_t request) {
+    if (graph_active_realm != 1 || graph_staged_phase != 1 ||
+        reservation != graph_staged_reservation || request != graph_staged_request) return -1;
+    graph_staged_phase = 2;
+    return 0;
+}
+int kiln_realm_graph_capsule_cancel(uint64_t reservation, uint64_t request) {
+    if (graph_active_realm != 1 || graph_staged_phase != 1 ||
+        reservation != graph_staged_reservation || request != graph_staged_request) return -1;
+    graph_staged_phase = 0;
+    graph_staged_capsule = NULL;
+    return 0;
+}
+int kiln_realm_graph_capsule_take(uint64_t reservation, uint64_t sender,
+                                  uint64_t request, void **out) {
+    *out = NULL;
+    if (graph_active_realm != 2 || sender != 1 || graph_staged_phase != 2 ||
+        reservation != graph_staged_reservation || request != graph_staged_request) return -1;
+    *out = graph_staged_capsule;
+    graph_staged_capsule = NULL;
+    graph_staged_phase = 0;
+    return 0;
+}
 void *kiln_realm_process_shared(uint64_t size) {
     static union { uint64_t align; unsigned char bytes[4096]; } block;
     return size <= sizeof block.bytes ? (void *)block.bytes : NULL;

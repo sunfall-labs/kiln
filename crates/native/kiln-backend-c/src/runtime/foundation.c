@@ -977,6 +977,11 @@ typedef struct kiln_c99_realm_state {
     kiln_entry *isolated_escrow_entry;
     kiln_value isolated_escrow_key;
     kiln_value isolated_escrow_value;
+    /* Sender-owned C allocation while a pair claim is held. The provider registry lends the
+     * same capsule to the receiver after unlink; this field keeps its lifetime through the
+     * sender's final escrow commit. It is never a GC root or a JavaScript handle. */
+    void *graph_outgoing_capsule;
+    uint64_t graph_outgoing_reservation;
     /* One native inbox slot for a future graph handoff. It is a GC root only after the
      * candidate chunks have been linked into this heap; publication itself cannot allocate. */
     uint64_t graph_inbox_next_id;

@@ -1,7 +1,6 @@
-/* Detached storage for a future actor graph transaction. This is a one-chunk primitive, not
- * transfer admission. The caller must hold both realm turns paused, secure host/JS publication,
- * and keep the sender escrow alive from certificate through detach. No collector or mutator may
- * run between detach and adoption. The pair transaction does not exist yet. */
+/* One-chunk actor graph transaction primitives. Only the host pair coordinator calls the
+ * paused controls below. Public ticket admission still needs a successful source-side poll and
+ * a verified JavaScript inbox slot; neither a C capsule nor a registry entry grants that alone. */
 
 typedef struct kiln_c99_graph_capsule_requirements {
     size_t regions;
@@ -206,4 +205,87 @@ static void kiln_c99_graph_capsule_commit_sender(kiln_gc_heap *from,
     if (capsule == NULL || !capsule->adopted || capsule->detached || capsule->chunk != NULL)
         abort();
     kiln_c99_actor_isolated_request_commit_published(from, request_id, capsule->root);
+}
+
+/* Both turns remain claimed for this whole sequence. The sender owns the capsule allocation
+ * even while the detached chunk is briefly lent to the receiver. Every fallible operation is
+ * before unlink. An invariant failure after unlink is process-fatal because resuming either
+ * realm would expose a dangling sender reference or an unrooted receiver graph. */
+static int kiln_c99_graph_capsule_paused_control(uint32_t kind, uint64_t first,
+                                                 uint64_t second, uint64_t third) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    kiln_c99_realm_state *realm;
+    kiln_c99_graph_capsule *capsule;
+    void *opaque = NULL;
+    if (heap == NULL) return 3;
+    realm = &heap->realm;
+    switch (kind) {
+    case 3: /* sender certify, prepare and stage: request, reservation, receiver */
+        if (first == 0 || second == 0 || third == 0 ||
+            realm->graph_outgoing_capsule != NULL) return 3;
+        capsule = (kiln_c99_graph_capsule *)malloc(sizeof *capsule);
+        if (capsule == NULL) {
+            (void)kiln_c99_actor_isolated_request_rollback(heap, first);
+            return 3;
+        }
+        if (!kiln_c99_graph_capsule_certify_request(heap, first, capsule)) {
+            free(capsule);
+            return 2;
+        }
+        if (kiln_realm_graph_capsule_stage(second, third, first, capsule) != 0) {
+            (void)kiln_c99_actor_isolated_request_rollback(heap, first);
+            free(capsule);
+            return 3;
+        }
+        realm->graph_outgoing_capsule = capsule;
+        realm->graph_outgoing_reservation = second;
+        return 0;
+    case 4: /* receiver preflight: reservation, sender, request */
+        if (first == 0 || second == 0 || third == 0 ||
+            kiln_realm_graph_capsule_peek(first, second, third, &opaque) != 0 ||
+            opaque == NULL) return 3;
+        capsule = (kiln_c99_graph_capsule *)opaque;
+        return kiln_c99_graph_capsule_receiver_preflight(heap, &capsule->needs, first) ? 0 : 3;
+    case 5: /* sender unlink: reservation, sender, request */
+        if (first == 0 || second == 0 || third == 0 ||
+            realm->graph_outgoing_reservation != first ||
+            realm->isolated_request_id != third ||
+            kiln_realm_graph_capsule_peek(first, second, third, &opaque) != 0 ||
+            opaque == NULL || opaque != realm->graph_outgoing_capsule) return 3;
+        capsule = (kiln_c99_graph_capsule *)opaque;
+        if (!kiln_c99_graph_capsule_detach(heap, capsule)) return 3;
+        if (kiln_realm_graph_capsule_detached(first, third) != 0) abort();
+        return 0;
+    case 6: /* receiver take and adopt: reservation, sender, request */
+        if (first == 0 || second == 0 || third == 0 ||
+            kiln_realm_graph_capsule_take(first, second, third, &opaque) != 0 ||
+            opaque == NULL) abort();
+        capsule = (kiln_c99_graph_capsule *)opaque;
+        kiln_c99_graph_capsule_adopt(heap, capsule, first);
+        return 0;
+    case 7: /* sender consume escrow after receiver adoption: request, reservation */
+        capsule = (kiln_c99_graph_capsule *)realm->graph_outgoing_capsule;
+        if (first == 0 || second == 0 || third != 0 || capsule == NULL ||
+            realm->graph_outgoing_reservation != second ||
+            realm->isolated_request_id != first || !capsule->adopted) abort();
+        kiln_c99_graph_capsule_commit_sender(heap, capsule, first);
+        realm->graph_outgoing_capsule = NULL;
+        realm->graph_outgoing_reservation = 0;
+        free(capsule);
+        return 0;
+    case 8: /* receiver pre-unlink rollback: reservation */
+        return second == 0 && third == 0 &&
+            kiln_c99_graph_receiver_rollback(heap, first) ? 0 : 3;
+    case 9: /* sender pre-unlink cancel: request, reservation */
+        capsule = (kiln_c99_graph_capsule *)realm->graph_outgoing_capsule;
+        if (first == 0 || second == 0 || third != 0 || capsule == NULL ||
+            realm->graph_outgoing_reservation != second || capsule->detached ||
+            kiln_realm_graph_capsule_cancel(second, first) != 0) abort();
+        realm->graph_outgoing_capsule = NULL;
+        realm->graph_outgoing_reservation = 0;
+        free(capsule);
+        return kiln_c99_actor_isolated_request_rollback(heap, first) ? 0 : 3;
+    default:
+        return 3;
+    }
 }
