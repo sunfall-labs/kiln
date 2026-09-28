@@ -1315,12 +1315,13 @@ int kiln_c99_default_require(void *context, kiln_host *host, kiln_value specifie
             return KILN_C99_OUT_OF_MEMORY;
         }
         kiln_value message = kiln_c99_text_value(&text);
-        kiln_value error;
-        status = kiln_c99_new_error(&error, KILN_C99_BUILTIN_ERROR, message);
-        if (status == KILN_C99_OK && thrown != NULL) {
-            *thrown = error;
-        }
-        return KILN_C99_HOST_ERROR;
+        if (thrown == NULL) return KILN_C99_INVALID_ARGUMENT;
+        status = kiln_c99_new_error(thrown, KILN_C99_BUILTIN_ERROR, message);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_put(NULL, *thrown, "code", 4,
+                              kiln_c99_static_text("MODULE_NOT_FOUND", 16), 0, NULL);
+        if (status != KILN_C99_OK) return status;
+        return KILN_C99_THROWN;
     }
     return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR, "Cannot find module");
 }

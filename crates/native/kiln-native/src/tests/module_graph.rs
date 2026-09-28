@@ -924,6 +924,68 @@ fn native_graph_reserves_commonjs_wrapper_bindings_for_the_launcher() {
 }
 
 #[test]
+fn native_declared_worker_starts_lazily_and_undeclared_sibling_stays_unavailable() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-declared-worker");
+    let entry = project.path.join("main.cjs");
+    let worker = project.path.join("worker.cjs");
+    let sibling = project.path.join("sibling.cjs");
+    fs::write(
+        &entry,
+        concat!(
+            "const { Worker } = require('node:worker_threads');\n",
+            "console.log('parent');\n",
+            "try { require(process.argv[3]); } catch (error) { console.log('sibling', error.code); }\n",
+            "const worker = new Worker(process.argv[2]);\n",
+            "worker.on('message', value => console.log('worker', value));\n",
+            "worker.on('error', error => { console.error(error); process.exitCode = 1; });\n",
+        ),
+    )
+    .expect("write parent entry");
+    fs::write(
+        &worker,
+        "const { parentPort } = require('node:worker_threads'); parentPort.postMessage(42); parentPort.close();",
+    )
+    .expect("write worker target");
+    fs::write(&sibling, "console.log('sibling evaluated'); module.exports = 99;")
+        .expect("write undeclared sibling");
+    let graph = ModuleGraph::build_node_with_includes(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+        vec![(worker.clone(), ModuleSource::CommonJs)],
+    )
+    .expect("build graph with declared worker target");
+    assert!(graph.module(&worker).is_some());
+    assert!(graph.module(&sibling).is_none());
+
+    let built = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("program"), NativeProfile::Dev)
+                .with_node(true),
+        )
+        .expect("build native graph with lazy worker target");
+    let output = Command::new(&built.output)
+        .arg(&worker)
+        .arg(&sibling)
+        .output_when_launchable()
+        .expect("run native graph with worker path");
+    assert!(
+        output.status.success(),
+        "worker process failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"parent\nsibling MODULE_NOT_FOUND\nworker 42\n");
+}
+
+#[test]
 fn native_commonjs_require_receives_the_builtin_projection_on_both_graph_paths() {
     use kiln_module_resolver::{NodeBuiltin, NodeRuntimeResolver};
 

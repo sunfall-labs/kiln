@@ -3109,7 +3109,7 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
                 .unwrap();
             }
         }
-        output.push_str("    { int matched = 0; int status = kiln_graph_declared_require(graph, specifier, result, thrown, &matched); if (matched) return status; }\n    if (thrown != NULL) *thrown = specifier;\n    return -2;\n}\n");
+        output.push_str("    { int matched = 0; int status = kiln_graph_declared_require(graph, specifier, result, thrown, &matched); if (matched) return status; }\n    return kiln_c99_default_require(NULL, host, specifier, result, thrown);\n}\n");
     }
     if modules
         .iter()
