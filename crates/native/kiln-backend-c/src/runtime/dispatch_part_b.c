@@ -1285,6 +1285,8 @@
         }
         case KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF: {
             kiln_value subject = argc > 0 ? args[0] : kiln_c99_undefined();
+            if (subject.tag == KILN_VALUE_SHARED)
+                return kiln_c99_shared_prototype(subject, result);
             if (subject.tag == KILN_VALUE_PROXY) {
                 kiln_value trap;
                 kiln_proxy *data = kiln_c99_proxy_of(subject);
@@ -1433,6 +1435,17 @@
         }
         case KILN_C99_METHOD_OBJECT_SET_PROTOTYPE_OF: {
             kiln_value subject = argc > 0 ? args[0] : kiln_c99_undefined();
+            if (subject.tag == KILN_VALUE_SHARED) {
+                kiln_value current;
+                kiln_value wanted = argc > 1 ? args[1] : kiln_c99_undefined();
+                status = kiln_c99_shared_prototype(subject, &current);
+                if (status != KILN_C99_OK) return status;
+                if (!kiln_c99_strict_equal(current, wanted))
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                                "Cannot set prototype of a non-extensible object");
+                *result = subject;
+                return KILN_C99_OK;
+            }
             if (subject.tag != KILN_VALUE_OBJECT && subject.tag != KILN_VALUE_FUNCTION &&
                 kiln_c99_exotic_store(subject) == NULL &&
                 !(subject.tag == KILN_VALUE_BUILTIN && kiln_c99_is_namespace(subject.bits))) {
@@ -2075,6 +2088,11 @@
             kiln_value subject = argc > 0 ? args[0] : kiln_c99_undefined();
             int *flag = NULL;
             int frozen = 0;
+            if (subject.tag == KILN_VALUE_SHARED) {
+                *result = code == KILN_C99_METHOD_OBJECT_IS_EXTENSIBLE
+                              ? kiln_c99_boolean(0) : subject;
+                return KILN_C99_OK;
+            }
             if (subject.tag == KILN_VALUE_OBJECT) {
                 kiln_object *object = kiln_c99_object_of(subject);
                 /* A module namespace is born non-extensible and cannot be made otherwise. */
@@ -2141,6 +2159,11 @@
         case KILN_C99_METHOD_OBJECT_IS_FROZEN: {
             kiln_value subject = argc > 0 ? args[0] : kiln_c99_undefined();
             int *flag = NULL;
+            if (subject.tag == KILN_VALUE_SHARED) {
+                *result = code == KILN_C99_METHOD_OBJECT_FREEZE
+                              ? subject : kiln_c99_boolean(1);
+                return KILN_C99_OK;
+            }
             if (subject.tag == KILN_VALUE_OBJECT) {
                 if (kiln_c99_object_of(subject)->module_namespace) {
                     kiln_object *namespace_object = kiln_c99_object_of(subject);

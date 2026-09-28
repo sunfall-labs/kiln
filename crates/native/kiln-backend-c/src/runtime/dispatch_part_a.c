@@ -3132,6 +3132,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             }
             *result = kiln_c99_boolean(
                 current.tag == KILN_VALUE_ARRAY ||
+                (current.tag == KILN_VALUE_SHARED &&
+                 kiln_c99_shared_is_array(current)) ||
                 (current.tag == KILN_VALUE_BUILTIN &&
                  current.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE));
             return KILN_C99_OK;

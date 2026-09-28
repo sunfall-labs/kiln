@@ -852,6 +852,24 @@ static int kiln_c99_shared_field_key(uint64_t lease, uint64_t index, kiln_value 
     return status == 0 ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
 }
 
+static int kiln_c99_shared_is_array(kiln_value value) {
+    kiln_shared_facade *facade = (kiln_shared_facade *)(uintptr_t)value.bits;
+    kiln_shared_info info;
+    return facade != NULL && facade->lease != 0 &&
+           kiln_shared_graph_info(facade->lease, &info) == 0 && info.array != 0;
+}
+
+static int kiln_c99_shared_prototype(kiln_value value, kiln_value *out) {
+    kiln_shared_facade *facade = (kiln_shared_facade *)(uintptr_t)value.bits;
+    kiln_shared_info info;
+    if (facade == NULL || facade->lease == 0 ||
+        kiln_shared_graph_info(facade->lease, &info) != 0) return KILN_C99_INVALID_ARGUMENT;
+    *out = info.array ? kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_PROTOTYPE)
+          : info.null_prototype ? kiln_c99_null()
+          : kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE);
+    return KILN_C99_OK;
+}
+
 /* The source IDs passed to the Rust builder identify a live C heap object during this one
  * synchronous call. The low bits distinguish arrays from records without giving Rust a C
  * pointer layout. No callback allocates in the C heap or calls JavaScript. */
