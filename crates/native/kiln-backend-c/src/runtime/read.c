@@ -123,7 +123,7 @@ static int kiln_c99_primitive_object_prototype_read(kiln_host *host, const kiln_
 /* Copy a sealed field through the provider lease. Neither a key nor a child edge points into
  * the arena after this call; strings become this realm's ordinary GC strings, and child nodes
  * get their own weak-cached realm facade. The caller holds `target` across all allocations. */
-static int kiln_c99_shared_field_value(kiln_shared_facade *facade, uint64_t index,
+static int kiln_c99_shared_field_value(uint64_t lease, uint64_t index,
                                         const kiln_shared_field_info *field, kiln_value *out) {
     uint16_t small[64];
     uint16_t *units = small;
@@ -149,7 +149,7 @@ static int kiln_c99_shared_field_value(kiln_shared_facade *facade, uint64_t inde
         units = (uint16_t *)malloc((size_t)length * sizeof(uint16_t));
         if (units == NULL) return KILN_C99_OUT_OF_MEMORY;
     }
-    status = kiln_shared_graph_field(facade->lease, index, &copied, NULL, 0, units, length);
+    status = kiln_shared_graph_field(lease, index, &copied, NULL, 0, units, length);
     if (status != 0 || copied.kind != field->kind || copied.value_length != length) {
         if (units != small) free(units);
         return KILN_C99_INVALID_ARGUMENT;
@@ -174,39 +174,56 @@ static int kiln_c99_shared_field_value(kiln_shared_facade *facade, uint64_t inde
 }
 
 static int kiln_c99_shared_own_read(kiln_value target, const kiln_string *key,
-                                    kiln_value *out, int *found) {
+                                    kiln_value *out, int *found, int *enumerable) {
     kiln_shared_facade *facade = (kiln_shared_facade *)(uintptr_t)target.bits;
     kiln_shared_info node;
     uint16_t small[64];
-    int status;
+    uint64_t lease;
+    int status = KILN_C99_OK;
     *found = 0;
-    if (facade == NULL || facade->lease == 0 || kiln_shared_graph_info(facade->lease, &node) != 0)
+    if (facade == NULL || facade->lease == 0)
         return KILN_C99_INVALID_ARGUMENT;
+    lease = kiln_shared_graph_retain(facade->graph, facade->generation, facade->node);
+    if (lease == 0) return KILN_C99_INVALID_ARGUMENT;
+    if (kiln_shared_graph_info(lease, &node) != 0) {
+        status = KILN_C99_INVALID_ARGUMENT;
+        goto done;
+    }
     /* A sealed graph has only string keys. A Symbol whose private key has the same code units
      * must not read the string field. */
-    if (kiln_c99_key_is_symbol(key)) return KILN_C99_OK;
+    if (kiln_c99_key_is_symbol(key)) goto done;
     if (node.array && kiln_c99_same_name_key(key, "length")) {
         *out = kiln_c99_number((double)node.length);
         *found = 1;
-        return KILN_C99_OK;
+        if (enumerable != NULL) *enumerable = 0;
+        goto done;
     }
     for (uint64_t index = 0; index < node.field_count; ++index) {
         kiln_shared_field_info field;
         uint16_t *units = small;
         int match = 1;
-        if (kiln_shared_graph_field(facade->lease, index, &field, NULL, 0, NULL, 0) != 0)
-            return KILN_C99_INVALID_ARGUMENT;
+        if (kiln_shared_graph_field(lease, index, &field, NULL, 0, NULL, 0) != 0) {
+            status = KILN_C99_INVALID_ARGUMENT;
+            goto done;
+        }
         if (field.key_length != key->unit_len) continue;
-        if (field.key_length > SIZE_MAX / sizeof(uint16_t)) return KILN_C99_OUT_OF_MEMORY;
+        if (field.key_length > SIZE_MAX / sizeof(uint16_t)) {
+            status = KILN_C99_OUT_OF_MEMORY;
+            goto done;
+        }
         if (field.key_length > sizeof small / sizeof small[0]) {
             units = (uint16_t *)malloc((size_t)field.key_length * sizeof(uint16_t));
-            if (units == NULL) return KILN_C99_OUT_OF_MEMORY;
+            if (units == NULL) {
+                status = KILN_C99_OUT_OF_MEMORY;
+                goto done;
+            }
         }
-        status = kiln_shared_graph_field(facade->lease, index, &field, units, field.key_length,
+        status = kiln_shared_graph_field(lease, index, &field, units, field.key_length,
                                          NULL, 0);
         if (status != 0) {
             if (units != small) free(units);
-            return KILN_C99_INVALID_ARGUMENT;
+            status = KILN_C99_INVALID_ARGUMENT;
+            goto done;
         }
         for (uint64_t at = 0; at < field.key_length; ++at) {
             if (units[at] != kiln_string_unit_at(key, (size_t)at)) { match = 0; break; }
@@ -214,10 +231,14 @@ static int kiln_c99_shared_own_read(kiln_value target, const kiln_string *key,
         if (units != small) free(units);
         if (match) {
             *found = 1;
-            return kiln_c99_shared_field_value(facade, index, &field, out);
+            if (enumerable != NULL) *enumerable = field.enumerable != 0;
+            status = kiln_c99_shared_field_value(lease, index, &field, out);
+            goto done;
         }
     }
-    return KILN_C99_OK;
+done:
+    (void)kiln_shared_graph_release(lease);
+    return status;
 }
 
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_string *key,
@@ -237,7 +258,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         kiln_shared_facade *facade = (kiln_shared_facade *)(uintptr_t)target.bits;
         kiln_shared_info node;
         int found;
-        int status = kiln_c99_shared_own_read(target, key, out, &found);
+        int status = kiln_c99_shared_own_read(target, key, out, &found, NULL);
         uint64_t code;
         if (status != KILN_C99_OK || found) return status;
         if (kiln_shared_graph_info(facade->lease, &node) != 0) return KILN_C99_INVALID_ARGUMENT;

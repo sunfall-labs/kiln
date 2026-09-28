@@ -104,8 +104,9 @@ fn native_shared_facade_reads_copied_fields_and_realm_prototype() {
         .expect("empty program emits runtime prelude");
     let wrapper = r#"
 int main(void) {
-    kiln_value shared, answer, keys;
+    kiln_value shared, answer, keys, descriptor;
     int status;
+    int found = 0;
     if (kiln_c99_new_shared_facade(17, 1, 0, &shared) != KILN_C99_OK) return 1;
     status = kiln_c99_get(NULL, shared, "x", 1, &answer, 0, NULL);
     if (status != KILN_C99_OK || answer.tag != KILN_VALUE_NUMBER ||
@@ -120,8 +121,14 @@ int main(void) {
         !kiln_test_units_equal(kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[0]),
                                "x", 1)) return 5;
     status = kiln_c99_own_keys(NULL, shared, &keys, 0, NULL);
-    return status == KILN_C99_OK && keys.tag == KILN_VALUE_ARRAY &&
-           kiln_c99_array_of(keys)->count == 1 ? 0 : 6;
+    if (status != KILN_C99_OK || keys.tag != KILN_VALUE_ARRAY ||
+        kiln_c99_array_of(keys)->count != 1) return 6;
+    status = kiln_c99_describe_property(NULL, shared, "x", 1, &descriptor, &found, 0, NULL);
+    if (status != KILN_C99_OK || !found || descriptor.tag != KILN_VALUE_OBJECT) return 7;
+    status = kiln_c99_get(NULL, descriptor, "writable", 8, &answer, 0, NULL);
+    if (status != KILN_C99_OK || answer.tag != KILN_VALUE_BOOLEAN || answer.bits != 0) return 8;
+    status = kiln_c99_get(NULL, descriptor, "configurable", 12, &answer, 0, NULL);
+    return status == KILN_C99_OK && answer.tag == KILN_VALUE_BOOLEAN && answer.bits == 0 ? 0 : 9;
 }
 "#;
     let run = run_with_main(&generated, wrapper, "shared-facade-read");

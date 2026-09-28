@@ -612,6 +612,25 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
         if (key_value.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
         return kiln_c99_proxy_describe(host, target, key_value, out, found, depth, thrown);
     }
+    if (target.tag == KILN_VALUE_SHARED) {
+        kiln_value value;
+        int enumerable = 0;
+        status = kiln_c99_shared_own_read(target, view, &value, found, &enumerable);
+        if (status != KILN_C99_OK || !*found) return status;
+        status = kiln_c99_new_object(&built);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, built, "value", 5, value, 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(0), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, built, "enumerable", 10,
+                                  kiln_c99_boolean(enumerable), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, built, "configurable", 12,
+                                  kiln_c99_boolean(0), 0, NULL);
+        if (status == KILN_C99_OK) *out = built;
+        return status;
+    }
     if (target.tag == KILN_VALUE_BUILTIN) {
         if (target.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE &&
             kiln_c99_same_name_key(view, "@@unscopables")) {
