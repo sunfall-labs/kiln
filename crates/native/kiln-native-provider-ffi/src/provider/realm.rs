@@ -1612,6 +1612,10 @@ fn active_realm() -> Option<Rc<NativeRealm>> {
     ACTIVE_REALM_RC.with(|slot| slot.borrow().clone())
 }
 
+pub(crate) fn active_clock_is_virtual() -> bool {
+    active_realm().is_some_and(|realm| matches!(realm.clock.get(), NativeClock::Virtual))
+}
+
 pub(crate) fn active_realm_id() -> u64 {
     ACTIVE_REALM.with(Cell::get)
 }

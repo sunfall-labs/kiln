@@ -737,9 +737,12 @@ mod tests {
         );
         assert_eq!((info.array, info.length, info.field_count), (1, 3, 2));
         assert_eq!(kiln_shared_graph_release(facade_lease), 0);
+        // Other concurrently running realm tests can hold the reclamation epoch open. The
+        // released lease must disappear at once; the graph ID may remain resolvable until the
+        // deferred strong handle reaches its turn-boundary grace period.
         assert_eq!(
-            kiln_shared_graph_retain(token.graph, token.generation, token.node),
-            0
+            unsafe { kiln_shared_graph_info(facade_lease, &mut info) },
+            -1
         );
     }
 }

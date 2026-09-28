@@ -349,5 +349,12 @@ function serve(): void {
 const startedMark = Symbol.for("kiln.actor.worker.started");
 if (!isMainThread && workerData?.__kilnActorVersion === 1 && !(globalThis as any)[startedMark]) {
   (globalThis as any)[startedMark] = true;
+  // An actor yields its lane between mailbox turns. A synchronous wait would keep that lane
+  // occupied while the actor that must notify it could be queued behind it.
+  if (typeof Atomics === "object" && Atomics !== null) {
+    Atomics.wait = (() => {
+      throw new TypeError("Atomics.wait cannot block an actor; use actor messages");
+    }) as typeof Atomics.wait;
+  }
   serve();
 }

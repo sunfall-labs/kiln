@@ -142,6 +142,17 @@ Addresses and references to a stopped actor reject future calls with `ActorClose
 An unexpected realm exit rejects every outstanding call with that error. Dropping a reference
 does not silently kill a live actor; the owner is responsible for its lifetime.
 
+### Scheduler placement
+
+Actor realms share the bounded turn scheduler, including when their spawning program runs in a
+single realm outside it. A mailbox wait parks the actor's ticket and consumes no scheduler lane.
+Synchronous `Atomics.wait` throws `TypeError` inside an actor, even for a zero timeout or an
+already mismatched value. A wait could otherwise occupy a lane needed by a pinned notifier and
+deadlock a cycle of actors. Actor code coordinates through calls and messages. This restriction
+belongs to the kiln actor extension; ordinary `node:worker_threads` keep their synchronous wait
+semantics and use dedicated threads by default. `Atomics.waitAsync` still requires a
+notification-driven native waiter before it can be offered as an actor coordination primitive.
+
 ### Isolation and consumption
 
 `isolate(factory)` returns an opaque `Isolated<T>` handle, not `T` with a phantom brand. The

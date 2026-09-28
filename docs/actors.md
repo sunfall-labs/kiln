@@ -85,10 +85,11 @@ can overlap another call after its current synchronous segment yields.
 `owner.stop()` drains accepted calls; `owner.stop({ force: true })` ends the
 actor at a turn boundary.
 
-Native actor workers currently use dedicated threads by default. Scheduling
-them on the shared realm pool is available for testing, but remains opt-in
-while synchronous `Atomics.wait` needs a safe way to suspend a pinned worker.
-Plan memory and thread counts accordingly when creating many live actors.
+Native actors share a bounded realm scheduler. Their mailbox and asynchronous
+methods release a lane between turns. `Atomics.wait` throws `TypeError` inside
+an actor because a synchronous wait could occupy the lane needed by its
+notifier; use actor messages for coordination. Ordinary `node:worker_threads`
+retain dedicated threads and their synchronous `Atomics.wait` behavior.
 
 These modules are kiln extensions. `KILN_EXTENSIONS=0` removes them without
 changing Node's built-in surface. `@kiln/concurrency` re-exports the actor API

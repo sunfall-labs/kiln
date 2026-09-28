@@ -9,6 +9,10 @@ export class Counter extends Actor {
     this.count += amount;
     return this.count;
   }
+  async waitTurn() {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    return this.count;
+  }
   echo(value) { return value; }
   sumLinked(value) {
     let count = 0;
@@ -23,6 +27,11 @@ export class Counter extends Actor {
   probeMailboxBind(endpoint) {
     const internals = MessagePort[Symbol.for('kiln.messagePort')];
     return internals.workerOp(33, endpoint);
+  }
+  waitRejected() {
+    const cell = new Int32Array(new SharedArrayBuffer(4));
+    try { return Atomics.wait(cell, 0, 0, 0); }
+    catch (error) { return `${error.name}: ${error.message}`; }
   }
   fail() { throw new RangeError('remote problem'); }
 }

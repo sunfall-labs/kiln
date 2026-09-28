@@ -588,6 +588,9 @@ static int kiln_c99_atomics_raw(kiln_value *out, const kiln_value *args, size_t 
         answer = kiln_atomics_wait(buffer->shared, (uint64_t)offset, (uint32_t)width,
                                    width == 8 ? (int64_t)expected : (int64_t)(int32_t)(uint32_t)expected,
                                    timeout);
+        if (answer == 4)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Atomics.wait cannot block an actor; use actor messages");
         if (answer == 3) {
             /* The worker waiting was terminated: its realm unwinds to the launcher. */
             (void)kiln_worker_exit(1);

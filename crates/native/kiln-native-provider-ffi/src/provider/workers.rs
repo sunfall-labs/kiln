@@ -23,7 +23,7 @@ use kiln_runtime::workers::{
 use kiln_shared_graph::{Handle, OpaqueHandle};
 use kiln_string::{StringUnits, StringView};
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicPtr, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::task::Waker;
 use std::time::{Duration, Instant};
 
@@ -89,6 +89,43 @@ const OP_ACTOR_BIND_RECEIVER: u32 = 33;
 const OP_ACTOR_GRAPH_RESERVE: u32 = 34;
 const OP_ACTOR_GRAPH_RECEIVE: u32 = 35;
 const OP_ACTOR_GRAPH_RELEASE: u32 = 36;
+const ACTOR_WORKER_ENTRY: &str = "kiln:actors/worker";
+
+fn actor_scheduler(virtual_clock: bool) -> std::io::Result<Arc<PinnedTurnScheduler>> {
+    static WALL: OnceLock<Mutex<Option<Arc<PinnedTurnScheduler>>>> = OnceLock::new();
+    static VIRTUAL: OnceLock<Mutex<Option<Arc<PinnedTurnScheduler>>>> = OnceLock::new();
+    let store = if virtual_clock { &VIRTUAL } else { &WALL };
+    let mut slot = store
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(scheduler) = slot.as_ref() {
+        return Ok(Arc::clone(scheduler));
+    }
+    if virtual_clock {
+        let scheduler = Arc::new(PinnedTurnScheduler::deterministic()?);
+        *slot = Some(Arc::clone(&scheduler));
+        return Ok(scheduler);
+    }
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    let workers = std::env::var("KILN_WORKER_COUNT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|count| *count > 0)
+        .unwrap_or(1);
+    let lanes = ["KILN_PARALLELISM", "KILN_SCHEDULER_LANES"]
+        .into_iter()
+        .find_map(|name| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|count| *count > 0)
+        })
+        .unwrap_or((cores / workers).max(1));
+    let scheduler = Arc::new(PinnedTurnScheduler::new(lanes)?);
+    *slot = Some(Arc::clone(&scheduler));
+    Ok(scheduler)
+}
 
 /// Borrowed, read-only description of one native heap value. The callback may reuse its
 /// scratch on the next call; the provider copies strings before asking for another field.
@@ -957,17 +994,32 @@ pub unsafe extern "C" fn kiln_worker_spawn(
             control,
             pipe_stdio: true,
         };
-        // A deterministic realm has one lane. `Atomics.wait` may block that lane while its
-        // child must notify it, so children keep their dedicated threads in that mode.
-        let scheduled = if std::env::var("KILN_WORKER_SCHEDULER")
+        // Actor mailboxes yield between turns and cannot enter synchronous Atomics.wait.
+        // They can therefore share lanes even when their parent runs on the ordinary single-
+        // realm launcher. Node-compatible workers retain dedicated threads by default: their
+        // synchronous waits can depend on a notifier pinned to the occupied scheduler lane.
+        let actor = matches!(&spec.entry, WorkerEntry::File(path) if path == ACTOR_WORKER_ENTRY);
+        let scheduler_enabled = std::env::var("KILN_REALM_SCHEDULER")
+            .map_or(true, |value| value.is_empty() || value != "0");
+        let scheduled = if actor && scheduler_enabled && TURN_RUNNER.get().is_some() {
+            match super::realm::current_scheduler() {
+                Some(scheduler) => Some(scheduler),
+                None => match actor_scheduler(super::realm::active_clock_is_virtual()) {
+                    Ok(scheduler) => Some(scheduler),
+                    Err(error) => {
+                        eprintln!("actor scheduler: {error}");
+                        return super::RUNTIME_ERROR;
+                    }
+                },
+            }
+        } else if std::env::var("KILN_WORKER_SCHEDULER")
             .is_ok_and(|value| !value.is_empty() && value != "0")
         {
-            super::realm::current_scheduler()
-                .filter(|scheduler| !scheduler.is_deterministic())
-                .zip(TURN_RUNNER.get().copied())
+            super::realm::current_scheduler().filter(|scheduler| !scheduler.is_deterministic())
         } else {
             None
-        };
+        }
+        .zip(TURN_RUNNER.get().copied());
         let started = if let Some((scheduler, turn_runner)) = scheduled {
             let pool = Arc::downgrade(&scheduler);
             let graph_coordinator = super::realm::current_graph_coordinator();
@@ -1242,6 +1294,13 @@ pub unsafe extern "C" fn kiln_atomics_wait(
     timeout: f64,
 ) -> i32 {
     ffi(|| {
+        if workers::current().is_some_and(|worker| {
+            matches!(&worker.spec.entry, WorkerEntry::File(path) if path == ACTOR_WORKER_ENTRY)
+        }) {
+            // A synchronous wait would occupy an actor lane. The C builtin turns this into a
+            // catchable TypeError before it can publish a waiter or pin the realm.
+            return 4;
+        }
         if handle.is_null() {
             return INVALID_ARGUMENT;
         }
