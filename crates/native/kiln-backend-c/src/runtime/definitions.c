@@ -413,6 +413,34 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
     if (status != KILN_C99_OK) {
         return status;
     }
+    /* A new data property needs no dictionary entry. The bootstrap defines most built-in
+     * methods this way; keeping their stores shaped lets all realms use the shared layout and
+     * the object's inline value slots. Missing descriptor fields have the ordinary default
+     * (false, or undefined for value). Redefinitions still take the full checks below. */
+    {
+        kiln_object *object = kiln_c99_object_of(store);
+        if (object->shape != NULL && !object->frozen && !object->not_extensible &&
+            !object->module_namespace && !has_getter && !has_setter) {
+            const kiln_string *ikey = stable != NULL ? stable : kiln_c99_intern_key(view);
+            uint32_t existing;
+            if (ikey == NULL) return KILN_C99_OUT_OF_MEMORY;
+            if (!kiln_c99_shape_find_slot(object->shape, ikey, &existing)) {
+                int shaped_status;
+                uint32_t attrs = 0;
+                if (!has_writable || !kiln_c99_truthy(writable)) attrs |= KILN_C99_ATTR_READONLY;
+                if (!has_enumerable || !kiln_c99_truthy(enumerable))
+                    attrs |= KILN_C99_ATTR_ENUM_FLIP;
+                if (!has_configurable || !kiln_c99_truthy(configurable))
+                    attrs |= KILN_C99_ATTR_FIXED;
+                if (kiln_c99_shape_define_new(object, ikey,
+                                              kiln_val_from_boundary(has_value ? value
+                                                                               : kiln_c99_undefined()),
+                                              attrs, NULL, &shaped_status)) {
+                    return shaped_status;
+                }
+            }
+        }
+    }
     {
         kiln_object *object = kiln_c99_object_of(store);
         if (object->shape != NULL) {
