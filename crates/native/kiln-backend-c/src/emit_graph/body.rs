@@ -1935,6 +1935,11 @@ fn compute_live_twins(
 
         match &block.terminator {
             Terminator::Branch { condition, .. } => {
+                if ints.contains(condition) {
+                    live_ints.insert(*condition);
+                } else if numbers.contains(condition) {
+                    live_numbers.insert(*condition);
+                }
                 if let Some(GraphOp::Binary { op, left, right }) = defs.get(condition) {
                     let is_cmp = matches!(
                         op,
@@ -2371,8 +2376,20 @@ fn compute_live_twins(
     (live_numbers, live_ints)
 }
 
+fn numeric_comparison_symbol(op: &BinaryOp) -> Option<&'static str> {
+    match op {
+        BinaryOp::LessThan => Some("<"),
+        BinaryOp::LessThanOrEqual => Some("<="),
+        BinaryOp::GreaterThan => Some(">"),
+        BinaryOp::GreaterThanOrEqual => Some(">="),
+        BinaryOp::StrictEqual | BinaryOp::LooseEqual => Some("=="),
+        BinaryOp::StrictNotEqual | BinaryOp::LooseNotEqual => Some("!="),
+        _ => None,
+    }
+}
+
 /// The values some operation reads boxed. Arithmetic and comparison on two proven numbers
-/// read the twins; a branch on such a comparison or on a proven boolean reads no box; a typed
+/// read the twins; a branch on such a comparison, proven number, or proven boolean reads no box; a typed
 /// entry returning a number returns the twin. Everything else reads the box, and a phi that is
 /// read boxed reads its inputs boxed.
 fn boxed_uses(
@@ -2395,19 +2412,6 @@ fn boxed_uses(
                 | BinaryOp::Exponentiate
                 | BinaryOp::Remainder
                 | BinaryOp::StrictEqual
-                | BinaryOp::StrictNotEqual
-                | BinaryOp::LooseEqual
-                | BinaryOp::LooseNotEqual
-                | BinaryOp::LessThan
-                | BinaryOp::LessThanOrEqual
-                | BinaryOp::GreaterThan
-                | BinaryOp::GreaterThanOrEqual
-        )
-    };
-    let is_comparison = |op: &BinaryOp| {
-        matches!(
-            op,
-            BinaryOp::StrictEqual
                 | BinaryOp::StrictNotEqual
                 | BinaryOp::LooseEqual
                 | BinaryOp::LooseNotEqual
@@ -2533,17 +2537,21 @@ fn boxed_uses(
         }
         match &block.terminator {
             Terminator::Branch { condition, .. } => {
-                // Only a *comparison* of two proven numbers is inlined by the branch (see
-                // `emit_terminator`); an arithmetic condition (`i % 2 ? a : b`, `n - 1 ? ..`)
-                // is tested for truthiness through its box, so it must keep that box. Using
-                // `twin_only` here dropped the box of every arithmetic condition, and the
-                // branch then read an unwritten `v` (issue 27).
+                // The branch inlines a comparison or tests a proven numeric/boolean twin.
+                // Other conditions still need their box. In particular, treating every
+                // twin-only binary as an inlined comparison read an unwritten box (issue 27).
                 let compares_twins = matches!(
                     defs.get(condition),
                     Some(GraphOp::Binary { op, left, right })
-                        if is_comparison(op) && numbers.contains(left) && numbers.contains(right)
+                        if numeric_comparison_symbol(op).is_some()
+                            && numbers.contains(left)
+                            && numbers.contains(right)
                 );
-                if !compares_twins && !booleans.contains(condition) {
+                if !compares_twins
+                    && !booleans.contains(condition)
+                    && !numbers.contains(condition)
+                    && !ints.contains(condition)
+                {
                     used.insert(*condition);
                 }
             }
@@ -3522,34 +3530,23 @@ fn emit_terminator(
         } => {
             // A comparison of two proven ints branches on ints directly;
             // a comparison of two proven numbers branches on doubles directly;
+            // a proven numeric condition tests its twin (zero and NaN are false);
             // anything else asks the value for its truthiness.
             let test = match defs.get(condition) {
                 Some(GraphOp::Binary { op, left, right })
-                    if ints.contains(left) && ints.contains(right) =>
+                    if ints.contains(left)
+                        && ints.contains(right)
+                        && numeric_comparison_symbol(op).is_some() =>
                 {
-                    let sym = match op {
-                        BinaryOp::LessThan => Some("<"),
-                        BinaryOp::LessThanOrEqual => Some("<="),
-                        BinaryOp::GreaterThan => Some(">"),
-                        BinaryOp::GreaterThanOrEqual => Some(">="),
-                        BinaryOp::StrictEqual | BinaryOp::LooseEqual => Some("=="),
-                        BinaryOp::StrictNotEqual | BinaryOp::LooseNotEqual => Some("!="),
-                        _ => None,
-                    };
-                    sym.map(|sym| format!("i{} {sym} i{}", left.0, right.0))
+                    let sym = numeric_comparison_symbol(op).expect("comparison guard");
+                    Some(format!("i{} {sym} i{}", left.0, right.0))
                 }
                 Some(GraphOp::Binary { op, left, right })
-                    if numbers.contains(left) && numbers.contains(right) =>
+                    if numbers.contains(left)
+                        && numbers.contains(right)
+                        && numeric_comparison_symbol(op).is_some() =>
                 {
-                    let sym = match op {
-                        BinaryOp::LessThan => Some("<"),
-                        BinaryOp::LessThanOrEqual => Some("<="),
-                        BinaryOp::GreaterThan => Some(">"),
-                        BinaryOp::GreaterThanOrEqual => Some(">="),
-                        BinaryOp::StrictEqual | BinaryOp::LooseEqual => Some("=="),
-                        BinaryOp::StrictNotEqual | BinaryOp::LooseNotEqual => Some("!="),
-                        _ => None,
-                    };
+                    let sym = numeric_comparison_symbol(op).expect("comparison guard");
                     let a = if live_numbers.contains(left) {
                         format!("d{}", left.0)
                     } else if live_ints.contains(left) {
@@ -3564,10 +3561,16 @@ fn emit_terminator(
                     } else {
                         format!("d{}", right.0)
                     };
-                    sym.map(|sym| format!("{a} {sym} {b}"))
+                    Some(format!("{a} {sym} {b}"))
                 }
                 // A proven boolean branches on its twin.
                 _ if booleans.contains(condition) => Some(format!("b{}", condition.0)),
+                _ if ints.contains(condition) && live_ints.contains(condition) => {
+                    Some(format!("i{} != 0", condition.0))
+                }
+                _ if numbers.contains(condition) && live_numbers.contains(condition) => {
+                    Some(format!("(d{0} != 0.0 && d{0} == d{0})", condition.0))
+                }
                 _ => None,
             }
             .unwrap_or_else(|| format!("kiln_c99_val_truthy(v{})", condition.0));

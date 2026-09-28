@@ -1829,12 +1829,11 @@ fn executable_fast_clone_exit_boxes_a_speculated_value_it_never_boxed() {
     );
 }
 
-/// Issue 27: a branch on an *arithmetic* value of two proven numbers (`i % 2 ? a : b`) tests the
-/// value's truthiness through its box, so the box must be written. `boxed_uses` treated every
-/// twin-only operator as a branch that reads no box -- only comparisons are inlined -- so the
-/// fast clone and the typed entry dropped the box and branched on an unwritten `v`.
+/// Issue 27: an arithmetic condition (`i % 2 ? a : b`) must test a value the emitter wrote.
+/// A proven numeric condition can use its integer or double twin directly, including zero and
+/// NaN's false answers. The generic path still tests the box for values without that proof.
 #[test]
-fn executable_branch_on_a_number_remainder_reads_a_written_box() {
+fn executable_branch_on_a_number_remainder_reads_a_live_twin() {
     let mut callee = function(vec![
         Instruction::LoadLocal(0),
         Instruction::Const(1), // 2
@@ -1884,6 +1883,16 @@ fn executable_branch_on_a_number_remainder_reads_a_written_box() {
             .contains("/* Clone A: guarded fast path */"),
         "the callee must be versioned for this test to mean anything"
     );
+    let fast = generated
+        .source
+        .split("/* Clone A: guarded fast path */")
+        .nth(1)
+        .and_then(|source| source.split("/* Clone B: generic fallback path */").next())
+        .expect("both clones emit");
+    assert!(
+        !fast.contains("kiln_c99_val_truthy(v2)"),
+        "the proven numeric condition must test its twin without boxing"
+    );
     let wrapper = format!(
         "int main(void) {{ kiln_value result; int status = {}(NULL, &result); if (status != 0) return 2; if (result.tag != KILN_VALUE_NUMBER) return 3; double d; memcpy(&d, &result.bits, sizeof d); return d == 1107.0 ? 0 : 4; }}\n",
         generated.symbol
@@ -1891,7 +1900,7 @@ fn executable_branch_on_a_number_remainder_reads_a_written_box() {
     let run = run_with_main(&generated, &wrapper, "branch-on-remainder");
     assert!(
         run.status.success(),
-        "the branch on `i % 2` read a box the fast clone never wrote ({:?}):\nstdout: {}\nstderr: {}",
+        "the branch on `i % 2` read a value the fast clone never wrote ({:?}):\nstdout: {}\nstderr: {}",
         run.status.code(),
         String::from_utf8_lossy(&run.stdout),
         String::from_utf8_lossy(&run.stderr)

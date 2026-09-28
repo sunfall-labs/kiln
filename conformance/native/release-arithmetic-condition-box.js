@@ -1,11 +1,10 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
 // A branch on a *comparison* of two proven numbers tests their twins, but a branch on an
-// *arithmetic* value -- `i % 2 ? a : b`, `n - 1 ? .. : ..`, `while (n % 7)` -- tests the value's
-// truthiness through its box. The box analysis treated every twin-only operator as a condition
-// that reads no box, so the fast clone and the typed entry dropped the box and branched on a
-// variable nothing wrote: every such condition took one arm (issue 27). `+x` of a proven number
-// copies `x`'s box, and was treated the same way.
+// *arithmetic* value -- `i % 2 ? a : b`, `n - 1 ? .. : ..`, `while (n % 7)` -- must read
+// something the emitter wrote. The original box analysis dropped the box while the branch
+// still read it (issue 27). A proven numeric condition now reads its live twin directly;
+// zero and NaN must still take the false arm. `+x` of a proven number copies `x`'s box.
 
 const shared = [1, , 3];
 const xs = [10, 20, 30, 40];
