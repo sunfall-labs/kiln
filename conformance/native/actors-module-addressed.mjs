@@ -37,6 +37,17 @@ const graphTicketState = Reflect.ownKeys(graphTicket)
   .map(key => Object.getOwnPropertyDescriptor(graphTicket, key)?.value)
   .find(value => value && typeof value === 'object' && 'consumed' in value);
 if (!graphTicketState || graphTicketState.consumed) throw new Error('new graph ticket is unusable');
+const forgedTicket = {};
+Object.defineProperty(forgedTicket, Symbol.for('kiln.actor.ticket'), { value: graphTicketState });
+let forgedRefused = false;
+try { await owner.ref.call('echo', [forgedTicket]); }
+catch (error) {
+  forgedRefused = error.name === 'DataCloneError'
+    && error.message === 'graph transfer needs ownership proof';
+}
+if (!forgedRefused || graphTicketState.consumed || graphTicketState.value !== isolated) {
+  throw new Error('forged graph ticket moved or consumed the genuine isolated handle');
+}
 for (const key of Reflect.ownKeys(graphTicket)) {
   const value = Object.getOwnPropertyDescriptor(graphTicket, key)?.value;
   if (value?.answer === 42 || value?.value?.answer === 42) throw new Error('isolated graph leaked through ticket');

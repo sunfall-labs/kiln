@@ -22,6 +22,7 @@ const REQUEST_ID = 25;
 const GRAPH_REQUEST = 30;
 const GRAPH_STATUS = 31;
 const GRAPH_CANCEL = 32;
+const graphMarker = "__kilnActorGraphReservation";
 
 declare const actorAddressBrand: unique symbol;
 export type ActorAddress<T extends Actor = Actor> = Readonly<{ readonly [actorAddressBrand]: T }>;
@@ -68,12 +69,22 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
       return new Promise((resolve, reject) => {
         let settled = false;
         let pendingGraphRequest = 0;
+        let graphTicket: Ticket | undefined;
+        let suspendedGraphHandle: any;
         const finish = (error: any, value?: any): void => {
           if (settled) return;
           settled = true;
           if (pendingGraphRequest) {
             try { internals.workerOp(GRAPH_CANCEL, pendingGraphRequest); } catch {}
             pendingGraphRequest = 0;
+          }
+          if (graphTicket) {
+            if (!error) error = namedError("DataCloneError", "graph transfer needs ownership proof");
+            if (suspendedGraphHandle !== undefined) {
+              try { graphTicket.restore(suspendedGraphHandle); } catch {}
+            }
+            graphTicket = undefined;
+            suspendedGraphHandle = undefined;
           }
           options?.signal?.removeEventListener("abort", abort);
           reply.port1.close();
@@ -91,22 +102,32 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
             const buffers: ArrayBuffer[] = [];
             const consumed: Ticket[] = [];
             try {
-              const snapshot = prepareActorMessage(args, buffers, consumed, new Map(), (handle: any): never => {
-                try {
-                  const endpoint = internals.portEndpoint(sender);
-                  const reservation = message.graphReservation;
-                  const bound = Number.isSafeInteger(reservation) && reservation > 0;
-                  const request = bound
-                    ? internals.workerOp(GRAPH_REQUEST, endpoint, handle, reservation, id,
-                      internals.portEndpoint(reply.port1))
-                    : internals.workerOp(GRAPH_REQUEST, endpoint, handle);
-                  if (Number.isSafeInteger(request) && request > 0) pendingGraphRequest = request;
-                } catch { /* A runtime without a graph coordinator retains the refusal. */ }
-                throw namedError("DataCloneError", "graph transfer needs ownership proof");
+              const reservation = message.graphReservation;
+              const snapshot = prepareActorMessage(args, buffers, consumed, new Map(), (_handle: any, ticket: Ticket): any => {
+                if (graphTicket || !Number.isSafeInteger(reservation) || reservation <= 0) {
+                  throw namedError("DataCloneError", "graph transfer needs ownership proof");
+                }
+                graphTicket = ticket;
+                return { [graphMarker]: reservation };
               });
-              const sent = sender.postMessage({ kind: "invoke", id, method, args: snapshot }, buffers);
-              consumeActorTickets(consumed);
-              if (sent === undefined) throw namedError("ActorClosedError", "actor mailbox closed");
+              if (graphTicket) {
+                if (buffers.length !== 0) throw namedError("DataCloneError", "graph transfer needs ownership proof");
+                const sent = sender.postMessage({ kind: "invoke", id, method, args: snapshot,
+                  graphReservation: reservation });
+                if (sent === undefined) throw namedError("ActorClosedError", "actor mailbox closed");
+                if (settled) return;
+                suspendedGraphHandle = graphTicket.suspend();
+                try {
+                  const request = internals.workerOp(GRAPH_REQUEST, internals.portEndpoint(sender),
+                    suspendedGraphHandle, reservation, id, internals.portEndpoint(reply.port1));
+                  if (Number.isSafeInteger(request) && request > 0) pendingGraphRequest = request;
+                } catch { /* An unscheduled realm keeps the refusal and restores the ticket. */ }
+                throw namedError("DataCloneError", "graph transfer needs ownership proof");
+              } else {
+                const sent = sender.postMessage({ kind: "invoke", id, method, args: snapshot }, buffers);
+                consumeActorTickets(consumed);
+                if (sent === undefined) throw namedError("ActorClosedError", "actor mailbox closed");
+              }
             } catch (error) {
               if (pendingGraphRequest) {
                 const poll = (): void => {
