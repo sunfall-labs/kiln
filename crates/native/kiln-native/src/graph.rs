@@ -4444,9 +4444,71 @@ typedef struct kiln_cli_scheduled_realm {
     FILE *output;
     char *captured;
     size_t captured_len;
+    size_t captured_cap;
+    int capture_failed;
     int memory_output;
     uint64_t index;
+#if !defined(_WIN32)
+    char stream_buffer[256];
+#endif
 } kiln_cli_scheduled_realm;
+
+/* An idle scheduled realm should retain only the bytes it has printed. `open_memstream` reserves
+ * an 8-KiB buffer for even a three-byte "hi\n", and the parity harness can park thousands of
+ * realms at once. Keep FILE* as the host ABI, give stdio a small buffer owned by the session,
+ * and append flushed writes into a growable capture. The session outlives fclose. */
+static int kiln_cli_scheduled_append(kiln_cli_scheduled_realm *session,
+                                     const char *bytes, size_t length) {
+    size_t needed, cap;
+    char *grown;
+    if (length == 0) return 1;
+    if (length > SIZE_MAX - session->captured_len) goto failed;
+    needed = session->captured_len + length;
+    if (needed > session->captured_cap) {
+        cap = session->captured_cap == 0 ? 64 : session->captured_cap;
+        while (cap < needed) {
+            if (cap > SIZE_MAX / 2) { cap = needed; break; }
+            cap *= 2;
+        }
+        grown = (char *)realloc(session->captured, cap);
+        if (grown == NULL) goto failed;
+        session->captured = grown;
+        session->captured_cap = cap;
+    }
+    memcpy(session->captured + session->captured_len, bytes, length);
+    session->captured_len = needed;
+    return 1;
+failed:
+    session->capture_failed = 1;
+    errno = ENOMEM;
+    return 0;
+}
+
+#if defined(__APPLE__)
+static int kiln_cli_scheduled_write(void *cookie, const char *bytes, int length) {
+    if (length < 0 || !kiln_cli_scheduled_append((kiln_cli_scheduled_realm *)cookie,
+                                                 bytes, (size_t)length)) return -1;
+    return length;
+}
+static FILE *kiln_cli_scheduled_stream(kiln_cli_scheduled_realm *session) {
+    FILE *file = funopen(session, NULL, kiln_cli_scheduled_write, NULL, NULL);
+    if (file != NULL && setvbuf(file, session->stream_buffer, _IOFBF,
+                               sizeof session->stream_buffer) != 0) { fclose(file); return NULL; }
+    return file;
+}
+#elif !defined(_WIN32)
+static ssize_t kiln_cli_scheduled_write(void *cookie, const char *bytes, size_t length) {
+    if (!kiln_cli_scheduled_append((kiln_cli_scheduled_realm *)cookie, bytes, length)) return -1;
+    return (ssize_t)length;
+}
+static FILE *kiln_cli_scheduled_stream(kiln_cli_scheduled_realm *session) {
+    cookie_io_functions_t functions = {NULL, kiln_cli_scheduled_write, NULL, NULL};
+    FILE *file = fopencookie(session, "w", functions);
+    if (file != NULL && setvbuf(file, session->stream_buffer, _IOFBF,
+                               sizeof session->stream_buffer) != 0) { fclose(file); return NULL; }
+    return file;
+}
+#endif
 
 static void *kiln_cli_scheduled_begin(void *context, uint64_t index) {
     const kiln_cli_realms *realms = (const kiln_cli_realms *)context;
@@ -4462,10 +4524,15 @@ static void *kiln_cli_scheduled_begin(void *context, uint64_t index) {
 #if defined(_WIN32)
     session->output = fopen(path, "wb");
 #else
-    session->output = open_memstream(&session->captured, &session->captured_len);
+    session->output = kiln_cli_scheduled_stream(session);
     session->memory_output = session->output != NULL;
 #endif
-    if (session->output == NULL) { free(session->run); free(session); return NULL; }
+    if (session->output == NULL) {
+        free(session->captured);
+        free(session->run);
+        free(session);
+        return NULL;
+    }
     session->realms = realms;
     session->index = index;
     kiln_cli_realm_begin(session->run, realms->argc, realms->argv, session->output, NULL, 0);
@@ -4491,6 +4558,7 @@ static int kiln_cli_scheduled_finish(void *opaque) {
     FILE *written;
     int status = kiln_cli_realm_finish(session->run, 0, 0);
     if (fclose(session->output) != 0 && status == 0) status = 1;
+    if (session->capture_failed) status = 1;
     if (session->memory_output) {
         snprintf(path, sizeof path, "%s/%llu.out", session->realms->directory,
                  (unsigned long long)session->index);
