@@ -885,23 +885,30 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
         }
         return KILN_C99_OK;
     }
-    /* The count is read each time round because a getter can add a property to the source; the
-     * bound is the source's *original* length, so a property the getter appends is not copied,
-     * which is what stops an appending getter from looping. */
+    /* CopyDataProperties takes the own-key list before invoking any getter. A getter can delete
+     * an earlier key and shift the dictionary, append another key, or replace a later value.
+     * Keep the original key order in a GC-traced array, then re-read each current descriptor by
+     * key: deleted keys disappear, newly added keys stay out, and later values remain live. */
     {
+        kiln_value keys;
         size_t length;
         int status = kiln_c99_property_walk(object, &length);
         if (status != KILN_C99_OK) return status;
+        status = kiln_c99_new_array(&keys);
+        if (status != KILN_C99_OK) return status;
         for (index = 0; index < length; ++index) {
-            size_t current_count;
             kiln_property projected;
+            const kiln_property *property = kiln_c99_property_view(object, index, &projected);
+            status = kiln_c99_array_push(keys, kiln_c99_stable_key_value(property->key));
+            if (status != KILN_C99_OK) return status;
+        }
+        for (index = 0; index < length; ++index) {
+            const kiln_string *key = (const kiln_string *)
+                kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[index]).ptr;
             kiln_property property;
             kiln_value copied;
             kiln_value symbol;
-            status = kiln_c99_property_walk(object, &current_count);
-            if (status != KILN_C99_OK) return status;
-            if (index >= current_count) break;
-            property = *kiln_c99_property_view(object, index, &projected);
+            if (!kiln_c99_property_read_own(object, key, key, &property)) continue;
             if (!property.enumerable) {
                 /* A symbol-keyed property is stored non-enumerable here whatever the program
                  * asked for: `kiln_c99_own_slot` marks every `@@` key that way, in one place, so
