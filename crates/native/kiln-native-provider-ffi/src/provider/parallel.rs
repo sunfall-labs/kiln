@@ -13,9 +13,8 @@ pub type ChunkFn = unsafe extern "C" fn(*const c_void, *mut c_void, usize, usize
 
 // -- Interim cost model and thread budget ---------------------------------------------------
 //
-// The chunk cost probe remains from parallel-builtins issue 04. Map chunks use the realm
-// scheduler's queue; sort still uses the interim Rayon pool until its stable merge plan moves
-// onto that queue (realms issue 09).
+// The chunk cost probe remains from parallel-builtins issue 04. Map chunks and stable sort
+// passes use the same realm scheduler queue (realms issue 09).
 
 /// The probe's first batch, run on the calling thread: a call of at most this many elements
 /// runs there without reading the clock and never touches the pool.
@@ -43,8 +42,8 @@ pub const PROBE_BATCH_NS: u64 = 2_000;
 /// left sequential up to 16 ms of work.
 pub const PARALLEL_MIN_WORK_NS: u64 = 100_000;
 
-/// Work per chunk handed to the pool once a call goes parallel: large enough that the per-chunk
-/// dispatch (~100-200 ns in Rayon) is under 1%, small enough to steal.
+/// Target work per chunk once a call goes parallel. This is the pre-scheduler tuning point;
+/// the scheduler benchmark will establish whether its ticket cost calls for a different value.
 pub const CHUNK_TARGET_NS: u64 = 25_000;
 
 /// At least this many chunks per pool thread, so stealing evens out uneven bodies and a thread
@@ -101,26 +100,6 @@ fn parallelism() -> usize {
     })
 }
 
-/// The pool, built the first time a call decides to use it (a program whose calls all stay
-/// inline never starts its threads): private to this archive, so it never shares Rayon's
-/// global pool with anything else linked into the process, and sized once per process.
-/// `None` when the answer is one worker.
-fn pool() -> Option<&'static rayon::ThreadPool> {
-    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
-    POOL.get_or_init(|| {
-        let threads = parallelism();
-        if threads <= 1 {
-            return None;
-        }
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .thread_name(|i| format!("kiln-parallel-{i}"))
-            .build()
-            .ok()
-    })
-    .as_ref()
-}
-
 /// The process fallback for parallel calls made outside a scheduled realm. In a scheduled
 /// realm, the caller borrows that realm's lane pool instead, so the call starts no extra worker
 /// threads. This pool is lazy for the same reason the older Rayon pool was.
@@ -134,7 +113,7 @@ fn scheduler_pool() -> Option<Arc<PinnedTurnScheduler>> {
     .clone()
 }
 
-/// The pointers a worker needs, made `Send + Sync` for the closure Rayon runs. The C side
+/// The pointers a worker needs, made `Send + Sync` for scheduler turns. The C side
 /// guarantees the ranges are disjoint per chunk and the arrays outlive the call.
 #[derive(Clone, Copy)]
 struct Job {
@@ -189,7 +168,7 @@ impl ChunkGroup {
         }
     }
 
-    fn run_one(&self, job: Job) -> bool {
+    fn run_one(&self, run: impl FnOnce(usize, usize)) -> bool {
         if self.failed.load(Ordering::Acquire) {
             return false;
         }
@@ -201,7 +180,7 @@ impl ChunkGroup {
             .start
             .saturating_add(index.saturating_mul(self.chunk_size));
         let end = start.saturating_add(self.chunk_size).min(self.count);
-        if catch_unwind(AssertUnwindSafe(|| unsafe { job.run(start, end) })).is_err() {
+        if catch_unwind(AssertUnwindSafe(|| run(start, end))).is_err() {
             self.failed.store(true, Ordering::Release);
             return false;
         }
@@ -215,6 +194,14 @@ impl ChunkGroup {
                 .changed
                 .wait(guard)
                 .expect("parallel join lock poisoned");
+        }
+    }
+
+    fn body_finished(&self) {
+        if self.running_bodies.fetch_sub(1, Ordering::AcqRel) == 1 {
+            // A notification cannot race between the joiner's check and Condvar::wait.
+            let _guard = self.done.lock().expect("parallel join lock poisoned");
+            self.changed.notify_all();
         }
     }
 }
@@ -235,7 +222,10 @@ impl ChunkTurn {
 
 impl PinnedTurn for ChunkTurn {
     fn run_turn(&mut self, _waker: &Waker) -> TurnOutcome {
-        if self.group.run_one(self.job) {
+        if self
+            .group
+            .run_one(|start, end| unsafe { self.job.run(start, end) })
+        {
             TurnOutcome::Ready
         } else {
             TurnOutcome::Done
@@ -245,12 +235,7 @@ impl PinnedTurn for ChunkTurn {
 
 impl Drop for ChunkTurn {
     fn drop(&mut self) {
-        if self.group.running_bodies.fetch_sub(1, Ordering::AcqRel) == 1 {
-            // Synchronize with the joiner's predicate check before notifying it. Without this
-            // lock, the last drop could notify between that check and Condvar::wait.
-            let _guard = self.group.done.lock().expect("parallel join lock poisoned");
-            self.group.changed.notify_all();
-        }
+        self.group.body_finished();
     }
 }
 
@@ -261,11 +246,11 @@ impl Drop for ChunkTurn {
 #[unsafe(no_mangle)]
 pub extern "C" fn kiln_parallel_threads() -> usize {
     super::realm::current_scheduler()
-        .map(|scheduler| scheduler.lane_count())
+        .map(|scheduler| scheduler.lane_count().min(parallelism()))
         .unwrap_or_else(parallelism)
 }
 
-/// Run `chunk` over `[0, count)` of `in_` into `out`, split across the pool.
+/// Run `chunk` over `[0, count)` of `in_` into `out`, split across scheduler lanes.
 ///
 /// Returns 0 when every chunk ran, -1 for a null worker, and -2 when a worker panicked, in
 /// which case some of `out` is unwritten and the caller takes its sequential path. The
@@ -348,7 +333,7 @@ pub unsafe extern "C" fn kiln_parallel_map(
     let handles = (0..worker_count)
         .map(|_| scheduler.spawn_movable(ChunkTurn::new(Arc::clone(&group), job)))
         .collect::<Vec<_>>();
-    while group.run_one(job) {}
+    while group.run_one(|start, end| unsafe { job.run(start, end) }) {}
     for handle in &handles {
         handle.cancel();
     }
@@ -366,7 +351,7 @@ pub unsafe extern "C" fn kiln_parallel_map(
 
 /// `parallelSort`'s orders (ADR 0069, parallel issue 10). The emitter passes one of these only
 /// where the answer is fixed by the order alone: a stable sort under a consistent comparator has
-/// exactly one result, so the pool's answer is `sort`'s.
+/// exactly one result, so the scheduler's answer is `sort`'s.
 ///
 /// `%TypedArray%.prototype.sort` with no comparator: numeric ascending, `-0` before `+0`, `NaN`
 /// last (and `NaN`s kept in their order).
@@ -382,7 +367,7 @@ pub const SORT_DESCENDING: i32 = 2;
 pub const SORT_KIND_VALUES: i32 = 100;
 
 /// Below this many elements the sort runs on the calling thread: a sort of 10,000 doubles takes
-/// about as long as waking the pool twice (issue 04's 45-90 us fork-join).
+/// about as long as several scheduler wake-and-join rounds.
 pub const SORT_PARALLEL_MIN: usize = 10_000;
 
 // `%TypedArray%` default order over floats (`SORT_DEFAULT`); integers compare as integers. The
@@ -403,15 +388,213 @@ fn difference_order(x: f64, y: f64) -> std::cmp::Ordering {
     }
 }
 
-/// A stable sort of `slice` by `cmp`, on the pool when it is large enough and there is one.
+#[derive(Clone, Copy)]
+enum SortPhase {
+    Runs,
+    Merge,
+}
+
+/// A phase borrows its comparator and buffers only until every scheduled body has been dropped.
+struct SortContext<T, F> {
+    source: *mut T,
+    target: *mut T,
+    len: usize,
+    width: usize,
+    cmp: *const F,
+    phase: SortPhase,
+}
+
+#[derive(Clone, Copy)]
+struct SortJob {
+    context: *const c_void,
+    run: unsafe fn(*const c_void, usize),
+}
+
+// SAFETY: the phase join keeps its stack context and both buffers alive. Tasks own disjoint
+// runs or merge destinations; all tasks only read the shared `Sync` comparator.
+unsafe impl Send for SortJob {}
+unsafe impl Sync for SortJob {}
+
+impl SortJob {
+    unsafe fn run_one(self, index: usize) {
+        // SAFETY: `run_sort_phase` joins all bodies before the context leaves scope.
+        unsafe { (self.run)(self.context, index) }
+    }
+}
+
+unsafe fn run_sort_one<T: Send + Copy, F: Fn(&T, &T) -> std::cmp::Ordering + Sync>(
+    context: *const c_void,
+    index: usize,
+) {
+    // SAFETY: the job is made only with a live SortContext<T, F> for this phase.
+    let context = unsafe { &*context.cast::<SortContext<T, F>>() };
+    let cmp = unsafe { &*context.cmp };
+    match context.phase {
+        SortPhase::Runs => {
+            let start = index * context.width;
+            let end = start.saturating_add(context.width).min(context.len);
+            // SAFETY: each index names a disjoint mutable run within source.
+            let run =
+                unsafe { std::slice::from_raw_parts_mut(context.source.add(start), end - start) };
+            run.sort_by(cmp);
+        }
+        SortPhase::Merge => {
+            let start = index.saturating_mul(context.width.saturating_mul(2));
+            let middle = start.saturating_add(context.width).min(context.len);
+            let end = middle.saturating_add(context.width).min(context.len);
+            let mut left = start;
+            let mut right = middle;
+            for out in start..end {
+                // Equal values come from the left run first, preserving input order.
+                let take_left = left < middle
+                    && (right == end
+                        || cmp(unsafe { &*context.source.add(left) }, unsafe {
+                            &*context.source.add(right)
+                        }) != std::cmp::Ordering::Greater);
+                // SAFETY: source and target are separate live buffers. Each task writes only
+                // its own merge interval, while all tasks read completed source runs.
+                unsafe {
+                    if take_left {
+                        context.target.add(out).write(*context.source.add(left));
+                    } else {
+                        context.target.add(out).write(*context.source.add(right));
+                    }
+                }
+                if take_left {
+                    left += 1;
+                } else {
+                    right += 1;
+                }
+            }
+        }
+    }
+}
+
+struct SortTurn {
+    group: Arc<ChunkGroup>,
+    job: SortJob,
+}
+
+impl SortTurn {
+    fn new(group: Arc<ChunkGroup>, job: SortJob) -> Self {
+        group.running_bodies.fetch_add(1, Ordering::AcqRel);
+        Self { group, job }
+    }
+}
+
+impl PinnedTurn for SortTurn {
+    fn run_turn(&mut self, _waker: &Waker) -> TurnOutcome {
+        if self
+            .group
+            .run_one(|index, _| unsafe { self.job.run_one(index) })
+        {
+            TurnOutcome::Ready
+        } else {
+            TurnOutcome::Done
+        }
+    }
+}
+
+impl Drop for SortTurn {
+    fn drop(&mut self) {
+        self.group.body_finished();
+    }
+}
+
+fn run_sort_phase<T: Send + Copy, F: Fn(&T, &T) -> std::cmp::Ordering + Sync>(
+    source: *mut T,
+    target: *mut T,
+    len: usize,
+    width: usize,
+    phase: SortPhase,
+    cmp: &F,
+    scheduler: &PinnedTurnScheduler,
+) {
+    let tasks = match phase {
+        SortPhase::Runs => len.div_ceil(width),
+        SortPhase::Merge => len.div_ceil(width.saturating_mul(2)),
+    };
+    let context = SortContext {
+        source,
+        target,
+        len,
+        width,
+        cmp,
+        phase,
+    };
+    let job = SortJob {
+        context: (&context as *const SortContext<T, F>).cast(),
+        run: run_sort_one::<T, F>,
+    };
+    let group = Arc::new(ChunkGroup::new(0, 1, tasks));
+    let workers = scheduler.lane_count().saturating_sub(1).min(tasks - 1);
+    let handles = (0..workers)
+        .map(|_| scheduler.spawn_movable(SortTurn::new(Arc::clone(&group), job)))
+        .collect::<Vec<_>>();
+    while group.run_one(|index, _| unsafe { job.run_one(index) }) {}
+    for handle in &handles {
+        handle.cancel();
+    }
+    drop(handles);
+    group.join();
+    assert!(
+        !group.failed.load(Ordering::Acquire),
+        "parallel sort task panicked"
+    );
+}
+
+/// Stable run sorting followed by stable pairwise merges, on the same lanes as realm turns.
 fn stable_sort<T: Send + Copy>(slice: &mut [T], cmp: impl Fn(&T, &T) -> std::cmp::Ordering + Sync) {
-    if slice.len() >= SORT_PARALLEL_MIN
-        && let Some(pool) = pool()
-    {
-        use rayon::slice::ParallelSliceMut;
-        pool.install(|| slice.par_sort_by(|a, b| cmp(a, b)));
+    let scheduler = if slice.len() >= SORT_PARALLEL_MIN && kiln_parallel_threads() > 1 {
+        super::realm::current_scheduler().or_else(scheduler_pool)
     } else {
-        slice.sort_by(|a, b| cmp(a, b));
+        None
+    };
+    let Some(scheduler) = scheduler.filter(|pool| pool.lane_count() > 1) else {
+        slice.sort_by(cmp);
+        return;
+    };
+    stable_sort_on_scheduler(slice, cmp, &scheduler);
+}
+
+fn stable_sort_on_scheduler<T: Send + Copy>(
+    slice: &mut [T],
+    cmp: impl Fn(&T, &T) -> std::cmp::Ordering + Sync,
+    scheduler: &PinnedTurnScheduler,
+) {
+    let len = slice.len();
+    let mut width = len.div_ceil(scheduler.lane_count().saturating_mul(CHUNKS_PER_THREAD));
+    width = width.max(1_024);
+    let mut scratch = slice.to_vec();
+    let original = slice.as_mut_ptr();
+    let temporary = scratch.as_mut_ptr();
+    run_sort_phase(
+        original,
+        temporary,
+        len,
+        width,
+        SortPhase::Runs,
+        &cmp,
+        scheduler,
+    );
+    let mut source = original;
+    let mut target = temporary;
+    while width < len {
+        run_sort_phase(
+            source,
+            target,
+            len,
+            width,
+            SortPhase::Merge,
+            &cmp,
+            scheduler,
+        );
+        std::mem::swap(&mut source, &mut target);
+        width = width.saturating_mul(2);
+    }
+    if source != original {
+        // SAFETY: source and original are separate buffers of `len` initialized elements.
+        unsafe { std::ptr::copy_nonoverlapping(source, original, len) };
     }
 }
 
@@ -696,6 +879,27 @@ mod tests {
             unsafe { kiln_parallel_sort(ints.as_mut_ptr().cast(), 4, 9, SORT_DEFAULT) },
             INVALID_ARGUMENT
         );
+    }
+
+    #[test]
+    fn scheduler_merge_preserves_ties_across_run_boundaries() {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        struct Item {
+            key: usize,
+            original: usize,
+        }
+
+        let scheduler = PinnedTurnScheduler::new(2).expect("sort lanes start");
+        let mut items = (0..30_017)
+            .map(|original| Item {
+                key: (original * 7919) % 17,
+                original,
+            })
+            .collect::<Vec<_>>();
+        let mut expected = items.clone();
+        expected.sort_by_key(|item| item.key);
+        stable_sort_on_scheduler(&mut items, |a, b| a.key.cmp(&b.key), &scheduler);
+        assert_eq!(items, expected);
     }
 
     #[test]
