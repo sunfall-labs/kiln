@@ -1520,6 +1520,7 @@ dependencies = [
 name = "kiln-ir"
 version = "0.1.0"
 dependencies = [
+ "kiln-builtin-surface",
  "kiln-hir",
  "kiln-host-abi",
  "kiln-string",

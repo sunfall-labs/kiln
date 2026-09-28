@@ -22,6 +22,8 @@ pub enum Constant {
     /// IEEE-754 `f64` bits; preserving bits makes program equality total (including NaN/-0).
     Number(u64),
     String(StringUnits),
+    /// An intrinsic symbol, independent of any user binding named `Symbol`.
+    WellKnownSymbol(kiln_builtin_surface::WellKnownSymbol),
     /// A BigInt literal's decimal digits, with no sign: `-1n` is a negation of `1n`.
     ///
     /// Held as text because the value has no bound. Two programs are equal when their digits

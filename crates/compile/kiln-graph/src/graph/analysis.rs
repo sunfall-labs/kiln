@@ -465,7 +465,7 @@ pub fn proven_types_with_bounds(
                         Constant::Boolean(_) => Proven::Boolean,
                         Constant::Undefined => Proven::Undefined,
                         Constant::Null => Proven::Null,
-                        Constant::BigInt(_) => {
+                        Constant::BigInt(_) | Constant::WellKnownSymbol(_) => {
                             finish(&mut state, vid, None, &mut changed);
                             continue;
                         }

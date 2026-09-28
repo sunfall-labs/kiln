@@ -1770,8 +1770,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let name = self.string_constant_units(*name, current)?;
                     let value = self.pop(current)?;
                     let target = self.pop(current)?;
-                    if let Some(private) = PropertyKeyRef::Units(&name)
-                        .known_ascii()
+                    if let Some(private) = name
+                        .to_scalar_cow()
+                        .ok()
                         .filter(|key| key.starts_with(PRIVATE_KEY_PREFIX))
                     {
                         let Some(store) = prototype_slot(&target) else {
@@ -1795,8 +1796,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let name = self.string_constant_units(*name, current)?;
                     let value = self.pop(current)?;
                     let target = self.pop(current)?;
-                    if let Some(private) = PropertyKeyRef::Units(&name)
-                        .known_ascii()
+                    if let Some(private) = name
+                        .to_scalar_cow()
+                        .ok()
                         .filter(|key| key.starts_with(PRIVATE_KEY_PREFIX))
                     {
                         let Some(store) = prototype_slot(&target) else {

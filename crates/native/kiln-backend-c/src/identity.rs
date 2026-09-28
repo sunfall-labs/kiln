@@ -147,6 +147,14 @@ pub(super) fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                     byte(&mut hash, digit);
                 }
             }
+            Constant::WellKnownSymbol(symbol) => {
+                byte(&mut hash, 6);
+                let key = symbol.property_key();
+                word(&mut hash, key.len() as u64);
+                for digit in key.bytes() {
+                    byte(&mut hash, digit);
+                }
+            }
         }
     }
     word(&mut hash, program.code.len() as u64);

@@ -23,6 +23,7 @@ fn constant_truthy(c: &Constant) -> bool {
         }
         Constant::String(s) => !s.is_empty(),
         Constant::BigInt(s) => s != "0" && !s.is_empty(),
+        Constant::WellKnownSymbol(_) => true,
     }
 }
 

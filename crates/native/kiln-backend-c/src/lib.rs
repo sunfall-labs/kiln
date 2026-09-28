@@ -2983,7 +2983,11 @@ fn render_constant_declarations(
                 let linkage = if should_chunk { "" } else { "static " };
                 writeln!(output, "{linkage}void *{symbol}_bigint_{index} = NULL;").unwrap();
             }
-            Constant::Undefined | Constant::Null | Constant::Boolean(_) | Constant::Number(_) => {}
+            Constant::Undefined
+            | Constant::Null
+            | Constant::Boolean(_)
+            | Constant::Number(_)
+            | Constant::WellKnownSymbol(_) => {}
         }
     }
     if compact {
@@ -3042,7 +3046,11 @@ fn render_constant_declarations_extern(
                 writeln!(output, "#define {symbol}_constant_{index} (&{name})").unwrap();
                 writeln!(output, "extern void *{symbol}_bigint_{index};").unwrap();
             }
-            Constant::Undefined | Constant::Null | Constant::Boolean(_) | Constant::Number(_) => {}
+            Constant::Undefined
+            | Constant::Null
+            | Constant::Boolean(_)
+            | Constant::Number(_)
+            | Constant::WellKnownSymbol(_) => {}
         }
     }
     if include_function_names {

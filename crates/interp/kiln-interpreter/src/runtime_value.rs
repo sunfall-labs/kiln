@@ -658,6 +658,9 @@ impl From<Constant> for Value {
             Constant::Boolean(value) => Self::Boolean(value),
             Constant::Number(bits) => Self::from_number_bits(bits),
             Constant::String(value) => Self::String(value),
+            Constant::WellKnownSymbol(symbol) => {
+                Self::Symbol(crate::symbol::Symbol::WellKnown(symbol))
+            }
             // Parsed once per push rather than held pre-parsed on the program, which would put
             // a heap value in a table the cache hashes by bytes.
             Constant::BigInt(digits) => {

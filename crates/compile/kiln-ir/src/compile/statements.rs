@@ -1,4 +1,5 @@
 use super::*;
+use kiln_builtin_surface::WellKnownSymbol;
 
 impl super::Compiler {
     pub(super) fn statement(&mut self, statement: &Statement) {
@@ -333,11 +334,8 @@ impl super::Compiler {
 
         // `value[Symbol.iterator]()`, which is what makes `const [a] = new Set([1])` bind 1: a
         // pattern reads what the value yields, not what its indices hold.
-        let symbol = self.constant_index(Constant::String("@@iterator".to_owned().into()));
-        self.code.push(Instruction::CallMethod {
-            name: symbol,
-            argc: 0,
-        });
+        self.push_constant(Constant::WellKnownSymbol(WellKnownSymbol::Iterator));
+        self.code.push(Instruction::CallComputed { argc: 0 });
         self.declare_hidden(&iterator, span);
         // The rest of the iterator record. `GetIteratorFromMethod` reads `next` once, before any
         // element is taken, and every step calls what it captured -- which is why `const [] = it`
@@ -1866,7 +1864,6 @@ impl super::Compiler {
 
         self.scopes.push(HashMap::new());
 
-        let symbol = self.constant_index(Constant::String("@@iterator".to_owned().into()));
         if awaiting {
             // `for await` prefers the async iterator and falls back to the sync one, and the two
             // are awaited in different places: an async iterator's `next` returns a promise of
@@ -1882,20 +1879,17 @@ impl super::Compiler {
             // call it asked an accessor twice and let a program hand back two different methods,
             // one of which was never invoked. It also missed `null`, which `GetMethod` treats as
             // absent exactly as it treats `undefined`.
-            let asynchronous =
-                self.constant_index(Constant::String("@@asyncIterator".to_owned().into()));
             self.load_hidden(&subject);
-            self.code.push(Instruction::GetProperty(asynchronous));
+            self.push_constant(Constant::WellKnownSymbol(WellKnownSymbol::AsyncIterator));
+            self.code.push(Instruction::GetComputed);
             self.declare_hidden(&method_binding, span);
 
             self.load_hidden(&method_binding);
             let use_async = self.emit_jump(Instruction::JumpIfNotNullish(0));
 
             self.load_hidden(&subject);
-            self.code.push(Instruction::CallMethod {
-                name: symbol,
-                argc: 0,
-            });
+            self.push_constant(Constant::WellKnownSymbol(WellKnownSymbol::Iterator));
+            self.code.push(Instruction::CallComputed { argc: 0 });
             self.push_constant(Constant::Boolean(false));
             let chosen = self.emit_jump(Instruction::Jump(0));
 
@@ -1913,10 +1907,8 @@ impl super::Compiler {
             // `iterable[Symbol.iterator]()`, which is what makes any iterable work rather than
             // only an array.
             self.expression(iterable);
-            self.code.push(Instruction::CallMethod {
-                name: symbol,
-                argc: 0,
-            });
+            self.push_constant(Constant::WellKnownSymbol(WellKnownSymbol::Iterator));
+            self.code.push(Instruction::CallComputed { argc: 0 });
             self.declare_hidden(&iterator_binding, span);
         }
 
@@ -2060,7 +2052,6 @@ impl super::Compiler {
         // Whether each step has to be awaited, and where. Fixed at compile time by the kind of
         // generator this `yield*` was written in, exactly as `GetGeneratorKind` fixes it.
         let asynchronous = self.async_generator;
-        let symbol = self.constant_index(Constant::String("@@iterator".to_owned().into()));
         let value_key = self.constant_index(Constant::String("value".to_owned().into()));
 
         match value {
@@ -2073,13 +2064,12 @@ impl super::Compiler {
             // TypeError raised *without* ever touching `@@iterator` -- which is what the two
             // must not share a path for.
             self.declare_hidden(&subject_binding, span);
-            let asynchronous_key =
-                self.constant_index(Constant::String("@@asyncIterator".to_owned().into()));
             // Read once and kept: `GetMethod` performs a single `Get`, and the method it answers
             // with is the one that is called. Reading the symbol to decide and again to call it
             // ran an accessor twice and let a program hand back a method that was never invoked.
             self.load_hidden(&subject_binding);
-            self.code.push(Instruction::GetProperty(asynchronous_key));
+            self.push_constant(Constant::WellKnownSymbol(WellKnownSymbol::AsyncIterator));
+            self.code.push(Instruction::GetComputed);
             self.declare_hidden(&method_binding, span);
             self.load_hidden(&method_binding);
             let is_async = self.emit_jump(Instruction::JumpIfNotNullish(0));
@@ -2089,10 +2079,8 @@ impl super::Compiler {
             // it to the program -- but the two places it awaits are, which is the whole of what
             // it does that the async protocol does not.
             self.load_hidden(&subject_binding);
-            self.code.push(Instruction::CallMethod {
-                name: symbol,
-                argc: 0,
-            });
+            self.push_constant(Constant::WellKnownSymbol(WellKnownSymbol::Iterator));
+            self.code.push(Instruction::CallComputed { argc: 0 });
             self.push_constant(Constant::Boolean(true));
             let chosen = self.emit_jump(Instruction::Jump(0));
 
@@ -2107,10 +2095,8 @@ impl super::Compiler {
             self.declare_hidden(&wrapped_binding, span);
             self.declare_hidden(&iterator_binding, span);
         } else {
-            self.code.push(Instruction::CallMethod {
-                name: symbol,
-                argc: 0,
-            });
+            self.push_constant(Constant::WellKnownSymbol(WellKnownSymbol::Iterator));
+            self.code.push(Instruction::CallComputed { argc: 0 });
             self.declare_hidden(&iterator_binding, span);
         }
 
