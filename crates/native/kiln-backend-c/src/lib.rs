@@ -3906,8 +3906,6 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
         slot->configurable = 0;
         slot->accessor = 0;
         slot->refused = 0;
-        slot->getter = kiln_c99_undefined();
-        slot->setter = kiln_c99_undefined();
     }}
     {{
         kiln_property *tag;

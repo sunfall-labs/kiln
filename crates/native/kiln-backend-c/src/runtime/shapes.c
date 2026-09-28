@@ -706,8 +706,6 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
             object->properties[pos].accessor = 0;
             object->properties[pos].refused = 0;
             object->properties[pos].value = kiln_val_to_boundary(object->elements[i]);
-            object->properties[pos].getter = kiln_c99_undefined();
-            object->properties[pos].setter = kiln_c99_undefined();
             pos++;
         }
         free(object->elements);
@@ -739,13 +737,10 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
         object->properties[pos].accessor = (attrs & KILN_C99_ATTR_ACCESSOR) != 0;
         object->properties[pos].refused = 0;
         if (attrs & KILN_C99_ATTR_ACCESSOR) {
-            object->properties[pos].value = kiln_c99_undefined();
             object->properties[pos].getter = kiln_c99_accessor_pair_half(held, 0);
             object->properties[pos].setter = kiln_c99_accessor_pair_half(held, 1);
         } else {
             object->properties[pos].value = kiln_val_to_boundary(held);
-            object->properties[pos].getter = kiln_c99_undefined();
-            object->properties[pos].setter = kiln_c99_undefined();
         }
         pos++;
     }

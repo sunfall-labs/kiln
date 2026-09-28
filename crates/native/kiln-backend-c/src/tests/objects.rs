@@ -1,6 +1,54 @@
 use super::*;
 
 #[test]
+fn compact_property_records_trace_the_live_data_or_accessor_arm() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0)).expect("unit emits");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap heap;
+    kiln_value object, data, getter, setter;
+    kiln_property *slot;
+    kiln_gc_block *data_block, *getter_block, *setter_block;
+    if (sizeof(kiln_property) != 48) return 1;
+    kiln_c99_gc_heap_init(&heap);
+    kiln_test_heap = &heap;
+    kiln_test_generation += 1;
+    heap.enabled = 0;
+    if (kiln_c99_new_object(&object) != KILN_C99_OK) return 2;
+    data = kiln_c99_copy_text("data", 4);
+    getter = kiln_c99_copy_text("getter", 6);
+    setter = kiln_c99_copy_text("setter", 6);
+    if (data.tag != KILN_VALUE_STRING || getter.tag != KILN_VALUE_STRING ||
+        setter.tag != KILN_VALUE_STRING) return 3;
+    if (kiln_c99_own_slot(object, "data", 4, &slot) != KILN_C99_OK) return 4;
+    slot->value = data;
+    if (kiln_c99_define_accessor_key(object, kiln_c99_intern_static("accessor", 8),
+                                     getter, setter, 1) != KILN_C99_OK) return 5;
+    if (kiln_c99_own_index(kiln_c99_object_of(object), NULL, "data", 4) ==
+        kiln_c99_object_of(object)->count) return 6;
+    data_block = kiln_c99_gc_lookup(&heap, (void *)(uintptr_t)data.bits);
+    getter_block = kiln_c99_gc_lookup(&heap, (void *)(uintptr_t)getter.bits);
+    setter_block = kiln_c99_gc_lookup(&heap, (void *)(uintptr_t)setter.bits);
+    if (data_block == NULL || getter_block == NULL || setter_block == NULL) return 7;
+    kiln_c99_nursery_turn_chunk(&heap);
+    kiln_c99_gc_begin(&heap);
+    kiln_c99_gc_mark_value(&heap, &object);
+    kiln_c99_gc_drain(&heap);
+    if (data_block->mark != heap.epoch || getter_block->mark != heap.epoch ||
+        setter_block->mark != heap.epoch) return 8;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "compact-property-records");
+    assert!(
+        run.status.success(),
+        "compact property fixture failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn weak_collections_mark_values_to_a_fixed_point_and_clear_dead_keys() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0)).expect("unit emits");
     let wrapper = r#"

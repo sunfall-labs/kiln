@@ -933,9 +933,9 @@ kiln_value kiln_cli_describe_error(kiln_value value) {
              * Keep the complete stride: an Error may have several own properties, and the
              * launcher needs to find message or stack without calling back into the heap. */
             unsigned int attributes;
+            /* The runtime's value/getter+setter union has a two-value stride. */
             kiln_value val;
-            kiln_value getter;
-            kiln_value setter;
+            kiln_value accessor_second_half;
         } kiln_runtime_prop_view;
         typedef struct kiln_runtime_obj_view {
             kiln_runtime_prop_view *properties;

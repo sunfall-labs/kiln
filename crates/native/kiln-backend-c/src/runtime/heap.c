@@ -4510,9 +4510,12 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         for (index = 0; index < object->count; ++index) {
             const kiln_property *property = &object->properties[index];
             kiln_c99_gc_mark_block(heap, property->key);
-            kiln_c99_gc_mark_value(heap, &property->value);
-            kiln_c99_gc_mark_value(heap, &property->getter);
-            kiln_c99_gc_mark_value(heap, &property->setter);
+            if (property->accessor) {
+                kiln_c99_gc_mark_value(heap, &property->getter);
+                kiln_c99_gc_mark_value(heap, &property->setter);
+            } else {
+                kiln_c99_gc_mark_value(heap, &property->value);
+            }
         }
         kiln_c99_gc_mark_value(heap, &object->prototype);
         break;

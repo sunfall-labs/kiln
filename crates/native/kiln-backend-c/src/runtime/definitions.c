@@ -532,7 +532,6 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
             kiln_c99_object_of(store)->accessor_count += 1;
             slot->getter = kiln_c99_undefined();
             slot->setter = kiln_c99_undefined();
-            slot->value = kiln_c99_undefined();
         }
         if (has_getter) {
             slot->getter = getter;
@@ -548,8 +547,6 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
         /* A value defined over a published-and-unanswerable name is a program supplying the
          * member this realm could not. It is now a data property like any other. */
         slot->refused = 0;
-        slot->getter = kiln_c99_undefined();
-        slot->setter = kiln_c99_undefined();
         slot->value = value;
     }
     if (has_writable) {

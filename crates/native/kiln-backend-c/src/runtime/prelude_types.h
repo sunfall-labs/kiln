@@ -1004,9 +1004,16 @@ typedef struct kiln_property {
      *
      * The same idea as `kiln_c99_builtin_backlog` one level down, and for the same reason. */
     unsigned int refused : 1;
-    kiln_value value;
-    kiln_value getter;
-    kiln_value setter;
+    /* A property is either data or an accessor. The second accessor half occupies space a
+     * data property never needs; keeping both representations here made every built-in data
+     * property pay for three values instead of one. `accessor` selects the live union arm. */
+    union {
+        kiln_value value;
+        struct {
+            kiln_value getter;
+            kiln_value setter;
+        };
+    };
 } kiln_property;
 
 /* Most bootstrap objects have fewer than eight shaped properties. Keeping sixteen slots in

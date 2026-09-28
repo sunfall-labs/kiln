@@ -922,8 +922,6 @@ static int kiln_c99_own_slot_key(kiln_value target, const kiln_string *key,
         object->properties[position].accessor = 0;
         object->properties[position].refused = 0;
         object->properties[position].value = kiln_c99_undefined();
-        object->properties[position].getter = kiln_c99_undefined();
-        object->properties[position].setter = kiln_c99_undefined();
         *out = &object->properties[position];
     }
     object->count += 1;

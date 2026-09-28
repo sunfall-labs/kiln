@@ -701,8 +701,6 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
     }
     slot->accessor = 0;
     slot->refused = 0;
-    slot->getter = kiln_c99_undefined();
-    slot->setter = kiln_c99_undefined();
     slot->value = value;
     slot->writable = 1;
     slot->enumerable = key.tag != KILN_VALUE_SYMBOL;
@@ -731,8 +729,6 @@ static int kiln_c99_put_refused(kiln_value target, const char *key, size_t key_l
     slot->writable = 0;
     slot->configurable = 0;
     slot->value = kiln_c99_undefined();
-    slot->getter = kiln_c99_undefined();
-    slot->setter = kiln_c99_undefined();
     return KILN_C99_OK;
 }
 
