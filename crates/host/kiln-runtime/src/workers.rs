@@ -385,6 +385,50 @@ struct ActorReservation {
     reply: u64,
     sender_realm: Option<u64>,
     sender_request: Option<u64>,
+    state: ActorReservationState,
+    closing: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActorReservationState {
+    Pending,
+    Publishing,
+    Published,
+}
+
+/// Holds a granted call's host identity from preflight through native root publication. Port
+/// close and receiver cancellation defer removal while this lease exists. Dropping it before
+/// `finish` refuses the grant; after native unlink, `finish` performs no allocation or lookup
+/// that can fail. The coordinator must keep both realm turns claimed for the whole lease.
+pub struct ActorPublicationLease {
+    reservation: u64,
+    finished: bool,
+}
+
+impl ActorPublicationLease {
+    pub fn finish(mut self) {
+        let mut reservations = lock(actor_reservations());
+        let entry = reservations
+            .get_mut(&self.reservation)
+            .expect("leased actor reservation cannot disappear");
+        assert!(
+            entry.state == ActorReservationState::Publishing,
+            "actor publication lease lost its state"
+        );
+        entry.state = ActorReservationState::Published;
+        if entry.closing {
+            reservations.remove(&self.reservation);
+        }
+        self.finished = true;
+    }
+}
+
+impl Drop for ActorPublicationLease {
+    fn drop(&mut self) {
+        if !self.finished {
+            lock(actor_reservations()).remove(&self.reservation);
+        }
+    }
 }
 
 static ACTOR_RESERVATIONS: OnceLock<Mutex<HashMap<u64, ActorReservation>>> = OnceLock::new();
@@ -451,6 +495,8 @@ fn actor_reserve_for_worker(
                 reply,
                 sender_realm: None,
                 sender_request: None,
+                state: ActorReservationState::Pending,
+                closing: false,
             });
             return Some(id);
         }
@@ -483,6 +529,8 @@ pub fn actor_claim_reservation(
         || entry.request != request
         || entry.reply != reply
         || entry.sender_realm.is_some()
+        || entry.state != ActorReservationState::Pending
+        || entry.closing
     {
         return None;
     }
@@ -497,14 +545,43 @@ pub fn actor_unclaim_reservation(reservation: u64, sender_realm: u64, sender_req
     if let Some(entry) = reservations.get_mut(&reservation)
         && entry.sender_realm == Some(sender_realm)
         && entry.sender_request == Some(sender_request)
+        && entry.state == ActorReservationState::Pending
     {
         entry.sender_realm = None;
         entry.sender_request = None;
     }
 }
 
-/// A receiver can release only its own grant. The pending move still fails closed; positive
-/// root publication will add a ready state to this same one-use entry.
+/// Verify the exact pair-claimed route and keep it reserved through the infallible C commit.
+/// The caller must acquire this before unlinking sender chunks or publishing receiver roots.
+pub fn actor_begin_publish(
+    reservation: u64,
+    sender_realm: u64,
+    sender_request: u64,
+    receiver_realm: u64,
+) -> Option<ActorPublicationLease> {
+    if reservation == 0 || sender_realm == 0 || sender_request == 0 || receiver_realm == 0 {
+        return None;
+    }
+    let mut reservations = lock(actor_reservations());
+    let entry = reservations.get_mut(&reservation)?;
+    if entry.sender_realm != Some(sender_realm)
+        || entry.sender_request != Some(sender_request)
+        || entry.receiver_realm != receiver_realm
+        || entry.state != ActorReservationState::Pending
+        || entry.closing
+    {
+        return None;
+    }
+    entry.state = ActorReservationState::Publishing;
+    Some(ActorPublicationLease {
+        reservation,
+        finished: false,
+    })
+}
+
+/// A receiver can release only its own grant. A publication lease defers deletion until the
+/// coordinator has either committed or rolled back the native root.
 pub fn actor_release_reservation(reservation: u64, realm: u64) -> bool {
     let Some(worker) = current() else {
         return false;
@@ -516,11 +593,18 @@ pub fn actor_release_reservation(reservation: u64, realm: u64) -> bool {
     {
         return false;
     }
-    reservations.remove(&reservation);
+    if let Some(entry) = reservations.get_mut(&reservation) {
+        if entry.state == ActorReservationState::Publishing {
+            entry.closing = true;
+        } else {
+            reservations.remove(&reservation);
+        }
+    }
     true
 }
 
-/// The receiver may poll a held invoke, but no root is ready until the C transaction commits.
+/// The receiver may poll a held invoke. A publishing lease still reports pending; only a
+/// completed native adoption/root publication makes the matching grant ready.
 pub fn actor_reservation_status(reservation: u64, request: u64, reply: u64, realm: u64) -> i32 {
     let Some(worker) = current() else {
         return -1;
@@ -531,9 +615,10 @@ pub fn actor_reservation_status(reservation: u64, request: u64, reply: u64, real
             if entry.reader == worker.key
                 && entry.receiver_realm == realm
                 && entry.request == request
-                && entry.reply == reply =>
+                && entry.reply == reply
+                && !entry.closing =>
         {
-            0
+            i32::from(entry.state == ActorReservationState::Published)
         }
         _ => -1,
     }
@@ -803,6 +888,14 @@ pub fn close(port: u64) {
     drop(endpoint);
     if let Some(reservations) = ACTOR_RESERVATIONS.get() {
         lock(reservations).retain(|_, entry| {
+            let affected = entry.receiver == port
+                || entry.receiver == peer
+                || entry.reply == port
+                || entry.reply == peer;
+            if affected && entry.state == ActorReservationState::Publishing {
+                entry.closing = true;
+                return true;
+            }
             entry.receiver != port
                 && entry.receiver != peer
                 && entry.reply != port
@@ -2189,7 +2282,41 @@ mod tests {
             None
         );
         assert!(!actor_release_reservation(reservation, 71)); // No worker scope.
+        let (other_sender, other_receiver) = channel();
+        let other = actor_reserve_for_worker(receiver, 71, 91, 43, other_receiver).unwrap();
+        assert_eq!(
+            actor_claim_reservation(sender, other, 43, other_receiver, 81, 2),
+            Some(71)
+        );
+        let abandoned = actor_begin_publish(other, 81, 2, 71).expect("exact pair can publish");
+        assert!(actor_begin_publish(other, 81, 2, 71).is_none());
+        actor_unclaim_reservation(other, 81, 2);
+        assert_eq!(
+            lock(actor_reservations()).get(&other).unwrap().sender_realm,
+            Some(81),
+            "publishing lease cannot lose its sender claim"
+        );
+        drop(abandoned);
+        assert!(!lock(actor_reservations()).contains_key(&other));
+        close(other_sender);
+        close(other_receiver);
+
+        assert_eq!(
+            actor_claim_reservation(sender, reservation, 42, reply_receiver, 81, 1),
+            Some(71)
+        );
+        assert!(actor_begin_publish(reservation, 82, 1, 71).is_none());
+        let publishing =
+            actor_begin_publish(reservation, 81, 1, 71).expect("exact pair can publish");
         close(reply_sender);
+        assert!(lock(actor_reservations()).contains_key(&reservation));
+        assert!(
+            lock(actor_reservations())
+                .get(&reservation)
+                .unwrap()
+                .closing
+        );
+        publishing.finish();
         assert!(!lock(actor_reservations()).contains_key(&reservation));
         close(reply_receiver);
         assert_eq!(actor_sender(&impostor), None);
