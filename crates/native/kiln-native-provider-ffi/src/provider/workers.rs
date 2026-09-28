@@ -866,10 +866,17 @@ pub unsafe extern "C" fn kiln_worker_spawn(
             control,
             pipe_stdio: true,
         };
-        let scheduled = std::env::var("KILN_WORKER_SCHEDULER")
+        // A deterministic realm has one lane. `Atomics.wait` may block that lane while its
+        // child must notify it, so children keep their dedicated threads in that mode.
+        let scheduled = if std::env::var("KILN_WORKER_SCHEDULER")
             .is_ok_and(|value| !value.is_empty() && value != "0")
-            .then(|| Some((super::realm::current_scheduler()?, *TURN_RUNNER.get()?)))
-            .flatten();
+        {
+            super::realm::current_scheduler()
+                .filter(|scheduler| !scheduler.is_deterministic())
+                .zip(TURN_RUNNER.get().copied())
+        } else {
+            None
+        };
         let started = if let Some((scheduler, turn_runner)) = scheduled {
             let pool = Arc::downgrade(&scheduler);
             Ok(workers::spawn_scheduled(
