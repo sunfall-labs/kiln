@@ -4298,55 +4298,105 @@ static FILE *kiln_cli_worker_stream(uint32_t stream) {
 }
 #endif
 
-/* The runtime, on a worker's own thread: run the module at `entry` as the worker's realm, with
- * `argv` as its `process.argv`, and answer its exit code. A worker made from source text needs
- * a compiler at run time, which a native program does not carry. */
-static int kiln_cli_run_worker(const uint8_t *entry, uint64_t entry_len, int32_t eval,
-                               uint64_t argc, const char *const *argv) {
+/* A worker graph is a heap-owned session just like a top-level scheduled realm. Its streams and
+ * result slots survive every one-turn callback; no generated C frame survives an advance. */
+typedef struct kiln_cli_worker_session {
+    kiln_cli_realm_run *run;
+    FILE *out;
+    FILE *err;
+    size_t worker_entry;
+    int failed_begin;
+} kiln_cli_worker_session;
+
+/* A worker made from source text needs a compiler at run time, which a native program does not
+ * carry. Report an invalid entry on the parent's error channel while the worker context is live. */
+static void kiln_cli_worker_bad_entry(int32_t eval) {
+    static const char no_eval[] = "kiln: a worker made from source text ({ eval: true }) needs a compiler at run time, which a natively built program does not have: put the worker's code in a module of the program";
+    static const char missing[] = "Cannot find module: the worker's script is not a module of this program";
+    static const char error_name[] = "Error";
+    const char *text = eval ? no_eval : missing;
+    size_t length = eval ? sizeof no_eval - 1 : sizeof missing - 1;
+    kiln_worker_token tokens[6];
+    memset(tokens, 0, sizeof tokens);
+    tokens[0].kind = 3; tokens[0].number = 0;
+    tokens[1].kind = 3; tokens[1].number = 19;
+    tokens[2].kind = 4; tokens[2].data = error_name; tokens[2].len = sizeof error_name - 1;
+    tokens[3].kind = 4; tokens[3].data = text; tokens[3].len = (uint64_t)length;
+    tokens[4].kind = 3; tokens[4].number = 0;
+    tokens[5].kind = 3; tokens[5].number = 0;
+    (void)kiln_worker_post(15, 0, 3, tokens, 6);
+}
+
+/* The caller installs the worker protocol scope before begin and on each later turn. `scheduled`
+ * selects the provider's one-turn drive; a continuous worker still uses the same session shape. */
+static void *kiln_cli_worker_begin(const uint8_t *entry, uint64_t entry_len, int32_t eval,
+                                    uint64_t argc, const char *const *argv, int scheduled) {
+    kiln_cli_worker_session *session = (kiln_cli_worker_session *)calloc(1, sizeof *session);
     long index = eval ? -1 : kiln_graph_module_index(entry, entry_len);
-    FILE *out, *err;
-    int status;
+    if (session == NULL) return NULL;
     if (index < 0) {
-        /* No realm to throw in: the parent's `error` event gets an `Error` built from tokens
-         * here, in the layout the shared TypeScript reads (no ports, then the error). */
-        static const char no_eval[] = "kiln: a worker made from source text ({ eval: true }) needs a compiler at run time, which a natively built program does not have: put the worker's code in a module of the program";
-        static const char missing[] = "Cannot find module: the worker's script is not a module of this program";
-        static const char error_name[] = "Error";
-        const char *text = eval ? no_eval : missing;
-        size_t length = eval ? sizeof no_eval - 1 : sizeof missing - 1;
-        kiln_worker_token tokens[6];
-        memset(tokens, 0, sizeof tokens);
-        tokens[0].kind = 3; tokens[0].number = 0;
-        tokens[1].kind = 3; tokens[1].number = 19;
-        tokens[2].kind = 4; tokens[2].data = error_name; tokens[2].len = sizeof error_name - 1;
-        tokens[3].kind = 4; tokens[3].data = text; tokens[3].len = (uint64_t)length;
-        tokens[4].kind = 3; tokens[4].number = 0;
-        tokens[5].kind = 3; tokens[5].number = 0;
-        (void)kiln_worker_post(15, 0, 3, tokens, 6);
-        return 1;
+        kiln_cli_worker_bad_entry(eval);
+        session->failed_begin = 1;
+        return session;
     }
+    session->worker_entry = (size_t)index + 1;
+    session->run = (kiln_cli_realm_run *)calloc(1, sizeof *session->run);
+    if (session->run == NULL) { session->failed_begin = 1; return session; }
+    session->out = kiln_cli_worker_stream(1);
+    session->err = kiln_cli_worker_stream(2);
     /* The worker's `process.argv` as node spells it names its script second; a native realm's
      * names the executable in both leading slots (the single-executable convention), so the
      * script's slot is left out and the realm fills it the way it fills a main realm's. */
     if (argc >= 2) {
         const char **realm_argv = (const char **)calloc((size_t)argc, sizeof *realm_argv);
         uint64_t at;
-        if (realm_argv == NULL) return 1;
+        if (realm_argv == NULL) { session->failed_begin = 1; return session; }
         realm_argv[0] = argv[0];
         for (at = 2; at < argc; ++at) realm_argv[at - 1] = argv[at];
-        out = kiln_cli_worker_stream(1);
-        err = kiln_cli_worker_stream(2);
-        status = kiln_cli_run_realm_as((int)(argc - 1), (char **)(uintptr_t)realm_argv, 0, out, err,
-                                       (size_t)index + 1);
+        kiln_cli_realm_begin(session->run, (int)(argc - 1), (char **)(uintptr_t)realm_argv,
+                             session->out, session->err, session->worker_entry);
         free(realm_argv);
     } else {
-        out = kiln_cli_worker_stream(1);
-        err = kiln_cli_worker_stream(2);
-        status = kiln_cli_run_realm_as((int)argc, (char **)(uintptr_t)argv, 0, out, err, (size_t)index + 1);
+        kiln_cli_realm_begin(session->run, (int)argc, (char **)(uintptr_t)argv,
+                             session->out, session->err, session->worker_entry);
     }
-    if (out != NULL) fclose(out);
-    if (err != NULL) fclose(err);
+    session->run->scheduled = scheduled;
+    return session;
+}
+
+static uint64_t kiln_cli_worker_identify(void *opaque) {
+    kiln_cli_worker_session *session = (kiln_cli_worker_session *)opaque;
+    return session->run == NULL ? 0 : session->run->realm;
+}
+
+static int kiln_cli_worker_advance(void *opaque, uint64_t *delay_ns) {
+    kiln_cli_worker_session *session = (kiln_cli_worker_session *)opaque;
+    if (session->failed_begin) { *delay_ns = 0; return 0; }
+    int progress = kiln_cli_realm_step(session->run);
+    *delay_ns = session->run->park_delay_ns;
+    return progress;
+}
+
+static int kiln_cli_worker_finish(void *opaque) {
+    kiln_cli_worker_session *session = (kiln_cli_worker_session *)opaque;
+    int status = session->failed_begin ? 1 : kiln_cli_realm_finish(session->run, 0,
+                                                                    session->worker_entry);
+    if (session->failed_begin) free(session->run);
+    if (session->out != NULL) fclose(session->out);
+    if (session->err != NULL) fclose(session->err);
+    free(session);
     return status;
+}
+
+/* The continuous worker path drives the same session to completion on its dedicated thread.
+ * The scheduler will call begin, advance and finish on separate turns. */
+static int kiln_cli_run_worker(const uint8_t *entry, uint64_t entry_len, int32_t eval,
+                               uint64_t argc, const char *const *argv) {
+    void *session = kiln_cli_worker_begin(entry, entry_len, eval, argc, argv, 0);
+    uint64_t delay_ns = 0;
+    if (session == NULL) return 1;
+    while (kiln_cli_worker_advance(session, &delay_ns)) {}
+    return kiln_cli_worker_finish(session);
 }
 
 /* `KILN_REALMS=N`: run the program as N realms at once in this one process, each pinned to its
