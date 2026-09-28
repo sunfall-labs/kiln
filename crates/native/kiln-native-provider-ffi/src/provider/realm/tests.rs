@@ -340,6 +340,11 @@ unsafe extern "C" fn claim_fixture_finish(session: *mut c_void) -> i32 {
 
 #[test]
 fn provider_maps_realm_handles_to_pair_claims_without_cross_lane_realm_borrows() {
+    // Shift provider IDs independently of this scheduler's ticket IDs. The graph coordinator
+    // must route controls through the registered pause targets, never the provider IDs.
+    let mut preceding_realm = 0;
+    assert_eq!(unsafe { kiln_realm_create(&raw mut preceding_realm) }, 0);
+    assert_eq!(kiln_realm_destroy(preceding_realm), 0);
     let state = Arc::new(ClaimFixtureState {
         realms: std::sync::Mutex::new(Vec::new()),
         advances: AtomicUsize::new(0),
@@ -380,6 +385,20 @@ fn provider_maps_realm_handles_to_pair_claims_without_cross_lane_realm_borrows()
     }
     let claim = claim_scheduled_realm_pair(realms[1], realms[0]).expect("live realm mapping");
     assert!(claim.wait(Duration::from_secs(1)));
+    assert_ne!(realms[1], claim.sender.id());
+    assert_ne!(realms[0], claim.receiver.id());
+    let command = PausedTurnCommand {
+        kind: 7,
+        ids: [0; 3],
+    };
+    let sender_control = claim
+        .enqueue_sender(command, None)
+        .expect("sender target is claimed");
+    let receiver_control = claim
+        .enqueue_receiver(command, None)
+        .expect("receiver target is claimed");
+    let _ = sender_control.wait(Duration::from_secs(1));
+    let _ = receiver_control.wait(Duration::from_secs(1));
     assert_eq!(state.advances.load(AtomicOrdering::SeqCst), 2);
     assert_eq!(
         claim_scheduled_realm_pair(realms[0], realms[1]).err(),

@@ -14,6 +14,9 @@ export class Counter extends Actor {
     return this.count;
   }
   echo(value) { return value; }
+  inspectGraph(value) {
+    return [Object.getPrototypeOf(value) === Object.prototype, value.answer, value.values.join(',')];
+  }
   sumLinked(value) {
     let count = 0;
     let sum = 0;

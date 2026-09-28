@@ -314,6 +314,12 @@ impl PendingTurnControl {
 }
 
 impl TurnPairClaim {
+    fn member(&self, target: &TurnPauseTarget) -> Option<&TurnPauseTarget> {
+        self.targets
+            .iter()
+            .find(|claimed| Arc::ptr_eq(&claimed.ticket, &target.ticket))
+    }
+
     /// Wait only from a coordinator thread, never from a scheduler lane: a lane could own
     /// either claimed realm and cannot acknowledge while its OS thread is blocked here.
     pub fn wait(&self, timeout: Duration) -> bool {
@@ -363,8 +369,12 @@ impl TurnPairClaim {
     /// body runs on its owner lane; a movable body can run on any lane between turns. Both
     /// bodies must already have acknowledged this claim. The operation is synchronous and must
     /// neither run JavaScript nor block on either realm; the claim stays held until it returns.
-    pub fn control(&self, realm_id: u64, command: PausedTurnCommand) -> PausedTurnResult {
-        let Some(pending) = self.enqueue_control(realm_id, command, None) else {
+    pub fn control(
+        &self,
+        target: &TurnPauseTarget,
+        command: PausedTurnCommand,
+    ) -> PausedTurnResult {
+        let Some(pending) = self.enqueue_control(target, command, None) else {
             return PausedTurnResult::Unavailable;
         };
         pending.wait(Duration::from_secs(1))
@@ -372,12 +382,16 @@ impl TurnPairClaim {
 
     /// Choose distinct lanes for two callbacks that must both enter before either unlinks a
     /// graph. A pinned pair on one lane, or a one-lane pool with two movable bodies, refuses.
-    pub fn concurrent_control_lanes(&self, first: u64, second: u64) -> Option<[usize; 2]> {
-        if first == second {
+    pub fn concurrent_control_lanes(
+        &self,
+        first: &TurnPauseTarget,
+        second: &TurnPauseTarget,
+    ) -> Option<[usize; 2]> {
+        if Arc::ptr_eq(&first.ticket, &second.ticket) {
             return None;
         }
-        let a = self.targets.iter().find(|target| target.id() == first)?;
-        let b = self.targets.iter().find(|target| target.id() == second)?;
+        let a = self.member(first)?;
+        let b = self.member(second)?;
         let a_pin = a.ticket.pinned_lane();
         let b_pin = b.ticket.pinned_lane();
         let choose = |avoid: usize| (0..self._scheduler.base_lanes).find(|lane| *lane != avoid);
@@ -396,7 +410,7 @@ impl TurnPairClaim {
     /// use its owner lane.
     pub fn enqueue_control(
         &self,
-        realm_id: u64,
+        target: &TurnPauseTarget,
         command: PausedTurnCommand,
         lane: Option<usize>,
     ) -> Option<PendingTurnControl> {
@@ -405,7 +419,7 @@ impl TurnPairClaim {
                 .is_some_and(|(queue, _)| queue == self.coordinator.queue_identity)
         });
         if on_lane
-            || !self.targets.iter().any(|target| target.id() == realm_id)
+            || self.member(target).is_none()
             || !self
                 .targets
                 .iter()
@@ -413,9 +427,7 @@ impl TurnPairClaim {
         {
             return None;
         }
-        let Some(target) = self.targets.iter().find(|target| target.id() == realm_id) else {
-            return None;
-        };
+        let target = self.member(target)?;
         if TurnStatus::read(target.status.load(Ordering::Acquire)) != TurnStatus::Active {
             return None;
         }
@@ -429,7 +441,7 @@ impl TurnPairClaim {
         let (result, received) = mpsc::sync_channel(1);
         let permit = Arc::new(AtomicU8::new(PAUSED_CONTROL_PENDING));
         self._scheduler.lanes[lane].command(Command::PausedControl {
-            realm_id,
+            realm_id: target.id(),
             claim: self.claim,
             command,
             permit: Arc::clone(&permit),
@@ -1421,7 +1433,7 @@ mod tests {
         assert!(claim.wait(Duration::from_secs(1)));
         assert_eq!(
             claim.control(
-                realm.id(),
+                &realm.pause_target(),
                 PausedTurnCommand {
                     kind: 7,
                     ids: [0; 3]
@@ -1506,24 +1518,27 @@ mod tests {
             ids: [11, 12, 13],
         };
         assert_eq!(
-            claim.control(pinned.id(), command),
+            claim.control(&pinned.pause_target(), command),
             PausedTurnResult::Unavailable
         );
         assert!(claim.wait(Duration::from_secs(1)));
-        assert_eq!(claim.control(pinned.id(), command), PausedTurnResult::Ready);
         assert_eq!(
-            claim.control(movable.id(), command),
+            claim.control(&pinned.pause_target(), command),
+            PausedTurnResult::Ready
+        );
+        assert_eq!(
+            claim.control(&movable.pause_target(), command),
             PausedTurnResult::Ready
         );
         let lanes = claim
-            .concurrent_control_lanes(pinned.id(), movable.id())
+            .concurrent_control_lanes(&pinned.pause_target(), &movable.pause_target())
             .expect("distinct control lanes");
         assert_ne!(lanes[0], lanes[1]);
         let first = claim
-            .enqueue_control(pinned.id(), command, Some(lanes[0]))
+            .enqueue_control(&pinned.pause_target(), command, Some(lanes[0]))
             .expect("pinned control queued");
         let second = claim
-            .enqueue_control(movable.id(), command, Some(lanes[1]))
+            .enqueue_control(&movable.pause_target(), command, Some(lanes[1]))
             .expect("movable control queued");
         assert_eq!(first.wait(Duration::from_secs(1)), PausedTurnResult::Ready);
         assert_eq!(second.wait(Duration::from_secs(1)), PausedTurnResult::Ready);
@@ -1567,7 +1582,7 @@ mod tests {
         assert!(claim.wait(Duration::from_secs(1)));
         assert_eq!(
             claim.control(
-                first.id(),
+                &first.pause_target(),
                 PausedTurnCommand {
                     kind: 1,
                     ids: [0; 3]
@@ -1627,7 +1642,7 @@ mod tests {
         entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_eq!(
             claim.control(
-                first.id(),
+                &first.pause_target(),
                 PausedTurnCommand {
                     kind: 1,
                     ids: [0; 3]

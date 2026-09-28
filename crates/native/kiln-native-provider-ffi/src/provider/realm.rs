@@ -5,8 +5,8 @@ use kiln_host_abi::{
 };
 use kiln_runtime::turn_queue::TurnOutcome;
 use kiln_runtime::turn_scheduler::{
-    PausedTurnCommand, PausedTurnResult, PinnedTurn, PinnedTurnScheduler, TurnClaimError,
-    TurnPairClaim, TurnPauseTarget,
+    PausedTurnCommand, PausedTurnResult, PendingTurnControl, PinnedTurn, PinnedTurnScheduler,
+    TurnClaimError, TurnPairClaim, TurnPauseTarget,
 };
 use kiln_runtime::{
     Executor, Realm, RealmCapabilities, RealmState, RuntimeTurn, TimerId, TokioHost, WorkItem,
@@ -5316,10 +5316,11 @@ fn coordinate_mixed_graph_request(
     ))
 }
 
-/// Both queued callbacks must enter their owner lanes before either stages the C capsule.
-/// A pinned same-lane pair refuses before any heap mutation.
+/// On distinct lanes, both callbacks enter before staging the capsule. When the pair shares
+/// one lane, run the same proved stage/reserve/detach/adopt/consume protocol as dedicated
+/// realms, one paused control at a time. Both turn tickets stay claimed throughout.
 fn coordinate_scheduled_graph_request(
-    claim: &TurnPairClaim,
+    claim: &ScheduledPairClaim,
     sender: u64,
     receiver: u64,
     request: u64,
@@ -5328,8 +5329,14 @@ fn coordinate_scheduled_graph_request(
     if reservation == 0 {
         return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
     }
-    let Some(lanes) = claim.concurrent_control_lanes(sender, receiver) else {
-        return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
+    let Some(lanes) = claim.concurrent_control_lanes() else {
+        return coordinate_claimed_graph_request(
+            sender,
+            receiver,
+            request,
+            reservation,
+            |realm, command| claim.control(realm, command),
+        );
     };
     let Some(lease) =
         kiln_runtime::workers::actor_begin_publish(reservation, sender, request, receiver)
@@ -5348,8 +5355,8 @@ fn coordinate_scheduled_graph_request(
         kind: 10,
         ids: [handoff.id(), 1, 0],
     };
-    let sender_pending = claim.enqueue_control(sender, sender_command, Some(lanes[0]));
-    let receiver_pending = claim.enqueue_control(receiver, receiver_command, Some(lanes[1]));
+    let sender_pending = claim.enqueue_sender(sender_command, Some(lanes[0]));
+    let receiver_pending = claim.enqueue_receiver(receiver_command, Some(lanes[1]));
     if sender_pending.is_none()
         || receiver_pending.is_none()
         || !handoff.handoff.wait_ready(Duration::from_secs(1))
@@ -5385,7 +5392,7 @@ fn coordinate_scheduled_graph_request(
 }
 
 fn coordinate_mixed_claimed_graph_request(
-    scheduled_claim: &TurnPairClaim,
+    scheduled_claim: &ScheduledSingleClaim,
     dedicated_claim: &dedicated_claim::DedicatedSingleClaim,
     sender: u64,
     receiver: u64,
@@ -5418,7 +5425,7 @@ fn coordinate_mixed_claimed_graph_request(
     std::thread::scope(|scope| {
         let dedicated_result =
             scope.spawn(|| dedicated_claim.control(dedicated, dedicated_command));
-        let scheduled_pending = scheduled_claim.enqueue_control(scheduled, scheduled_command, None);
+        let scheduled_pending = scheduled_claim.enqueue_control(scheduled_command);
         if scheduled_pending.is_none() || !handoff.handoff.wait_ready(Duration::from_secs(1)) {
             handoff.handoff.cancel();
             if let Some(pending) = scheduled_pending {
@@ -5562,12 +5569,75 @@ pub(crate) enum ScheduledRealmClaimError {
     Scheduler(TurnClaimError),
 }
 
+/// A provider realm ID names the host protocol; a pause target names a scheduler ticket.
+/// Keep that mapping inside the claim so graph controls cannot use the wrong ID space.
+pub(crate) struct ScheduledPairClaim {
+    claim: TurnPairClaim,
+    sender_realm: u64,
+    receiver_realm: u64,
+    sender: TurnPauseTarget,
+    receiver: TurnPauseTarget,
+}
+
+impl ScheduledPairClaim {
+    fn wait(&self, timeout: Duration) -> bool {
+        self.claim.wait(timeout)
+    }
+
+    fn control(&self, realm: u64, command: PausedTurnCommand) -> PausedTurnResult {
+        let target = if realm == self.sender_realm {
+            &self.sender
+        } else if realm == self.receiver_realm {
+            &self.receiver
+        } else {
+            return PausedTurnResult::Unavailable;
+        };
+        self.claim.control(target, command)
+    }
+
+    fn concurrent_control_lanes(&self) -> Option<[usize; 2]> {
+        self.claim
+            .concurrent_control_lanes(&self.sender, &self.receiver)
+    }
+
+    fn enqueue_sender(
+        &self,
+        command: PausedTurnCommand,
+        lane: Option<usize>,
+    ) -> Option<PendingTurnControl> {
+        self.claim.enqueue_control(&self.sender, command, lane)
+    }
+
+    fn enqueue_receiver(
+        &self,
+        command: PausedTurnCommand,
+        lane: Option<usize>,
+    ) -> Option<PendingTurnControl> {
+        self.claim.enqueue_control(&self.receiver, command, lane)
+    }
+}
+
+struct ScheduledSingleClaim {
+    claim: TurnPairClaim,
+    target: TurnPauseTarget,
+}
+
+impl ScheduledSingleClaim {
+    fn wait(&self, timeout: Duration) -> bool {
+        self.claim.wait(timeout)
+    }
+
+    fn enqueue_control(&self, command: PausedTurnCommand) -> Option<PendingTurnControl> {
+        self.claim.enqueue_control(&self.target, command, None)
+    }
+}
+
 /// Resolve only opaque provider realm IDs. The returned claim pauses both scheduler bodies;
 /// it is not a graph ownership certificate and carries no C heap or realm pointer.
 pub(crate) fn claim_scheduled_realm_pair(
     sender: u64,
     receiver: u64,
-) -> Result<TurnPairClaim, ScheduledRealmClaimError> {
+) -> Result<ScheduledPairClaim, ScheduledRealmClaimError> {
     let (scheduler, from, to) = {
         let registry = scheduled_realms()
             .lock()
@@ -5591,12 +5661,19 @@ pub(crate) fn claim_scheduled_realm_pair(
         }
         (scheduler, from.target.clone(), to.target.clone())
     };
-    scheduler
+    let claim = scheduler
         .claim_pair(&from, &to)
-        .map_err(ScheduledRealmClaimError::Scheduler)
+        .map_err(ScheduledRealmClaimError::Scheduler)?;
+    Ok(ScheduledPairClaim {
+        claim,
+        sender_realm: sender,
+        receiver_realm: receiver,
+        sender: from,
+        receiver: to,
+    })
 }
 
-fn claim_scheduled_realm_one(realm: u64) -> Result<TurnPairClaim, ScheduledRealmClaimError> {
+fn claim_scheduled_realm_one(realm: u64) -> Result<ScheduledSingleClaim, ScheduledRealmClaimError> {
     let (scheduler, target) = {
         let registry = scheduled_realms()
             .lock()
@@ -5610,9 +5687,10 @@ fn claim_scheduled_realm_one(realm: u64) -> Result<TurnPairClaim, ScheduledRealm
             .ok_or(ScheduledRealmClaimError::UnknownRealm)?;
         (scheduler, entry.target.clone())
     };
-    scheduler
+    let claim = scheduler
         .claim_one(&target)
-        .map_err(ScheduledRealmClaimError::Scheduler)
+        .map_err(ScheduledRealmClaimError::Scheduler)?;
+    Ok(ScheduledSingleClaim { claim, target })
 }
 
 struct ScheduledRun {
