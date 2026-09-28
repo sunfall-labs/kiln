@@ -729,6 +729,7 @@ typedef int (*kiln_gc_visit_roots_fn)(void *context, kiln_gc_visit_root_fn visit
 extern int kiln_realm_gc_register_roots_with_visitor(kiln_gc_roots_fn roots,
                                                       kiln_gc_visit_roots_fn visit_roots,
                                                       void *context, uint32_t flags);
+extern int kiln_realm_is_active(void);
 
 /* A closure is its body plus the boxes it captured.
  *

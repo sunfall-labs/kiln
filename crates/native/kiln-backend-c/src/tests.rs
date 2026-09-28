@@ -256,6 +256,7 @@ static kiln_gc_visit_roots_fn kiln_test_registered_visitors[32];
 static void *kiln_test_registered_contexts[32];
 static size_t kiln_test_registered_count = 0;
 static int kiln_test_legacy_roots = 0;
+static int kiln_test_fail_root_registration = 0;
 static uint64_t kiln_test_entropy_seed = 0;
 static uint64_t kiln_test_entropy_state = 0;
 static int kiln_test_entropy_initialized = 0;
@@ -622,6 +623,7 @@ int kiln_realm_gc_register_roots_with_visitor(kiln_gc_roots_fn roots,
                                                void *context, uint32_t flags) {
     (void)roots;
     (void)flags;
+    if (kiln_test_fail_root_registration) return KILN_C99_HOST_ERROR;
     if (!kiln_test_realm_active || visit_roots == NULL || kiln_test_registered_count == 32)
         return KILN_C99_INVALID_ARGUMENT;
     kiln_test_registered_visitors[kiln_test_registered_count] = visit_roots;

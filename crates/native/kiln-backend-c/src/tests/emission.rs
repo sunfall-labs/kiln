@@ -1,6 +1,48 @@
 use super::*;
 
 #[test]
+fn generated_entry_refuses_a_failed_root_registration_before_running() {
+    let generated = emit(&program(
+        vec![Constant::Number(42.0f64.to_bits())],
+        vec![Instruction::Const(0), Instruction::Return],
+        0,
+    ))
+    .expect("scalar entry emits");
+    let wrapper = r#"
+static int root_registration_entry(void *context) {
+    kiln_value result = kiln_c99_number(91.0);
+    kiln_value before = result;
+    int status;
+    (void)context;
+    kiln_test_fail_root_registration = 1;
+    status = __MODULE_ENTRY__(NULL, &result);
+    if (status != KILN_C99_HOST_ERROR || memcmp(&result, &before, sizeof result) != 0) return 1;
+    kiln_test_fail_root_registration = 0;
+    status = __MODULE_ENTRY__(NULL, &result);
+    if (status != KILN_C99_OK || result.tag != KILN_VALUE_NUMBER ||
+        kiln_c99_as_number(result) != 42.0) return 2;
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int status;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 3;
+    status = kiln_realm_enter(realm, root_registration_entry, NULL);
+    if (status != KILN_C99_OK) return status;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 4;
+}
+"#
+    .replace("__MODULE_ENTRY__", &generated.symbol);
+    let run = run_with_main(&generated, &wrapper, "failed-module-root-registration");
+    assert!(
+        run.status.success(),
+        "module ran after failed root registration ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn default_emission_policy_is_inert_and_host_clock_changes_identity() {
     let program = Program {
         source: "".into(),
@@ -1111,6 +1153,7 @@ fn emitted_async_module_emits_publish_exports() {
         "void {}_publish_exports(kiln_value *exports)",
         generated.symbol
     )));
+    assert!(generated.source.contains("if (roots_status != KILN_C99_OK) return roots_status;"));
 }
 
 #[test]

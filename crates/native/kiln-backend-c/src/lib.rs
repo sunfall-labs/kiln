@@ -2587,7 +2587,7 @@ fn render_entry(
         }
         writeln!(
             output,
-            "    (void)kiln_realm_gc_register_roots_with_visitor({unit_symbol}_gc_roots, {unit_symbol}_gc_visit_roots, NULL, 0);"
+            "    if (kiln_realm_is_active()) {{ int roots_status = kiln_realm_gc_register_roots_with_visitor({unit_symbol}_gc_roots, {unit_symbol}_gc_visit_roots, NULL, 0); if (roots_status != KILN_C99_OK) return roots_status; }}"
         )
         .unwrap();
         render_key_prologue(output, unit_symbol, keyed);
@@ -2726,7 +2726,7 @@ fn render_entry(
     }
     writeln!(
         output,
-        "    (void)kiln_realm_gc_register_roots_with_visitor({unit_symbol}_gc_roots, {unit_symbol}_gc_visit_roots, NULL, 0);"
+        "    if (kiln_realm_is_active()) {{ int roots_status = kiln_realm_gc_register_roots_with_visitor({unit_symbol}_gc_roots, {unit_symbol}_gc_visit_roots, NULL, 0); if (roots_status != KILN_C99_OK) return roots_status; }}"
     )
     .unwrap();
     render_key_prologue(output, unit_symbol, keyed);
