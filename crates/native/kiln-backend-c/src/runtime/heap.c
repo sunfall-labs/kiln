@@ -35,6 +35,9 @@
 #define KILN_GC_HOOKS_VERSION 2u
 #define KILN_GC_DEFAULT_FLOOR ((size_t)256 * 1024)
 #define KILN_GC_MID_TURN_FLOOR ((size_t)4 * 1024 * 1024)
+/* A moved block can be received and sent back inside one callback. Defer its first mid-turn
+ * scan unless several large stores accumulate; the turn-boundary pass still sees net growth. */
+#define KILN_GC_MID_TURN_MOVED_FLOOR ((size_t)64 * 1024 * 1024)
 /* The nursery's chunk budget: filled chunks are collected inside a turn once this many bytes of
  * them wait, while the live heap is small next to it (`KILN_NURSERY_SMALL_LIVE_BUDGETS`).
  * `KILN_NURSERY_KIB` overrides it. */
@@ -347,6 +350,11 @@ typedef struct kiln_gc_heap {
     size_t bytes;
     size_t since_collection;
     size_t survived;
+    /* Moved ArrayBuffer stores are allocated elsewhere. Track the bytes this realm currently
+     * owns, and collect when that total grows beyond the last collection's live baseline.
+     * Moving one store back and forth must not charge a fresh 16 MB on every adoption. */
+    size_t moved_external_current;
+    size_t moved_external_baseline;
     size_t floor;
     uint32_t epoch;
     int enabled;
@@ -2724,6 +2732,20 @@ static void kiln_c99_gc_note_external(size_t size) {
     if (heap != NULL) heap->since_collection += size;
 }
 
+static void kiln_c99_gc_note_moved_external(size_t size) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    if (heap == NULL || size == 0) return;
+    if (size > SIZE_MAX - heap->moved_external_current) abort();
+    heap->moved_external_current += size;
+}
+
+static void kiln_c99_gc_unnote_moved_external(size_t size) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    if (heap == NULL || size == 0) return;
+    if (size > heap->moved_external_current) abort();
+    heap->moved_external_current -= size;
+}
+
 /* A filled-chunk collection is worthwhile while the live heap is small enough that the root
  * walk it buys is cheaper than retaining another nursery budget. Keep this predicate shared by
  * allocation and turn-boundary collection so the two entry points cannot drift. */
@@ -2747,6 +2769,11 @@ static inline void kiln_c99_gc_alloc_due(kiln_gc_heap *heap) {
         int due;
         if (threshold < KILN_GC_MID_TURN_FLOOR) threshold = KILN_GC_MID_TURN_FLOOR;
         due = heap->since_collection >= threshold;
+        if (!due && heap->moved_external_current > heap->moved_external_baseline) {
+            size_t moved_threshold = threshold > KILN_GC_MID_TURN_MOVED_FLOOR
+                                         ? threshold : KILN_GC_MID_TURN_MOVED_FLOOR;
+            due = heap->moved_external_current - heap->moved_external_baseline >= moved_threshold;
+        }
         /* A budget of filled chunks is collected while the live heap is small next to it: the
          * pass over them either resets a chunk, and allocation stays a bump into hot memory, or
          * promotes it alone. A large live heap makes every mark expensive; there the chunks
@@ -3818,7 +3845,7 @@ static void kiln_c99_gc_unlink(kiln_gc_heap *heap, kiln_gc_block *block) {
     heap->bytes -= block->size;
 }
 
-static void kiln_c99_gc_finalize(kiln_gc_block *block);
+static void kiln_c99_gc_finalize(kiln_gc_heap *heap, kiln_gc_block *block);
 
 /* Explicit release for a block whose lifetime is already known: queued work after it ran, a
  * host-operation completion after its callback. The collector remains the backstop. */
@@ -3839,7 +3866,7 @@ static void kiln_c99_gc_release_cell(void *payload) {
     if (block->size == KILN_GC_SLOT_FREE || (block->kind & KILN_GC_FLAG_DEAD)) return;
     if (block->kind & KILN_GC_FLAG_NURSERY) {
         if ((block->kind & KILN_GC_FLAG_DEAD) == 0) {
-            kiln_c99_gc_finalize(block);
+            kiln_c99_gc_finalize(heap, block);
             block->kind |= KILN_GC_FLAG_DEAD;
             kiln_c99_nursery_note_release(heap, block);
             heap->freed_blocks += 1;
@@ -3849,7 +3876,7 @@ static void kiln_c99_gc_release_cell(void *payload) {
         }
         return;
     }
-    kiln_c99_gc_finalize(block);
+    kiln_c99_gc_finalize(heap, block);
     heap->freed_blocks += 1;
     heap->freed_bytes += block->size;
     if (block->kind & KILN_GC_FLAG_LARGE) {
@@ -4086,7 +4113,7 @@ static void kiln_c99_gc_release(void *payload) {
                 const kiln_string *text = (const kiln_string *)payload;
                 kiln_c99_key_forget(heap, text);
             }
-            kiln_c99_gc_finalize(block);
+            kiln_c99_gc_finalize(heap, block);
             block->kind |= KILN_GC_FLAG_DEAD;
             kiln_c99_nursery_note_release(heap, block);
             heap->freed_blocks += 1;
@@ -4108,7 +4135,7 @@ static void kiln_c99_gc_release(void *payload) {
         const kiln_string *text = (const kiln_string *)payload;
         kiln_c99_key_forget(heap, text);
     }
-    kiln_c99_gc_finalize(block);
+    kiln_c99_gc_finalize(heap, block);
     heap->freed_blocks += 1;
     heap->freed_bytes += block->size;
     if (slab != NULL) {
@@ -4455,7 +4482,7 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
 
 /* Inner growth buffers are the owner's, never a value's, so they are released here and only
  * here. A kind whose payload owns a provider handle releases it here too. */
-static void kiln_c99_gc_finalize(kiln_gc_block *block) {
+static void kiln_c99_gc_finalize(kiln_gc_heap *heap, kiln_gc_block *block) {
     void *payload = block + 1;
     switch (block->kind & KILN_GC_KIND_MASK) {
     case KILN_GC_STRING:
@@ -4508,16 +4535,20 @@ static void kiln_c99_gc_finalize(kiln_gc_block *block) {
         free(((kiln_collection *)payload)->entries);
         free(((kiln_collection *)payload)->hash_table);
         break;
-    case KILN_GC_TYPED_BUFFER:
-        if (((kiln_typed_buffer *)payload)->owns_bytes) {
-            kiln_c99_bytes_retire(((kiln_typed_buffer *)payload)->bytes,
-                                  ((kiln_typed_buffer *)payload)->byte_length);
+    case KILN_GC_TYPED_BUFFER: {
+        kiln_typed_buffer *buffer = (kiln_typed_buffer *)payload;
+        if (buffer->owns_bytes) {
+            if (buffer->moved_external) {
+                if (buffer->byte_length > heap->moved_external_current) abort();
+                heap->moved_external_current -= buffer->byte_length;
+            }
+            kiln_c99_bytes_retire(buffer->bytes, buffer->byte_length);
         }
         /* A `SharedArrayBuffer`'s store outlives this realm's buffer while another realm holds
          * it; this buffer's reference is handed back. */
-        if (((kiln_typed_buffer *)payload)->shared != NULL)
-            kiln_shared_release(((kiln_typed_buffer *)payload)->shared);
+        if (buffer->shared != NULL) kiln_shared_release(buffer->shared);
         break;
+    }
     case KILN_GC_REGEXP:
         /* The compiled pattern is the provider's, and this is the only place it is handed back. */
         kiln_regexp_free(((kiln_regexp *)payload)->handle);
@@ -4628,7 +4659,7 @@ static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
         kiln_gc_block *next = block->next;
         if (block->mark != heap->epoch) {
             kiln_c99_gc_unlink(heap, block);
-            kiln_c99_gc_finalize(block);
+            kiln_c99_gc_finalize(heap, block);
             heap->freed_blocks += 1;
             heap->freed_bytes += block->size;
             kiln_c99_gc_ptrset_remove(&heap->large_table, block);
@@ -4650,7 +4681,7 @@ static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
             kiln_gc_block *slot = kiln_c99_gc_slab_slot(slab, index);
             if (slot->size == KILN_GC_SLOT_FREE) continue;
             if (slot->mark != heap->epoch) {
-                if (kiln_c99_gc_kind_finalized(slot->kind)) kiln_c99_gc_finalize(slot);
+                if (kiln_c99_gc_kind_finalized(slot->kind)) kiln_c99_gc_finalize(heap, slot);
                 heap->freed_blocks += 1;
                 heap->freed_bytes += slot->size;
                 heap->count -= 1;
@@ -4704,6 +4735,7 @@ static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
         }
     }
     heap->survived = survived;
+    heap->moved_external_baseline = heap->moved_external_current;
     heap->since_collection = 0;
 }
 
@@ -4740,7 +4772,7 @@ static size_t kiln_c99_nursery_settle(kiln_gc_heap *heap, kiln_nursery_chunk *ch
             kiln_gc_block *b = (kiln_gc_block *)(chunk->base + bit_idx * 16);
             finals &= finals - 1;
             if ((b->kind & KILN_GC_FLAG_DEAD) == 0) {
-                kiln_c99_gc_finalize(b);
+                kiln_c99_gc_finalize(heap, b);
                 b->kind |= KILN_GC_FLAG_DEAD;
             }
         }
@@ -4887,7 +4919,9 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
     nursery_has_allocs = heap->nursery.full != NULL ||
                          (heap->nursery.active && heap->nursery.bump > heap->nursery.base);
     threshold = heap->floor > heap->survived ? heap->floor : heap->survived;
-    tenured_due = force || heap->stress || (heap->since_collection >= threshold);
+    tenured_due = force || heap->stress || (heap->since_collection >= threshold) ||
+                  (heap->moved_external_current > heap->moved_external_baseline &&
+                   heap->moved_external_current - heap->moved_external_baseline >= threshold);
 
     /* A partial current chunk is safe to leave in the nursery between turn boundaries.  The
      * allocator already triggers a mid-turn pass when the configured filled-chunk budget is
@@ -5099,7 +5133,7 @@ static void kiln_c99_gc_teardown_end(void *opaque) {
             size_t payload = b->size == 0 ? 1 : b->size;
             size_t total = (sizeof(kiln_gc_block) + payload + 15) & ~((size_t)15);
             if ((b->kind & KILN_GC_FLAG_DEAD) == 0) {
-                kiln_c99_gc_finalize(b);
+                kiln_c99_gc_finalize(heap, b);
                 b->kind |= KILN_GC_FLAG_DEAD;
             }
             curr += total;
@@ -5114,7 +5148,7 @@ static void kiln_c99_gc_teardown_end(void *opaque) {
                 size_t payload = b->size == 0 ? 1 : b->size;
                 size_t total = (sizeof(kiln_gc_block) + payload + 15) & ~((size_t)15);
                 if ((b->kind & KILN_GC_FLAG_DEAD) == 0) {
-                    kiln_c99_gc_finalize(b);
+                    kiln_c99_gc_finalize(heap, b);
                     b->kind |= KILN_GC_FLAG_DEAD;
                 }
                 curr += total;
@@ -5291,4 +5325,3 @@ static size_t kiln_c99_gc_alloc_text_run(size_t count, const size_t *lens, char 
     heap->since_collection += counted;
     return count;
 }
-

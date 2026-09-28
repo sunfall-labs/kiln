@@ -2348,6 +2348,8 @@ static int kiln_c99_worker_tokens(kiln_value list, int copy, kiln_worker_token *
             token->len = buffer->byte_length;
             if (buffer->owns_bytes) {
                 token->handle = buffer->bytes;
+                if (buffer->moved_external)
+                    kiln_c99_gc_unnote_moved_external(buffer->byte_length);
             } else {
                 /* Bytes this runtime does not own (a borrowed `node:ffi` view) move as a copy. */
                 uint8_t *block = (uint8_t *)malloc(buffer->byte_length == 0 ? 1 : buffer->byte_length);
@@ -2361,6 +2363,7 @@ static int kiln_c99_worker_tokens(kiln_value list, int copy, kiln_worker_token *
             buffer->bytes = (uint8_t *)kiln_c99_detached_bytes;
             buffer->byte_length = 0;
             buffer->owns_bytes = 0;
+            buffer->moved_external = 0;
             buffer->detached = 1;
             break;
         }
@@ -2414,7 +2417,9 @@ static int kiln_c99_worker_value(kiln_worker_token *token, kiln_value *out) {
             buffer->bytes = token->handle != NULL ? (uint8_t *)token->handle
                                                   : (uint8_t *)kiln_c99_detached_bytes;
             buffer->owns_bytes = token->handle != NULL;
-            if (token->handle != NULL) kiln_c99_gc_note_external(buffer->byte_length);
+            buffer->moved_external = token->handle != NULL;
+            if (buffer->moved_external)
+                kiln_c99_gc_note_moved_external(buffer->byte_length);
         } else {
             buffer->bytes = (uint8_t *)(uintptr_t)token->data;
             buffer->owns_bytes = 0;

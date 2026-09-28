@@ -477,6 +477,9 @@ typedef struct kiln_typed_buffer {
     /* A borrowed FFI view points into a loaded native library's memory. Ordinary ArrayBuffers
      * own their allocation; borrowed ones must never feed that pointer to free(). */
     int owns_bytes;
+    /* Bytes adopted from a worker message, counted as this realm's moved external memory.
+     * Cleared when ownership leaves the realm or passes to another buffer here. */
+    int moved_external;
     /* Set once, by `__kilnArrayBufferDetach`, and never cleared: the bytes went to another
      * buffer, `bytes` points at a static empty block and `byte_length` is zero. */
     int detached;

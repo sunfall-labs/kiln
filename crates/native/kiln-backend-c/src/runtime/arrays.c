@@ -350,6 +350,7 @@ static int kiln_c99_array_buffer_detach_raw(kiln_value *out, const kiln_value *a
     moved->bytes = source->bytes;
     moved->byte_length = source->byte_length;
     moved->owns_bytes = source->owns_bytes;
+    moved->moved_external = source->moved_external;
     if (length != source->byte_length || !source->owns_bytes) {
         /* A new length, or bytes this runtime does not own (a borrowed FFI view): the result
          * needs its own block. Growth is zero-filled, as `transfer(n)` specifies. */
@@ -365,10 +366,18 @@ static int kiln_c99_array_buffer_detach_raw(kiln_value *out, const kiln_value *a
             moved->bytes = (uint8_t *)kiln_c99_detached_bytes;
             moved->byte_length = 0;
             moved->owns_bytes = 0;
+            moved->moved_external = 0;
             return KILN_C99_OUT_OF_MEMORY;
         }
         if (length > kept) memset(bytes + kept, 0, length - kept);
-        if (length > source->byte_length) kiln_c99_gc_note_external(length - source->byte_length);
+        if (moved->moved_external) {
+            if (length > source->byte_length)
+                kiln_c99_gc_note_moved_external(length - source->byte_length);
+            else
+                kiln_c99_gc_unnote_moved_external(source->byte_length - length);
+        } else if (length > source->byte_length) {
+            kiln_c99_gc_note_external(length - source->byte_length);
+        }
         moved->bytes = bytes;
         moved->byte_length = length;
         moved->owns_bytes = 1;
@@ -376,6 +385,7 @@ static int kiln_c99_array_buffer_detach_raw(kiln_value *out, const kiln_value *a
     source->bytes = (uint8_t *)kiln_c99_detached_bytes;
     source->byte_length = 0;
     source->owns_bytes = 0;
+    source->moved_external = 0;
     source->detached = 1;
     *out = kiln_c99_value(KILN_VALUE_ARRAY_BUFFER, (uint64_t)(uintptr_t)moved, NULL, 0);
     return KILN_C99_OK;
