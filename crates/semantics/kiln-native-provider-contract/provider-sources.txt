@@ -75,6 +75,7 @@ crates/native/kiln-native-provider-ffi/src/provider/intl.rs
 crates/native/kiln-native-provider-ffi/src/provider/json.rs
 crates/native/kiln-native-provider-ffi/src/provider/parallel.rs
 crates/native/kiln-native-provider-ffi/src/provider/realm.rs
+crates/native/kiln-native-provider-ffi/src/provider/realm/dedicated_claim.rs
 crates/native/kiln-native-provider-ffi/src/provider/realm/graph_capsules.rs
 crates/native/kiln-native-provider-ffi/src/provider/realm/reclaim.rs
 crates/native/kiln-native-provider-ffi/src/provider/realm/shared_graph.rs

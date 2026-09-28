@@ -42,6 +42,9 @@ pub use graph_capsules::{
     kiln_realm_graph_capsule_stage, kiln_realm_graph_capsule_take,
 };
 
+#[path = "realm/dedicated_claim.rs"]
+mod dedicated_claim;
+
 type Entry = unsafe extern "C" fn(*mut c_void) -> i32;
 type RunWork = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> i32;
 type DropWork = unsafe extern "C" fn(*mut c_void);
@@ -811,6 +814,12 @@ struct NativeRealm {
     /// A scheduled drive's local waiter. Only its owning lane polls the task or reads this
     /// state; the shared reactor can wake its ticket without seeing the realm itself.
     scheduled_wait: RefCell<Option<ScheduledWait>>,
+    /// The dedicated drive's turn-boundary pause gate. A coordinator can name this gate but
+    /// never borrow the realm or its generated stack across threads.
+    dedicated_gate: RefCell<Option<Arc<dedicated_claim::DedicatedGate>>>,
+    /// Keeps the gate visible from realm creation through teardown, including module entries
+    /// before the continuous drive begins.
+    dedicated_registration: RefCell<Option<dedicated_claim::DedicatedRegistration>>,
     /// Zero only while a realm has never published thread-affine state.
     affinity: Cell<u32>,
     /// Program identity, children and exit state follow this realm across scheduler lanes.
@@ -1159,6 +1168,8 @@ impl Drop for CurrentHeap {
 
 impl Drop for NativeRealm {
     fn drop(&mut self) {
+        self.dedicated_registration.get_mut().take();
+        self.dedicated_gate.get_mut().take();
         // A scheduled main realm may have started dedicated workers on a lane shared with
         // other realms. End only its own children while its program scope is installed.
         // A dedicated realm may be dropped by the TLS registry destructor after other TLS
@@ -1289,6 +1300,8 @@ impl NativeRealm {
             promise_lane: Cell::new(None),
             introspect_armed: Cell::new(false),
             scheduled_wait: RefCell::new(None),
+            dedicated_gate: RefCell::new(None),
+            dedicated_registration: RefCell::new(None),
             affinity: Cell::new(0),
             worker_scope: Rc::new(RefCell::new(
                 kiln_runtime::workers::RealmScopeState::capture_current(),
@@ -1977,6 +1990,9 @@ fn run_one_timer(realm: &NativeRealm) -> i32 {
 fn drive_one_ready_turn(realm: &NativeRealm) -> DriveStep {
     // A turn boundary: no generated frame is on this thread's stack.
     reclaim::quiescent();
+    if let Some(gate) = realm.dedicated_gate.borrow().clone() {
+        gate.boundary(invoke_active_graph_control);
+    }
     // A worker whose parent called `terminate()` ends here (realms issue 06); the launcher
     // reads the exit it asked for.
     if kiln_runtime::workers::terminate_requested() {
@@ -2188,6 +2204,7 @@ pub unsafe extern "C" fn kiln_realm_create(out: *mut u64) -> i32 {
             return INVALID_ARGUMENT;
         }
         let reactor = SCHEDULED_REACTOR.with(|slot| slot.borrow().clone());
+        let dedicated = reactor.is_none();
         let created = match reactor {
             Some(reactor) => NativeRealm::on_reactor(reactor),
             None => NativeRealm::new(),
@@ -2201,6 +2218,15 @@ pub unsafe extern "C" fn kiln_realm_create(out: *mut u64) -> i32 {
             return RUNTIME_ERROR;
         };
         realm.handle.set(handle);
+        if dedicated {
+            let signal = realm.runtime.state.borrow().completion_signal();
+            if let Some(registration) = signal
+                .and_then(|signal| dedicated_claim::DedicatedRegistration::new(handle, signal))
+            {
+                realm.dedicated_gate.replace(Some(registration.gate()));
+                realm.dedicated_registration.replace(Some(registration));
+            }
+        }
         REALMS.with(|realms| {
             realms.borrow_mut().insert(handle, Rc::new(realm));
         });
@@ -2227,10 +2253,19 @@ pub unsafe extern "C" fn enter(handle: u64, entry: Option<Entry>, context: *mut 
         if realm.runtime.state.borrow().is_shutdown() {
             return RUNTIME_ERROR;
         }
-        realm
+        if let Some(gate) = realm.dedicated_gate.borrow().clone() {
+            reclaim::quiescent();
+            gate.boundary(invoke_active_graph_control);
+        }
+        let status = realm
             .runtime
             .executor()
-            .block_on(async move { unsafe { entry(context) } })
+            .block_on(async move { unsafe { entry(context) } });
+        if let Some(gate) = realm.dedicated_gate.borrow().clone() {
+            reclaim::quiescent();
+            gate.boundary(invoke_active_graph_control);
+        }
+        status
     })
 }
 
@@ -4993,17 +5028,22 @@ pub(crate) fn run_paused_graph_control(
     realm_id: u64,
     command: PausedTurnCommand,
 ) -> PausedTurnResult {
-    let Some(control) = GRAPH_CONTROL.get().copied() else {
-        return PausedTurnResult::Unavailable;
-    };
     let Some(realm) = realm(realm_id) else {
         return PausedTurnResult::Unavailable;
     };
     let Some(_active) = ActiveRealm::enter_paused(realm_id, realm) else {
         return PausedTurnResult::Unavailable;
     };
+    invoke_active_graph_control(command)
+}
+
+fn invoke_active_graph_control(command: PausedTurnCommand) -> PausedTurnResult {
+    let Some(control) = GRAPH_CONTROL.get().copied() else {
+        return PausedTurnResult::Unavailable;
+    };
     // SAFETY: the launcher registered a process-lifetime callback. The scheduler holds this
-    // realm's exclusive ticket and both claimed mutators remain stopped until it returns.
+    // realm's exclusive ticket, or the dedicated drive has acknowledged a turn boundary.
+    // Both claimed mutators remain stopped until it returns.
     let status = unsafe { control(command.kind, command.ids[0], command.ids[1], command.ids[2]) };
     match status {
         0 => PausedTurnResult::Ready,
