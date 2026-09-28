@@ -3365,6 +3365,7 @@ static uint64_t kiln_c99_key_hash(const kiln_string *string) {
                     (uint64_t)(string == NULL ? 0 : string->unit_len);
     size_t index;
     if (string == NULL) return hash ^ (hash >> 32);
+    if (kiln_c99_key_is_symbol(string)) hash ^= UINT64_C(0x6a09e667f3bcc909);
     index = 0;
     while (string->unit_len - index >= 4) {
         uint64_t word = (uint64_t)kiln_string_unit_at(string, index) |
@@ -3397,7 +3398,9 @@ static kiln_key_entry *kiln_c99_key_probe(const kiln_key_table *table, const kil
     for (;;) {
         kiln_key_entry *entry = &table->entries[at];
         if (entry->string == NULL) return NULL;
-        if (entry->hash == hash && kiln_string_equal(entry->string, string))
+        if (entry->hash == hash &&
+            kiln_c99_key_is_symbol(entry->string) == kiln_c99_key_is_symbol(string) &&
+            kiln_string_equal(entry->string, string))
             return entry;
         at = (at + 1) & mask;
     }
@@ -3477,7 +3480,9 @@ static const kiln_string *kiln_c99_shared_key_probe(const kiln_string *string, u
         const kiln_key_entry *entry = &table->entries[at];
         const kiln_string *candidate = __atomic_load_n(&entry->string, __ATOMIC_ACQUIRE);
         if (candidate == NULL) return NULL;
-        if (entry->hash == hash && kiln_string_equal(candidate, string)) return candidate;
+        if (entry->hash == hash &&
+            kiln_c99_key_is_symbol(candidate) == kiln_c99_key_is_symbol(string) &&
+            kiln_string_equal(candidate, string)) return candidate;
         at = (at + 1) & mask;
     }
 }
@@ -3539,7 +3544,7 @@ static const kiln_string *kiln_c99_shared_key_insert(kiln_shared_state *process,
     copy = (kiln_string *)malloc(storage + 1);
     if (copy == NULL) return NULL;
     copy->unit_len = string->unit_len;
-    copy->flags = enc;
+    copy->flags = enc | (string->flags & KILN_STRING_SYMBOL_KEY);
     copy->data = (const void *)(copy + 1);
     if (storage > sizeof *copy) memcpy((void *)copy->data, string->data, storage - sizeof *copy);
     ((char *)copy)[storage] = '\0';
@@ -3577,7 +3582,7 @@ static kiln_string *kiln_c99_gc_alloc_key_copy(const kiln_string *view) {
     copy = (kiln_string *)kiln_c99_gc_alloc_tenured(KILN_GC_STRING, total);
     if (copy == NULL) return NULL;
     copy->unit_len = view->unit_len;
-    copy->flags = enc;
+    copy->flags = enc | (view->flags & KILN_STRING_SYMBOL_KEY);
     copy->data = (const void *)(copy + 1);
     if (storage > sizeof *copy) {
         memcpy((void *)copy->data, view->data, storage - sizeof *copy);

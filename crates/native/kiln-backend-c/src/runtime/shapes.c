@@ -62,7 +62,7 @@ static int kiln_c99_shape_find_slot(const kiln_shape *shape, const kiln_string *
  * is 0 for every reserved (`@@`) key. A symbol key's program-visible answer is `ENUM_FLIP`'s
  * absence (`KILN_C99_ATTR_ENUM_FLIP`). */
 static inline int kiln_c99_shape_slot_enumerable(const kiln_shape *shape, uint32_t slot) {
-    return !kiln_c99_key_is_reserved(shape->keys[slot]) &&
+    return !kiln_c99_key_is_symbol(shape->keys[slot]) &&
            (shape->attrs[slot] & KILN_C99_ATTR_ENUM_FLIP) == 0;
 }
 
@@ -350,9 +350,7 @@ static kiln_shape *kiln_c99_shape_child(kiln_shape *current, const kiln_string *
     if (next_shape == NULL) return NULL;
     next_shape->parent = current;
     next_shape->ikey = ikey;
-    next_shape->has_symbol_key = current->has_symbol_key ||
-                                 (ikey->unit_len >= 2 && kiln_string_unit_at(ikey, 0) == '@' &&
-                                  kiln_string_unit_at(ikey, 1) == '@');
+    next_shape->has_symbol_key = current->has_symbol_key || kiln_c99_key_is_symbol(ikey);
     next_shape->slot_index = current->property_count;
     next_shape->property_count = current->property_count + 1;
     next_shape->num_transitions = 0;
@@ -733,8 +731,7 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
             /* A reserved key is stored non-enumerable and its flip is the hidden bit a symbol's
              * record carries (`kiln_property.symbol_hidden`); any other key's flip is the
              * stored bit's. */
-            int reserved = key_len >= 2 && kiln_string_unit_at(key, 0) == '@' &&
-                           kiln_string_unit_at(key, 1) == '@';
+            int reserved = kiln_c99_key_is_symbol(key);
             int flip = (attrs & KILN_C99_ATTR_ENUM_FLIP) != 0;
             object->properties[pos].enumerable = !reserved && !flip;
             object->properties[pos].symbol_hidden = reserved && flip;
@@ -935,7 +932,7 @@ static int kiln_c99_shared_source_inspect(void *context, uint64_t id, uint64_t i
         const kiln_string *key = store->shape->keys[index];
         uint32_t attrs = store->shape->attrs[index];
         if (key == NULL || index >= store->slot_capacity) return -1;
-        field->key_kind = kiln_c99_key_is_reserved(key) ? 1 : 0;
+        field->key_kind = kiln_c99_key_is_symbol(key) ? 1 : 0;
         field->key_id = (uint64_t)(uintptr_t)key;
         field->key_length = key->unit_len;
         field->enumerable = kiln_c99_shape_slot_enumerable(store->shape, (uint32_t)index);
@@ -946,7 +943,7 @@ static int kiln_c99_shared_source_inspect(void *context, uint64_t id, uint64_t i
     {
         const kiln_property *slot = &store->properties[index];
         if (slot->key == NULL || slot->refused) return -1;
-        field->key_kind = kiln_c99_key_is_reserved(slot->key) ? 1 : 0;
+        field->key_kind = kiln_c99_key_is_symbol(slot->key) ? 1 : 0;
         field->key_id = (uint64_t)(uintptr_t)slot->key;
         field->key_length = slot->key->unit_len;
         field->enumerable = slot->enumerable;

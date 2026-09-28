@@ -9,7 +9,7 @@ static kiln_symbol *kiln_c99_symbol_of(kiln_value value) {
  * reserved-name path smuggles a payload pointer into the store. */
 #define KILN_C99_STATIC_SYMBOL_KEY(name, text) \
     static const char name##_bytes[] = text; \
-    static const kiln_string name = {sizeof(text) - 1, KILN_STRING_LATIN1, name##_bytes}
+    static const kiln_string name = {sizeof(text) - 1, KILN_STRING_LATIN1 | KILN_STRING_SYMBOL_KEY, name##_bytes}
 KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_iterator, "@@iterator");
 KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_async_iterator, "@@asyncIterator");
 KILN_C99_STATIC_SYMBOL_KEY(kiln_c99_symbol_key_has_instance, "@@hasInstance");
@@ -224,7 +224,7 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
             return KILN_C99_OUT_OF_MEMORY;
         }
         view.unit_len = (uint32_t)key.len;
-        view.flags = KILN_STRING_LATIN1;
+        view.flags = KILN_STRING_LATIN1 | KILN_STRING_SYMBOL_KEY;
         view.data = key.bytes;
         symbol->key = kiln_c99_intern_pinned_key(&view);
         if (symbol->key == NULL) {
@@ -325,13 +325,13 @@ static int kiln_c99_symbol_for(kiln_value *out, kiln_value key) {
         int wide = 0;
         for (index = prefix_len; index < property_len; ++index) wide |= property_units[index] > 0xFF;
         if (wide) {
-            property_view.flags = KILN_STRING_UTF16;
+            property_view.flags = KILN_STRING_UTF16 | KILN_STRING_SYMBOL_KEY;
             property_view.data = property_units;
         } else {
             /* Narrowed in place: a Latin-1 spelling is the canonical form of a narrow key. */
             unsigned char *narrow = (unsigned char *)property_units;
             for (index = 0; index < property_len; ++index) narrow[index] = (unsigned char)property_units[index];
-            property_view.flags = KILN_STRING_LATIN1;
+            property_view.flags = KILN_STRING_LATIN1 | KILN_STRING_SYMBOL_KEY;
             property_view.data = narrow;
         }
         property_view.unit_len = (uint32_t)property_len;

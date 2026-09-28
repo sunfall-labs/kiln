@@ -701,7 +701,7 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
     slot->setter = kiln_c99_undefined();
     slot->value = value;
     slot->writable = 1;
-    slot->enumerable = !kiln_c99_key_is_reserved((const kiln_string *)text.ptr);
+    slot->enumerable = key.tag != KILN_VALUE_SYMBOL;
     slot->configurable = 1;
     return KILN_C99_OK;
 }

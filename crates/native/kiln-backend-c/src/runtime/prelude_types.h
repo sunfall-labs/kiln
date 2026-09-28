@@ -4,6 +4,10 @@ static inline int kiln_c99_key_is_reserved(const kiln_string *key) {
            kiln_string_unit_at(key, 1) == '@';
 }
 
+static inline int kiln_c99_key_is_symbol(const kiln_string *key) {
+    return key != NULL && (key->flags & KILN_STRING_SYMBOL_KEY) != 0;
+}
+
 /* A symbol the program made -- `Symbol()` is stored as `@@symbol:<n>`, `Symbol.for(k)` as
  * `@@symbol-for:<k>` -- as opposed to a well-known symbol (`@@iterator`) or one of the runtime's
  * own slots (`@@state`). A built-in can carry one of these only through its property store, so

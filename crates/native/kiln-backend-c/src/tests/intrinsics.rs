@@ -124,6 +124,51 @@ int main(void) {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+#[test]
+fn native_shared_snapshot_distinguishes_symbol_from_colliding_string() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    uint64_t realm;
+    kiln_value object, symbol, string, answer;
+    kiln_shared_source_node node = {0};
+    kiln_shared_source_field first = {0}, second = {0};
+    const kiln_string *key;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
+    kiln_test_realm_active = 1;
+    if (kiln_c99_new_symbol(&symbol, kiln_c99_undefined()) != KILN_C99_OK) return 2;
+    key = kiln_c99_symbol_of(symbol)->key;
+    string = kiln_c99_copy_text((const char *)key->data, key->unit_len);
+    if (string.tag != KILN_VALUE_STRING || kiln_c99_new_object(&object) != KILN_C99_OK) return 3;
+    if (kiln_c99_define_computed(object, symbol, kiln_c99_number(1)) != KILN_C99_OK ||
+        kiln_c99_define_computed(object, string, kiln_c99_number(2)) != KILN_C99_OK) return 4;
+    if (kiln_c99_get_computed(NULL, object, symbol, &answer, 0, NULL) != KILN_C99_OK ||
+        answer.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(answer) != 1) return 5;
+    if (kiln_c99_get_computed(NULL, object, string, &answer, 0, NULL) != KILN_C99_OK ||
+        answer.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(answer) != 2) return 6;
+    if (kiln_c99_shared_source_inspect(NULL, kiln_c99_shared_source_id(object), UINT64_MAX,
+                                       &node, NULL) != 0 || node.field_count != 2) return 7;
+    if (kiln_c99_shared_source_inspect(NULL, kiln_c99_shared_source_id(object), 0,
+                                       NULL, &first) != 0 ||
+        kiln_c99_shared_source_inspect(NULL, kiln_c99_shared_source_id(object), 1,
+                                       NULL, &second) != 0 ||
+        first.key_kind == second.key_kind ||
+        (first.key_kind == 0 && !first.enumerable) ||
+        (second.key_kind == 0 && !second.enumerable)) return 8;
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 9;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "shared-snapshot-symbol-string-collision");
+    assert!(
+        run.status.success(),
+        "symbol/string collision failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
 #[test]
 fn owned_boundary_strings_preserve_header_identity_across_conversions() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
