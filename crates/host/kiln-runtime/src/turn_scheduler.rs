@@ -31,7 +31,7 @@ pub trait PinnedTurn {
 
     /// Run a bounded, non-JavaScript operation while this body is paused by a pair claim.
     /// Implementations must not enter a language turn or retain a pointer from `command`.
-    fn paused_control(&mut self, _command: PausedTurnCommand) -> PausedTurnResult {
+    fn paused_control(&mut self, _command: PausedTurnCommand, _lane: usize) -> PausedTurnResult {
         PausedTurnResult::Unavailable
     }
 }
@@ -1079,7 +1079,7 @@ fn run_lane(
                                 PausedTurnResult::Unavailable
                             } else {
                                 match catch_unwind(AssertUnwindSafe(|| {
-                                    realm.body.paused_control(command)
+                                    realm.body.paused_control(command, lane.index)
                                 })) {
                                     Ok(answer) => answer,
                                     Err(_) => {
@@ -1114,7 +1114,7 @@ fn run_lane(
                                         entry.body.lock().expect("movable body lock poisoned");
                                     body.as_mut().map(|body| {
                                         catch_unwind(AssertUnwindSafe(|| {
-                                            body.paused_control(command)
+                                            body.paused_control(command, lane.index)
                                         }))
                                     })
                                 };
@@ -1322,6 +1322,7 @@ mod tests {
             observed: std::sync::mpsc::Sender<std::thread::ThreadId>,
             owner: Option<std::thread::ThreadId>,
             pinned: bool,
+            last_turn_lane: Option<usize>,
         }
         impl PinnedTurn for ControlledBody {
             fn run_turn(&mut self, _waker: &Waker) -> TurnOutcome {
@@ -1331,11 +1332,25 @@ mod tests {
                 TurnOutcome::Parked
             }
 
-            fn paused_control(&mut self, command: PausedTurnCommand) -> PausedTurnResult {
+            fn run_turn_on(&mut self, waker: &Waker, lane: usize) -> TurnOutcome {
+                self.last_turn_lane = Some(lane);
+                self.run_turn(waker)
+            }
+
+            fn paused_control(
+                &mut self,
+                command: PausedTurnCommand,
+                lane: usize,
+            ) -> PausedTurnResult {
                 assert_eq!(command.kind, 7);
                 assert_eq!(command.ids, [11, 12, 13]);
+                assert_eq!(
+                    ACTIVE_LANE.with(|slot| slot.get().map(|(_, active)| active)),
+                    Some(lane)
+                );
                 if self.pinned {
                     assert_eq!(self.owner, Some(std::thread::current().id()));
+                    assert_eq!(self.last_turn_lane, Some(lane));
                 }
                 PausedTurnResult::Ready
             }
@@ -1353,6 +1368,7 @@ mod tests {
                 observed: pinned_tx,
                 owner: None,
                 pinned: true,
+                last_turn_lane: None,
             }
         });
         let movable = scheduler.spawn_movable(ControlledBody {
@@ -1360,6 +1376,7 @@ mod tests {
             observed: movable_tx,
             owner: None,
             pinned: false,
+            last_turn_lane: None,
         });
         pinned_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         movable_rx.recv_timeout(Duration::from_secs(1)).unwrap();
@@ -1393,7 +1410,11 @@ mod tests {
                 TurnOutcome::Parked
             }
 
-            fn paused_control(&mut self, _command: PausedTurnCommand) -> PausedTurnResult {
+            fn paused_control(
+                &mut self,
+                _command: PausedTurnCommand,
+                _lane: usize,
+            ) -> PausedTurnResult {
                 panic!("control failed");
             }
         }
@@ -1442,7 +1463,11 @@ mod tests {
                 TurnOutcome::Parked
             }
 
-            fn paused_control(&mut self, _command: PausedTurnCommand) -> PausedTurnResult {
+            fn paused_control(
+                &mut self,
+                _command: PausedTurnCommand,
+                _lane: usize,
+            ) -> PausedTurnResult {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 PausedTurnResult::Ready
             }
