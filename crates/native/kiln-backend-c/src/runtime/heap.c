@@ -3509,6 +3509,7 @@ static int kiln_c99_graph_has_c_root_alias_except(const kiln_gc_heap *heap,
     if (kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->isolated_graphs)) return 1;
     if (kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->isolated_request_handle) ||
         kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->isolated_escrow_key)) return 1;
+    if (kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->graph_inbox_root)) return 1;
     if (excluded_escrow_slot != &realm->isolated_escrow_value &&
         kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->isolated_escrow_value)) return 1;
     if (kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->array_unscopables)) return 1;
@@ -3860,6 +3861,89 @@ static int kiln_c99_heap_move_chunks(kiln_gc_heap *from, kiln_gc_heap *to,
     to->bytes += moved_bytes;
     to->since_collection += moved_bytes;
     to->nursery.full_bytes += moved_filled;
+    return 1;
+}
+
+enum {
+    KILN_C99_GRAPH_INBOX_EMPTY = 0,
+    KILN_C99_GRAPH_INBOX_RESERVED = 1,
+    KILN_C99_GRAPH_INBOX_PUBLISHED = 2
+};
+
+/* Reserve the receiver's native inbox slot and all region-set capacity before sender unlink.
+ * This is one slot, distinct from the actor's JS mailbox grant. A future coordinator must
+ * reserve both while the receiver mutator is paused, and keep it paused through publication. */
+static int kiln_c99_graph_receiver_reserve(kiln_gc_heap *to, size_t chunk_count,
+                                           uint64_t *out_id) {
+    kiln_c99_realm_state *realm;
+    size_t wanted;
+    if (to == NULL || out_id == NULL || chunk_count == 0 || to->collecting ||
+        to->parallel_paused || chunk_count > SIZE_MAX - to->nursery.regions.count) return 0;
+    realm = &to->realm;
+    wanted = to->nursery.regions.count + chunk_count;
+    if (realm->graph_inbox_state != KILN_C99_GRAPH_INBOX_EMPTY ||
+        realm->graph_inbox_root.tag != KILN_VALUE_UNDEFINED ||
+        realm->graph_inbox_next_id == UINT64_MAX || wanted > SIZE_MAX / 2) return 0;
+    if (wanted * 2 > to->nursery.regions.capacity &&
+        kiln_c99_gc_ptrset_grow(&to->nursery.regions, wanted) != KILN_C99_OK) return 0;
+    realm->graph_inbox_reservation_id = ++realm->graph_inbox_next_id;
+    realm->graph_inbox_reserved_chunks = chunk_count;
+    realm->graph_inbox_region_count = to->nursery.regions.count;
+    realm->graph_inbox_epoch = to->epoch;
+    realm->graph_inbox_root = kiln_c99_undefined();
+    realm->graph_inbox_state = KILN_C99_GRAPH_INBOX_RESERVED;
+    *out_id = realm->graph_inbox_reservation_id;
+    return 1;
+}
+
+/* Refusal before unlink releases the reserved slot. A published root cannot be cleared by
+ * rollback: the receiver must first install it in a durable actor inbox and own its lifetime. */
+static int kiln_c99_graph_receiver_rollback(kiln_gc_heap *to, uint64_t id) {
+    kiln_c99_realm_state *realm;
+    if (to == NULL || id == 0) return 0;
+    realm = &to->realm;
+    if (realm->graph_inbox_state != KILN_C99_GRAPH_INBOX_RESERVED ||
+        realm->graph_inbox_reservation_id != id) return 0;
+    realm->graph_inbox_state = KILN_C99_GRAPH_INBOX_EMPTY;
+    realm->graph_inbox_reservation_id = 0;
+    realm->graph_inbox_reserved_chunks = 0;
+    realm->graph_inbox_region_count = 0;
+    realm->graph_inbox_epoch = 0;
+    realm->graph_inbox_root = kiln_c99_undefined();
+    return 1;
+}
+
+/* Low-level publication primitive, not an ownership certificate. The caller must have already
+ * proved zero sender aliases and paused both realm mutators. Every check and possible allocation
+ * happens before `kiln_c99_heap_move_chunks` unlinks anything; after it returns true, storing
+ * the root in the reserved slot is infallible and occurs before either realm may resume. */
+static int kiln_c99_graph_receiver_move_and_publish(kiln_gc_heap *from, kiln_gc_heap *to,
+    kiln_nursery_chunk *const *chunks, size_t count, kiln_value root, uint64_t reservation_id) {
+    kiln_c99_realm_state *realm;
+    const kiln_gc_block *block;
+    uint32_t kind;
+    if (from == NULL || to == NULL || chunks == NULL || count == 0 || reservation_id == 0)
+        return 0;
+    realm = &to->realm;
+    if (realm->graph_inbox_state != KILN_C99_GRAPH_INBOX_RESERVED ||
+        realm->graph_inbox_reservation_id != reservation_id ||
+        realm->graph_inbox_root.tag != KILN_VALUE_UNDEFINED ||
+        realm->graph_inbox_reserved_chunks != count ||
+        realm->graph_inbox_region_count != to->nursery.regions.count ||
+        realm->graph_inbox_epoch != to->epoch ||
+        root.bits == 0 || !kiln_c99_graph_value_in_batch(from, chunks, count, &root)) return 0;
+    block = kiln_c99_gc_lookup(from, (const void *)(uintptr_t)root.bits);
+    if (block == NULL || (const void *)(block + 1) != (const void *)(uintptr_t)root.bits)
+        return 0;
+    kind = block->kind & KILN_GC_KIND_MASK;
+    if (!((root.tag == KILN_VALUE_CELL && kind == KILN_GC_CELL) ||
+          (root.tag == KILN_VALUE_STRING &&
+           (kind == KILN_GC_STRING || kind == KILN_GC_SLICED_STRING)))) return 0;
+    if (!kiln_c99_graph_candidate_closed(from, chunks, count,
+                                          (const void *)(uintptr_t)root.bits)) return 0;
+    if (!kiln_c99_heap_move_chunks(from, to, chunks, count)) return 0;
+    realm->graph_inbox_root = root;
+    realm->graph_inbox_state = KILN_C99_GRAPH_INBOX_PUBLISHED;
     return 1;
 }
 
@@ -5898,6 +5982,7 @@ static void kiln_c99_gc_mark_realm(kiln_gc_heap *heap) {
     kiln_c99_gc_mark_value(heap, &realm->isolated_request_handle);
     kiln_c99_gc_mark_value(heap, &realm->isolated_escrow_key);
     kiln_c99_gc_mark_value(heap, &realm->isolated_escrow_value);
+    kiln_c99_gc_mark_value(heap, &realm->graph_inbox_root);
     kiln_c99_gc_mark_value(heap, &realm->array_unscopables);
     kiln_c99_gc_mark_values(heap, realm->native_prototypes,
                             sizeof realm->native_prototypes / sizeof *realm->native_prototypes);

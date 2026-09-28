@@ -977,6 +977,15 @@ typedef struct kiln_c99_realm_state {
     kiln_entry *isolated_escrow_entry;
     kiln_value isolated_escrow_key;
     kiln_value isolated_escrow_value;
+    /* One native inbox slot for a future graph handoff. It is a GC root only after the
+     * candidate chunks have been linked into this heap; publication itself cannot allocate. */
+    uint64_t graph_inbox_next_id;
+    uint64_t graph_inbox_reservation_id;
+    uint32_t graph_inbox_state;
+    size_t graph_inbox_reserved_chunks;
+    size_t graph_inbox_region_count;
+    uint32_t graph_inbox_epoch;
+    kiln_value graph_inbox_root;
     /* `node:ffi`: prepared-function and callback metadata, and the next value-slot key a
      * callback's root takes. The provider's half (libraries, closures) is the realm's too. */
     struct kiln_ffi_function_meta *ffi_functions;

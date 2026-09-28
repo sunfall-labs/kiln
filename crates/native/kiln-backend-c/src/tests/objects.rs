@@ -2106,6 +2106,85 @@ int main(void) {
 }
 
 #[test]
+fn executable_graph_receiver_reserves_then_publishes_a_root() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap sender, receiver;
+    kiln_c99_par_arena candidate;
+    kiln_nursery_chunk *batch[1], *chunk;
+    kiln_val *cell;
+    kiln_value root, wrong;
+    uint64_t old_id = 0, id = 0;
+    kiln_c99_gc_heap_init(&sender);
+    kiln_c99_gc_heap_init(&receiver);
+    if (!kiln_c99_graph_candidate_open(&candidate, &sender,
+                                        sender.nursery.capacity)) return 1;
+    cell = (kiln_val *)kiln_c99_par_alloc(&candidate, KILN_GC_CELL, sizeof *cell);
+    if (cell == NULL) return 2;
+    *cell = KILN_VAL_UNDEFINED;
+    kiln_c99_par_arena_seal(&candidate);
+    chunk = candidate.filled;
+    if (chunk == NULL || !kiln_c99_heap_adopt_chunks(&sender, chunk)) return 3;
+    batch[0] = chunk;
+    root.tag = KILN_VALUE_CELL;
+    root.bits = (uint64_t)(uintptr_t)cell;
+    root.len = 0;
+    root.flags = 0;
+    if (!kiln_c99_graph_receiver_reserve(&receiver, 1, &old_id) || old_id == 0 ||
+        receiver.realm.graph_inbox_root.tag != KILN_VALUE_UNDEFINED ||
+        receiver.nursery.regions.capacity < 2 * (receiver.nursery.regions.count + 1))
+        return 4;
+    if (kiln_c99_graph_receiver_reserve(&receiver, 1, &id) ||
+        kiln_c99_graph_receiver_rollback(&receiver, old_id + 1) ||
+        kiln_c99_graph_receiver_move_and_publish(&sender, &receiver, batch, 1, root,
+                                                   old_id + 1)) return 5;
+    if (!kiln_c99_graph_receiver_rollback(&receiver, old_id) ||
+        receiver.realm.graph_inbox_state != KILN_C99_GRAPH_INBOX_EMPTY) return 6;
+    if (!kiln_c99_graph_receiver_reserve(&receiver, 1, &id) || id <= old_id ||
+        kiln_c99_graph_receiver_move_and_publish(&sender, &receiver, batch, 1, root,
+                                                   old_id)) return 7;
+    wrong = root;
+    wrong.tag = KILN_VALUE_STRING;
+    if (kiln_c99_graph_receiver_move_and_publish(&sender, &receiver, batch, 1, wrong, id) ||
+        sender.count != 1 || receiver.count != 0) return 8;
+    receiver.epoch++;
+    if (kiln_c99_graph_receiver_move_and_publish(&sender, &receiver, batch, 1, root, id))
+        return 9;
+    receiver.epoch--;
+    chunk->finals[0] |= UINT64_C(1);
+    if (kiln_c99_graph_receiver_move_and_publish(&sender, &receiver, batch, 1, root, id) ||
+        sender.count != 1 || receiver.count != 0 ||
+        receiver.realm.graph_inbox_root.tag != KILN_VALUE_UNDEFINED) return 10;
+    chunk->finals[0] &= ~UINT64_C(1);
+    if (!kiln_c99_graph_receiver_move_and_publish(&sender, &receiver, batch, 1, root, id))
+        return 11;
+    if (sender.count != 0 || receiver.count != 1 ||
+        kiln_c99_gc_lookup(&sender, cell) != NULL ||
+        kiln_c99_gc_lookup(&receiver, cell) == NULL ||
+        receiver.realm.graph_inbox_root.tag != root.tag ||
+        receiver.realm.graph_inbox_root.bits != root.bits ||
+        receiver.realm.graph_inbox_state != KILN_C99_GRAPH_INBOX_PUBLISHED) return 12;
+    kiln_c99_gc_mark_realm(&receiver);
+    if (((kiln_gc_block *)cell - 1)->mark != receiver.epoch) return 14;
+    if (kiln_c99_graph_receiver_rollback(&receiver, id) ||
+        kiln_c99_graph_receiver_reserve(&receiver, 1, &old_id)) return 13;
+    kiln_c99_nursery_destroy(&sender.nursery);
+    kiln_c99_nursery_destroy(&receiver.nursery);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "graph-receiver-reservation");
+    assert!(
+        run.status.success(),
+        "graph receiver reservation check failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_graph_candidate_closure_rejects_external_and_unreachable_edges() {
     let program = program(vec![], vec![Instruction::Return], 0);
     let generated = emit(&program).expect("program emits");
