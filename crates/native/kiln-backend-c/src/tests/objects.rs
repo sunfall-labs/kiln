@@ -2101,6 +2101,12 @@ int main(void) {
     ((kiln_gc_block *)next - 1)->kind = saved_kind;
     if (kiln_c99_graph_candidate_closed(&heap, batch, 2, next)) return 11;
     if (!kiln_c99_graph_candidate_closed(&heap, batch, 2, root)) return 12;
+    saved_edge = *root;
+    *root = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, next);
+    if (kiln_c99_graph_candidate_closed(&heap, batch, 2, root)) return 13;
+    *root = saved_edge;
+    if (kiln_c99_graph_candidate_closed(&heap, batch, 2, (char *)root + 1)) return 14;
+    if (!kiln_c99_graph_candidate_closed(&heap, batch, 2, root)) return 15;
     kiln_c99_nursery_destroy(&heap.nursery);
     return 0;
 }

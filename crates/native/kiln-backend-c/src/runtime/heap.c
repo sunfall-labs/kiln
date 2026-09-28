@@ -3154,12 +3154,13 @@ typedef struct kiln_c99_graph_walk {
     size_t capacity;
 } kiln_c99_graph_walk;
 
-/* Every reference must resolve to a block in the same candidate. A static or process-wide
+/* Every reference must name the start of a block in the same candidate. A static or process-wide
  * pointer is refused too: this narrow walker has no certificate that it is shared immutable
  * storage, and a raw pointer outside the sender heap is not proof of that fact. */
 static int kiln_c99_graph_follow(kiln_c99_graph_walk *walk, const void *payload) {
     kiln_gc_block *block = kiln_c99_gc_lookup(walk->heap, payload);
-    if (block == NULL || !kiln_c99_gc_ptrset_contains(&walk->members, block)) return 0;
+    if (block == NULL || (const void *)(block + 1) != payload ||
+        !kiln_c99_gc_ptrset_contains(&walk->members, block)) return 0;
     if (kiln_c99_gc_ptrset_contains(&walk->reached, block)) return 1;
     if (walk->queued == walk->capacity ||
         kiln_c99_gc_ptrset_insert(&walk->reached, block) != KILN_C99_OK) return 0;
@@ -3168,8 +3169,23 @@ static int kiln_c99_graph_follow(kiln_c99_graph_walk *walk, const void *payload)
 }
 
 static int kiln_c99_graph_follow_val(kiln_c99_graph_walk *walk, kiln_val value) {
-    if (KILN_VAL_IS_NUMBER(value) || value < KILN_TAG_STRING_PREFIX) return 1;
-    return kiln_c99_graph_follow(walk, KILN_VAL_PTR(value));
+    const void *payload;
+    const kiln_gc_block *block;
+    uint32_t kind;
+    if (KILN_VAL_IS_NUMBER(value) || KILN_VAL_IS_IMMEDIATE(value) ||
+        KILN_VAL_IS_BUILTIN(value) || KILN_VAL_IS_METHOD(value)) return 1;
+    if ((value & KILN_TAG_MASK) != KILN_TAG_STRING_PREFIX &&
+        (value & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX) return 0;
+    payload = KILN_VAL_PTR(value);
+    block = kiln_c99_gc_lookup(walk->heap, payload);
+    if (block == NULL || (const void *)(block + 1) != payload) return 0;
+    kind = block->kind & KILN_GC_KIND_MASK;
+    if ((value & KILN_TAG_MASK) == KILN_TAG_STRING_PREFIX) {
+        if (kind != KILN_GC_STRING && kind != KILN_GC_SLICED_STRING) return 0;
+    } else if (kind != KILN_GC_CELL) {
+        return 0;
+    }
+    return kiln_c99_graph_follow(walk, payload);
 }
 
 static int kiln_c99_graph_inline_string(const kiln_gc_block *block) {
