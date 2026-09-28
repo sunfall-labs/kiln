@@ -5,6 +5,7 @@
 //! races the end of a running turn is remembered and queues exactly one successor turn.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -60,7 +61,7 @@ impl ReadyQueue {
     fn make_ticket(self: &Arc<Self>, realm_id: u64, lane: Option<usize>) -> Arc<TurnTicket> {
         Arc::new(TurnTicket {
             realm_id,
-            lane,
+            lane: AtomicUsize::new(lane.unwrap_or(usize::MAX)),
             queue: Arc::downgrade(self),
             state: Mutex::new(TicketState {
                 generation: 1,
@@ -75,7 +76,8 @@ impl ReadyQueue {
         if state.closed {
             return false;
         }
-        if let Some(lane) = ticket.lane {
+        let lane = ticket.lane.load(Ordering::Acquire);
+        if lane != usize::MAX {
             state.pinned[lane].push_back((ticket, generation));
             self.changed[lane].notify_one();
         } else {
@@ -205,7 +207,8 @@ struct TicketState {
 /// An opaque realm identity and generation, never a language-state pointer.
 pub struct TurnTicket {
     realm_id: u64,
-    lane: Option<usize>,
+    /// `usize::MAX` is movable. Once pinned, the owner lane never changes.
+    lane: AtomicUsize,
     queue: Weak<ReadyQueue>,
     state: Mutex<TicketState>,
 }
@@ -214,6 +217,26 @@ impl TurnTicket {
     /// The realm identity supplied at registration.
     pub fn realm_id(&self) -> u64 {
         self.realm_id
+    }
+
+    /// Permanently bind an unqueued or running ticket to the lane that owns thread-affine
+    /// state. A wake racing a running turn is retained until that turn finishes, so the next
+    /// enqueue observes the new owner. A queued ticket cannot change its route.
+    pub fn pin_to_lane(&self, lane: usize) -> bool {
+        let state = self.state.lock().expect("turn ticket lock poisoned");
+        let Some(queue) = self.queue.upgrade() else {
+            return false;
+        };
+        if lane >= queue.changed.len() || matches!(state.phase, Phase::Queued | Phase::Done) {
+            return false;
+        }
+        let prior = self.lane.load(Ordering::Relaxed);
+        if prior == usize::MAX {
+            self.lane.store(lane, Ordering::Release);
+            true
+        } else {
+            prior == lane
+        }
     }
 
     /// Queue a parked realm or retain one wake for its currently running turn.
@@ -479,5 +502,24 @@ mod tests {
             ticket.wake();
             worker.join().unwrap();
         });
+    }
+
+    #[test]
+    fn a_running_ticket_can_pin_before_a_racing_wake_is_enqueued() {
+        let queue = ReadyQueue::with_lanes(2);
+        let ticket = queue.ticket(12);
+        ticket.wake();
+        let lease = queue.take_for_lane(0).expect("first turn");
+        ticket.wake();
+        assert!(ticket.pin_to_lane(0));
+        assert!(!ticket.pin_to_lane(1));
+        lease.finish(TurnOutcome::Parked);
+        assert!(
+            queue
+                .take_timeout_for_lane(1, Duration::from_millis(1))
+                .is_none()
+        );
+        let lease = queue.take_for_lane(0).expect("owner claims successor");
+        lease.finish(TurnOutcome::Done);
     }
 }

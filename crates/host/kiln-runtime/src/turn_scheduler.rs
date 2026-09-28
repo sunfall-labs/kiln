@@ -20,6 +20,11 @@ pub trait PinnedTurn {
     /// Run one language turn, polling any local tasks with `waker` before parking.
     /// The implementation must return with no generated frame on its C stack.
     fn run_turn(&mut self, waker: &Waker) -> TurnOutcome;
+
+    /// The lane identity for a turn body that can become pinned while it runs.
+    fn run_turn_on(&mut self, waker: &Waker, _lane: usize) -> TurnOutcome {
+        self.run_turn(waker)
+    }
 }
 
 impl<F> PinnedTurn for F
@@ -38,6 +43,8 @@ pub trait MovableTurn: PinnedTurn + Send {}
 impl<T: PinnedTurn + Send> MovableTurn for T {}
 
 type Factory = Box<dyn FnOnce(Arc<Reactor>, Arc<TurnTicket>) -> Box<dyn PinnedTurn> + Send>;
+type MovableFactory =
+    Box<dyn FnOnce(Arc<Reactor>, Arc<TurnTicket>, usize) -> Box<dyn MovableTurn> + Send>;
 
 enum Command {
     Install {
@@ -45,6 +52,10 @@ enum Command {
         ticket: Arc<TurnTicket>,
         status: Arc<AtomicU8>,
         factory: Factory,
+    },
+    InstallMovable {
+        entry: Arc<MovableEntry>,
+        factory: MovableFactory,
     },
     Remove(u64),
 }
@@ -299,6 +310,33 @@ impl PinnedTurnScheduler {
             realms: Arc::clone(&self.movable),
         }
     }
+
+    /// Construct a movable body on one scheduler lane. The factory may permanently pin its
+    /// ticket there before the first wake if initialization publishes thread-affine state.
+    pub fn spawn_movable_with<F, T>(&self, factory: F) -> MovableTurnHandle
+    where
+        F: FnOnce(Arc<Reactor>, Arc<TurnTicket>, usize) -> T + Send + 'static,
+        T: MovableTurn + 'static,
+    {
+        let id = self.next_realm_id.fetch_add(1, Ordering::Relaxed);
+        let lane = Arc::clone(&self.lanes[(id as usize - 1) % self.lanes.len()]);
+        let entry = Arc::new(MovableEntry {
+            body: Mutex::new(None),
+            status: Arc::new(AtomicU8::new(TurnStatus::Active as u8)),
+            ticket: lane.queue.ticket(id),
+            deadline_epoch: AtomicU64::new(0),
+        });
+        lane.command(Command::InstallMovable {
+            entry: Arc::clone(&entry),
+            factory: Box::new(move |reactor, ticket, lane| {
+                Box::new(factory(reactor, ticket, lane))
+            }),
+        });
+        MovableTurnHandle {
+            entry,
+            realms: Arc::clone(&self.movable),
+        }
+    }
 }
 
 impl Drop for PinnedTurnScheduler {
@@ -401,6 +439,34 @@ fn run_lane(lane: Arc<LaneControl>, reactor: Arc<Reactor>, movable: MovableRealm
                             }
                         }
                     }
+                    Command::InstallMovable { entry, factory } => {
+                        if entry.status.load(Ordering::Acquire) != TurnStatus::Active as u8 {
+                            continue;
+                        }
+                        let ticket = Arc::clone(&entry.ticket);
+                        match catch_unwind(AssertUnwindSafe(|| {
+                            factory(Arc::clone(&reactor), Arc::clone(&ticket), lane.index)
+                        })) {
+                            Ok(body) => {
+                                let mut registry =
+                                    movable.lock().expect("movable realm lock poisoned");
+                                if entry.status.load(Ordering::Acquire) == TurnStatus::Active as u8
+                                {
+                                    *entry.body.lock().expect("movable body lock poisoned") =
+                                        Some(body);
+                                    registry.insert(ticket.realm_id(), entry);
+                                    drop(registry);
+                                    ticket.wake();
+                                }
+                            }
+                            Err(_) => {
+                                entry
+                                    .status
+                                    .store(TurnStatus::Panicked as u8, Ordering::Release);
+                                ticket.cancel();
+                            }
+                        }
+                    }
                     Command::Remove(realm_id) => {
                         realms.remove(&realm_id);
                     }
@@ -410,11 +476,13 @@ fn run_lane(lane: Arc<LaneControl>, reactor: Arc<Reactor>, movable: MovableRealm
             continue;
         }
         let Some(realm) = realms.get_mut(&realm_id) else {
-            run_movable(lease, &movable, &mut deadlines);
+            run_movable(lease, lane.index, &movable, &mut deadlines);
             continue;
         };
         let waker = Waker::from(lease.ticket());
-        let result = catch_unwind(AssertUnwindSafe(|| realm.body.run_turn(&waker)));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            realm.body.run_turn_on(&waker, lane.index)
+        }));
         match result {
             Ok(outcome) => {
                 let done = matches!(outcome, TurnOutcome::Done);
@@ -449,6 +517,7 @@ fn run_lane(lane: Arc<LaneControl>, reactor: Arc<Reactor>, movable: MovableRealm
 
 fn run_movable(
     lease: TurnLease,
+    lane: usize,
     movable: &MovableRealms,
     deadlines: &mut BinaryHeap<Reverse<(Instant, u64, u64)>>,
 ) {
@@ -484,7 +553,7 @@ fn run_movable(
         return;
     };
     let waker = Waker::from(lease.ticket());
-    let result = catch_unwind(AssertUnwindSafe(|| body.run_turn(&waker)));
+    let result = catch_unwind(AssertUnwindSafe(|| body.run_turn_on(&waker, lane)));
     match result {
         Ok(outcome) => {
             let done = matches!(outcome, TurnOutcome::Done);
@@ -840,5 +909,30 @@ mod tests {
         }
         assert_eq!(movable.status(), TurnStatus::Complete);
         drop(second_blocker);
+    }
+
+    #[test]
+    fn construction_can_pin_a_movable_factory_before_its_first_wake() {
+        let scheduler = PinnedTurnScheduler::new(2).expect("lanes start");
+        let body = scheduler.spawn_movable_with(|_, ticket, lane| {
+            assert!(ticket.pin_to_lane(lane));
+            let owner = std::thread::current().id();
+            let mut first = true;
+            move |_: &Waker| {
+                assert_eq!(std::thread::current().id(), owner);
+                if first {
+                    first = false;
+                    TurnOutcome::Ready
+                } else {
+                    TurnOutcome::Done
+                }
+            }
+        });
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while body.status() == TurnStatus::Active {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert_eq!(body.status(), TurnStatus::Complete);
     }
 }
