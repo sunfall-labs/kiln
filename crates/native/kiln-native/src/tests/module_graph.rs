@@ -1854,9 +1854,9 @@ fn native_dynamic_import_uses_importer_identity_for_relative_modules() {
         &entry,
         "import { load as loadA } from './a/loader.mjs';\n\
          import { load as loadB } from './b/loader.mjs';\n\
-         import * as staticAssert from 'node:assert';\n\
-         const dynamicAssert = await import('node:assert');\n\
-         console.log(await loadA(), await loadB(), staticAssert === dynamicAssert);\n",
+         import * as staticTimers from 'node:timers';\n\
+         const dynamicTimers = await import('node:timers');\n\
+         console.log(await loadA(), await loadB(), staticTimers === dynamicTimers);\n",
     )
     .expect("write entry");
     let graph = ModuleGraph::build_node(
