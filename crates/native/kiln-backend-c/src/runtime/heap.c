@@ -19,8 +19,8 @@
  * `kiln_c99_gc_collect_mid_turn` from inside a turn, once allocation since the last collection
  * has grown enough to be worth the pass, and that path has no root list to hand back -- generated
  * frames are on the stack -- so `kiln_c99_gc_scan_stack` treats the stack conservatively instead,
- * scanning both the spilled callee-saved registers (`setjmp`) and every word from there down to
- * the realm's recorded stack base, marking anything that resolves to a live block or interior
+ * scanning both the spilled callee-saved registers (`setjmp`) and every word from there up to
+ * the current thread's stack base, marking anything that resolves to a live block or interior
  * pointer and leaving everything else alone.
  *
  * The heap struct's first member is the hooks pointer. The runtime reads exactly that one word
@@ -414,7 +414,6 @@ typedef struct kiln_gc_heap {
      * registers spilled onto it, that decodes to an address inside a live block is a root.
      * Objects never move, so a word that only looks like a pointer keeps one block alive for
      * one collection and costs nothing else. */
-    void *stack_base;
     int mid_turn;
     /* ADR 0069's paused state: nonzero while a parallel call's worker arenas are open (between
      * `kiln_c99_par_arenas_open` and `kiln_c99_par_arenas_join`). The arenas' chunks are no part
@@ -2233,13 +2232,15 @@ static inline int kiln_c99_gc_is_tenured_kind(uint32_t kind) {
 #include <setjmp.h>
 #include <pthread.h>
 
-/* The highest address of this thread's stack, from the thread itself: the realm runs on one
- * thread, so the base is found once and kept. Above it lie the launcher's and the runtime's
- * own frames, which scanning them cannot harm. */
-static void *kiln_c99_gc_stack_base(kiln_gc_heap *heap) {
-    if (heap->stack_base == NULL) {
+/* A stack bound belongs to an OS thread, not a realm heap. Scheduler turns can move a heap
+ * between lanes after every generated frame has returned, so caching the first collector's
+ * bound in the heap would scan the old lane's address range on the next mid-turn collection.
+ * Query once per thread; a replacement thread gets its own TLS slot even if an OS ID is reused. */
+static void *kiln_c99_gc_stack_base(void) {
+    static _Thread_local void *stack_base;
+    if (stack_base == NULL) {
 #if defined(__APPLE__)
-        heap->stack_base = pthread_get_stackaddr_np(pthread_self());
+        stack_base = pthread_get_stackaddr_np(pthread_self());
 #else
         extern int pthread_getattr_np(pthread_t, pthread_attr_t *);
         pthread_attr_t attr;
@@ -2247,13 +2248,13 @@ static void *kiln_c99_gc_stack_base(kiln_gc_heap *heap) {
         size_t size = 0;
         if (pthread_getattr_np(pthread_self(), &attr) == 0) {
             if (pthread_attr_getstack(&attr, &addr, &size) == 0 && addr != NULL) {
-                heap->stack_base = (char *)addr + size;
+                stack_base = (char *)addr + size;
             }
             pthread_attr_destroy(&attr);
         }
 #endif
     }
-    return heap->stack_base;
+    return stack_base;
 }
 
 /* The block whose start is the nearest set bit at or below `bit_idx` in a nursery bitmap, if
@@ -2338,7 +2339,7 @@ static void kiln_c99_gc_mark_word(kiln_gc_heap *heap, uintptr_t word) {
 __attribute__((noinline)) static void kiln_c99_gc_scan_from_here(kiln_gc_heap *heap) {
     volatile uintptr_t anchor = 0;
     uintptr_t *low = (uintptr_t *)((uintptr_t)&anchor & ~(uintptr_t)7);
-    uintptr_t *high = (uintptr_t *)kiln_c99_gc_stack_base(heap);
+    uintptr_t *high = (uintptr_t *)kiln_c99_gc_stack_base();
     (void)anchor;
     if (high == NULL) return;
     for (; low < high; ++low) kiln_c99_gc_mark_word(heap, *low);

@@ -1878,6 +1878,69 @@ int main(void) {
 }
 
 #[test]
+fn executable_gc_stack_scan_uses_the_current_lane_after_a_heap_moves() {
+    let program = program(vec![], vec![Instruction::Return], 0);
+    let generated = emit(&program).expect("program emits");
+    let wrapper = r#"
+typedef struct {
+    kiln_gc_heap *heap;
+    void *root;
+    void *first_stack_base;
+    int failed;
+} kiln_stack_move_test;
+
+static void *kiln_stack_move_second_lane(void *opaque) {
+    kiln_stack_move_test *test = (kiln_stack_move_test *)opaque;
+    void *volatile root = test->root;
+    void *second_stack_base = kiln_c99_gc_stack_base();
+    if (second_stack_base == NULL || second_stack_base == test->first_stack_base) {
+        test->failed = 1;
+        return NULL;
+    }
+    kiln_c99_gc_collect_mid_turn(test->heap);
+    if (kiln_c99_gc_lookup(test->heap, (void *)root) == NULL) test->failed = 2;
+    for (size_t index = 0; index < 32; ++index) {
+        if (((unsigned char *)root)[index] != 0x5a) test->failed = 3;
+    }
+    return NULL;
+}
+
+int main(void) {
+    kiln_gc_heap heap;
+    void *volatile root;
+    kiln_stack_move_test test;
+    pthread_t second;
+    kiln_c99_gc_heap_init(&heap);
+    heap.enabled = 1;
+    root = kiln_c99_gc_nursery_bump(&heap, KILN_GC_BYTES, 32);
+    if (root == NULL) return 1;
+    memset((void *)root, 0x5a, 32);
+    kiln_c99_nursery_turn_chunk(&heap);
+    kiln_c99_gc_collect_mid_turn(&heap);
+    if (kiln_c99_gc_lookup(&heap, (void *)root) == NULL) return 2;
+    test.heap = &heap;
+    test.root = (void *)root;
+    test.first_stack_base = kiln_c99_gc_stack_base();
+    test.failed = 0;
+    if (pthread_create(&second, NULL, kiln_stack_move_second_lane, &test) != 0) return 3;
+    if (pthread_join(second, NULL) != 0) return 4;
+    if (test.failed != 0) return 4 + test.failed;
+    kiln_c99_nursery_destroy(&heap.nursery);
+    free(heap.large_table.table);
+    free(heap.slab_table.table);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "gc-stack-moved-lane-test");
+    assert!(
+        run.status.success(),
+        "moved-heap stack scan failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_cached_shape_object_literal_executes_correctly() {
     // Function 0 (maker): takes 2 arguments, returns { x: arg0, y: arg1 }
     let maker = FunctionProto {

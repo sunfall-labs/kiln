@@ -2074,7 +2074,7 @@ static int kiln_c99_string_is_ascii(kiln_value value) {
 static inline int kiln_c99_gc_is_tenured_kind(uint32_t kind) {
 #include <setjmp.h>
 #include <pthread.h>
-static void *kiln_c99_gc_stack_base(kiln_gc_heap *heap) {
+static void *kiln_c99_gc_stack_base(void) {
 #if defined(__APPLE__)
 #else
 #endif
