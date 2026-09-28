@@ -3656,17 +3656,35 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
             kiln_c99_graph_in_batch(heap, chunks, count, object->shape) ||
             kiln_c99_graph_in_batch(heap, chunks, count, object->slots) ||
             kiln_c99_graph_in_batch(heap, chunks, count, object->elements) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, object->sealed) ||
             kiln_c99_graph_value_in_batch(heap, chunks, count, &object->prototype))
             return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
-        /* Shaped objects can name candidate strings through shared/local shape keys and
-         * accessor slots. Their separate shape tables need a complete visitor. */
-        if (object->shape != NULL || object->count > object->capacity ||
-            object->element_count > object->element_capacity ||
+        if (object->count > object->capacity || object->element_count > object->element_capacity ||
             (object->count != 0 && object->properties == NULL) ||
             (object->element_count != 0 && object->elements == NULL) ||
             (object->sealed != NULL &&
              (object->slots == NULL || object->slot_capacity < object->sealed->count)))
             return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        if (object->shape != NULL) {
+            const kiln_shape *shape = object->shape;
+            /* A process-shared shape cannot hold realm-owned transition keys. Its current
+             * keys and the object's slots are the two edge arrays the GC traces. Local
+             * shapes have separate realm-owned transition state and still refuse. */
+            if ((shape->shared & 1u) == 0 || object->sealed != NULL ||
+                shape->property_count > KILN_SHAPE_MAX_FAST_PROPERTIES ||
+                (object->slots == object->inline_slots &&
+                 shape->property_count > KILN_C99_INLINE_SLOTS) ||
+                (shape->property_count != 0 &&
+                 (object->slots == NULL || object->slot_capacity < shape->property_count)))
+                return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+            for (index = 0; index < shape->property_count; ++index) {
+                if (shape->keys[index] == NULL)
+                    return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+                if (kiln_c99_graph_in_batch(heap, chunks, count, shape->keys[index]) ||
+                    kiln_c99_graph_val_in_batch(heap, chunks, count, object->slots[index]))
+                    return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+            }
+        }
         if (object->sealed != NULL) {
             for (index = 0; index < object->sealed->count; ++index) {
                 if (kiln_c99_graph_val_in_batch(heap, chunks, count, object->slots[index]))

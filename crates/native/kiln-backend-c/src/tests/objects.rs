@@ -2349,6 +2349,7 @@ int main(void) {
     kiln_string *text;
     kiln_sliced_string *slice;
     kiln_object *outside;
+    kiln_shape shared_shape;
     const void *saved_data;
     kiln_val saved_edge;
     uintptr_t stack_words[2];
@@ -2504,10 +2505,33 @@ int main(void) {
     if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
         KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED) return 49;
     outside_collection->count = 1;
-    outside->shape = (kiln_shape *)(uintptr_t)1;
+    memset(&shared_shape, 0, sizeof shared_shape);
+    shared_shape.shared = 1 | KILN_C99_SHAPE_FINAL;
+    shared_shape.property_count = 1;
+    shared_shape.keys[0] = &kiln_c99_empty_string;
+    outside->shape = &shared_shape;
+    outside->slots = outside->inline_slots;
+    outside->slot_capacity = KILN_C99_INLINE_SLOTS;
+    outside->slots[0] = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, text);
+    if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
+        KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 50;
+    outside->slots[0] = KILN_VAL_UNDEFINED;
+    if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
+        KILN_C99_GRAPH_PROVIDER_ROOTS_UNENUMERATED) return 51;
+    shared_shape.keys[0] = text;
+    if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
+        KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 52;
+    shared_shape.keys[0] = &kiln_c99_empty_string;
+    shared_shape.property_count = KILN_C99_INLINE_SLOTS + 1;
+    if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
+        KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED) return 53;
+    shared_shape.property_count = 1;
+    shared_shape.shared = 0;
     if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
         KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED) return 30;
     outside->shape = NULL;
+    outside->slots = NULL;
+    outside->slot_capacity = 0;
     outside->properties[0].value.tag = KILN_VALUE_STRING;
     outside->properties[0].value.bits = (uint64_t)(uintptr_t)text;
     kiln_nursery_chunk *outside_chunk = kiln_c99_nursery_seal(&heap.nursery);
