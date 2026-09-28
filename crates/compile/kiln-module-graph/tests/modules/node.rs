@@ -3,7 +3,11 @@ use super::*;
 #[test]
 fn declared_node_include_is_linked_but_not_evaluated_with_the_entry() {
     let project = TempProject::new();
-    let included = project.write("task.cjs", "console.log('task'); module.exports = 42;");
+    project.write("data.json", r#"{"answer":42}"#);
+    let included = project.write(
+        "task.cjs",
+        "const os = require('node:os'); const data = require('./data.json'); console.log('task', typeof os.platform, data.answer); module.exports = 42;",
+    );
     let entry = project.write("main.cjs", "console.log('main');");
     let graph = ModuleGraph::build_node_with_includes(
         &entry,
@@ -50,7 +54,7 @@ fn declared_node_include_is_linked_but_not_evaluated_with_the_entry() {
             ExecutionCapabilities::default(),
         )
         .expect("execute included module");
-    assert_eq!(worker_host.output, ["task"]);
+    assert_eq!(worker_host.output, ["task function 42"]);
 }
 
 #[test]

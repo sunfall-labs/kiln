@@ -1088,6 +1088,41 @@ mod tests {
     }
 
     #[test]
+    fn declared_package_subpath_uses_node_exports_from_the_root_package() {
+        let tree = Tree::new("declared-package-subpath");
+        tree.file("src/main.cjs");
+        tree.file("node_modules/pkg/worker.cjs");
+        std::fs::write(
+            tree.0.join("package.json"),
+            r#"{"kiln":{"include":["pkg/worker"]}}"#,
+        )
+        .expect("write include declaration");
+        std::fs::write(
+            tree.0.join("node_modules/pkg/package.json"),
+            r#"{"name":"pkg","exports":{"./worker":"./worker.cjs"}}"#,
+        )
+        .expect("write dependency export map");
+        let root = tree.0.canonicalize().expect("canonical root");
+        let entry = root.join("src/main.cjs");
+        let mut texts = Vec::new();
+        let (_, formats, includes) = include_reachable_dependencies_with_includes(
+            &root,
+            entry.to_str().expect("UTF-8 entry"),
+            &mut texts,
+            true,
+        )
+        .expect("resolve declared package subpath");
+        assert_eq!(includes.len(), 1);
+        assert_eq!(includes[0].specifier, "pkg/worker");
+        assert_eq!(
+            includes[0].target,
+            root.join("node_modules/pkg/worker.cjs").to_string_lossy()
+        );
+        assert!(texts.iter().any(|(path, _)| path == &includes[0].target));
+        assert!(formats.iter().any(|format| format.path == includes[0].target));
+    }
+
+    #[test]
     fn collects_sources_and_skips_the_usual_noise() {
         let tree = Tree::new("walk");
         tree.file("src/b.ts");

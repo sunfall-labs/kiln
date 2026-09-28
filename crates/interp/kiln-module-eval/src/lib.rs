@@ -1525,6 +1525,20 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
                 ),
             });
         };
+        if module_node.source == ModuleSource::Json {
+            let source = module_node.data.as_deref().ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: format!("JSON module `{}` has no captured source text", target.display()),
+            })?;
+            let value = parse_json_module(source)?;
+            unsafe {
+                (&mut *self.values).insert(
+                    target.to_path_buf(),
+                    HashMap::from([("default".to_owned(), value.clone())]),
+                );
+            }
+            return Ok(value);
+        }
         if !matches!(module_node.source, ModuleSource::NodeBuiltin(_)) {
             return Err(ExecutionError::Host {
                 instruction,
@@ -1676,6 +1690,20 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
             .clone();
         let mut targets = Vec::with_capacity(module_node.dependencies.len());
         for dependency in &module_node.dependencies {
+            // An included worker is a fresh entry: a builtin or JSON dependency used only by
+            // that worker has not been evaluated during the parent's startup. Materialize it
+            // before building this CommonJS module's fixed require table.
+            if !self.commonjs_cache.contains_key(&dependency.target)
+                && unsafe { (&*self.values).get(&dependency.target).is_none() }
+                && self
+                    .graph
+                    .module(&dependency.target)
+                    .is_some_and(|node| {
+                        matches!(node.source, ModuleSource::NodeBuiltin(_) | ModuleSource::Json)
+                    })
+            {
+                self.ensure_target_value(&dependency.target, 0)?;
+            }
             let value =
                 if let Some(cell) = self.commonjs_cache.get(&dependency.target) {
                     std::rc::Rc::clone(cell)
