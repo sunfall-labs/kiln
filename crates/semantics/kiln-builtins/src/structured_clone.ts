@@ -20,7 +20,7 @@
 // The plain-data fast path (ADR 0065, measured): a copy of a value made only of plain objects,
 // arrays and primitives, in one engine call, or `undefined` when the value has anything else --
 // nothing it reads can run program code, so answering `undefined` half way leaves nothing to undo.
-const __kilnCloneData: (value: any) => any = (globalThis as any).__kilnCloneData;
+const __kilnCloneData: (value: any, mode?: number) => any = (globalThis as any).__kilnCloneData;
 delete (globalThis as any).__kilnCloneData;
 
 const __kilnStructuredClone = (function installStructuredClone() {
@@ -415,6 +415,9 @@ const __kilnStructuredClone = (function installStructuredClone() {
 
   const internal = {
     serialize,
+    // Mode 1 asks the heap adapter for the existing message wire, with no transfer effects.
+    // An adapter without this specialization answers undefined and encodeMessage uses serialize.
+    encodeMessageData(value: any): any[] | undefined { return __kilnCloneData(value, 1); },
     transferOption,
     sequence,
     dataCloneError,

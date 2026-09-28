@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed, 2026-09-27. Awaiting project-owner review.
+Accepted, 2026-09-27, under the project owner's delegation to adjust or approve the API
+contracts and implement them.
 
 Specifies the actor API left open by ADR 0070. Uses its realm scheduler, messages, shared
 immutable region and ownership transfer; follows ADR 0068 for kiln extensions. Supersedes the

@@ -707,6 +707,8 @@ delete (globalThis as any).__kilnPortWait;
         encodeInto(message, out, new Map());
         return out;
       }
+      const encoded = clone.encodeMessageData(message);
+      if (encoded !== undefined) return encoded;
       copy = clone.serialize(message, undefined);
     } else {
       copy = clone.serialize(message, list, (item: any) => {
@@ -743,6 +745,12 @@ delete (globalThis as any).__kilnPortWait;
       ports.push(port);
     }
     return [decodeValue(state), ports];
+  }
+
+  function decodeRemote(got: any[]): [any, any[]] {
+    // The native adapter can already have built a plain graph or buffer in the receiving heap.
+    // Other kinds and transferred ports still use the shared TypeScript decoder.
+    return got[2] === true ? [got[1], NO_PORTS] : decodeMessage(got[1]);
   }
 
   let deliverNext: (port: MessagePort) => void;
@@ -1026,7 +1034,7 @@ delete (globalThis as any).__kilnPortWait;
           if (port.#remote === 0) return undefined;
           const got = __kilnWorkerOp(OP_TAKE, port.#remote);
           if (got === undefined) return undefined;
-          return { message: decodeMessage(got[1])[0] };
+          return { message: decodeRemote(got)[0] };
         }
         const data = queue[at];
         if (data === CLOSE_MARK) return undefined;
@@ -1083,7 +1091,7 @@ delete (globalThis as any).__kilnPortWait;
         let value: any;
         let ports: any[];
         try {
-          [value, ports] = decodeMessage(got[1]);
+          [value, ports] = decodeRemote(got);
         } catch (error) {
           const target = port.#target === null ? port : port.#target;
           if (port.#kinds !== null) port.#kinds(-1, error, NO_PORTS);
@@ -1371,7 +1379,7 @@ delete (globalThis as any).__kilnPortWait;
     let environmentData: any[] = [];
     const init = __kilnWorkerOp(OP_TAKE, endpoint);
     if (init !== undefined) {
-      const [start] = decodeMessage(init[1]);
+      const [start] = decodeRemote(init);
       workerData = start[0];
       environmentData = start[2];
       const env = start[1];

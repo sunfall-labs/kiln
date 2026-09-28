@@ -870,6 +870,191 @@ static int kiln_c99_json_define(kiln_value built, const kiln_string *ikey, kiln_
     }
 }
 
+/* Decode plain graphs and their ArrayBuffers from the shared message format directly into this
+ * realm's heap. The TypeScript decoder handles every other tag and owns the clone semantics;
+ * this is only its object/array/primitive/buffer representation path. A JS array roots all partially built
+ * containers through every allocation, including cycles not yet linked to the root. */
+typedef struct kiln_c99_message_decode {
+    kiln_worker_token *tokens;
+    size_t count;
+    size_t at;
+    size_t refs_seen;
+    kiln_value refs;
+} kiln_c99_message_decode;
+
+static int kiln_c99_message_word(kiln_c99_message_decode *state, size_t *out) {
+    double value;
+    if (state->at >= state->count || state->tokens[state->at].kind != KILN_WORKER_TOKEN_NUMBER)
+        return KILN_C99_CLONE_BAIL;
+    value = state->tokens[state->at++].number;
+    if (!isfinite(value) || value < 0 || value > (double)UINT32_MAX || value != (double)(uint32_t)value)
+        return KILN_C99_CLONE_BAIL;
+    *out = (size_t)value;
+    return KILN_C99_OK;
+}
+
+/* Check the whole wire before allocating a receiving graph. A port, view, Map or
+ * other unsupported value often sits several fields into an object; discovering it after building
+ * a partial graph would tax precisely those messages the TypeScript fallback must handle. */
+static int kiln_c99_message_plain_val(kiln_c99_message_decode *state, int depth) {
+    size_t tag, length, index;
+    int status = kiln_c99_message_word(state, &tag);
+    if (status != KILN_C99_OK || depth > KILN_C99_CLONE_MAX_DEPTH) return KILN_C99_CLONE_BAIL;
+    switch (tag) {
+    case 0: case 1: case 2: case 3: return KILN_C99_OK;
+    case 4: case 5:
+        if (state->at >= state->count ||
+            state->tokens[state->at].kind != (tag == 4 ? KILN_WORKER_TOKEN_NUMBER : KILN_WORKER_TOKEN_STRING))
+            return KILN_C99_CLONE_BAIL;
+        ++state->at;
+        return KILN_C99_OK;
+    case 7:
+        status = kiln_c99_message_word(state, &index);
+        return status == KILN_C99_OK && index < state->refs_seen
+                   ? KILN_C99_OK : KILN_C99_CLONE_BAIL;
+    case 15:
+        if (state->at >= state->count ||
+            (state->tokens[state->at].kind != KILN_WORKER_TOKEN_MOVED &&
+             state->tokens[state->at].kind != KILN_WORKER_TOKEN_BYTES))
+            return KILN_C99_CLONE_BAIL;
+        ++state->at;
+        ++state->refs_seen;
+        return KILN_C99_OK;
+    case 8:
+        status = kiln_c99_message_word(state, &length);
+        if (status != KILN_C99_OK || length > (state->count - state->at) / 2) return KILN_C99_CLONE_BAIL;
+        ++state->refs_seen;
+        for (index = 0; index < length; ++index) {
+            if (state->at >= state->count || state->tokens[state->at++].kind != KILN_WORKER_TOKEN_STRING)
+                return KILN_C99_CLONE_BAIL;
+            status = kiln_c99_message_plain_val(state, depth + 1);
+            if (status != KILN_C99_OK) return status;
+        }
+        return KILN_C99_OK;
+    case 9:
+        status = kiln_c99_message_word(state, &length);
+        if (status != KILN_C99_OK || length > state->count - state->at) return KILN_C99_CLONE_BAIL;
+        ++state->refs_seen;
+        for (index = 0; index < length; ++index) {
+            if (state->at < state->count && state->tokens[state->at].kind == KILN_WORKER_TOKEN_NUMBER &&
+                state->tokens[state->at].number == 10.0) {
+                ++state->at;
+            } else {
+                status = kiln_c99_message_plain_val(state, depth + 1);
+                if (status != KILN_C99_OK) return status;
+            }
+        }
+        return KILN_C99_OK;
+    default: return KILN_C99_CLONE_BAIL;
+    }
+}
+
+static int kiln_c99_message_decode_val(kiln_c99_message_decode *state, kiln_value *out, int depth) {
+    size_t tag, length, index;
+    int status = kiln_c99_message_word(state, &tag);
+    if (status != KILN_C99_OK || depth > KILN_C99_CLONE_MAX_DEPTH) return KILN_C99_CLONE_BAIL;
+    switch (tag) {
+    case 0:
+        *out = kiln_c99_undefined();
+        /* This is the wire tag for the language value, not an absent member answer. */
+        return KILN_C99_OK;
+    case 1: *out = kiln_c99_null(); return KILN_C99_OK;
+    case 2: *out = kiln_c99_boolean(0); return KILN_C99_OK;
+    case 3: *out = kiln_c99_boolean(1); return KILN_C99_OK;
+    case 4:
+    case 5:
+        if (state->at >= state->count ||
+            state->tokens[state->at].kind != (tag == 4 ? KILN_WORKER_TOKEN_NUMBER : KILN_WORKER_TOKEN_STRING))
+            return KILN_C99_CLONE_BAIL;
+        return kiln_c99_worker_value(&state->tokens[state->at++], out);
+    case 7:
+        status = kiln_c99_message_word(state, &index);
+        if (status != KILN_C99_OK) return status;
+        {
+            kiln_array *refs = kiln_c99_array_of(state->refs);
+            if (index >= refs->count) return KILN_C99_CLONE_BAIL;
+            *out = kiln_val_to_boundary(refs->elements[index]);
+            return KILN_C99_OK;
+        }
+    case 15:
+        if (state->at >= state->count) return KILN_C99_CLONE_BAIL;
+        status = kiln_c99_worker_value(&state->tokens[state->at++], out);
+        return status == KILN_C99_OK ? kiln_c99_array_push(state->refs, *out) : status;
+    case 9: {
+        kiln_array *array;
+        status = kiln_c99_message_word(state, &length);
+        if (status != KILN_C99_OK || length > state->count - state->at) return KILN_C99_CLONE_BAIL;
+        status = kiln_c99_new_array_with_capacity(out, length, 0);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_array_push(state->refs, *out);
+        if (status != KILN_C99_OK) return status;
+        array = kiln_c99_array_of(*out);
+        /* The collector scans every element below count. Capacity comes from an unzeroed
+         * allocation, and the recursive walk may collect before filling the next slot. */
+        for (index = 0; index < length; ++index) array->elements[index] = KILN_VAL_HOLE;
+        array->count = length;
+        for (index = 0; index < length; ++index) {
+            kiln_value item;
+            if (state->at < state->count && state->tokens[state->at].kind == KILN_WORKER_TOKEN_NUMBER &&
+                state->tokens[state->at].number == 10.0) {
+                ++state->at;
+                array->elements[index] = KILN_VAL_HOLE;
+                continue;
+            }
+            status = kiln_c99_message_decode_val(state, &item, depth + 1);
+            if (status != KILN_C99_OK) return status;
+            array->elements[index] = kiln_val_from_boundary(item);
+        }
+        return KILN_C99_OK;
+    }
+    case 8:
+        status = kiln_c99_message_word(state, &length);
+        if (status != KILN_C99_OK || length > (state->count - state->at) / 2) return KILN_C99_CLONE_BAIL;
+        status = kiln_c99_new_object(out);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_array_push(state->refs, *out);
+        if (status != KILN_C99_OK) return status;
+        for (index = 0; index < length; ++index) {
+            kiln_value key, item;
+            const kiln_string *ikey;
+            if (state->at >= state->count || state->tokens[state->at].kind != KILN_WORKER_TOKEN_STRING)
+                return KILN_C99_CLONE_BAIL;
+            status = kiln_c99_worker_value(&state->tokens[state->at++], &key);
+            if (status != KILN_C99_OK) return status;
+            ikey = kiln_c99_intern_key((const kiln_string *)key.ptr);
+            if (ikey == NULL) return KILN_C99_OUT_OF_MEMORY;
+            status = kiln_c99_message_decode_val(state, &item, depth + 1);
+            if (status != KILN_C99_OK) return status;
+            status = kiln_c99_json_define(*out, ikey, kiln_val_from_boundary(item));
+            if (status != KILN_C99_OK) return status;
+        }
+        return KILN_C99_OK;
+    default: return KILN_C99_CLONE_BAIL;
+    }
+}
+
+/* 0: decoded, 1: let the TypeScript decoder handle it, negative: allocation failure. */
+static int kiln_c99_decode_message_data(kiln_worker_token *tokens, size_t count, kiln_value *out) {
+    kiln_c99_message_decode state;
+    size_t ports;
+    int status;
+    if (count < 2 || tokens == NULL) return KILN_C99_CLONE_BAIL;
+    state.tokens = tokens;
+    state.count = count;
+    state.at = 0;
+    state.refs_seen = 0;
+    status = kiln_c99_message_word(&state, &ports);
+    if (status != KILN_C99_OK || ports != 0) return KILN_C99_CLONE_BAIL;
+    status = kiln_c99_message_plain_val(&state, 0);
+    if (status != KILN_C99_OK || state.at != count) return KILN_C99_CLONE_BAIL;
+    state.at = 1;
+    status = kiln_c99_new_array(&state.refs);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_message_decode_val(&state, out, 0);
+    if (status == KILN_C99_OK && state.at != count) return KILN_C99_CLONE_BAIL;
+    return status;
+}
+
 /* Building `JSON.parse`'s answer from the tape the linked reader produced.
  *
  * The grammar is not here. It is in `crates/semantics/kiln-json`, linked from the provider archive and

@@ -2475,6 +2475,20 @@ static int kiln_c99_worker_take(uint64_t port, kiln_value *result) {
         return KILN_C99_OK;
     }
     if (status < 0) KILN_C99_REFUSE("a message the runtime's ports would not hand over");
+    status = kiln_c99_decode_message_data(tokens, (size_t)count, &item);
+    if (status == KILN_C99_OK) {
+        kiln_worker_message_free(message);
+        status = kiln_c99_new_array(&pair);
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, kiln_c99_number((double)kind));
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, item);
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, kiln_c99_boolean(1));
+        if (status == KILN_C99_OK) *result = pair;
+        return status;
+    }
+    if (status != KILN_C99_CLONE_BAIL) {
+        kiln_worker_message_free(message);
+        return status;
+    }
     status = kiln_c99_new_array(&list);
     for (index = 0; status == KILN_C99_OK && index < count; ++index) {
         status = kiln_c99_worker_value(&tokens[index], &item);
