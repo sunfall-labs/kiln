@@ -1,4 +1,76 @@
 use crate::*;
+
+#[test]
+fn two_lanes_run_local_tasks_on_one_wall_reactor() {
+    let reactor = Reactor::shared_wall().expect("shared reactor builds");
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let lanes = (0..2)
+        .map(|_| {
+            let reactor = std::sync::Arc::clone(&reactor);
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let executor = Executor::on_reactor(reactor);
+                let lane = std::thread::current().id();
+                barrier.wait();
+                let local = executor.block_on(async {
+                    let (send, receive) = tokio::sync::oneshot::channel();
+                    tokio::task::spawn_local(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                        send.send(std::thread::current().id())
+                            .expect("local task replies");
+                    });
+                    receive.await.expect("local task completes")
+                });
+                assert_eq!(local, lane, "local task stayed on its scheduler lane");
+                lane
+            })
+        })
+        .collect::<Vec<_>>();
+    let first = lanes
+        .into_iter()
+        .map(|lane| lane.join().expect("lane exits"))
+        .collect::<Vec<_>>();
+    assert_ne!(first[0], first[1], "two lanes used different OS threads");
+}
+
+#[test]
+fn local_task_wakes_a_scheduler_lane_without_parking_it() {
+    struct LaneWake(std::sync::atomic::AtomicUsize);
+    impl std::task::Wake for LaneWake {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    let executor = Executor::on_reactor(Reactor::shared_wall().expect("reactor"));
+    let wake = std::sync::Arc::new(LaneWake(std::sync::atomic::AtomicUsize::new(0)));
+    let waker = std::task::Waker::from(std::sync::Arc::clone(&wake));
+    let lane = std::thread::current().id();
+    let (signal, receive) = tokio::sync::oneshot::channel::<()>();
+    let observed = std::rc::Rc::new(std::cell::Cell::new(None));
+    executor.scope(|| {
+        let observed = std::rc::Rc::clone(&observed);
+        tokio::task::spawn_local(async move {
+            receive.await.expect("signal arrives");
+            observed.set(Some(std::thread::current().id()));
+        });
+    });
+
+    executor.poll_local_once(&waker);
+    assert_eq!(observed.get(), None);
+    let before = wake.0.load(std::sync::atomic::Ordering::SeqCst);
+    signal.send(()).expect("receiver still alive");
+    assert!(
+        wake.0.load(std::sync::atomic::Ordering::SeqCst) > before,
+        "the local task wakes the scheduler ticket"
+    );
+    executor.poll_local_once(&waker);
+    assert_eq!(observed.get(), Some(lane));
+}
+
 #[cfg(unix)]
 #[test]
 fn tokio_host_runs_process_with_bidirectional_pipes_and_preserves_status() {
@@ -330,7 +402,7 @@ fn active_realm_host_protocol_admits_persistent_resources() {
     let request = runtime
         .executor
         .local
-        .block_on(&runtime.executor.runtime, async {
+        .block_on(&runtime.executor.reactor.runtime, async {
             submit_listener(&mut runtime.state.host)
         });
     let resource = match next_host_completion(&mut runtime)
@@ -725,8 +797,11 @@ fn supervised_task_panic_fails_the_realm_and_cancels_siblings() {
     let failed = RequestId::new(90);
     let sibling = RequestId::new(91);
     let executor = Rc::clone(&runtime.executor);
-    let (local, tokio_runtime, host) =
-        (&executor.local, &executor.runtime, &mut runtime.state.host);
+    let (local, tokio_runtime, host) = (
+        &executor.local,
+        &executor.reactor.runtime,
+        &mut runtime.state.host,
+    );
     local.block_on(tokio_runtime, async {
         host.spawn_task(failed, 90, true, async {
             panic!("supervised task panic");
@@ -2023,7 +2098,7 @@ fn realm_shutdown_cancels_pending_tcp_work_before_closing_resources() {
     runtime
         .executor
         .local
-        .block_on(&runtime.executor.runtime, async {
+        .block_on(&runtime.executor.reactor.runtime, async {
             tokio::task::yield_now().await;
         });
     assert_eq!(
@@ -2856,7 +2931,7 @@ fn direct_engine_close_settles_pre_first_poll_admissions() {
     assert!(runtime.server_attach_queued(server_resource, false));
     let executor = &runtime.executor;
     let server_engine = &mut runtime.state.http_server;
-    assert!(executor.local.block_on(&executor.runtime, async {
+    assert!(executor.local.block_on(&executor.reactor.runtime, async {
         server_engine.close(server_resource, HttpCloseMode::Abort)
     }));
     let mut realm: Realm = Realm::new();
@@ -2870,7 +2945,7 @@ fn direct_engine_close_settles_pre_first_poll_admissions() {
     assert!(runtime.client_attach_queued(client_resource));
     let executor = &runtime.executor;
     let client_engine = &mut runtime.state.http_client;
-    assert!(executor.local.block_on(&executor.runtime, async {
+    assert!(executor.local.block_on(&executor.reactor.runtime, async {
         client_engine.close(client_resource, HttpCloseMode::Abort)
     }));
     let events = drain_client_events(&mut runtime, client_resource, |events| {

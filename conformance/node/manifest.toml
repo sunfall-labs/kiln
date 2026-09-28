@@ -6,6 +6,30 @@ source_commit = "d795edb56765d4ec743bcda5a0c1452bed74de0c"
 adaptation = "Harness-only rewrites are documented in UPSTREAM.md; API assertions remain intact."
 
 [[test]]
+id = "kiln/fs/descriptor-callbacks"
+requires_host = "node"
+source = "fs-descriptor-callbacks.cjs"
+status = "runnable"
+features = ["node:fs", "open", "write", "fsync", "close", "callback-order"]
+expected_stdout = "pass\n"
+
+[[test]]
+id = "kiln/worker_threads/lifecycle"
+requires_host = "node"
+source = "worker-thread-lifecycle.cjs"
+status = "runnable"
+features = ["node:worker_threads", "worker-realm", "message-order", "workerData"]
+expected_stdout = "pass\n"
+
+[[test]]
+id = "kiln/worker_threads/transfer"
+requires_host = "node"
+source = "worker-thread-transfer.cjs"
+status = "runnable"
+features = ["node:worker_threads", "worker-realm", "transfer-list", "arraybuffer"]
+expected_stdout = "pass\n"
+
+[[test]]
 id = "node-v24.7.0/fs-promises-readfile-empty/buffer"
 requires_host = "node"
 source = "upstream-adapted/fs-promises-readfile-empty-buffer.js"
@@ -316,4 +340,3 @@ source = "upstream-adapted/crypto-primitives.mjs"
 status = "runnable"
 features = ["node:crypto", "randomBytes", "randomFillSync", "getHashes", "createHash", "createHmac", "module-graph"]
 expected_stdout = "pass\n"
-

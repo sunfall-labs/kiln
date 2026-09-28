@@ -54,6 +54,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .collect(),
             )),
         );
+        // The runtime does not forward its own command-line flags to a user's worker. Node
+        // packages such as pino still inspect this array before creating one.
+        process.set("execArgv", Value::Array(ArrayData::new(Vec::new())));
         if let Some(executable) = self.argv.first() {
             process.set("execPath", Value::String(executable.clone().into()));
         }

@@ -17,8 +17,60 @@ use kiln_module_resolver::{
     ResolutionKind, ResolutionPolicy, is_asset_extension,
 };
 use kiln_proto::{
-    NodeModuleFormat, NodeSourceFormat, PackageResolution, SourceDigest, source_digest,
+    DeclaredInclude, NodeModuleFormat, NodeSourceFormat, PackageResolution, SourceDigest,
+    source_digest,
 };
+
+/// The root package's explicit closed-world module declaration (ADR 0067 §2). A relative
+/// spelling resolves from this package boundary, even when the command's entry is in `src/`.
+fn declared_include_specifiers(root: &Path) -> Result<Vec<String>> {
+    let manifest = root.join("package.json");
+    if !manifest.is_file() {
+        return Ok(Vec::new());
+    }
+    let text = std::fs::read_to_string(&manifest)
+        .map_err(|source| Error::io(format!("cannot read {}", manifest.display()), source))?;
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
+        Error::BadInput(format!("cannot parse {}: {error}", manifest.display()))
+    })?;
+    let Some(kiln) = value.get("kiln") else {
+        return Ok(Vec::new());
+    };
+    let Some(kiln) = kiln.as_object() else {
+        return Err(Error::BadInput(format!(
+            "{}: `kiln` must be an object with an `include` array",
+            manifest.display()
+        )));
+    };
+    let Some(include) = kiln.get("include") else {
+        return Ok(Vec::new());
+    };
+    let Some(include) = include.as_array() else {
+        return Err(Error::BadInput(format!(
+            "{}: `kiln.include` must be an array of module specifiers",
+            manifest.display()
+        )));
+    };
+    let mut specifiers = Vec::with_capacity(include.len());
+    for (index, value) in include.iter().enumerate() {
+        let Some(specifier) = value.as_str().filter(|value| !value.is_empty()) else {
+            return Err(Error::BadInput(format!(
+                "{}: `kiln.include[{index}]` must be a nonempty module specifier",
+                manifest.display()
+            )));
+        };
+        specifiers.push(specifier.to_owned());
+    }
+    specifiers.sort();
+    if let Some(pair) = specifiers.windows(2).find(|pair| pair[0] == pair[1]) {
+        return Err(Error::BadInput(format!(
+            "{}: duplicate `kiln.include` specifier {:?}",
+            manifest.display(),
+            pair[0]
+        )));
+    }
+    Ok(specifiers)
+}
 
 fn captured_importer_path(raw: &str) -> Result<PathBuf> {
     if raw.starts_with("file:") {
@@ -339,17 +391,33 @@ fn stat_key(file: &Path) -> Option<(u128, u64)> {
 /// parses only reachable modules and asks the same resolution-policy interface used by the daemon
 /// for their exact targets. Existing project texts are reused byte-for-byte, while newly reached
 /// package sources are read once and become part of the authoritative source manifest.
+#[cfg(test)]
 pub(crate) fn include_reachable_dependencies(
     root: &Path,
     entry: &str,
     texts: &mut Vec<(String, String)>,
     node: bool,
 ) -> Result<(Vec<PackageResolution>, Vec<NodeSourceFormat>)> {
+    let (resolutions, formats, _) =
+        include_reachable_dependencies_with_includes(root, entry, texts, node)?;
+    Ok((resolutions, formats))
+}
+
+pub(crate) fn include_reachable_dependencies_with_includes(
+    root: &Path,
+    entry: &str,
+    texts: &mut Vec<(String, String)>,
+    node: bool,
+) -> Result<(
+    Vec<PackageResolution>,
+    Vec<NodeSourceFormat>,
+    Vec<DeclaredInclude>,
+)> {
     let resolver = NodePackageResolver::new(root)
         .map_err(|error| Error::BadInput(format!("cannot resolve project modules: {error}")))?;
     let entry = PathBuf::from(entry);
     if !entry.starts_with(resolver.project_root()) {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
     }
 
     let mut indexes = texts
@@ -376,6 +444,55 @@ pub(crate) fn include_reachable_dependencies(
     // CommonJS requires are runtime-reachable subtrees: capture anything that exists, but do not
     // reject the whole snapshot when a descendant is unavailable.
     let mut pending = vec![(entry, true)];
+    let mut declared_includes = Vec::new();
+    if node {
+        let package_importer = resolver.project_root().join("package.json");
+        for specifier in declared_include_specifiers(resolver.project_root())? {
+            let resolved = resolver
+                .resolve_with_metadata_for_request(
+                    &specifier,
+                    &package_importer,
+                    NodeRequestKind::Require,
+                )
+                .map_err(|error| {
+                    Error::BadInput(format!(
+                        "{}: `kiln.include` cannot resolve {:?}: {error}",
+                        package_importer.display(),
+                        specifier
+                    ))
+                })?;
+            let target = resolved.module.path;
+            if target
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(is_asset_extension)
+            {
+                return Err(Error::BadInput(format!(
+                    "{}: `kiln.include` names an asset, not a module: {:?}",
+                    package_importer.display(),
+                    specifier
+                )));
+            }
+            if !indexes.contains_key(&target) {
+                let text = std::fs::read_to_string(&target).map_err(|source| {
+                    Error::io(
+                        format!("cannot read declared module {}", target.display()),
+                        source,
+                    )
+                })?;
+                let path = target.to_str().ok_or_else(|| {
+                    Error::BadInput(format!("path is not valid UTF-8: {}", target.display()))
+                })?;
+                indexes.insert(target.clone(), texts.len());
+                texts.push((path.to_owned(), text));
+            }
+            declared_includes.push(DeclaredInclude {
+                specifier,
+                target: target.to_string_lossy().into_owned(),
+            });
+            pending.push((target, true));
+        }
+    }
     // Keep the strongest reachability mode seen for each module. A dynamic edge may be popped
     // before a later static edge to the same path; the latter must still validate its subtree.
     let mut visited = HashMap::<PathBuf, bool>::new();
@@ -606,6 +723,7 @@ pub(crate) fn include_reachable_dependencies(
                 format,
             })
             .collect(),
+        declared_includes,
     ))
 }
 
@@ -893,6 +1011,115 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn declared_include_is_a_lazy_source_root_from_the_package_boundary() {
+        let tree = Tree::new("declared-include");
+        tree.file("src/main.cjs");
+        tree.file("worker-task.cjs");
+        tree.file("worker-dependency.cjs");
+        std::fs::write(
+            tree.0.join("package.json"),
+            r#"{"kiln":{"include":["./worker-task.cjs"]}}"#,
+        )
+        .expect("write include declaration");
+        std::fs::write(
+            tree.0.join("worker-task.cjs"),
+            "module.exports = require('./worker-dependency.cjs');",
+        )
+        .expect("write included worker");
+        let root = tree.0.canonicalize().expect("canonical root");
+        let entry = root.join("src/main.cjs");
+        let mut texts = Vec::new();
+        let (resolutions, formats, includes) = include_reachable_dependencies_with_includes(
+            &root,
+            entry.to_str().expect("UTF-8 path"),
+            &mut texts,
+            true,
+        )
+        .expect("collect declared closure");
+        assert_eq!(includes.len(), 1);
+        assert_eq!(includes[0].specifier, "./worker-task.cjs");
+        assert_eq!(
+            includes[0].target,
+            root.join("worker-task.cjs").to_string_lossy()
+        );
+        assert!(texts.iter().any(|(path, _)| path == &includes[0].target));
+        assert!(
+            texts
+                .iter()
+                .any(|(path, _)| path == &root.join("worker-dependency.cjs").to_string_lossy())
+        );
+        assert!(
+            formats
+                .iter()
+                .any(|format| format.path == includes[0].target)
+        );
+        assert!(
+            resolutions
+                .iter()
+                .any(|resolution| resolution.specifier == "./worker-dependency.cjs")
+        );
+    }
+
+    #[test]
+    fn invalid_declared_include_names_its_package_and_entry() {
+        let tree = Tree::new("invalid-declared-include");
+        tree.file("main.cjs");
+        std::fs::write(
+            tree.0.join("package.json"),
+            r#"{"kiln":{"include":["./missing.cjs"]}}"#,
+        )
+        .expect("write include declaration");
+        let root = tree.0.canonicalize().expect("canonical root");
+        let entry = root.join("main.cjs");
+        let error = include_reachable_dependencies_with_includes(
+            &root,
+            entry.to_str().expect("UTF-8 path"),
+            &mut Vec::new(),
+            true,
+        )
+        .expect_err("missing declared module");
+        let message = error.to_string();
+        assert!(message.contains("package.json"), "{message}");
+        assert!(message.contains("kiln.include"), "{message}");
+        assert!(message.contains("./missing.cjs"), "{message}");
+    }
+
+    #[test]
+    fn declared_package_subpath_uses_node_exports_from_the_root_package() {
+        let tree = Tree::new("declared-package-subpath");
+        tree.file("src/main.cjs");
+        tree.file("node_modules/pkg/worker.cjs");
+        std::fs::write(
+            tree.0.join("package.json"),
+            r#"{"kiln":{"include":["pkg/worker"]}}"#,
+        )
+        .expect("write include declaration");
+        std::fs::write(
+            tree.0.join("node_modules/pkg/package.json"),
+            r#"{"name":"pkg","exports":{"./worker":"./worker.cjs"}}"#,
+        )
+        .expect("write dependency export map");
+        let root = tree.0.canonicalize().expect("canonical root");
+        let entry = root.join("src/main.cjs");
+        let mut texts = Vec::new();
+        let (_, formats, includes) = include_reachable_dependencies_with_includes(
+            &root,
+            entry.to_str().expect("UTF-8 entry"),
+            &mut texts,
+            true,
+        )
+        .expect("resolve declared package subpath");
+        assert_eq!(includes.len(), 1);
+        assert_eq!(includes[0].specifier, "pkg/worker");
+        assert_eq!(
+            includes[0].target,
+            root.join("node_modules/pkg/worker.cjs").to_string_lossy()
+        );
+        assert!(texts.iter().any(|(path, _)| path == &includes[0].target));
+        assert!(formats.iter().any(|format| format.path == includes[0].target));
     }
 
     #[test]

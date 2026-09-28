@@ -166,6 +166,18 @@ cargo run -p kiln-cli -- --one-shot build server.mjs --node --profile native-rel
 ```
 
 `--node` selects Node's module resolution and installs the Tokio-owned adapter for `node:*`.
+When a worker or another loader receives a module path at run time, declare that module in the
+project's `package.json` so the native build can compile it:
+
+```json
+{"kiln": {"include": ["./src/worker-task.cjs", "pino/file"]}}
+```
+
+Relative entries resolve from the package root. Declared modules and their dependencies are linked
+into the graph but run only when requested; missing entries fail the build with the package path
+and specifier. A computed loader can request a declared module by its resolved absolute path or
+file URL. See [ADR 0067](docs/adr/0067-what-kiln-build-does-when-a-program-is-not-closed-world.md)
+for the closed-world policy.
 `kiln watch` re-runs an entry in the interpreter on every save. `kiln test <dir>` runs a
 conformance corpus; the corpora and the runner each one needs are listed in `AGENTS.md`.
 

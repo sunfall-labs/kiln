@@ -12,6 +12,7 @@
 
 mod process_wire;
 mod timer_queue;
+pub mod turn_queue;
 pub use process_wire::{
     ProcessWireError, ProcessWireRequest, decode as decode_process_wire,
     encode as encode_process_wire,
@@ -81,6 +82,10 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 use timer_queue::{SequenceBuild, TimerEntry, TimerQueue};
 
@@ -749,23 +754,63 @@ pub struct RuntimeMetricsSnapshot {
     pub busy_duration: Duration,
 }
 
-/// The Tokio executor: a current-thread runtime and the `LocalSet` realm tasks run on.
+/// The I/O and timer runtime a scheduler lane may share with other lanes.
+///
+/// This owns no realm or local task set. A wall-clock scheduler uses one process-wide instance;
+/// deterministic mode uses a separate current-thread instance whose clock may be paused.
+pub struct Reactor {
+    runtime: tokio::runtime::Runtime,
+    /// The current-thread deterministic reactor may pause time. A shared wall-clock reactor
+    /// never does: pausing it would change every realm using it.
+    pause_supported: bool,
+    time_paused: AtomicBool,
+}
+
+impl Reactor {
+    /// A reactor for one deterministic lane. It is driven only while that lane enters it.
+    pub fn current_thread() -> Result<Arc<Self>, RuntimeBuildError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .map_err(RuntimeBuildError)?;
+        Ok(Arc::new(Self {
+            runtime,
+            pause_supported: true,
+            time_paused: AtomicBool::new(false),
+        }))
+    }
+
+    /// One process-wide wall-clock I/O service for scheduler lanes. Its only Tokio worker
+    /// drives Send I/O futures; a lane polls its realm's local tasks on that lane itself.
+    pub fn shared_wall() -> Result<Arc<Self>, RuntimeBuildError> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_io()
+            .enable_time()
+            .build()
+            .map_err(RuntimeBuildError)?;
+        Ok(Arc::new(Self {
+            runtime,
+            pause_supported: false,
+            time_paused: AtomicBool::new(false),
+        }))
+    }
+}
+
+/// The lane-local executor: one `LocalSet` run on a selected reactor.
 ///
 /// Separate from [`RealmState`], which owns everything a drive reads and writes, so that a drive
 /// can hold the state for its whole lifetime while the executor runs it. The previous single
 /// struct could not express that, and the native adapter re-entered the executor for every small
 /// step instead of running inside it once (ADR 0040).
 ///
-/// An executor owns no realm. It is shared as `Rc<Executor>`, and a [`RealmState`] is built
-/// without one, so the state is an owned value a later scheduler can drive from whichever
-/// executor runs its next turn (ADR 0070). What an executor does own is what Tokio makes
-/// per-runtime: the paused clock and the runtime's metric stream.
+/// An executor owns no realm. It can be made on a shared reactor while `RealmState` remains
+/// separately owned. Its `LocalSet` cannot move to another thread while tasks are alive;
+/// scheduler migration recreates an empty task set on the destination lane (ADR 0070).
 pub struct Executor {
-    runtime: tokio::runtime::Runtime,
+    reactor: Arc<Reactor>,
     local: tokio::task::LocalSet,
-    /// Whether Tokio time has been paused for a deterministic clock. Pausing is a property of
-    /// the runtime, not of any one realm.
-    time_paused: std::cell::Cell<bool>,
     runtime_metrics: std::cell::RefCell<tokio_metrics::RuntimeIntervals>,
     // Current-thread by construction: the LocalSet and the realms it drives are thread-bound.
     _not_send: PhantomData<Rc<()>>,
@@ -774,26 +819,41 @@ pub struct Executor {
 impl Executor {
     /// Builds a current-thread runtime with Tokio's I/O and timer drivers enabled.
     pub fn new() -> Result<Self, RuntimeBuildError> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .enable_time()
-            .build()
-            .map_err(RuntimeBuildError)?;
-        let runtime_metrics = tokio_metrics::RuntimeMonitor::new(runtime.handle()).intervals();
-        Ok(Self {
-            runtime,
+        Ok(Self::on_reactor(Reactor::current_thread()?))
+    }
+
+    /// Make a lane-local task set on an already-owned reactor. A local task set is never sent
+    /// to another thread while it has live tasks; the scheduler recreates an empty one when a
+    /// movable realm resumes on a different lane.
+    pub fn on_reactor(reactor: Arc<Reactor>) -> Self {
+        let runtime_metrics =
+            tokio_metrics::RuntimeMonitor::new(reactor.runtime.handle()).intervals();
+        Self {
+            reactor,
             local: tokio::task::LocalSet::new(),
-            time_paused: std::cell::Cell::new(false),
             runtime_metrics: std::cell::RefCell::new(runtime_metrics),
             _not_send: PhantomData,
-        })
+        }
     }
 
     /// Run `future` to completion on this runtime and `LocalSet`: the one place a realm's
     /// thread parks. A drive enters here once per program run; Tokio panics on a nested entry,
     /// which is what makes a stray one loud instead of a deadlock.
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
-        self.local.block_on(&self.runtime, future)
+        self.local.block_on(&self.reactor.runtime, future)
+    }
+
+    /// Poll this lane's local tasks once without parking it. The scheduler supplies a waker
+    /// that queues the owning realm's next turn when a local task becomes ready.
+    ///
+    /// Tokio's `LocalSet::run_until` retains unfinished local tasks after its borrowed future
+    /// is dropped. Polling a never-ready future once therefore drives a bounded task batch and
+    /// registers `waker` with the LocalSet while leaving the scheduler in charge of parking.
+    pub fn poll_local_once(&self, waker: &std::task::Waker) {
+        let _runtime = self.reactor.runtime.enter();
+        let mut future = std::pin::pin!(self.local.run_until(std::future::pending::<()>()));
+        let mut context = std::task::Context::from_waker(waker);
+        let _ = future.as_mut().poll(&mut context);
     }
 
     /// Make this executor ambient for `operation` without running it or parking the thread.
@@ -805,23 +865,27 @@ impl Executor {
     /// the deleted `_in_context` twins put on every caller does not arise: this is correct in
     /// either case and never calls `block_on`. Spawned tasks run at the next entry.
     pub fn scope<R>(&self, operation: impl FnOnce() -> R) -> R {
-        let _runtime = self.runtime.enter();
+        let _runtime = self.reactor.runtime.enter();
         let _local = self.local.enter();
         operation()
     }
 
     /// Pause Tokio time for a deterministic clock, once for this runtime.
     pub fn pause_time(&self) {
-        if !self.time_paused.get() {
-            let _entered = self.runtime.enter();
+        assert!(
+            self.reactor.pause_supported,
+            "a shared wall-clock reactor cannot pause time"
+        );
+        if !self.reactor.time_paused.load(Ordering::Acquire) {
+            let _entered = self.reactor.runtime.enter();
             tokio::time::pause();
-            self.time_paused.set(true);
+            self.reactor.time_paused.store(true, Ordering::Release);
         }
     }
 
     /// Whether Tokio time has been paused on this runtime.
     pub fn is_time_paused(&self) -> bool {
-        self.time_paused.get()
+        self.reactor.time_paused.load(Ordering::Acquire)
     }
 
     /// Samples stable whole-runtime counters accumulated since the previous call.
@@ -856,6 +920,9 @@ impl Executor {
         state.shutdown()
     }
 }
+
+/// Wake signal a realm drive may hold across a turn boundary.
+pub type DriveSignal = Rc<tokio::sync::Notify>;
 
 /// What ended a drive's wait.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

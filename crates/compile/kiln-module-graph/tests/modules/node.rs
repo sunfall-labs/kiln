@@ -1,6 +1,92 @@
 use super::*;
 
 #[test]
+fn declared_node_include_is_linked_but_not_evaluated_with_the_entry() {
+    let project = TempProject::new();
+    project.write("data.json", r#"{"answer":42}"#);
+    let included = project.write(
+        "task.cjs",
+        "const os = require('node:os'); const data = require('./data.json'); console.log('task', typeof os.platform, data.answer); module.exports = 42;",
+    );
+    let entry = project.write("main.cjs", "console.log('main');");
+    let graph = ModuleGraph::build_node_with_includes(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        OxcFrontend,
+        vec![(included.clone(), ModuleSource::CommonJs)],
+    )
+    .expect("build with declared include");
+    assert!(graph.module(&included).is_some());
+    assert!(graph.declared_includes().contains(&included));
+    assert_eq!(
+        graph.declared_target_for_runtime_specifier(&included.to_string_lossy()),
+        Some(included.clone())
+    );
+    let included_url = url::Url::from_file_path(&included)
+        .expect("file URL")
+        .to_string();
+    assert_eq!(
+        graph.declared_target_for_runtime_specifier(&included_url),
+        Some(included.clone())
+    );
+    assert_eq!(
+        graph.declared_target_for_runtime_specifier("./task.cjs"),
+        None
+    );
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute entry");
+    assert_eq!(host.output, ["main"]);
+
+    let mut worker_host = TestHost::default();
+    graph
+        .with_entry(&included)
+        .expect("included module can be a worker entry")
+        .execute_node(
+            &mut worker_host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute included module");
+    assert_eq!(worker_host.output, ["task function 42"]);
+}
+
+#[test]
+fn computed_commonjs_loader_can_use_only_a_declared_target() {
+    let project = TempProject::new();
+    let included = project.write("task.cjs", "console.log('task'); module.exports = 42;");
+    project.write("other.cjs", "module.exports = 99;");
+    let entry = project.write(
+        "main.cjs",
+        "const path = require('node:path'); console.log('before'); console.log(require(path.join(__dirname, 'task.cjs')));",
+    );
+    let graph = ModuleGraph::build_node_with_includes(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        OxcFrontend,
+        vec![(included.clone(), ModuleSource::CommonJs)],
+    )
+    .expect("build with declared target");
+    assert!(graph.module(project.root.join("other.cjs")).is_none());
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute computed loader");
+    assert_eq!(host.output, ["before", "task", "42"]);
+}
+
+#[test]
 fn dynamic_loader_requires_file_attribute_for_assets_and_rejects_it_for_source() {
     let project = TempProject::new();
     let asset = project.root.join("tree-sitter.wasm");

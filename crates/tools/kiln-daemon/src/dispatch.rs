@@ -643,6 +643,7 @@ fn canonical_source_path(path: &str, project_root: &Path) -> Option<PathBuf> {
 pub(crate) fn build_graph_from_snapshot(
     snapshot: &OwnedGraphSnapshot,
 ) -> Result<ModuleGraph, kiln_module_graph::ModuleGraphError> {
+    let declared_includes = declared_include_sources(snapshot.resolutions.as_ref())?;
     let entries = snapshot
         .resolutions
         .iter()
@@ -699,9 +700,58 @@ pub(crate) fn build_graph_from_snapshot(
         specifier: String::new(),
         error,
     })?;
-    ModuleGraph::build_with_typed_policy(&snapshot.entry, resolver, |path, source_kind| {
-        snapshot_module_payload(snapshot, path, source_kind)
-    })
+    ModuleGraph::build_with_typed_policy_includes(
+        &snapshot.entry,
+        resolver,
+        |path, source_kind| snapshot_module_payload(snapshot, path, source_kind),
+        declared_includes,
+    )
+}
+
+fn declared_include_sources(
+    resolutions: Option<&ResolutionMap>,
+) -> Result<Vec<(PathBuf, kiln_module_graph::ModuleSource)>, kiln_module_graph::ModuleGraphError> {
+    let Some(resolutions) = resolutions else {
+        return Ok(Vec::new());
+    };
+    resolutions
+        .declared_includes
+        .iter()
+        .map(|include| {
+            let path = PathBuf::from(&include.target);
+            let source = if path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(kiln_data_formats::is_data_extension)
+            {
+                kiln_module_graph::ModuleSource::Json
+            } else {
+                match resolutions
+                    .node_formats
+                    .iter()
+                    .find(|format| format.path == include.target)
+                    .map(|format| format.format)
+                {
+                    Some(kiln_proto::NodeModuleFormat::CommonJs) => {
+                        kiln_module_graph::ModuleSource::CommonJs
+                    }
+                    Some(kiln_proto::NodeModuleFormat::EsModule) => {
+                        kiln_module_graph::ModuleSource::Source
+                    }
+                    None => {
+                        return Err(kiln_module_graph::ModuleGraphError::Source {
+                            path,
+                            message: format!(
+                                "declared include {:?} has no pinned Node source format",
+                                include.specifier
+                            ),
+                        });
+                    }
+                }
+            };
+            Ok((path, source))
+        })
+        .collect()
 }
 
 /// Patch one ordinary ESM module in an old immutable graph. Returning `None` asks the caller to
@@ -1138,6 +1188,7 @@ fn build_graph<E: QueryEngine>(
     project_root: &str,
     node: bool,
 ) -> Result<ModuleGraph, kiln_module_graph::ModuleGraphError> {
+    let declared_includes = declared_include_sources(resolutions)?;
     let entries = resolutions
         .into_iter()
         .flat_map(|map| &map.entries)
@@ -1195,7 +1246,7 @@ fn build_graph<E: QueryEngine>(
         specifier: String::new(),
         error,
     })?;
-    ModuleGraph::build_with_typed_policy(entry, resolver, provider)
+    ModuleGraph::build_with_typed_policy_includes(entry, resolver, provider, declared_includes)
 }
 
 fn module_payload<E: QueryEngine>(

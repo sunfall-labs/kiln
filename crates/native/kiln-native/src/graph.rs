@@ -23,7 +23,27 @@ pub(super) fn native_graph_plan_with_validator(
         runtime: bool,
     }
 
-    let static_reachable = graph.statically_reachable();
+    let mut static_reachable = graph.statically_reachable();
+    // A declared module is another possible runtime entry. Traverse its ordinary imports now
+    // so validation and emission see the whole closure, while the launcher still evaluates only
+    // the program entry until a worker or dynamic loader asks for this module.
+    let mut include_work = graph
+        .declared_includes()
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    while let Some(path) = include_work.pop() {
+        if !static_reachable.insert(path.clone()) {
+            continue;
+        }
+        if let Some(node) = graph.module(&path) {
+            include_work.extend(
+                node.dependencies
+                    .iter()
+                    .map(|dependency| dependency.target.clone()),
+            );
+        }
+    }
     validate_native_builtins_in_paths(graph, &static_reachable, validate)?;
     let mut plan = NativeGraphPlan::default();
     let mut retained = static_reachable.clone();
@@ -2143,10 +2163,23 @@ import_attributes_valid:
                 }
             }
         }
+        if graph.declared_includes().contains(&node.path) {
+            resolutions.insert((node.path.to_string_lossy().into_owned(), modules.len()));
+            if let Ok(url) = Url::from_file_path(&node.path) {
+                resolutions.insert((url.to_string(), modules.len()));
+            }
+        }
         for (spec, importer_index) in resolutions {
             let c_spec = native_c_string(&spec);
             let len = spec.len();
-            let importer = native_c_string(&modules[importer_index].1.symbol);
+            let importer_guard = if importer_index == modules.len() {
+                "1".to_owned()
+            } else {
+                format!(
+                    "importer != NULL && strcmp(importer, {}) == 0",
+                    native_c_string(&modules[importer_index].1.symbol)
+                )
+            };
             let attribute_guard = if matches!(node.source, ModuleSource::Asset) {
                 " && attribute_type == 1"
             } else {
@@ -2154,7 +2187,7 @@ import_attributes_valid:
             };
             writeln!(
                 output,
-                "    if (importer != NULL && strcmp(importer, {importer}) == 0{attribute_guard} && kiln_c99_string_equals_ascii(specifier, {c_spec}, (size_t){len})) {{"
+                "    if ({importer_guard}{attribute_guard} && kiln_c99_string_equals_ascii(specifier, {c_spec}, (size_t){len})) {{"
             )
             .unwrap();
             writeln!(
@@ -2332,10 +2365,23 @@ import_attributes_valid:
                 }
             }
         }
+        if graph.declared_includes().contains(&node.path) {
+            resolutions.insert((node.path.to_string_lossy().into_owned(), modules.len()));
+            if let Ok(url) = Url::from_file_path(&node.path) {
+                resolutions.insert((url.to_string(), modules.len()));
+            }
+        }
         for (spec, importer_index) in resolutions {
             let c_spec = native_c_string(&spec);
             let len = spec.len();
-            let importer = native_c_string(&modules[importer_index].1.symbol);
+            let importer_guard = if importer_index == modules.len() {
+                "1".to_owned()
+            } else {
+                format!(
+                    "importer != NULL && strcmp(importer, {}) == 0",
+                    native_c_string(&modules[importer_index].1.symbol)
+                )
+            };
             let attribute_guard = if matches!(node.source, ModuleSource::Asset) {
                 " && attribute_type == 1"
             } else {
@@ -2343,7 +2389,7 @@ import_attributes_valid:
             };
             writeln!(
                 output,
-                "        if (importer != NULL && strcmp(importer, {importer}) == 0{attribute_guard} && kiln_c99_string_equals_ascii(specifier, {c_spec}, (size_t){len})) {{"
+                "        if ({importer_guard}{attribute_guard} && kiln_c99_string_equals_ascii(specifier, {c_spec}, (size_t){len})) {{"
             )
             .unwrap();
             if modules[index].0.source == ModuleSource::CommonJs {
@@ -3003,6 +3049,28 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
         runtime_importers.len().max(1),
     );
     output = output.replace("/* KILN_GRAPH_CONTEXT */\n", &context);
+    output.push_str("static int kiln_graph_declared_require(kiln_graph_context *graph, kiln_value specifier, kiln_value *result, kiln_value *thrown, int *matched) {\n    *matched = 0;\n");
+    for path in graph.declared_includes() {
+        let Some(&provider_index) = indices.get(path) else {
+            continue;
+        };
+        if modules[provider_index].0.source != ModuleSource::CommonJs {
+            continue;
+        }
+        let matches = std::iter::once(path.to_string_lossy().into_owned())
+            .chain(Url::from_file_path(path).ok().map(|url| url.to_string()))
+            .map(|specifier| {
+                format!(
+                    "kiln_c99_string_equals_ascii(specifier, {}, (size_t){})",
+                    native_c_string(&specifier),
+                    specifier.len()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" || ");
+        writeln!(output, "    if ({matches}) {{ *matched = 1; return kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, thrown); }}").unwrap();
+    }
+    output.push_str("    (void)graph; (void)specifier; (void)result; (void)thrown;\n    return KILN_C99_OK;\n}\n");
     for (index, (node, _)) in modules.iter().enumerate() {
         writeln!(
             output,
@@ -3041,7 +3109,7 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
                 .unwrap();
             }
         }
-        output.push_str("    if (thrown != NULL) *thrown = specifier;\n    return -2;\n}\n");
+        output.push_str("    { int matched = 0; int status = kiln_graph_declared_require(graph, specifier, result, thrown, &matched); if (matched) return status; }\n    return kiln_c99_default_require(NULL, host, specifier, result, thrown);\n}\n");
     }
     if modules
         .iter()
@@ -3156,7 +3224,36 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
         }
         output.push_str("            break;\n");
     }
-    output.push_str("        default: break;\n    }\n    return kiln_c99_default_require(NULL, host, specifier, result, thrown);\n}\n\n");
+    output.push_str("        default: break;\n    }\n");
+    for path in graph.declared_includes() {
+        let Some(&provider_index) = indices.get(path) else {
+            continue;
+        };
+        let matches = std::iter::once(path.to_string_lossy().into_owned())
+            .chain(Url::from_file_path(path).ok().map(|url| url.to_string()))
+            .map(|specifier| {
+                format!(
+                    "kiln_c99_string_equals_ascii(specifier, {}, (size_t){})",
+                    native_c_string(&specifier),
+                    specifier.len()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" || ");
+        if modules[provider_index].0.source == ModuleSource::CommonJs {
+            writeln!(
+                output,
+                "    if ({matches}) return kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, thrown);"
+            )
+            .unwrap();
+        } else if let Some(projection) = native_commonjs_projection_index(modules[provider_index].0)
+        {
+            writeln!(output, "    if ({matches}) {{ int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->module_states[{provider_index}].result; return status; }} *result = kiln_exports_{provider_index}[{projection}]; return KILN_C99_OK; }}").unwrap();
+        }
+    }
+    output.push_str(
+        "    return kiln_c99_default_require(NULL, host, specifier, result, thrown);\n}\n\n",
+    );
     output.push_str(
         "static int kiln_graph_require_builtin(void *opaque, kiln_host *host, kiln_value specifier, kiln_value *result, kiln_value *thrown) {\n    kiln_graph_context *graph = (kiln_graph_context *)opaque;\n    (void)host;\n    if (graph == NULL || result == NULL || specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) return KILN_C99_INVALID_ARGUMENT;\n",
     );

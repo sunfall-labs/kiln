@@ -1,0 +1,17 @@
+{
+  "name": "kiln-worker-deploy-acceptance",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "pino": "10.3.1",
+    "piscina": "5.3.2"
+  },
+  "kiln": {
+    "include": [
+      "./node_modules/piscina/dist/worker.js",
+      "./node_modules/thread-stream/lib/worker.js",
+      "./piscina-task.cjs",
+      "pino/file"
+    ]
+  }
+}

@@ -235,6 +235,13 @@ pub fn select_executable_modules<'a>(
         }
     };
     mark_live(graph.entry(), &mut live, &mut queue);
+    // Declared includes are potential runtime entries (for example a worker's target supplied
+    // in workerData). They are linked and retained, but entry evaluation still starts only from
+    // graph.entry(). A loader may ask for any export, so preserve each complete namespace.
+    for path in graph.declared_includes() {
+        namespace_demands.insert(path.clone());
+        mark_live(path, &mut live, &mut queue);
+    }
 
     let has_any_dynamic_import = graph
         .modules()

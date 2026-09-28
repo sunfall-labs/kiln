@@ -880,6 +880,16 @@ impl CommonJsRequire {
         }
     }
 
+    pub fn for_module(
+        importer: impl Into<String>,
+        targets: impl IntoIterator<Item = (String, String, Cell)>,
+    ) -> Self {
+        Self {
+            targets: targets.into_iter().collect(),
+            importer: Some(importer.into()),
+        }
+    }
+
     pub fn importer(&self) -> Option<&str> {
         self.importer.as_deref()
     }
