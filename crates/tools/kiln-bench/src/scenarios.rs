@@ -695,7 +695,7 @@ fn require_node_net_selection(
     summary: &TestSummary,
     expected_cache_hit: bool,
 ) -> Result<(), String> {
-    if summary.discovered == 36
+    if summary.discovered == 39
         && summary.selected == 5
         && summary.passed == 5
         && summary.failed == 0
@@ -706,7 +706,7 @@ fn require_node_net_selection(
         return Ok(());
     }
     Err(format!(
-        "changed node:net batch was discovered={} selected={} pass={} fail={} unsupported={} skipped={} discovery_cache_hit={}, expected 36/5/5/0/0/0/{expected_cache_hit}",
+        "changed node:net batch was discovered={} selected={} pass={} fail={} unsupported={} skipped={} discovery_cache_hit={}, expected 39/5/5/0/0/0/{expected_cache_hit}",
         summary.discovered,
         summary.selected,
         summary.passed,
