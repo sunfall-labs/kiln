@@ -3,11 +3,17 @@
 //! A ticket is the only cross-thread name for a realm. Its owner stores the realm itself behind
 //! an exclusive turn lease; this queue never contains a pointer into language state. A wake that
 //! races the end of a running turn is remembered and queues exactly one successor turn.
+//! Successor turns get up to fifteen turns ahead of initial turns, then an initial turn runs.
+//! That bounds response latency during a startup burst without starving realm admission.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
+
+// A new realm gets at least one in every 16 selections when successors stay ready. Smaller
+// quotas left socket callbacks behind a burst of realm startup turns in the connection probe.
+const MAX_RESUMED_STREAK: u8 = 15;
 
 /// One source of ready tickets, shared by scheduler lanes.
 pub struct ReadyQueue {
@@ -17,11 +23,39 @@ pub struct ReadyQueue {
 
 struct QueueState {
     movable: VecDeque<(Arc<TurnTicket>, u64)>,
+    resumed_movable: VecDeque<(Arc<TurnTicket>, u64)>,
     pinned: Vec<VecDeque<(Arc<TurnTicket>, u64)>>,
+    resumed_pinned: Vec<VecDeque<(Arc<TurnTicket>, u64)>>,
     waiting: Vec<bool>,
     prefer_pinned: Vec<bool>,
+    resumed_streak: Vec<u8>,
     next_wake: usize,
     closed: bool,
+}
+
+impl QueueState {
+    fn pop_for_lane(
+        &mut self,
+        lane: usize,
+        resumed: bool,
+    ) -> Option<((Arc<TurnTicket>, u64), bool)> {
+        let (pinned, movable) = if resumed {
+            (&mut self.resumed_pinned[lane], &mut self.resumed_movable)
+        } else {
+            (&mut self.pinned[lane], &mut self.movable)
+        };
+        if self.prefer_pinned[lane] {
+            pinned
+                .pop_front()
+                .map(|entry| (entry, true))
+                .or_else(|| movable.pop_front().map(|entry| (entry, false)))
+        } else {
+            movable
+                .pop_front()
+                .map(|entry| (entry, false))
+                .or_else(|| pinned.pop_front().map(|entry| (entry, true)))
+        }
+    }
 }
 
 impl ReadyQueue {
@@ -37,9 +71,12 @@ impl ReadyQueue {
         Arc::new(Self {
             state: Mutex::new(QueueState {
                 movable: VecDeque::new(),
+                resumed_movable: VecDeque::new(),
                 pinned: (0..lanes).map(|_| VecDeque::new()).collect(),
+                resumed_pinned: (0..lanes).map(|_| VecDeque::new()).collect(),
                 waiting: vec![false; lanes],
                 prefer_pinned: vec![true; lanes],
+                resumed_streak: vec![0; lanes],
                 next_wake: 0,
                 closed: false,
             }),
@@ -67,21 +104,30 @@ impl ReadyQueue {
                 generation: 1,
                 phase: Phase::Parked,
                 wake_pending: false,
+                has_run: false,
             }),
         })
     }
 
-    fn enqueue(&self, ticket: Arc<TurnTicket>, generation: u64) -> bool {
+    fn enqueue(&self, ticket: Arc<TurnTicket>, generation: u64, resumed: bool) -> bool {
         let mut state = self.state.lock().expect("ready queue lock poisoned");
         if state.closed {
             return false;
         }
         let lane = ticket.lane.load(Ordering::Acquire);
         if lane != usize::MAX {
-            state.pinned[lane].push_back((ticket, generation));
+            if resumed {
+                state.resumed_pinned[lane].push_back((ticket, generation));
+            } else {
+                state.pinned[lane].push_back((ticket, generation));
+            }
             self.changed[lane].notify_one();
         } else {
-            state.movable.push_back((ticket, generation));
+            if resumed {
+                state.resumed_movable.push_back((ticket, generation));
+            } else {
+                state.movable.push_back((ticket, generation));
+            }
             let lanes = state.waiting.len();
             for offset in 0..lanes {
                 let lane = (state.next_wake + offset) % lanes;
@@ -126,19 +172,21 @@ impl ReadyQueue {
                     if state.closed {
                         return None;
                     }
-                    let entry = if state.prefer_pinned[lane] {
-                        state.pinned[lane]
-                            .pop_front()
-                            .map(|entry| (entry, true))
-                            .or_else(|| state.movable.pop_front().map(|entry| (entry, false)))
-                    } else {
-                        state
-                            .movable
-                            .pop_front()
-                            .map(|entry| (entry, false))
-                            .or_else(|| state.pinned[lane].pop_front().map(|entry| (entry, true)))
-                    };
+                    let resumed_ready =
+                        !state.resumed_pinned[lane].is_empty() || !state.resumed_movable.is_empty();
+                    let ordinary_ready =
+                        !state.pinned[lane].is_empty() || !state.movable.is_empty();
+                    let resumed = resumed_ready
+                        && (!ordinary_ready || state.resumed_streak[lane] < MAX_RESUMED_STREAK);
+                    let entry = state.pop_for_lane(lane, resumed);
                     if let Some((entry, was_pinned)) = entry {
+                        state.resumed_streak[lane] = if resumed {
+                            state.resumed_streak[lane]
+                                .saturating_add(1)
+                                .min(MAX_RESUMED_STREAK)
+                        } else {
+                            0
+                        };
                         state.prefer_pinned[lane] = !was_pinned;
                         state.waiting[lane] = false;
                         break entry;
@@ -167,6 +215,7 @@ impl ReadyQueue {
                 continue;
             }
             state.phase = Phase::Running;
+            state.has_run = true;
             drop(state);
             return Some(TurnLease {
                 ticket,
@@ -181,7 +230,11 @@ impl ReadyQueue {
         let mut state = self.state.lock().expect("ready queue lock poisoned");
         state.closed = true;
         state.movable.clear();
+        state.resumed_movable.clear();
         for pinned in &mut state.pinned {
+            pinned.clear();
+        }
+        for pinned in &mut state.resumed_pinned {
             pinned.clear();
         }
         for changed in &self.changed {
@@ -202,6 +255,7 @@ struct TicketState {
     generation: u64,
     phase: Phase,
     wake_pending: bool,
+    has_run: bool,
 }
 
 /// An opaque realm identity and generation, never a language-state pointer.
@@ -256,7 +310,7 @@ impl TurnTicket {
                 let Some(queue) = self.queue.upgrade() else {
                     return false;
                 };
-                if queue.enqueue(Arc::clone(self), state.generation) {
+                if queue.enqueue(Arc::clone(self), state.generation, state.has_run) {
                     state.phase = Phase::Queued;
                     true
                 } else {
@@ -356,7 +410,7 @@ impl TurnTicket {
             TurnOutcome::Ready => {
                 state.wake_pending = false;
                 if let Some(queue) = self.queue.upgrade()
-                    && queue.enqueue(Arc::clone(self), generation)
+                    && queue.enqueue(Arc::clone(self), generation, true)
                 {
                     state.phase = Phase::Queued;
                 } else {
@@ -367,7 +421,7 @@ impl TurnTicket {
                 if state.wake_pending {
                     state.wake_pending = false;
                     if let Some(queue) = self.queue.upgrade()
-                        && queue.enqueue(Arc::clone(self), generation)
+                        && queue.enqueue(Arc::clone(self), generation, true)
                     {
                         state.phase = Phase::Queued;
                     } else {
@@ -384,6 +438,72 @@ impl TurnTicket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_io_wake_runs_ahead_of_a_burst_of_first_turns() {
+        let queue = ReadyQueue::new();
+        let resumed = queue.ticket(1);
+        resumed.wake();
+        queue.take().unwrap().finish(TurnOutcome::Parked);
+        let fresh: Vec<_> = (2..102).map(|id| queue.ticket(id)).collect();
+        for ticket in &fresh {
+            ticket.wake();
+        }
+        resumed.wake();
+        let lease = queue.take().expect("parked realm is ready");
+        assert_eq!(lease.realm_id(), 1);
+        lease.finish(TurnOutcome::Parked);
+        let lease = queue.take().expect("initial admission resumes");
+        assert_eq!(lease.realm_id(), 2);
+        lease.finish(TurnOutcome::Done);
+    }
+
+    #[test]
+    fn recurring_io_wakes_cannot_starve_first_turns() {
+        let queue = ReadyQueue::new();
+        let resumed: Vec<_> = (1..=16).map(|id| queue.ticket(id)).collect();
+        for ticket in &resumed {
+            ticket.wake();
+            queue.take().unwrap().finish(TurnOutcome::Parked);
+        }
+        let fresh = queue.ticket(17);
+        fresh.wake();
+        for ticket in &resumed {
+            ticket.wake();
+        }
+        for expected in 1..=15 {
+            let lease = queue.take().unwrap();
+            assert_eq!(lease.realm_id(), expected);
+            lease.finish(TurnOutcome::Parked);
+        }
+        let lease = queue.take().unwrap();
+        assert_eq!(lease.realm_id(), 17);
+        lease.finish(TurnOutcome::Done);
+        let lease = queue.take().unwrap();
+        assert_eq!(lease.realm_id(), 16);
+        lease.finish(TurnOutcome::Done);
+    }
+
+    #[test]
+    fn immediately_ready_turns_cannot_starve_first_turns() {
+        let queue = ReadyQueue::new();
+        let ongoing = queue.ticket(1);
+        ongoing.wake();
+        queue.take().unwrap().finish(TurnOutcome::Ready);
+        let fresh = queue.ticket(2);
+        fresh.wake();
+        for _ in 0..MAX_RESUMED_STREAK {
+            let lease = queue.take().unwrap();
+            assert_eq!(lease.realm_id(), 1);
+            lease.finish(TurnOutcome::Ready);
+        }
+        let lease = queue.take().unwrap();
+        assert_eq!(lease.realm_id(), 2);
+        lease.finish(TurnOutcome::Done);
+        let lease = queue.take().unwrap();
+        assert_eq!(lease.realm_id(), 1);
+        lease.finish(TurnOutcome::Done);
+    }
 
     #[test]
     fn wakes_coalesce_and_a_racing_wake_survives_the_turn() {
