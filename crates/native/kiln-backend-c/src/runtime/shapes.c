@@ -662,6 +662,31 @@ static int kiln_c99_shape_store_recorded(kiln_object *object, uint32_t slot, kil
     return 1;
 }
 
+/* Project one shaped slot into the ordinary property record. This is a borrowed read view:
+ * values still belong to the realm, while keys and attributes come from the shared shape. */
+static void kiln_c99_shape_property(const kiln_object *object, uint32_t slot,
+                                    kiln_property *property) {
+    const kiln_shape *shape = object->shape;
+    const kiln_string *key = shape->keys[slot];
+    uint32_t attrs = shape->attrs[slot];
+    kiln_val held = object->slots != NULL && slot < object->slot_capacity
+                        ? object->slots[slot] : KILN_VAL_UNDEFINED;
+    int flip = (attrs & KILN_C99_ATTR_ENUM_FLIP) != 0;
+    property->key = key;
+    property->enumerable = !kiln_c99_key_is_reserved(key) && !flip;
+    property->symbol_hidden = kiln_c99_key_is_symbol(key) && flip;
+    property->writable = (attrs & KILN_C99_ATTR_READONLY) == 0;
+    property->configurable = (attrs & KILN_C99_ATTR_FIXED) == 0;
+    property->accessor = (attrs & KILN_C99_ATTR_ACCESSOR) != 0;
+    property->refused = 0;
+    if (property->accessor) {
+        property->getter = kiln_c99_accessor_pair_half(held, 0);
+        property->setter = kiln_c99_accessor_pair_half(held, 1);
+    } else {
+        property->value = kiln_val_to_boundary(held);
+    }
+}
+
 static int kiln_c99_ensure_dictionary(kiln_object *object) {
     kiln_c99_prototype_touched(object);
     kiln_shape *shape;
@@ -714,34 +739,7 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
         object->element_capacity = 0;
     }
     for (i = 0; i < shape->property_count; ++i) {
-        const kiln_string *key = shape->keys[i];
-        uint32_t attrs = shape->attrs[i];
-        kiln_val held = (object->slots != NULL && i < object->slot_capacity)
-                            ? object->slots[i]
-                            : KILN_VAL_UNDEFINED;
-        /* The record a list-mode object would carry for the same history: see
-         * `KILN_C99_ATTR_*`, which are its differences from an assignment's record. */
-        object->properties[pos].key = key;
-        {
-            /* A reserved key is stored non-enumerable and its flip is the hidden bit a symbol's
-             * record carries (`kiln_property.symbol_hidden`); any other key's flip is the
-             * stored bit's. */
-            int reserved = kiln_c99_key_is_reserved(key);
-            int symbol = kiln_c99_key_is_symbol(key);
-            int flip = (attrs & KILN_C99_ATTR_ENUM_FLIP) != 0;
-            object->properties[pos].enumerable = !reserved && !flip;
-            object->properties[pos].symbol_hidden = symbol && flip;
-        }
-        object->properties[pos].writable = (attrs & KILN_C99_ATTR_READONLY) == 0;
-        object->properties[pos].configurable = (attrs & KILN_C99_ATTR_FIXED) == 0;
-        object->properties[pos].accessor = (attrs & KILN_C99_ATTR_ACCESSOR) != 0;
-        object->properties[pos].refused = 0;
-        if (attrs & KILN_C99_ATTR_ACCESSOR) {
-            object->properties[pos].getter = kiln_c99_accessor_pair_half(held, 0);
-            object->properties[pos].setter = kiln_c99_accessor_pair_half(held, 1);
-        } else {
-            object->properties[pos].value = kiln_val_to_boundary(held);
-        }
+        kiln_c99_shape_property(object, (uint32_t)i, &object->properties[pos]);
         pos++;
     }
     object->count = pos;

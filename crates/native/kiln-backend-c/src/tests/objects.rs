@@ -481,12 +481,13 @@ fn definitions_keep_objects_shaped_with_attributes() {
     let wrapper = r#"
 int main(void) {
     kiln_gc_heap *heap = (kiln_gc_heap *)malloc(sizeof *heap);
-    kiln_value proto, plain, receiver, getter;
+    kiln_value proto, plain, receiver, getter, descriptor, read;
     kiln_object *p, *q, *r;
     const kiln_string *m;
     kiln_c99_site site;
     kiln_c99_pic_entry entry;
     uint32_t slot;
+    int found;
     if (heap == NULL) return 1;
     kiln_c99_gc_heap_init(heap);
     heap->enabled = 0;
@@ -558,6 +559,20 @@ int main(void) {
 
     /* Dictionary mode carries exactly the records the list path would have made. */
     if (!kiln_c99_shape_find_slot(p->shape, m, &slot) || slot != 0) return 22;
+    if (kiln_c99_describe_property(NULL, proto, "m", 1, &descriptor, &found, 0, NULL) !=
+            KILN_C99_OK || !found || p->shape == NULL || p->properties != NULL) return 28;
+    if (kiln_c99_get(NULL, descriptor, "value", 5, &read, 0, NULL) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(read) != 5.0) return 29;
+    if (kiln_c99_get(NULL, descriptor, "enumerable", 10, &read, 0, NULL) != KILN_C99_OK ||
+        kiln_c99_truthy(read)) return 30;
+    if (kiln_c99_describe_property(NULL, proto, "g", 1, &descriptor, &found, 0, NULL) !=
+            KILN_C99_OK || !found || p->shape == NULL || p->properties != NULL) return 31;
+    if (kiln_c99_get(NULL, descriptor, "get", 3, &read, 0, NULL) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(read) != 7.0) return 32;
+    if (kiln_c99_get(NULL, descriptor, "writable", 8, &read, 0, NULL) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_UNDEFINED) return 33;
+    if (kiln_c99_describe_property(NULL, proto, "missing", 7, &descriptor, &found, 0, NULL) !=
+            KILN_C99_OK || found || p->shape == NULL || p->properties != NULL) return 34;
     if (kiln_c99_ensure_dictionary(p) != KILN_C99_OK || p->shape != NULL || p->count != 3) return 23;
     if (p->properties[0].enumerable || !p->properties[0].writable ||
         !p->properties[0].configurable || p->properties[0].accessor) return 24;

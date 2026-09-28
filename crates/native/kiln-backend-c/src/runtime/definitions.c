@@ -945,15 +945,32 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
     {
         kiln_object *object = kiln_c99_object_of(store);
         size_t index;
+        kiln_property shaped_property;
+        kiln_property *selected = NULL;
         if (object->shape != NULL) {
-            kiln_c99_ensure_dictionary(object);
+            /* A descriptor read does not change the object. Most shaped stores have no dense
+             * elements or list-mode properties, so read their shared key/attribute layout and
+             * realm-owned value slot directly instead of retaining a dictionary copy. Keep the
+             * conversion path for mixed stores, whose dense indices have their own ordering. */
+            if (object->elements == NULL && object->properties == NULL && object->count == 0) {
+                const kiln_string *ikey = kiln_c99_interned_key_in(kiln_c99_gc_heap(), view);
+                uint32_t slot;
+                if (ikey == NULL || !kiln_c99_shape_find_slot(object->shape, ikey, &slot)) {
+                    return KILN_C99_OK;
+                }
+                kiln_c99_shape_property(object, slot, &shaped_property);
+                selected = &shaped_property;
+            } else {
+                status = kiln_c99_ensure_dictionary(object);
+                if (status != KILN_C99_OK) return status;
+            }
         }
-        for (index = 0; index < object->count; ++index) {
+        for (index = 0; index < (selected != NULL ? 1 : object->count); ++index) {
             kiln_property property;
-            if (!kiln_c99_same_key_view(&object->properties[index], view)) {
+            if (selected == NULL && !kiln_c99_same_key_view(&object->properties[index], view)) {
                 continue;
             }
-            property = object->properties[index];
+            property = selected != NULL ? *selected : object->properties[index];
             status = kiln_c99_new_object(&built);
             if (status != KILN_C99_OK) {
                 return status;
