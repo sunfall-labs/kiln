@@ -4906,6 +4906,9 @@ pub extern "C" fn kiln_realm_destroy(handle: u64) -> i32 {
                 INVALID_ARGUMENT
             }
         });
+        if status == 0 {
+            kiln_runtime::workers::actor_revoke_realm(handle);
+        }
         if status == 0
             && let Ok(mut registry) = scheduled_realms().lock()
         {

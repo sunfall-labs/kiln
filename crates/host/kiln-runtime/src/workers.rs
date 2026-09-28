@@ -387,6 +387,7 @@ struct ActorReservation {
     sender_request: Option<u64>,
     state: ActorReservationState,
     closing: bool,
+    receiver_gone: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -418,6 +419,10 @@ impl ActorPublicationLease {
         entry.state = ActorReservationState::Published;
         /* A published native inbox still owns a graph root. Even if the port closed during
          * publication, retain the grant until its receiver releases that root. */
+        if entry.receiver_gone {
+            /* Realm teardown destroys its native inbox before revoking this grant. */
+            reservations.remove(&self.reservation);
+        }
         self.finished = true;
     }
 }
@@ -496,6 +501,7 @@ fn actor_reserve_for_worker(
                 sender_request: None,
                 state: ActorReservationState::Pending,
                 closing: false,
+                receiver_gone: false,
             });
             return Some(id);
         }
@@ -600,6 +606,28 @@ pub fn actor_release_reservation(reservation: u64, realm: u64) -> bool {
         }
     }
     true
+}
+
+/// Realm teardown has freed its native inbox root. No receiver can subsequently poll these
+/// grants. A pair-claimed publication, if still completing, retains its lease until finish.
+pub fn actor_revoke_realm(realm: u64) {
+    if realm == 0 {
+        return;
+    }
+    if let Some(reservations) = ACTOR_RESERVATIONS.get() {
+        lock(reservations).retain(|_, entry| {
+            if entry.receiver_realm != realm {
+                return true;
+            }
+            if entry.state == ActorReservationState::Publishing {
+                entry.closing = true;
+                entry.receiver_gone = true;
+                true
+            } else {
+                false
+            }
+        });
+    }
 }
 
 /// The receiver may poll a held invoke. A publishing lease still reports pending; only a
@@ -2319,7 +2347,8 @@ mod tests {
         assert!(lock(actor_reservations()).contains_key(&reservation));
         close(reply_receiver);
         assert!(lock(actor_reservations()).contains_key(&reservation));
-        lock(actor_reservations()).remove(&reservation);
+        actor_revoke_realm(71);
+        assert!(!lock(actor_reservations()).contains_key(&reservation));
         assert_eq!(actor_sender(&impostor), None);
         let token = address.opaque();
         drop(address);
