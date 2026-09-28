@@ -177,6 +177,16 @@ impl TurnTicket {
     }
 }
 
+impl std::task::Wake for TurnTicket {
+    fn wake(self: Arc<Self>) {
+        let _ = TurnTicket::wake(&self);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        let _ = TurnTicket::wake(self);
+    }
+}
+
 /// What a single language turn did.
 pub enum TurnOutcome {
     /// Another turn is immediately ready.
