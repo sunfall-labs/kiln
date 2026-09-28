@@ -2587,7 +2587,7 @@ fn render_entry(
         }
         writeln!(
             output,
-            "    (void)kiln_realm_gc_register_roots({unit_symbol}_gc_roots, NULL, 0);"
+            "    (void)kiln_realm_gc_register_roots_with_visitor({unit_symbol}_gc_roots, {unit_symbol}_gc_visit_roots, NULL, 0);"
         )
         .unwrap();
         render_key_prologue(output, unit_symbol, keyed);
@@ -2726,7 +2726,7 @@ fn render_entry(
     }
     writeln!(
         output,
-        "    (void)kiln_realm_gc_register_roots({unit_symbol}_gc_roots, NULL, 0);"
+        "    (void)kiln_realm_gc_register_roots_with_visitor({unit_symbol}_gc_roots, {unit_symbol}_gc_visit_roots, NULL, 0);"
     )
     .unwrap();
     render_key_prologue(output, unit_symbol, keyed);
@@ -3666,6 +3666,11 @@ fn render_unit_roots(output: &mut String, symbol: &str, keyed: bool) {
     }
     // Module globals and template sites are in the realm's block, which its heap marks.
     output.push_str("    kiln_c99_gc_unit_roots(heap, context, phase);\n}\n");
+    writeln!(
+        output,
+        "static int {symbol}_gc_visit_roots(void *context, kiln_gc_visit_root_fn visit, void *visit_context) {{\n    const kiln_value *roots[] = {{ &kiln_c99_new_target, &kiln_c99_adopted_this, &kiln_c99_captured_arguments, &kiln_c99_frame_arguments_object, &kiln_c99_frame_callee }};\n    size_t index;\n    (void)context;\n    for (index = 0; index < sizeof roots / sizeof roots[0]; ++index)\n        if (visit(visit_context, roots[index], KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;\n    return KILN_C99_OK;\n}}"
+    )
+    .unwrap();
 }
 
 fn render_scalar_realm_wrapper(output: &mut String, symbol: &str) {
@@ -3677,9 +3682,15 @@ typedef struct {symbol}_realm_context {{
     kiln_value *result;
 }} {symbol}_realm_context;
 
+static int {symbol}_gc_visit_result(void *context, kiln_gc_visit_root_fn visit,
+                                     void *visit_context) {{
+    if (context == NULL) return KILN_C99_OK;
+    return visit(visit_context, context, KILN_GC_VISIT_VALUE);
+}}
+
 static int {symbol}_gc_result_entry(void *result) {{
-    return kiln_realm_gc_register_roots(kiln_c99_gc_result_roots, result,
-                                        KILN_GC_ROOT_SURVIVES_TEARDOWN);
+    return kiln_realm_gc_register_roots_with_visitor(kiln_c99_gc_result_roots,
+             {symbol}_gc_visit_result, result, KILN_GC_ROOT_SURVIVES_TEARDOWN);
 }}
 
 static int {symbol}_realm_entry(void *opaque) {{
@@ -3730,9 +3741,15 @@ typedef struct {unit_symbol}_realm_context {{
     size_t export_count;
 }} {unit_symbol}_realm_context;
 
+static int {unit_symbol}_gc_visit_result(void *context, kiln_gc_visit_root_fn visit,
+                                         void *visit_context) {{
+    if (context == NULL) return KILN_C99_OK;
+    return visit(visit_context, context, KILN_GC_VISIT_VALUE);
+}}
+
 static int {unit_symbol}_gc_result_entry(void *result) {{
-    return kiln_realm_gc_register_roots(kiln_c99_gc_result_roots, result,
-                                        KILN_GC_ROOT_SURVIVES_TEARDOWN);
+    return kiln_realm_gc_register_roots_with_visitor(kiln_c99_gc_result_roots,
+             {unit_symbol}_gc_visit_result, result, KILN_GC_ROOT_SURVIVES_TEARDOWN);
 }}
 
 static int {unit_symbol}_realm_entry(void *opaque) {{

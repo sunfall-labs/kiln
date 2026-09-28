@@ -1058,6 +1058,25 @@ fn provider_root_visitor_finds_aliases_without_marking_or_invoking_root_callback
     unsafe extern "C" fn registered_roots(_heap: *mut c_void, _context: *mut c_void, _phase: i32) {
         ROOT_CALLS.fetch_add(1, AtomicOrdering::SeqCst);
     }
+    unsafe extern "C" fn paired_roots(_heap: *mut c_void, _context: *mut c_void, _phase: i32) {
+        ROOT_CALLS.fetch_add(1, AtomicOrdering::SeqCst);
+    }
+    unsafe extern "C" fn paired_visit(
+        context: *mut c_void,
+        visit: GcVisitRoot,
+        visit_context: *mut c_void,
+    ) -> i32 {
+        let probe = unsafe { &*context.cast::<Probe>() };
+        // Model an enumerator that ignores rejection. The provider's relay still records it.
+        let _ = unsafe {
+            visit(
+                visit_context,
+                probe.paired_only as *const c_void,
+                GC_VISIT_BLOCK,
+            )
+        };
+        0
+    }
     unsafe extern "C" fn drop_work(_pointer: *mut c_void) {}
     unsafe extern "C" fn run_work(
         _pointer: *mut c_void,
@@ -1082,9 +1101,11 @@ fn provider_root_visitor_finds_aliases_without_marking_or_invoking_root_callback
         slot: usize,
         candidate: usize,
         work: usize,
+        paired_only: usize,
         seen_slot: bool,
         seen_candidate: bool,
         seen_work: bool,
+        seen_paired: bool,
     }
     unsafe extern "C" fn visit(context: *mut c_void, pointer: *const c_void, kind: u32) -> i32 {
         let probe = unsafe { &mut *context.cast::<Probe>() };
@@ -1098,6 +1119,9 @@ fn provider_root_visitor_finds_aliases_without_marking_or_invoking_root_callback
         if kind == GC_VISIT_BLOCK && address == probe.work {
             probe.seen_work = true;
         }
+        if kind == GC_VISIT_BLOCK && address == probe.paired_only {
+            probe.seen_paired = true;
+        }
         0
     }
     unsafe extern "C" fn reject_visit(
@@ -1106,6 +1130,18 @@ fn provider_root_visitor_finds_aliases_without_marking_or_invoking_root_callback
         _kind: u32,
     ) -> i32 {
         1
+    }
+    unsafe extern "C" fn reject_paired(
+        context: *mut c_void,
+        pointer: *const c_void,
+        kind: u32,
+    ) -> i32 {
+        let probe = unsafe { &*context.cast::<Probe>() };
+        if kind == GC_VISIT_BLOCK && pointer as usize == probe.paired_only {
+            1
+        } else {
+            0
+        }
     }
     unsafe extern "C" fn enter(context: *mut c_void) -> i32 {
         let probe = unsafe { &mut *context.cast::<Probe>() };
@@ -1151,6 +1187,26 @@ fn provider_root_visitor_finds_aliases_without_marking_or_invoking_root_callback
         assert_eq!(MARKS.load(AtomicOrdering::SeqCst), 0);
         assert_eq!(ROOT_CALLS.load(AtomicOrdering::SeqCst), 0);
         assert_eq!(
+            unsafe {
+                kiln_realm_gc_register_roots_with_visitor(
+                    Some(paired_roots),
+                    Some(paired_visit),
+                    context,
+                    0,
+                )
+            },
+            0
+        );
+        assert_eq!(
+            unsafe { kiln_realm_gc_visit_provider_roots(heap, Some(visit), context) },
+            0
+        );
+        assert!(probe.seen_paired);
+        assert_eq!(
+            unsafe { kiln_realm_gc_visit_provider_roots(heap, Some(reject_paired), context) },
+            RUNTIME_ERROR
+        );
+        assert_eq!(
             unsafe { kiln_realm_gc_register_roots(Some(registered_roots), context, 0) },
             0
         );
@@ -1171,6 +1227,7 @@ fn provider_root_visitor_finds_aliases_without_marking_or_invoking_root_callback
     let mut probe = Probe {
         candidate: opaque_test_pointer(0x9280) as usize,
         work: opaque_test_pointer(0x9281) as usize,
+        paired_only: opaque_test_pointer(0x9282) as usize,
         ..Probe::default()
     };
     assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);

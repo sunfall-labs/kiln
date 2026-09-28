@@ -2571,6 +2571,26 @@ pub(super) fn render_graph_roots(
         modules.len()
     )
     .unwrap();
+    output.push_str(
+        "static int kiln_graph_gc_visit_roots(void *context, kiln_gc_visit_root_fn visit, void *visit_context) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    size_t index;\n    if (graph == NULL) return 0;\n",
+    );
+    for (index, (node, _)) in modules.iter().enumerate() {
+        let export_count = native_graph_export_count(node);
+        if export_count != 0 {
+            writeln!(output, "    for (index = 0; index < (size_t){export_count}; ++index) if (visit(visit_context, &kiln_exports_{index}[index], KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;").unwrap();
+        }
+        if !node.program.imports.is_empty() {
+            writeln!(output, "    for (index = 0; index < (size_t){}; ++index) if (visit(visit_context, &kiln_imports_{index}[index], KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;", node.program.imports.len()).unwrap();
+        }
+    }
+    writeln!(output, "    for (index = 0; index < (size_t){}; ++index) if (visit(visit_context, &kiln_namespaces[index], KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;", modules.len()).unwrap();
+    if modules
+        .iter()
+        .any(|(node, _)| node.program.program.has_dynamic_import())
+    {
+        output.push_str("    if (visit(visit_context, &kiln_opentui_namespace, KILN_GC_VISIT_VALUE) != 0 ||\n        visit(visit_context, &kiln_node_ffi_namespace, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;\n");
+    }
+    writeln!(output, "    if (visit(visit_context, &graph->result, KILN_GC_VISIT_VALUE) != 0 ||\n        visit(visit_context, &graph->entry_result, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;\n    for (index = 0; index < (size_t){}; ++index) {{\n        if (visit(visit_context, &graph->module_states[index].result, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->module_states[index].active_promise, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->module_states[index].completion_promise, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->module_states[index].completion_resolve, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->module_states[index].completion_reject, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;\n    }}\n    return 0;\n}}", modules.len()).unwrap();
 }
 
 #[cfg(test)]
@@ -2851,6 +2871,11 @@ extern int kiln_c99_worker_report_error(kiln_value error) __attribute__((visibil
 extern int kiln_realm_kiln_extensions_on(void);
 typedef void (*kiln_gc_roots_fn)(void *heap, void *context, int phase);
 extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
+typedef int (*kiln_gc_visit_root_fn)(void *context, const void *pointer, uint32_t kind);
+typedef int (*kiln_gc_visit_roots_fn)(void *context, kiln_gc_visit_root_fn visit, void *visit_context);
+extern int kiln_realm_gc_register_roots_with_visitor(kiln_gc_roots_fn roots,
+             kiln_gc_visit_roots_fn visit_roots, void *context, uint32_t flags);
+#define KILN_GC_VISIT_VALUE 2u
 extern int kiln_realm_gc_unregister_roots(kiln_gc_roots_fn roots, void *context);
 extern int kiln_realm_gc_mark_value(void *heap, const void *value);
 #define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
@@ -3566,7 +3591,8 @@ static int kiln_graph_enter(void *opaque) {
     output.push_str(
         r#"
     if (!graph->roots_registered) {
-        status = kiln_realm_gc_register_roots(kiln_graph_gc_roots, graph, KILN_GC_ROOT_SURVIVES_TEARDOWN);
+        status = kiln_realm_gc_register_roots_with_visitor(kiln_graph_gc_roots,
+                         kiln_graph_gc_visit_roots, graph, KILN_GC_ROOT_SURVIVES_TEARDOWN);
         if (status != 0) return status;
         graph->roots_registered = 1;
         /* A realm hosted beside others writes its standard streams where its host said. */

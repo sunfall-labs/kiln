@@ -887,6 +887,8 @@ struct CallableStore {
 }
 
 type GcRootsFn = unsafe extern "C" fn(*mut c_void, *mut c_void, i32);
+type GcVisitRoot = unsafe extern "C" fn(*mut c_void, *const c_void, u32) -> i32;
+type GcRootsVisitFn = unsafe extern "C" fn(*mut c_void, GcVisitRoot, *mut c_void) -> i32;
 
 /// The prelude's collector entry points (ADR 0041). The prelude owns the heap layout and the
 /// tracer; the archive only ever calls these and reads the hooks pointer that every heap keeps
@@ -918,6 +920,7 @@ const GC_ROOT_SURVIVES_TEARDOWN: u32 = 1;
 
 struct GcRoot {
     roots: GcRootsFn,
+    visit: Option<GcRootsVisitFn>,
     context: *mut c_void,
     flags: u32,
 }
@@ -970,7 +973,6 @@ impl GcRootSink for GcMarker {
     }
 }
 
-type GcVisitRoot = unsafe extern "C" fn(*mut c_void, *const c_void, u32) -> i32;
 const GC_VISIT_BLOCK: u32 = 1;
 const GC_VISIT_VALUE: u32 = 2;
 const GC_VISIT_REGISTERED_ROOTS_UNENUMERATED: i32 = 1;
@@ -979,6 +981,25 @@ struct GcVisitor {
     visit: GcVisitRoot,
     context: *mut c_void,
     failed: std::cell::Cell<bool>,
+}
+
+unsafe extern "C" fn relay_registered_root(
+    context: *mut c_void,
+    pointer: *const c_void,
+    kind: u32,
+) -> i32 {
+    // SAFETY: `kiln_realm_gc_visit_provider_roots` keeps this visitor live until all registered
+    // callbacks return. The callback receives a read-only borrow and cannot retain it.
+    let visitor = unsafe { &*context.cast::<GcVisitor>() };
+    if visitor.failed.get() {
+        return RUNTIME_ERROR;
+    }
+    // SAFETY: the caller supplied this visitor and its context for the duration of the walk.
+    let status = unsafe { (visitor.visit)(visitor.context, pointer, kind) };
+    if status != 0 {
+        visitor.failed.set(true);
+    }
+    status
 }
 
 impl GcRootSink for GcVisitor {
@@ -1016,8 +1037,8 @@ fn gc_hooks_of(heap: *mut c_void) -> Option<GcHooks> {
     Some(unsafe { *hooks })
 }
 
-/// Marks everything the archive keeps a JavaScript reference to, then the roots each
-/// translation unit and the launcher registered.
+/// Enumerates every root the archive itself keeps, for both GC marking and the read-only
+/// incoming-edge probe. Registered C callbacks are visited separately.
 fn for_each_provider_root(realm: &NativeRealm, sink: &impl GcRootSink) {
     for slot in realm.value_slots.borrow().values() {
         sink.value(slot.as_ptr().cast::<c_void>());
@@ -3400,6 +3421,36 @@ pub unsafe extern "C" fn kiln_realm_gc_register_roots(
     context: *mut c_void,
     flags: u32,
 ) -> i32 {
+    register_gc_roots(roots, None, context, flags)
+}
+
+/// Registers the same mark/teardown callback as `kiln_realm_gc_register_roots`, plus a
+/// read-only enumerator of exactly its live roots. The enumerator must neither mark nor change
+/// the realm. Registrations without an enumerator still force ownership proof to refuse.
+///
+/// # Safety
+///
+/// Both callbacks and `context` must stay valid until the realm is destroyed. `visit_roots`
+/// must call `visit` for every root its mark callback could mark at a turn safepoint.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_gc_register_roots_with_visitor(
+    roots: Option<GcRootsFn>,
+    visit_roots: Option<GcRootsVisitFn>,
+    context: *mut c_void,
+    flags: u32,
+) -> i32 {
+    if visit_roots.is_none() {
+        return INVALID_ARGUMENT;
+    }
+    register_gc_roots(roots, visit_roots, context, flags)
+}
+
+fn register_gc_roots(
+    roots: Option<GcRootsFn>,
+    visit_roots: Option<GcRootsVisitFn>,
+    context: *mut c_void,
+    flags: u32,
+) -> i32 {
     ffi(|| {
         let Some(roots) = roots else {
             return INVALID_ARGUMENT;
@@ -3408,18 +3459,25 @@ pub unsafe extern "C" fn kiln_realm_gc_register_roots(
             return INVALID_ARGUMENT;
         };
         let mut gc = realm.gc.borrow_mut();
-        if gc
+        if let Some(existing) = gc
             .roots
             .iter()
-            .any(|root| root.roots as usize == roots as usize && root.context == context)
+            .find(|root| root.roots as usize == roots as usize && root.context == context)
         {
-            return 0;
+            return if existing.visit.map(|visit| visit as usize)
+                == visit_roots.map(|visit| visit as usize)
+            {
+                0
+            } else {
+                INVALID_ARGUMENT
+            };
         }
         if gc.roots.try_reserve(1).is_err() {
             return RUNTIME_ERROR;
         }
         gc.roots.push(GcRoot {
             roots,
+            visit: visit_roots,
             context,
             flags,
         });
@@ -3472,10 +3530,10 @@ pub unsafe extern "C" fn kiln_realm_gc_mark_roots(heap: *mut c_void) -> i32 {
 
 /// Visits the provider's own GC roots without marking or allocating in the sender heap.
 /// The callback receives a live `kiln_value` slot (`GC_VISIT_VALUE`) or a block payload pointer
-/// (`GC_VISIT_BLOCK`). Return zero on complete provider-owned enumeration, one when registered
-/// module/launcher root callbacks remain unenumerated, or an error on invalid input/visitor
-/// failure. A caller must refuse ownership transfer on every nonzero result. Registered root
-/// functions accept only a mark hook today; invoking them here would mutate GC state.
+/// (`GC_VISIT_BLOCK`). Paired registered callbacks then enumerate their roots through the same
+/// visitor. Return zero only when all provider and registered roots were enumerated, one when a
+/// legacy mark-only registration remains, or an error on invalid input/visitor failure. A caller
+/// must refuse ownership transfer on every nonzero result. Mark callbacks are never invoked here.
 ///
 /// # Safety
 ///
@@ -3499,7 +3557,10 @@ pub unsafe extern "C" fn kiln_realm_gc_visit_provider_roots(
             if heap.is_null() || gc.heap != heap || gc.hooks.is_none() {
                 return INVALID_ARGUMENT;
             }
-            !gc.roots.is_empty()
+            gc.roots
+                .iter()
+                .map(|root| (root.visit, root.context))
+                .collect::<Vec<_>>()
         };
         let visitor = GcVisitor {
             visit,
@@ -3507,10 +3568,28 @@ pub unsafe extern "C" fn kiln_realm_gc_visit_provider_roots(
             failed: std::cell::Cell::new(false),
         };
         for_each_provider_root(&realm, &visitor);
+        let mut incomplete = false;
+        for (roots, root_context) in registered_roots {
+            if let Some(roots) = roots {
+                // SAFETY: registration promises a live, non-mutating root enumerator.
+                if unsafe {
+                    roots(
+                        root_context,
+                        relay_registered_root,
+                        (&raw const visitor).cast_mut().cast(),
+                    )
+                } != 0
+                {
+                    return RUNTIME_ERROR;
+                }
+            } else {
+                incomplete = true;
+            }
+        }
         if visitor.failed.get() {
             return RUNTIME_ERROR;
         }
-        if registered_roots {
+        if incomplete {
             GC_VISIT_REGISTERED_ROOTS_UNENUMERATED
         } else {
             0
@@ -5357,6 +5436,9 @@ macro_rules! assert_provider_export {
         };
         (realm, kiln_realm_gc_register_roots, realm_gc_register_roots) => {
             const _: unsafe extern "C" fn(Option<GcRootsFn>, *mut c_void, u32) -> i32 = kiln_realm_gc_register_roots;
+        };
+        (realm, kiln_realm_gc_register_roots_with_visitor, realm_gc_register_roots_with_visitor) => {
+            const _: unsafe extern "C" fn(Option<GcRootsFn>, Option<GcRootsVisitFn>, *mut c_void, u32) -> i32 = kiln_realm_gc_register_roots_with_visitor;
         };
         (realm, kiln_realm_gc_unregister_roots, realm_gc_unregister_roots) => {
             const _: unsafe extern "C" fn(Option<GcRootsFn>, *mut c_void) -> i32 = kiln_realm_gc_unregister_roots;

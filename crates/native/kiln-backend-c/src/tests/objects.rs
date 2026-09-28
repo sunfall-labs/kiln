@@ -2301,6 +2301,12 @@ fn executable_graph_incoming_probe_sees_provider_root_aliases() {
         .expect("empty program emits runtime prelude");
     let wrapper = r#"
 static void graph_provider_noop_drop(void *pointer) { (void)pointer; }
+static void graph_provider_mark(void *heap, void *context, int phase) {
+    (void)heap; (void)context; (void)phase;
+}
+static int graph_provider_visit(void *context, kiln_gc_visit_root_fn visit, void *visit_context) {
+    return visit(visit_context, context, KILN_GC_VISIT_BLOCK);
+}
 static int graph_provider_entry(void *context) {
     kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
     kiln_c99_par_arena candidate;
@@ -2328,10 +2334,14 @@ static int graph_provider_entry(void *context) {
     *slot = kiln_c99_undefined();
     if (kiln_c99_graph_incoming_probe(heap, batch, 1, root) !=
         KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 7;
-    if (kiln_realm_callable_store(1, 991, root, graph_provider_noop_drop, &store) !=
-        KILN_C99_OK || store != root) return 8;
+    if (kiln_realm_gc_register_roots_with_visitor(graph_provider_mark, graph_provider_visit,
+                                                   root, 0) != KILN_C99_OK) return 8;
     if (kiln_c99_graph_incoming_probe(heap, batch, 1, root) !=
         KILN_C99_GRAPH_PROVIDER_ROOT_ALIAS) return 9;
+    if (kiln_realm_callable_store(1, 991, root, graph_provider_noop_drop, &store) !=
+        KILN_C99_OK || store != root) return 12;
+    if (kiln_c99_graph_incoming_probe(heap, batch, 1, root) !=
+        KILN_C99_GRAPH_PROVIDER_ROOT_ALIAS) return 13;
     return 0;
 }
 int main(void) {

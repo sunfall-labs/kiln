@@ -252,6 +252,10 @@ static uint64_t kiln_test_callable_codes[256];
 static void *kiln_test_callable_stores[256];
 static size_t kiln_test_callable_store_count = 0;
 static kiln_value kiln_test_value_slots[5];
+static kiln_gc_visit_roots_fn kiln_test_registered_visitors[32];
+static void *kiln_test_registered_contexts[32];
+static size_t kiln_test_registered_count = 0;
+static int kiln_test_legacy_roots = 0;
 static uint64_t kiln_test_entropy_seed = 0;
 static uint64_t kiln_test_entropy_state = 0;
 static int kiln_test_entropy_initialized = 0;
@@ -300,6 +304,8 @@ static int kiln_test_units_contain(kiln_value value, const char *needle) {    co
 
 int kiln_realm_create(uint64_t *out_realm) {
     if (out_realm == NULL) return KILN_C99_INVALID_ARGUMENT;
+    kiln_test_registered_count = 0;
+    kiln_test_legacy_roots = 0;
     *out_realm = 1;
     return KILN_C99_OK;
 }
@@ -608,6 +614,18 @@ int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t
     (void)roots;
     (void)context;
     (void)flags;
+    kiln_test_legacy_roots = 1;
+    return KILN_C99_OK;
+}
+int kiln_realm_gc_register_roots_with_visitor(kiln_gc_roots_fn roots,
+                                               kiln_gc_visit_roots_fn visit_roots,
+                                               void *context, uint32_t flags) {
+    (void)roots;
+    (void)flags;
+    if (!kiln_test_realm_active || visit_roots == NULL || kiln_test_registered_count == 32)
+        return KILN_C99_INVALID_ARGUMENT;
+    kiln_test_registered_visitors[kiln_test_registered_count] = visit_roots;
+    kiln_test_registered_contexts[kiln_test_registered_count++] = context;
     return KILN_C99_OK;
 }
 static kiln_value kiln_test_gc_root;
@@ -627,7 +645,11 @@ int kiln_realm_gc_visit_provider_roots(void *heap, kiln_gc_visit_root_fn visit, 
     for (index = 0; index < kiln_test_callable_store_count; ++index)
         if (visit(context, kiln_test_callable_stores[index], KILN_GC_VISIT_BLOCK) != 0)
             return KILN_C99_HOST_ERROR;
-    return KILN_C99_OK;
+    for (index = 0; index < kiln_test_registered_count; ++index)
+        if (kiln_test_registered_visitors[index](kiln_test_registered_contexts[index],
+                                                 visit, context) != 0)
+            return KILN_C99_HOST_ERROR;
+    return kiln_test_legacy_roots ? 1 : KILN_C99_OK;
 }
 int kiln_realm_now(double *out_milliseconds) {
     if (!kiln_test_realm_active || out_milliseconds == NULL) {
