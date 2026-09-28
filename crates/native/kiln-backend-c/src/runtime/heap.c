@@ -5117,7 +5117,15 @@ static int kiln_c99_register_static_text(kiln_shared_state *process, const char 
     view.unit_len = (uint32_t)len;
     view.flags = KILN_STRING_LATIN1;
     view.data = bytes;
-    return kiln_c99_register_static_keys_locked(process, &key, NULL, 1);
+    if (!kiln_c99_register_static_keys_locked(process, &key, NULL, 1)) return 0;
+    /* The C byte-name adapters classify fixed @@ names as either private slots or well-known
+     * symbols, while generated TypeScript can also use the same spelling as an ordinary string
+     * key. Register both domains before any realm exists. They remain distinct canonical keys;
+     * registering only the ordinary spelling made the C adapter build a realm-local shape and
+     * every later property of that bootstrap object stayed local too. */
+    view.flags = kiln_c99_fixed_key_flags(bytes, len);
+    return view.flags == KILN_STRING_LATIN1 ||
+           kiln_c99_register_static_keys_locked(process, &key, NULL, 1);
 }
 
 /* A string block released by hand (`kiln_c99_gc_release`) must not stay canonical. */

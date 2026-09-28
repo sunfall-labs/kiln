@@ -2630,6 +2630,7 @@ extern char **environ;
 #define kiln_c99_environ environ
 #endif
 static int kiln_c99_realm_value_slot(uint32_t key, kiln_value **out) {
+static const char *const kiln_c99_atomics_names[] = {
 static int kiln_c99_atomics_object(kiln_value *out) {
 static int kiln_c99_console_object(kiln_value *out) {
 static int kiln_c99_process_object(kiln_value *out) {

@@ -22,11 +22,14 @@ static int kiln_c99_realm_value_slot(uint32_t key, kiln_value **out) {
     return KILN_C99_OK;
 }
 
+/* The same names are registered before the first realm in surface.c. A function-local table
+ * escaped the prelude's literal-key registration, so each realm made its own 14-shape chain. */
+static const char *const kiln_c99_atomics_names[] = {
+    "add", "and", "compareExchange", "exchange", "isLockFree", "load", "notify",
+    "or", "pause", "store", "sub", "wait", "waitAsync", "xor",
+};
+
 static int kiln_c99_atomics_object(kiln_value *out) {
-    static const char *const names[] = {
-        "add", "and", "compareExchange", "exchange", "isLockFree", "load", "notify",
-        "or", "pause", "store", "sub", "wait", "waitAsync", "xor",
-    };
     kiln_value *atomics;
     size_t index;
     int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_ATOMICS, &atomics);
@@ -36,9 +39,11 @@ static int kiln_c99_atomics_object(kiln_value *out) {
         return KILN_C99_OK;
     }
     status = kiln_c99_new_object(atomics);
-    for (index = 0; status == KILN_C99_OK && index < sizeof names / sizeof *names; ++index)
+    for (index = 0; status == KILN_C99_OK &&
+                    index < sizeof kiln_c99_atomics_names / sizeof *kiln_c99_atomics_names;
+         ++index)
         status = kiln_c99_define_method(
-            *atomics, names[index], strlen(names[index]),
+            *atomics, kiln_c99_atomics_names[index], strlen(kiln_c99_atomics_names[index]),
             kiln_c99_method(KILN_C99_METHOD_ATOMICS_UNAVAILABLE));
     /* `Atomics[Symbol.toStringTag]` is a string, not a shared-memory operation, so nothing about
      * the missing `SharedArrayBuffer` stops this backend from answering it -- and it read
