@@ -100,6 +100,7 @@ pub(super) fn forwards_to_call_value(value: &Value) -> bool {
         | Value::Proxy(_)
         | Value::Symbol(_)
         | Value::Object(_)
+        | Value::Shared(_)
         | Value::Function(_) => false,
     }
 }

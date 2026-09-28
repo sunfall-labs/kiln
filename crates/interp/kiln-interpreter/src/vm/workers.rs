@@ -201,7 +201,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             OP_TAKE => match workers::take(endpoint_of(first)) {
                 Some(message) => {
-                    let tokens = message.tokens.into_iter().map(token_value).collect();
+                    let realm = self.current_realm;
+                    let cache = Rc::clone(&self.shared_facades);
+                    let tokens = message
+                        .tokens
+                        .into_iter()
+                        .map(|token| token_value(token, realm, &cache))
+                        .collect();
                     Value::Array(ArrayData::new(vec![
                         Value::Number(f64::from(message.kind)),
                         Value::Array(ArrayData::new(tokens)),
@@ -363,6 +369,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Value::Boolean(value) => Token::Bool(value),
                 Value::Number(value) => Token::Number(value),
                 Value::String(text) => Token::String(text),
+                Value::Shared(facade) => Token::Graph(facade.handle.clone()),
                 Value::ArrayBuffer(buffer) if buffer.shared => match buffer.bytes.store() {
                     Some(store) => Token::Shared(Arc::new(SharedBytes {
                         store: Arc::clone(store),
@@ -464,13 +471,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 }
 
 /// This engine's value for one token of a message it received.
-fn token_value(token: Token) -> Value {
+fn token_value(token: Token, realm: RealmId, cache: &Rc<RefCell<SharedCache>>) -> Value {
     match token {
         Token::Undefined => Value::Undefined,
         Token::Null => Value::Null,
         Token::Bool(value) => Value::Boolean(value),
         Token::Number(value) => Value::Number(value),
         Token::String(text) => Value::String(text),
+        Token::Graph(handle) => Value::Shared(SharedFacade::obtain(handle, realm, cache)),
         Token::Moved(store) => {
             let bytes = store
                 .downcast::<MovedBytes>()

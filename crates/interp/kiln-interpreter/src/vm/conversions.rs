@@ -228,6 +228,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Object(_)
                 | Value::Function(_)
                 | Value::Array(_)
+                | Value::Shared(_)
                 | Value::Temporal(_)
                 // A `Date` is a value kind here rather than an object, but it reduces by
                 // *calling* for the same reason a `Temporal` does, and it is the one built-in
@@ -267,7 +268,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // through to `valueOf` would answer with something it deliberately overrode.
             return if matches!(
                 produced,
-                Value::Object(_) | Value::Function(_) | Value::Array(_)
+                Value::Object(_) | Value::Function(_) | Value::Array(_) | Value::Shared(_)
             ) {
                 Err(ExecutionError::NotPrimitive)
             } else {

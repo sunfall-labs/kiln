@@ -458,6 +458,91 @@ pub(super) fn json_stringify(
             );
         }
         Value::ArrayBuffer(_) | Value::DataView(_) => Some(StringUnits::from("{}")),
+        Value::Shared(facade) if facade.is_array() => {
+            let guard = CycleGuard::enter(seen, Rc::as_ptr(facade).cast::<()>())?;
+            let length = facade
+                .array_length()
+                .expect("shared array kind was checked");
+            let mut out = StringUnitsBuilder::new();
+            out.push_ascii("[")?;
+            if length > 0 && pretty {
+                out.push_ascii("\n")?;
+                out.push_units(&nested)?;
+            }
+            for index in 0..length {
+                if index > 0 {
+                    out.push_ascii(if pretty { ",\n" } else { "," })?;
+                    if pretty {
+                        out.push_units(&nested)?;
+                    }
+                }
+                let at = StringUnits::from(index.to_string());
+                let item = facade.own_property(PropertyKeyRef::Units(&at)).map_or(
+                    Value::Undefined,
+                    |(property, _)| match property {
+                        Property::Value(value) => value,
+                        Property::Accessor { .. } => unreachable!("sealed properties are data"),
+                    },
+                );
+                let part = json_stringify(
+                    &item, indent, &nested, guard.seen, resolve, allowed, &at, value,
+                )?;
+                out.push_units(&part.unwrap_or_else(|| StringUnits::from("null")))?;
+            }
+            if length > 0 && pretty {
+                out.push_ascii("\n")?;
+                out.push_units(current)?;
+            }
+            out.push_ascii("]")?;
+            Some(out.finish())
+        }
+        Value::Shared(facade) => {
+            let guard = CycleGuard::enter(seen, Rc::as_ptr(facade).cast::<()>())?;
+            let entries = facade.own_fields();
+            let entries: Vec<_> = match allowed {
+                Some(keys) => keys
+                    .iter()
+                    .filter_map(|name| entries.iter().find(|(key, _, _)| key == name).cloned())
+                    .collect(),
+                None => entries,
+            };
+            let mut out = StringUnitsBuilder::new();
+            out.push_ascii("{")?;
+            let mut emitted = 0usize;
+            for (key, property, attributes) in entries {
+                if !attributes.enumerable {
+                    continue;
+                }
+                let Property::Value(item) = property else {
+                    unreachable!("sealed properties are data");
+                };
+                let Some(part) = json_stringify(
+                    &item, indent, &nested, guard.seen, resolve, allowed, &key, value,
+                )?
+                else {
+                    continue;
+                };
+                if emitted > 0 {
+                    out.push_ascii(if pretty { ",\n" } else { "," })?;
+                    if pretty {
+                        out.push_units(&nested)?;
+                    }
+                } else if pretty {
+                    out.push_ascii("\n")?;
+                    out.push_units(&nested)?;
+                }
+                out.push_units(&json_quote(&key)?)?;
+                out.push_ascii(if pretty { ": " } else { ":" })?;
+                out.push_units(&part)?;
+                emitted += 1;
+            }
+            if emitted > 0 && pretty {
+                out.push_ascii("\n")?;
+                out.push_units(current)?;
+            }
+            out.push_ascii("}")?;
+            Some(out.finish())
+        }
         Value::BigInt(_) => return Err(ExecutionError::BigIntNotSerialisable),
         Value::Cell(_) => unreachable!("a cell is never used as a value"),
     })

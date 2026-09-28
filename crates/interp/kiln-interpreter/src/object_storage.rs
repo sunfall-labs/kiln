@@ -30,7 +30,7 @@ impl ObjectData {
     pub(super) fn get_own_property_key(&self, key: PropertyKeyRef<'_>) -> Option<&Property> {
         self.properties
             .iter()
-            .find(|slot| key.matches(&slot.key))
+            .find(|slot| key.matches_slot(slot))
             .map(|slot| &slot.property)
     }
 
@@ -46,7 +46,7 @@ impl ObjectData {
     pub(super) fn get_own_attributes_key(&self, key: PropertyKeyRef<'_>) -> Option<Attributes> {
         self.properties
             .iter()
-            .find(|slot| key.matches(&slot.key))
+            .find(|slot| key.matches_slot(slot))
             .map(|slot| slot.attributes)
     }
 
@@ -114,7 +114,7 @@ impl ObjectData {
     }
 
     pub(super) fn lookup_key(&self, key: PropertyKeyRef<'_>) -> Option<Property> {
-        if let Some(own) = self.properties.iter().find(|slot| key.matches(&slot.key)) {
+        if let Some(own) = self.properties.iter().find(|slot| key.matches_slot(slot)) {
             return Some(own.property.clone());
         }
         let mut current = self.prototype.clone();
@@ -130,7 +130,7 @@ impl ObjectData {
                     store
                         .properties
                         .iter()
-                        .find(|slot| key.matches(&slot.key))
+                        .find(|slot| key.matches_slot(slot))
                         .map(|slot| slot.property.clone())
                         .ok_or_else(|| store.prototype.clone())
                 }
@@ -139,7 +139,7 @@ impl ObjectData {
                     parent
                         .properties
                         .iter()
-                        .find(|slot| key.matches(&slot.key))
+                        .find(|slot| key.matches_slot(slot))
                         .map(|slot| slot.property.clone())
                         .ok_or_else(|| parent.prototype.clone())
                 }
@@ -148,7 +148,7 @@ impl ObjectData {
                     parent
                         .properties
                         .iter()
-                        .find(|slot| key.matches(&slot.key))
+                        .find(|slot| key.matches_slot(slot))
                         .map(|slot| slot.property.clone())
                         .ok_or_else(|| parent.prototype.clone())
                 }
@@ -185,7 +185,7 @@ impl ObjectData {
         if let Some(slot) = self
             .properties
             .iter_mut()
-            .find(|slot| key.matches(&slot.key))
+            .find(|slot| key.matches_slot(slot))
         {
             if !redefinable(slot, attributes, true) {
                 return;
@@ -257,7 +257,7 @@ impl ObjectData {
         if let Some(slot) = self
             .properties
             .iter_mut()
-            .find(|slot| key.matches(&slot.key))
+            .find(|slot| key.matches_slot(slot))
         {
             if !redefinable(slot, attributes, false) {
                 return;
@@ -268,7 +268,7 @@ impl ObjectData {
         }
         self.properties.push(Slot {
             key: key.owned(),
-
+            symbol: key.is_symbol(),
             property,
             attributes,
         });
@@ -283,7 +283,7 @@ impl ObjectData {
         if let Some(slot) = self
             .properties
             .iter_mut()
-            .find(|slot| key.matches(&slot.key))
+            .find(|slot| key.matches_slot(slot))
         {
             slot.property = property;
             slot.attributes = attributes;
@@ -360,7 +360,7 @@ impl ObjectData {
         if let Some(slot) = self
             .properties
             .iter_mut()
-            .find(|slot| key.matches(&slot.key))
+            .find(|slot| key.matches_slot(slot))
         {
             // Only a data property can refuse a write. An accessor's setter has already had its
             // chance -- `inherited_setter_key` runs ahead of every store -- so a store that reaches
@@ -385,9 +385,14 @@ impl ObjectData {
     ) {
         let slot = Slot {
             key: key.owned(),
+            symbol: key.is_symbol(),
             property,
             attributes,
         };
+        if slot.symbol {
+            self.properties.push(slot);
+            return;
+        }
         let Some(index) = index_key_units(&slot.key) else {
             self.properties.push(slot);
             return;
@@ -409,7 +414,11 @@ impl ObjectData {
     /// object has to exist before the body that fills those bindings runs, so it is built over
     /// the slots and caught up from them rather than snapshotted after the fact.
     pub fn refresh_module_namespace_export(&mut self, key: &str, value: Value) {
-        if let Some(slot) = self.properties.iter_mut().find(|slot| slot.key == key) {
+        if let Some(slot) = self
+            .properties
+            .iter_mut()
+            .find(|slot| !slot.symbol && slot.key == key)
+        {
             slot.property = Property::Value(value);
         }
     }
@@ -535,13 +544,13 @@ impl ObjectData {
         if self
             .properties
             .iter()
-            .find(|slot| key.matches(&slot.key))
+            .find(|slot| key.matches_slot(slot))
             .is_some_and(|slot| !slot.attributes.configurable)
         {
             return false;
         }
         self.properties
-            .retain(|slot| !key.matches(&slot.key) || !slot.attributes.configurable);
+            .retain(|slot| !key.matches_slot(slot) || !slot.attributes.configurable);
 
         true
     }
@@ -742,6 +751,7 @@ pub(super) fn remove_exotic_property_key(
 
 pub(super) fn is_extensible_target(intrinsics: &Intrinsics, target: &Value) -> bool {
     match target {
+        Value::Shared(_) => false,
         Value::Object(object) => object.borrow().is_extensible(),
         Value::Function(closure) => closure.properties.borrow().is_extensible(),
         Value::Array(items) => items.properties.borrow().is_extensible(),
@@ -784,6 +794,7 @@ pub(super) fn own_property_state_key(
 ) -> Option<(Property, Attributes)> {
     let attributes = own_attributes_key(intrinsics, target, key)?;
     let property = match target {
+        Value::Shared(facade) => facade.own_property(key).map(|(property, _)| property),
         Value::Object(object) => object
             .borrow()
             .get_own_property_key(key)
@@ -1246,6 +1257,21 @@ pub(super) fn define_own_property_key(
     key: PropertyKeyRef<'_>,
     descriptor: &Descriptor,
 ) -> Result<bool, ExecutionError> {
+    if let Value::Shared(facade) = target {
+        let Some((Property::Value(current), attributes)) = facade.own_property(key) else {
+            return Ok(false);
+        };
+        return Ok(descriptor.configurable != Some(true)
+            && descriptor
+                .enumerable
+                .is_none_or(|wanted| wanted == attributes.enumerable)
+            && !descriptor.is_accessor()
+            && descriptor.writable != Some(true)
+            && descriptor
+                .value
+                .as_ref()
+                .is_none_or(|wanted| same_value(wanted, &current)));
+    }
     // An array's `length` has a definition of its own, and it has to run *instead of* the
     // ordinary one: the ordinary one has no way to raise a `RangeError`, and no reason to
     // shorten the elements when the length it was handed is smaller than the array.

@@ -179,7 +179,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // with respect to every other (`node:worker_threads`, realms issue 06).
         let _indivisible = view.buffer.shared.then(|| {
             static ATOMICS: std::sync::Mutex<()> = std::sync::Mutex::new(());
-            ATOMICS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+            ATOMICS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
         });
         let old = view.get(index).unwrap_or(Value::Undefined);
         match op {
@@ -448,7 +450,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let key = agent::address(store, view.offset + index * view.kind.width());
             #[allow(clippy::cast_precision_loss)]
             return Ok(Value::Number(
-                kiln_runtime::workers::notify(key, wanted) as f64,
+                kiln_runtime::workers::notify(key, wanted) as f64
             ));
         }
         let (Some(group), Some(store)) = (self.agents.clone(), store) else {

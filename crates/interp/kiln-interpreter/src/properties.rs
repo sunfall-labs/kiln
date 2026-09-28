@@ -2660,12 +2660,14 @@ pub(super) fn own_property_keys_units(intrinsics: &Intrinsics, target: &Value) -
         intrinsics.materialize(target);
     }
     let from_object = |data: &ObjectData| -> Vec<StringUnits> {
-        data.keys()
-            .filter(|key| !is_reserved_units(key))
-            .cloned()
+        data.properties
+            .iter()
+            .filter(|slot| !slot.symbol)
+            .map(|slot| slot.key.clone())
             .collect()
     };
     match target {
+        Value::Shared(facade) => facade.own_keys(),
         // A String wrapper lists its characters first, in index order, and then whatever the
         // program put on the box -- the order the specification's `OrdinaryOwnPropertyKeys`
         // gives, where integer indices always precede the rest.
@@ -3024,13 +3026,48 @@ pub(super) fn own_property_keys_including_symbols_units(
     // proxy invariants and `Object.defineProperties` consume the full own-key list. Append the
     // reserved slots after the ordinary names, preserving each store's insertion order.
     let stored = match target {
-        Value::Object(object) => object.borrow().keys().cloned().collect(),
-        Value::Function(closure) => closure.properties.borrow().keys().cloned().collect(),
-        Value::Bound(bound) => bound.properties.borrow().keys().cloned().collect(),
-        Value::Array(items) => items.properties.borrow().keys().cloned().collect(),
+        Value::Object(object) => object
+            .borrow()
+            .properties
+            .iter()
+            .filter(|slot| slot.symbol)
+            .map(|slot| slot.key.clone())
+            .collect(),
+        Value::Function(closure) => closure
+            .properties
+            .borrow()
+            .properties
+            .iter()
+            .filter(|slot| slot.symbol)
+            .map(|slot| slot.key.clone())
+            .collect(),
+        Value::Bound(bound) => bound
+            .properties
+            .borrow()
+            .properties
+            .iter()
+            .filter(|slot| slot.symbol)
+            .map(|slot| slot.key.clone())
+            .collect(),
+        Value::Array(items) => items
+            .properties
+            .borrow()
+            .properties
+            .iter()
+            .filter(|slot| slot.symbol)
+            .map(|slot| slot.key.clone())
+            .collect(),
 
         other if exotic_properties(other).is_some() => exotic_properties(target)
-            .map(|store| store.borrow().keys().cloned().collect())
+            .map(|store| {
+                store
+                    .borrow()
+                    .properties
+                    .iter()
+                    .filter(|slot| slot.symbol)
+                    .map(|slot| slot.key.clone())
+                    .collect()
+            })
             .unwrap_or_default(),
         Value::Native(_, _)
         | Value::Callback(_, _)
@@ -3039,7 +3076,13 @@ pub(super) fn own_property_keys_including_symbols_units(
         | Value::Element(_) => intrinsic_key(target)
             .and_then(|identity| {
                 intrinsics.entries.borrow().iter().find_map(|(held, data)| {
-                    (*held == identity).then(|| data.keys().cloned().collect())
+                    (*held == identity).then(|| {
+                        data.properties
+                            .iter()
+                            .filter(|slot| slot.symbol)
+                            .map(|slot| slot.key.clone())
+                            .collect()
+                    })
                 })
             })
             .unwrap_or_default(),
@@ -3108,6 +3151,7 @@ pub(super) fn own_attributes_key(
     key: PropertyKeyRef<'_>,
 ) -> Option<Attributes> {
     match target {
+        Value::Shared(facade) => facade.own_property(key).map(|(_, attributes)| attributes),
         Value::Object(object) => object.borrow().get_own_attributes_key(key).or_else(|| {
             // A String wrapper's own characters, which no store holds: they are derived from the
             // boxed string and are locked, exactly as a string primitive's are.

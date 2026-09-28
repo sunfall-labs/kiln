@@ -437,6 +437,7 @@ pub(super) fn value_realm(value: &Value) -> RealmId {
         // hand it that realm's `Error.prototype` to inspect.
         Value::Wrapped(wrapped) => wrapped.realm,
         Value::Proxy(proxy) => value_realm(&proxy.target),
+        Value::Shared(facade) => facade.realm,
         _ => RealmId::PRIMARY,
     }
 }
@@ -486,6 +487,9 @@ pub(super) fn is_buffer_view(view: &TypedArrayData) -> bool {
 }
 
 pub(super) fn prototype_of(value: &Value) -> Value {
+    if let Value::Shared(facade) = value {
+        return facade.prototype();
+    }
     let realm = value_realm(value);
     // A subclassed value keeps its prototype with its other non-element properties, which is what
     // makes `new (class extends Array {})() instanceof that class` true -- and, through the same
@@ -1001,6 +1005,7 @@ impl std::hash::Hash for CollectionKey {
             Value::Capability(a) => (Rc::as_ptr(a) as usize).hash(state),
             Value::Element(a) => (Rc::as_ptr(a) as usize).hash(state),
             Value::Array(a) => (Rc::as_ptr(a) as usize).hash(state),
+            Value::Shared(a) => (Rc::as_ptr(a) as usize).hash(state),
             Value::TypedArray(a) => (Rc::as_ptr(a) as usize).hash(state),
             Value::ArrayBuffer(a) => (Rc::as_ptr(a) as usize).hash(state),
             Value::DataView(a) => (Rc::as_ptr(a) as usize).hash(state),

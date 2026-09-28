@@ -2,6 +2,7 @@ use super::super::*;
 
 fn is_frozen_array(value: &Value) -> bool {
     matches!(value, Value::Array(items) if items.properties.borrow().is_frozen())
+        || matches!(value, Value::Shared(facade) if facade.is_array())
 }
 
 pub(crate) fn call_native(
@@ -75,7 +76,7 @@ pub(crate) fn call_native(
             Value::Boolean(matches!(
                 current,
                 Value::Array(_) | Value::Native(Native::PrototypeOf(PrototypeTable::Array), _)
-            ))
+            ) || matches!(current, Value::Shared(facade) if facade.is_array()))
         }
         Native::BigIntConstructor => {
             let Some(value) = arguments.first() else {
@@ -234,6 +235,7 @@ pub(crate) fn call_native(
                 Value::Undefined => "Undefined",
                 Value::Null => "Null",
                 Value::Array(_) | Value::Native(Native::PrototypeOf(PrototypeTable::Array), _) => "Array",
+                Value::Shared(facade) if facade.is_array() => "Array",
                 // The `arguments` object of a call. Ordinary in every other respect, so the
                 // brand is the only thing that separates it from the object it otherwise is.
                 Value::Object(object) if object.borrow().arguments_brand => "Arguments",
@@ -285,7 +287,7 @@ pub(crate) fn call_native(
                 other if matches!(
                     unwrap_proxy(other),
                     Value::Array(_) | Value::Native(Native::PrototypeOf(PrototypeTable::Array), _)
-                ) => "Array",
+                ) || matches!(unwrap_proxy(other), Value::Shared(facade) if facade.is_array()) => "Array",
                 _ => "Object",
             }
         ).into()),
@@ -481,6 +483,7 @@ pub(crate) fn call_native(
             arguments.first().cloned().unwrap_or(Value::Undefined)
         }
         Native::ObjectIsFrozen => Value::Boolean(match arguments.first() {
+            Some(Value::Shared(_)) => true,
             Some(Value::Object(object)) => object.borrow().is_frozen(),
             Some(Value::Array(items)) => items.properties.borrow().is_frozen(),
             Some(Value::Function(closure)) => closure.properties.borrow().is_frozen(),

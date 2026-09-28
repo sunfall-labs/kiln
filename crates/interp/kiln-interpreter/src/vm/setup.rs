@@ -38,6 +38,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             // The module body has no `arguments` at all, mapped or not.
             mapped_arguments: false,
             current_realm: RealmId::PRIMARY,
+            shared_facades: Rc::new(RefCell::new(SharedCache::default())),
             async_context: AsyncContext::default(),
             esm_body_pending_checkpoint: false,
             this_value: Value::Undefined,

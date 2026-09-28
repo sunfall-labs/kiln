@@ -429,7 +429,7 @@ fn materialized_intrinsic_store_makes_absence_and_symbol_order_authoritative() {
     assert!(delete_property(
         &intrinsics,
         &array_prototype,
-        &Value::String(iterator_key.clone().into()),
+        &Value::Symbol(Symbol::WellKnown(WellKnown::Iterator)),
     ));
     assert!(!own_property_keys_with_symbols(&intrinsics, &array_prototype).contains(&iterator_key));
     assert!(own_attributes(&intrinsics, &array_prototype, &iterator_key).is_none());
@@ -1490,7 +1490,7 @@ fn symbol_registry_and_symbol_key_names_preserve_units() {
 }
 
 #[test]
-fn a_symbols_key_is_reserved_so_a_string_cannot_spell_it() {
+fn a_symbol_key_and_a_colliding_string_are_distinct_own_properties() {
     let symbol = Symbol::Unique(Rc::new(UniqueSymbol {
         serial: 7,
         description: None,
@@ -1500,6 +1500,151 @@ fn a_symbols_key_is_reserved_so_a_string_cannot_spell_it() {
         Symbol::WellKnown(WellKnown::Iterator)
             .property_key()
             .starts_with(RESERVED_KEY_PREFIX)
+    );
+    let spelling = StringUnits::from(symbol.property_key());
+    let mut object = ObjectData::default();
+    object.set_units(&spelling, Value::Number(1.0));
+    object.set_key(PropertyKeyRef::SymbolUnits(&spelling), Value::Number(2.0));
+    assert_eq!(object.properties.len(), 2);
+    assert_eq!(
+        object.get_own_property_units(&spelling),
+        Some(&Property::Value(Value::Number(1.0)))
+    );
+    assert_eq!(
+        object.get_own_property_key(PropertyKeyRef::SymbolUnits(&spelling)),
+        Some(&Property::Value(Value::Number(2.0)))
+    );
+    let source = Value::Object(Rc::new(RefCell::new(object)));
+    assert_eq!(
+        own_property_keys_units(&Intrinsics::default(), &source),
+        vec![spelling.clone()]
+    );
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: Default::default(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let receiver = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    vm.assign_with_strict(
+        &receiver,
+        &Value::String(spelling.clone()),
+        Value::Number(4.0),
+        0,
+        false,
+    )
+    .unwrap();
+    vm.assign_with_strict(
+        &receiver,
+        &Value::Symbol(symbol.clone()),
+        Value::Number(5.0),
+        0,
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        vm.read_computed(&receiver, &Value::String(spelling.clone()), 0),
+        Ok(Value::Number(4.0))
+    );
+    assert_eq!(
+        vm.read_computed(&receiver, &Value::Symbol(symbol), 0),
+        Ok(Value::Number(5.0))
+    );
+    assert!(
+        vm.share_value(source).is_err(),
+        "an actual Symbol key is rejected"
+    );
+    let mut string_only = ObjectData::default();
+    string_only.set_units(&spelling, Value::Number(3.0));
+    assert!(
+        vm.share_value(Value::Object(Rc::new(RefCell::new(string_only))))
+            .is_ok(),
+        "the colliding string is accepted"
+    );
+    let array = ArrayData::new(vec![Value::Number(1.0)]);
+    array
+        .properties
+        .borrow_mut()
+        .set_units(&spelling, Value::Number(6.0));
+    assert!(
+        vm.share_value(Value::Array(Rc::clone(&array))).is_ok(),
+        "an array's colliding string is accepted"
+    );
+    array
+        .properties
+        .borrow_mut()
+        .set_key(PropertyKeyRef::SymbolUnits(&spelling), Value::Number(7.0));
+    assert!(
+        vm.share_value(Value::Array(array)).is_err(),
+        "an array's actual Symbol key is rejected"
+    );
+}
+
+#[test]
+fn shared_facades_keep_aliases_cycles_holes_and_frozen_descriptors() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: Default::default(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let child = Value::Array(ArrayData::new(vec![
+        Value::Number(7.0),
+        Value::Native(Native::Hole, RealmId::PRIMARY),
+        Value::Number(9.0),
+    ]));
+    let root = Rc::new(RefCell::new(ObjectData::default()));
+    root.borrow_mut().set("first", child.clone());
+    root.borrow_mut().set("again", child);
+    root.borrow_mut()
+        .set("self", Value::Object(Rc::clone(&root)));
+    let shared = vm.share_value(Value::Object(Rc::clone(&root))).unwrap();
+    assert!(matches!(shared, Value::Shared(_)));
+    assert_eq!(vm.share_value(shared.clone()).unwrap(), shared);
+    let first = vm
+        .read_computed(&shared, &Value::String("first".into()), 0)
+        .unwrap();
+    let again = vm
+        .read_computed(&shared, &Value::String("again".into()), 0)
+        .unwrap();
+    assert_eq!(first, again, "both edges must return the same realm facade");
+    assert_eq!(
+        vm.read_computed(&shared, &Value::String("self".into()), 0),
+        Ok(shared.clone()),
+        "a cycle must return the root facade"
+    );
+    assert_eq!(
+        vm.read_computed(&first, &Value::String("length".into()), 0),
+        Ok(Value::Number(3.0))
+    );
+    assert!(!vm.has(&first, &Value::String("1".into()), 0).unwrap());
+    assert_eq!(
+        vm.read_computed(&first, &Value::String("2".into()), 0),
+        Ok(Value::Number(9.0))
+    );
+    let Some((Property::Value(_), flags)) = vm
+        .own_state(&shared, &Value::String("first".into()), 0)
+        .unwrap()
+    else {
+        panic!("shared field must have an own data descriptor")
+    };
+    assert!(!flags.writable && flags.enumerable && !flags.configurable);
+    assert!(!vm.target_extensible(&shared, 0).unwrap());
+    assert_eq!(
+        vm.target_prototype(&first, 0).unwrap(),
+        Value::Native(Native::PrototypeOf(PrototypeTable::Array), RealmId::PRIMARY)
+    );
+    root.borrow_mut().set("first", Value::Null);
+    assert_eq!(
+        vm.read_computed(&shared, &Value::String("first".into()), 0),
+        Ok(first),
+        "later source writes must not affect the snapshot"
     );
 }
 

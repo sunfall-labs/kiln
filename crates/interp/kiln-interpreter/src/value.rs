@@ -47,6 +47,7 @@ pub(super) fn strict_equal(left: &Value, right: &Value) -> bool {
         // Identity, like every other function: a program may hold one and compare it later.
         Value::Element(a) => matches!(right, Value::Element(b) if Rc::ptr_eq(a, b)),
         Value::Array(a) => matches!(right, Value::Array(b) if Rc::ptr_eq(a, b)),
+        Value::Shared(a) => matches!(right, Value::Shared(b) if Rc::ptr_eq(a, b)),
         Value::TypedArray(a) => matches!(right, Value::TypedArray(b) if Rc::ptr_eq(a, b)),
         Value::ArrayBuffer(a) => matches!(right, Value::ArrayBuffer(b) if Rc::ptr_eq(a, b)),
         Value::DataView(a) => matches!(right, Value::DataView(b) if Rc::ptr_eq(a, b)),
@@ -115,13 +116,14 @@ pub(super) fn loose_equal_checked(left: &Value, right: &Value) -> Result<bool, E
         }
         // An object compares by identity against another object, and by its primitive form
         // against anything else -- which is what makes `[1] == 1` true.
-        (Value::Object(_) | Value::Array(_), Value::Object(_) | Value::Array(_)) => {
-            strict_equal(left, right)
-        }
-        (object @ (Value::Object(_) | Value::Array(_)), primitive) => {
+        (
+            Value::Object(_) | Value::Array(_) | Value::Shared(_),
+            Value::Object(_) | Value::Array(_) | Value::Shared(_),
+        ) => strict_equal(left, right),
+        (object @ (Value::Object(_) | Value::Array(_) | Value::Shared(_)), primitive) => {
             loose_equal_checked(&to_primitive(object)?, primitive)?
         }
-        (primitive, object @ (Value::Object(_) | Value::Array(_))) => {
+        (primitive, object @ (Value::Object(_) | Value::Array(_) | Value::Shared(_))) => {
             loose_equal_checked(primitive, &to_primitive(object)?)?
         }
         _ => strict_equal(left, right),

@@ -78,6 +78,9 @@ pub enum Value {
     /// has to be able to tell them apart, `length` is not an ordinary property, and a dense
     /// `Vec` is the representation that makes indexing the common case it is.
     Array(Rc<ArrayData>),
+    /// A realm-local facade over one node of a sealed shared graph (ADR 0073). The facade owns a
+    /// strong graph handle; the arena contains no realm value or prototype pointer.
+    Shared(Rc<SharedFacade>),
     /// A built-in that takes a callback, invoked by the VM rather than by `call_native`.
     Callback(CallbackMethod, RealmId),
     /// A view over a byte buffer: `Uint8Array` and its siblings.
@@ -243,7 +246,7 @@ impl Value {
             Self::Number(_) => "number",
             Self::String(_) => "string",
             Self::Function(_) => "function",
-            Self::Object(_) => "object",
+            Self::Object(_) | Self::Shared(_) => "object",
             // A method table stands for a prototype *object*, and `typeof Object.prototype` is
             // "object". `Function.prototype` is the exception the specification makes: it is a
             // function that does nothing.
@@ -343,6 +346,10 @@ impl Value {
             Self::String(_) => "string",
             Self::Function(_) => "function",
             Self::Object(_) => "object",
+            Self::Shared(facade) => match facade.handle.graph().node(facade.handle.index()) {
+                Some(kiln_shared_graph::Node::Array { .. }) => "array",
+                _ => "object",
+            },
             Self::Native(Native::PrototypeOf(PrototypeTable::Function), _) => "function",
             Self::Native(Native::PrototypeOf(_), _) => "object",
             Self::Native(
@@ -434,6 +441,7 @@ impl Value {
             // `Number({})` is NaN: ToPrimitive on a plain object yields "[object Object]",
             // which does not parse as a number.
             Self::Object(_)
+            | Self::Shared(_)
             | Self::Native(_, _)
             | Self::Callback(_, _)
             | Self::Generator(_)
@@ -491,6 +499,7 @@ impl Value {
             Self::Function(_) => true,
             // Every object is truthy, including an empty one.
             Self::Object(_)
+            | Self::Shared(_)
             | Self::Native(_, _)
             | Self::Callback(_, _)
             | Self::Array(_)
@@ -543,7 +552,7 @@ impl Value {
             Self::Function(closure) => closure.source_text().to_owned(),
             // What `String({})` produces. `console.log` in a real console prints the contents
             // instead, which needs a formatter the host side does not have yet.
-            Self::Object(_) => "[object Object]".to_owned(),
+            Self::Object(_) | Self::Shared(_) => "[object Object]".to_owned(),
             // The same name a console shows. `String(f)` in node is the source text, which a
             // backend does not have; naming the function beats an invented body, and naming it
             // the way the program does beats naming it the way the implementation does.

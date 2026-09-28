@@ -73,6 +73,8 @@ impl Attributes {
 #[derive(Clone, Debug)]
 pub(super) struct Slot {
     pub(super) key: StringUnits,
+    /// Symbol identity is separate from a user string with the same reserved spelling.
+    pub(super) symbol: bool,
     pub(super) property: Property,
     pub(super) attributes: Attributes,
 }
@@ -81,6 +83,7 @@ pub(super) struct Slot {
 pub(super) enum PropertyKeyRef<'a> {
     Utf8(&'a str),
     Units(&'a StringUnits),
+    SymbolUnits(&'a StringUnits),
 }
 
 impl<'a> PropertyKeyRef<'a> {
@@ -92,7 +95,7 @@ impl<'a> PropertyKeyRef<'a> {
     pub(super) fn matches_ascii(self, key: &str) -> bool {
         match self {
             Self::Utf8(stored) => stored == key,
-            Self::Units(stored) => stored == key,
+            Self::Units(stored) | Self::SymbolUnits(stored) => stored == key,
         }
     }
 
@@ -102,7 +105,7 @@ impl<'a> PropertyKeyRef<'a> {
     pub(super) fn known_ascii(self) -> Option<Cow<'a, str>> {
         match self {
             Self::Utf8(key) => Some(Cow::Borrowed(key)),
-            Self::Units(key) => match key.as_view() {
+            Self::Units(key) | Self::SymbolUnits(key) => match key.as_view() {
                 StringView::Latin1(bytes) => {
                     let key = std::str::from_utf8(bytes).ok()?;
                     key.is_ascii().then_some(Cow::Borrowed(key))
@@ -118,14 +121,34 @@ impl<'a> PropertyKeyRef<'a> {
     pub(super) fn matches(self, stored: &StringUnits) -> bool {
         match self {
             Self::Utf8(key) => stored == key,
-            Self::Units(key) => stored == key,
+            Self::Units(key) | Self::SymbolUnits(key) => stored == key,
         }
     }
 
     pub(super) fn owned(self) -> StringUnits {
         match self {
             Self::Utf8(key) => StringUnits::from(key),
-            Self::Units(key) => key.clone(),
+            Self::Units(key) | Self::SymbolUnits(key) => key.clone(),
+        }
+    }
+
+    pub(super) fn is_symbol(self) -> bool {
+        match self {
+            Self::Utf8(key) => is_symbol_key(key),
+            Self::Units(_) => false,
+            Self::SymbolUnits(_) => true,
+        }
+    }
+
+    pub(super) fn matches_slot(self, slot: &Slot) -> bool {
+        self.is_symbol() == slot.symbol && self.matches(&slot.key)
+    }
+
+    pub(super) fn from_value(value: &Value, units: &'a StringUnits) -> Self {
+        if matches!(value, Value::Symbol(_)) {
+            Self::SymbolUnits(units)
+        } else {
+            Self::Units(units)
         }
     }
 }

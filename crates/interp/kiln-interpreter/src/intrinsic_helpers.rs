@@ -1005,6 +1005,7 @@ pub(super) fn array_index_key(key: PropertyKeyRef<'_>) -> Option<usize> {
     match key {
         PropertyKeyRef::Utf8(name) => canonical_index(name),
         PropertyKeyRef::Units(name) => index_key_units(name),
+        PropertyKeyRef::SymbolUnits(_) => None,
     }
 }
 
@@ -1118,6 +1119,7 @@ pub(super) fn canonical_numeric_index(name: &str) -> Option<f64> {
 pub(super) fn canonical_numeric_index_key(key: PropertyKeyRef<'_>) -> Option<f64> {
     match key {
         PropertyKeyRef::Utf8(name) => canonical_numeric_index(name),
+        PropertyKeyRef::SymbolUnits(_) => None,
         PropertyKeyRef::Units(name) => {
             let name = name;
             if name.is_empty() {
@@ -1217,7 +1219,7 @@ pub(super) fn delete_property_checked(
     Ok(delete_property_key(
         intrinsics,
         target,
-        PropertyKeyRef::Units(&units),
+        PropertyKeyRef::from_value(key, &units),
     ))
 }
 
@@ -1232,6 +1234,7 @@ pub(super) fn delete_property_key(
     key: PropertyKeyRef<'_>,
 ) -> bool {
     match target {
+        Value::Shared(facade) => facade.own_property(key).is_none(),
         Value::Object(object) => {
             // `delete` reports whether the property is gone, and a non-configurable one never
             // is. `remove` already declines to do the work; the answer has to agree with it.
@@ -2102,6 +2105,11 @@ pub(super) fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>)
             }
             inspect_object(&object.borrow(), depth, guard.seen)
         }
+        Value::Shared(facade) => format!(
+            "Shared {{ graph: {}, node: {} }}",
+            facade.handle.graph().id(),
+            facade.handle.index()
+        ),
         Value::Cell(_) => unreachable!("a cell is never inspected"),
     }
 }

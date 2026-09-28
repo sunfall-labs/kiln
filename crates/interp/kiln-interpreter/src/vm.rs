@@ -76,6 +76,9 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// realm 1 is current belongs to realm 1, which is what `GetFunctionRealm` and every
     /// "throw *this* realm's TypeError" step in the specification are asking about.
     pub(super) current_realm: RealmId,
+    /// Weak facade identities for the shared graph nodes this execution has read. Each facade
+    /// itself retains its graph; this cache never keeps an unreachable graph alive.
+    pub(super) shared_facades: Rc<RefCell<SharedCache>>,
     /// `this` in the running frame. At module scope it is `undefined`, because a module body is
     /// always strict and strict code does not get the global object.
     pub(super) this_value: Value,

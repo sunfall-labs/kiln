@@ -114,6 +114,9 @@ pub(crate) use async_hooks::{
 };
 mod object_model;
 pub use object_model::*;
+mod shared;
+use shared::SharedCache;
+pub use shared::SharedFacade;
 mod vm;
 use vm::Vm;
 mod intrinsics;

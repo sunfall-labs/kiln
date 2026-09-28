@@ -8,7 +8,7 @@
 //! messages and GC before `kiln:shared` can be installed.
 
 use kiln_string::StringUnits;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
@@ -88,6 +88,8 @@ pub enum SnapshotError<E> {
     Unsupported(UnsupportedKind),
     SymbolKey,
     Accessor,
+    DuplicateKey,
+    InvalidBigInt,
     TooLarge,
 }
 
@@ -98,6 +100,8 @@ impl<E: fmt::Display> fmt::Display for SnapshotError<E> {
             Self::Unsupported(kind) => write!(out, "cannot share {kind:?}"),
             Self::SymbolKey => out.write_str("cannot share a symbol-keyed property"),
             Self::Accessor => out.write_str("cannot share an accessor property"),
+            Self::DuplicateKey => out.write_str("shared graph has a duplicate own property"),
+            Self::InvalidBigInt => out.write_str("shared graph has an invalid BigInt"),
             Self::TooLarge => out.write_str("shared graph is too large"),
         }
     }
@@ -311,10 +315,14 @@ pub fn share<I: Inspector>(
             SourceNode::Unsupported(kind) => return Err(SnapshotError::Unsupported(kind)),
         };
         let mut fields = Vec::with_capacity(properties.len());
+        let mut keys = HashSet::with_capacity(properties.len());
         for property in properties {
             let Key::String(key) = property.key else {
                 return Err(SnapshotError::SymbolKey);
             };
+            if !keys.insert(key.clone()) {
+                return Err(SnapshotError::DuplicateKey);
+            }
             let Descriptor::Data(value) = property.descriptor else {
                 return Err(SnapshotError::Accessor);
             };
@@ -334,6 +342,13 @@ pub fn share<I: Inspector>(
                     Value::Node(index)
                 }
                 InputValue::Shared(handle) => Value::Shared(handle),
+                InputValue::BigInt(text) => {
+                    let digits = text.strip_prefix('-').unwrap_or(&text);
+                    if digits.is_empty() || !digits.bytes().all(|digit| digit.is_ascii_digit()) {
+                        return Err(SnapshotError::InvalidBigInt);
+                    }
+                    Value::BigInt(text)
+                }
                 scalar => scalar_value(scalar),
             };
             fields.push(Field {
@@ -515,6 +530,35 @@ mod tests {
         assert!(matches!(
             share(InputValue::Object(1), &mut source),
             Err(SnapshotError::SymbolKey)
+        ));
+    }
+
+    #[test]
+    fn rejects_duplicate_keys_and_invalid_bigints_before_publication() {
+        let mut source = Table(HashMap::from([(
+            1,
+            SourceNode::Record {
+                null_prototype: false,
+                properties: vec![
+                    field("same", InputValue::Number(1.0)),
+                    field("same", InputValue::Number(2.0)),
+                ],
+            },
+        )]));
+        assert!(matches!(
+            share(InputValue::Object(1), &mut source),
+            Err(SnapshotError::DuplicateKey)
+        ));
+        source.0.insert(
+            1,
+            SourceNode::Record {
+                null_prototype: false,
+                properties: vec![field("number", InputValue::BigInt("1e8".into()))],
+            },
+        );
+        assert!(matches!(
+            share(InputValue::Object(1), &mut source),
+            Err(SnapshotError::InvalidBigInt)
         ));
     }
 

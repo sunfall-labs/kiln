@@ -369,7 +369,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<Option<(Property, Attributes)>, ExecutionError> {
         let units = key.property_key_units_checked()?;
-        self.own_state_key(target, key, PropertyKeyRef::Units(&units), instruction)
+        self.own_state_key(
+            target,
+            key,
+            PropertyKeyRef::from_value(key, &units),
+            instruction,
+        )
     }
 
     pub(crate) fn own_state_key(
@@ -1014,6 +1019,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         key: PropertyKeyRef<'_>,
     ) -> Option<Property> {
         match target {
+            Value::Shared(facade) => facade.own_property(key).map(|(property, _)| property),
             Value::Object(object) => object.borrow().lookup_key(key),
             Value::Function(closure) if !key.matches_ascii("prototype") => {
                 closure.properties.borrow().lookup_key(key)
@@ -1337,7 +1343,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return Ok(delete_property_key(
                 &self.intrinsics,
                 target,
-                PropertyKeyRef::Units(&units),
+                PropertyKeyRef::from_value(key, &units),
             ));
         };
         let proxy = Rc::clone(proxy);
@@ -1594,7 +1600,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         let property_key_units = key.property_key_units_checked()?;
 
-        let property_key = PropertyKeyRef::Units(&property_key_units);
+        let property_key = PropertyKeyRef::from_value(key, &property_key_units);
 
         // The same accessors the named read consults, for the computed spelling: a symbol key
         // reaches `Symbol.species` only through here.
@@ -1912,7 +1918,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         let key_units = key.property_key_units_checked()?;
 
-        let property_key = PropertyKeyRef::Units(&key_units);
+        let property_key = PropertyKeyRef::from_value(key, &key_units);
 
         if let Value::TypedArray(view) = target
             && let Some(index) = canonical_numeric_index_key(property_key)
@@ -1948,6 +1954,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return Err(restricted_property_error());
         }
         match target {
+            Value::Shared(_) => Ok(()),
             // Indexed writes still reach their descriptor walk: even a frozen array may
             // inherit a setter, and invoking it does not create or change an own element.
             Value::Array(items)
@@ -2245,6 +2252,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         target: &Value,
         instruction: usize,
     ) -> Result<Vec<Value>, ExecutionError> {
+        if let Value::Shared(facade) = target {
+            return Ok(facade.own_keys().into_iter().map(Value::String).collect());
+        }
         let keys = match target {
             // A proxy answers with a trap rather than a store, and the trap already reports
             // both kinds in the trap result's order.
@@ -2387,7 +2397,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             };
         }
         let units = key.property_key_units_checked()?;
-        let property_key = PropertyKeyRef::Units(&units);
+        let property_key = PropertyKeyRef::from_value(key, &units);
         // An integer-indexed exotic object answers `[[Set]]` for every *canonical numeric* name
         // itself, whether or not the view has such an element, so the prototype chain is never
         // consulted for one: a setter installed on `%TypedArray%.prototype["0"]` stays

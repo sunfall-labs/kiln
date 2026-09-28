@@ -362,6 +362,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // `length` is not an ordinary property of an array: it is derived, and writing it
             // truncates. Reading it is all the corpus needs so far.
             Value::Array(items) if name == "length" => Value::Number(items.length() as f64),
+            Value::Shared(facade) => facade
+                .own_property(PropertyKeyRef::Utf8(name))
+                .and_then(|(property, _)| match property {
+                    Property::Value(value) => Some(value),
+                    Property::Accessor { .. } => None,
+                })
+                .unwrap_or_else(|| self.property(&facade.prototype(), name)),
             // Unbound, so that reading the same method twice yields the same value. The
             // receiver is supplied by `CallMethod`, not captured here.
             // Strings expose `length` and the iterator. `length` is UTF-16 code units, which is
