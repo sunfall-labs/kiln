@@ -802,6 +802,8 @@ struct NativeRealm {
     scheduled_wait: RefCell<Option<ScheduledWait>>,
     /// Zero only while a realm has never published thread-affine state.
     affinity: Cell<u32>,
+    /// Program identity, children and exit state follow this realm across scheduler lanes.
+    worker_scope: Rc<RefCell<kiln_runtime::workers::RealmScopeState>>,
     /// The realm's `node:ffi` libraries, prepared functions and callback closures (ADR 0070):
     /// released at teardown before the heap their callbacks name is torn down.
     #[cfg(feature = "ffi")]
@@ -1083,6 +1085,19 @@ impl Drop for CurrentHeap {
 
 impl Drop for NativeRealm {
     fn drop(&mut self) {
+        // A scheduled main realm may have started dedicated workers on a lane shared with
+        // other realms. End only its own children while its program scope is installed.
+        // A dedicated realm may be dropped by the TLS registry destructor after other TLS
+        // keys have already gone away. `try_with` makes that path a no-op.
+        if SCHEDULED_POOL
+            .try_with(|slot| slot.borrow().as_ref().and_then(Weak::upgrade).is_some())
+            .unwrap_or(false)
+            && kiln_runtime::workers::current().is_none()
+        {
+            let _scope =
+                kiln_runtime::workers::RealmScopeGuard::enter(Rc::clone(&self.worker_scope));
+            kiln_runtime::workers::finish_children();
+        }
         // Teardown runs prelude code -- the callable stores' and work items' destructors below,
         // the collector's teardown hooks -- and the prelude finds its heap by asking which one is
         // current on this thread. A realm is destroyed outside `ActiveRealm`, so nothing is: the
@@ -1197,6 +1212,7 @@ impl NativeRealm {
             introspect_armed: Cell::new(false),
             scheduled_wait: RefCell::new(None),
             affinity: Cell::new(0),
+            worker_scope: Rc::new(RefCell::new(kiln_runtime::workers::RealmScopeState::new())),
             #[cfg(feature = "ffi")]
             ffi: RefCell::new(crate::ffi::State::default()),
             gc: RefCell::new(GcState::default()),
@@ -1257,6 +1273,7 @@ impl Drop for NativeRuntime {
 
 struct ActiveRealm {
     realm: Rc<NativeRealm>,
+    worker_scope: Option<kiln_runtime::workers::RealmScopeGuard>,
     /// Generated code runs only inside an active realm, so the thread may read shared cache
     /// state for exactly as long as this lives (`reclaim`). Dropped after `Drop::drop`.
     _online: reclaim::Online,
@@ -1287,8 +1304,14 @@ impl ActiveRealm {
         ACTIVE_REALM_RC.with(|slot| *slot.borrow_mut() = Some(Rc::clone(&realm)));
         ACTIVE_HEAP.with(|slot| slot.set(realm.gc.borrow().heap));
         bump_generation();
+        // A scheduler lane hosts several top-level realms. Its thread-local worker protocol
+        // state must describe only the realm holding this turn's exclusive lease. Dedicated
+        // worker threads retain their existing state until their graph runner is turn based.
+        let worker_scope = current_scheduler()
+            .map(|_| kiln_runtime::workers::RealmScopeGuard::enter(Rc::clone(&realm.worker_scope)));
         Some(Self {
             realm,
+            worker_scope,
             _online: reclaim::online(),
         })
     }
@@ -1296,6 +1319,7 @@ impl ActiveRealm {
 
 impl Drop for ActiveRealm {
     fn drop(&mut self) {
+        self.worker_scope.take();
         ACTIVE_REALM.with(|active| active.set(0));
         ACTIVE_REALM_RC.with(|slot| slot.borrow_mut().take());
         ACTIVE_HEAP.with(|slot| slot.set(std::ptr::null_mut()));

@@ -43,6 +43,7 @@
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
@@ -724,6 +725,74 @@ thread_local! {
     static PROGRAM: RefCell<Option<Arc<Program>>> = const { RefCell::new(None) };
 }
 
+/// Worker protocol state that belongs to a realm, even when several realms take turns on one
+/// scheduler lane. Dedicated worker threads keep using their thread-local state directly.
+pub struct RealmScopeState {
+    program: Option<Arc<Program>>,
+    children: Vec<u64>,
+    exit_request: Option<i32>,
+    owns_exit: bool,
+}
+
+impl RealmScopeState {
+    pub fn new() -> Self {
+        Self {
+            // Most realms never use worker channels. Allocate a program ID on first use.
+            program: None,
+            children: Vec::new(),
+            exit_request: None,
+            owns_exit: false,
+        }
+    }
+}
+
+impl Default for RealmScopeState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Restores the lane's prior worker state after a scheduled realm turn. The realm state is
+/// exclusively leased with its native heap; no other lane can enter it concurrently.
+pub struct RealmScopeGuard {
+    state: Rc<RefCell<RealmScopeState>>,
+    previous: RealmScopeState,
+}
+
+impl RealmScopeGuard {
+    pub fn enter(state: Rc<RefCell<RealmScopeState>>) -> Self {
+        let mut realm = state.borrow_mut();
+        let previous = RealmScopeState {
+            program: PROGRAM
+                .with(|slot| std::mem::replace(&mut *slot.borrow_mut(), realm.program.take())),
+            children: CHILDREN.with(|slot| {
+                std::mem::replace(&mut *slot.borrow_mut(), std::mem::take(&mut realm.children))
+            }),
+            exit_request: EXIT_REQUEST.with(|slot| slot.replace(realm.exit_request.take())),
+            owns_exit: OWNS_EXIT.with(|slot| slot.replace(realm.owns_exit)),
+        };
+        drop(realm);
+        Self { state, previous }
+    }
+}
+
+impl Drop for RealmScopeGuard {
+    fn drop(&mut self) {
+        let mut realm = self.state.borrow_mut();
+        realm.program = PROGRAM
+            .with(|slot| std::mem::replace(&mut *slot.borrow_mut(), self.previous.program.take()));
+        realm.children = CHILDREN.with(|slot| {
+            std::mem::replace(
+                &mut *slot.borrow_mut(),
+                std::mem::take(&mut self.previous.children),
+            )
+        });
+        realm.exit_request =
+            EXIT_REQUEST.with(|slot| slot.replace(self.previous.exit_request.take()));
+        realm.owns_exit = OWNS_EXIT.with(|slot| slot.replace(self.previous.owns_exit));
+    }
+}
+
 /// One program: a top-level realm and every worker under it. What node scopes to a process --
 /// `threadId`s numbered from 1, the names `BroadcastChannel`s meet by -- kiln scopes to this,
 /// because one kiln process can run several programs at once (`KILN_REALMS`, `KILN_WORKERS` thread
@@ -1111,6 +1180,36 @@ fn interrupt_waits(key: u64) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scheduled_realms_keep_worker_protocol_state_across_lane_turns() {
+        use super::*;
+
+        let first = Rc::new(RefCell::new(RealmScopeState::new()));
+        let second = Rc::new(RefCell::new(RealmScopeState::new()));
+        let first_port = {
+            let _turn = RealmScopeGuard::enter(Rc::clone(&first));
+            own_exits();
+            assert!(request_exit(17));
+            broadcast_join("scheduled-realms")
+        };
+        let second_port = {
+            let _turn = RealmScopeGuard::enter(Rc::clone(&second));
+            assert_eq!(take_exit_request(), None);
+            assert!(!request_exit(8));
+            broadcast_join("scheduled-realms")
+        };
+        {
+            let _turn = RealmScopeGuard::enter(Rc::clone(&first));
+            assert_eq!(take_exit_request(), Some(17));
+            assert_eq!(
+                broadcast_post(first_port, Message::new(kind::USER, Vec::new())),
+                0
+            );
+        }
+        assert!(take(second_port).is_none());
+        close(first_port);
+        close(second_port);
+    }
     use super::*;
     use kiln_shared_graph::{Handle, InputValue, Inspector, Snapshot, SourceId, SourceNode, share};
 

@@ -20,6 +20,72 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static TEST_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn scheduled_native_realms_keep_distinct_worker_programs_on_one_lane() {
+    struct Turn {
+        port: u64,
+        exit: bool,
+        observed_exit: Option<i32>,
+    }
+    unsafe extern "C" fn enter(context: *mut c_void) -> i32 {
+        let turn = unsafe { &mut *context.cast::<Turn>() };
+        if turn.port == 0 {
+            turn.port = kiln_runtime::workers::broadcast_join("scheduled-native-program");
+        }
+        if turn.exit {
+            kiln_runtime::workers::own_exits();
+            assert!(kiln_runtime::workers::request_exit(23));
+        } else {
+            turn.observed_exit = kiln_runtime::workers::take_exit_request();
+        }
+        0
+    }
+
+    let scheduler = Arc::new(PinnedTurnScheduler::new(1).expect("one lane"));
+    let _pool = ScheduledPoolGuard::enter(Some(Arc::downgrade(&scheduler)));
+    let mut first = 0;
+    let mut second = 0;
+    assert_eq!(unsafe { kiln_realm_create(&raw mut first) }, 0);
+    assert_eq!(unsafe { kiln_realm_create(&raw mut second) }, 0);
+    let mut a = Turn {
+        port: 0,
+        exit: true,
+        observed_exit: None,
+    };
+    let mut b = Turn {
+        port: 0,
+        exit: false,
+        observed_exit: None,
+    };
+    assert_eq!(
+        unsafe { kiln_realm_enter(first, Some(enter), (&raw mut a).cast()) },
+        0
+    );
+    assert_eq!(
+        unsafe { kiln_realm_enter(second, Some(enter), (&raw mut b).cast()) },
+        0
+    );
+    assert_eq!(b.observed_exit, None);
+    assert_eq!(
+        kiln_runtime::workers::broadcast_post(
+            a.port,
+            kiln_runtime::workers::Message::new(kiln_runtime::workers::kind::USER, Vec::new()),
+        ),
+        0,
+    );
+    assert!(kiln_runtime::workers::take(b.port).is_none());
+    a.exit = false;
+    assert_eq!(
+        unsafe { kiln_realm_enter(first, Some(enter), (&raw mut a).cast()) },
+        0
+    );
+    assert_eq!(a.observed_exit, Some(23));
+    kiln_runtime::workers::close(a.port);
+    kiln_runtime::workers::close(b.port);
+    assert_eq!(kiln_realm_destroy(first), 0);
+    assert_eq!(kiln_realm_destroy(second), 0);
+}
+
+#[test]
 fn unpinned_realm_rebinds_its_executor_on_another_thread() {
     static LANE_RESETS: AtomicUsize = AtomicUsize::new(0);
     unsafe extern "C" fn roots(_heap: *mut c_void, _context: *mut c_void, phase: i32) {
