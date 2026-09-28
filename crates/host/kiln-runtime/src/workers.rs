@@ -416,9 +416,8 @@ impl ActorPublicationLease {
             "actor publication lease lost its state"
         );
         entry.state = ActorReservationState::Published;
-        if entry.closing {
-            reservations.remove(&self.reservation);
-        }
+        /* A published native inbox still owns a graph root. Even if the port closed during
+         * publication, retain the grant until its receiver releases that root. */
         self.finished = true;
     }
 }
@@ -892,7 +891,7 @@ pub fn close(port: u64) {
                 || entry.receiver == peer
                 || entry.reply == port
                 || entry.reply == peer;
-            if affected && entry.state == ActorReservationState::Publishing {
+            if affected && entry.state != ActorReservationState::Pending {
                 entry.closing = true;
                 return true;
             }
@@ -2317,8 +2316,10 @@ mod tests {
                 .closing
         );
         publishing.finish();
-        assert!(!lock(actor_reservations()).contains_key(&reservation));
+        assert!(lock(actor_reservations()).contains_key(&reservation));
         close(reply_receiver);
+        assert!(lock(actor_reservations()).contains_key(&reservation));
+        lock(actor_reservations()).remove(&reservation);
         assert_eq!(actor_sender(&impostor), None);
         let token = address.opaque();
         drop(address);

@@ -2656,29 +2656,65 @@ static int kiln_c99_worker_op_raw(kiln_value *result, const kiln_value *args, si
     case KILN_C99_WORKER_OP_ACTOR_GRAPH_RECEIVE: {
         uint64_t call = kiln_c99_worker_word(args, argc, 2);
         uint64_t reply = kiln_c99_worker_word(args, argc, 3);
+        kiln_c99_realm_state *realm = kiln_c99_realm();
+        kiln_value received = kiln_c99_undefined();
         int state = -1;
         if (first != 0 && call != 0 && reply != 0) {
             words[0] = call;
             words[1] = reply;
             if (kiln_worker_op((uint32_t)op, first, words) == 0)
-                state = words[0] == 0 ? 0 : -1;
+                state = (int)(int64_t)words[0];
+        }
+        if (state == 1) {
+            if (realm->graph_inbox_state != KILN_C99_GRAPH_INBOX_PUBLISHED ||
+                realm->graph_inbox_reservation_id != first ||
+                realm->graph_inbox_root.tag == KILN_VALUE_UNDEFINED) {
+                state = -1;
+            } else {
+                received = realm->graph_inbox_root;
+            }
         }
         status = kiln_c99_new_array(&built);
         if (status == KILN_C99_OK)
             status = kiln_c99_array_push(built, kiln_c99_number((double)state));
         if (status == KILN_C99_OK)
-            status = kiln_c99_array_push(built, kiln_c99_undefined());
+            status = kiln_c99_array_push(built, received);
+        if (status == KILN_C99_OK && state == 1) {
+            /* The native inbox keeps the moved graph rooted across array construction. Once
+             * the value is in the result, release the matching host grant before clearing
+             * that root. A failed release leaves both inbox and root intact for retry. */
+            words[0] = 0;
+            if (kiln_worker_op(KILN_C99_WORKER_OP_ACTOR_GRAPH_RELEASE, first, words) != 0 ||
+                words[0] == 0) return KILN_C99_INVALID_ARGUMENT;
+            realm->graph_inbox_state = KILN_C99_GRAPH_INBOX_EMPTY;
+            realm->graph_inbox_reservation_id = 0;
+            realm->graph_inbox_reserved_chunks = 0;
+            realm->graph_inbox_region_count = 0;
+            realm->graph_inbox_epoch = 0;
+            realm->graph_inbox_root = kiln_c99_undefined();
+        }
         if (status == KILN_C99_OK) *result = built;
         return status;
     }
-    case KILN_C99_WORKER_OP_ACTOR_GRAPH_RELEASE:
+    case KILN_C99_WORKER_OP_ACTOR_GRAPH_RELEASE: {
+        kiln_c99_realm_state *realm = kiln_c99_realm();
         words[0] = 0;
         if (first == 0 || kiln_worker_op((uint32_t)op, first, words) != 0) {
             *result = kiln_c99_boolean(0);
             return KILN_C99_OK;
         }
+        if (words[0] != 0 && realm->graph_inbox_reservation_id == first &&
+            realm->graph_inbox_state != KILN_C99_GRAPH_INBOX_EMPTY) {
+            realm->graph_inbox_state = KILN_C99_GRAPH_INBOX_EMPTY;
+            realm->graph_inbox_reservation_id = 0;
+            realm->graph_inbox_reserved_chunks = 0;
+            realm->graph_inbox_region_count = 0;
+            realm->graph_inbox_epoch = 0;
+            realm->graph_inbox_root = kiln_c99_undefined();
+        }
         *result = kiln_c99_boolean(words[0] != 0);
         return KILN_C99_OK;
+    }
     case KILN_C99_WORKER_OP_ACTOR_GRAPH_REQUEST: {
         uint64_t request = 0;
         kiln_gc_heap *heap = kiln_c99_gc_heap();
