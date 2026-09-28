@@ -10,12 +10,13 @@
 # rewritten under another thread's reader, a key interned into the wrong realm: each shows up as a
 # realm printing something the program alone does not.
 #
-# HOW. Each probe is built once, by `kiln run --native` (the realm keeps its virtual clock). The
-# binary runs alone, and then with `KILN_REALMS=N`, which makes
-# its launcher run N realms of the program at once, each pinned to its own thread of the runtime's
-# `WorkerPool` (`kiln_realm_run_pinned`), and write each realm's standard streams (both into one
-# file, as `2>&1` does) and exit status to `$KILN_REALMS_OUT/<index>.{out,status}`. Every realm's
-# pair must be the lone run's, for N = 1 (the pinned host itself), 2, and the core count.
+# HOW. Each probe is built once by `kiln run --native`, which keeps the realm's virtual clock.
+# The binary runs alone, then with `KILN_REALMS=N`, which launches N realms at once. By default
+# each realm is pinned to its own `WorkerPool` thread. `KILN_REALM_SCHEDULER=1` uses shared
+# turn-scheduler lanes; `KILN_REALM_MIGRATE=1` permits eligible turns to move between lanes.
+# The launcher writes each realm's standard streams into one file (as `2>&1` does) and its exit
+# status to `$KILN_REALMS_OUT/<index>.{out,status}`. Every realm's pair must match the lone run
+# for N = 1, 2, and the core count.
 #
 # The oracle is the binary alone, not the interpreter: `native.sh` owns that comparison, and a
 # probe that diverges there diverges here only if realms make it worse.
