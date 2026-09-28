@@ -1,7 +1,7 @@
 /* Detached storage for a future actor graph transaction. This is a one-chunk primitive, not
  * transfer admission. The caller must hold both realm turns paused, secure host/JS publication,
  * and keep the sender escrow alive from certificate through detach. No collector or mutator may
- * run between detach and adoption. The opaque-ID registry and pair transaction do not exist yet. */
+ * run between detach and adoption. The pair transaction does not exist yet. */
 
 typedef struct kiln_c99_graph_capsule_requirements {
     size_t regions;
@@ -22,8 +22,8 @@ typedef struct kiln_c99_graph_capsule {
 } kiln_c99_graph_capsule;
 
 /* All fallible closure and root-kind checks run on the sender before its ownership proof. Only
- * exact cell payloads and inline string bytes are supported; the returned requirements contain
- * numbers only and may be copied to the receiver lane before either heap is changed. */
+ * exact cell/object/array payloads and inline string bytes are supported; the returned
+ * requirements contain numbers only and may cross lanes before either heap is changed. */
 static int kiln_c99_graph_capsule_prepare(const kiln_gc_heap *from, kiln_nursery_chunk *chunk,
                                           kiln_value root, kiln_c99_graph_capsule *out) {
     kiln_nursery_chunk *it;
@@ -50,6 +50,10 @@ static int kiln_c99_graph_capsule_prepare(const kiln_gc_heap *from, kiln_nursery
         if (kind != KILN_GC_STRING || !kiln_c99_graph_inline_string(block) ||
             string->data != (const void *)(uintptr_t)root.bits ||
             string->unit_len != root.len) return 0;
+    } else if (root.tag == KILN_VALUE_OBJECT || root.tag == KILN_VALUE_ARRAY) {
+        if ((root.tag == KILN_VALUE_OBJECT ? kind != KILN_GC_OBJECT : kind != KILN_GC_ARRAY) ||
+            payload != (const void *)(uintptr_t)root.bits ||
+            !kiln_c99_graph_inert_finalizer_block(block)) return 0;
     } else {
         return 0;
     }

@@ -2220,6 +2220,104 @@ int main(void) {
 }
 
 #[test]
+fn executable_graph_capsule_moves_inline_object_and_array() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap sender, receiver;
+    kiln_c99_par_arena candidate;
+    kiln_nursery_chunk *chunk;
+    kiln_c99_graph_capsule capsule;
+    kiln_shape shape;
+    kiln_object *object;
+    kiln_array *array;
+    kiln_string *text;
+    kiln_val external[1];
+    kiln_value root;
+    size_t bit;
+    uint64_t reservation = 91;
+    kiln_c99_gc_heap_init(&sender);
+    kiln_c99_gc_heap_init(&receiver);
+    if (!kiln_c99_graph_candidate_open(&candidate, &sender,
+                                        sender.nursery.capacity)) return 1;
+    object = (kiln_object *)kiln_c99_par_alloc(&candidate, KILN_GC_OBJECT, sizeof *object);
+    array = (kiln_array *)kiln_c99_par_alloc(&candidate, KILN_GC_ARRAY, sizeof *array);
+    text = (kiln_string *)kiln_c99_par_alloc(&candidate, KILN_GC_STRING,
+                                              sizeof *text + 3);
+    if (object == NULL || array == NULL || text == NULL) return 2;
+    memset(&shape, 0, sizeof shape);
+    shape.shared = 1;
+    shape.property_count = 1;
+    shape.keys[0] = kiln_c99_key_empty;
+    memset(object, 0, sizeof *object);
+    object->prototype = kiln_c99_undefined();
+    object->shape = &shape;
+    object->slots = object->inline_slots;
+    object->slot_capacity = KILN_C99_INLINE_SLOTS;
+    for (size_t i = 0; i < KILN_C99_INLINE_SLOTS; ++i)
+        object->slots[i] = KILN_VAL_UNDEFINED;
+    object->slots[0] = KILN_VAL_TAG_PTR(KILN_TAG_BUFFER_PREFIX, array);
+    memset(array, 0, sizeof *array);
+    array->elements = array->inline_elements;
+    array->count = 1;
+    array->capacity = 8;
+    array->properties = kiln_c99_undefined();
+    array->match_index = -1;
+    array->match_input = kiln_c99_undefined();
+    array->match_groups = kiln_c99_undefined();
+    array->inline_elements[0] = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, text);
+    text->unit_len = 3;
+    text->flags = KILN_STRING_LATIN1;
+    text->data = text + 1;
+    memcpy((void *)text->data, "yes", 3);
+    kiln_c99_par_arena_seal(&candidate);
+    chunk = candidate.filled;
+    if (chunk == NULL || !kiln_c99_heap_adopt_chunks(&sender, chunk)) return 3;
+    root = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
+    if (!kiln_c99_graph_capsule_prepare(&sender, chunk, root, &capsule)) return 4;
+    external[0] = object->slots[0];
+    object->slots = external;
+    if (kiln_c99_graph_capsule_prepare(&sender, chunk, root, &capsule)) return 5;
+    object->slots = object->inline_slots;
+    array->properties = root;
+    if (kiln_c99_graph_capsule_prepare(&sender, chunk, root, &capsule)) return 6;
+    array->properties = kiln_c99_undefined();
+    shape.shared = 0;
+    if (kiln_c99_graph_capsule_prepare(&sender, chunk, root, &capsule)) return 7;
+    shape.shared = 1;
+    bit = (size_t)((char *)((kiln_gc_block *)object - 1) - chunk->base) >> 4;
+    chunk->finals[bit >> 6] &= ~(UINT64_C(1) << (bit & 63));
+    if (kiln_c99_graph_capsule_prepare(&sender, chunk, root, &capsule)) return 8;
+    chunk->finals[bit >> 6] |= UINT64_C(1) << (bit & 63);
+    if (!kiln_c99_graph_capsule_prepare(&sender, chunk, root, &capsule)) return 9;
+    if (!kiln_c99_graph_capsule_receiver_preflight(&receiver, &capsule.needs,
+                                                    reservation)) return 10;
+    if (!kiln_c99_graph_capsule_detach(&sender, &capsule)) return 11;
+    kiln_c99_graph_capsule_adopt(&receiver, &capsule, reservation);
+    if (sender.count != 0 || receiver.count != 3 ||
+        receiver.realm.graph_inbox_root.bits != root.bits ||
+        kiln_c99_gc_lookup(&receiver, object) == NULL ||
+        kiln_c99_gc_lookup(&sender, object) != NULL) return 12;
+    kiln_c99_gc_mark_realm(&receiver);
+    if (((kiln_gc_block *)object - 1)->mark != receiver.epoch ||
+        ((kiln_gc_block *)array - 1)->mark != receiver.epoch ||
+        ((kiln_gc_block *)text - 1)->mark != receiver.epoch) return 13;
+    kiln_c99_nursery_destroy(&sender.nursery);
+    kiln_c99_nursery_destroy(&receiver.nursery);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "graph-inline-object-array");
+    assert!(
+        run.status.success(),
+        "graph inline object/array capsule failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_graph_capsule_detaches_before_receiver_adoption() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");

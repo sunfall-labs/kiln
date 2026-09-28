@@ -3133,10 +3133,54 @@ static int kiln_c99_heap_adopt_chunks(kiln_gc_heap *heap, kiln_nursery_chunk *ch
     return 1;
 }
 
+/* These two finalizers do no work when all storage is inside the block and the object has no
+ * realm-owned side index. Keep this narrower than the collector's supported layouts: a finalizer
+ * bit is permission to run arbitrary teardown for every other kind. */
+static int kiln_c99_graph_inert_finalizer_block(const kiln_gc_block *block) {
+    size_t index;
+    switch (block->kind & KILN_GC_KIND_MASK) {
+    case KILN_GC_OBJECT: {
+        const kiln_object *object = (const kiln_object *)(block + 1);
+        const kiln_shape *shape;
+        if (block->size < sizeof *object || object->properties != NULL || object->count != 0 ||
+            object->capacity != 0 || object->sealed != NULL || object->elements != NULL ||
+            object->element_count != 0 || object->element_capacity != 0 ||
+            object->slots != object->inline_slots ||
+            object->slot_capacity != KILN_C99_INLINE_SLOTS || object->shape == NULL ||
+            object->module_namespace || object->arguments_brand || object->error_brand ||
+            object->layout_token != 0 || object->accessor_count != 0 ||
+            object->read_only_seen || object->frozen || object->not_extensible ||
+            (object->prototype.tag != KILN_VALUE_UNDEFINED &&
+             object->prototype.tag != KILN_VALUE_NULL)) return 0;
+        shape = object->shape;
+        if ((shape->shared & 1u) == 0 || shape->property_count > KILN_C99_INLINE_SLOTS ||
+            shape->special_mask != 0 || shape->accessor_mask != 0 || shape->code_mask != 0)
+            return 0;
+        for (index = 0; index < shape->property_count; ++index) {
+            if (!kiln_c99_key_is_shared(shape->keys[index])) return 0;
+        }
+        return 1;
+    }
+    case KILN_GC_ARRAY: {
+        const kiln_array *array = (const kiln_array *)(block + 1);
+        if (block->size < sizeof *array || array->count > array->capacity ||
+            array->count > 8 || array->capacity > 8 ||
+            (array->elements == NULL ? (array->count != 0 || array->capacity != 0)
+                                     : array->elements != array->inline_elements) ||
+            array->properties.tag != KILN_VALUE_UNDEFINED ||
+            array->match_input.tag != KILN_VALUE_UNDEFINED ||
+            array->match_groups.tag != KILN_VALUE_UNDEFINED || array->match_index != -1 ||
+            array->frozen || array->not_extensible) return 0;
+        return 1;
+    }
+    default:
+        return 0;
+    }
+}
+
 /* A candidate must still have its original contiguous bump layout. Promoted chunks can have
  * holes after a collection and need a different proof. Check the complete bitmap, rather than
- * trusting the chunk's counters or only the headers encountered by a forward walk. A finalizer
- * can own bytes or an entry in a realm side table, so this primitive refuses it outright. */
+ * trusting the chunk's counters or only the headers encountered by a forward walk. */
 static int kiln_c99_chunk_sealed_for_move(const kiln_gc_nursery *nursery,
                                           const kiln_nursery_chunk *chunk) {
     const char *region = (const char *)chunk;
@@ -3157,7 +3201,7 @@ static int kiln_c99_chunk_sealed_for_move(const kiln_gc_nursery *nursery,
         chunk->base != region + KILN_NURSERY_HEADER + 3 * bitmap_bytes ||
         chunk->limit < chunk->base || chunk->limit > region + nursery->capacity) return 0;
     for (word = 0; word < nursery->bitmap_words; ++word) {
-        if (chunk->finals[word] != 0) return 0;
+        if ((chunk->finals[word] & ~chunk->bitmap[word]) != 0) return 0;
         bits += (size_t)__builtin_popcountll(chunk->bitmap[word]);
     }
     for (cursor = chunk->base; cursor < chunk->limit;) {
@@ -3178,6 +3222,12 @@ static int kiln_c99_chunk_sealed_for_move(const kiln_gc_nursery *nursery,
             return 0;
         total = (sizeof(kiln_gc_block) + payload + 15) & ~(size_t)15;
         if (total > remaining) return 0;
+        {
+            int final_bit = (chunk->finals[bit >> 6] & (UINT64_C(1) << (bit & 63))) != 0;
+            uint32_t kind = block->kind & KILN_GC_KIND_MASK;
+            if (final_bit && !kiln_c99_graph_inert_finalizer_block(block)) return 0;
+            if (!final_bit && (kind == KILN_GC_OBJECT || kind == KILN_GC_ARRAY)) return 0;
+        }
         cursor += total;
         bytes += block->size;
         count += 1;
@@ -3209,6 +3259,12 @@ static int kiln_c99_graph_follow(kiln_c99_graph_walk *walk, const void *payload)
     return 1;
 }
 
+static int kiln_c99_graph_pointer_names_member(const kiln_c99_graph_walk *walk,
+                                                const void *pointer) {
+    const kiln_gc_block *block = kiln_c99_gc_lookup_interior(walk->heap, (uintptr_t)pointer);
+    return block != NULL && kiln_c99_gc_ptrset_contains(&walk->members, block);
+}
+
 static int kiln_c99_graph_follow_val(kiln_c99_graph_walk *walk, kiln_val value) {
     const void *payload;
     const kiln_gc_block *block;
@@ -3216,15 +3272,29 @@ static int kiln_c99_graph_follow_val(kiln_c99_graph_walk *walk, kiln_val value) 
     if (KILN_VAL_IS_NUMBER(value) || KILN_VAL_IS_IMMEDIATE(value) ||
         KILN_VAL_IS_BUILTIN(value) || KILN_VAL_IS_METHOD(value)) return 1;
     if ((value & KILN_TAG_MASK) != KILN_TAG_STRING_PREFIX &&
-        (value & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX) return 0;
+        (value & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX &&
+        (value & KILN_TAG_MASK) != KILN_TAG_OBJECT_PREFIX &&
+        (value & KILN_TAG_MASK) != KILN_TAG_BUFFER_PREFIX) return 0;
     payload = KILN_VAL_PTR(value);
     block = kiln_c99_gc_lookup(walk->heap, payload);
     if (block == NULL || (const void *)(block + 1) != payload) return 0;
     kind = block->kind & KILN_GC_KIND_MASK;
     if ((value & KILN_TAG_MASK) == KILN_TAG_STRING_PREFIX) {
         if (kind != KILN_GC_STRING && kind != KILN_GC_SLICED_STRING) return 0;
-    } else if (kind != KILN_GC_CELL) {
-        return 0;
+    } else {
+        switch (value & KILN_TAG_MASK) {
+        case KILN_TAG_CELL_PREFIX:
+            if (kind != KILN_GC_CELL) return 0;
+            break;
+        case KILN_TAG_OBJECT_PREFIX:
+            if (kind != KILN_GC_OBJECT) return 0;
+            break;
+        case KILN_TAG_BUFFER_PREFIX:
+            if (kind != KILN_GC_ARRAY) return 0;
+            break;
+        default:
+            return 0;
+        }
     }
     return kiln_c99_graph_follow(walk, payload);
 }
@@ -3281,6 +3351,26 @@ static int kiln_c99_graph_walk_block(kiln_c99_graph_walk *walk, kiln_gc_block *b
     case KILN_GC_CELL:
         if (block->size < sizeof(kiln_val)) return 0;
         return kiln_c99_graph_follow_val(walk, *(const kiln_val *)(block + 1));
+    case KILN_GC_OBJECT: {
+        const kiln_object *object = (const kiln_object *)(block + 1);
+        size_t index;
+        if (!kiln_c99_graph_inert_finalizer_block(block)) return 0;
+        if (kiln_c99_graph_pointer_names_member(walk, object->shape)) return 0;
+        for (index = 0; index < object->shape->property_count; ++index) {
+            if (kiln_c99_graph_pointer_names_member(walk, object->shape->keys[index])) return 0;
+            if (!kiln_c99_graph_follow_val(walk, object->slots[index])) return 0;
+        }
+        return 1;
+    }
+    case KILN_GC_ARRAY: {
+        const kiln_array *array = (const kiln_array *)(block + 1);
+        size_t index;
+        if (!kiln_c99_graph_inert_finalizer_block(block)) return 0;
+        for (index = 0; index < array->count; ++index) {
+            if (!kiln_c99_graph_follow_val(walk, array->elements[index])) return 0;
+        }
+        return 1;
+    }
     default:
         return 0;
     }
