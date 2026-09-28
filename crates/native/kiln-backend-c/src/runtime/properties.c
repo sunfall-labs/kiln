@@ -929,6 +929,74 @@ static int kiln_c99_own_slot_key(kiln_value target, const kiln_string *key,
     return KILN_C99_OK;
 }
 
+/* Commit one complete own data descriptor. Bootstrap callers can supply the final attributes
+ * when the key is inserted instead of taking a writable record pointer and fixing it later.
+ * The ordinary assignment path still handles inherited setters and read-only properties. */
+static int kiln_c99_commit_own_data_key(kiln_value target, const kiln_string *key,
+                                        kiln_value value, int enumerable, int writable,
+                                        int configurable) {
+    kiln_property *slot;
+    kiln_object *object;
+    int status = kiln_c99_own_slot_key(target, key, NULL, &slot);
+    if (status != KILN_C99_OK) return status;
+    object = kiln_c99_object_of(target);
+    kiln_c99_prototype_touched(object);
+    if (slot->accessor && object->accessor_count != 0) object->accessor_count -= 1;
+    slot->accessor = 0;
+    slot->refused = 0;
+    slot->value = value;
+    slot->enumerable = enumerable && !kiln_c99_key_is_reserved(slot->key);
+    slot->writable = writable;
+    slot->configurable = configurable;
+    slot->symbol_hidden = 0;
+    if (!enumerable && kiln_c99_key_is_reserved(slot->key)) {
+        kiln_value symbol;
+        if (kiln_c99_symbol_of_key_view(slot->key, &symbol)) slot->symbol_hidden = 1;
+    }
+    if (!writable) object->read_only_seen = 1;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_commit_own_data(kiln_value target, const char *key, size_t key_len,
+                                    kiln_value value, int enumerable, int writable,
+                                    int configurable) {
+    kiln_string view;
+    if (key_len > UINT32_MAX) return KILN_C99_OUT_OF_MEMORY;
+    view.unit_len = (uint32_t)key_len;
+    view.flags = kiln_c99_fixed_key_flags(key, key_len);
+    view.data = key;
+    return kiln_c99_commit_own_data_key(target, &view, value, enumerable, writable,
+                                         configurable);
+}
+
+/* Preserve DefineMethod's assignment semantics, including a setter on the prototype or an
+ * existing read-only own property, while keeping its record update inside property storage.
+ * A future direct descriptor/value store can implement this boundary without exposing a
+ * writable kiln_property pointer to the definition caller. */
+static int kiln_c99_commit_method_key(kiln_value target, const kiln_string *key,
+                                      kiln_value method) {
+    kiln_object *object;
+    size_t index;
+    int status = kiln_c99_put_mode_key(NULL, target, key, NULL, method, 0, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    object = kiln_c99_object_of(target);
+    if (object->shape != NULL) {
+        kiln_c99_ensure_dictionary(object);
+        object->shape = NULL;
+    }
+    for (index = 0; index < object->count; ++index) {
+        kiln_property *slot = &object->properties[index];
+        kiln_value symbol;
+        if (!kiln_c99_same_key_view(slot, key)) continue;
+        slot->enumerable = 0;
+        if (kiln_c99_key_is_reserved(slot->key) &&
+            kiln_c99_symbol_of_key_view(slot->key, &symbol))
+            slot->symbol_hidden = 1;
+        return KILN_C99_OK;
+    }
+    KILN_C99_REFUSE("a method definition that left no property slot");
+}
+
 /* Write an own data property the way an assignment would have left it, without asking the
  * prototype chain for permission first.
  *

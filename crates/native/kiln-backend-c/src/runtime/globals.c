@@ -517,15 +517,16 @@ static int kiln_c99_global_object(kiln_value *out) {
     }
     for (index = 0; index < sizeof constructors / sizeof *constructors && status == KILN_C99_OK;
          ++index) {
-        status = kiln_c99_put(NULL, *globals, constructors[index].name,
-                              strlen(constructors[index].name),
-                              kiln_c99_builtin(constructors[index].builtin), 0, NULL);
+        status = kiln_c99_commit_own_data(*globals, constructors[index].name,
+                                          strlen(constructors[index].name),
+                                          kiln_c99_builtin(constructors[index].builtin),
+                                          0, 1, 1);
     }
     for (index = 0; index < sizeof functions / sizeof *functions && status == KILN_C99_OK;
          ++index) {
-        status = kiln_c99_put(NULL, *globals, functions[index].name,
-                              strlen(functions[index].name),
-                              kiln_c99_method(functions[index].code), 0, NULL);
+        status = kiln_c99_commit_own_data(*globals, functions[index].name,
+                                          strlen(functions[index].name),
+                                          kiln_c99_method(functions[index].code), 0, 1, 1);
     }
     /* The two the realm builds rather than names: each is a real object with its own slot, so
      * `globalThis.console === console` and a second read finds the same one. */
@@ -533,22 +534,23 @@ static int kiln_c99_global_object(kiln_value *out) {
         kiln_value built;
         status = kiln_c99_atomics_object(&built);
         if (status == KILN_C99_OK) {
-            status = kiln_c99_put(NULL, *globals, "Atomics", 7, built, 0, NULL);
+            status = kiln_c99_commit_own_data(*globals, "Atomics", 7, built, 0, 1, 1);
         }
     }
     if (status == KILN_C99_OK) {
         kiln_value built;
         status = kiln_c99_console_object(&built);
         if (status == KILN_C99_OK) {
-            status = kiln_c99_put(NULL, *globals, "console", 7, built, 0, NULL);
+            status = kiln_c99_commit_own_data(*globals, "console", 7, built, 0, 1, 1);
         }
     }
     /* Whether this realm installs kiln's own members (ADR 0068), for the shared bootstrap's
      * `%TypedArray%.prototype`, which installs its extension itself. Captured and deleted by
      * `kiln-builtins/src/extensions.ts` before any program runs, as the interpreter does. */
     if (status == KILN_C99_OK) {
-        status = kiln_c99_put(NULL, *globals, "__kilnExtensions", 16,
-                              kiln_c99_boolean(kiln_c99_kiln_extensions_on()), 0, NULL);
+        status = kiln_c99_commit_own_data(*globals, "__kilnExtensions", 16,
+                                          kiln_c99_boolean(kiln_c99_kiln_extensions_on()),
+                                          0, 1, 1);
     }
     /* `process` too: the bare name loaded it by demand while `globalThis.process` answered
      * `undefined` (2026-09-19). One object, the realm slot's, so the two spellings agree. */
@@ -556,7 +558,7 @@ static int kiln_c99_global_object(kiln_value *out) {
         kiln_value built;
         status = kiln_c99_process_object(&built);
         if (status == KILN_C99_OK) {
-            status = kiln_c99_put(NULL, *globals, "process", 7, built, 0, NULL);
+            status = kiln_c99_commit_own_data(*globals, "process", 7, built, 0, 1, 1);
         }
     }
     /* `crypto` is a namespace built-in with no rows, so a member read refuses by name rather than
@@ -565,8 +567,8 @@ static int kiln_c99_global_object(kiln_value *out) {
      * it replaces rather than patches because a write into a built-in's store bumps
      * `kiln_c99_builtin_store_epoch` and would switch off built-in speculation for the program. */
     if (status == KILN_C99_OK) {
-        status = kiln_c99_put(NULL, *globals, "crypto", 6, kiln_c99_builtin(KILN_C99_BUILTIN_CRYPTO), 0,
-                              NULL);
+        status = kiln_c99_commit_own_data(*globals, "crypto", 6,
+                                          kiln_c99_builtin(KILN_C99_BUILTIN_CRYPTO), 0, 1, 1);
     }
     /* The three value properties of the global object are the only ones the specification locks
      * on every axis: `{ writable: false, enumerable: false, configurable: false }`. An ordinary
@@ -588,42 +590,24 @@ static int kiln_c99_global_object(kiln_value *out) {
         values[1] = 1.0 / 0.0;
         values[2] = 0.0;
         for (index = 0; index < sizeof locked / sizeof *locked && status == KILN_C99_OK; ++index) {
-            kiln_property *slot;
-            status = kiln_c99_own_slot(*globals, locked[index].name, locked[index].length, &slot);
-            if (status != KILN_C99_OK) {
-                break;
-            }
-            slot->accessor = 0;
-            slot->value = locked[index].is_undefined ? kiln_c99_undefined()
-                                                     : kiln_c99_number(values[index]);
-            slot->enumerable = 0;
-            slot->writable = 0;
-            slot->configurable = 0;
-            kiln_c99_object_of(*globals)->read_only_seen = 1;
+            status = kiln_c99_commit_own_data(
+                *globals, locked[index].name, locked[index].length,
+                locked[index].is_undefined ? kiln_c99_undefined()
+                                           : kiln_c99_number(values[index]),
+                0, 0, 0);
         }
     }
     /* It holds itself under both of its names, which is how a program reaches it without a
      * keyword: `global.Object === Object` is the standard test for "am I in a realm that has
      * one". */
     if (status == KILN_C99_OK) {
-        status = kiln_c99_put(NULL, *globals, "globalThis", 10, *globals, 0, NULL);
+        status = kiln_c99_commit_own_data(*globals, "globalThis", 10, *globals, 0, 1, 1);
     }
     if (status == KILN_C99_OK) {
-        status = kiln_c99_put(NULL, *globals, "global", 6, *globals, 0, NULL);
+        status = kiln_c99_commit_own_data(*globals, "global", 6, *globals, 0, 1, 1);
     }
     if (status != KILN_C99_OK) {
         return status;
-    }
-    {
-        kiln_object *object = kiln_c99_object_of(*globals);
-        size_t slot;
-        if (object->shape != NULL) {
-            kiln_c99_ensure_dictionary(object);
-            object->shape = NULL;
-        }
-        for (slot = 0; slot < object->count; ++slot) {
-            object->properties[slot].enumerable = 0;
-        }
     }
     *out = *globals;
     return KILN_C99_OK;

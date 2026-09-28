@@ -1400,8 +1400,6 @@ static int kiln_c99_define_private_key(kiln_value target, const kiln_string *key
 static int kiln_c99_define_method_key(kiln_value target, const kiln_string *key,
                                       kiln_value method) {
     if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
-    kiln_object *object;
-    size_t index;
     int status;
     if (target.tag == KILN_VALUE_FUNCTION || target.tag == KILN_VALUE_METHOD ||
         target.tag == KILN_VALUE_BUILTIN) {
@@ -1420,23 +1418,7 @@ static int kiln_c99_define_method_key(kiln_value target, const kiln_string *key,
                                             &status);
         if (shaped) return status;
     }
-    status = kiln_c99_put_mode_key(NULL, target, key, NULL, method, 0, 0, NULL);
-    if (status != KILN_C99_OK) {
-        return status;
-    }
-    object = kiln_c99_object_of(target);
-    if (object->shape != NULL) {
-        kiln_c99_ensure_dictionary(object);
-        object->shape = NULL;
-    }
-    for (index = 0; index < object->count; ++index) {
-        if (kiln_c99_same_key_view(&object->properties[index], key)) {
-            object->properties[index].enumerable = 0;
-            kiln_c99_hide_symbol_property(&object->properties[index]);
-            return KILN_C99_OK;
-        }
-    }
-    KILN_C99_REFUSE("a method definition that left no property slot");
+    return kiln_c99_commit_method_key(target, key, method);
 }
 
 /* Fixed C names use a borrowed Latin-1 view; the headed implementation above owns the write. */
