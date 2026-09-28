@@ -949,6 +949,8 @@ static int kiln_c99_read_property(kiln_host *host, kiln_value target,
                                   const char *key, size_t key_len,
                                   int depth, kiln_value *thrown,
                                   kiln_c99_site *site, kiln_value *out) {
+    if (target.tag == KILN_VALUE_OBJECT && kiln_c99_object_of(target)->sealed != NULL)
+        site = NULL;
     if (site != NULL) {
         if (KILN_LIKELY(target.tag == KILN_VALUE_OBJECT)) {
             const kiln_object *object = kiln_c99_object_of(target);
@@ -1008,6 +1010,9 @@ static int kiln_c99_write_property(kiln_host *host, kiln_value target,
                                    kiln_c99_site *site) {
     if (site != NULL && target.tag == KILN_VALUE_OBJECT) {
         kiln_object *object = kiln_c99_object_of(target);
+        if (object->sealed != NULL)
+            return kiln_c99_put_site(host, target, key, key_len, value, strict, depth,
+                                     thrown, NULL);
         const kiln_c99_pic_entry *entry =
             object->shape != NULL ? kiln_c99_site_entry(site, object->shape) : NULL;
         kiln_c99_prototype_touched(object);

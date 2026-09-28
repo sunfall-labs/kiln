@@ -2167,6 +2167,9 @@ static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, siz
 static int kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object,
                                const kiln_string *key, const kiln_string *canonical) {
     size_t index;
+    /* A sealed store projects values and visibility from realm-owned storage. No dictionary
+     * index or shaped slot can identify one of its properties for this site. */
+    if (object->sealed != NULL) return 0;
     if (kiln_c99_key_is_reserved(key) || kiln_c99_same_name_key(key, "__proto__")) {
         return 0;
     }
@@ -2189,6 +2192,7 @@ static int kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object,
     }
     if (object->prototype.tag == KILN_VALUE_OBJECT) {
         const kiln_object *parent = kiln_c99_object_of(object->prototype);
+        if (parent->sealed != NULL) return 0;
         for (index = 0; index < parent->count && parent->properties != NULL; ++index) {
             if (kiln_c99_same_key_view(&parent->properties[index], key)) {
                 kiln_c99_site_set_dictionary(site, 0, kiln_c99_site_encode_dictionary_index(index));
@@ -2217,6 +2221,8 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const kiln_stri
     }
     {
         const kiln_object *object = kiln_c99_object_of(target);
+        if (object->sealed != NULL)
+            return kiln_c99_get_key(host, target, key, canonical, out, depth, thrown);
         if (object->shape != NULL) {
             const kiln_c99_pic_entry *entry = kiln_c99_site_entry(site, object->shape);
             if (entry != NULL && entry->slot < object->slot_capacity) {
@@ -2241,6 +2247,7 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const kiln_stri
                 kiln_value current = object->prototype;
                 while (current.tag == KILN_VALUE_OBJECT) {
                     const kiln_object *proto_obj = kiln_c99_object_of(current);
+                    if (proto_obj->sealed != NULL) goto generic;
                     if (proto_obj->shape != NULL) {
                         uint32_t proto_slot;
                         if (canonical != NULL &&
@@ -2279,6 +2286,7 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const kiln_stri
                    !kiln_c99_same_key_view(&object->properties[index], key)) ++index;
             if (index == object->count) {
                 const kiln_object *parent = kiln_c99_object_of(object->prototype);
+                if (parent->sealed != NULL) goto generic;
                 uint32_t at = kiln_c99_site_decode_dictionary_index(kiln_c99_site_proto(site));
                 if (parent->properties != NULL && at < parent->count &&
                     kiln_c99_same_key_view(&parent->properties[at], key) &&
