@@ -767,6 +767,7 @@ const AFFINITY_FFI: u32 = 1 << 3;
 pub(crate) const AFFINITY_ATOMICS_WAIT: u32 = 1 << 4;
 
 struct NativeRealm {
+    handle: Cell<u64>,
     runtime: NativeRuntime,
     work: RefCell<Realm<NativeMicrotask, NativeWork>>,
     continuations: RefCell<HashMap<RequestId, AsyncContinuation>>,
@@ -1164,6 +1165,9 @@ impl Drop for NativeRealm {
                 kiln_runtime::workers::RealmScopeGuard::enter(Rc::clone(&self.worker_scope));
             kiln_runtime::workers::finish_children();
         }
+        /* TLS registry teardown may drop a realm without an explicit kiln_realm_destroy call.
+         * Its actor grants must leave the process registry on that path as well. */
+        kiln_runtime::workers::actor_revoke_realm(self.handle.get());
         // Teardown runs prelude code -- the callable stores' and work items' destructors below,
         // the collector's teardown hooks -- and the prelude finds its heap by asking which one is
         // current on this thread. A realm is destroyed outside `ActiveRealm`, so nothing is: the
@@ -1246,6 +1250,7 @@ impl NativeRealm {
         reactor: Arc<kiln_runtime::Reactor>,
     ) -> Result<Self, kiln_runtime::RuntimeBuildError> {
         Ok(Self {
+            handle: Cell::new(0),
             runtime: NativeRuntime {
                 executor: RefCell::new(Some(Executor::on_reactor(Arc::clone(&reactor)))),
                 reactor,
@@ -2188,6 +2193,7 @@ pub unsafe extern "C" fn kiln_realm_create(out: *mut u64) -> i32 {
         }) else {
             return RUNTIME_ERROR;
         };
+        realm.handle.set(handle);
         REALMS.with(|realms| {
             realms.borrow_mut().insert(handle, Rc::new(realm));
         });
