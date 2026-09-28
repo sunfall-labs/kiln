@@ -15,3 +15,5 @@ kiln build --node --output piscina-native piscina.cjs && ./piscina-native
 The expected stdout is `{"level":30,"answer":42,"msg":"worker transport"}` for pino
 and `42` for piscina. `kiln.include` declares the worker scripts and the runtime targets
 they load. The parent must not evaluate these modules at startup.
+
+The Node oracle was recorded with Node 26.8.1 and npm 11.19.0.
