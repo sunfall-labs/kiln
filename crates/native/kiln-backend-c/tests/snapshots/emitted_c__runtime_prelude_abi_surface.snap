@@ -2175,6 +2175,7 @@ static int kiln_c99_graph_candidate_closed(const kiln_gc_heap *heap,
 done:
 typedef enum kiln_c99_graph_incoming_result {
 static int kiln_c99_graph_in_batch(const kiln_gc_heap *heap,
+static int kiln_c99_graph_machine_words_alias(const kiln_gc_heap *heap,
 static int kiln_c99_graph_val_in_batch(const kiln_gc_heap *heap,
 static int kiln_c99_graph_value_in_batch(const kiln_gc_heap *heap,
 static int kiln_c99_graph_has_c_root_alias(const kiln_gc_heap *heap,
