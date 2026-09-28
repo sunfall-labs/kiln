@@ -4,11 +4,13 @@
 //! send factories or cancellation commands. This is the first scheduling mode: migration waits
 //! for the provider's realm-registry, GC and affinity audit (ADR 0070).
 
-use std::collections::{HashMap, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Waker;
+use std::time::Instant;
 
 use crate::Reactor;
 use crate::turn_queue::{ReadyQueue, TurnOutcome, TurnTicket};
@@ -60,6 +62,8 @@ impl LaneControl {
 struct RealmEntry {
     body: Box<dyn PinnedTurn>,
     status: Arc<AtomicU8>,
+    ticket: Arc<TurnTicket>,
+    deadline_epoch: u64,
 }
 
 /// Observable state of a pinned scheduler realm.
@@ -222,7 +226,39 @@ impl Drop for PinnedTurnScheduler {
 
 fn run_lane(lane: Arc<LaneControl>, reactor: Arc<Reactor>) {
     let mut realms = HashMap::<u64, RealmEntry>::new();
-    while let Some(lease) = lane.queue.take() {
+    // One heap per lane schedules all pure realm timers without a Tokio task or OS thread per
+    // realm. The epoch invalidates an old deadline when an external wake runs that realm first.
+    let mut deadlines = BinaryHeap::<Reverse<(Instant, u64, u64)>>::new();
+    loop {
+        let now = Instant::now();
+        while let Some(&Reverse((at, realm_id, epoch))) = deadlines.peek() {
+            if at > now {
+                break;
+            }
+            deadlines.pop();
+            if let Some(realm) = realms.get(&realm_id)
+                && realm.deadline_epoch == epoch
+            {
+                realm.ticket.wake();
+            }
+        }
+        let lease = match deadlines.peek() {
+            Some(&Reverse((at, _, _))) => {
+                lane.queue.take_timeout(at.saturating_duration_since(now))
+            }
+            None => lane.queue.take(),
+        };
+        let Some(lease) = lease else {
+            // A timed wait returns None both on timeout and on shutdown. A closed queue rejects
+            // the control ticket, so use the next deadline to distinguish the ordinary timeout.
+            if deadlines
+                .peek()
+                .is_some_and(|Reverse((at, _, _))| *at <= Instant::now())
+            {
+                continue;
+            }
+            break;
+        };
         let realm_id = lease.realm_id();
         if realm_id == 0 {
             let commands = {
@@ -247,7 +283,15 @@ fn run_lane(lane: Arc<LaneControl>, reactor: Arc<Reactor>) {
                             factory(Arc::clone(&reactor), Arc::clone(&ticket))
                         })) {
                             Ok(body) => {
-                                realms.insert(realm_id, RealmEntry { body, status });
+                                realms.insert(
+                                    realm_id,
+                                    RealmEntry {
+                                        body,
+                                        status,
+                                        ticket: Arc::clone(&ticket),
+                                        deadline_epoch: 0,
+                                    },
+                                );
                                 ticket.wake();
                             }
                             Err(_) => {
@@ -273,6 +317,10 @@ fn run_lane(lane: Arc<LaneControl>, reactor: Arc<Reactor>) {
         match result {
             Ok(outcome) => {
                 let done = matches!(outcome, TurnOutcome::Done);
+                realm.deadline_epoch = realm.deadline_epoch.wrapping_add(1);
+                if let TurnOutcome::ParkedUntil(at) = &outcome {
+                    deadlines.push(Reverse((*at, realm_id, realm.deadline_epoch)));
+                }
                 if done {
                     let _ = realm.status.compare_exchange(
                         PinnedTurnStatus::Active as u8,
@@ -507,5 +555,40 @@ mod tests {
         let lanes = lanes.lock().unwrap();
         assert_eq!(lanes.len(), 20);
         assert!(lanes.iter().all(|lane| *lane == lanes[0]));
+    }
+
+    #[test]
+    fn pure_deadlines_wake_many_parked_realms_on_fixed_lanes() {
+        let scheduler = PinnedTurnScheduler::new(2).expect("lanes start");
+        let realms = (0..100)
+            .map(|_| {
+                scheduler.spawn_pinned(|_, _| {
+                    let owner = std::thread::current().id();
+                    let mut first = true;
+                    move |_: &Waker| {
+                        assert_eq!(std::thread::current().id(), owner);
+                        if first {
+                            first = false;
+                            TurnOutcome::ParkedUntil(Instant::now() + Duration::from_millis(2))
+                        } else {
+                            TurnOutcome::Done
+                        }
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while realms
+            .iter()
+            .any(|realm| realm.status() == PinnedTurnStatus::Active)
+        {
+            assert!(Instant::now() < deadline, "all pure deadlines wake");
+            std::thread::yield_now();
+        }
+        assert!(
+            realms
+                .iter()
+                .all(|realm| realm.status() == PinnedTurnStatus::Complete)
+        );
     }
 }

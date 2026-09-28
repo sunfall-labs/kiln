@@ -193,6 +193,8 @@ pub enum TurnOutcome {
     Ready,
     /// Wait for an external wake or deadline.
     Parked,
+    /// Wake at this monotonic deadline unless an external event runs the realm first.
+    ParkedUntil(Instant),
     /// Realm teardown may begin; later wakes are discarded.
     Done,
 }
@@ -257,7 +259,7 @@ impl TurnTicket {
                     state.phase = Phase::Parked;
                 }
             }
-            TurnOutcome::Parked => {
+            TurnOutcome::Parked | TurnOutcome::ParkedUntil(_) => {
                 if state.wake_pending {
                     state.wake_pending = false;
                     if let Some(queue) = self.queue.upgrade()
