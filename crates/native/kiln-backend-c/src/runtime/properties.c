@@ -685,19 +685,9 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
                 array->count = (size_t)wanted;
                 return KILN_C99_OK;
             }
-            if (array->elements != NULL && !kiln_c99_array_elements_owned(array)) {
-                size_t grown = array->capacity < 16 ? 16 : array->capacity;
-                while (grown < (size_t)wanted) grown *= 2;
-                kiln_val *moved = (kiln_val *)malloc(grown * sizeof(kiln_val));
-                if (KILN_UNLIKELY(moved == NULL)) return KILN_C99_OUT_OF_MEMORY;
-                memcpy(moved, array->elements, array->count * sizeof(kiln_val));
-                array->elements = moved;
-                array->capacity = grown;
-            } else {
-                status = kiln_c99_array_reserve(array, (size_t)wanted);
-                if (status != KILN_C99_OK) {
-                    return status;
-                }
+            status = kiln_c99_array_reserve(array, (size_t)wanted);
+            if (status != KILN_C99_OK) {
+                return status;
             }
             for (at = array->count; at < (size_t)wanted; ++at) {
                 array->elements[at] = KILN_VAL_HOLE;

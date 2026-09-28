@@ -324,19 +324,9 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
                        ? kiln_c99_throw_read_only_key(thrown, (const kiln_string *)text.ptr)
                        : KILN_C99_OK;
         }
-        if (array->elements != NULL && !kiln_c99_array_elements_owned(array)) {
-            size_t grown = array->capacity < 16 ? 16 : array->capacity;
-            while (grown < slot + 1) grown *= 2;
-            kiln_val *moved = (kiln_val *)malloc(grown * sizeof(kiln_val));
-            if (KILN_UNLIKELY(moved == NULL)) return KILN_C99_OUT_OF_MEMORY;
-            memcpy(moved, array->elements, array->count * sizeof(kiln_val));
-            array->elements = moved;
-            array->capacity = grown;
-        } else {
-            status = kiln_c99_array_reserve(array, slot + 1);
-            if (status != KILN_C99_OK) {
-                return status;
-            }
+        status = kiln_c99_array_reserve(array, slot + 1);
+        if (status != KILN_C99_OK) {
+            return status;
         }
         /* Growing leaves holes, which read as undefined and are not the same thing. */
         if (slot > array->count) {

@@ -73,7 +73,7 @@ static int kiln_c99_array_reserve(kiln_array *array, size_t needed) {
         if (moved == NULL) {
             return KILN_C99_OUT_OF_MEMORY;
         }
-        memcpy(moved, array->elements, array->capacity * sizeof(kiln_val));
+        memcpy(moved, array->elements, array->count * sizeof(kiln_val));
     } else {
         moved = (kiln_val *)realloc(array->elements, grown * sizeof(kiln_val));
         if (moved == NULL) {
