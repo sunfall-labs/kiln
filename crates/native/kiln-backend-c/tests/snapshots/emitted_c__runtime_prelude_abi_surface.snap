@@ -2205,8 +2205,10 @@ kiln_c99_graph_incoming_request_probe(kiln_gc_heap *heap, uint64_t request_id) {
 #endif
 static int kiln_c99_heap_move_chunks(kiln_gc_heap *from, kiln_gc_heap *to,
 enum {
+static int kiln_c99_graph_receiver_reserve_id(kiln_gc_heap *to, size_t chunk_count,
 static int kiln_c99_graph_receiver_reserve(kiln_gc_heap *to, size_t chunk_count,
 static int kiln_c99_graph_receiver_rollback(kiln_gc_heap *to, uint64_t id) {
+int kiln_c99_graph_paused_control(uint32_t kind, uint64_t first,
 static int kiln_c99_graph_receiver_move_and_publish(kiln_gc_heap *from, kiln_gc_heap *to,
 struct kiln_c99_par_arena {
 static uint64_t kiln_c99_graph_candidate_next_id;
@@ -3107,6 +3109,13 @@ int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code
 #define KILN_C99_WORKER_OP_ACTOR_ISOLATED_HAS 27
 #define KILN_C99_WORKER_OP_ACTOR_CANDIDATE_BEGIN 28
 #define KILN_C99_WORKER_OP_ACTOR_CANDIDATE_END 29
+#define KILN_C99_WORKER_OP_ACTOR_GRAPH_REQUEST 30
+#define KILN_C99_WORKER_OP_ACTOR_GRAPH_STATUS 31
+#define KILN_C99_WORKER_OP_ACTOR_GRAPH_CANCEL 32
+#define KILN_C99_WORKER_OP_ACTOR_BIND_RECEIVER 33
+#define KILN_C99_WORKER_OP_ACTOR_GRAPH_RESERVE 34
+#define KILN_C99_WORKER_OP_ACTOR_GRAPH_RECEIVE 35
+#define KILN_C99_WORKER_OP_ACTOR_GRAPH_RELEASE 36
 static uint64_t kiln_c99_worker_word(const kiln_value *args, size_t argc, size_t at) {
 static int kiln_c99_worker_tokens(kiln_value list, int copy, kiln_worker_token **out,
 static int kiln_c99_worker_value(kiln_worker_token *token, kiln_value *out) {

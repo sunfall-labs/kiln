@@ -1069,8 +1069,10 @@ fn runtime_prelude_size() {
     // it to 61,384 lines.
     // The read-only object property projection and its GC edge boundary (realms issue 08)
     // bring the measured prelude to 61,502 lines.
+    // Actor grant registration and the claimed-lane graph refusal callback (issue 10)
+    // bring the measured prelude to 61,877 lines.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 61_750;
+    const CEILING_LINES: usize = 62_000;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
