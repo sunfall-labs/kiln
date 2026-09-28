@@ -2679,20 +2679,9 @@ static int kiln_c99_worker_op_raw(kiln_value *result, const kiln_value *args, si
             status = kiln_c99_array_push(built, kiln_c99_number((double)state));
         if (status == KILN_C99_OK)
             status = kiln_c99_array_push(built, received);
-        if (status == KILN_C99_OK && state == 1) {
-            /* The native inbox keeps the moved graph rooted across array construction. Once
-             * the value is in the result, release the matching host grant before clearing
-             * that root. A failed release leaves both inbox and root intact for retry. */
-            words[0] = 0;
-            if (kiln_worker_op(KILN_C99_WORKER_OP_ACTOR_GRAPH_RELEASE, first, words) != 0 ||
-                words[0] == 0) return KILN_C99_INVALID_ARGUMENT;
-            realm->graph_inbox_state = KILN_C99_GRAPH_INBOX_EMPTY;
-            realm->graph_inbox_reservation_id = 0;
-            realm->graph_inbox_reserved_chunks = 0;
-            realm->graph_inbox_region_count = 0;
-            realm->graph_inbox_epoch = 0;
-            realm->graph_inbox_root = kiln_c99_undefined();
-        }
+        /* A successful result is only a loan. JavaScript still has to replace its preflighted
+         * placeholder; that assignment can fail. Keep the native root and host grant until
+         * GRAPH_RELEASE acknowledges that the JavaScript inbox now owns the value. */
         if (status == KILN_C99_OK) *result = built;
         return status;
     }

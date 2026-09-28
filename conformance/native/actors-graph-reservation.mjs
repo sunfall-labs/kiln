@@ -26,6 +26,25 @@ sender.postMessage({
 });
 const answer = await refusal;
 if (answer?.kind !== 'cloneError') throw new Error('forged graph placeholder was accepted');
+// A correctly shaped placeholder is held until the native handoff resolves. Cancelling that
+// request must free the actor's capacity and its one-use receiver reservation.
+const heldId = internals.workerOp(25);
+const heldReply = new MessageChannel();
+const heldGrant = new Promise(resolve => {
+  heldReply.port1.once('message', resolve);
+  heldReply.port1.start();
+});
+sender.postMessage({ kind: 'reserve', id: heldId, reply: heldReply.port2 }, [heldReply.port2]);
+const held = await heldGrant;
+if (held?.kind !== 'grant') throw new Error('held actor call was not granted');
+if (held.graphReservation) {
+  sender.postMessage({
+    kind: 'invoke', id: heldId, method: 'echo',
+    args: [{ __kilnActorGraphReservation: held.graphReservation }],
+    graphReservation: held.graphReservation,
+  });
+}
+sender.postMessage({ kind: 'cancel', id: heldId });
 if (await owner.ref.call('echo', [17]) !== 17) throw new Error('actor did not recover after refusal');
 await owner.stop();
 console.log('graph reservation refused safely');

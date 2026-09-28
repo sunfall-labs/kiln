@@ -17,6 +17,7 @@ type Reservation = {
   payload: any;
   graphReservation: number;
   graphWaiting: boolean;
+  graphSlot?: { holder: any; key: string | number };
 };
 
 let control: any;
@@ -51,31 +52,37 @@ function matchingGraphMarker(value: any, id: number): boolean {
     && Object.keys(value).length === 1 && value[graphMarker] === id;
 }
 
-function countGraphMarkers(value: any, id: number, seen = new Set<any>()): number {
-  if (value === null || typeof value !== "object" || seen.has(value)) return 0;
-  if (matchingGraphMarker(value, id)) return 1;
-  seen.add(value);
-  if (Array.isArray(value)) {
-    let count = 0;
-    for (let i = 0; i < value.length; i++) if (i in value) count += countGraphMarkers(value[i], id, seen);
-    return count;
-  }
-  if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return 0;
-  let count = 0;
-  for (const key of Object.keys(value)) count += countGraphMarkers(value[key], id, seen);
-  return count;
-}
-
-function replaceGraphMarker(value: any, id: number, graph: any, seen = new Set<any>()): any {
-  if (value === null || typeof value !== "object" || seen.has(value)) return value;
-  if (matchingGraphMarker(value, id)) return graph;
-  seen.add(value);
-  if (Array.isArray(value)) {
-    for (let i = 0; i < value.length; i++) if (i in value) value[i] = replaceGraphMarker(value[i], id, graph, seen);
-  } else if (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null) {
-    for (const key of Object.keys(value)) value[key] = replaceGraphMarker(value[key], id, graph, seen);
-  }
-  return value;
+function findGraphSlot(value: any, id: number): { holder: any; key: string | number } | undefined {
+  const seen = new Set<any>();
+  let slot: { holder: any; key: string | number } | undefined;
+  let duplicate = false;
+  const visit = (current: any, holder?: any, key?: string | number): void => {
+    if (current === null || typeof current !== "object") return;
+    if (matchingGraphMarker(current, id)) {
+      if (holder === undefined || key === undefined || slot !== undefined) {
+        duplicate = true;
+        return;
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(holder, key);
+      if (!descriptor || !("value" in descriptor) || !descriptor.writable) {
+        duplicate = true;
+        return;
+      }
+      slot = { holder, key };
+      return;
+    }
+    if (seen.has(current)) return;
+    seen.add(current);
+    if (Array.isArray(current)) {
+      for (let index = 0; index < current.length; index++) {
+        if (index in current) visit(current[index], current, index);
+      }
+    } else if (Object.getPrototypeOf(current) === Object.prototype || Object.getPrototypeOf(current) === null) {
+      for (const name of Object.keys(current)) visit(current[name], current, name);
+    }
+  };
+  visit(value);
+  return duplicate ? undefined : slot;
 }
 
 function serve(): void {
@@ -91,8 +98,11 @@ function serve(): void {
 
   function releaseGraphReservation(request: Reservation): void {
     if (!request.graphReservation) return;
-    try { internals.workerOp(GRAPH_RELEASE, request.graphReservation); } catch {}
-    request.graphReservation = 0;
+    try {
+      if (internals.workerOp(GRAPH_RELEASE, request.graphReservation) === true) {
+        request.graphReservation = 0;
+      }
+    } catch {}
   }
 
   function refuseGraph(request: Reservation): void {
@@ -118,13 +128,25 @@ function serve(): void {
         setTimeout(() => receiveGraph(request), 0);
         return;
       }
-      if (answer[0] !== 1) throw new Error("graph handoff refused");
-      request.payload.args = replaceGraphMarker(request.payload.args, request.graphReservation, answer[1]);
-      request.graphReservation = 0;
+      if (answer[0] !== 1) {
+        refuseGraph(request);
+        return;
+      }
+      const slot = request.graphSlot;
+      if (!slot || !matchingGraphMarker(slot.holder[slot.key], request.graphReservation)) {
+        throw new Error("graph placeholder changed after preflight");
+      }
+      // The C inbox retains its root while this existing own data slot is written. Only the
+      // subsequent release acknowledges that the JavaScript mailbox now owns the graph.
+      slot.holder[slot.key] = answer[1];
+      request.graphSlot = undefined;
       request.graphWaiting = false;
+      releaseGraphReservation(request);
       dispatch();
     } catch {
-      refuseGraph(request);
+      // An allocation or assignment failed after publication may be retried because the C
+      // inbox still roots the graph. Never release a possibly published reservation here.
+      setTimeout(() => receiveGraph(request), 0);
     }
   }
 
@@ -230,11 +252,21 @@ function serve(): void {
       if (request && request.granted && request.payload === undefined) {
         const graphReservation = message.graphReservation;
         if (graphReservation !== undefined) {
-          if (!request.graphReservation || graphReservation !== request.graphReservation
-            || countGraphMarkers(message.args, graphReservation) !== 1) {
+          let slot: ReturnType<typeof findGraphSlot>;
+          try {
+            slot = request.graphReservation && graphReservation === request.graphReservation
+              ? findGraphSlot(message.args, graphReservation) : undefined;
+          } catch {
+            // A malformed clone must not escape the inbox callback with a granted request
+            // still occupying capacity and a native reservation still rooted.
             refuseGraph(request);
             return;
           }
+          if (!slot) {
+            refuseGraph(request);
+            return;
+          }
+          request.graphSlot = slot;
           request.graphWaiting = true;
         } else {
           releaseGraphReservation(request);
