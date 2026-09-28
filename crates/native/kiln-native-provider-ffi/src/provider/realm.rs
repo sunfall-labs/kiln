@@ -16,6 +16,7 @@ use kiln_runtime::{
 use kiln_string::StringUnits;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
@@ -747,6 +748,9 @@ impl hashbrown::Equivalent<StringUnits> for BorrowedStringView<'_> {
 struct ScheduledWait {
     wake: Rc<Cell<Option<kiln_runtime::DriveWake>>>,
     yield_first: bool,
+    timer_armed: Rc<Cell<bool>>,
+    virtual_delay: Option<Duration>,
+    advanced: bool,
 }
 
 /// Reasons a scheduled realm must keep its current OS lane. These are deliberately lifetime
@@ -1689,9 +1693,33 @@ fn drive_scheduled_inner(realm: &NativeRealm, waker: &Waker) -> ScheduledStep {
     // becoming ready while another realm runs queues this realm without a parked OS thread.
     realm.runtime.executor().poll_local_once(waker);
     let pending_wait = { realm.scheduled_wait.borrow_mut().take() };
-    if let Some(wait) = pending_wait {
+    if let Some(mut wait) = pending_wait {
+        if wait.wake.get().is_none()
+            && !wait.advanced
+            && wait.timer_armed.get()
+            && let Some(delay) = wait.virtual_delay
+        {
+            // The waiter has polled its timer after the preceding yield. Advancing earlier
+            // makes the timer start at the new time and leaves the virtual realm parked.
+            wait.advanced = true;
+            // Tokio's timer wheel rounds to its next millisecond tick. Advancing by exactly
+            // the requested delay can stop just before that tick and leave the waiter asleep.
+            // This cushion affects only Tokio's paused clock; the language clock still runs
+            // the timer at its declared deadline.
+            realm
+                .runtime
+                .executor()
+                .advance_virtual_time(delay.saturating_add(Duration::from_millis(1)));
+            realm.runtime.executor().poll_local_once(waker);
+        }
         let Some(wake) = wait.wake.get() else {
+            let virtual_clock = matches!(realm.clock.get(), NativeClock::Virtual);
             realm.scheduled_wait.replace(Some(wait));
+            if virtual_clock {
+                // A current-thread reactor has no background I/O driver. Give parked sockets
+                // another bounded tick without pinning an OS thread per realm.
+                return ScheduledStep::ParkedUntil(Instant::now() + Duration::from_millis(1));
+            }
             return ScheduledStep::Parked;
         };
         if wait.yield_first
@@ -1730,28 +1758,43 @@ fn drive_scheduled_inner(realm: &NativeRealm, waker: &Waker) -> ScheduledStep {
             let virtual_delay = matches!(realm.clock.get(), NativeClock::Virtual)
                 .then_some(delay)
                 .flatten();
+            let timer_armed = Rc::new(Cell::new(false));
+            let armed_for_task = Rc::clone(&timer_armed);
             let ticket = waker.clone();
             realm.pin(AFFINITY_LOCAL_TASK);
             realm.runtime.executor().spawn_local(async move {
                 if yield_first {
                     kiln_runtime::yield_to_tasks().await;
                 }
-                let result = kiln_runtime::wait_for_turn(signal, delay).await;
+                let mut waiting = Box::pin(kiln_runtime::wait_for_turn(signal, delay));
+                let result = std::future::poll_fn(|cx| {
+                    let progress = waiting.as_mut().poll(cx);
+                    if progress.is_pending() {
+                        armed_for_task.set(true);
+                    }
+                    progress
+                })
+                .await;
                 wake_for_task.set(Some(result));
                 ticket.wake();
             });
             realm.scheduled_wait.replace(Some(ScheduledWait {
                 wake: Rc::clone(&wake),
                 yield_first,
+                timer_armed,
+                virtual_delay,
+                advanced: false,
             }));
             realm.runtime.executor().poll_local_once(waker);
-            if let Some(delay) = virtual_delay
-                && wake.get().is_none()
-            {
-                realm.runtime.executor().advance_virtual_time(delay);
-                realm.runtime.executor().poll_local_once(waker);
+            if virtual_delay.is_some() {
+                // One successor turn observes whether the waiter has armed its timer before
+                // advancing virtual time. The ticket coalesces with any task wake meanwhile.
+                ScheduledStep::Ready
+            } else if matches!(realm.clock.get(), NativeClock::Virtual) && wake.get().is_none() {
+                ScheduledStep::ParkedUntil(Instant::now() + Duration::from_millis(1))
+            } else {
+                ScheduledStep::Parked
             }
-            ScheduledStep::Parked
         }
     }
 }

@@ -8,6 +8,15 @@ bench/concurrency/run.sh --quick    # 1 round, fewer sizes, about 3 minutes
 bench/concurrency/run.sh --only messages,server
 ```
 
+The separate one-realm-per-connection scheduler probe is
+`python3 bench/concurrency/realm-connections.py --quick` after building the release CLI with
+`mbx build --release -p kiln-cli`. It compiles one native TCP client outside the measured runs,
+serves loopback replies from one Python reactor, and compares Node workers, the original pinned
+realm launcher, and the turn scheduler. On Linux it records peak process threads and RSS from
+`/proc`; every client must return the same checksum. The full form runs three interleaved rounds
+at 1, 10, 100 and 500 clients (Node stops at 100), with raw records under
+`target/bench-concurrency/realm-connections.json`. `--lanes N` fixes the scheduler budget.
+
 It refreshes the release `kiln` with `mbx build --release -p kiln-cli` (unless `--kiln` selects
 an explicit binary), builds the kiln
 programs with `--node --profile native-release` and the Go program once, outside every

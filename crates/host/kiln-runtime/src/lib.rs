@@ -851,6 +851,13 @@ impl Executor {
     /// is dropped. Polling a never-ready future once therefore drives a bounded task batch and
     /// registers `waker` with the LocalSet while leaving the scheduler in charge of parking.
     pub fn poll_local_once(&self, waker: &std::task::Waker) {
+        if self.reactor.pause_supported {
+            // A current-thread reactor has no background I/O driver. Entering its runtime
+            // for one bounded tick lets socket readiness reach local tasks; merely polling
+            // LocalSet::run_until with Handle::enter does not drive the reactor.
+            self.local
+                .block_on(&self.reactor.runtime, tokio::task::yield_now());
+        }
         let _runtime = self.reactor.runtime.enter();
         let mut future = std::pin::pin!(self.local.run_until(std::future::pending::<()>()));
         let mut context = std::task::Context::from_waker(waker);

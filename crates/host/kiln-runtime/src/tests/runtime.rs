@@ -55,7 +55,11 @@ fn local_task_wakes_a_scheduler_lane_without_parking_it() {
     executor.poll_local_once(&waker);
     assert_eq!(observed.get(), None);
     lease.finish(crate::turn_queue::TurnOutcome::Parked);
-    assert!(queue.take_timeout(std::time::Duration::from_millis(1)).is_none());
+    assert!(
+        queue
+            .take_timeout(std::time::Duration::from_millis(1))
+            .is_none()
+    );
     signal.send(()).expect("receiver still alive");
     let lease = queue
         .take_timeout(std::time::Duration::from_millis(100))
@@ -64,6 +68,33 @@ fn local_task_wakes_a_scheduler_lane_without_parking_it() {
     executor.poll_local_once(&waker);
     assert_eq!(observed.get(), Some(lane));
     lease.finish(crate::turn_queue::TurnOutcome::Done);
+}
+
+#[test]
+fn a_virtual_lane_advances_a_timer_after_a_local_task_yields() {
+    let executor = Executor::new().expect("current-thread reactor");
+    executor.pause_time();
+    let queue = crate::turn_queue::ReadyQueue::new();
+    let ticket = queue.ticket(43);
+    let waker = std::task::Waker::from(ticket);
+    let fired = std::rc::Rc::new(std::cell::Cell::new(false));
+    executor.scope(|| {
+        let fired = std::rc::Rc::clone(&fired);
+        tokio::task::spawn_local(async move {
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            fired.set(true);
+        });
+    });
+    for _ in 0..3 {
+        executor.poll_local_once(&waker);
+    }
+    // Tokio's next timer tick can lie just beyond the requested millisecond.
+    executor.advance_virtual_time(std::time::Duration::from_millis(2));
+    for _ in 0..3 {
+        executor.poll_local_once(&waker);
+    }
+    assert!(fired.get(), "the paused reactor must deliver the timer");
 }
 
 #[cfg(unix)]
