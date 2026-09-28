@@ -1335,7 +1335,7 @@ fn every_object_tag_converts_and_is_truthy_and_names_itself() {
         (
             "kiln_c99_has_intrinsic_text",
             intrinsic_text,
-            &["KILN_VALUE_OBJECT", "KILN_VALUE_ARRAY"][..],
+            &["KILN_VALUE_OBJECT", "KILN_VALUE_ARRAY", "KILN_VALUE_SHARED"][..],
         ),
     ] {
         let missing: Vec<&&str> = tags

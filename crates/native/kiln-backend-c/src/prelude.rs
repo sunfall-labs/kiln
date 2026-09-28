@@ -4759,6 +4759,8 @@ pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_ffi_callback_thrown", C99StateOwner::Frame),
     ("kiln_c99_ffi_callback_depth", C99StateOwner::Frame),
     ("kiln_c99_ffi_callback_active", C99StateOwner::Frame),
+    // Set only around one synchronous kiln:shared module initializer; no turn boundary sees it.
+    ("kiln_c99_kiln_shared_hooks_active", C99StateOwner::Frame),
     ("kiln_c99_fixture_method_stores", C99StateOwner::TestFixture),
     ("kiln_c99_gc_fallback", C99StateOwner::TestFixture),
     ("kiln_c99_keys_check_mode", C99StateOwner::TestFixture),

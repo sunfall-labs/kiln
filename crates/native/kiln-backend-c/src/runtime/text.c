@@ -125,6 +125,7 @@ static int kiln_c99_truthy(kiln_value value) {
     /* An object is always truthy, empty or not. */
     case KILN_VALUE_OBJECT:
     case KILN_VALUE_ARRAY:
+    case KILN_VALUE_SHARED:
     case KILN_VALUE_GENERATOR:
     case KILN_VALUE_DATE:
     case KILN_VALUE_COLLECTION:
@@ -717,6 +718,14 @@ static kiln_value kiln_c99_text(kiln_value value) {
          * two could interleave, though C sequences a call's arguments before its body. */
         size_t length = kiln_c99_double_to_js(number, buffer);
         return kiln_c99_copy_text(buffer, length);
+    }
+    case KILN_VALUE_SHARED: {
+        /* Observable conversion asks the facade's prototype through ToPrimitive, so an array
+         * joins its elements and a null-prototype record may throw. This unchecked text path
+         * is used by diagnostics and the embedding boundary, where a record's fallback is the
+         * same ordinary-object label as its source. */
+        static const char object_text[] = "[object Object]";
+        return kiln_c99_static_text(object_text, sizeof(object_text) - 1);
     }
     case KILN_VALUE_OBJECT: {
         static const char object_text[] = "[object Object]";
