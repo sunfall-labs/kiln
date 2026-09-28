@@ -772,7 +772,7 @@
              * Only for an object, because only an object can carry one. A primitive's tag comes
              * from its kind and asking it for a property would be a conversion the operation does
              * not make. */
-            if (receiver.tag == KILN_VALUE_OBJECT) {
+            if (receiver.tag == KILN_VALUE_OBJECT || receiver.tag == KILN_VALUE_SHARED) {
                 int status = kiln_c99_probe_symbol(host, receiver, "@@toStringTag", 13, &custom, depth,
                                           thrown);
                 if (status != KILN_C99_OK) {
@@ -974,7 +974,7 @@
              * `@@iterator` is this very method -- iterates as the array-like it is. Refusing
              * here is what made `[...arguments]` stop compiling the moment `arguments` stopped
              * being an array, and the interpreter has walked an array-like receiver all along. */
-            if (receiver.tag == KILN_VALUE_OBJECT) {
+            if (receiver.tag == KILN_VALUE_OBJECT || receiver.tag == KILN_VALUE_SHARED) {
                 kiln_value length;
                 double count;
                 status = kiln_c99_get(host, receiver, "length", 6, &length, depth, thrown);
