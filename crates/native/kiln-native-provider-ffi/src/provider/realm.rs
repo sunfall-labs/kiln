@@ -212,6 +212,7 @@ const OP_MKDIR: u32 = 14;
 const OP_PROCESS_RUN: u32 = 15;
 /// Wait until a cross-realm port has something for this realm (`kiln_runtime::workers`).
 const OP_PORT_WAIT: u32 = 16;
+const OP_ATOMICS_WAIT: u32 = 17;
 
 /// What a drive answers when the worker it runs has been asked to end (`process.exit`,
 /// `terminate`): the C runtime's host-error status, which no `catch` takes, so the realm unwinds
@@ -1741,6 +1742,22 @@ unsafe fn host_operation(view: &HostOpView) -> Option<AsyncHostOp> {
         OP_PORT_WAIT => AsyncHostOp::PortWait {
             port: view.resource,
         },
+        OP_ATOMICS_WAIT => {
+            let millis = f64::from_bits(view.argument);
+            let timeout = if millis.is_infinite() || millis >= 1.0e12 {
+                // A duration beyond 31 years cannot be represented as a Tokio deadline on
+                // every host. It remains pending until a notify or realm cancellation.
+                None
+            } else if millis.is_finite() && millis >= 0.0 {
+                Some(std::time::Duration::from_secs_f64(millis / 1_000.0))
+            } else {
+                return None;
+            };
+            AsyncHostOp::AtomicsWait {
+                ticket: view.resource,
+                timeout,
+            }
+        }
         _ => return None,
     })
 }

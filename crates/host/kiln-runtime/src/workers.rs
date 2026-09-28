@@ -1729,11 +1729,37 @@ struct Waiter {
 // SAFETY: `woken` is only read or written while `FUTEX`'s mutex is held.
 unsafe impl Sync for Waiter {}
 
-type WaiterList = HashMap<(usize, usize), VecDeque<Arc<Waiter>>>;
+struct AsyncWaiter {
+    ticket: u64,
+    notified: Arc<Notify>,
+    woken: Cell<bool>,
+    // Keep the shared store alive even if the JavaScript view is collected while it waits.
+    _store: Arc<dyn Any + Send + Sync>,
+}
+
+// SAFETY: `woken` is only read or written while `FUTEX`'s mutex is held.
+unsafe impl Sync for AsyncWaiter {}
+
+enum WaiterEntry {
+    Sync(Arc<Waiter>),
+    Async(Arc<AsyncWaiter>),
+}
+
+struct WaiterList {
+    by_key: HashMap<(usize, usize), VecDeque<WaiterEntry>>,
+    async_by_ticket: HashMap<u64, ((usize, usize), Arc<AsyncWaiter>)>,
+    next_ticket: u64,
+}
 
 fn futex() -> &'static Mutex<WaiterList> {
     static FUTEX: OnceLock<Mutex<WaiterList>> = OnceLock::new();
-    FUTEX.get_or_init(|| Mutex::new(HashMap::new()))
+    FUTEX.get_or_init(|| {
+        Mutex::new(WaiterList {
+            by_key: HashMap::new(),
+            async_by_ticket: HashMap::new(),
+            next_ticket: 1,
+        })
+    })
 }
 
 /// `Atomics.wait`: if `still_expected()` -- evaluated under the waiter list's lock -- wait on
@@ -1753,7 +1779,10 @@ pub fn wait(
         woken: Cell::new(false),
         wake: Condvar::new(),
     });
-    list.entry(key).or_default().push_back(Arc::clone(&waiter));
+    list.by_key
+        .entry(key)
+        .or_default()
+        .push_back(WaiterEntry::Sync(Arc::clone(&waiter)));
     let deadline = timeout.and_then(|timeout| Instant::now().checked_add(timeout));
     loop {
         if waiter.woken.get() {
@@ -1768,10 +1797,10 @@ pub fn wait(
             }
         };
         if let Some(outcome) = outcome {
-            if let Some(waiters) = list.get_mut(&key) {
-                waiters.retain(|other| !Arc::ptr_eq(other, &waiter));
+            if let Some(waiters) = list.by_key.get_mut(&key) {
+                waiters.retain(|other| !matches!(other, WaiterEntry::Sync(other) if Arc::ptr_eq(other, &waiter)));
                 if waiters.is_empty() {
-                    list.remove(&key);
+                    list.by_key.remove(&key);
                 }
             }
             return outcome;
@@ -1793,10 +1822,63 @@ pub fn wait(
     }
 }
 
+/// Register an asynchronous wait under the same lock as the comparison and synchronous waits.
+/// A ticket is returned only when the cell still has the expected value.
+pub fn wait_async_register(
+    key: (usize, usize),
+    still_expected: impl FnOnce() -> bool,
+    store: Arc<dyn Any + Send + Sync>,
+) -> Option<u64> {
+    let mut list = lock(futex());
+    if !still_expected() {
+        return None;
+    }
+    let ticket = list.next_ticket;
+    list.next_ticket = list
+        .next_ticket
+        .checked_add(1)
+        .expect("Atomics waiter ticket overflow");
+    let waiter = Arc::new(AsyncWaiter {
+        ticket,
+        notified: Arc::new(Notify::new()),
+        woken: Cell::new(false),
+        _store: store,
+    });
+    list.by_key
+        .entry(key)
+        .or_default()
+        .push_back(WaiterEntry::Async(Arc::clone(&waiter)));
+    list.async_by_ticket.insert(ticket, (key, waiter));
+    Some(ticket)
+}
+
+/// The signal belonging to an async waiter. A notify before this lookup leaves a permit.
+pub fn wait_async_signal(ticket: u64) -> Option<Arc<Notify>> {
+    lock(futex())
+        .async_by_ticket
+        .get(&ticket)
+        .map(|(_, waiter)| Arc::clone(&waiter.notified))
+}
+
+/// Finish or cancel an async wait. A notify that claimed the waiter before this call wins a
+/// concurrent timeout; otherwise the timeout removes it from the FIFO list.
+pub fn wait_async_finish(ticket: u64) -> Option<bool> {
+    let mut list = lock(futex());
+    let (key, waiter) = list.async_by_ticket.remove(&ticket)?;
+    if let Some(waiters) = list.by_key.get_mut(&key) {
+        waiters
+            .retain(|entry| !matches!(entry, WaiterEntry::Async(other) if other.ticket == ticket));
+        if waiters.is_empty() {
+            list.by_key.remove(&key);
+        }
+    }
+    Some(waiter.woken.get())
+}
+
 /// `Atomics.notify`: wake up to `count` waiters on `key`, oldest first; how many were woken.
 pub fn notify(key: (usize, usize), count: usize) -> usize {
     let mut list = lock(futex());
-    let Some(waiters) = list.get_mut(&key) else {
+    let Some(waiters) = list.by_key.get_mut(&key) else {
         return 0;
     };
     let mut woken = 0;
@@ -1804,22 +1886,32 @@ pub fn notify(key: (usize, usize), count: usize) -> usize {
         let Some(waiter) = waiters.pop_front() else {
             break;
         };
-        waiter.woken.set(true);
-        waiter.wake.notify_one();
+        match waiter {
+            WaiterEntry::Sync(waiter) => {
+                waiter.woken.set(true);
+                waiter.wake.notify_one();
+            }
+            WaiterEntry::Async(waiter) => {
+                waiter.woken.set(true);
+                waiter.notified.notify_one();
+            }
+        }
         woken += 1;
     }
     if waiters.is_empty() {
-        list.remove(&key);
+        list.by_key.remove(&key);
     }
     woken
 }
 
 fn interrupt_waits(key: u64) {
     let list = lock(futex());
-    for waiters in list.values() {
+    for waiters in list.by_key.values() {
         for waiter in waiters {
-            if waiter.thread == key {
-                waiter.wake.notify_one();
+            if let WaiterEntry::Sync(waiter) = waiter {
+                if waiter.thread == key {
+                    waiter.wake.notify_one();
+                }
             }
         }
     }
@@ -1828,6 +1920,29 @@ fn interrupt_waits(key: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn async_wait_is_notified_without_a_value_change_and_counts_in_fifo_order() {
+        let cell = std::sync::atomic::AtomicI32::new(0);
+        let key = (&cell as *const _ as usize, 0);
+        let hold: Arc<dyn Any + Send + Sync> = Arc::new(());
+        let first =
+            wait_async_register(key, || cell.load(Ordering::SeqCst) == 0, Arc::clone(&hold))
+                .unwrap();
+        let second =
+            wait_async_register(key, || cell.load(Ordering::SeqCst) == 0, Arc::clone(&hold))
+                .unwrap();
+        let signal = wait_async_signal(first).unwrap();
+        assert_eq!(notify(key, 1), 1);
+        signal.notified().await;
+        assert_eq!(cell.load(Ordering::SeqCst), 0);
+        assert_eq!(wait_async_finish(first), Some(true));
+        assert_eq!(wait_async_finish(second), Some(false));
+        assert_eq!(notify(key, 1), 0);
+        assert!(wait_async_signal(first).is_none());
+        assert!(wait_async_signal(second).is_none());
+        assert_eq!(Arc::strong_count(&hold), 1);
+    }
 
     struct TwoTurnWorker {
         context: Arc<WorkerContext>,

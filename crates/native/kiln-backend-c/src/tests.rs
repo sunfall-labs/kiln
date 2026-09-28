@@ -217,6 +217,11 @@ int kiln_atomics_wait(void *handle, uint64_t offset, uint32_t width, int64_t exp
     (void)handle; (void)offset; (void)width; (void)expected; (void)timeout;
     return 2;
 }
+int kiln_atomics_wait_async_register(void *handle, uint64_t offset, uint32_t width, int64_t expected, uint64_t *out_ticket) {
+    (void)handle; (void)offset; (void)width; (void)expected; (void)out_ticket;
+    return 1;
+}
+void kiln_atomics_wait_async_cancel(uint64_t ticket) { (void)ticket; }
 uint64_t kiln_atomics_notify(void *handle, uint64_t offset, uint64_t count) {
     (void)handle; (void)offset; (void)count;
     return 0;

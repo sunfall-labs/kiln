@@ -19,7 +19,7 @@ delete (globalThis as any).__kilnAtomics;
   }
   const target = G.Atomics;
   const LOAD = 1, STORE = 2, ADD = 3, SUB = 4, AND = 5, OR = 6, XOR = 7, EXCHANGE = 8;
-  const COMPARE_EXCHANGE = 9, WAIT = 10, NOTIFY = 11;
+  const COMPARE_EXCHANGE = 9, WAIT = 10, NOTIFY = 11, WAIT_ASYNC = 12;
   const objectTag = Object.prototype.toString;
   const INTEGER_KINDS = ["Int8Array", "Uint8Array", "Int16Array", "Uint16Array", "Int32Array", "Uint32Array",
     "BigInt64Array", "BigUint64Array"];
@@ -135,20 +135,10 @@ delete (globalThis as any).__kilnAtomics;
       const expected = operand(kind, value);
       const limit = timeout === undefined ? Infinity : +timeout;
       const duration = limit !== limit ? Infinity : Math.max(limit, 0);
-      if (primitive(LOAD, view, at) !== expected) return { async: false, value: "not-equal" };
-      if (duration === 0) return { async: false, value: "timed-out" };
-      // The turn loop cannot park a realm on the provider's synchronous waiter list.
-      // Observe the shared element from later turns so another realm can advance it.
-      // This also keeps a thread-stream worker alive while its parent flushes.
-      return { async: true, value: new Promise<string>((resolve) => {
-        const deadline = duration === Infinity ? Infinity : Date.now() + duration;
-        const check = () => {
-          if (primitive(LOAD, view, at) !== expected) { resolve("ok"); return; }
-          if (Date.now() >= deadline) { resolve("timed-out"); return; }
-          setTimeout(check, Math.min(10, deadline - Date.now()));
-        };
-        setTimeout(check, 1);
-      }) };
+      const answer = primitive(WAIT_ASYNC, view, at, expected, duration);
+      return typeof answer === "string"
+        ? { async: false, value: answer }
+        : { async: true, value: answer };
     } }.waitAsync,
     xor: { xor(view: any, index: any, value: any): any { return readModifyWrite(XOR, view, index, value); } }.xor,
   };

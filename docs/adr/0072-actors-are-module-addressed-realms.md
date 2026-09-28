@@ -150,8 +150,10 @@ Synchronous `Atomics.wait` throws `TypeError` inside an actor, even for a zero t
 already mismatched value. A wait could otherwise occupy a lane needed by a pinned notifier and
 deadlock a cycle of actors. Actor code coordinates through calls and messages. This restriction
 belongs to the kiln actor extension; ordinary `node:worker_threads` keep their synchronous wait
-semantics and use dedicated threads by default. `Atomics.waitAsync` still requires a
-notification-driven native waiter before it can be offered as an actor coordination primitive.
+semantics and use dedicated threads by default. Native `Atomics.waitAsync` registers on the
+process-wide FIFO waiter list and parks a host request without occupying a scheduler lane.
+`Atomics.notify` wakes it even if the cell's value does not change. Its timeout uses the host
+timer only for the deadline; an unreferenced wait alone does not keep a realm alive.
 
 ### Isolation and consumption
 

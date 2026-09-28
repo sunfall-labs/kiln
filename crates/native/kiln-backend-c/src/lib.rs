@@ -413,6 +413,12 @@ macro_rules! provider_c_declaration {
     ($group:ident, $name:ident, atomics_wait) => {
         concat!("int ", stringify!($name), "(void *handle, uint64_t offset, uint32_t width, int64_t expected, double timeout);\n")
     };
+    ($group:ident, $name:ident, atomics_wait_async_register) => {
+        concat!("int ", stringify!($name), "(void *handle, uint64_t offset, uint32_t width, int64_t expected, uint64_t *out_ticket);\n")
+    };
+    ($group:ident, $name:ident, atomics_wait_async_cancel) => {
+        concat!("void ", stringify!($name), "(uint64_t ticket);\n")
+    };
     ($group:ident, $name:ident, atomics_notify) => {
         concat!("uint64_t ", stringify!($name), "(void *handle, uint64_t offset, uint64_t count);\n")
     };

@@ -492,6 +492,22 @@ static int kiln_c99_shared_buffer_raw(kiln_value *out, const kiln_value *args, s
 #define KILN_C99_ATOMICS_COMPARE_EXCHANGE 9
 #define KILN_C99_ATOMICS_WAIT 10
 #define KILN_C99_ATOMICS_NOTIFY 11
+#define KILN_C99_ATOMICS_WAIT_ASYNC 12
+
+static int kiln_c99_atomics_wait_async_complete(void *opaque, const kiln_async_completion *completion,
+                                                 void *host, void *thrown) {
+    kiln_node_process_completion *work = (kiln_node_process_completion *)opaque;
+    kiln_value answer;
+    (void)host;
+    (void)thrown;
+    if (work == NULL || completion == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (completion->status != 0)
+        return kiln_c99_settle(work->promise, kiln_c99_copy_text("Atomics.waitAsync failed", 24), 1);
+    answer = kiln_c99_copy_text((const char *)completion->bytes, (size_t)completion->bytes_len);
+    return kiln_c99_settle(work->promise, answer, 0);
+}
+
+static void kiln_c99_atomics_wait_async_drop(void *opaque) { kiln_c99_gc_release(opaque); }
 
 /* Number-backed atomic views are at most 32 bits wide. Reduce at that width: adding 2^64 to a
  * negative remainder rounds small values (including -1) to 2^64 in double precision, turning
@@ -600,6 +616,56 @@ static int kiln_c99_atomics_raw(kiln_value *out, const kiln_value *args, size_t 
         *out = answer == 0 ? kiln_c99_copy_text(ok, sizeof ok - 1)
              : answer == 1 ? kiln_c99_copy_text(not_equal, sizeof not_equal - 1)
                            : kiln_c99_copy_text(timed_out, sizeof timed_out - 1);
+        return KILN_C99_OK;
+    }
+    if (op == KILN_C99_ATOMICS_WAIT_ASYNC) {
+        double timeout = argc > 4 && args[4].tag == KILN_VALUE_NUMBER ? kiln_c99_as_number(args[4]) : INFINITY;
+        uint64_t expected = 0, ticket = 0, request = 0, bits;
+        int answer;
+        kiln_value promise;
+        kiln_node_process_completion *work;
+        kiln_async_host_op operation = {0};
+        if (buffer->shared == NULL)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "Atomics.waitAsync requires a SharedArrayBuffer");
+        status = kiln_c99_atomics_operand(view->kind, argc > 3 ? args[3] : kiln_c99_undefined(), &expected, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (timeout == 0) {
+            uint64_t actual = width == 8
+                ? __atomic_load_n((uint64_t *)(void *)cell, __ATOMIC_SEQ_CST)
+                : (uint64_t)__atomic_load_n((uint32_t *)(void *)cell, __ATOMIC_SEQ_CST);
+            *out = kiln_c99_copy_text(actual == (width == 8 ? expected : (uint32_t)expected)
+                                      ? "timed-out" : "not-equal", 9);
+            return KILN_C99_OK;
+        }
+        answer = kiln_atomics_wait_async_register(buffer->shared, (uint64_t)offset, (uint32_t)width,
+                    width == 8 ? (int64_t)expected : (int64_t)(int32_t)(uint32_t)expected, &ticket);
+        if (answer == 1) {
+            *out = kiln_c99_copy_text("not-equal", 9);
+            return KILN_C99_OK;
+        }
+        if (answer != 0) KILN_C99_REFUSE("an Atomics.waitAsync the runtime's waiter list would not take");
+        if (kiln_c99_new_promise(&promise) != KILN_C99_OK) {
+            kiln_atomics_wait_async_cancel(ticket);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        work = (kiln_node_process_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_PROCESS_COMPLETION, sizeof *work);
+        if (work == NULL) {
+            kiln_atomics_wait_async_cancel(ticket);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        work->promise = promise;
+        operation.operation = KILN_REALM_OP_ATOMICS_WAIT;
+        operation.resource = ticket;
+        memcpy(&bits, &timeout, sizeof bits);
+        operation.argument = bits;
+        status = kiln_realm_start_active_host_op(&operation, kiln_c99_atomics_wait_async_complete,
+                    kiln_c99_atomics_wait_async_drop, work, &request);
+        if (status != KILN_C99_OK) {
+            kiln_atomics_wait_async_cancel(ticket);
+            kiln_c99_gc_release(work);
+            return status;
+        }
+        *out = promise;
         return KILN_C99_OK;
     }
     if (op == KILN_C99_ATOMICS_NOTIFY) {

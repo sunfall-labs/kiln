@@ -3276,6 +3276,7 @@ typedef int (*kiln_realm_entry_fn)(void *context);
 #define KILN_REALM_OP_PROCESS_RUN 15
 /* Done once a cross-realm port (`resource`) has something for this realm (realms issue 06). */
 #define KILN_REALM_OP_PORT_WAIT 16
+#define KILN_REALM_OP_ATOMICS_WAIT 17
 #define KILN_REALM_HTTP_CLOSE_GRACEFUL 0
 #define KILN_REALM_HTTP_CLOSE_ABORT 1
 /* One element of a message between realms, as the runtime's ports carry it

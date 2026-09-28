@@ -1355,6 +1355,66 @@ pub unsafe extern "C" fn kiln_atomics_wait(
     })
 }
 
+/// Compare and enqueue an asynchronous waiter atomically. Returns 0 and writes a ticket when
+/// registered, 1 when the value differs, or a negative error for an invalid cell.
+///
+/// # Safety
+/// `handle` is a live shared-store reference and `out_ticket` is writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_atomics_wait_async_register(
+    handle: *mut c_void,
+    offset: u64,
+    width: u32,
+    expected: i64,
+    out_ticket: *mut u64,
+) -> i32 {
+    ffi(|| {
+        if handle.is_null() || out_ticket.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        let store = unsafe { &*handle.cast::<NativeShared>().cast_const() };
+        let Ok(offset) = usize::try_from(offset) else {
+            return INVALID_ARGUMENT;
+        };
+        let size = match width {
+            4 | 8 => width as usize,
+            _ => return INVALID_ARGUMENT,
+        };
+        if offset
+            .checked_add(size)
+            .is_none_or(|end| end > store.length.load(Ordering::Acquire))
+            || offset % size != 0
+        {
+            return INVALID_ARGUMENT;
+        }
+        let cell = unsafe { store.pointer.add(offset) };
+        let still_expected = || {
+            if size == 8 {
+                unsafe { AtomicI64::from_ptr(cell.cast()) }.load(Ordering::SeqCst) == expected
+            } else {
+                i64::from(unsafe { AtomicI32::from_ptr(cell.cast()) }.load(Ordering::SeqCst))
+                    == expected
+            }
+        };
+        let pointer = handle.cast::<NativeShared>().cast_const();
+        unsafe { Arc::increment_strong_count(pointer) };
+        let hold: Arc<dyn std::any::Any + Send + Sync> = unsafe { Arc::from_raw(pointer) };
+        let Some(ticket) =
+            workers::wait_async_register((handle as usize, offset), still_expected, hold)
+        else {
+            return 1;
+        };
+        unsafe { out_ticket.write(ticket) };
+        0
+    })
+}
+
+/// Cancel a registered async waiter if submission to the realm host failed.
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_atomics_wait_async_cancel(ticket: u64) {
+    workers::wait_async_finish(ticket);
+}
+
 /// `Atomics.notify`: wake up to `count` waiters on the cell at `offset` of a shared store; how
 /// many were woken.
 ///
@@ -1426,6 +1486,12 @@ macro_rules! assert_worker_export {
     };
     (realm, kiln_atomics_wait, atomics_wait) => {
         const _: unsafe extern "C" fn(*mut c_void, u64, u32, i64, f64) -> i32 = kiln_atomics_wait;
+    };
+    (realm, kiln_atomics_wait_async_register, atomics_wait_async_register) => {
+        const _: unsafe extern "C" fn(*mut c_void, u64, u32, i64, *mut u64) -> i32 = kiln_atomics_wait_async_register;
+    };
+    (realm, kiln_atomics_wait_async_cancel, atomics_wait_async_cancel) => {
+        const _: extern "C" fn(u64) = kiln_atomics_wait_async_cancel;
     };
     (realm, kiln_atomics_notify, atomics_notify) => {
         const _: unsafe extern "C" fn(*mut c_void, u64, u64) -> u64 = kiln_atomics_notify;

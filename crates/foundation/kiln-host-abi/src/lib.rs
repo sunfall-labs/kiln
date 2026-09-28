@@ -203,6 +203,12 @@ pub enum AsyncHostOp {
     /// Wait until a cross-realm message port (`kiln_runtime::workers`) has a message queued, or
     /// its peer has closed. Completes with no payload: the realm then takes what is queued.
     PortWait { port: u64 },
+    /// Wait on a registered shared-memory cell without occupying an executor lane. The ticket
+    /// was compared and enqueued under the process waiter lock before this request was started.
+    AtomicsWait {
+        ticket: u64,
+        timeout: Option<std::time::Duration>,
+    },
 }
 
 /// Stable resource category that does not expose executor or operating-system types.

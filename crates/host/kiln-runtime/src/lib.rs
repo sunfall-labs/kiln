@@ -2520,6 +2520,14 @@ struct PortWait {
     sequence: u64,
 }
 
+struct AsyncAtomicsWait(u64);
+
+impl Drop for AsyncAtomicsWait {
+    fn drop(&mut self) {
+        workers::wait_async_finish(self.0);
+    }
+}
+
 impl std::fmt::Debug for TokioHost {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -2679,6 +2687,49 @@ impl TokioHost {
                         sequence,
                     },
                 );
+                return request;
+            }
+            AsyncHostOp::AtomicsWait { ticket, timeout } => {
+                let Some(signal) = workers::wait_async_signal(ticket) else {
+                    self.insert_immediate(
+                        request,
+                        sequence,
+                        referenced,
+                        Err(AsyncHostError::new(
+                            "EINVAL",
+                            "Atomics.waitAsync",
+                            None,
+                            "unknown async waiter ticket",
+                        )),
+                    );
+                    return request;
+                };
+                let waiter = AsyncAtomicsWait(ticket);
+                self.spawn_task(request, sequence, referenced, async move {
+                    let notified = match timeout {
+                        Some(duration) => tokio::time::timeout(duration, signal.notified())
+                            .await
+                            .is_ok(),
+                        None => {
+                            signal.notified().await;
+                            true
+                        }
+                    };
+                    let answer = if workers::wait_async_finish(ticket).unwrap_or(notified) {
+                        "ok"
+                    } else {
+                        "timed-out"
+                    };
+                    drop(waiter);
+                    HostCompletion {
+                        request,
+                        sequence,
+                        lifecycle: None,
+                        result: Ok(HostCompletionValue::Public(AsyncHostValue::String(
+                            answer.into(),
+                        ))),
+                    }
+                });
                 return request;
             }
             AsyncHostOp::CloseResource { resource } => {
@@ -4033,7 +4084,9 @@ async fn execute_async_host_op(operation: AsyncHostOp) -> Result<AsyncHostValue,
             bytes.truncate(length);
             Ok(AsyncHostValue::Bytes(bytes))
         }
-        AsyncHostOp::ProcessRun { .. } | AsyncHostOp::PortWait { .. } => {
+        AsyncHostOp::ProcessRun { .. }
+        | AsyncHostOp::PortWait { .. }
+        | AsyncHostOp::AtomicsWait { .. } => {
             unreachable!("process and port operations are handled by start_on")
         }
         AsyncHostOp::CloseResource { .. }

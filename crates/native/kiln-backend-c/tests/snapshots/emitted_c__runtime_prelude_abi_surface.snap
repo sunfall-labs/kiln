@@ -1351,6 +1351,7 @@ typedef int (*kiln_realm_entry_fn)(void *context);
 #define KILN_REALM_OP_MKDIR 14
 #define KILN_REALM_OP_PROCESS_RUN 15
 #define KILN_REALM_OP_PORT_WAIT 16
+#define KILN_REALM_OP_ATOMICS_WAIT 17
 #define KILN_REALM_HTTP_CLOSE_GRACEFUL 0
 #define KILN_REALM_HTTP_CLOSE_ABORT 1
 typedef struct kiln_worker_token {
@@ -1440,6 +1441,8 @@ int kiln_shared_create(uint64_t length, uint64_t capacity, uint8_t **out_bytes, 
 void kiln_shared_release(void *handle);
 int kiln_shared_grow(void *handle, uint64_t length, uint64_t *out);
 int kiln_atomics_wait(void *handle, uint64_t offset, uint32_t width, int64_t expected, double timeout);
+int kiln_atomics_wait_async_register(void *handle, uint64_t offset, uint32_t width, int64_t expected, uint64_t *out_ticket);
+void kiln_atomics_wait_async_cancel(uint64_t ticket);
 uint64_t kiln_atomics_notify(void *handle, uint64_t offset, uint64_t count);
 int kiln_string_normalize(const uint16_t *units, uint64_t count, uint32_t form, uint16_t *out, uint64_t capacity, uint64_t *out_len);
 int kiln_intl_collate(const uint16_t *left, uint64_t left_len, const uint16_t *right, uint64_t right_len, const uint8_t *spec, uint64_t spec_len, int32_t *out_order);
@@ -2469,6 +2472,9 @@ static int kiln_c99_shared_buffer_raw(kiln_value *out, const kiln_value *args, s
 #define KILN_C99_ATOMICS_COMPARE_EXCHANGE 9
 #define KILN_C99_ATOMICS_WAIT 10
 #define KILN_C99_ATOMICS_NOTIFY 11
+#define KILN_C99_ATOMICS_WAIT_ASYNC 12
+static int kiln_c99_atomics_wait_async_complete(void *opaque, const kiln_async_completion *completion,
+static void kiln_c99_atomics_wait_async_drop(void *opaque) { kiln_c99_gc_release(opaque); }
 static uint64_t kiln_c99_atomics_number_bits(double number) {
 static int kiln_c99_atomics_operand(kiln_typed_kind kind, kiln_value value, uint64_t *out,
 static int kiln_c99_atomics_value(kiln_typed_kind kind, uint64_t bits, kiln_value *out) {
