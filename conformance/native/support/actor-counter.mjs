@@ -10,5 +10,9 @@ export class Counter extends Actor {
     return this.count;
   }
   echo(value) { return value; }
+  probeMailboxBind(endpoint) {
+    const internals = MessagePort[Symbol.for('kiln.messagePort')];
+    return internals.workerOp(33, endpoint);
+  }
   fail() { throw new RangeError('remote problem'); }
 }

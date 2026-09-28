@@ -283,9 +283,12 @@ struct Endpoint {
     /// does not close this end, because the runtime still has the worker's `exit` to deliver
     /// through it.
     awaits_exit: bool,
-    /// Set only by the actor worker while this endpoint is its inbox. An actor route names
-    /// the opposite sending endpoint; graph requests use this ID to find its scheduler body.
+    /// Set only for the actor worker's own parentPort endpoint. An actor route names the
+    /// opposite sending endpoint; graph requests use this ID to find its scheduler body.
     actor_realm: Option<u64>,
+    /// Only this host worker may drain a bound actor inbox. Endpoint numbers are visible to
+    /// JavaScript, so the realm binding alone would not prevent another realm taking a message.
+    actor_reader: Option<u64>,
 }
 
 impl Endpoint {
@@ -298,6 +301,7 @@ impl Endpoint {
             group: None,
             awaits_exit: false,
             actor_realm: None,
+            actor_reader: None,
         }
     }
 
@@ -426,10 +430,26 @@ pub fn actor_sender(address: &SharedHandle) -> Option<u64> {
     Some(route.sender)
 }
 
-/// Bind the actual receiving endpoint from inside its native realm. A transferred port cannot
-/// rebind the endpoint to another realm; closing the port removes the binding with the port.
+/// Bind the actor worker's own receiving endpoint from inside its native realm. The worker
+/// channel is recorded by the host at spawn; a JavaScript supplied port number cannot name
+/// another worker's inbox. Closing the endpoint removes the binding with the port.
 pub fn actor_bind_receiver(endpoint: u64, realm: u64) -> bool {
-    if endpoint == 0 || realm == 0 {
+    let Some(worker) = current() else {
+        return false;
+    };
+    if worker.spec.entry != WorkerEntry::File("kiln:actors/worker".into()) {
+        return false;
+    }
+    actor_bind_receiver_for_worker(endpoint, realm, worker.spec.port, worker.key)
+}
+
+fn actor_bind_receiver_for_worker(
+    endpoint: u64,
+    realm: u64,
+    worker_port: u64,
+    worker_key: u64,
+) -> bool {
+    if endpoint == 0 || realm == 0 || worker_key == 0 || endpoint != worker_port {
         return false;
     }
     let mut ports = ports();
@@ -440,6 +460,7 @@ pub fn actor_bind_receiver(endpoint: u64, realm: u64) -> bool {
         return false;
     }
     port.actor_realm = Some(realm);
+    port.actor_reader = Some(worker_key);
     true
 }
 
@@ -527,7 +548,13 @@ pub fn enqueue(port: u64, message: Message) -> bool {
 
 /// The oldest message queued for `port`.
 pub fn take(port: u64) -> Option<Message> {
-    ports().endpoints.get_mut(&port)?.queue.pop_front()
+    let reader = current().map(|worker| worker.key);
+    let mut ports = ports();
+    let endpoint = ports.endpoints.get_mut(&port)?;
+    if endpoint.actor_reader.is_some() && endpoint.actor_reader != reader {
+        return None;
+    }
+    endpoint.queue.pop_front()
 }
 
 /// `STATE_*` bits for `port`.
@@ -1907,10 +1934,15 @@ mod tests {
         assert!(!actor_register(&address, &owner, sender));
         assert_eq!(actor_sender(&address), Some(sender));
         assert_eq!(actor_receiver_for_sender(sender), None);
-        assert!(!actor_bind_receiver(receiver, 0));
-        assert!(actor_bind_receiver(receiver, 71));
-        assert!(!actor_bind_receiver(receiver, 72));
+        assert!(!actor_bind_receiver(receiver, 71)); // No actor worker is in scope.
+        assert!(!actor_bind_receiver_for_worker(receiver, 0, receiver, 91));
+        assert!(!actor_bind_receiver_for_worker(receiver, 71, sender, 91));
+        assert!(!actor_bind_receiver_for_worker(receiver, 71, receiver, 0));
+        assert!(actor_bind_receiver_for_worker(receiver, 71, receiver, 91));
+        assert!(!actor_bind_receiver_for_worker(receiver, 72, receiver, 92));
         assert_eq!(actor_receiver_for_sender(sender), Some(71));
+        assert!(post(sender, Message::new(kind::USER, Vec::new())));
+        assert!(take(receiver).is_none()); // A realm without the worker key cannot drain it.
         assert_eq!(actor_sender(&impostor), None);
         let token = address.opaque();
         drop(address);

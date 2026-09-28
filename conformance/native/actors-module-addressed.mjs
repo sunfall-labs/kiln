@@ -23,6 +23,7 @@ try { ticketState.value = new ArrayBuffer(4); } catch {}
 if (ticketState.value !== data) throw new Error('buffer ticket payload was replaced');
 const result = await owner.ref.call('echo', [bufferTicket]);
 if (!ticketState.consumed) throw new Error('accepted buffer ticket was not consumed');
+if (ticketState.value !== undefined) throw new Error('consumed ticket retained its ArrayBuffer');
 try { ticketState.consumed = false; } catch {}
 if (!ticketState.consumed) throw new Error('buffer ticket consumption was reset');
 console.log(data.byteLength, new Uint8Array(result)[0]);
@@ -56,6 +57,17 @@ try { isolate(() => { throw new Error('factory failed'); }); }
 catch (error) { factoryFailed = error.message === 'factory failed'; }
 if (!factoryFailed) throw new Error('failed isolate factory did not unwind');
 const actorInternals = MessagePort[Symbol.for('kiln.messagePort')];
+const senderEndpoint = actorInternals.workerOp(23, owner.ref.address);
+if (actorInternals.workerOp(33, senderEndpoint) !== false) {
+  throw new Error('a nonworker realm claimed the actor inbox');
+}
+if (await owner.ref.call('probeMailboxBind', [senderEndpoint]) !== false) {
+  throw new Error('actor worker claimed a different endpoint');
+}
+const retainedHandle = graphTicketState.suspend();
+if (graphTicketState.value !== undefined) throw new Error('suspended ticket retained its handle');
+graphTicketState.restore(retainedHandle);
+if (graphTicketState.value !== isolated) throw new Error('restored ticket changed identity');
 const originalWorkerOp = actorInternals.workerOp;
 const factoryError = new Error('original factory exception');
 let preservedFactoryError = false;

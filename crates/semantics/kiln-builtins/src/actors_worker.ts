@@ -42,7 +42,7 @@ function remoteError(error: any): any {
 function serve(): void {
   control = parentPort;
   const init: any = workerData;
-  inbox = init.mailbox;
+  inbox = control;
   // Name this inbox's actual provider realm for a future opaque graph request. A failed bind
   // leaves graph requests unavailable; ordinary cloned actor messages keep working.
   const internals: any = (MessagePort as any)[Symbol.for("kiln.messagePort")];

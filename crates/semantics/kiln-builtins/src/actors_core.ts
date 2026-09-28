@@ -5,7 +5,14 @@ export abstract class Actor {}
 // A global symbol marks the prototype chain across those plans without sharing mutable state.
 Object.defineProperty(Actor.prototype, Symbol.for("kiln.actor.base"), { value: true });
 
-export type Ticket = { readonly value: any; readonly consumed: boolean; readonly graph: boolean; consume(): void };
+export type Ticket = {
+  readonly value: any;
+  readonly consumed: boolean;
+  readonly graph: boolean;
+  consume(): void;
+  suspend(): any;
+  restore(value: any): void;
+};
 const tickets = new WeakMap<object, Ticket>();
 const isolatedMark = Symbol.for("kiln.actor.isolated");
 const ticketMark = Symbol.for("kiln.actor.ticket");
@@ -74,13 +81,29 @@ export function transfer<T>(value: Isolated<T> | ArrayBuffer): TransferTicket<T>
   }
   const ticket: any = { __uncloneable: () => {} };
   let used = false;
+  let retained: any = value;
+  let suspended = false;
   const entry: Ticket = Object.freeze({
-    // Retain the handle, not its graph. The consuming runtime will need to remove this root
-    // before any ownership proof; until then every graph ticket is refused below.
-    value,
+    // The ticket marker keeps this entry alive across dynamic-import plans. Its value must
+    // therefore be a revocable slot, not a nonconfigurable data property holding the handle.
+    get value() { return retained; },
     graph,
     get consumed() { return used; },
-    consume() { used = true; },
+    consume() { used = true; retained = undefined; suspended = false; },
+    suspend() {
+      if (!graph || used || suspended) throw dataCloneError("transfer ticket is unavailable");
+      const handle = retained;
+      retained = undefined;
+      suspended = true;
+      return handle;
+    },
+    restore(handle: any) {
+      if (used || !suspended || !isIsolated(handle)) {
+        throw dataCloneError("transfer ticket could not be restored");
+      }
+      retained = handle;
+      suspended = false;
+    },
   });
   tickets.set(ticket, entry);
   Object.defineProperty(ticket, ticketMark, { value: entry });
@@ -99,6 +122,7 @@ export function prepareActorMessage(
   if (ticket) {
     if (typeof ticket !== "object" || ticket === null) throw dataCloneError("invalid transfer ticket");
     if (ticket.consumed) throw dataCloneError("transfer ticket was already consumed");
+    if (ticket.value === undefined) throw dataCloneError("transfer ticket is unavailable");
     if (ticket.graph) {
       if (onGraphTicket) onGraphTicket(ticket.value);
       throw dataCloneError("graph transfer needs ownership proof");

@@ -173,15 +173,14 @@ export async function spawnActor<T extends Actor>(options: {
   const buffers: ArrayBuffer[] = [];
   const consumed: Ticket[] = [];
   const args = prepareActorMessage(options.args === undefined ? [] : options.args, buffers, consumed);
-  const mailbox = new MessageChannel();
   const address = share({}) as ActorAddress<T>;
   const ownerKey = share({});
   const worker = new Worker(actorWorkerEntry, {
-    workerData: { __kilnActorVersion: 1, module, exportName: options.export, args, capacity, mailbox: mailbox.port2 },
-    transferList: [mailbox.port2, ...buffers],
+    workerData: { __kilnActorVersion: 1, module, exportName: options.export, args, capacity },
+    transferList: buffers,
   });
   consumeActorTickets(consumed);
-  const endpoint = internals.portEndpoint(mailbox.port1);
+  const endpoint = (worker as any)[Symbol.for("kiln.actor.senderEndpoint")]();
   if (!endpoint || !internals.workerOp(REGISTER, address, endpoint, ownerKey)) {
     void worker.terminate();
     throw new Error("actor mailbox registration failed");
@@ -192,7 +191,6 @@ export async function spawnActor<T extends Actor>(options: {
     let stopping: Promise<void> | undefined;
     const close = (): void => {
       internals.workerOp(CLOSE, address, ownerKey);
-      mailbox.port1.close();
     };
     worker.on("error", (error: any) => { close(); if (!ready) reject(error); });
     worker.on("exit", () => {

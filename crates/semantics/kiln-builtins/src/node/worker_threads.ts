@@ -353,6 +353,12 @@ export class Worker extends EventEmitter {
     return this.#exited ? -1 : this.#threadId;
   }
 
+  // The actor mailbox uses the worker's own channel. The host knows the peer of this
+  // endpoint as WorkerContext.spec.port and can authenticate the receiving realm.
+  [Symbol.for("kiln.actor.senderEndpoint")](): number {
+    return internals.portEndpoint(this.#port);
+  }
+
   get resourceLimits(): any {
     return this.#exited ? {} : { ...this.#limits };
   }
