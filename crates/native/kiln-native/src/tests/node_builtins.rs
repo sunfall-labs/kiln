@@ -409,13 +409,14 @@ writeFile({path:?}, 'héllo').then(() => readFile({path:?}, 'utf8')).then((text)
   console.log(info.isFile());
   console.log(info.isDirectory());
   console.log(info['@@kiln:node:is-file'] === undefined);
+  // The user-spelled string is an ordinary property, separate from the adapter's reserved key.
   Object.defineProperty(info, '@@kiln:node:is-file', {{ value: false }});
   console.log(info.isFile());
-  delete info['@@kiln:node:is-file'];
+  try {{ delete info['@@kiln:node:is-file']; }} catch (error) {{ console.log(error.constructor.name); }}
   console.log(info.isFile());
-  console.log(Object.hasOwn(info, '@@kiln:node:is-file') === false);
-  console.log(('@@kiln:node:is-file' in info) === false);
-  console.log(Object.getOwnPropertyDescriptor(info, '@@kiln:node:is-file') === undefined);
+  console.log(Object.hasOwn(info, '@@kiln:node:is-file'));
+  console.log('@@kiln:node:is-file' in info);
+  console.log(Object.getOwnPropertyDescriptor(info, '@@kiln:node:is-file').value);
   return writeFile({malformed_path:?}, new Uint8Array([0xe2, 0x82]));
 }}).then(() => readFile({malformed_path:?}, 'utf8')).then((text) => {{
   console.log(text === '\ufffd');
@@ -463,7 +464,7 @@ writeFile({path:?}, 'héllo').then(() => readFile({path:?}, 'utf8')).then((text)
     );
     assert_eq!(
             output.stdout,
-            "héllo\ntrue\n6\n6\ntrue\nfalse\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\nENOENT\nopen\ntrue\n".as_bytes()
+            "héllo\ntrue\n6\n6\ntrue\nfalse\ntrue\ntrue\nTypeError\ntrue\ntrue\ntrue\nfalse\ntrue\nENOENT\nopen\ntrue\n".as_bytes()
         );
 }
 
