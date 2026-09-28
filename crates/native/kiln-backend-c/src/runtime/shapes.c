@@ -580,15 +580,7 @@ static int kiln_c99_shape_define_new(kiln_object *object, const kiln_string *ike
         kiln_val *new_slots;
         size_t fill;
         while (slot >= new_cap) new_cap *= 2;
-        if (object->slots == object->inline_slots) {
-            new_slots = (kiln_val *)malloc(new_cap * sizeof(kiln_val));
-            if (new_slots != NULL)
-                memcpy(new_slots, object->inline_slots, KILN_C99_INLINE_SLOTS * sizeof(kiln_val));
-        } else if (object->slots == NULL) {
-            new_slots = (kiln_val *)malloc(new_cap * sizeof(kiln_val));
-        } else {
-            new_slots = (kiln_val *)realloc(object->slots, new_cap * sizeof(kiln_val));
-        }
+        new_slots = kiln_c99_object_slots_resize(object, new_cap);
         if (new_slots == NULL) {
             *status = KILN_C99_OUT_OF_MEMORY;
             return 1;
@@ -778,7 +770,7 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
         pos++;
     }
     object->count = pos;
-    if (object->slots != NULL && object->slots != object->inline_slots) {
+    if (kiln_c99_object_slots_owned(object)) {
         free(object->slots);
     }
     object->slots = NULL;
@@ -1158,10 +1150,14 @@ static void kiln_c99_sealed_layout_publish(uint32_t tag, uint64_t code,
     free(candidate);
 }
 
-static int kiln_c99_new_object(kiln_value *out) {
+static int kiln_c99_new_object_sized(kiln_value *out, size_t tail_slots) {
     /* Every field is written below before anything can observe the object, so the block is
      * taken unzeroed: the zeroing was a second pass over two hundred bytes per object. */
-    kiln_object *object = (kiln_object *)kiln_c99_gc_alloc_hot(KILN_GC_OBJECT, sizeof *object, 0);
+    kiln_object *object;
+    if (tail_slots > (SIZE_MAX - sizeof(kiln_object)) / sizeof(kiln_val))
+        return KILN_C99_OUT_OF_MEMORY;
+    object = (kiln_object *)kiln_c99_gc_alloc_hot(
+        KILN_GC_OBJECT, sizeof *object + tail_slots * sizeof(kiln_val), 0);
     if (object == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
@@ -1179,16 +1175,22 @@ static int kiln_c99_new_object(kiln_value *out) {
     object->accessor_count = 0;
     object->read_only_seen = 0;
     object->shape = kiln_c99_shape_root();
-    object->slots = object->inline_slots;
-    object->slot_capacity = KILN_C99_INLINE_SLOTS;
+    object->slots = tail_slots == 0 ? object->inline_slots : (kiln_val *)(object + 1);
+    object->slot_capacity = tail_slots == 0 ? KILN_C99_INLINE_SLOTS : tail_slots;
     for (size_t slot_i = 0; slot_i < KILN_C99_INLINE_SLOTS; ++slot_i) {
         object->inline_slots[slot_i] = KILN_VAL_UNDEFINED;
     }
+    for (size_t slot_i = 0; slot_i < tail_slots; ++slot_i)
+        object->slots[slot_i] = KILN_VAL_UNDEFINED;
     object->elements = NULL;
     object->element_count = 0;
     object->element_capacity = 0;
     *out = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
     return KILN_C99_OK;
+}
+
+static int kiln_c99_new_object(kiln_value *out) {
+    return kiln_c99_new_object_sized(out, 0);
 }
 
 /* Allocate or recover this realm's identity for one graph node. The weak chain is not a GC root;
@@ -1443,18 +1445,20 @@ static int kiln_c99_share_value(kiln_value input, kiln_value *out) {
  * not a limit -- passing a number too small only restores the doubling. */
 static int kiln_c99_new_object_with_capacity(kiln_value *out, size_t capacity) {
     kiln_object *object;
+    if (capacity > KILN_C99_INLINE_SLOTS && capacity <= KILN_SHAPE_MAX_FAST_PROPERTIES)
+        return kiln_c99_new_object_sized(out, capacity);
     int status = kiln_c99_new_object(out);
     if (status != KILN_C99_OK) {
         return status;
     }
     object = kiln_c99_object_of(*out);
     if (capacity > KILN_C99_INLINE_SLOTS) {
-        kiln_val *new_slots = (kiln_val *)malloc(capacity * sizeof(kiln_val));
+        kiln_val *new_slots = kiln_c99_object_slots_resize(object, capacity);
         size_t i;
         if (new_slots == NULL) {
             return KILN_C99_OUT_OF_MEMORY;
         }
-        for (i = 0; i < capacity; ++i) {
+        for (i = KILN_C99_INLINE_SLOTS; i < capacity; ++i) {
             new_slots[i] = KILN_VAL_UNDEFINED;
         }
         object->slots = new_slots;

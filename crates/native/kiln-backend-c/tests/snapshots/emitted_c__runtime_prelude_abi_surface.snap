@@ -991,6 +991,8 @@ typedef struct kiln_sealed_values {
 #define KILN_C99_SEALED_GLOBAL_CODE UINT64_MAX
 #define KILN_C99_INLINE_SLOTS 8
 typedef struct kiln_object {
+static inline int kiln_c99_object_slots_owned(const kiln_object *object) {
+static inline kiln_val *kiln_c99_object_slots_resize(const kiln_object *object, size_t capacity) {
 static inline kiln_sealed_values *kiln_c99_sealed_values_of(const kiln_object *object) {
 typedef struct kiln_shared_facade {
 static uint64_t kiln_c99_builtin_store_epoch;
@@ -2407,6 +2409,7 @@ static const kiln_sealed_layout *kiln_c99_sealed_layout_find(uint32_t tag, uint6
 static int kiln_c99_sealed_layout_attach(uint32_t tag, uint64_t code,
 static int kiln_c99_sealed_layout_attach_empty(uint32_t tag, uint64_t code,
 static void kiln_c99_sealed_layout_publish(uint32_t tag, uint64_t code,
+static int kiln_c99_new_object_sized(kiln_value *out, size_t tail_slots) {
 static int kiln_c99_new_object(kiln_value *out) {
 static int kiln_c99_new_shared_facade(uint32_t graph, uint32_t generation, uint32_t node,
 static int kiln_c99_shared_field_key(uint64_t lease, uint64_t index, kiln_value *out,

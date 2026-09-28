@@ -2571,7 +2571,8 @@ int main(void) {
     kiln_c99_gc_heap_init(&receiver);
     if (!kiln_c99_graph_candidate_open(&candidate, &sender,
                                         sender.nursery.capacity)) return 1;
-    object = (kiln_object *)kiln_c99_par_alloc(&candidate, KILN_GC_OBJECT, sizeof *object);
+    object = (kiln_object *)kiln_c99_par_alloc(&candidate, KILN_GC_OBJECT,
+                                               sizeof *object + 12 * sizeof(kiln_val));
     array = (kiln_array *)kiln_c99_par_alloc(&candidate, KILN_GC_ARRAY,
                                              sizeof *array + 12 * sizeof(kiln_val));
     text = (kiln_string *)kiln_c99_par_alloc(&candidate, KILN_GC_STRING,
@@ -2634,7 +2635,22 @@ int main(void) {
     array->capacity = 13;
     if (kiln_c99_graph_capsule_prepare(&sender, chunk, root, &capsule)) return 15;
     array->capacity = 12;
+    object->slots = (kiln_val *)(object + 1);
+    object->slot_capacity = 12;
+    shape.property_count = 12;
+    for (size_t i = 0; i < shape.property_count; ++i) {
+        shape.keys[i] = kiln_c99_key_empty;
+        object->slots[i] = KILN_VAL_UNDEFINED;
+    }
+    object->slots[0] = KILN_VAL_TAG_PTR(KILN_TAG_BUFFER_PREFIX, array);
     if (!kiln_c99_graph_capsule_prepare(&sender, chunk, root, &capsule)) return 16;
+    object->slots = external;
+    if (kiln_c99_graph_capsule_prepare(&sender, chunk, root, &capsule)) return 17;
+    object->slots = (kiln_val *)(object + 1);
+    object->slot_capacity = 13;
+    if (kiln_c99_graph_capsule_prepare(&sender, chunk, root, &capsule)) return 18;
+    object->slot_capacity = 12;
+    if (!kiln_c99_graph_capsule_prepare(&sender, chunk, root, &capsule)) return 19;
     if (!kiln_c99_graph_capsule_receiver_preflight(&receiver, &capsule.needs,
                                                     reservation)) return 10;
     if (!kiln_c99_graph_capsule_detach(&sender, &capsule)) return 11;
@@ -2642,6 +2658,8 @@ int main(void) {
     if (sender.count != 0 || receiver.count != 3 ||
         receiver.realm.graph_inbox_root.bits != root.bits ||
         kiln_c99_gc_lookup(&receiver, object) == NULL ||
+        object->slots != (kiln_val *)(object + 1) ||
+        object->slot_capacity != 12 || object->slots[11] != KILN_VAL_UNDEFINED ||
         array->elements != (kiln_val *)(array + 1) ||
         array->count != 12 || array->elements[11] != KILN_VAL_UNDEFINED ||
         kiln_c99_gc_lookup(&sender, object) != NULL) return 12;

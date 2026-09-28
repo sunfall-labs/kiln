@@ -1160,6 +1160,27 @@ typedef struct kiln_object {
     const kiln_sealed_layout *sealed;
 } kiln_object;
 
+/* A shaped object's slots can be its fixed prefix, a tail reserved in the same GC block by
+ * `kiln_c99_new_object_with_capacity`, or a separately malloc'd array. Only the last one may
+ * be handed to realloc/free. Sealed-layout values have their own owner and are handled before
+ * this helper is used. */
+static inline int kiln_c99_object_slots_owned(const kiln_object *object) {
+    return object->slots != NULL && object->slots != object->inline_slots &&
+           object->slots != (const kiln_val *)(object + 1);
+}
+
+static inline kiln_val *kiln_c99_object_slots_resize(const kiln_object *object, size_t capacity) {
+    kiln_val *slots;
+    if (object->sealed != NULL || capacity < object->slot_capacity ||
+        capacity > SIZE_MAX / sizeof(kiln_val)) return NULL;
+    if (kiln_c99_object_slots_owned(object))
+        return (kiln_val *)realloc(object->slots, capacity * sizeof(kiln_val));
+    slots = (kiln_val *)malloc(capacity * sizeof(kiln_val));
+    if (slots != NULL && object->slots != NULL)
+        memcpy(slots, object->slots, object->slot_capacity * sizeof(kiln_val));
+    return slots;
+}
+
 static inline kiln_sealed_values *kiln_c99_sealed_values_of(const kiln_object *object) {
     return (kiln_sealed_values *)((char *)object->slots -
                                   offsetof(kiln_sealed_values, values));

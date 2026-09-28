@@ -3165,15 +3165,19 @@ static int kiln_c99_graph_inert_finalizer_block(const kiln_gc_block *block) {
         if (block->size < sizeof *object || object->properties != NULL || object->count != 0 ||
             object->capacity != 0 || object->sealed != NULL || object->elements != NULL ||
             object->element_count != 0 || object->element_capacity != 0 ||
-            object->slots != object->inline_slots ||
-            object->slot_capacity != KILN_C99_INLINE_SLOTS || object->shape == NULL ||
+            (object->slots == object->inline_slots
+                 ? object->slot_capacity != KILN_C99_INLINE_SLOTS
+                 : object->slots != (const kiln_val *)(object + 1) ||
+                   object->slot_capacity <= KILN_C99_INLINE_SLOTS ||
+                   object->slot_capacity > (block->size - sizeof *object) / sizeof(kiln_val)) ||
+            object->shape == NULL ||
             object->module_namespace || object->arguments_brand || object->error_brand ||
             object->layout_token != 0 || object->accessor_count != 0 ||
             object->read_only_seen || object->frozen || object->not_extensible ||
             (object->prototype.tag != KILN_VALUE_UNDEFINED &&
              object->prototype.tag != KILN_VALUE_NULL)) return 0;
         shape = object->shape;
-        if ((shape->shared & 1u) == 0 || shape->property_count > KILN_C99_INLINE_SLOTS ||
+        if ((shape->shared & 1u) == 0 || shape->property_count > object->slot_capacity ||
             shape->special_mask != 0 || shape->accessor_mask != 0 || shape->code_mask != 0)
             return 0;
         for (index = 0; index < shape->property_count; ++index) {
@@ -6269,7 +6273,7 @@ static void kiln_c99_gc_finalize(kiln_gc_heap *heap, kiln_gc_block *block) {
         free(((kiln_object *)payload)->properties);
         if (((kiln_object *)payload)->sealed != NULL) {
             free(kiln_c99_sealed_values_of((kiln_object *)payload));
-        } else if (((kiln_object *)payload)->slots != ((kiln_object *)payload)->inline_slots) {
+        } else if (kiln_c99_object_slots_owned((kiln_object *)payload)) {
             free(((kiln_object *)payload)->slots);
         }
         free(((kiln_object *)payload)->elements);

@@ -9,17 +9,8 @@ static int kiln_c99_grow_slots(kiln_object *dest, size_t needed) {
     }
     new_cap = dest->slot_capacity == 0 ? KILN_C99_INLINE_SLOTS : dest->slot_capacity * 2;
     while (needed > new_cap) new_cap *= 2;
-    if (dest->slots == dest->inline_slots) {
-        new_slots = (kiln_val *)malloc(new_cap * sizeof(kiln_val));
-        if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
-        memcpy(new_slots, dest->inline_slots, KILN_C99_INLINE_SLOTS * sizeof(kiln_val));
-    } else if (dest->slots == NULL) {
-        new_slots = (kiln_val *)malloc(new_cap * sizeof(kiln_val));
-        if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
-    } else {
-        new_slots = (kiln_val *)realloc(dest->slots, new_cap * sizeof(kiln_val));
-        if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
-    }
+    new_slots = kiln_c99_object_slots_resize(dest, new_cap);
+    if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
     for (fill_i = dest->slot_capacity; fill_i < new_cap; ++fill_i) {
         new_slots[fill_i] = KILN_VAL_UNDEFINED;
     }

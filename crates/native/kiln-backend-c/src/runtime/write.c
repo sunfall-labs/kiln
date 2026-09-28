@@ -665,17 +665,8 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
                     kiln_val *new_slots;
                     size_t fill_i;
                     while (new_slot >= new_cap) new_cap *= 2;
-                    if (object->slots == object->inline_slots) {
-                        new_slots = (kiln_val *)malloc(new_cap * sizeof(kiln_val));
-                        if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
-                        memcpy(new_slots, object->inline_slots, KILN_C99_INLINE_SLOTS * sizeof(kiln_val));
-                    } else if (object->slots == NULL) {
-                        new_slots = (kiln_val *)malloc(new_cap * sizeof(kiln_val));
-                        if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
-                    } else {
-                        new_slots = (kiln_val *)realloc(object->slots, new_cap * sizeof(kiln_val));
-                        if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
-                    }
+                    new_slots = kiln_c99_object_slots_resize(object, new_cap);
+                    if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
                     for (fill_i = object->slot_capacity; fill_i < new_cap; ++fill_i) {
                         new_slots[fill_i] = KILN_VAL_UNDEFINED;
                     }
