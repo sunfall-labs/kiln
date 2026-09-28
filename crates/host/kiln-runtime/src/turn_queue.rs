@@ -219,6 +219,14 @@ impl TurnTicket {
         self.realm_id
     }
 
+    /// The lane this ticket is permanently bound to, if any.
+    pub fn pinned_lane(&self) -> Option<usize> {
+        match self.lane.load(Ordering::Acquire) {
+            usize::MAX => None,
+            lane => Some(lane),
+        }
+    }
+
     /// Permanently bind an unqueued or running ticket to the lane that owns thread-affine
     /// state. A wake racing a running turn is retained until that turn finishes, so the next
     /// enqueue observes the new owner. A queued ticket cannot change its route.

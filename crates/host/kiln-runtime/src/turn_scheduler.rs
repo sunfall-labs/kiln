@@ -164,6 +164,7 @@ impl Drop for PinnedTurnHandle {
 pub struct MovableTurnHandle {
     entry: Arc<MovableEntry>,
     realms: MovableRealms,
+    lanes: Arc<Vec<Arc<LaneControl>>>,
 }
 
 impl MovableTurnHandle {
@@ -192,10 +193,14 @@ impl MovableTurnHandle {
             .is_ok()
         {
             self.entry.ticket.cancel();
-            self.realms
-                .lock()
-                .expect("movable realm lock poisoned")
-                .remove(&self.id());
+            if let Some(lane) = self.entry.ticket.pinned_lane() {
+                self.lanes[lane].command(Command::Remove(self.id()));
+            } else {
+                self.realms
+                    .lock()
+                    .expect("movable realm lock poisoned")
+                    .remove(&self.id());
+            }
         }
     }
 }
@@ -212,7 +217,7 @@ impl Drop for MovableTurnHandle {
 pub struct PinnedTurnScheduler {
     reactor: Arc<Reactor>,
     movable: MovableRealms,
-    lanes: Vec<Arc<LaneControl>>,
+    lanes: Arc<Vec<Arc<LaneControl>>>,
     threads: Vec<std::thread::JoinHandle<()>>,
     next_realm_id: AtomicU64,
 }
@@ -232,27 +237,33 @@ impl PinnedTurnScheduler {
 
     fn with_reactor(lane_count: usize, reactor: Arc<Reactor>) -> std::io::Result<Self> {
         let queue = ReadyQueue::with_lanes(lane_count);
+        let lanes = Arc::new(
+            (0..lane_count)
+                .map(|index| {
+                    Arc::new(LaneControl {
+                        index,
+                        control: queue.ticket_on_lane(0, index),
+                        queue: Arc::clone(&queue),
+                        commands: Mutex::new(VecDeque::new()),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        );
         let mut scheduler = Self {
             reactor,
             movable: Arc::new(Mutex::new(HashMap::new())),
-            lanes: Vec::new(),
+            lanes,
             threads: Vec::new(),
             next_realm_id: AtomicU64::new(1),
         };
         for index in 0..lane_count {
-            let lane = Arc::new(LaneControl {
-                index,
-                control: queue.ticket_on_lane(0, index),
-                queue: Arc::clone(&queue),
-                commands: Mutex::new(VecDeque::new()),
-            });
+            let lane = Arc::clone(&scheduler.lanes[index]);
             let lane_for_thread = Arc::clone(&lane);
             let reactor_for_thread = Arc::clone(&scheduler.reactor);
             let movable_for_thread = Arc::clone(&scheduler.movable);
             let thread = std::thread::Builder::new()
                 .name(format!("kiln-turn-{index}"))
                 .spawn(move || run_lane(lane_for_thread, reactor_for_thread, movable_for_thread))?;
-            scheduler.lanes.push(lane);
             scheduler.threads.push(thread);
         }
         Ok(scheduler)
@@ -308,6 +319,7 @@ impl PinnedTurnScheduler {
         MovableTurnHandle {
             entry,
             realms: Arc::clone(&self.movable),
+            lanes: Arc::clone(&self.lanes),
         }
     }
 
@@ -335,6 +347,7 @@ impl PinnedTurnScheduler {
         MovableTurnHandle {
             entry,
             realms: Arc::clone(&self.movable),
+            lanes: Arc::clone(&self.lanes),
         }
     }
 }
@@ -452,9 +465,21 @@ fn run_lane(lane: Arc<LaneControl>, reactor: Arc<Reactor>, movable: MovableRealm
                                     movable.lock().expect("movable realm lock poisoned");
                                 if entry.status.load(Ordering::Acquire) == TurnStatus::Active as u8
                                 {
-                                    *entry.body.lock().expect("movable body lock poisoned") =
-                                        Some(body);
-                                    registry.insert(ticket.realm_id(), entry);
+                                    if ticket.pinned_lane() == Some(lane.index) {
+                                        realms.insert(
+                                            ticket.realm_id(),
+                                            RealmEntry {
+                                                body,
+                                                status: Arc::clone(&entry.status),
+                                                ticket: Arc::clone(&ticket),
+                                                deadline_epoch: 0,
+                                            },
+                                        );
+                                    } else {
+                                        *entry.body.lock().expect("movable body lock poisoned") =
+                                            Some(body);
+                                        registry.insert(ticket.realm_id(), entry);
+                                    }
                                     drop(registry);
                                     ticket.wake();
                                 }
@@ -476,7 +501,7 @@ fn run_lane(lane: Arc<LaneControl>, reactor: Arc<Reactor>, movable: MovableRealm
             continue;
         }
         let Some(realm) = realms.get_mut(&realm_id) else {
-            run_movable(lease, lane.index, &movable, &mut deadlines);
+            run_movable(lease, lane.index, &movable, &mut realms, &mut deadlines);
             continue;
         };
         let waker = Waker::from(lease.ticket());
@@ -519,6 +544,7 @@ fn run_movable(
     lease: TurnLease,
     lane: usize,
     movable: &MovableRealms,
+    pinned: &mut HashMap<u64, RealmEntry>,
     deadlines: &mut BinaryHeap<Reverse<(Instant, u64, u64)>>,
 ) {
     let id = lease.realm_id();
@@ -572,7 +598,23 @@ fn run_movable(
                     Ordering::Acquire,
                 );
             } else if entry.status.load(Ordering::Acquire) == TurnStatus::Active as u8 {
-                *entry.body.lock().expect("movable body lock poisoned") = Some(body);
+                if entry.ticket.pinned_lane() == Some(lane) {
+                    pinned.insert(
+                        id,
+                        RealmEntry {
+                            body,
+                            status: Arc::clone(&entry.status),
+                            ticket: Arc::clone(&entry.ticket),
+                            deadline_epoch: epoch,
+                        },
+                    );
+                    movable
+                        .lock()
+                        .expect("movable realm lock poisoned")
+                        .remove(&id);
+                } else {
+                    *entry.body.lock().expect("movable body lock poisoned") = Some(body);
+                }
             }
             lease.finish(outcome);
             if done || entry.status.load(Ordering::Acquire) != TurnStatus::Active as u8 {
@@ -934,5 +976,55 @@ mod tests {
             std::thread::yield_now();
         }
         assert_eq!(body.status(), TurnStatus::Complete);
+    }
+
+    #[test]
+    fn a_body_that_pins_during_a_turn_is_dropped_on_that_lane() {
+        struct PinThenPark {
+            ticket: Arc<TurnTicket>,
+            owner: Option<std::thread::ThreadId>,
+            parked: std::sync::mpsc::Sender<std::thread::ThreadId>,
+            dropped: std::sync::mpsc::Sender<std::thread::ThreadId>,
+        }
+        impl PinnedTurn for PinThenPark {
+            fn run_turn(&mut self, _: &Waker) -> TurnOutcome {
+                unreachable!("scheduler supplies the lane")
+            }
+
+            fn run_turn_on(&mut self, _: &Waker, lane: usize) -> TurnOutcome {
+                let current = std::thread::current().id();
+                if let Some(owner) = self.owner {
+                    assert_eq!(current, owner);
+                    self.parked.send(owner).unwrap();
+                    TurnOutcome::Parked
+                } else {
+                    assert!(self.ticket.pin_to_lane(lane));
+                    self.owner = Some(current);
+                    TurnOutcome::Ready
+                }
+            }
+        }
+        impl Drop for PinThenPark {
+            fn drop(&mut self) {
+                self.dropped.send(std::thread::current().id()).unwrap();
+            }
+        }
+
+        let scheduler = PinnedTurnScheduler::new(2).expect("lanes start");
+        let (parked, parked_rx) = std::sync::mpsc::channel();
+        let (dropped, dropped_rx) = std::sync::mpsc::channel();
+        let handle = scheduler.spawn_movable_with(move |_, ticket, _| PinThenPark {
+            ticket,
+            owner: None,
+            parked,
+            dropped,
+        });
+        let owner = parked_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        handle.cancel();
+        assert_eq!(
+            dropped_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            owner
+        );
+        assert_eq!(handle.status(), TurnStatus::Cancelled);
     }
 }
