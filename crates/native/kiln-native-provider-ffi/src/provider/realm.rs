@@ -42,6 +42,9 @@ pub use graph_capsules::{
     kiln_realm_graph_capsule_peek, kiln_realm_graph_capsule_stage, kiln_realm_graph_capsule_take,
 };
 
+#[path = "realm/graph_handoff.rs"]
+mod graph_handoff;
+
 #[path = "realm/dedicated_claim.rs"]
 mod dedicated_claim;
 
@@ -5038,6 +5041,9 @@ pub(crate) fn run_paused_graph_control(
 }
 
 fn invoke_active_graph_control(command: PausedTurnCommand) -> PausedTurnResult {
+    if command.kind == 10 {
+        return graph_handoff::run_active(command.ids[0], command.ids[1]);
+    }
     let Some(control) = GRAPH_CONTROL.get().copied() else {
         return PausedTurnResult::Unavailable;
     };
@@ -5169,9 +5175,7 @@ fn refuse_graph_claim_request(
     }
     let result = if let Ok(claim) = claim_scheduled_realm_pair(sender, receiver) {
         if claim.wait(Duration::from_secs(1)) {
-            probe_claimed_graph_request(sender, receiver, request, reservation, |realm, command| {
-                claim.control(realm, command)
-            })
+            coordinate_scheduled_graph_request(&claim, sender, receiver, request, reservation)
         } else {
             GRAPH_REQUEST_REFUSED
         }
@@ -5279,47 +5283,149 @@ fn coordinate_mixed_graph_request(
     if !scheduled_claim.wait(Duration::from_secs(1)) {
         return Some(GRAPH_REQUEST_REFUSED);
     }
-    Some(probe_claimed_graph_request(
+    Some(coordinate_mixed_claimed_graph_request(
+        &scheduled_claim,
+        &dedicated_claim,
         sender,
         receiver,
         request,
         reservation,
-        |realm, command| {
-            if realm == scheduled {
-                scheduled_claim.control(realm, command)
-            } else {
-                dedicated_claim.control(realm, command)
-            }
-        },
+        scheduled,
+        dedicated,
     ))
 }
 
-/// A scheduled control may sit behind an unrelated turn on its lane. Refuse before unlink until
-/// the scheduler can place both post-unlink callbacks on executing lanes concurrently.
-fn probe_claimed_graph_request(
+/// Both queued callbacks must enter their owner lanes before either stages the C capsule.
+/// A pinned same-lane pair refuses before any heap mutation.
+fn coordinate_scheduled_graph_request(
+    claim: &TurnPairClaim,
     sender: u64,
     receiver: u64,
     request: u64,
     reservation: u64,
-    mut control: impl FnMut(u64, PausedTurnCommand) -> PausedTurnResult,
 ) -> u8 {
-    if reservation != 0 {
-        let _ = control(
-            receiver,
-            PausedTurnCommand {
-                kind: 2,
-                ids: [reservation, 0, 0],
-            },
-        );
-        let _ = control(
-            sender,
-            PausedTurnCommand {
-                kind: 1,
-                ids: [request, 0, 0],
-            },
-        );
+    if reservation == 0 {
+        return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
     }
-    GRAPH_REQUEST_REFUSED_AFTER_PAUSE
+    let Some(lanes) = claim.concurrent_control_lanes(sender, receiver) else {
+        return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
+    };
+    let Some(lease) =
+        kiln_runtime::workers::actor_begin_publish(reservation, sender, request, receiver)
+    else {
+        return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
+    };
+    let Some(handoff) = graph_handoff::Registration::new(sender, receiver, request, reservation)
+    else {
+        return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
+    };
+    let sender_command = PausedTurnCommand {
+        kind: 10,
+        ids: [handoff.id(), 0, 0],
+    };
+    let receiver_command = PausedTurnCommand {
+        kind: 10,
+        ids: [handoff.id(), 1, 0],
+    };
+    let sender_pending = claim.enqueue_control(sender, sender_command, Some(lanes[0]));
+    let receiver_pending = claim.enqueue_control(receiver, receiver_command, Some(lanes[1]));
+    if sender_pending.is_none()
+        || receiver_pending.is_none()
+        || !handoff.handoff.wait_ready(Duration::from_secs(1))
+    {
+        handoff.handoff.cancel();
+        if let Some(pending) = sender_pending {
+            let _ = pending.wait(Duration::from_secs(1));
+        }
+        if let Some(pending) = receiver_pending {
+            let _ = pending.wait(Duration::from_secs(1));
+        }
+        return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
+    }
+    handoff.handoff.start();
+    let sender_result = sender_pending
+        .expect("ready sender was queued")
+        .wait(Duration::from_secs(1));
+    let receiver_result = receiver_pending
+        .expect("ready receiver was queued")
+        .wait(Duration::from_secs(1));
+    if sender_result == PausedTurnResult::Ready
+        && receiver_result == PausedTurnResult::Ready
+        && handoff.handoff.done()
+    {
+        lease.finish();
+        GRAPH_REQUEST_PUBLISHED
+    } else {
+        if !handoff.handoff.refused_safely() {
+            std::process::abort();
+        }
+        GRAPH_REQUEST_REFUSED_AFTER_PAUSE
+    }
+}
+
+fn coordinate_mixed_claimed_graph_request(
+    scheduled_claim: &TurnPairClaim,
+    dedicated_claim: &dedicated_claim::DedicatedSingleClaim,
+    sender: u64,
+    receiver: u64,
+    request: u64,
+    reservation: u64,
+    scheduled: u64,
+    dedicated: u64,
+) -> u8 {
+    if reservation == 0 {
+        return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
+    }
+    let Some(lease) =
+        kiln_runtime::workers::actor_begin_publish(reservation, sender, request, receiver)
+    else {
+        return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
+    };
+    let Some(handoff) = graph_handoff::Registration::new(sender, receiver, request, reservation)
+    else {
+        return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
+    };
+    let side = |realm| u64::from(realm == receiver);
+    let scheduled_command = PausedTurnCommand {
+        kind: 10,
+        ids: [handoff.id(), side(scheduled), 0],
+    };
+    let dedicated_command = PausedTurnCommand {
+        kind: 10,
+        ids: [handoff.id(), side(dedicated), 0],
+    };
+    std::thread::scope(|scope| {
+        let dedicated_result =
+            scope.spawn(|| dedicated_claim.control(dedicated, dedicated_command));
+        let scheduled_pending = scheduled_claim.enqueue_control(scheduled, scheduled_command, None);
+        if scheduled_pending.is_none() || !handoff.handoff.wait_ready(Duration::from_secs(1)) {
+            handoff.handoff.cancel();
+            if let Some(pending) = scheduled_pending {
+                let _ = pending.wait(Duration::from_secs(1));
+            }
+            let _ = dedicated_result.join();
+            return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
+        }
+        handoff.handoff.start();
+        let scheduled_result = scheduled_pending
+            .expect("ready scheduled side was queued")
+            .wait(Duration::from_secs(1));
+        let dedicated_result = dedicated_result
+            .join()
+            .unwrap_or(PausedTurnResult::Unavailable);
+        if scheduled_result == PausedTurnResult::Ready
+            && dedicated_result == PausedTurnResult::Ready
+            && handoff.handoff.done()
+        {
+            lease.finish();
+            GRAPH_REQUEST_PUBLISHED
+        } else {
+            if !handoff.handoff.refused_safely() {
+                std::process::abort();
+            }
+            GRAPH_REQUEST_REFUSED_AFTER_PAUSE
+        }
+    })
 }
 
 /// All C operations are lane-local and carry IDs only. The host lease pins the authenticated
