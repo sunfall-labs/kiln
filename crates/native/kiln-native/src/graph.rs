@@ -2726,8 +2726,11 @@ pub(super) fn graph_launcher_source(
     graph_launcher_source_with_imports(graph, modules, policy, None, None, None, None, None, None)
 }
 
-/// What a startup module's completion handler does with a rejection nobody awaits.
-pub(super) const FATAL_UNHANDLED_REJECTION: &str = r#"/* A startup module has no importer waiting on it, so its rejection is unhandled and, as in node, fatal. This runs as a `then` reaction, so a thrown status would only reject the derived promise; and the launcher reads the entry promise only once the turn loop is quiescent, which a listening server never lets it be -- a rejected top-level await beside a live server hung the process here. */ { kiln_cli_report_failure_in(KILN_C99_THROWN, kiln_cli_describe_error(*value), "module body"); exit(1); }"#;
+/// Stop the promise checkpoint on a startup rejection. A thrown status would reject the
+/// completion handler's derived promise instead, and waiting for quiescence hangs beside a live
+/// server. The launcher maps this private status back to an uncaught throw at realm teardown.
+pub(super) const FATAL_UNHANDLED_REJECTION: &str =
+    r#"{ graph->result = *value; return KILN_GRAPH_FATAL_REJECTION; }"#;
 
 pub(super) fn graph_launcher_source_with_imports(
     graph: &ModuleGraph,
@@ -3012,6 +3015,9 @@ extern int kiln_realm_gc_mark_value(void *heap, const void *value);
 #define KILN_C99_THROWN (-7)
 #define KILN_C99_CONTROL_ERROR (-2)
 #define KILN_C99_HOST_ERROR (-3)
+/* Private to the generated graph launcher. Promise jobs propagate non-throw statuses, so this
+ * ends the checkpoint without turning the failure into another rejected promise. */
+#define KILN_GRAPH_FATAL_REJECTION (-1000)
 extern int kiln_c99_process_object(kiln_value *result);
 #define KILN_C99_INVALID_ARGUMENT (-1)
 #define KILN_C99_HOST_MODULE_CREATE_REQUIRE UINT16_C(0x7FF0)
@@ -4325,6 +4331,10 @@ static int kiln_cli_realm_finish(kiln_cli_realm_run *run, int writes_result,
     .unwrap();
     output.push_str(
         r##"
+    if (status == KILN_GRAPH_FATAL_REJECTION) {
+        status = KILN_C99_THROWN;
+        phase = "module body";
+    }
     if (status == 0 && graph->entry_result.tag == 16 /* KILN_VALUE_PROMISE */) {
         typedef struct kiln_launcher_promise_view {
             int state;

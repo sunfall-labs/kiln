@@ -54,29 +54,54 @@ fn native_unhandled_top_level_rejection_exits_with_a_live_handle() {
             },
         )
         .expect("fixture builds");
-    let mut child = Command::new(&report.output)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn fixture");
-    let started = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().expect("poll fixture") {
-            break status;
+    for scheduler in [None, Some(false), Some(true)] {
+        let mut command = Command::new(&report.output);
+        let realm_output = project.path.join(format!("realms-{scheduler:?}"));
+        if let Some(scheduler) = scheduler {
+            fs::create_dir(&realm_output).expect("create realm output directory");
+            command
+                .env("KILN_REALMS", "2")
+                .env("KILN_REALMS_OUT", &realm_output);
+            if scheduler {
+                command.env("KILN_REALM_SCHEDULER", "1");
+            }
         }
-        assert!(
-            started.elapsed() < Duration::from_secs(20),
-            "the fixture is still running after 20s: an unhandled rejection with a live timer hung"
+        let mut child = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn fixture");
+        let started = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("poll fixture") {
+                break status;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "the fixture is still running after 20s: an unhandled rejection with a live timer hung"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let output = child.wait_with_output().expect("collect fixture output");
+        assert_eq!(
+            status.code(),
+            Some(1),
+            "uncaught rejection must exit cleanly: {status:?}"
         );
-        std::thread::sleep(Duration::from_millis(50));
-    };
-    let output = child.wait_with_output().expect("collect fixture output");
-    assert!(
-        !status.success(),
-        "an unhandled rejection must exit non-zero"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("unhandled on purpose"), "{stderr}");
+        if scheduler.is_some() {
+            for index in 0..2 {
+                let output = fs::read_to_string(realm_output.join(format!("{index}.out")))
+                    .expect("read realm output");
+                let status = fs::read_to_string(realm_output.join(format!("{index}.status")))
+                    .expect("read realm status");
+                assert_eq!(status.trim(), "1");
+                assert!(output.contains("unhandled on purpose"), "{output}");
+            }
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("unhandled on purpose"), "{stderr}");
+        }
+    }
 }
 
 #[test]
