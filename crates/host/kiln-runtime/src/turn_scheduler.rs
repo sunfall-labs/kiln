@@ -1194,6 +1194,101 @@ mod tests {
     }
 
     #[test]
+    fn two_waiting_parents_starve_cross_routed_pinned_notifiers() {
+        let reactor = Reactor::shared_wall().expect("reactor starts");
+        let scheduler = Arc::new(
+            PinnedTurnScheduler::with_reactor(2, 2, reactor).expect("scheduler lanes start"),
+        );
+        let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+        let (outcome_tx, outcome_rx) = std::sync::mpsc::channel();
+        let start = Arc::new(std::sync::Barrier::new(3));
+        let mut parents = Vec::new();
+        for key in [(0x51, 0), (0x52, 0)] {
+            let scheduler = Arc::clone(&scheduler);
+            let waiting_tx = waiting_tx.clone();
+            let outcome_tx = outcome_tx.clone();
+            let start = Arc::clone(&start);
+            parents.push(scheduler.clone().spawn_pinned(move |_, _| {
+                move |_: &Waker| {
+                    let _replacement = scheduler.enter_blocking().expect("replacement starts");
+                    waiting_tx.send(std::thread::current().id()).unwrap();
+                    start.wait();
+                    let outcome = crate::workers::wait(key, || true, Some(Duration::from_secs(1)));
+                    outcome_tx.send(outcome).unwrap();
+                    TurnOutcome::Done
+                }
+            }));
+        }
+        drop(waiting_tx);
+        drop(outcome_tx);
+        let first_lane = waiting_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let second_lane = waiting_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_ne!(first_lane, second_lane);
+        start.wait();
+
+        // Round-robin assigns these children to lanes 0 and 1. Each would notify the parent
+        // on the opposite lane, but both owner lanes are occupied by synchronous waits.
+        let (notified_tx, notified_rx) = std::sync::mpsc::channel();
+        let mut children = Vec::new();
+        for key in [(0x52, 0), (0x51, 0)] {
+            let notified_tx = notified_tx.clone();
+            children.push(scheduler.spawn_pinned(move |_, _| {
+                move |_: &Waker| {
+                    notified_tx.send(crate::workers::notify(key, 1)).unwrap();
+                    TurnOutcome::Done
+                }
+            }));
+        }
+        drop(notified_tx);
+
+        let (movable_tx, movable_rx) = std::sync::mpsc::channel();
+        let movable = scheduler.spawn_movable(move |_: &Waker| {
+            movable_tx.send(std::thread::current().id()).unwrap();
+            TurnOutcome::Done
+        });
+        let replacement_lane = movable_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_ne!(replacement_lane, first_lane);
+        assert_ne!(replacement_lane, second_lane);
+        assert!(
+            notified_rx.recv_timeout(Duration::from_millis(20)).is_err(),
+            "cross-routed pinned children ran while both parents waited"
+        );
+
+        for parent in &parents {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while parent.status() == TurnStatus::Active {
+                assert!(Instant::now() < deadline, "parent wait never timed out");
+                std::thread::yield_now();
+            }
+            assert_eq!(parent.status(), TurnStatus::Complete);
+        }
+        let outcomes = [
+            outcome_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            outcome_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        ];
+        assert!(outcomes.contains(&crate::workers::WaitOutcome::TimedOut));
+        notified_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        notified_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(movable.status(), TurnStatus::Complete);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while children
+            .iter()
+            .any(|child| child.status() == TurnStatus::Active)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "pinned notifiers did not complete"
+            );
+            std::thread::yield_now();
+        }
+        assert!(
+            children
+                .iter()
+                .all(|child| child.status() == TurnStatus::Complete)
+        );
+    }
+
+    #[test]
     fn a_draining_replacement_hands_off_a_movable_deadline() {
         let reactor = Reactor::shared_wall().expect("reactor starts");
         let scheduler = Arc::new(
