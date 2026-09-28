@@ -671,7 +671,7 @@ static int kiln_c99_has_property(kiln_host *host, kiln_value target, const char 
     kiln_string view;
     if (key_len > UINT32_MAX) return KILN_C99_INVALID_ARGUMENT;
     view.unit_len = (uint32_t)key_len;
-    view.flags = KILN_STRING_LATIN1;
+    view.flags = kiln_c99_fixed_key_flags(key, key_len);
     view.data = key;
     return kiln_c99_has_property_key(host, target, &view, NULL, answer, depth, thrown);
 }
@@ -810,7 +810,7 @@ static int kiln_c99_delete(kiln_host *host, kiln_value target, const char *key,
     kiln_string view;
     if (key_len > UINT32_MAX) return KILN_C99_INVALID_ARGUMENT;
     view.unit_len = (uint32_t)key_len;
-    view.flags = KILN_STRING_LATIN1;
+    view.flags = kiln_c99_fixed_key_flags(key, key_len);
     view.data = key;
     return kiln_c99_delete_key(host, target, &view, NULL, answer, depth, thrown);
 }

@@ -12,6 +12,25 @@ static inline uint32_t kiln_c99_key_domain(const kiln_string *key) {
     return key == NULL ? 0 : key->flags & (KILN_STRING_SYMBOL_KEY | KILN_STRING_PRIVATE_KEY);
 }
 
+/* The C runtime's fixed byte names predate headed property keys. A user-computed key is always
+ * passed as a headed value and keeps the ordinary string domain, even when its units start @@.
+ * Only these fixed-name adapters classify the runtime's private slots and well-known symbols. */
+static inline uint32_t kiln_c99_fixed_key_flags(const char *name, size_t length) {
+    static const char *const symbols[] = {
+        "@@iterator", "@@asyncIterator", "@@hasInstance", "@@toStringTag",
+        "@@toPrimitive", "@@isConcatSpreadable", "@@match", "@@matchAll",
+        "@@replace", "@@search", "@@species", "@@split", "@@unscopables",
+        "@@dispose", "@@asyncDispose"
+    };
+    size_t index;
+    if (length < 2 || name[0] != '@' || name[1] != '@') return KILN_STRING_LATIN1;
+    for (index = 0; index < sizeof symbols / sizeof *symbols; ++index) {
+        if (strlen(symbols[index]) == length && memcmp(symbols[index], name, length) == 0)
+            return KILN_STRING_LATIN1 | KILN_STRING_SYMBOL_KEY;
+    }
+    return KILN_STRING_LATIN1 | KILN_STRING_PRIVATE_KEY;
+}
+
 /* A symbol the program made -- `Symbol()` is stored as `@@symbol:<n>`, `Symbol.for(k)` as
  * `@@symbol-for:<k>` -- as opposed to a well-known symbol (`@@iterator`) or one of the runtime's
  * own slots (`@@state`). A built-in can carry one of these only through its property store, so

@@ -3602,7 +3602,7 @@ static const kiln_string *kiln_c99_intern(const char *bytes, size_t len) {
 static const kiln_string *kiln_c99_interned_in(kiln_gc_heap *heap, const char *bytes,
                                                size_t len) {
     if (len > UINT32_MAX) return NULL;
-    kiln_string view = {(uint32_t)len, KILN_STRING_LATIN1, bytes};
+    kiln_string view = {(uint32_t)len, kiln_c99_fixed_key_flags(bytes, len), bytes};
     return kiln_c99_interned_key_in(heap, &view);
 }
 

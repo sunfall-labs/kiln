@@ -204,7 +204,7 @@ static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t k
     kiln_string view;
     if (key_len > UINT32_MAX) return KILN_C99_INVALID_ARGUMENT;
     view.unit_len = (uint32_t)key_len;
-    view.flags = KILN_STRING_LATIN1;
+    view.flags = kiln_c99_fixed_key_flags(key, key_len);
     view.data = key;
     return kiln_c99_define_accessor_key(target, &view, getter, setter, enumerable);
 }
@@ -542,7 +542,7 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
     kiln_string view;
     if (key_len > UINT32_MAX) return KILN_C99_INVALID_ARGUMENT;
     view.unit_len = (uint32_t)key_len;
-    view.flags = KILN_STRING_LATIN1;
+    view.flags = kiln_c99_fixed_key_flags(key, key_len);
     view.data = key;
     return kiln_c99_define_property_key(host, target, &view, NULL, descriptor, depth, thrown);
 }
@@ -960,7 +960,7 @@ static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const 
     kiln_string view;
     if (key_len > UINT32_MAX) return KILN_C99_INVALID_ARGUMENT;
     view.unit_len = (uint32_t)key_len;
-    view.flags = KILN_STRING_LATIN1;
+    view.flags = kiln_c99_fixed_key_flags(key, key_len);
     view.data = key;
     return kiln_c99_describe_property_key(host, target, &view, NULL, out, found, depth, thrown);
 }
@@ -1280,7 +1280,7 @@ static int kiln_c99_define_private(kiln_value target, const char *key, size_t ke
     if (target.tag == KILN_VALUE_OBJECT && key_len <= UINT32_MAX) {
         kiln_string view;
         view.unit_len = (uint32_t)key_len;
-        view.flags = KILN_STRING_LATIN1;
+        view.flags = KILN_STRING_LATIN1 | KILN_STRING_PRIVATE_KEY;
         view.data = key;
         if (kiln_c99_define_shaped(target, &view, kiln_val_from_boundary(function), 3, &status))
             return status;
@@ -1388,7 +1388,7 @@ static int kiln_c99_define_method(kiln_value target, const char *key, size_t key
     kiln_string view;
     if (key_len > UINT32_MAX) return KILN_C99_INVALID_ARGUMENT;
     view.unit_len = (uint32_t)key_len;
-    view.flags = KILN_STRING_LATIN1;
+    view.flags = kiln_c99_fixed_key_flags(key, key_len);
     view.data = key;
     return kiln_c99_define_method_key(target, &view, method);
 }

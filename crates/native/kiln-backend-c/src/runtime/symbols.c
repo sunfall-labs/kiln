@@ -113,7 +113,7 @@ static int kiln_c99_symbol_of_key(const char *key, size_t key_len, kiln_value *o
     kiln_string view;
     if (key_len > UINT32_MAX) return 0;
     view.unit_len = (uint32_t)key_len;
-    view.flags = KILN_STRING_LATIN1;
+    view.flags = kiln_c99_fixed_key_flags(key, key_len);
     view.data = key;
     return kiln_c99_symbol_of_key_view(&view, out);
 }

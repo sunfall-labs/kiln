@@ -71,6 +71,8 @@ static int kiln_c99_same_name_key(const kiln_string *key, const char *name) {
     size_t index;
     while (name[len] != '\0') ++len;
     if (key == NULL || key->unit_len != len) return 0;
+    if (len >= 2 && name[0] == '@' && name[1] == '@' &&
+        !kiln_c99_key_is_reserved(key)) return 0;
     for (index = 0; index < len; ++index) {
         if (kiln_string_unit_at(key, index) != (unsigned char)name[index]) return 0;
     }
@@ -100,7 +102,7 @@ static int kiln_c99_same_key(const kiln_property *property, const char *key, siz
     kiln_string view;
     if (key_len > UINT32_MAX) return 0;
     view.unit_len = (uint32_t)key_len;
-    view.flags = KILN_STRING_LATIN1;
+    view.flags = kiln_c99_fixed_key_flags(key, key_len);
     view.data = key;
     return kiln_c99_same_key_view(property, &view);
 }
@@ -166,7 +168,8 @@ static size_t kiln_c99_own_index(const kiln_object *object, const kiln_string *i
     kiln_string view;
     if (key_len > UINT32_MAX) return object->count;
     view.unit_len = (uint32_t)key_len;
-    view.flags = KILN_STRING_LATIN1;
+    view.flags = ikey != NULL ? KILN_STRING_LATIN1 | kiln_c99_key_domain(ikey)
+                              : kiln_c99_fixed_key_flags(key, key_len);
     view.data = key;
     return kiln_c99_own_index_key(object, ikey, &view);
 }
@@ -406,7 +409,7 @@ static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key
     kiln_string view;
     if (key_len > UINT32_MAX) return KILN_C99_OUT_OF_MEMORY;
     view.unit_len = (uint32_t)key_len;
-    view.flags = KILN_STRING_LATIN1;
+    view.flags = kiln_c99_fixed_key_flags(key, key_len);
     view.data = key;
     return kiln_c99_put_mode_key(host, target, &view, NULL, value, strict, depth, thrown);
 }
@@ -813,7 +816,8 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
     kiln_string view;
     if (key_len > UINT32_MAX) return KILN_C99_OUT_OF_MEMORY;
     view.unit_len = (uint32_t)key_len;
-    view.flags = KILN_STRING_LATIN1;
+    view.flags = ikey != NULL ? KILN_STRING_LATIN1 | kiln_c99_key_domain(ikey)
+                              : kiln_c99_fixed_key_flags(key, key_len);
     view.data = key;
     return kiln_c99_put_mode_key(host, target, &view, ikey, value, strict, depth, thrown);
 }
@@ -840,7 +844,7 @@ static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
     kiln_string view;
     if (key_len > UINT32_MAX) return KILN_C99_OUT_OF_MEMORY;
     view.unit_len = (uint32_t)key_len;
-    view.flags = KILN_STRING_LATIN1;
+    view.flags = kiln_c99_fixed_key_flags(key, key_len);
     view.data = key;
     return kiln_c99_own_slot_key(target, &view, NULL, out);
 }
@@ -852,7 +856,8 @@ static int kiln_c99_own_slot_ikey(kiln_value target, const char *key, size_t key
     kiln_string view;
     if (key_len > UINT32_MAX) return KILN_C99_OUT_OF_MEMORY;
     view.unit_len = (uint32_t)key_len;
-    view.flags = KILN_STRING_LATIN1;
+    view.flags = ikey != NULL ? KILN_STRING_LATIN1 | kiln_c99_key_domain(ikey)
+                              : kiln_c99_fixed_key_flags(key, key_len);
     view.data = key;
     return kiln_c99_own_slot_key(target, &view, ikey, out);
 }

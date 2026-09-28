@@ -62,7 +62,7 @@ static int kiln_c99_shape_find_slot(const kiln_shape *shape, const kiln_string *
  * is 0 for every reserved (`@@`) key. A symbol key's program-visible answer is `ENUM_FLIP`'s
  * absence (`KILN_C99_ATTR_ENUM_FLIP`). */
 static inline int kiln_c99_shape_slot_enumerable(const kiln_shape *shape, uint32_t slot) {
-    return !kiln_c99_key_is_symbol(shape->keys[slot]) &&
+    return !kiln_c99_key_is_reserved(shape->keys[slot]) &&
            (shape->attrs[slot] & KILN_C99_ATTR_ENUM_FLIP) == 0;
 }
 
@@ -350,7 +350,7 @@ static kiln_shape *kiln_c99_shape_child(kiln_shape *current, const kiln_string *
     if (next_shape == NULL) return NULL;
     next_shape->parent = current;
     next_shape->ikey = ikey;
-    next_shape->has_symbol_key = current->has_symbol_key || kiln_c99_key_is_symbol(ikey);
+    next_shape->has_symbol_key = current->has_symbol_key || kiln_c99_key_is_reserved(ikey);
     next_shape->slot_index = current->property_count;
     next_shape->property_count = current->property_count + 1;
     next_shape->num_transitions = 0;
@@ -731,10 +731,11 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
             /* A reserved key is stored non-enumerable and its flip is the hidden bit a symbol's
              * record carries (`kiln_property.symbol_hidden`); any other key's flip is the
              * stored bit's. */
-            int reserved = kiln_c99_key_is_symbol(key);
+            int reserved = kiln_c99_key_is_reserved(key);
+            int symbol = kiln_c99_key_is_symbol(key);
             int flip = (attrs & KILN_C99_ATTR_ENUM_FLIP) != 0;
             object->properties[pos].enumerable = !reserved && !flip;
-            object->properties[pos].symbol_hidden = reserved && flip;
+            object->properties[pos].symbol_hidden = symbol && flip;
         }
         object->properties[pos].writable = (attrs & KILN_C99_ATTR_READONLY) == 0;
         object->properties[pos].configurable = (attrs & KILN_C99_ATTR_FIXED) == 0;
@@ -953,6 +954,14 @@ static int kiln_c99_shared_source_inspect(void *context, uint64_t id, uint64_t i
                    !(prototype.tag == KILN_VALUE_BUILTIN &&
                      prototype.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE)) return -1;
         if (array != NULL && array->count > UINT32_MAX) return -1;
+        if (store != NULL) {
+            for (size_t at = 0; at < named; ++at) {
+                const kiln_string *key = store->shape != NULL
+                                             ? store->shape->keys[at]
+                                             : store->properties[at].key;
+                if (key != NULL && (key->flags & KILN_STRING_PRIVATE_KEY) != 0) return -1;
+            }
+        }
         node->kind = array == NULL ? 1 : 2;
         node->null_prototype = prototype.tag == KILN_VALUE_NULL;
         node->length = array == NULL ? 0 : (uint32_t)array->count;

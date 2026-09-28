@@ -205,7 +205,7 @@ fn native_shared_snapshot_distinguishes_symbol_from_colliding_string() {
     let wrapper = r#"
 int main(void) {
     uint64_t realm;
-    kiln_value object, symbol, string, answer;
+    kiln_value object, symbol, string, answer, own, enumerable;
     kiln_shared_source_node node = {0};
     kiln_shared_source_field first = {0}, second = {0};
     const kiln_string *key;
@@ -221,6 +221,15 @@ int main(void) {
         answer.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(answer) != 1) return 5;
     if (kiln_c99_get_computed(NULL, object, string, &answer, 0, NULL) != KILN_C99_OK ||
         answer.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(answer) != 2) return 6;
+    if (kiln_c99_all_own_keys(NULL, object, &own, 0, NULL) != KILN_C99_OK ||
+        own.tag != KILN_VALUE_ARRAY || kiln_c99_array_of(own)->count != 2 ||
+        kiln_val_to_boundary(kiln_c99_array_of(own)->elements[0]).tag != KILN_VALUE_STRING ||
+        kiln_val_to_boundary(kiln_c99_array_of(own)->elements[1]).tag != KILN_VALUE_SYMBOL)
+        return 10;
+    if (kiln_c99_own_keys(NULL, object, &enumerable, 0, NULL) != KILN_C99_OK ||
+        enumerable.tag != KILN_VALUE_ARRAY || kiln_c99_array_of(enumerable)->count != 1 ||
+        kiln_val_to_boundary(kiln_c99_array_of(enumerable)->elements[0]).tag != KILN_VALUE_STRING)
+        return 11;
     if (kiln_c99_shared_source_inspect(NULL, kiln_c99_shared_source_id(object), UINT64_MAX,
                                        &node, NULL) != 0 || node.field_count != 2) return 7;
     if (kiln_c99_shared_source_inspect(NULL, kiln_c99_shared_source_id(object), 0,
@@ -238,6 +247,49 @@ int main(void) {
     assert!(
         run.status.success(),
         "symbol/string collision failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn native_ordinary_double_at_string_is_an_enumerable_string_key() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    uint64_t realm;
+    kiln_value object, name, answer, all, keys;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
+    kiln_test_realm_active = 1;
+    if (kiln_c99_new_object(&object) != KILN_C99_OK) return 2;
+    if (kiln_c99_put(NULL, object, "@@x", 3, kiln_c99_number(11), 0, NULL) != KILN_C99_OK)
+        return 8;
+    name = kiln_c99_copy_text("@@x", 3);
+    if (kiln_c99_define_computed(object, name, kiln_c99_number(7)) != KILN_C99_OK) return 3;
+    if (kiln_c99_get(NULL, object, "@@x", 3, &answer, 0, NULL) != KILN_C99_OK ||
+        answer.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(answer) != 11) return 9;
+    if (kiln_c99_get_computed(NULL, object, name, &answer, 0, NULL) != KILN_C99_OK ||
+        answer.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(answer) != 7) return 4;
+    if (kiln_c99_all_own_keys(NULL, object, &all, 0, NULL) != KILN_C99_OK ||
+        all.tag != KILN_VALUE_ARRAY || kiln_c99_array_of(all)->count != 1 ||
+        kiln_val_to_boundary(kiln_c99_array_of(all)->elements[0]).tag != KILN_VALUE_STRING)
+        return 5;
+    if (kiln_c99_own_keys(NULL, object, &keys, 0, NULL) != KILN_C99_OK ||
+        keys.tag != KILN_VALUE_ARRAY || kiln_c99_array_of(keys)->count != 1 ||
+        kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[0]).tag != KILN_VALUE_STRING)
+        return 6;
+    { kiln_shared_source_node node = {0};
+      if (kiln_c99_shared_source_inspect(NULL, kiln_c99_shared_source_id(object), UINT64_MAX,
+                                         &node, NULL) == 0) return 10; }
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 7;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "ordinary-double-at-key");
+    assert!(
+        run.status.success(),
+        "ordinary double-at key failed ({:?}):\n{}",
         run.status.code(),
         String::from_utf8_lossy(&run.stderr)
     );

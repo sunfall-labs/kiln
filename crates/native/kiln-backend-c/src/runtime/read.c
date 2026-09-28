@@ -2226,7 +2226,8 @@ static int kiln_c99_get_ikey(kiln_host *host, kiln_value target, const char *key
     kiln_string view;
     if (key_len > UINT32_MAX) return KILN_C99_INVALID_ARGUMENT;
     view.unit_len = (uint32_t)key_len;
-    view.flags = KILN_STRING_LATIN1;
+    view.flags = ikey != NULL ? KILN_STRING_LATIN1 | kiln_c99_key_domain(ikey)
+                              : kiln_c99_fixed_key_flags(key, key_len);
     view.data = key;
     return kiln_c99_get_key(host, target, &view, ikey, out, depth, thrown);
 }
