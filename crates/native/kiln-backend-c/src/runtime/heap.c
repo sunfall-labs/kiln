@@ -3084,18 +3084,70 @@ static int kiln_c99_heap_adopt_chunks(kiln_gc_heap *heap, kiln_nursery_chunk *ch
     return 1;
 }
 
+/* A candidate must still have its original contiguous bump layout. Promoted chunks can have
+ * holes after a collection and need a different proof. Check the complete bitmap, rather than
+ * trusting the chunk's counters or only the headers encountered by a forward walk. A finalizer
+ * can own bytes or an entry in a realm side table, so this primitive refuses it outright. */
+static int kiln_c99_chunk_sealed_for_move(const kiln_gc_nursery *nursery,
+                                          const kiln_nursery_chunk *chunk) {
+    const char *region = (const char *)chunk;
+    const char *cursor;
+    size_t bitmap_bytes;
+    size_t count = 0;
+    size_t bytes = 0;
+    size_t bits = 0;
+    size_t word;
+    if (nursery->bitmap_words > (SIZE_MAX - 15) / sizeof(uint64_t)) return 0;
+    bitmap_bytes = (nursery->bitmap_words * sizeof(uint64_t) + 15) & ~(size_t)15;
+    if (KILN_NURSERY_HEADER > nursery->capacity ||
+        bitmap_bytes > (nursery->capacity - KILN_NURSERY_HEADER) / 3 ||
+        chunk->bitmap_words != nursery->bitmap_words ||
+        chunk->bitmap != (const uint64_t *)(region + KILN_NURSERY_HEADER) ||
+        chunk->marks != (const uint64_t *)(region + KILN_NURSERY_HEADER + bitmap_bytes) ||
+        chunk->finals != (const uint64_t *)(region + KILN_NURSERY_HEADER + 2 * bitmap_bytes) ||
+        chunk->base != region + KILN_NURSERY_HEADER + 3 * bitmap_bytes ||
+        chunk->limit < chunk->base || chunk->limit > region + nursery->capacity) return 0;
+    for (word = 0; word < nursery->bitmap_words; ++word) {
+        if (chunk->finals[word] != 0) return 0;
+        bits += (size_t)__builtin_popcountll(chunk->bitmap[word]);
+    }
+    for (cursor = chunk->base; cursor < chunk->limit;) {
+        const kiln_gc_block *block;
+        size_t offset = (size_t)(cursor - chunk->base);
+        size_t bit = offset >> 4;
+        size_t remaining = (size_t)(chunk->limit - cursor);
+        size_t payload;
+        size_t total;
+        if ((offset & 15) != 0 || bit >> 6 >= nursery->bitmap_words ||
+            (chunk->bitmap[bit >> 6] & (UINT64_C(1) << (bit & 63))) == 0 ||
+            remaining < sizeof(kiln_gc_block)) return 0;
+        block = (const kiln_gc_block *)cursor;
+        if ((block->kind & (KILN_GC_FLAG_NURSERY | KILN_GC_FLAG_DEAD)) !=
+                KILN_GC_FLAG_NURSERY) return 0;
+        payload = block->size == 0 ? 1 : block->size;
+        if (payload > remaining - sizeof(kiln_gc_block) || bytes > SIZE_MAX - block->size)
+            return 0;
+        total = (sizeof(kiln_gc_block) + payload + 15) & ~(size_t)15;
+        if (total > remaining) return 0;
+        cursor += total;
+        bytes += block->size;
+        count += 1;
+    }
+    return count != 0 && count == bits && count == chunk->alloc_count &&
+           bytes == chunk->alloc_bytes;
+}
+
 /* The inverse of adoption for chunks whose entire contents have already passed an ownership
  * proof. `chunks` is an array because `next` still links every candidate into the sender's
- * `full` or `promoted` list. Validate the complete batch and reserve the receiver's region set
- * before changing either heap. In particular, never transfer the current bump chunk: another
- * allocation in the sender could otherwise write into memory the receiver now owns.
+ * `full` list. Validate the complete batch and reserve the receiver's region set before changing
+ * either heap. In particular, never transfer the current bump chunk: another allocation in the
+ * sender could otherwise write into memory the receiver now owns.
  *
  * This is only a storage primitive. A caller must additionally prove that every allocated block
  * in these chunks belongs to one closed graph, that no sender root or outside object reaches it,
  * and that no block has realm-local side ownership (weak-list membership, external-byte balance,
- * provider/host handle, finalizer, or mutable shape). It must publish the destination root with
- * no mutator or collection between proof and this call. A TypeScript ticket is not that proof.
- */
+ * provider/host handle, or mutable shape). It must publish the destination root with no mutator
+ * or collection between proof and this call. A TypeScript ticket is not that proof. */
 static int kiln_c99_heap_move_chunks(kiln_gc_heap *from, kiln_gc_heap *to,
                                      kiln_nursery_chunk *const *chunks, size_t count) {
     size_t index;
@@ -3128,12 +3180,7 @@ static int kiln_c99_heap_move_chunks(kiln_gc_heap *from, kiln_gc_heap *to,
             if (sender_full_bytes > SIZE_MAX - filled) return 0;
             sender_full_bytes += filled;
         }
-        if (!found) {
-            for (it = from->nursery.promoted; it != NULL; it = it->next) {
-                if (it == chunk) { found = 1; break; }
-            }
-        }
-        if (!found) return 0;
+        if (!found || !kiln_c99_chunk_sealed_for_move(&from->nursery, chunk)) return 0;
         for (prior = 0; prior < index; ++prior) if (chunks[prior] == chunk) return 0;
         if (moved_count > SIZE_MAX - chunk->alloc_count ||
             moved_bytes > SIZE_MAX - chunk->alloc_bytes ||
@@ -3157,15 +3204,9 @@ static int kiln_c99_heap_move_chunks(kiln_gc_heap *from, kiln_gc_heap *to,
     for (index = 0; index < count; ++index) {
         kiln_nursery_chunk *chunk = chunks[index];
         kiln_nursery_chunk **link = &from->nursery.full;
-        int was_full = 1;
         while (*link != NULL && *link != chunk) link = &(*link)->next;
-        if (*link == NULL) {
-            link = &from->nursery.promoted;
-            was_full = 0;
-            while (*link != chunk) link = &(*link)->next;
-        }
         *link = chunk->next;
-        if (was_full) from->nursery.full_bytes -= (size_t)(chunk->limit - chunk->base);
+        from->nursery.full_bytes -= (size_t)(chunk->limit - chunk->base);
         kiln_c99_gc_ptrset_remove(&from->nursery.regions, chunk);
         (void)kiln_c99_gc_ptrset_insert(&to->nursery.regions, chunk);
         if (to->nursery.lo == NULL || (char *)chunk < to->nursery.lo)

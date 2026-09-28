@@ -1881,6 +1881,20 @@ int main(void) {
     if (kiln_c99_heap_move_chunks(&sender, &receiver, batch, 2)) return 6;
     if (sender.count != 2 || receiver.count != 0) return 7;
     batch[1] = second;
+    /* The relink must reject a malformed or finalizable source chunk before moving either
+     * candidate. The second chunk makes this an all-or-nothing batch test. */
+    first->finals[0] |= UINT64_C(1);
+    if (kiln_c99_heap_move_chunks(&sender, &receiver, batch, 2)) return 15;
+    first->finals[0] &= ~UINT64_C(1);
+    if (sender.count != 2 || receiver.count != 0) return 16;
+    first->bitmap[0] |= UINT64_C(2);
+    if (kiln_c99_heap_move_chunks(&sender, &receiver, batch, 2)) return 17;
+    first->bitmap[0] &= ~UINT64_C(2);
+    if (sender.count != 2 || receiver.count != 0) return 18;
+    first->alloc_count += 1;
+    if (kiln_c99_heap_move_chunks(&sender, &receiver, batch, 2)) return 19;
+    first->alloc_count -= 1;
+    if (sender.count != 2 || receiver.count != 0) return 20;
     if (!kiln_c99_heap_move_chunks(&sender, &receiver, batch, 2)) return 8;
     if (sender.count != 0 || receiver.count != 2 || sender.nursery.full != NULL) return 9;
     if (receiver.nursery.full_bytes != 2 * (size_t)(second->limit - second->base)) return 10;
