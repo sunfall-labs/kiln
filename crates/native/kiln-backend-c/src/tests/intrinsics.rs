@@ -128,7 +128,17 @@ int main(void) {
     status = kiln_c99_get(NULL, descriptor, "writable", 8, &answer, 0, NULL);
     if (status != KILN_C99_OK || answer.tag != KILN_VALUE_BOOLEAN || answer.bits != 0) return 8;
     status = kiln_c99_get(NULL, descriptor, "configurable", 12, &answer, 0, NULL);
-    return status == KILN_C99_OK && answer.tag == KILN_VALUE_BOOLEAN && answer.bits == 0 ? 0 : 9;
+    if (status != KILN_C99_OK || answer.tag != KILN_VALUE_BOOLEAN || answer.bits != 0) return 9;
+    status = kiln_c99_invoke_method(NULL, &answer, KILN_C99_METHOD_OBJECT_IS_FROZEN,
+                                    kiln_c99_undefined(), &shared, 1, 0, NULL);
+    if (status != KILN_C99_OK || answer.tag != KILN_VALUE_BOOLEAN || answer.bits != 1) return 10;
+    status = kiln_c99_invoke_method(NULL, &answer, KILN_C99_METHOD_OBJECT_IS_EXTENSIBLE,
+                                    kiln_c99_undefined(), &shared, 1, 0, NULL);
+    if (status != KILN_C99_OK || answer.tag != KILN_VALUE_BOOLEAN || answer.bits != 0) return 11;
+    status = kiln_c99_invoke_method(NULL, &answer, KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF,
+                                    kiln_c99_undefined(), &shared, 1, 0, NULL);
+    return status == KILN_C99_OK && answer.tag == KILN_VALUE_BUILTIN &&
+           answer.bits == KILN_C99_BUILTIN_OBJECT_PROTOTYPE ? 0 : 12;
 }
 "#;
     let run = run_with_main(&generated, wrapper, "shared-facade-read");
