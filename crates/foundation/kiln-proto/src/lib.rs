@@ -33,7 +33,7 @@ pub enum StepBudget {
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 36;
+pub const PROTOCOL_VERSION: u32 = 37;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -157,6 +157,13 @@ pub struct NodeSourceFormat {
     pub format: NodeModuleFormat,
 }
 
+/// A project-declared lazy module root, resolved by the CLI from its package boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclaredInclude {
+    pub specifier: String,
+    pub target: String,
+}
+
 /// The package-resolution snapshot belonging to one [`Request::Sync`].
 ///
 /// Entries are canonicalized by `(importer, specifier, condition)`. Construct maps through [`Self::new`],
@@ -169,6 +176,8 @@ pub struct ResolutionMap {
     pub entries: Vec<PackageResolution>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub node_formats: Vec<NodeSourceFormat>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declared_includes: Vec<DeclaredInclude>,
 }
 
 /// A malformed package-resolution snapshot.
@@ -178,6 +187,8 @@ pub enum ResolutionMapError {
     IncompleteManifest { index: usize },
     NodeFormatsNotSorted { previous: String, current: String },
     DuplicateNodeFormat { path: String },
+    DeclaredIncludesNotSorted { previous: String, current: String },
+    DuplicateDeclaredInclude { specifier: String },
     EntriesNotSorted { previous: String, current: String },
     DuplicateEntry { importer: String, specifier: String },
 }
@@ -198,6 +209,13 @@ impl fmt::Display for ResolutionMapError {
             ),
             Self::DuplicateNodeFormat { path } => {
                 write!(formatter, "duplicate node format for {path:?}")
+            }
+            Self::DeclaredIncludesNotSorted { previous, current } => write!(
+                formatter,
+                "declared includes are not sorted: {previous:?} appears before {current:?}"
+            ),
+            Self::DuplicateDeclaredInclude { specifier } => {
+                write!(formatter, "duplicate declared include for {specifier:?}")
             }
             Self::EntriesNotSorted { previous, current } => write!(
                 formatter,
@@ -222,6 +240,8 @@ struct ResolutionMapWire {
     entries: Vec<PackageResolution>,
     #[serde(default)]
     node_formats: Vec<NodeSourceFormat>,
+    #[serde(default)]
+    declared_includes: Vec<DeclaredInclude>,
 }
 
 impl<'de> Deserialize<'de> for ResolutionMap {
@@ -230,8 +250,13 @@ impl<'de> Deserialize<'de> for ResolutionMap {
         D: Deserializer<'de>,
     {
         let wire = ResolutionMapWire::deserialize(deserializer)?;
-        Self::from_sorted(wire.project_root, wire.entries, wire.node_formats)
-            .map_err(de::Error::custom)
+        Self::from_sorted(
+            wire.project_root,
+            wire.entries,
+            wire.node_formats,
+            wire.declared_includes,
+        )
+        .map_err(de::Error::custom)
     }
 }
 
@@ -246,6 +271,7 @@ impl ResolutionMap {
             project_root: project_root.into(),
             entries,
             node_formats: Vec::new(),
+            declared_includes: Vec::new(),
         };
         map.validate()?;
         Ok(map)
@@ -263,6 +289,27 @@ impl ResolutionMap {
             project_root: project_root.into(),
             entries,
             node_formats,
+            declared_includes: Vec::new(),
+        };
+        map.validate()?;
+        Ok(map)
+    }
+
+    /// Include declared lazy roots in the canonical snapshot and its cache identity.
+    pub fn with_node_formats_and_includes(
+        project_root: impl Into<String>,
+        mut entries: Vec<PackageResolution>,
+        mut node_formats: Vec<NodeSourceFormat>,
+        mut declared_includes: Vec<DeclaredInclude>,
+    ) -> Result<Self, ResolutionMapError> {
+        entries.sort_by(Self::compare_entries);
+        node_formats.sort_by(|left, right| left.path.cmp(&right.path));
+        declared_includes.sort_by(|left, right| left.specifier.cmp(&right.specifier));
+        let map = Self {
+            project_root: project_root.into(),
+            entries,
+            node_formats,
+            declared_includes,
         };
         map.validate()?;
         Ok(map)
@@ -341,6 +388,39 @@ impl ResolutionMap {
                 }
             }
         }
+        for (index, include) in self.declared_includes.iter().enumerate() {
+            if include.specifier.is_empty() {
+                return Err(ResolutionMapError::EmptyField {
+                    field: "declared_includes.specifier",
+                    index,
+                });
+            }
+            if include.target.is_empty() {
+                return Err(ResolutionMapError::EmptyField {
+                    field: "declared_includes.target",
+                    index,
+                });
+            }
+            if let Some(previous) = index
+                .checked_sub(1)
+                .and_then(|previous| self.declared_includes.get(previous))
+            {
+                match previous.specifier.cmp(&include.specifier) {
+                    std::cmp::Ordering::Less => {}
+                    std::cmp::Ordering::Equal => {
+                        return Err(ResolutionMapError::DuplicateDeclaredInclude {
+                            specifier: include.specifier.clone(),
+                        });
+                    }
+                    std::cmp::Ordering::Greater => {
+                        return Err(ResolutionMapError::DeclaredIncludesNotSorted {
+                            previous: previous.specifier.clone(),
+                            current: include.specifier.clone(),
+                        });
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -352,7 +432,7 @@ impl ResolutionMap {
     pub fn identity(&self) -> Digest {
         debug_assert!(self.validate().is_ok());
         let mut bytes = Vec::new();
-        frame(&mut bytes, b"kiln-resolution-map\0v4");
+        frame(&mut bytes, b"kiln-resolution-map\0v5");
         frame(&mut bytes, self.project_root.as_bytes());
         frame_u64(&mut bytes, self.entries.len() as u64);
         for entry in &self.entries {
@@ -387,6 +467,11 @@ impl ResolutionMap {
                 },
             );
         }
+        frame_u64(&mut bytes, self.declared_includes.len() as u64);
+        for include in &self.declared_includes {
+            frame(&mut bytes, include.specifier.as_bytes());
+            frame(&mut bytes, include.target.as_bytes());
+        }
         Digest::hash(&bytes)
     }
 
@@ -394,11 +479,13 @@ impl ResolutionMap {
         project_root: String,
         entries: Vec<PackageResolution>,
         node_formats: Vec<NodeSourceFormat>,
+        declared_includes: Vec<DeclaredInclude>,
     ) -> Result<Self, ResolutionMapError> {
         let map = Self {
             project_root,
             entries,
             node_formats,
+            declared_includes,
         };
         map.validate()?;
         Ok(map)
@@ -1005,7 +1092,7 @@ mod tests {
 
     #[test]
     fn current_protocol_run_step_budget_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 36);
+        assert_eq!(PROTOCOL_VERSION, 37);
 
         let requests = [
             (
@@ -1440,6 +1527,23 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<ResolutionMap>(encoded).expect("decode format snapshot"),
             formatted_map
+        );
+
+        let included = ResolutionMap::with_node_formats_and_includes(
+            "/project",
+            Vec::new(),
+            Vec::new(),
+            vec![DeclaredInclude {
+                specifier: "./task.cjs".to_owned(),
+                target: "/project/task.cjs".to_owned(),
+            }],
+        )
+        .expect("declared root snapshot");
+        assert_ne!(empty_resolution_map().identity(), included.identity());
+        let encoded = serde_json::to_value(&included).expect("encode declared include");
+        assert_eq!(
+            serde_json::from_value::<ResolutionMap>(encoded).expect("decode declared include"),
+            included
         );
     }
 
