@@ -64,7 +64,7 @@ below is about the native runtime.
 
 | # | workload | node / bun | Go | kiln today |
 | --- | --- | --- | --- | --- |
-| 1 | **Worker start**: start a worker and get one message back; memory per added worker with 1, 10, 100 alive | `worker_threads` `Worker` (`js/start.mjs`) | goroutine + channel | `worker_threads` over a realm (`js/start.mjs`); `KILN_WORKERS=N` processes are shown separately for deployment context |
+| 1 | **Worker and actor start**: start a worker and get one message back; memory per added worker with 1, 10, 100 alive | `worker_threads` `Worker` (`js/start.mjs`) | goroutine + channel | `worker_threads` over a realm (`js/start.mjs`), plus `spawnActor` to ready and first call (`js/actor-start.mjs`); `KILN_WORKERS=N` processes are shown separately for deployment context |
 | 2 | **Messages**: ping-pong round trip and one-way throughput of a short object; a ~1 MB object graph; a 16 MB `ArrayBuffer` copied vs transferred | across a `Worker` (`js/messages.mjs`), and in one realm over `MessageChannel` (`js/inrealm.mjs`) | channels; the graph deep-copied (the structured-clone equivalent) and by reference | the same cross-realm Worker and in-realm programs as node and bun |
 | 3 | **Shared read-only dataset**: a 50 MB `Float64Array` lookup table, N workers each doing 2M pseudo-random lookups | copied to each worker, or one `SharedArrayBuffer` (`js/shared.mjs`) | one slice every goroutine reads | the same copied and shared-buffer program; a user object graph in the immutable region awaits issue 11 |
 | 4 | **Many tasks**: 10, 1,000, 100,000 concurrent tasks, each waking 10 times on a 10 ms timer | async functions + `setTimeout` in one realm (`js/tasks.mjs`) | goroutines + `time.Sleep` | async tasks **in one realm**, labelled (a realm per task comes with issues 05 and 09) |
@@ -77,6 +77,9 @@ Details that matter when reading the numbers:
 - **1.** The node/bun start is measured from `new Worker` to the first `message` event; each worker
   is terminated before the next starts, so it is start cost, not pool reuse. "Memory per added
   worker" is the RSS delta over the process before any worker was started, divided by N. The kiln
+  actor row separately measures `spawnActor` until its ready handshake, then the first method
+  reply; it stops each actor outside those clocks. It does not claim a node/bun comparison for
+  kiln's actor API. The kiln
   process rows are wall time from spawn to the exit of the whole tree (supervisor included when
   N > 1) and PSS of the held-alive tree; "per added worker" is `(PSS(N) - PSS(1)) / (N - 1)`, so
   it includes a share of the supervisor. The node and bun "process start" row times the same

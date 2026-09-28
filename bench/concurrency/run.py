@@ -182,7 +182,7 @@ def build_all(kiln, go_cmd, work, selected):
     """Build the selected workloads' binaries once. Returns paths and failures."""
     binaries, failures = {}, {}
     by_workload = {
-        "start": ["kiln-start", "start"],
+        "start": ["kiln-start", "start", "actor-start"],
         "messages": ["inrealm", "messages"],
         "shared": ["shared"],
         "tasks": ["tasks"],
@@ -460,6 +460,7 @@ def jobs_for(cfg, bins):
         add("start", "go", lambda n=n: simple("go", [go, "mem", str(n)]), go)
     # `node:worker_threads` in kiln (realms issue 06): the same program node and bun run, built.
     add("start", "kiln", lambda: simple("kiln", [k["start"], "start", str(cfg["start_warm"])]), k["start"])
+    add("start", "kiln", lambda: simple("kiln", [k["actor-start"], str(cfg["start_warm"])]), k["actor-start"])
     for n in cfg["mem_ns"]:
         add("start", "kiln", lambda n=n: simple("kiln", [k["start"], "mem", str(n)]), k["start"])
     for n in cfg["kiln_ns"]:
@@ -701,6 +702,14 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
             rep.cell(f"mem-{n}", "bun", "per_worker_kib", " MB", scale=mb),
             rep.cell(f"mem-{n}", "go", "per_worker_kib", " KB"),
             rep.cell(f"mem-{n}", "kiln", "per_worker_kib", " MB", scale=mb) or na_kiln_worker]))
+    w("")
+    w("The public `spawnActor` path is measured separately because its ready handshake and first method call add work beyond `new Worker`. Each sample creates and stops a fresh actor realm; process startup is outside the clock.")
+    w("")
+    w("| kiln actor API | time |")
+    w("| --- | ---: |")
+    w(rep.row("`spawnActor` to ready, first (cold)", [rep.cell("actor-start", "kiln", "cold_ms", " ms")]))
+    w(rep.row("`spawnActor` to ready, warm median", [rep.cell("actor-start", "kiln", "median_ms", " ms")]))
+    w(rep.row("first method call after ready, warm median", [rep.cell("actor-start", "kiln", "first_call_ms", " ms")]))
     w("")
     w("Deployment comparison: one `KILN_WORKERS` process per worker (process mode, forked by the "
       "supervisor from a process that never built a realm). Timed from spawn to exit of the whole tree, each "
