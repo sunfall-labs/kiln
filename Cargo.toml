@@ -37,6 +37,7 @@ kiln-native-provider-ffi = { path = "crates/native/kiln-native-provider-ffi" }
 kiln-native-runtime = { path = "crates/native/kiln-native-runtime" }
 kiln-number-core = { path = "crates/foundation/kiln-number-core" }
 kiln-runtime = { path = "crates/host/kiln-runtime" }
+kiln-shared-graph = { path = "crates/host/kiln-shared-graph" }
 kiln-temporal = { path = "crates/semantics/kiln-temporal" }
 kiln-json = { path = "crates/semantics/kiln-json" }
 kiln-intl = { path = "crates/semantics/kiln-intl" }

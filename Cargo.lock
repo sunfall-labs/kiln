@@ -1703,6 +1703,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-shared-graph"
+version = "0.1.0"
+dependencies = [
+ "kiln-string",
+ "libc",
+]
+
+[[package]]
 name = "kiln-string"
 version = "0.1.0"
 dependencies = [
