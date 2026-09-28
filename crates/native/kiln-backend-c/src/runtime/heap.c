@@ -3319,7 +3319,9 @@ done:
 typedef enum kiln_c99_graph_incoming_result {
     KILN_C99_GRAPH_OUTGOING_UNPROVEN = 0,
     KILN_C99_GRAPH_C_ROOT_ALIAS = 1,
-    KILN_C99_GRAPH_ROOTS_UNENUMERATED = 2
+    KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS = 2,
+    KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED = 3,
+    KILN_C99_GRAPH_ROOTS_UNENUMERATED = 4
 } kiln_c99_graph_incoming_result;
 
 /* A root can hold an interior address, including a string's inline bytes. The collector accepts
@@ -3403,6 +3405,155 @@ static int kiln_c99_graph_has_c_root_alias(const kiln_gc_heap *heap,
     return kiln_c99_graph_in_batch(heap, chunks, count, heap->object_prototype_store);
 }
 
+/* A separate, read-only walk for edges *into* the candidate. The collector's tracer is not
+ * suitable here: it mutates mark epochs and deliberately ignores non-heap pointers. Until each
+ * kind's complete pointer layout is audited, an unhandled kind means "unknown", never "clear". */
+static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
+    const kiln_gc_heap *heap, kiln_nursery_chunk *const *chunks, size_t count,
+    const kiln_gc_block *block) {
+    size_t index;
+    switch (block->kind & KILN_GC_KIND_MASK) {
+    case KILN_GC_BYTES:
+        return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    case KILN_GC_STRING: {
+        const kiln_string *string = (const kiln_string *)(block + 1);
+        if (block->size < sizeof *string) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        if (kiln_c99_graph_in_batch(heap, chunks, count, string->data))
+            return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        return kiln_c99_graph_inline_string(block) ? KILN_C99_GRAPH_ROOTS_UNENUMERATED
+                                                   : KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+    }
+    case KILN_GC_SLICED_STRING: {
+        const kiln_sliced_string *string = (const kiln_sliced_string *)(block + 1);
+        if (block->size < sizeof *string) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        if (kiln_c99_graph_in_batch(heap, chunks, count, string->parent) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, string->base.data))
+            return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        /* Validity of an outside slice's parent is the collector's concern. Both pointer
+         * fields were inspected; no other field can name the candidate. */
+        return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    }
+    case KILN_GC_CELL:
+        if (block->size < sizeof(kiln_val)) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        return kiln_c99_graph_val_in_batch(heap, chunks, count,
+                                           *(const kiln_val *)(block + 1))
+                   ? KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS : KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    case KILN_GC_ARRAY: {
+        const kiln_array *array = (const kiln_array *)(block + 1);
+        if (block->size < sizeof *array) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        if (kiln_c99_graph_in_batch(heap, chunks, count, array->elements) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &array->properties) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &array->match_input) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &array->match_groups))
+            return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        if (array->count > array->capacity || (array->count != 0 && array->elements == NULL))
+            return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        for (index = 0; index < array->count; ++index) {
+            if (kiln_c99_graph_val_in_batch(heap, chunks, count, array->elements[index]))
+                return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        }
+        return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    }
+    case KILN_GC_OBJECT: {
+        const kiln_object *object = (const kiln_object *)(block + 1);
+        if (block->size < sizeof *object) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        if (kiln_c99_graph_in_batch(heap, chunks, count, object->properties) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, object->shape) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, object->slots) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, object->elements) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &object->prototype))
+            return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        /* Shaped objects can name candidate strings through shared/local shape keys and
+         * accessor slots. Their separate shape tables need a complete visitor. */
+        if (object->shape != NULL || object->count > object->capacity ||
+            object->element_count > object->element_capacity ||
+            (object->count != 0 && object->properties == NULL) ||
+            (object->element_count != 0 && object->elements == NULL))
+            return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        for (index = 0; index < object->count; ++index) {
+            const kiln_property *property = &object->properties[index];
+            if (kiln_c99_graph_in_batch(heap, chunks, count, property->key) ||
+                (property->accessor
+                     ? kiln_c99_graph_value_in_batch(heap, chunks, count, &property->getter) ||
+                       kiln_c99_graph_value_in_batch(heap, chunks, count, &property->setter)
+                     : kiln_c99_graph_value_in_batch(heap, chunks, count, &property->value)))
+                return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        }
+        for (index = 0; index < object->element_count; ++index) {
+            if (kiln_c99_graph_val_in_batch(heap, chunks, count, object->elements[index]))
+                return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        }
+        return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    }
+    default:
+        return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+    }
+}
+
+static kiln_c99_graph_incoming_result kiln_c99_graph_scan_nursery_chunk(
+    const kiln_gc_heap *heap, kiln_nursery_chunk *const *chunks, size_t count,
+    const kiln_nursery_chunk *chunk, const char *limit) {
+    size_t word;
+    size_t index;
+    for (index = 0; index < count; ++index) if (chunks[index] == chunk)
+        return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    if (limit < chunk->base || limit > (const char *)chunk + heap->nursery.capacity)
+        return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+    for (word = 0; word < chunk->bitmap_words; ++word) {
+        uint64_t bits = chunk->bitmap[word];
+        while (bits != 0) {
+            size_t bit = (word << 6) + (size_t)__builtin_ctzll(bits);
+            uintptr_t address = (uintptr_t)chunk->base + (bit << 4);
+            const kiln_gc_block *block;
+            kiln_c99_graph_incoming_result result;
+            bits &= bits - 1;
+            if (address < (uintptr_t)chunk->base || address > (uintptr_t)limit ||
+                (uintptr_t)limit - address < sizeof(kiln_gc_block))
+                return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+            block = (const kiln_gc_block *)address;
+            if ((block->kind & KILN_GC_FLAG_DEAD) != 0) continue;
+            result = kiln_c99_graph_outside_block(heap, chunks, count, block);
+            if (result != KILN_C99_GRAPH_ROOTS_UNENUMERATED) return result;
+        }
+    }
+    return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+}
+
+static kiln_c99_graph_incoming_result kiln_c99_graph_scan_outside_heap(
+    const kiln_gc_heap *heap, kiln_nursery_chunk *const *chunks, size_t count) {
+    const kiln_gc_block *block;
+    const kiln_gc_slab *slab;
+    const kiln_nursery_chunk *chunk;
+    kiln_c99_graph_incoming_result result;
+    for (block = heap->head; block != NULL; block = block->next) {
+        result = kiln_c99_graph_outside_block(heap, chunks, count, block);
+        if (result != KILN_C99_GRAPH_ROOTS_UNENUMERATED) return result;
+    }
+    for (slab = heap->all_slabs; slab != NULL; slab = slab->all_next) {
+        uint32_t index;
+        for (index = 0; index < slab->fresh; ++index) {
+            block = kiln_c99_gc_slab_slot(slab, index);
+            if (block->size == KILN_GC_SLOT_FREE) continue;
+            result = kiln_c99_graph_outside_block(heap, chunks, count, block);
+            if (result != KILN_C99_GRAPH_ROOTS_UNENUMERATED) return result;
+        }
+    }
+    if (heap->nursery.region != NULL && heap->nursery.bump > heap->nursery.base) {
+        result = kiln_c99_graph_scan_nursery_chunk(heap, chunks, count,
+            (const kiln_nursery_chunk *)heap->nursery.region, heap->nursery.bump);
+        if (result != KILN_C99_GRAPH_ROOTS_UNENUMERATED) return result;
+    }
+    for (chunk = heap->nursery.full; chunk != NULL; chunk = chunk->next) {
+        result = kiln_c99_graph_scan_nursery_chunk(heap, chunks, count, chunk, chunk->limit);
+        if (result != KILN_C99_GRAPH_ROOTS_UNENUMERATED) return result;
+    }
+    for (chunk = heap->nursery.promoted; chunk != NULL; chunk = chunk->next) {
+        result = kiln_c99_graph_scan_nursery_chunk(heap, chunks, count, chunk, chunk->limit);
+        if (result != KILN_C99_GRAPH_ROOTS_UNENUMERATED) return result;
+    }
+    return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+}
+
 /* A future actor transaction may call this at its sender turn safepoint, after its consuming
  * handle has been detached. Today even a candidate with no C root is refused: the provider's
  * root callbacks and every outside heap edge still need exact, non-mutating enumeration, and
@@ -3414,6 +3565,11 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_incoming_probe(
         return KILN_C99_GRAPH_OUTGOING_UNPROVEN;
     if (kiln_c99_graph_has_c_root_alias(heap, chunks, count))
         return KILN_C99_GRAPH_C_ROOT_ALIAS;
+    {
+        kiln_c99_graph_incoming_result outside =
+            kiln_c99_graph_scan_outside_heap(heap, chunks, count);
+        if (outside != KILN_C99_GRAPH_ROOTS_UNENUMERATED) return outside;
+    }
     return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
 }
 

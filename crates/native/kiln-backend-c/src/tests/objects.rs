@@ -2117,6 +2117,7 @@ int main(void) {
     kiln_val *root, *next;
     kiln_string *text;
     kiln_sliced_string *slice;
+    kiln_object *outside;
     const void *saved_data;
     kiln_val saved_edge;
     uint32_t saved_kind;
@@ -2217,6 +2218,70 @@ int main(void) {
     *next = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &slice->base);
     if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
         KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 23;
+    outside = (kiln_object *)kiln_c99_gc_nursery_bump(&heap, KILN_GC_OBJECT, sizeof *outside);
+    if (outside == NULL) return 26;
+    memset(outside, 0, sizeof *outside);
+    outside->properties = (kiln_property *)calloc(1, sizeof *outside->properties);
+    if (outside->properties == NULL) return 27;
+    outside->capacity = outside->count = 1;
+    outside->prototype = kiln_c99_undefined();
+    outside->properties[0].key = &kiln_c99_empty_string;
+    outside->properties[0].value.tag = KILN_VALUE_STRING;
+    outside->properties[0].value.bits = (uint64_t)(uintptr_t)text;
+    if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
+        KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 28;
+    outside->properties[0].value = kiln_c99_undefined();
+    if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
+        KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 29;
+    outside->shape = (kiln_shape *)(uintptr_t)1;
+    if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
+        KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED) return 30;
+    outside->shape = NULL;
+    outside->properties[0].value.tag = KILN_VALUE_STRING;
+    outside->properties[0].value.bits = (uint64_t)(uintptr_t)text;
+    kiln_nursery_chunk *outside_chunk = kiln_c99_nursery_seal(&heap.nursery);
+    outside_chunk->next = heap.nursery.full;
+    heap.nursery.full = outside_chunk;
+    heap.nursery.region = NULL;
+    heap.nursery.base = heap.nursery.bump = heap.nursery.limit = NULL;
+    heap.nursery.active = 0;
+    if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
+        KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 31;
+    heap.nursery.full = outside_chunk->next;
+    outside_chunk->next = heap.nursery.promoted;
+    heap.nursery.promoted = outside_chunk;
+    if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
+        KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 32;
+    outside->properties[0].value = kiln_c99_undefined();
+    kiln_gc_slab *slab = kiln_c99_gc_slab_new(&heap, 0);
+    if (slab == NULL) return 33;
+    kiln_gc_block *slot = kiln_c99_gc_slab_take(&heap, slab);
+    slot->kind = KILN_GC_CELL;
+    slot->size = sizeof(kiln_val);
+    *(kiln_val *)(slot + 1) = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, text);
+    if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
+        KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 34;
+    *(kiln_val *)(slot + 1) = KILN_VAL_UNDEFINED;
+    kiln_gc_block *large = (kiln_gc_block *)calloc(1, sizeof *large + sizeof(kiln_val));
+    if (large == NULL) return 35;
+    large->kind = KILN_GC_CELL | KILN_GC_FLAG_LARGE;
+    large->size = sizeof(kiln_val);
+    heap.head = large;
+    kiln_c99_gc_bound(&heap, large, sizeof *large + sizeof(kiln_val));
+    if (kiln_c99_gc_ptrset_insert(&heap.large_table, large) != KILN_C99_OK) return 36;
+    *(kiln_val *)(large + 1) = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, text);
+    if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
+        KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 37;
+    *(kiln_val *)(large + 1) = KILN_VAL_UNDEFINED;
+    if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
+        KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 38;
+    kiln_c99_gc_ptrset_remove(&heap.large_table, large);
+    free(heap.large_table.table);
+    free(large);
+    kiln_c99_gc_ptrset_remove(&heap.slab_table, slab);
+    free(heap.slab_table.table);
+    kiln_c99_gc_aligned_free(slab);
+    free(outside->properties);
     kiln_c99_nursery_destroy(&heap.nursery);
     return 0;
 }
