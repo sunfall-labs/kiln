@@ -274,7 +274,7 @@ pub struct TurnPairClaim {
     _scheduler: Arc<PinnedTurnScheduler>,
     coordinator: Arc<TurnPauseCoordinator>,
     claim: u64,
-    targets: [TurnPauseTarget; 2],
+    targets: Vec<TurnPauseTarget>,
 }
 
 impl TurnPairClaim {
@@ -677,10 +677,29 @@ impl PinnedTurnScheduler {
         if a.id() == b.id() {
             return Err(TurnClaimError::SameRealm);
         }
-        if !Arc::ptr_eq(&self.pause, &a.coordinator) || !Arc::ptr_eq(&self.pause, &b.coordinator) {
+        self.claim_targets(vec![a.clone(), b.clone()])
+    }
+
+    /// Claim one scheduled realm when its peer has a dedicated owner thread. The caller
+    /// separately claims that peer's gate and keeps both leases through publication.
+    pub fn claim_one(
+        self: &Arc<Self>,
+        target: &TurnPauseTarget,
+    ) -> Result<TurnPairClaim, TurnClaimError> {
+        self.claim_targets(vec![target.clone()])
+    }
+
+    fn claim_targets(
+        self: &Arc<Self>,
+        mut targets: Vec<TurnPauseTarget>,
+    ) -> Result<TurnPairClaim, TurnClaimError> {
+        if targets.is_empty()
+            || targets
+                .iter()
+                .any(|target| !Arc::ptr_eq(&self.pause, &target.coordinator))
+        {
             return Err(TurnClaimError::ForeignScheduler);
         }
-        let mut targets = [a.clone(), b.clone()];
         targets.sort_by_key(TurnPauseTarget::id);
         let claim = {
             let mut state = self.pause.state.lock().expect("turn pause lock poisoned");
@@ -1314,6 +1333,45 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn one_scheduled_realm_can_pause_beside_a_dedicated_peer() {
+        struct Body(Arc<AtomicUsize>);
+        impl PinnedTurn for Body {
+            fn run_turn(&mut self, _: &Waker) -> TurnOutcome {
+                TurnOutcome::Parked
+            }
+            fn paused_control(&mut self, command: PausedTurnCommand, _: usize) -> PausedTurnResult {
+                if command.kind != 7 {
+                    return PausedTurnResult::Unavailable;
+                }
+                self.0.fetch_add(1, Ordering::SeqCst);
+                PausedTurnResult::Ready
+            }
+        }
+        let scheduler = Arc::new(PinnedTurnScheduler::new(1).expect("lane starts"));
+        let visits = Arc::new(AtomicUsize::new(0));
+        let realm = scheduler.spawn_pinned({
+            let visits = Arc::clone(&visits);
+            move |_, _| Body(visits)
+        });
+        let claim = scheduler
+            .claim_one(&realm.pause_target())
+            .expect("one claim");
+        assert!(claim.wait(Duration::from_secs(1)));
+        assert_eq!(
+            claim.control(
+                realm.id(),
+                PausedTurnCommand {
+                    kind: 7,
+                    ids: [0; 3]
+                }
+            ),
+            PausedTurnResult::Ready
+        );
+        assert_eq!(visits.load(Ordering::SeqCst), 1);
+        drop(claim);
+    }
 
     #[test]
     fn pair_control_runs_on_scheduler_lanes_without_resuming_turns() {

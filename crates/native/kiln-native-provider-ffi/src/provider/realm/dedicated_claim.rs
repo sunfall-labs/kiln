@@ -153,6 +153,12 @@ fn targets() -> &'static Mutex<HashMap<u64, Arc<DedicatedGate>>> {
     TARGETS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+pub(crate) fn contains(realm: u64) -> bool {
+    targets()
+        .lock()
+        .is_ok_and(|targets| targets.contains_key(&realm))
+}
+
 pub(crate) struct DedicatedRegistration {
     realm: u64,
     gate: Arc<DedicatedGate>,
@@ -212,6 +218,48 @@ impl Drop for DedicatedPairClaim {
     fn drop(&mut self) {
         self.second.1.release(self.id);
         self.first.1.release(self.id);
+    }
+}
+
+pub(crate) struct DedicatedSingleClaim {
+    id: u64,
+    realm: u64,
+    gate: Arc<DedicatedGate>,
+}
+
+impl DedicatedSingleClaim {
+    pub(crate) fn control(&self, realm: u64, command: PausedTurnCommand) -> PausedTurnResult {
+        if realm == self.realm {
+            self.gate.control(self.id, command)
+        } else {
+            PausedTurnResult::Unavailable
+        }
+    }
+}
+
+impl Drop for DedicatedSingleClaim {
+    fn drop(&mut self) {
+        self.gate.release(self.id);
+    }
+}
+
+pub(crate) fn claim_one(realm: u64, timeout: Duration) -> Option<DedicatedSingleClaim> {
+    if realm == 0 {
+        return None;
+    }
+    let gate = {
+        let targets = targets().lock().ok()?;
+        Arc::clone(targets.get(&realm)?)
+    };
+    let id = NEXT_CLAIM.fetch_add(1, Ordering::Relaxed);
+    if id == 0 || !gate.claim(id) {
+        return None;
+    }
+    let claim = DedicatedSingleClaim { id, realm, gate };
+    if claim.gate.wait_paused(id, Instant::now() + timeout) {
+        Some(claim)
+    } else {
+        None
     }
 }
 
@@ -404,13 +452,7 @@ mod tests {
         unsafe extern "C" fn arm(context: *mut c_void) -> i32 {
             let mut id = 0;
             unsafe {
-                kiln_realm_set_timeout(
-                    750.0,
-                    Some(noop),
-                    Some(no_drop),
-                    context,
-                    &raw mut id,
-                )
+                kiln_realm_set_timeout(750.0, Some(noop), Some(no_drop), context, &raw mut id)
             }
         }
         unsafe extern "C" fn submit(context: *mut c_void) -> i32 {

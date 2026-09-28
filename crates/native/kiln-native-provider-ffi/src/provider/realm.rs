@@ -5180,7 +5180,8 @@ fn refuse_graph_claim_request(
             GRAPH_REQUEST_REFUSED
         }
     } else {
-        GRAPH_REQUEST_REFUSED
+        coordinate_mixed_graph_request(sender, receiver, request, reservation)
+            .unwrap_or(GRAPH_REQUEST_REFUSED)
     };
     let _ = status.compare_exchange(
         GRAPH_REQUEST_PENDING,
@@ -5247,7 +5248,8 @@ fn refuse_dedicated_graph_claim_request(
             |realm, command| claim.control(realm, command),
         )
     } else {
-        GRAPH_REQUEST_REFUSED
+        coordinate_mixed_graph_request(sender, receiver, request, reservation)
+            .unwrap_or(GRAPH_REQUEST_REFUSED)
     };
     let _ = status.compare_exchange(
         GRAPH_REQUEST_PENDING,
@@ -5255,6 +5257,45 @@ fn refuse_dedicated_graph_claim_request(
         Ordering::Release,
         Ordering::Relaxed,
     );
+}
+
+/// A scheduled top-level realm can call a dedicated actor worker, and a dedicated actor can
+/// reply to a scheduled realm. Claim each owner through its own coordinator while holding both
+/// leases; neither realm's generated frame or heap pointer crosses into the other scheduler.
+fn coordinate_mixed_graph_request(
+    sender: u64,
+    receiver: u64,
+    request: u64,
+    reservation: u64,
+) -> Option<u8> {
+    let (scheduled, dedicated) =
+        if scheduled_realm_exists(sender) && dedicated_claim::contains(receiver) {
+            (sender, receiver)
+        } else if scheduled_realm_exists(receiver) && dedicated_claim::contains(sender) {
+            (receiver, sender)
+        } else {
+            return None;
+        };
+    // Reserve the scheduler ticket first, then wake the dedicated owner. A failure drops the
+    // first claim and releases its pause before reporting refusal.
+    let scheduled_claim = claim_scheduled_realm_one(scheduled).ok()?;
+    let dedicated_claim = dedicated_claim::claim_one(dedicated, Duration::from_secs(1))?;
+    if !scheduled_claim.wait(Duration::from_secs(1)) {
+        return Some(GRAPH_REQUEST_REFUSED);
+    }
+    Some(coordinate_claimed_graph_request(
+        sender,
+        receiver,
+        request,
+        reservation,
+        |realm, command| {
+            if realm == scheduled {
+                scheduled_claim.control(realm, command)
+            } else {
+                dedicated_claim.control(realm, command)
+            }
+        },
+    ))
 }
 
 /// All C operations are lane-local and carry IDs only. The host lease pins the authenticated
@@ -5311,6 +5352,12 @@ static SCHEDULED_REALMS: OnceLock<Mutex<HashMap<u64, ScheduledRealmTarget>>> = O
 
 fn scheduled_realms() -> &'static Mutex<HashMap<u64, ScheduledRealmTarget>> {
     SCHEDULED_REALMS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn scheduled_realm_exists(realm: u64) -> bool {
+    scheduled_realms()
+        .lock()
+        .is_ok_and(|registry| registry.contains_key(&realm))
 }
 
 pub(crate) struct ScheduledRealmRegistration {
@@ -5390,6 +5437,25 @@ pub(crate) fn claim_scheduled_realm_pair(
     };
     scheduler
         .claim_pair(&from, &to)
+        .map_err(ScheduledRealmClaimError::Scheduler)
+}
+
+fn claim_scheduled_realm_one(realm: u64) -> Result<TurnPairClaim, ScheduledRealmClaimError> {
+    let (scheduler, target) = {
+        let registry = scheduled_realms()
+            .lock()
+            .map_err(|_| ScheduledRealmClaimError::UnknownRealm)?;
+        let entry = registry
+            .get(&realm)
+            .ok_or(ScheduledRealmClaimError::UnknownRealm)?;
+        let scheduler = entry
+            .scheduler
+            .upgrade()
+            .ok_or(ScheduledRealmClaimError::UnknownRealm)?;
+        (scheduler, entry.target.clone())
+    };
+    scheduler
+        .claim_one(&target)
         .map_err(ScheduledRealmClaimError::Scheduler)
 }
 
