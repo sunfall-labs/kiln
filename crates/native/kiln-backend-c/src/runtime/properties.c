@@ -536,9 +536,10 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
                                  const kiln_string *ikey, kiln_value value, int strict,
                                  int depth, kiln_value *thrown);
 
-/* Storage-side assignment for an own dictionary entry. The caller handles fast shaped slots and
- * the inherited setter walk; an overlay will answer this boundary before dictionary fallback.
- * No writable list record escapes it. */
+/* Storage-side assignment for an existing own entry. A sealed data entry owns its value in this
+ * realm's dense slots, so replacing that value does not change its shared descriptor or require
+ * materializing the whole store. The caller handles fast shaped slots and inherited setters.
+ * No writable list record escapes this boundary. */
 static int kiln_c99_property_storage_assign_existing(kiln_host *host, kiln_value target,
                                                       kiln_object *object,
                                                       const kiln_string *key,
@@ -546,7 +547,20 @@ static int kiln_c99_property_storage_assign_existing(kiln_host *host, kiln_value
                                                       kiln_value value, int strict, int depth,
                                                       kiln_value *thrown, int *found) {
     size_t index;
-    if (object->sealed != NULL || object->shape != NULL) {
+    if (object->sealed != NULL) {
+        uint32_t *orders = kiln_c99_sealed_orders(object);
+        for (index = 0; index < object->sealed->count; ++index) {
+            const kiln_sealed_property *entry = &object->sealed->entries[index];
+            kiln_property candidate = {.key = entry->key};
+            if (orders[index] == 0 ||
+                !((ikey != NULL && entry->key == ikey) ||
+                  (key != NULL && kiln_c99_same_key_view(&candidate, key)))) continue;
+            *found = 1;
+            if (entry->writable) object->slots[index] = kiln_val_from_boundary(value);
+            else if (strict) return kiln_c99_throw_read_only_key(thrown, key);
+            return KILN_C99_OK;
+        }
+    } else if (object->shape != NULL) {
         int status = kiln_c99_ensure_dictionary(object);
         if (status != KILN_C99_OK) return status;
     }
