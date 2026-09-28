@@ -223,6 +223,98 @@ fn provider_moves_pure_realm_turns_between_lanes() {
     assert!(lanes_by_realm.values().any(|lanes| lanes.len() > 1));
 }
 
+#[cfg(feature = "ffi")]
+#[test]
+fn ffi_library_open_pins_subsequent_turns_to_its_os_lane() {
+    #[cfg(target_os = "linux")]
+    const LIBRARY: &[u8] = b"libc.so.6";
+    #[cfg(target_os = "macos")]
+    const LIBRARY: &[u8] = b"/usr/lib/libSystem.B.dylib";
+
+    struct Session {
+        realm: u64,
+        turns: usize,
+        lanes: std::sync::Arc<std::sync::Mutex<Vec<std::thread::ThreadId>>>,
+    }
+
+    unsafe extern "C" fn begin(context: *mut c_void, _index: u64) -> *mut c_void {
+        let lanes = unsafe {
+            &*context.cast::<std::sync::Arc<std::sync::Mutex<Vec<std::thread::ThreadId>>>>()
+        };
+        let mut realm = 0;
+        if unsafe { kiln_realm_create(&raw mut realm) } != 0
+            || kiln_realm_use_wall_clock(realm) != 0
+        {
+            return ptr::null_mut();
+        }
+        Box::into_raw(Box::new(Session {
+            realm,
+            turns: 0,
+            lanes: std::sync::Arc::clone(lanes),
+        }))
+        .cast()
+    }
+
+    unsafe extern "C" fn identify(session: *mut c_void) -> u64 {
+        unsafe { &*session.cast::<Session>() }.realm
+    }
+
+    unsafe extern "C" fn open_library(context: *mut c_void) -> i32 {
+        let library = unsafe { &mut *context.cast::<u64>() };
+        unsafe { crate::ffi::kiln_ffi_open(LIBRARY.as_ptr(), LIBRARY.len() as u64, library) }
+    }
+
+    unsafe extern "C" fn advance(session: *mut c_void, _delay: *mut u64) -> i32 {
+        let session = unsafe { &mut *session.cast::<Session>() };
+        if session.turns == 0 {
+            let mut library: u64 = 0;
+            if unsafe {
+                kiln_realm_enter(session.realm, Some(open_library), (&raw mut library).cast())
+            } != 0
+                || library == 0
+                || realm(session.realm).is_none_or(|realm| realm.affinity.get() & AFFINITY_FFI == 0)
+            {
+                return -1;
+            }
+        }
+        session
+            .lanes
+            .lock()
+            .unwrap()
+            .push(std::thread::current().id());
+        session.turns += 1;
+        if session.turns == 3 { 0 } else { 1 }
+    }
+
+    unsafe extern "C" fn finish(session: *mut c_void) -> i32 {
+        let session = unsafe { Box::from_raw(session.cast::<Session>()) };
+        kiln_realm_destroy(session.realm)
+    }
+
+    let lanes = std::sync::Arc::new(std::sync::Mutex::new(Vec::<std::thread::ThreadId>::new()));
+    let mut status = -1;
+    assert_eq!(
+        unsafe {
+            kiln_realm_run_migrating(
+                1,
+                2,
+                0,
+                Some(begin),
+                Some(identify),
+                Some(advance),
+                Some(finish),
+                (&raw const lanes).cast_mut().cast(),
+                &raw mut status,
+            )
+        },
+        0
+    );
+    assert_eq!(status, 0);
+    let lanes = lanes.lock().unwrap();
+    assert_eq!(lanes.len(), 3);
+    assert!(lanes.iter().all(|lane| *lane == lanes[0]));
+}
+
 unsafe extern "C" fn exercises_realm_value_slots(context: *mut c_void) -> i32 {
     let slots = unsafe { &mut *context.cast::<[*mut c_void; 3]>() };
     if unsafe { kiln_realm_value_slot(1, &raw mut slots[0]) } != 0
