@@ -972,7 +972,7 @@ typedef struct kiln_shape_edge_table {
 #define KILN_C99_ATTR_FIXED 4u       /* not configurable */
 #define KILN_C99_ATTR_ACCESSOR 8u    /* the slot holds an accessor pair */
 typedef struct kiln_property {
-#define KILN_C99_INLINE_SLOTS 16
+#define KILN_C99_INLINE_SLOTS 8
 typedef struct kiln_object {
 typedef struct kiln_shared_facade {
 static uint64_t kiln_c99_builtin_store_epoch;
