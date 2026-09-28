@@ -885,19 +885,24 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
         }
         return KILN_C99_OK;
     }
-    if (object->shape != NULL) {
-        kiln_c99_ensure_dictionary(object);
-    }
     /* The count is read each time round because a getter can add a property to the source; the
      * bound is the source's *original* length, so a property the getter appends is not copied,
      * which is what stops an appending getter from looping. */
     {
-        size_t length = object->count;
-        for (index = 0; index < length && index < object->count; ++index) {
+        size_t length;
+        int status = kiln_c99_property_walk(object, &length);
+        if (status != KILN_C99_OK) return status;
+        for (index = 0; index < length; ++index) {
+            size_t current_count;
+            kiln_property projected;
+            kiln_property property;
             kiln_value copied;
             kiln_value symbol;
-            int status;
-            if (!object->properties[index].enumerable) {
+            status = kiln_c99_property_walk(object, &current_count);
+            if (status != KILN_C99_OK) return status;
+            if (index >= current_count) break;
+            property = *kiln_c99_property_view(object, index, &projected);
+            if (!property.enumerable) {
                 /* A symbol-keyed property is stored non-enumerable here whatever the program
                  * asked for: `kiln_c99_own_slot` marks every `@@` key that way, in one place, so
                  * that none of the walks over own *string* keys has to know about the prefix.
@@ -909,20 +914,20 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
                  * and skipping them silently drops what the interpreter kept -- which is the
                  * failure this whole helper exists to stop. A machine slot is not a symbol and
                  * is not affected: it is skipped, as it should be. */
-                if (!kiln_c99_symbol_of_key_view(object->properties[index].key, &symbol) ||
-                    object->properties[index].symbol_hidden) {
+                if (!kiln_c99_symbol_of_key_view(property.key, &symbol) ||
+                    property.symbol_hidden) {
                     continue;
                 }
             }
-            if (object->properties[index].accessor) {
-                if (object->properties[index].getter.tag == KILN_VALUE_UNDEFINED) {
+            if (property.accessor) {
+                if (property.getter.tag == KILN_VALUE_UNDEFINED) {
                     /* Setter-only: reading it answers `undefined`, and `undefined` is what a
                      * spread copies. Skipping the key instead left the property *absent* --
                      * `"gone" in { ...source }` said false where node says true, because
                      * `CopyDataProperties` creates a property for every enumerable own key it
                      * was given, whatever the read produced. */
-                    status = kiln_c99_put_mode_key(host, target, object->properties[index].key,
-                                                   object->properties[index].key,
+                    status = kiln_c99_put_mode_key(host, target, property.key,
+                                                   property.key,
                                                    kiln_c99_undefined(), 0, depth, thrown);
                     if (status != KILN_C99_OK) {
                         return status;
@@ -931,16 +936,16 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
                 }
                 /* The receiver is the *source*, not the store it was found in: a getter a
                  * function's statics declare has to see the function. */
-                status = kiln_c99_call(host, &copied, object->properties[index].getter, source,
+                status = kiln_c99_call(host, &copied, property.getter, source,
                                        NULL, 0, depth, thrown);
                 if (status != KILN_C99_OK) {
                     return status;
                 }
             } else {
-                copied = object->properties[index].value;
+                copied = property.value;
             }
-            status = kiln_c99_put_mode_key(host, target, object->properties[index].key,
-                                           object->properties[index].key, copied, 0, depth,
+            status = kiln_c99_put_mode_key(host, target, property.key,
+                                           property.key, copied, 0, depth,
                                            thrown);
             if (status != KILN_C99_OK) {
                 return status;

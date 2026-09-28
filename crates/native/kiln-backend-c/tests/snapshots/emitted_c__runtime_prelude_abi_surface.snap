@@ -2195,6 +2195,10 @@ typedef struct kiln_c99_graph_provider_visit {
 static int kiln_c99_graph_visit_provider_root(void *opaque, const void *pointer,
 static kiln_c99_graph_incoming_result kiln_c99_graph_incoming_probe(
 static int kiln_c99_heap_move_chunks(kiln_gc_heap *from, kiln_gc_heap *to,
+enum {
+static int kiln_c99_graph_receiver_reserve(kiln_gc_heap *to, size_t chunk_count,
+static int kiln_c99_graph_receiver_rollback(kiln_gc_heap *to, uint64_t id) {
+static int kiln_c99_graph_receiver_move_and_publish(kiln_gc_heap *from, kiln_gc_heap *to,
 struct kiln_c99_par_arena {
 static uint64_t kiln_c99_graph_candidate_next_id;
 static uint64_t kiln_c99_graph_candidate_new_id(void) {
@@ -3234,6 +3238,7 @@ static int kiln_c99_delete(kiln_host *host, kiln_value target, const char *key,
 static int kiln_c99_delete_or_throw(kiln_host *host, kiln_value target, const char *key,
 static int kiln_c99_delete_or_throw_key(kiln_host *host, kiln_value target,
 static int kiln_c99_delete_computed_or_throw(kiln_host *host, kiln_value target, kiln_value key,
+static int kiln_c99_append_enumerable_object_keys(kiln_object *object, kiln_value built,
 static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out, int depth,
 static int kiln_c99_keys_contain(kiln_value keys, const kiln_string *key) {
 static int kiln_c99_enumerate_keys(kiln_host *host, kiln_value target, kiln_value *out,

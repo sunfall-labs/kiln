@@ -864,6 +864,40 @@ static int kiln_c99_delete_computed_or_throw(kiln_host *host, kiln_value target,
         ((const kiln_string *)text.ptr)->unit_len);
 }
 
+/* Append an ordinary store's enumerable string keys through the read-only projection. Dense
+ * indices precede named shape keys; a mixed shape/list store keeps the dictionary conversion
+ * until its integer-key merge has a read-only cursor. */
+static int kiln_c99_append_enumerable_object_keys(kiln_object *object, kiln_value built,
+                                                   int include_dense) {
+    size_t index;
+    size_t count;
+    int status;
+    if (object->properties == NULL && object->shape != NULL) {
+        if (include_dense && object->elements != NULL) {
+            for (index = 0; index < object->element_count; ++index) {
+                char num_buf[32];
+                size_t nlen;
+                if (object->elements[index] == KILN_VAL_HOLE) continue;
+                nlen = kiln_c99_double_to_js((double)index, num_buf);
+                status = kiln_c99_array_push(built, kiln_c99_copy_text(num_buf, nlen));
+                if (status != KILN_C99_OK) return status;
+            }
+        }
+        count = object->shape->property_count;
+    } else {
+        status = kiln_c99_property_walk(object, &count);
+        if (status != KILN_C99_OK) return status;
+    }
+    for (index = 0; index < count; ++index) {
+        kiln_property projected;
+        const kiln_property *property = kiln_c99_property_view(object, index, &projected);
+        if (!property->enumerable) continue;
+        status = kiln_c99_array_push(built, kiln_c99_stable_key_value(property->key));
+        if (status != KILN_C99_OK) return status;
+    }
+    return KILN_C99_OK;
+}
+
 /* An array of a value's own enumerable string keys, in enumeration order: what `for...in` walks
  * and what `Object.keys` reports. A snapshot, which is what the language specifies -- a key added
  * during the loop may or may not be visited, and this chooses not to. */
@@ -897,39 +931,8 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
     }
     if (target.tag == KILN_VALUE_OBJECT) {
         kiln_object *object = kiln_c99_object_of(target);
-        if (object->properties == NULL && object->shape != NULL) {
-            if (object->elements != NULL) {
-                for (index = 0; index < object->element_count; ++index) {
-                    if (object->elements[index] == KILN_VAL_HOLE) continue;
-                    char num_buf[32];
-                    size_t nlen = kiln_c99_double_to_js((double)index, num_buf);
-                    status = kiln_c99_array_push(built, kiln_c99_copy_text(num_buf, nlen));
-                    if (status != KILN_C99_OK) return status;
-                }
-            }
-            for (index = 0; index < object->shape->property_count; ++index) {
-                const kiln_string *skey = object->shape->keys[index];
-                if (!kiln_c99_shape_slot_enumerable(object->shape, (uint32_t)index)) {
-                    continue;
-                }
-                status = kiln_c99_array_push(built, kiln_c99_stable_key_value(skey));
-                if (status != KILN_C99_OK) return status;
-            }
-        } else {
-            if (object->shape != NULL) {
-                kiln_c99_ensure_dictionary(object);
-            }
-            for (index = 0; index < object->count; ++index) {
-                if (!object->properties[index].enumerable) {
-                    continue;
-                }
-                status = kiln_c99_array_push(
-                    built, kiln_c99_stable_key_value(object->properties[index].key));
-                if (status != KILN_C99_OK) {
-                    return status;
-                }
-            }
-        }
+        status = kiln_c99_append_enumerable_object_keys(object, built, 1);
+        if (status != KILN_C99_OK) return status;
     } else if (target.tag == KILN_VALUE_ARRAY) {
         /* An array's own enumerable keys are its indices, as strings: `for (const i in [7,8])`
          * gives "0" and "1", not 0 and 1. */
@@ -945,28 +948,8 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
         }
         if (array->properties.tag == KILN_VALUE_OBJECT) {
             kiln_object *extra = kiln_c99_object_of(array->properties);
-            if (extra->properties == NULL && extra->shape != NULL) {
-                for (index = 0; index < extra->shape->property_count; ++index) {
-                    const kiln_string *skey = extra->shape->keys[index];
-                    if (!kiln_c99_shape_slot_enumerable(extra->shape, (uint32_t)index)) continue;
-                    status = kiln_c99_array_push(built, kiln_c99_stable_key_value(skey));
-                    if (status != KILN_C99_OK) return status;
-                }
-            } else {
-                if (extra->shape != NULL) {
-                    kiln_c99_ensure_dictionary(extra);
-                }
-                for (index = 0; index < extra->count; ++index) {
-                    if (!extra->properties[index].enumerable) {
-                        continue;
-                    }
-                    status = kiln_c99_array_push(
-                        built, kiln_c99_stable_key_value(extra->properties[index].key));
-                    if (status != KILN_C99_OK) {
-                        return status;
-                    }
-                }
-            }
+            status = kiln_c99_append_enumerable_object_keys(extra, built, 0);
+            if (status != KILN_C99_OK) return status;
         }
     } else if (target.tag == KILN_VALUE_TYPED_ARRAY) {
         kiln_typed_array *view = kiln_c99_typed_array_of(target);

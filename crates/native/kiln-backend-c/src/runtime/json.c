@@ -762,56 +762,63 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
                 written += 1;
             }
         } else {
-            if (object->shape != NULL) {
-                kiln_c99_ensure_dictionary(object);
-            }
-            length = object->count;
-            for (index = 0; index < length && index < object->count; ++index) {
-            kiln_value member;
-            size_t mark;
-            int wrote;
-            if (!object->properties[index].enumerable) {
-                continue;
-            }
-            if (object->properties[index].accessor) {
-                if (object->properties[index].getter.tag == KILN_VALUE_UNDEFINED) {
-                    continue;
-                }
-                status = kiln_c99_call(host, &member, object->properties[index].getter, value,
-                                       NULL, 0, depth, thrown);
-                if (status != KILN_C99_OK) {
-                    kiln_c99_json_drop_nested(&nested);
-                    return status;
-                }
-            } else {
-                member = object->properties[index].value;
-            }
-            /* Written straight into `text` at `mark`: a member with no JSON spelling is
-             * *dropped*, so on that answer the separator and key just written are rolled back
-             * along with it rather than never written in the first place. */
-            mark = text->len;
-            KILN_JSON_BREAK(written == 0);
-            {
-                const kiln_string *key = object->properties[index].key;
-                status = kiln_c99_json_quote_string(text, key);
-            }
-            if (status != KILN_C99_OK ||
-                (indent_len != 0 ? kiln_c99_text_append(text, ": ", 2) : kiln_c99_text_append(text, ":", 1)) != KILN_C99_OK) {
-                kiln_c99_json_drop_nested(&nested);
-                return KILN_C99_OUT_OF_MEMORY;
-            }
-            status = kiln_c99_json_value(host, text, member, indent, indent_len, nested.bytes,
-                                         nested.len, &wrote, depth, &frame, thrown);
+            status = kiln_c99_property_walk(object, &length);
             if (status != KILN_C99_OK) {
                 kiln_c99_json_drop_nested(&nested);
                 return status;
             }
-            if (!wrote) {
-                text->len = mark;
-                continue;
+            for (index = 0; index < length; ++index) {
+                size_t current_count;
+                kiln_property projected;
+                kiln_property property;
+                kiln_value member;
+                size_t mark;
+                int wrote;
+                status = kiln_c99_property_walk(object, &current_count);
+                if (status != KILN_C99_OK) {
+                    kiln_c99_json_drop_nested(&nested);
+                    return status;
+                }
+                if (index >= current_count) break;
+                property = *kiln_c99_property_view(object, index, &projected);
+                if (!property.enumerable) {
+                    continue;
+                }
+                if (property.accessor) {
+                    if (property.getter.tag == KILN_VALUE_UNDEFINED) {
+                        continue;
+                    }
+                    status = kiln_c99_call(host, &member, property.getter, value,
+                                           NULL, 0, depth, thrown);
+                    if (status != KILN_C99_OK) {
+                        kiln_c99_json_drop_nested(&nested);
+                        return status;
+                    }
+                } else {
+                    member = property.value;
+                }
+                /* A member with no JSON spelling is dropped with its separator and key. */
+                mark = text->len;
+                KILN_JSON_BREAK(written == 0);
+                status = kiln_c99_json_quote_string(text, property.key);
+                if (status != KILN_C99_OK ||
+                    (indent_len != 0 ? kiln_c99_text_append(text, ": ", 2) :
+                                       kiln_c99_text_append(text, ":", 1)) != KILN_C99_OK) {
+                    kiln_c99_json_drop_nested(&nested);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                status = kiln_c99_json_value(host, text, member, indent, indent_len, nested.bytes,
+                                             nested.len, &wrote, depth, &frame, thrown);
+                if (status != KILN_C99_OK) {
+                    kiln_c99_json_drop_nested(&nested);
+                    return status;
+                }
+                if (!wrote) {
+                    text->len = mark;
+                    continue;
+                }
+                written += 1;
             }
-            written += 1;
-        }
     }
     if (indent_len != 0 && written != 0 &&
             (kiln_c99_text_append_c(text, "\n") != KILN_C99_OK ||
