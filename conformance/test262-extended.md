@@ -5,7 +5,7 @@ section. `mise run test262-full` runs both. The corresponding gate commands are 
 and `mise run gate-full`. Existing `scripts/test262.sh --out report.json --path <subtree>` still
 runs every case in that pinned subtree, regardless of its classification here.
 
-The split now defers **499 files / 998 variants**, leaving **101,640 routine variants**.
+The split now defers **58 files / 116 variants**, leaving **102,522 routine variants**.
 The original 502 files accounted for 88% of summed case durations in the recorded full run.
 Three Map/Set iterator-close files were promoted after fixing constructor adder dispatch:
 all six variants now pass in milliseconds instead of consuming the instruction budget. Classification
@@ -19,9 +19,14 @@ This is an execution-cost policy, not a claim that these tests inherently need s
 
 | Files | Workload | Interpretation |
 | ---: | --- | --- |
-| 448 | Unicode/RegExp sweeps | Large inputs; guarded indexed writes, numeric dispatch and string storage improvements reduced measured wall time by 25% |
+| 7 | Remaining RegExp sweeps | Other large regular-expression inputs remain in extended coverage; all 441 generated Unicode property-escape files moved to routine after the complete run measured a 650 ms median, 771 ms p90 and 943 ms maximum per variant, with all 882 variants passing |
 | 3 | TypedArray copyWithin cases | Earlier implementation exhausted its budget on finite setup; latest main's shared implementation instead fails promptly on missing post-coercion detachment checks, still unresolved |
 | 48 | Mixed compiler, property, URI, iterator and calendar workloads | Constant interning and key membership had quadratic costs; profiling separates finite budget exhaustion from an erroneous iterator-close loop |
+
+The 441 promoted property-escape files account for 882 routine variants. Together they summed
+583.2 seconds of per-case execution time in that full run, but each individual case completed in
+under one second. The full baseline and inventory digest are unchanged; the manifest's extended
+reference count for `built-ins/RegExp` drops from 896 to 14 passing variants.
 
 A representative Unicode-builder probe produced identical output in Node and Kiln. Median
 end-to-end process times over three runs were 56 ms and 1.11 s, respectively. These include

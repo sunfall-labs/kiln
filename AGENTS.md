@@ -126,9 +126,11 @@ fail the run. Complete per-chunk result documents remain available beside batch 
 the complement, initially 101,634 variants. This is a cost classification, not a claim that these
 tests must be slow: Unicode sweeps dominate it, and several entries expose optimization or
 correctness problems. All variants of a file stay together. Selection uses the committed list;
-timings only order batches and never silently omit a case. Three fixed Map/Set files have since
-returned to routine coverage: the current split is 499 extended files / 998 variants and 101,640
-routine variants.
+timings only order batches and never silently omit a case. Three fixed Map/Set files and 441
+generated Unicode RegExp property-escape files have since returned to routine coverage: the
+current split is 58 extended files / 116 variants and 102,522 routine variants. The Unicode
+promotion follows the 2026-09-27 complete run: all 882 variants passed, with 650 ms median and
+943 ms maximum per variant.
 
 The full chunk baseline remains unchanged. The extended manifest records its section's reference
 counts; the routine passing floor is the full chunk floor minus that section's reference passes.
