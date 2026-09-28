@@ -3972,27 +3972,33 @@ static int kiln_cli_report_worker_error(void *opaque) {
     return kiln_c99_worker_report_error(graph->result);
 }
 
+/* The graph and result slots outlive every generated C frame. A scheduler can run one step,
+ * release its lane, and later resume this record without retaining a frame pointer. */
+typedef struct kiln_cli_realm_run {
+    kiln_graph_context *graph;
+    uint64_t realm;
+    const char *phase;
+    int status;
+    int final_drive;
+    int settling_driven;
+} kiln_cli_realm_run;
+
 /* `worker_entry` is one plus the index of the module a worker's realm runs (0 for the program's
  * own realm); a worker's standard streams are `output` and `error_output`. */
-static int kiln_cli_run_realm_as(int argc, char **argv, int writes_result, FILE *output,
-                                 FILE *error_output, size_t worker_entry) {
+static void kiln_cli_realm_begin(kiln_cli_realm_run *run, int argc, char **argv, FILE *output,
+                                  FILE *error_output, size_t worker_entry) {
     /* The realm's graph: its module states and every module's linkage, one per realm run and freed
      * after the realm is destroyed (a result slot is read after teardown). */
     kiln_graph_context *graph = (kiln_graph_context *)calloc(1, sizeof *graph);
     uint64_t realm = 0;
-    /* A refusal that reaches here has no diagnostic of its own -- the realm stopped before it
-     * could leave one -- so the launcher says which of the three phases was running. */
-    const char *phase = "realm creation";
-    int status;
-    int destroy_status;
-    int unsettled_entry = 0;
-    /* `process.exit(code)` in a thread-mode realm (realms issue 23): the code, and whether it
-     * was asked for. */
-    int32_t exit_requested = 0;
-    int exit_asked = 0;
+    int status = 1;
+    memset(run, 0, sizeof *run);
+    run->graph = graph;
+    run->phase = "realm creation";
+    run->status = 1;
     if (graph == NULL) {
         kiln_cli_warn("kiln: out of memory for the module graph", NULL);
-        return 1;
+        return;
     }
     graph->cli.output = output;
     graph->cli.error_output = error_output;
@@ -4011,18 +4017,53 @@ static int kiln_cli_run_realm_as(int argc, char **argv, int writes_result, FILE 
         // entered so no timer is ever armed against the virtual clock.
         output.push_str("    if (status == 0) status = kiln_realm_use_wall_clock(realm);\n");
     }
+    output.push_str("    run->realm = realm;\n    run->status = status;\n}\n");
     writeln!(
         output,
-        r#"    while (status == 0 && (graph->current_module < (size_t){} || !graph->roots_registered)) {{
-        if (graph->current_module < (size_t){} && graph->module_states[kiln_graph_startup_indices[graph->current_module]].module_settling) {{
-            phase = "the turn loop";
-            status = kiln_realm_drive(realm, &graph->host, &graph->result);
-            if (status != 0) break;
+        r#"
+/* Advance at most one module body or one drive. A drive still waits to quiescence today; its
+ * synchronous one-turn provider entry will replace that call when the scheduler owns waking. */
+static int kiln_cli_realm_step(kiln_cli_realm_run *run) {{
+    kiln_graph_context *graph = run->graph;
+    uint64_t realm = run->realm;
+    if (run->status != 0 || graph == NULL) return 0;
+    if (graph->current_module < (size_t){} || !graph->roots_registered) {{
+        if (!run->settling_driven && graph->current_module < (size_t){} &&
+            graph->module_states[kiln_graph_startup_indices[graph->current_module]].module_settling) {{
+            run->settling_driven = 1;
+            run->phase = "the turn loop";
+            run->status = kiln_realm_drive(realm, &graph->host, &graph->result);
+        }} else {{
+            run->settling_driven = 0;
+            run->phase = "module body";
+            run->status = kiln_realm_enter(realm, kiln_graph_enter, graph);
         }}
-        phase = "module body";
-        status = kiln_realm_enter(realm, kiln_graph_enter, graph);
+        return run->status == 0;
     }}
-        if (status == 0) {{ phase = "the turn loop"; status = kiln_realm_drive(realm, &graph->host, &graph->result); }}"#,
+    if (!run->final_drive) {{
+        run->final_drive = 1;
+        run->phase = "the turn loop";
+        run->status = kiln_realm_drive(realm, &graph->host, &graph->result);
+    }}
+    return 0;
+}}
+
+static int kiln_cli_run_realm_as(int argc, char **argv, int writes_result, FILE *output,
+                                 FILE *error_output, size_t worker_entry) {{
+    kiln_cli_realm_run run;
+    kiln_cli_realm_begin(&run, argc, argv, output, error_output, worker_entry);
+    while (kiln_cli_realm_step(&run)) {{}}
+    kiln_graph_context *graph = run.graph;
+    uint64_t realm = run.realm;
+    const char *phase = run.phase;
+    int status = run.status;
+    int destroy_status;
+    int unsettled_entry = 0;
+    /* `process.exit(code)` in a thread-mode realm (realms issue 23): the code, and whether it
+     * was asked for. */
+    int32_t exit_requested = 0;
+    int exit_asked = 0;
+    if (graph == NULL) return 1;"#,
         startup_indices.len(),
         startup_indices.len()
     )
