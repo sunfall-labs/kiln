@@ -156,6 +156,7 @@ extern void kiln_c99_materialize_match_properties(kiln_array *arr);
 extern kiln_value kiln_c99_property_key(kiln_value key);
 extern int kiln_c99_new_symbol(kiln_value *out, kiln_value description);
 extern int kiln_c99_symbol_for(kiln_value *out, kiln_value key);
+extern int kiln_c99_symbol_of_key(const char *key, size_t key_len, kiln_value *out);
 extern kiln_value kiln_c99_symbol_key_for(kiln_value value);
 extern int kiln_c99_is_namespace(uint64_t builtin);
 extern uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, size_t key_len);

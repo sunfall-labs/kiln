@@ -109,7 +109,7 @@ static int kiln_c99_symbol_of_key_view(const kiln_string *key, kiln_value *out) 
 
 /* Fixed C names still arrive as bytes. This adapter is intentionally one-way: it builds a
  * borrowed Latin-1 view and immediately delegates to the unit comparison above. */
-static int kiln_c99_symbol_of_key(const char *key, size_t key_len, kiln_value *out) {
+int kiln_c99_symbol_of_key(const char *key, size_t key_len, kiln_value *out) {
     kiln_string view;
     if (key_len > UINT32_MAX) return 0;
     view.unit_len = (uint32_t)key_len;
