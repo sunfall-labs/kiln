@@ -1056,8 +1056,10 @@ fn runtime_prelude_size() {
     // "has the program written this member onto a kind's prototype" (`stores.c`), the reads that
     // let a written member shadow a method table (`read.c`), the stack floor (`foundation.c`),
     // `split`'s limit and `parseInt` on UTF-16 text.
+    // The shared Rust message encoder's native descriptor callbacks replace the old C wire
+    // walker (realms issue 21); the resulting prelude has 59,001 lines. Leave a small margin.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 59_000;
+    const CEILING_LINES: usize = 59_050;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

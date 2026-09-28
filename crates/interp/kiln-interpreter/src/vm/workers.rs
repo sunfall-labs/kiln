@@ -12,6 +12,110 @@ use super::*;
 use kiln_runtime::signals;
 use kiln_runtime::workers::{self, Message, Token, WorkerEntry, WorkerSpec};
 
+struct InterpreterPlainSource {
+    handles: Vec<Value>,
+}
+
+impl InterpreterPlainSource {
+    fn new(root: Value) -> Self {
+        Self {
+            handles: vec![root],
+        }
+    }
+
+    fn retain(&mut self, value: Value) -> usize {
+        let handle = self.handles.len();
+        self.handles.push(value);
+        handle
+    }
+}
+
+impl workers::PlainSource for InterpreterPlainSource {
+    type Handle = usize;
+
+    fn describe(&mut self, handle: usize) -> Option<workers::PlainNode> {
+        Some(match self.handles.get(handle)? {
+            Value::Undefined => workers::PlainNode::Undefined,
+            Value::Null => workers::PlainNode::Null,
+            Value::Boolean(value) => workers::PlainNode::Bool(*value),
+            Value::Number(value) => workers::PlainNode::Number(*value),
+            Value::String(value) => workers::PlainNode::String(value.clone()),
+            Value::Object(object) => {
+                let data = object.borrow();
+                if data.prototype.is_some()
+                    || data.primitive.is_some()
+                    || data.error_brand
+                    || data.arguments_brand
+                    || data.buffer_brand
+                    || data.module_namespace
+                    || data.node_events.is_some()
+                    || data.node_object.is_some()
+                    || data.shadow_realm.is_some()
+                    || data.properties.iter().any(|slot| {
+                        slot.attributes != Attributes::DEFAULT
+                            || !matches!(slot.property, Property::Value(_))
+                            || (slot.key.unit_at(0) == Some(b'@' as u16)
+                                && slot.key.unit_at(1) == Some(b'@' as u16))
+                            || slot.key.to_scalar_string().map_or(true, |key| {
+                                key.as_bytes().first().is_some_and(u8::is_ascii_digit)
+                            })
+                    })
+                {
+                    return None;
+                }
+                workers::PlainNode::Object {
+                    identity: Rc::as_ptr(object) as usize,
+                    length: data.properties.len(),
+                }
+            }
+            Value::Array(array) => {
+                if !array.properties.borrow().properties.is_empty()
+                    || array.properties.borrow().prototype.is_some()
+                    || !array.elements.borrow().is_empty()
+                    || array.length.get() != array.items.borrow().len()
+                    || array.sparse.get()
+                {
+                    return None;
+                }
+                workers::PlainNode::Array {
+                    identity: Rc::as_ptr(array) as usize,
+                    length: array.length.get(),
+                }
+            }
+            _ => return None,
+        })
+    }
+
+    fn child(&mut self, handle: usize, index: usize) -> Option<workers::PlainChild<usize>> {
+        match self.handles.get(handle)? {
+            Value::Object(object) => {
+                let data = object.borrow();
+                let slot = data.properties.get(index)?;
+                let Property::Value(value) = &slot.property else {
+                    return None;
+                };
+                let key = slot.key.clone();
+                let value = value.clone();
+                drop(data);
+                Some(workers::PlainChild {
+                    key: Some(key),
+                    value: Some(self.retain(value)),
+                })
+            }
+            Value::Array(array) => {
+                let value = array.items.borrow().get(index)?.clone();
+                let value = if matches!(value, Value::Native(Native::Hole, _)) {
+                    None
+                } else {
+                    Some(self.retain(value))
+                };
+                Some(workers::PlainChild { key: None, value })
+            }
+            _ => None,
+        }
+    }
+}
+
 const OP_CHANNEL: u32 = 1;
 const OP_POST: u32 = 2;
 const OP_TAKE: u32 = 3;
@@ -31,6 +135,7 @@ const OP_SIGNAL_NUMBER: u32 = 16;
 const OP_SIGNAL_LISTEN: u32 = 17;
 const OP_SIGNAL_UNHANDLED: u32 = 18;
 const OP_KILL: u32 = 19;
+const OP_POST_PLAIN: u32 = 21;
 
 /// A moved `ArrayBuffer`'s store, as this engine boxes it into a [`Token::Moved`].
 struct MovedBytes(Vec<u8>);
@@ -78,6 +183,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 } else {
                     workers::enqueue(endpoint, message)
                 })
+            }
+            OP_POST_PLAIN => {
+                let root = arguments.get(2).cloned().unwrap_or(Value::Undefined);
+                if !matches!(root, Value::Object(_) | Value::Array(_)) {
+                    Value::Undefined
+                } else {
+                    let mut source = InterpreterPlainSource::new(root);
+                    match workers::encode_plain(&mut source, 0) {
+                        Some(tokens) => {
+                            let _ = workers::post(endpoint_of(first), Message::new(0, tokens));
+                            Value::Boolean(true)
+                        }
+                        None => Value::Undefined,
+                    }
+                }
             }
             OP_TAKE => match workers::take(endpoint_of(first)) {
                 Some(message) => {

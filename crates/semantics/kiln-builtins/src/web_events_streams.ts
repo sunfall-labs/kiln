@@ -450,6 +450,7 @@ delete (globalThis as any).__kilnPortWait;
   const OP_CHANNEL = 1, OP_POST = 2, OP_TAKE = 3, OP_CLOSE = 4, OP_STATE = 5, OP_ENQUEUE = 6;
   const OP_BROADCAST_JOIN = 7, OP_BROADCAST_POST = 8, OP_SPAWN = 9, OP_TERMINATE = 10, OP_SELF = 11;
   const OP_CANCEL_WAIT = 12, OP_REAP = 13, OP_STDIO = 14;
+  const OP_POST_PLAIN = 21;
   // `kiln_runtime::workers::kind` and `STATE_*`.
   const KIND_USER = 0, KIND_TERMINATE = 7;
   const STATE_PEER_CLOSED = 2, STATE_GONE = 4;
@@ -457,6 +458,8 @@ delete (globalThis as any).__kilnPortWait;
   const objectTag = Object.prototype.toString;
   const isArrayValue = Array.isArray;
   const objectKeys = Object.keys;
+  const hasOwn = Object.prototype.hasOwnProperty;
+  const defineProperty = Object.defineProperty;
 
   // A port that was transferred: its endpoint, standing where the port was in the copy.
   class PortHandle {
@@ -488,7 +491,7 @@ delete (globalThis as any).__kilnPortWait;
       const length = value.length;
       out.push(T_ARRAY, length);
       for (let i = 0; i < length; i++) {
-        if (i in value) encodeInto(value[i], out, seen);
+        if (hasOwn.call(value, i)) encodeInto(value[i], out, seen);
         else out.push(T_HOLE);
       }
       return;
@@ -581,7 +584,8 @@ delete (globalThis as any).__kilnPortWait;
             state.at++;
             continue;
           }
-          out[i] = decodeValue(state);
+          defineProperty(out, i, { value: decodeValue(state), writable: true,
+            enumerable: true, configurable: true });
         }
         return out;
       }
@@ -707,8 +711,6 @@ delete (globalThis as any).__kilnPortWait;
         encodeInto(message, out, new Map());
         return out;
       }
-      const encoded = clone.encodeMessageData(message);
-      if (encoded !== undefined) return encoded;
       copy = clone.serialize(message, undefined);
     } else {
       copy = clone.serialize(message, list, (item: any) => {
@@ -864,6 +866,11 @@ delete (globalThis as any).__kilnPortWait;
           : clone.transferOption(transfer, "postMessage");
       }
       if (this.#remote !== 0) {
+        if (!this.#closed && !this.#broadcast && (list === undefined || list.length === 0)
+            && message !== null && typeof message === "object") {
+          const posted = __kilnWorkerOp(OP_POST_PLAIN, this.#remote, message);
+          if (posted !== undefined) return true;
+        }
         const tokens = encodeMessage(message, list, this);
         if (this.#closed) return undefined;
         if (this.#broadcast) __kilnWorkerOp(OP_BROADCAST_POST, this.#remote, tokens);

@@ -3099,6 +3099,22 @@ typedef struct kiln_worker_token {
     uint64_t len;
     void *handle;
 } kiln_worker_token;
+typedef struct kiln_worker_plain_node {
+    uint32_t kind;
+    double number;
+    const kiln_string *text;
+    size_t identity;
+    size_t length;
+} kiln_worker_plain_node;
+typedef struct kiln_worker_plain_child {
+    const kiln_string *key;
+    uint64_t value;
+    uint32_t hole;
+} kiln_worker_plain_child;
+typedef int (*kiln_worker_plain_describe)(void *context, uint64_t handle,
+                                           kiln_worker_plain_node *out);
+typedef int (*kiln_worker_plain_field)(void *context, uint64_t handle, size_t index,
+                                        kiln_worker_plain_child *out);
 #define KILN_WORKER_TOKEN_UNDEFINED 0u
 #define KILN_WORKER_TOKEN_NULL 1u
 #define KILN_WORKER_TOKEN_BOOL 2u

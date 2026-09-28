@@ -77,6 +77,7 @@ pub(super) fn clone_plain_data(
                 || !array.properties.borrow().properties.is_empty()
                 || !array.elements.borrow().is_empty()
                 || array.length.get() != array.items.borrow().len()
+                || array.sparse.get()
             {
                 return None;
             }

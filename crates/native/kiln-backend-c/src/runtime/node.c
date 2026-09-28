@@ -2269,6 +2269,7 @@ int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code
 #define KILN_C99_WORKER_OP_SIGNAL_LISTEN 17
 #define KILN_C99_WORKER_OP_SIGNAL_UNHANDLED 18
 #define KILN_C99_WORKER_OP_KILL 19
+#define KILN_C99_WORKER_OP_POST_PLAIN 21
 
 static uint64_t kiln_c99_worker_word(const kiln_value *args, size_t argc, size_t at) {
     double number;
@@ -2563,6 +2564,8 @@ static int kiln_c99_worker_op_raw(kiln_value *result, const kiln_value *args, si
     case KILN_C99_WORKER_OP_ENQUEUE:
         return kiln_c99_worker_post((uint32_t)op, first, (uint32_t)kiln_c99_worker_word(args, argc, 2),
                                     argc > 3 ? args[3] : kiln_c99_undefined(), result, thrown);
+    case KILN_C99_WORKER_OP_POST_PLAIN:
+        return kiln_c99_worker_post_plain(first, argc > 2 ? args[2] : kiln_c99_undefined(), result);
     case KILN_C99_WORKER_OP_BROADCAST_POST:
         return kiln_c99_worker_post((uint32_t)op, first, 0, argc > 2 ? args[2] : kiln_c99_undefined(),
                                     result, thrown);
