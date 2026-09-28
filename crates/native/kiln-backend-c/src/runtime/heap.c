@@ -3422,7 +3422,10 @@ static void kiln_c99_key_place(kiln_key_table *table, kiln_key_entry entry) {
 static int kiln_c99_key_grow(kiln_key_table *table) {
     kiln_key_entry *old = table->entries;
     size_t old_capacity = table->capacity;
-    size_t capacity = old_capacity == 0 ? 256 : old_capacity * 2;
+    /* Constant keys live in the process table. An idle realm usually has only a few dynamic
+     * keys; begin with room for 32 at the table's half-full growth threshold, then grow as
+     * ordinary object/JSON workloads need it. */
+    size_t capacity = old_capacity == 0 ? 64 : old_capacity * 2;
     kiln_key_entry *grown;
     size_t index;
     if (capacity > ((size_t)-1) / sizeof *grown) return KILN_C99_OUT_OF_MEMORY;
