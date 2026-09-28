@@ -1902,10 +1902,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     return Ok(Value::Array(ArrayData::new(items)));
                 }
                 let mut items = Vec::new();
-                for (key, property) in own_properties_units(&self.intrinsics, &source) {
-                    if is_reserved_units(&key) {
-                        continue;
-                    }
+                for (key, property) in own_string_properties_units(&self.intrinsics, &source) {
                     let value = match property {
                         Property::Value(value) => value,
                         Property::Accessor { get, .. } => match get {
@@ -2384,7 +2381,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let descriptor = self.read_descriptor(&source, instruction)?;
                 let defined = self.define_own_key(
                     &target,
-                    PropertyKeyRef::Units(&key_units),
+                    PropertyKeyRef::from_value(&key, &key_units),
                     &descriptor,
                     instruction,
                 )?;
@@ -2513,14 +2510,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     return self.proxy_descriptor(&target, &key, instruction);
                 }
                 let key_units = key.property_key_units_checked()?;
-                Ok(
-                    own_descriptor_key(
-                        &self.intrinsics,
-                        &target,
-                        PropertyKeyRef::Units(&key_units),
-                    )
-                    .unwrap_or(Value::Undefined),
+                Ok(own_descriptor_key(
+                    &self.intrinsics,
+                    &target,
+                    PropertyKeyRef::from_value(&key, &key_units),
                 )
+                .unwrap_or(Value::Undefined))
             }
             Native::ReflectDeleteProperty => {
                 let target = self.reflect_target(arguments.first(), "deleteProperty")?;

@@ -1409,6 +1409,14 @@ pub(super) fn own_properties_units(
                     .collect::<Vec<_>>(),
             )
             .collect(),
+        Value::Shared(facade) => facade
+            .own_keys()
+            .into_iter()
+            .filter_map(|key| {
+                let (property, attributes) = facade.own_property(PropertyKeyRef::Units(&key))?;
+                attributes.enumerable.then_some((key, property))
+            })
+            .collect(),
         // The elements, and then whatever the program hung on the view: a spread copies both,
         // in the order the own-key walk lists them.
         Value::TypedArray(view) => {
@@ -1446,6 +1454,54 @@ pub(super) fn own_properties_units(
             })
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+/// Enumerable string properties for `Object.values`, `Object.entries`, and JSON. The key's
+/// spelling cannot distinguish a user string from a Symbol with identical reserved units.
+pub(super) fn own_string_properties_units(
+    intrinsics: &Intrinsics,
+    value: &Value,
+) -> Vec<(StringUnits, Property)> {
+    let stored = |data: &ObjectData| {
+        data.string_entries()
+            .map(|(key, property)| (key.clone(), property.clone()))
+            .collect::<Vec<_>>()
+    };
+    match value {
+        Value::Object(object) => string_wrapper_entries_units(value)
+            .into_iter()
+            .chain(stored(&object.borrow()))
+            .collect(),
+        Value::Function(function) => stored(&function.properties.borrow()),
+        Value::Bound(bound) => stored(&bound.properties.borrow()),
+        Value::Array(items) => items
+            .borrow()
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole, _)))
+            .map(|(index, item)| {
+                (
+                    StringUnits::from(index.to_string()),
+                    Property::Value(item.clone()),
+                )
+            })
+            .chain(stored(&items.properties.borrow()))
+            .collect(),
+        Value::TypedArray(view) => {
+            let mut entries = (0..view.len())
+                .filter_map(|index| {
+                    view.get(index)
+                        .map(|item| (StringUnits::from(index.to_string()), Property::Value(item)))
+                })
+                .collect::<Vec<_>>();
+            entries.extend(stored(&view.properties.borrow()));
+            entries
+        }
+        other if exotic_properties(other).is_some() => exotic_properties(value)
+            .map(|store| stored(&store.borrow()))
+            .unwrap_or_default(),
+        _ => own_properties_units(intrinsics, value),
     }
 }
 

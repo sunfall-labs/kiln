@@ -64,6 +64,7 @@ pub struct ResolvedModule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum NodeBuiltin {
     Process,
+    Shared,
     Assert,
     Buffer,
     AsyncHooks,
@@ -108,6 +109,7 @@ pub enum NodeBuiltin {
 impl NodeBuiltin {
     pub const ALL: &[Self] = &[
         Self::Process,
+        Self::Shared,
         Self::Assert,
         Self::Buffer,
         Self::AsyncHooks,
@@ -150,8 +152,12 @@ impl NodeBuiltin {
     ];
 
     pub fn parse(specifier: &str) -> Option<Self> {
+        if specifier == "node:kiln:shared" {
+            return None;
+        }
         Some(match specifier.strip_prefix("node:").unwrap_or(specifier) {
             "process" | "kiln:process" => Self::Process,
+            "kiln:shared" => Self::Shared,
             "assert" | "assert/strict" => Self::Assert,
             "buffer" => Self::Buffer,
             "async_hooks" => Self::AsyncHooks,
@@ -198,6 +204,7 @@ impl NodeBuiltin {
     pub const fn specifier(self) -> &'static str {
         match self {
             Self::Process => "kiln:process",
+            Self::Shared => "kiln:shared",
             Self::Assert => "node:assert",
             Self::Buffer => "node:buffer",
             Self::AsyncHooks => "node:async_hooks",
@@ -263,13 +270,15 @@ impl ResolvedModule {
         let stem = file.strip_suffix(".builtin")?;
         let parent = components.next()?.as_os_str().to_str()?;
         let name = if parent == "builtins" {
-            // `kiln:process` is the one explicit Kiln namespace. Its virtual path uses the
+            // Kiln namespaces use an unprefixed virtual path. Preserve their identity here
+            // without making the same bare names or `node:` names aliases.
+            // `kiln:process` is the original explicit Kiln namespace. Its virtual path uses the
             // unprefixed stem for compatibility with the existing builtin path layout, so
             // preserve that identity here without making `node:process` a Node builtin.
-            if stem == "process" {
-                "kiln:process".to_owned()
-            } else {
-                stem.to_owned()
+            match stem {
+                "process" => "kiln:process".to_owned(),
+                "shared" => "kiln:shared".to_owned(),
+                _ => stem.to_owned(),
             }
         } else {
             format!("{parent}/{stem}")
@@ -590,6 +599,12 @@ impl ModuleResolver {
         specifier: &str,
         importer: impl AsRef<Path>,
     ) -> Result<ResolvedModule, ResolveError> {
+        if specifier == "kiln:shared" {
+            return Ok(ResolvedModule::new(
+                NodeBuiltin::Shared.virtual_path(self.project_root()),
+                ResolutionKind::Builtin,
+            ));
+        }
         resolve_in_root(specifier, importer.as_ref(), &self.project_root)
     }
 }
@@ -2233,6 +2248,10 @@ mod tests {
 
     #[test]
     fn bounded_node_builtin_parse_and_specifier_round_trip() {
+        assert_eq!(NodeBuiltin::parse("kiln:shared"), Some(NodeBuiltin::Shared));
+        assert_eq!(NodeBuiltin::parse("shared"), None);
+        assert_eq!(NodeBuiltin::parse("node:shared"), None);
+        assert_eq!(NodeBuiltin::parse("node:kiln:shared"), None);
         for builtin in [
             NodeBuiltin::Buffer,
             NodeBuiltin::Console,

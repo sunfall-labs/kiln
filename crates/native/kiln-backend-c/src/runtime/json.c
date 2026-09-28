@@ -430,7 +430,8 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
      * inside an object, and as `null` inside an array -- three different wrong answers from one
      * missing arm, none of which stopped the program. */
     if (value.tag != KILN_VALUE_OBJECT && value.tag != KILN_VALUE_ARRAY &&
-        value.tag != KILN_VALUE_TYPED_ARRAY && value.tag != KILN_VALUE_PROXY) {
+        value.tag != KILN_VALUE_TYPED_ARRAY && value.tag != KILN_VALUE_PROXY &&
+        value.tag != KILN_VALUE_SHARED) {
         return kiln_c99_text_append_c(text, "{}");
     }
 
@@ -551,7 +552,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
         kiln_c99_json_drop_nested(&nested);
         return kiln_c99_text_append_c(text, "}");
     }
-    if (value.tag == KILN_VALUE_PROXY) {
+    if (value.tag == KILN_VALUE_PROXY || value.tag == KILN_VALUE_SHARED) {
         /* Read entirely through the handler: an `ownKeys` for the shape and a `get` per member,
          * which is what the language specifies and what makes a virtual object serialise as the
          * thing it presents rather than as the target hiding behind it.
@@ -559,19 +560,24 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
          * Whether it is written as an array or as an object follows the target, exactly as
          * `Array.isArray` does -- the two must agree or a proxy of an array serialises with
          * quoted indices. */
-        int is_array = kiln_c99_proxy_inner(value).tag == KILN_VALUE_ARRAY;
+        int is_array = value.tag == KILN_VALUE_SHARED
+                           ? kiln_c99_shared_is_array(value)
+                           : kiln_c99_proxy_inner(value).tag == KILN_VALUE_ARRAY;
+        const void *identity = value.tag == KILN_VALUE_SHARED
+                                   ? (const void *)(uintptr_t)value.bits
+                                   : (const void *)kiln_c99_proxy_of(value);
         kiln_value keys;
         size_t count = 0;
         size_t written = 0;
         for (ancestor = parents; ancestor != NULL; ancestor = ancestor->parent) {
-            if (ancestor->container == (const void *)kiln_c99_proxy_of(value)) {
+            if (ancestor->container == identity) {
                 kiln_c99_json_drop_nested(&nested);
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                             "Converting circular structure to JSON");
             }
         }
         frame.parent = parents;
-        frame.container = (const void *)kiln_c99_proxy_of(value);
+        frame.container = identity;
         if (is_array) {
             kiln_value length_value;
             double length;

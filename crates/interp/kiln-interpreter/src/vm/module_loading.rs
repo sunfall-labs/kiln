@@ -225,7 +225,34 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 };
             }
             let module_path = Rc::from(planned.key.as_str());
-            match self.drive_module(Rc::clone(&planned.program), locals, Some(module_path))? {
+            let saved_shared_global = if planned.kiln_shared {
+                if !kiln_builtin_surface::kiln_extensions_installed() {
+                    return Ok(Err(self.construct_error(
+                        ErrorKind::Type,
+                        &[Value::String(
+                            "kiln:shared requires enabled Kiln extensions".into(),
+                        )],
+                    )));
+                }
+                if let Value::Object(global) = self.global_object_in(realm) {
+                    let mut global = global.borrow_mut();
+                    let saved = global.properties.clone();
+                    install_kiln_shared_hooks(&mut global, realm, true);
+                    Some(saved)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let module_result =
+                self.drive_module(Rc::clone(&planned.program), locals, Some(module_path));
+            if let Some(saved) = saved_shared_global
+                && let Value::Object(global) = self.global_object_in(realm)
+            {
+                global.borrow_mut().properties = saved;
+            }
+            match module_result? {
                 Ok(returned) => {
                     let Value::Array(exported) = returned else {
                         let error = self.construct_error(

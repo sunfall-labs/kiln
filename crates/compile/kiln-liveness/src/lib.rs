@@ -592,7 +592,7 @@ pub fn retained_method_groups(
             Fs | FsPromises => groups::NODE_STREAM | groups::NODE_EVENT | groups::BUFFER,
             // Audited `Direct`-only (see phase1-PRD): no groups implicated.
             Url => groups::URL,
-            Assert | Console | Crypto | Dns | Module | Os | Process | Tty | Zlib
+            Assert | Console | Crypto | Dns | Module | Os | Process | Shared | Tty | Zlib
             | StringDecoder | QueryString | WorkerThreads | PerfHooks | AsyncHooks
             | ChildProcess | Timers | TimersPromises | Readline | ReadlinePromises | Sqlite
             | Constants | V8 | Vm | Path | Util | UtilTypes | DiagnosticsChannel => 0,

@@ -421,6 +421,7 @@ const __kilnStructuredClone = (function installStructuredClone() {
 
   const internal = {
     serialize,
+    isShared(value: any): boolean { return __kilnSharedIs(value); },
     transferOption,
     sequence,
     dataCloneError,

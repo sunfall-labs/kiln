@@ -446,7 +446,7 @@ delete (globalThis as any).__kilnPortWait;
   const T_UNDEFINED = 0, T_NULL = 1, T_FALSE = 2, T_TRUE = 3, T_NUMBER = 4, T_STRING = 5, T_BIGINT = 6;
   const T_REF = 7, T_OBJECT = 8, T_ARRAY = 9, T_HOLE = 10, T_DATE = 11, T_REGEXP = 12, T_MAP = 13;
   const T_SET = 14, T_BUFFER = 15, T_VIEW = 16, T_DATA_VIEW = 17, T_SHARED = 18, T_ERROR = 19;
-  const T_BOXED = 20, T_PORT = 21;
+  const T_BOXED = 20, T_PORT = 21, T_GRAPH = 22;
 
   // The runtime's operations (`__kilnWorkerOp`); the numbers are the engines' too.
   const OP_CHANNEL = 1, OP_POST = 2, OP_TAKE = 3, OP_CLOSE = 4, OP_STATE = 5, OP_ENQUEUE = 6;
@@ -489,6 +489,10 @@ delete (globalThis as any).__kilnPortWait;
       return;
     }
     seen.set(value, seen.size);
+    if (clone.isShared(value)) {
+      out.push(T_GRAPH, value);
+      return;
+    }
     if (isArrayValue(value)) {
       const length = value.length;
       out.push(T_ARRAY, length);
@@ -577,6 +581,11 @@ delete (globalThis as any).__kilnPortWait;
       case T_STRING: return tokens[state.at++];
       case T_BIGINT: return BigInt(tokens[state.at++]);
       case T_REF: return state.objects[tokens[state.at++]];
+      case T_GRAPH: {
+        const graph = tokens[state.at++];
+        state.objects.push(graph);
+        return graph;
+      }
       case T_ARRAY: {
         const length = tokens[state.at++];
         const out = new Array(length);

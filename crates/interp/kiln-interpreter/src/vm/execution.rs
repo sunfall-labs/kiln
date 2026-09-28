@@ -980,7 +980,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         else {
                             continue;
                         };
-                        object.set_units(&key_units, pair[1].clone());
+                        object.set_key(
+                            PropertyKeyRef::from_value(&key, &key_units),
+                            pair[1].clone(),
+                        );
                     }
                     if raised {
                         continue;
@@ -1389,14 +1392,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             )?;
                             continue;
                         }
-                        Property::Value(_) => {
-                            self.set_computed(
-                                &target,
-                                &Value::String(name.into()),
-                                value.clone(),
-                                current,
-                            )?;
-                        }
+                        Property::Value(_) => match &target {
+                            Value::Object(object) => object.borrow_mut().set(&name, value.clone()),
+                            Value::Function(function) => {
+                                function.properties.borrow_mut().set(&name, value.clone())
+                            }
+                            _ => unreachable!("a private element has an object store"),
+                        },
                     }
                     self.stack.push(value);
                 }
@@ -1468,6 +1470,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     else {
                         continue;
                     };
+                    let property_key = PropertyKeyRef::from_value(&key, &name);
                     if self
                         .catchable(
                             define_function_name(
@@ -1492,17 +1495,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     };
                     match &target {
                         Value::Object(object) => {
-                            object
-                                .borrow_mut()
-                                .define_accessor_units(&name, getter, setter, attributes);
+                            object.borrow_mut().define_accessor_key(
+                                property_key,
+                                getter,
+                                setter,
+                                attributes,
+                            );
                         }
                         // A static accessor lands on the constructor, whose properties live in
                         // its own store rather than in an object.
                         Value::Function(closure) => {
-                            closure
-                                .properties
-                                .borrow_mut()
-                                .define_accessor_units(&name, getter, setter, attributes);
+                            closure.properties.borrow_mut().define_accessor_key(
+                                property_key,
+                                getter,
+                                setter,
+                                attributes,
+                            );
                         }
                         other => {
                             return Err(ExecutionError::NotAnObject {
@@ -1528,6 +1536,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     else {
                         continue;
                     };
+                    let property_key = PropertyKeyRef::from_value(&key, &name);
                     if *name_function
                         && self
                             .catchable(define_function_name(&function, &key, None), current)?
@@ -1537,8 +1546,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     let target = self.stack.last().cloned().unwrap_or(Value::Undefined);
                     if let Value::Object(object) = &target {
-                        object.borrow_mut().define_value_units(
-                            &name,
+                        object.borrow_mut().define_value_key(
+                            property_key,
                             function,
                             Attributes::DEFAULT,
                         );
@@ -1556,6 +1565,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     else {
                         continue;
                     };
+                    let property_key = PropertyKeyRef::from_value(&key, &name);
                     if self
                         .catchable(define_function_name(&function, &key, None), current)?
                         .is_none()
@@ -1564,8 +1574,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     match &target {
                         Value::Object(object) => {
-                            object.borrow_mut().define_value_units(
-                                &name,
+                            object.borrow_mut().define_value_key(
+                                property_key,
                                 function,
                                 Attributes::BUILT_IN,
                             );
@@ -1573,8 +1583,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         // A static method lands on the constructor, whose properties live in its
                         // own store rather than in an object.
                         Value::Function(closure) => {
-                            closure.properties.borrow_mut().define_value_units(
-                                &name,
+                            closure.properties.borrow_mut().define_value_key(
+                                property_key,
                                 function,
                                 Attributes::BUILT_IN,
                             );
@@ -1771,6 +1781,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let name = self.string_constant_units(*name, current)?;
                     let value = self.pop(current)?;
                     let target = self.pop(current)?;
+                    if let Some(private) = PropertyKeyRef::Units(&name)
+                        .known_ascii()
+                        .filter(|key| key.starts_with(PRIVATE_KEY_PREFIX))
+                    {
+                        match &target {
+                            Value::Object(object) => {
+                                object.borrow_mut().set(&private, value.clone())
+                            }
+                            Value::Function(function) => function
+                                .properties
+                                .borrow_mut()
+                                .set(&private, value.clone()),
+                            _ => unreachable!("private initialization targets an object"),
+                        }
+                        self.stack.push(value);
+                        continue;
+                    }
                     let assigned =
                         self.assign(&target, &Value::String(name), value.clone(), current);
                     if self.catchable(assigned, current)?.is_none() {
@@ -1782,6 +1809,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let name = self.string_constant_units(*name, current)?;
                     let value = self.pop(current)?;
                     let target = self.pop(current)?;
+                    if let Some(private) = PropertyKeyRef::Units(&name)
+                        .known_ascii()
+                        .filter(|key| key.starts_with(PRIVATE_KEY_PREFIX))
+                    {
+                        match &target {
+                            Value::Object(object) => {
+                                object.borrow_mut().set(&private, value.clone())
+                            }
+                            Value::Function(function) => function
+                                .properties
+                                .borrow_mut()
+                                .set(&private, value.clone()),
+                            _ => unreachable!("private initialization targets an object"),
+                        }
+                        self.stack.push(value);
+                        continue;
+                    }
                     let assigned = self.assign_with_strict(
                         &target,
                         &Value::String(name),

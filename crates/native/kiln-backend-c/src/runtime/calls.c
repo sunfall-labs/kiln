@@ -864,7 +864,10 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
         switch (constructor.bits) {
         case KILN_C99_BUILTIN_DATE: *answer = value.tag == KILN_VALUE_DATE; return KILN_C99_OK;
         case KILN_C99_BUILTIN_REGEXP: *answer = value.tag == KILN_VALUE_REGEXP; return KILN_C99_OK;
-        case KILN_C99_BUILTIN_ARRAY: *answer = value.tag == KILN_VALUE_ARRAY; return KILN_C99_OK;
+        case KILN_C99_BUILTIN_ARRAY:
+            *answer = value.tag == KILN_VALUE_ARRAY ||
+                      (value.tag == KILN_VALUE_SHARED && kiln_c99_shared_is_array(value));
+            return KILN_C99_OK;
         case KILN_C99_BUILTIN_ARRAY_BUFFER:
             *answer = value.tag == KILN_VALUE_ARRAY_BUFFER &&
                       kiln_c99_typed_buffer_of(value)->shared == NULL;
@@ -1091,6 +1094,7 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
     case KILN_VALUE_SETTLER:
         return kiln_c99_static_text(function_text, sizeof(function_text) - 1);
     case KILN_VALUE_OBJECT:
+    case KILN_VALUE_SHARED:
     case KILN_VALUE_ARRAY:
     case KILN_VALUE_GENERATOR:
     case KILN_VALUE_DATE:

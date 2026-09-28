@@ -628,6 +628,39 @@ static int kiln_c99_global_object(kiln_value *out) {
     return KILN_C99_OK;
 }
 
+/* This flag spans one synchronous `kiln:shared` initializer. A realm never changes lanes in
+ * the middle of a turn; the module has no await, so no continuation can inherit the flag. */
+static _Thread_local int kiln_c99_kiln_shared_hooks_active;
+
+/* The read overlay never writes the global. A user-defined property with one of these names
+ * therefore keeps its descriptor and slot order across a later dynamic import. */
+static int kiln_c99_kiln_shared_hook_read(kiln_value target, const kiln_string *key,
+                                          kiln_value *out) {
+    kiln_value *global;
+    if (kiln_c99_kiln_shared_hooks_active == 0 || target.tag != KILN_VALUE_OBJECT ||
+        key == NULL || kiln_c99_key_is_reserved(key) || out == NULL) return 0;
+    if (kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_GLOBALS, &global) != KILN_C99_OK ||
+        global == NULL || global->tag != KILN_VALUE_OBJECT || global->bits != target.bits) return 0;
+    if (kiln_c99_same_name_key(key, "__kilnShare")) {
+        *out = kiln_c99_kiln_shared_hooks_active > 0
+            ? kiln_c99_method(KILN_C99_METHOD_SHARE_RAW) : kiln_c99_undefined();
+        return 1;
+    }
+    if (kiln_c99_same_name_key(key, "__kilnSharedIs")) {
+        *out = kiln_c99_kiln_shared_hooks_active > 0
+            ? kiln_c99_method(KILN_C99_METHOD_SHARED_IS_RAW) : kiln_c99_undefined();
+        return 1;
+    }
+    return 0;
+}
+
+/* The generated graph wrapper calls this immediately around the module initializer, after
+ * the realm bootstrap. It changes only the read overlay above, never global properties. */
+int kiln_realm_kiln_shared_hooks(int begin) {
+    kiln_c99_kiln_shared_hooks_active = begin ? (kiln_c99_kiln_extensions_on() ? 1 : -1) : 0;
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_global_object_val(kiln_val *out) {
     kiln_value g;
     int status = kiln_c99_global_object(&g);

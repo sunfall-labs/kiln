@@ -617,7 +617,9 @@ pub(crate) fn include_reachable_dependencies_with_includes(
         }
 
         for (specifier, request, required, request_importer) in requests {
-            if node && kiln_module_resolver::NodeBuiltin::parse(&specifier).is_some() {
+            if specifier == "kiln:shared"
+                || (node && kiln_module_resolver::NodeBuiltin::parse(&specifier).is_some())
+            {
                 // Builtins are typed virtual graph nodes. They have no source bytes or package
                 // metadata to synchronize, and the daemon's Node resolver materializes them.
                 continue;
@@ -1119,7 +1121,11 @@ mod tests {
             root.join("node_modules/pkg/worker.cjs").to_string_lossy()
         );
         assert!(texts.iter().any(|(path, _)| path == &includes[0].target));
-        assert!(formats.iter().any(|format| format.path == includes[0].target));
+        assert!(
+            formats
+                .iter()
+                .any(|format| format.path == includes[0].target)
+        );
     }
 
     #[test]

@@ -309,7 +309,7 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
         if (key_value.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
         return kiln_c99_proxy_define(host, target, key_value, descriptor, depth, thrown);
     }
-    if (target.tag != KILN_VALUE_OBJECT && target.tag != KILN_VALUE_FUNCTION &&
+    if (target.tag != KILN_VALUE_SHARED && target.tag != KILN_VALUE_OBJECT && target.tag != KILN_VALUE_FUNCTION &&
         target.tag != KILN_VALUE_BUILTIN && target.tag != KILN_VALUE_METHOD &&
         target.tag != KILN_VALUE_BOUND && kiln_c99_exotic_store(target) == NULL) {
         /* References with an own-property store are valid targets. Their intrinsic names still
@@ -356,6 +356,21 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
     }
     if (status != KILN_C99_OK) {
         return status;
+    }
+    if (target.tag == KILN_VALUE_SHARED) {
+        kiln_value held;
+        int present = 0;
+        int held_enumerable = 0;
+        status = kiln_c99_shared_own_read(target, view, &held, &present, &held_enumerable);
+        if (status != KILN_C99_OK) return status;
+        if (present && !has_getter && !has_setter &&
+            (!has_value || kiln_c99_strict_equal(value, held)) &&
+            (!has_writable || !kiln_c99_truthy(writable)) &&
+            (!has_configurable || !kiln_c99_truthy(configurable)) &&
+            (!has_enumerable || (kiln_c99_truthy(enumerable) != 0) == held_enumerable)) {
+            return KILN_C99_OK;
+        }
+        return kiln_c99_throw_named_key_text(thrown, "Cannot redefine property: ", view, "");
     }
     if (target.tag == KILN_VALUE_ARRAY) {
         /* An array index is an element, not a name. The store below holds `a.total = 1`; putting

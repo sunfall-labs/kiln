@@ -1606,6 +1606,19 @@ fn shared_facades_keep_aliases_cycles_holes_and_frozen_descriptors() {
         .set("self", Value::Object(Rc::clone(&root)));
     let shared = vm.share_value(Value::Object(Rc::clone(&root))).unwrap();
     assert!(matches!(shared, Value::Shared(_)));
+    assert_eq!(
+        vm.dispatch_native(Native::SharedIsRaw, &Value::Undefined, &[shared.clone()], 0),
+        Ok(Value::Boolean(true))
+    );
+    assert_eq!(
+        vm.dispatch_native(
+            Native::SharedIsRaw,
+            &Value::Undefined,
+            &[Value::Object(Rc::clone(&root))],
+            0
+        ),
+        Ok(Value::Boolean(false))
+    );
     assert_eq!(vm.share_value(shared.clone()).unwrap(), shared);
     let first = vm
         .read_computed(&shared, &Value::String("first".into()), 0)

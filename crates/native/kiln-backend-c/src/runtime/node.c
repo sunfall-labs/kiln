@@ -2325,6 +2325,15 @@ static int kiln_c99_worker_tokens(kiln_value list, int copy, kiln_worker_token *
             }
             break;
         }
+        case KILN_VALUE_SHARED: {
+            kiln_shared_facade *facade = (kiln_shared_facade *)(uintptr_t)item.bits;
+            if (facade == NULL) { free(tokens); return KILN_C99_INVALID_ARGUMENT; }
+            token->kind = KILN_WORKER_TOKEN_GRAPH;
+            token->flag = facade->graph;
+            token->len = facade->generation;
+            token->number = (double)facade->node;
+            break;
+        }
         case KILN_VALUE_ARRAY_BUFFER: {
             kiln_typed_buffer *buffer = kiln_c99_typed_buffer_of(item);
             if (buffer->shared != NULL) {
@@ -2439,6 +2448,12 @@ static int kiln_c99_worker_value(kiln_worker_token *token, kiln_value *out) {
             memcpy(kiln_c99_typed_buffer_of(*out)->bytes, token->data, (size_t)token->len);
         return status;
     }
+    case KILN_WORKER_TOKEN_GRAPH:
+        if (!isfinite(token->number) || token->number < 0.0 ||
+            token->number > (double)UINT32_MAX || floor(token->number) != token->number ||
+            token->len > UINT32_MAX) return KILN_C99_INVALID_ARGUMENT;
+        return kiln_c99_new_shared_facade(token->flag, (uint32_t)token->len,
+                                           (uint32_t)token->number, out);
     default:
         /* The token that stands for `undefined` in a message: a value, not a missing member. */
         *out = kiln_c99_undefined();

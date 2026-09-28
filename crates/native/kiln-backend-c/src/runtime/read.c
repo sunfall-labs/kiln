@@ -2171,6 +2171,7 @@ static int kiln_c99_get_key(kiln_host *host, kiln_value target, const kiln_strin
                             kiln_value *thrown) {
     int status;
     if (key == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (kiln_c99_kiln_shared_hook_read(target, key, out)) return KILN_C99_OK;
     if (kiln_c99_is_node_hidden_key_key(key)) {
         KILN_C99_ABSENT("a hidden runtime slot, which no program names", out);
     }
@@ -2291,6 +2292,7 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const kiln_stri
                              kiln_value *thrown, kiln_c99_site *site) {
     int status;
     if (key == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (kiln_c99_kiln_shared_hook_read(target, key, out)) return KILN_C99_OK;
     if (site == NULL || target.tag != KILN_VALUE_OBJECT) {
         return kiln_c99_get_key(host, target, key, canonical, out, depth, thrown);
     }

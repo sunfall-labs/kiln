@@ -1,4 +1,5 @@
 use super::*;
+use kiln_module_resolver::NodeBuiltin;
 
 pub(super) fn graph_shared_header(wrapper_symbol: &str) -> Result<String, NativeError> {
     // The graph wrapper has the same public two-argument signature as a scalar embedded module,
@@ -401,6 +402,7 @@ extern int kiln_realm_gc_mark_value(void *heap, const void *value);
 #define KILN_C99_HINT_STRING 1
 #define KILN_C99_HOST_MODULE_CREATE_REQUIRE UINT16_C(0x7FF0)
 extern int kiln_realm_is_active(void);
+extern int kiln_realm_kiln_shared_hooks(int begin);
 
 typedef int (*kiln_graph_module_fn)(kiln_host *host, kiln_value *result,
                                     const kiln_value *imports, size_t import_count,
@@ -941,12 +943,22 @@ typedef struct {wrapper_symbol}_realm_context {{
             }
             continue;
         }
+        let shared_builtin = node.source == ModuleSource::NodeBuiltin(NodeBuiltin::Shared);
+        if shared_builtin {
+            output.push_str("    status = kiln_realm_kiln_shared_hooks(1);\n    if (status != KILN_C99_OK) goto cleanup;\n");
+        }
         writeln!(
             output,
-            "    module_result = (kiln_value){{ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }};\n    status = {}(proxy_host, &module_result, import_arrays[{index}], (size_t){import_count}, export_arrays[{index}], (size_t){export_count});\n    if (status != KILN_C99_OK) {{ *result = module_result; goto cleanup; }}",
+            "    module_result = (kiln_value){{ .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 }};\n    status = {}(proxy_host, &module_result, import_arrays[{index}], (size_t){import_count}, export_arrays[{index}], (size_t){export_count});",
             modules[index].1.symbol
         )
         .unwrap();
+        if shared_builtin {
+            output.push_str("    { int hook_status = kiln_realm_kiln_shared_hooks(0); if (status == KILN_C99_OK) status = hook_status; }\n");
+        }
+        output.push_str(
+            "    if (status != KILN_C99_OK) { *result = module_result; goto cleanup; }\n",
+        );
         if index == entry_index {
             output.push_str("    *result = module_result;\n");
         }

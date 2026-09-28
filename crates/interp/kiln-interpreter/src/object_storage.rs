@@ -269,6 +269,7 @@ impl ObjectData {
         self.properties.push(Slot {
             key: key.owned(),
             symbol: key.is_symbol(),
+            internal: key.is_internal(),
             property,
             attributes,
         });
@@ -386,6 +387,7 @@ impl ObjectData {
         let slot = Slot {
             key: key.owned(),
             symbol: key.is_symbol(),
+            internal: key.is_internal(),
             property,
             attributes,
         };
@@ -556,7 +558,10 @@ impl ObjectData {
     }
 
     pub fn keys(&self) -> impl Iterator<Item = &StringUnits> {
-        self.properties.iter().map(|slot| &slot.key)
+        self.properties
+            .iter()
+            .filter(|slot| !slot.symbol && !slot.internal)
+            .map(|slot| &slot.key)
     }
 
     /// Own *enumerable* property slots in insertion order, which is the order JavaScript
@@ -564,7 +569,14 @@ impl ObjectData {
     pub fn entries(&self) -> impl Iterator<Item = (&StringUnits, &Property)> {
         self.properties
             .iter()
-            .filter(|slot| slot.attributes.enumerable)
+            .filter(|slot| slot.attributes.enumerable && !slot.internal)
+            .map(|slot| (&slot.key, &slot.property))
+    }
+
+    pub(super) fn string_entries(&self) -> impl Iterator<Item = (&StringUnits, &Property)> {
+        self.properties
+            .iter()
+            .filter(|slot| slot.attributes.enumerable && !slot.symbol && !slot.internal)
             .map(|slot| (&slot.key, &slot.property))
     }
 

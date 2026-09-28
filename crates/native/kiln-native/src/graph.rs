@@ -1,4 +1,5 @@
 use super::*;
+use kiln_module_resolver::NodeBuiltin;
 #[derive(Debug, Default)]
 pub(super) struct NativeGraphPlan {
     pub(super) excluded: BTreeSet<PathBuf>,
@@ -2700,6 +2701,7 @@ enum kiln_value_tag {
  * those writes back out of the prelude's process-wide summary of modified built-ins, before any
  * user module can observe or mutate the realm (`kiln_c99_builtin_store_epoch`). */
 extern void kiln_c99_builtin_bootstrap_done(void) __attribute__((visibility("hidden")));
+extern int kiln_realm_kiln_shared_hooks(int begin);
 
 static kiln_value kiln_graph_diagnostic(const char *phase, const char *module) {
     kiln_value value = { .tag = KILN_VALUE_STRING, .flags = 0, .len = 0, .bits = 0 };
@@ -3794,9 +3796,15 @@ static int kiln_graph_enter(void *opaque) {
             export_count
         )
         .unwrap();
+        if node.source == ModuleSource::NodeBuiltin(NodeBuiltin::Shared) {
+            evaluation.push_str("            status = kiln_realm_kiln_shared_hooks(1);\n            if (status != 0) return status;\n");
+        }
         evaluation.push_str(
             "            state->body_started = 1;\n            status = context.module(context.host, context.result, context.imports, context.import_count, context.exports, context.export_count);\n",
         );
+        if node.source == ModuleSource::NodeBuiltin(NodeBuiltin::Shared) {
+            evaluation.push_str("            { int hook_status = kiln_realm_kiln_shared_hooks(0); if (status == 0) status = hook_status; }\n");
+        }
         if node.path == graph.entry() && !is_async {
             // The whole graph evaluates inside one job (a dependency's body runs synchronously
             // before the entry's), so the checkpoint that follows is the entry's, once. An entry

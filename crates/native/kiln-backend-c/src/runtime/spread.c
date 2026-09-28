@@ -630,6 +630,23 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
     if (source.tag == KILN_VALUE_PROXY) {
         return kiln_c99_spread_proxy(host, target, source, depth, thrown);
     }
+    if (source.tag == KILN_VALUE_SHARED) {
+        kiln_value keys;
+        kiln_array *names;
+        int status = kiln_c99_own_keys(host, source, &keys, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        names = kiln_c99_array_of(keys);
+        for (index = 0; index < names->count; ++index) {
+            kiln_value key = kiln_val_to_boundary(names->elements[index]);
+            kiln_value value;
+            status = kiln_c99_get_computed(host, source, key, &value, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            status = kiln_c99_put_mode_key(host, target, (const kiln_string *)key.ptr, NULL,
+                                           value, 0, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+        }
+        return KILN_C99_OK;
+    }
     /* A primitive has no own enumerable properties, so spreading one contributes nothing:
      * `{...5}` is `{}`, not an error. A string is the exception and is handled below, because
      * its indices *are* own properties. */

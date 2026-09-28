@@ -3166,10 +3166,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (argc == 0) {
                 KILN_C99_REFUSE("Object.keys, Object.values or Object.entries with no argument");
             }
-            if (args[0].tag == KILN_VALUE_PROXY) {
-                /* A proxy has no store to walk: its keys come from the `ownKeys` trap and each
-                 * value from a `get`, which is the pair of trips the language specifies and the
-                 * reason a logging handler sees both. */
+            if (args[0].tag == KILN_VALUE_PROXY || args[0].tag == KILN_VALUE_SHARED) {
+                /* A proxy's keys come from `ownKeys`; a shared facade's come from its sealed
+                 * graph. Neither has a mutable property store to walk, and both use the
+                 * ordinary computed read for values and entries. */
                 kiln_value keys;
                 kiln_array *listed;
                 status = kiln_c99_own_keys(host, args[0], &keys, depth, thrown);

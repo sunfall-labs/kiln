@@ -148,10 +148,12 @@ impl kiln_interpreter::WorkerHost for GraphWorkers {
         };
         let mut host = WorkerStdio {
             worker: Arc::clone(&worker),
-            inner: kiln_runtime::CaptureHost::new()
-                .with_fs(Box::new(kiln_host_abi::OsFileSystem)),
+            inner: kiln_runtime::CaptureHost::new().with_fs(Box::new(kiln_host_abi::OsFileSystem)),
         };
-        let capabilities = self.capabilities.clone().with_argv(worker.spec.argv.clone());
+        let capabilities = self
+            .capabilities
+            .clone()
+            .with_argv(worker.spec.argv.clone());
         LAST_THROWN.with(|last| last.borrow_mut().take());
         let outcome = graph.execute_node(&mut host, self.limits, capabilities);
         let thrown = LAST_THROWN.with(|last| last.borrow_mut().take());
@@ -174,10 +176,9 @@ impl kiln_interpreter::WorkerHost for GraphWorkers {
                     Some(value) => {
                         kiln_interpreter::worker_error_tokens(&value, error_constructor.as_deref())
                     }
-                    None => kiln_interpreter::worker_error_tokens(
-                        &Value::String(message.into()),
-                        None,
-                    ),
+                    None => {
+                        kiln_interpreter::worker_error_tokens(&Value::String(message.into()), None)
+                    }
                 };
                 worker.report_error(tokens);
                 1
@@ -224,11 +225,12 @@ fn eval_graph(source: &str) -> Result<ModuleGraph, String> {
     }
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     let build = |name: &str| {
-        let resolver = kiln_module_resolver::NodeRuntimeResolver::new(&cwd)
-            .map_err(|error| ModuleGraphError::Source {
+        let resolver = kiln_module_resolver::NodeRuntimeResolver::new(&cwd).map_err(|error| {
+            ModuleGraphError::Source {
                 path: cwd.clone(),
                 message: error.to_string(),
-            })?;
+            }
+        })?;
         ModuleGraph::build_node_virtual(
             cwd.join(name),
             source.to_owned(),
@@ -772,6 +774,7 @@ impl GraphExecutor<'_> {
             modules.push(PlannedModule {
                 key: path.to_string_lossy().into_owned(),
                 program: std::rc::Rc::new(plan_program),
+                kiln_shared: node.source == ModuleSource::NodeBuiltin(NodeBuiltin::Shared),
                 bindings,
             });
         }
@@ -1250,6 +1253,14 @@ impl GraphExecutor<'_> {
                 max_steps: limits.max_steps - total_steps,
                 ..limits
             };
+            let shared_builtin =
+                module_node.source == ModuleSource::NodeBuiltin(NodeBuiltin::Shared);
+            if shared_builtin {
+                node_session
+                    .as_mut()
+                    .expect("the graph owns a session")
+                    .begin_kiln_shared();
+            }
             let result = execute_node_module_in_session_with_loader(
                 &module_node.program,
                 &imports,
@@ -1263,8 +1274,14 @@ impl GraphExecutor<'_> {
                 &mut commonjs_loader,
                 true,
                 Some(path.to_string_lossy().as_ref()),
-            )
-            .map_err(|error| {
+            );
+            if shared_builtin {
+                node_session
+                    .as_mut()
+                    .expect("the graph owns a session")
+                    .end_kiln_shared();
+            }
+            let result = result.map_err(|error| {
                 let error = match error {
                     ExecutionError::StepLimitExceeded { steps, .. } => {
                         ExecutionError::StepLimitExceeded {
@@ -1526,10 +1543,16 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
             });
         };
         if module_node.source == ModuleSource::Json {
-            let source = module_node.data.as_deref().ok_or_else(|| ExecutionError::Host {
-                instruction,
-                message: format!("JSON module `{}` has no captured source text", target.display()),
-            })?;
+            let source = module_node
+                .data
+                .as_deref()
+                .ok_or_else(|| ExecutionError::Host {
+                    instruction,
+                    message: format!(
+                        "JSON module `{}` has no captured source text",
+                        target.display()
+                    ),
+                })?;
             let value = parse_json_module(source)?;
             unsafe {
                 (&mut *self.values).insert(
@@ -1611,39 +1634,42 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
                 })?,
             );
         }
-        let result = unsafe {
-            if self.node {
-                execute_node_module_in_session_with_loader(
-                    &program,
-                    &imports,
-                    &[],
-                    &mut *self.host,
-                    self.limits,
-                    &mut *self.runtime,
-                    (&mut *self.node_session)
-                        .as_mut()
-                        .expect("Node mode owns a session"),
-                    self.capabilities.clone(),
-                    false,
-                    self,
-                    false,
-                    Some(target.to_string_lossy().as_ref()),
-                )
-            } else {
-                execute_module_in_runtime_with_loader(
-                    &program,
-                    &imports,
-                    &[],
-                    &mut *self.host,
-                    self.limits,
-                    &mut *self.runtime,
-                    self.capabilities.clone(),
-                    self,
-                    false,
-                    Some(target.to_string_lossy().as_ref()),
-                )
+        let shared_builtin = module_node.source == ModuleSource::NodeBuiltin(NodeBuiltin::Shared);
+        if shared_builtin {
+            unsafe {
+                (&mut *self.node_session)
+                    .as_mut()
+                    .expect("the graph owns a realm session")
+                    .begin_kiln_shared();
             }
-        }?;
+        }
+        let result = unsafe {
+            execute_node_module_in_session_with_loader(
+                &program,
+                &imports,
+                &[],
+                &mut *self.host,
+                self.limits,
+                &mut *self.runtime,
+                (&mut *self.node_session)
+                    .as_mut()
+                    .expect("the graph owns a realm session"),
+                self.capabilities.clone(),
+                false,
+                self,
+                false,
+                Some(target.to_string_lossy().as_ref()),
+            )
+        };
+        if shared_builtin {
+            unsafe {
+                (&mut *self.node_session)
+                    .as_mut()
+                    .expect("the graph owns a realm session")
+                    .end_kiln_shared();
+            }
+        }
+        let result = result?;
         let exports = result
             .exports
             .into_iter()
@@ -1695,12 +1721,12 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
             // before building this CommonJS module's fixed require table.
             if !self.commonjs_cache.contains_key(&dependency.target)
                 && unsafe { (&*self.values).get(&dependency.target).is_none() }
-                && self
-                    .graph
-                    .module(&dependency.target)
-                    .is_some_and(|node| {
-                        matches!(node.source, ModuleSource::NodeBuiltin(_) | ModuleSource::Json)
-                    })
+                && self.graph.module(&dependency.target).is_some_and(|node| {
+                    matches!(
+                        node.source,
+                        ModuleSource::NodeBuiltin(_) | ModuleSource::Json
+                    )
+                })
             {
                 self.ensure_target_value(&dependency.target, 0)?;
             }

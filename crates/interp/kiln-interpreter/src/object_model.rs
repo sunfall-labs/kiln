@@ -75,6 +75,8 @@ pub(super) struct Slot {
     pub(super) key: StringUnits,
     /// Symbol identity is separate from a user string with the same reserved spelling.
     pub(super) symbol: bool,
+    /// Engine bookkeeping is separate from a user string with the same spelling.
+    pub(super) internal: bool,
     pub(super) property: Property,
     pub(super) attributes: Attributes,
 }
@@ -140,8 +142,14 @@ impl<'a> PropertyKeyRef<'a> {
         }
     }
 
+    pub(super) fn is_internal(self) -> bool {
+        matches!(self, Self::Utf8(key) if symbol::is_reserved(key) && !is_symbol_key(key))
+    }
+
     pub(super) fn matches_slot(self, slot: &Slot) -> bool {
-        self.is_symbol() == slot.symbol && self.matches(&slot.key)
+        self.is_symbol() == slot.symbol
+            && self.is_internal() == slot.internal
+            && self.matches(&slot.key)
     }
 
     pub(super) fn from_value(value: &Value, units: &'a StringUnits) -> Self {

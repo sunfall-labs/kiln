@@ -1631,12 +1631,7 @@ impl Intrinsics {
         let identity = intrinsic_key(target)?;
         let entries = self.entries.borrow();
         let data = &entries.iter().find(|(key, _)| *key == identity)?.1;
-        Some(
-            data.keys()
-                .filter(|key| !is_reserved_units(key))
-                .cloned()
-                .collect(),
-        )
+        Some(data.keys().cloned().collect())
     }
 
     pub(super) fn enumerable_entries_units(&self, target: &Value) -> Vec<(StringUnits, Property)> {
@@ -1648,8 +1643,7 @@ impl Intrinsics {
         let Some((_, data)) = entries.iter().find(|(held, _)| *held == identity) else {
             return Vec::new();
         };
-        data.entries()
-            .filter(|(key, _)| !is_reserved_units(key))
+        data.string_entries()
             .map(|(key, property)| (key.clone(), property.clone()))
             .collect()
     }
@@ -2585,12 +2579,7 @@ pub(super) fn own_property_names_units(
     intrinsics: &Intrinsics,
     target: &Value,
 ) -> Vec<StringUnits> {
-    let from_store = |data: &ObjectData| {
-        data.keys()
-            .filter(|key| !is_reserved_units(key))
-            .cloned()
-            .collect::<Vec<_>>()
-    };
+    let from_store = |data: &ObjectData| data.keys().cloned().collect::<Vec<_>>();
     match target {
         Value::Object(object) => {
             let mut keys = match wrapped_primitive(target) {
@@ -2662,7 +2651,7 @@ pub(super) fn own_property_keys_units(intrinsics: &Intrinsics, target: &Value) -
     let from_object = |data: &ObjectData| -> Vec<StringUnits> {
         data.properties
             .iter()
-            .filter(|slot| !slot.symbol)
+            .filter(|slot| !slot.symbol && !slot.internal)
             .map(|slot| slot.key.clone())
             .collect()
     };
@@ -2975,12 +2964,6 @@ pub(super) fn is_reserved_units(key: &StringUnits) -> bool {
         .is_some_and(|name| symbol::is_reserved(name.as_ref()))
 }
 
-pub(super) fn is_symbol_key_units(key: &StringUnits) -> bool {
-    PropertyKeyRef::Units(key)
-        .known_ascii()
-        .is_some_and(|name| is_symbol_key(name.as_ref()))
-}
-
 /// `OrdinaryOwnPropertyKeys`: the string keys, then the symbol keys, each in insertion order.
 ///
 /// Distinct from [`own_property_keys_including_symbols`], which hands back every reserved slot
@@ -3012,9 +2995,6 @@ pub(super) fn own_property_keys_with_symbols_units(
     target: &Value,
 ) -> Vec<StringUnits> {
     own_property_keys_including_symbols_units(intrinsics, target)
-        .into_iter()
-        .filter(|key| !is_reserved_units(key) || is_symbol_key_units(key))
-        .collect()
 }
 
 pub(super) fn own_property_keys_including_symbols_units(
@@ -3022,10 +3002,16 @@ pub(super) fn own_property_keys_including_symbols_units(
     target: &Value,
 ) -> Vec<StringUnits> {
     let mut keys = own_property_keys_units(intrinsics, target);
+    keys.extend(own_symbol_keys_units(intrinsics, target));
+    keys
+}
+
+/// Symbol slots retain their key domain even when a string slot has identical UTF-16 units.
+pub(super) fn own_symbol_keys_units(intrinsics: &Intrinsics, target: &Value) -> Vec<StringUnits> {
     // Ordinary reflection intentionally hides symbol slots, but internal operations such as
     // proxy invariants and `Object.defineProperties` consume the full own-key list. Append the
     // reserved slots after the ordinary names, preserving each store's insertion order.
-    let stored = match target {
+    let mut keys: Vec<StringUnits> = match target {
         Value::Object(object) => object
             .borrow()
             .properties
@@ -3088,7 +3074,6 @@ pub(super) fn own_property_keys_including_symbols_units(
             .unwrap_or_default(),
         _ => Vec::new(),
     };
-    keys.extend(stored);
     // A built-in's symbol-keyed members. They are answered by the value tables and listed by
     // nothing, so `Object.getOwnPropertySymbols(Date.prototype)` was `[]` where every other
     // engine reports `Symbol.toPrimitive` -- the property read correctly, described correctly,
@@ -3119,9 +3104,8 @@ pub(super) fn own_property_keys_including_symbols_units(
             }
         }
     }
-    // A derived key such as an array's `length` may also be present in its store. The target's
-    // own-key operation cannot return duplicates, so preserve the first occurrence from the
-    // specification order and discard later copies.
+    // A built-in table and a materialized slot may describe one symbol. Deduplicate within
+    // the Symbol domain only; a string of the same spelling remains a separate property.
     let mut stable = Vec::with_capacity(keys.len());
     let mut seen = HashSet::with_capacity(keys.len());
     for key in keys {

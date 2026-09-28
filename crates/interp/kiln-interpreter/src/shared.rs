@@ -304,6 +304,7 @@ impl Inspector for InterpreterInspector {
                             properties.push(Slot {
                                 key,
                                 symbol: false,
+                                internal: false,
                                 property,
                                 attributes,
                             });

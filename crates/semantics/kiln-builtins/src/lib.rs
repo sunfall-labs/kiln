@@ -102,6 +102,17 @@ macro_rules! declare_ts_builtins {
 }
 
 declare_ts_builtins! {
+    Shared {
+        variant: Shared,
+        file: "shared.ts",
+        logical_path: "kiln:shared.ts",
+        source_const: SHARED_SOURCE,
+        exports_const: SHARED_EXPORTS,
+        sample_source_check: "export function share",
+        presence_test: shared_builtin_source_is_present,
+        compilation_test: shared_builtin_compiles_cleanly,
+        exports: ["default", "share", "isShared"],
+    },
     Process {
         variant: Process,
         file: "node/process.ts",

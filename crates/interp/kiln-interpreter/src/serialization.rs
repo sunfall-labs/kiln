@@ -366,7 +366,7 @@ pub(super) fn json_stringify(
         Value::Object(object) => {
             let guard = CycleGuard::enter(seen, Rc::as_ptr(object).cast::<()>())?;
             // Read out before iterating, so the object is not borrowed while a getter runs.
-            let entries = own_properties_units(&Intrinsics::default(), value);
+            let entries = own_string_properties_units(&Intrinsics::default(), value);
             let entries: Vec<(StringUnits, Property)> = match allowed {
                 Some(keys) => keys
                     .iter()
@@ -383,9 +383,6 @@ pub(super) fn json_stringify(
             out.push_ascii("{")?;
             let mut emitted = 0usize;
             for (key, property) in entries {
-                if is_reserved_units(&key) {
-                    continue;
-                }
                 let property = match property {
                     Property::Value(value) => value,
                     Property::Accessor { get, .. } => match get {

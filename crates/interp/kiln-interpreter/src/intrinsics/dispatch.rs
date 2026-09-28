@@ -576,11 +576,9 @@ pub(crate) fn call_native(
         }
         Native::ObjectGetOwnPropertyDescriptor => {
             let target = arguments.first().unwrap_or(&Value::Undefined);
-            let key = match arguments.get(1) {
-                Some(value) => value.property_key_units_checked()?,
-                None => StringUnits::default(),
-            };
-            own_descriptor_key(intrinsics, target, PropertyKeyRef::Units(&key))
+            let value = arguments.get(1).unwrap_or(&Value::Undefined);
+            let key = value.property_key_units_checked()?;
+            own_descriptor_key(intrinsics, target, PropertyKeyRef::from_value(value, &key))
                 .unwrap_or(Value::Undefined)
         }
         Native::ObjectGetOwnPropertyDescriptors => {
@@ -624,22 +622,14 @@ pub(crate) fn call_native(
                 Some(Value::Function(closure)) => closure
                     .properties
                     .borrow()
-                    .entries()
-                    .map(|(key, _)| key)
-
-                    .filter(|key| !is_reserved_units(key))
-
-                    .map(|key| Value::String(key.clone()))
+                    .string_entries()
+                    .map(|(key, _)| Value::String(key.clone()))
                     .collect(),
                 Some(Value::Bound(bound)) => bound
                     .properties
                     .borrow()
-                    .entries()
-                    .map(|(key, _)| key)
-
-                    .filter(|key| !is_reserved_units(key))
-
-                    .map(|key| Value::String(key.clone()))
+                    .string_entries()
+                    .map(|(key, _)| Value::String(key.clone()))
                     .collect(),
                 // `entries` rather than `keys`: this reports what is *enumerated*, where
                 // `getOwnPropertyNames` reports everything. An error's own properties are the
@@ -650,12 +640,8 @@ pub(crate) fn call_native(
                     .chain(
                         object
                             .borrow()
-                            .entries()
-                            .map(|(key, _)| key)
-
-                            .filter(|key| !is_reserved_units(key))
-
-                            .map(|key| Value::String(key.clone())),
+                            .string_entries()
+                            .map(|(key, _)| Value::String(key.clone())),
                     )
                     .collect(),
                 // A built-in's own enumerated properties are the ones a program added -- the
@@ -686,13 +672,13 @@ pub(crate) fn call_native(
                         items
                             .properties
                             .borrow()
-                            .entries()
-                            .map(|(key, _)| key)
-
-                            .filter(|key| !is_reserved_units(key))
-
-                            .map(|key| Value::String(key.clone())),
+                            .string_entries()
+                            .map(|(key, _)| Value::String(key.clone())),
                     )
+                    .collect(),
+                Some(target @ Value::Shared(_)) => own_properties_units(intrinsics, target)
+                    .into_iter()
+                    .map(|(key, _)| Value::String(key))
                     .collect(),
                 // The elements, and then whatever the program hung on the view by name: an
                 // exotic object enumerates both, in the order its own-key walk lists them.
@@ -701,24 +687,16 @@ pub(crate) fn call_native(
                     .chain(
                         view.properties
                             .borrow()
-                            .entries()
-                            .map(|(key, _)| key)
-
-                            .filter(|key| !is_reserved_units(key))
-
-                            .map(|key| Value::String(key.clone())),
+                            .string_entries()
+                            .map(|(key, _)| Value::String(key.clone())),
                     )
                     .collect(),
                 Some(target) if exotic_properties(target).is_some() => exotic_properties(target)
                     .map(|store| {
                         store
                             .borrow()
-                            .entries()
-                            .map(|(key, _)| key)
-
-                            .filter(|key| !is_reserved_units(key))
-
-                            .map(|key| Value::String(key.clone()))
+                            .string_entries()
+                            .map(|(key, _)| Value::String(key.clone()))
                             .collect()
                     })
                     .unwrap_or_default(),

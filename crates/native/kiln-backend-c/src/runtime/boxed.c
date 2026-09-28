@@ -1190,10 +1190,41 @@ generic_read:;
     return status;
 }
 
+static const kiln_string *kiln_c99_compiler_named_key(const kiln_string *key) {
+    static const struct { const char *name; size_t length; } symbols[] = {
+        {"@@iterator", sizeof "@@iterator" - 1},
+        {"@@asyncIterator", sizeof "@@asyncIterator" - 1},
+        {"@@dispose", sizeof "@@dispose" - 1},
+        {"@@asyncDispose", sizeof "@@asyncDispose" - 1}
+    };
+    size_t index;
+    if (key == NULL || kiln_c99_key_is_symbol(key)) return key;
+    if (key->unit_len >= sizeof "@@private:" - 1 &&
+        kiln_c99_key_has_prefix(key, "@@private:")) {
+        kiln_string private_key = *key;
+        private_key.flags = (private_key.flags & ~KILN_STRING_SYMBOL_KEY) |
+                            KILN_STRING_PRIVATE_KEY;
+        return kiln_c99_intern_static_key(&private_key);
+    }
+    for (index = 0; index < sizeof symbols / sizeof *symbols; ++index) {
+        if (key->unit_len == symbols[index].length &&
+            kiln_c99_key_has_prefix(key, symbols[index].name)) {
+            kiln_string symbol = *key;
+            symbol.flags = (symbol.flags & ~KILN_STRING_PRIVATE_KEY) | KILN_STRING_SYMBOL_KEY;
+            return kiln_c99_intern_static_key(&symbol);
+        }
+    }
+    return key;
+}
+
 static int kiln_c99_val_read_property_key(kiln_host *host, kiln_val target,
                                           const kiln_string *key, int depth,
                                           kiln_value *thrown, kiln_c99_site *site,
                                           kiln_val *out) {
+    /* Named @@ accesses are emitted only by the compiler's iterator/disposal protocols.
+     * A program's `obj["@@iterator"]` uses the computed path and keeps the string domain. */
+    key = kiln_c99_compiler_named_key(key);
+    if (key == NULL) return KILN_C99_OUT_OF_MEMORY;
     return kiln_c99_val_read_property_view(host, target, key, key, depth, thrown, site, out);
 }
 
@@ -1287,6 +1318,8 @@ static int kiln_c99_val_write_property_key(kiln_host *host, kiln_val target,
                                            const kiln_string *key, kiln_val value, int strict,
                                            int depth, kiln_value *thrown,
                                            kiln_c99_site *site) {
+    key = kiln_c99_compiler_named_key(key);
+    if (key == NULL) return KILN_C99_OUT_OF_MEMORY;
     return kiln_c99_val_write_property_view(host, target, key, key, value, strict, depth, thrown,
                                              site);
 }
@@ -2313,6 +2346,8 @@ static int kiln_c99_val_call_method_key(kiln_host *host, kiln_val receiver, cons
                                         kiln_value *thrown, kiln_c99_site *site,
                                         const char *inst_site, size_t inst_idx, const char *inst_op,
                                         kiln_val *out) {
+    key = kiln_c99_compiler_named_key(key);
+    if (key == NULL) return KILN_C99_OUT_OF_MEMORY;
     return kiln_c99_val_call_method_view(host, receiver, args, argc, key, key, depth, thrown, site,
                                          inst_site, inst_idx, inst_op, out);
 }

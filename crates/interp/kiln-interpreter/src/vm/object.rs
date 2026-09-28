@@ -2255,7 +2255,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if let Value::Shared(facade) = target {
             return Ok(facade.own_keys().into_iter().map(Value::String).collect());
         }
-        let keys = match target {
+        let names = match target {
             // A proxy answers with a trap rather than a store, and the trap already reports
             // both kinds in the trap result's order.
             Value::Proxy(_) => {
@@ -2274,16 +2274,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     })
                     .collect());
             }
-            _ => own_property_keys_with_symbols_units(&self.intrinsics, target),
+            _ => own_property_keys_units(&self.intrinsics, target),
         };
-        let (reserved, named): (Vec<StringUnits>, Vec<StringUnits>) =
-            keys.into_iter().partition(is_reserved_units);
-        let mut reflected: Vec<Value> = named
+        let mut reflected: Vec<Value> = names
             .into_iter()
             .map(|value| Value::String(value.into()))
             .collect();
         reflected.extend(
-            reserved
+            own_symbol_keys_units(&self.intrinsics, target)
                 .into_iter()
                 .filter_map(|key| {
                     PropertyKeyRef::Units(&key)

@@ -649,7 +649,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.self_bindings = self_bindings;
         self.self_namespaces = self_namespaces;
         let thrown = match outcome {
-            Ok(Ok(_)) => return Ok(global),
+            Ok(Ok(_)) => {
+                if let Some(shared) = &self.module_realm {
+                    let pending = shared.borrow().shared_hooks_pending;
+                    if pending && let Value::Object(object) = &global {
+                        let mut shared = shared.borrow_mut();
+                        let mut object = object.borrow_mut();
+                        shared.saved_shared_global = Some(object.properties.clone());
+                        install_kiln_shared_hooks(
+                            &mut object,
+                            realm,
+                            kiln_builtin_surface::kiln_extensions_installed(),
+                        );
+                    }
+                }
+                return Ok(global);
+            }
             Ok(Err(thrown)) => thrown,
             Err(ExecutionError::ThrownAcrossNative) => {
                 self.caught.take().unwrap_or(Value::Undefined)

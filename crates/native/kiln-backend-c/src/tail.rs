@@ -130,7 +130,9 @@ pub(crate) fn emit_tail_instruction(
                              {unwind} \
                          }} \
                      }} \
-                     kiln_property *slot = kiln_c99_own_private_key(receiver, {symbol}_constant_{name}); \
+                     kiln_string private_key = *{symbol}_constant_{name}; \
+                     private_key.flags |= KILN_STRING_PRIVATE_KEY; \
+                     kiln_property *slot = kiln_c99_own_private_key(receiver, &private_key); \
                      if (slot == NULL) {{ \
                          int status = kiln_c99_private_error_key(thrown, {symbol}_constant_{name}, 0); \
                          {unwind} \
@@ -182,7 +184,9 @@ pub(crate) fn emit_tail_instruction(
                              {unwind} \
                          }} \
                      }} \
-                     kiln_property *slot = kiln_c99_own_private_key(receiver, {symbol}_constant_{name}); \
+                     kiln_string private_key = *{symbol}_constant_{name}; \
+                     private_key.flags |= KILN_STRING_PRIVATE_KEY; \
+                     kiln_property *slot = kiln_c99_own_private_key(receiver, &private_key); \
                      if (slot == NULL) {{ \
                          int status = kiln_c99_private_error_key(thrown, {symbol}_constant_{name}, 1); \
                          {unwind} \
@@ -373,7 +377,7 @@ pub(crate) fn emit_tail_instruction(
             };
             writeln!(
                 output,
-                "    {{ kiln_value function = kiln_val_to_boundary(stack[--sp]); kiln_value key = kiln_c99_value(KILN_VALUE_STRING, 0, (const char *){symbol}_constant_{name}, {len}); if (kiln_c99_set_function_name(function, key, {prefix}) != KILN_C99_OK) {{ {direct_refusal} }} if (kiln_c99_define_private_key(kiln_val_to_boundary(stack[sp - 1]), {symbol}_constant_{name}, function, {tag}) != KILN_C99_OK) {{ {direct_refusal} }} }}",
+                "    {{ kiln_value function = kiln_val_to_boundary(stack[--sp]); kiln_value key = kiln_c99_value(KILN_VALUE_STRING, 0, (const char *){symbol}_constant_{name}, {len}); kiln_string private_key = *{symbol}_constant_{name}; private_key.flags |= KILN_STRING_PRIVATE_KEY; if (kiln_c99_set_function_name(function, key, {prefix}) != KILN_C99_OK) {{ {direct_refusal} }} if (kiln_c99_define_private_key(kiln_val_to_boundary(stack[sp - 1]), &private_key, function, {tag}) != KILN_C99_OK) {{ {direct_refusal} }} }}",
                 len = text.len()
             )
             .unwrap();

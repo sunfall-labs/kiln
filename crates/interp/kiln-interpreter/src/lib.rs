@@ -1644,6 +1644,8 @@ pub struct PlannedModule {
     /// The epilogue that builds that array is the host's work, because only the host has a
     /// compiler: nothing here can look inside a module and decide which slots an importer wants.
     pub program: Rc<Program>,
+    /// The `kiln:shared` initializer alone captures temporary realm-local engine hooks.
+    pub kiln_shared: bool,
     /// Module-scope slots to fill before the body runs, and where each value comes from.
     pub bindings: Vec<(u32, ModuleBinding)>,
 }
@@ -1863,6 +1865,55 @@ impl ModuleRealmSession {
             ..Self::default()
         }
     }
+
+    /// Temporarily publish the engine hooks while `kiln:shared` captures them. The module
+    /// evaluator calls `end_kiln_shared` on both normal and throwing exits.
+    pub fn begin_kiln_shared(&mut self) {
+        let mut shared = self.shared.borrow_mut();
+        shared.shared_hooks_pending = true;
+        if let Some(Value::Object(global)) = shared.global_objects.first().cloned().flatten() {
+            let mut global = global.borrow_mut();
+            shared.saved_shared_global = Some(global.properties.clone());
+            install_kiln_shared_hooks(
+                &mut global,
+                RealmId(0),
+                kiln_builtin_surface::kiln_extensions_installed(),
+            );
+        }
+    }
+
+    pub fn end_kiln_shared(&mut self) {
+        let mut shared = self.shared.borrow_mut();
+        shared.shared_hooks_pending = false;
+        if let Some(Value::Object(global)) = shared.global_objects.first().cloned().flatten() {
+            let mut global = global.borrow_mut();
+            if let Some(saved) = shared.saved_shared_global.take() {
+                global.properties = saved;
+            }
+        }
+    }
+}
+
+fn install_kiln_shared_hooks(global: &mut ObjectData, realm: RealmId, available: bool) {
+    for (name, native) in [
+        ("__kilnShare", Native::ShareRaw),
+        ("__kilnSharedIs", Native::SharedIsRaw),
+    ] {
+        let value = if available {
+            Value::Native(native, realm)
+        } else {
+            Value::Undefined
+        };
+        if let Some(slot) = global
+            .properties
+            .iter_mut()
+            .find(|slot| PropertyKeyRef::Utf8(name).matches_slot(slot))
+        {
+            slot.property = Property::Value(value);
+        } else {
+            global.set_non_enumerable(name, value);
+        }
+    }
 }
 
 // A pointer identifies the compiled call site only while its allocation cannot be reused.
@@ -1874,6 +1925,8 @@ type TemplateObjectCache =
 struct ModuleRealmShared {
     realm: Realm<Scheduled, Timer>,
     global_objects: Vec<Option<Value>>,
+    shared_hooks_pending: bool,
+    saved_shared_global: Option<Vec<Slot>>,
     pending_host: Vec<PendingHostRequest>,
     pending_node: Vec<PendingNodeRequest>,
     rejections: Rejections,
@@ -1894,6 +1947,8 @@ impl Default for ModuleRealmSession {
             shared: Rc::new(RefCell::new(ModuleRealmShared {
                 realm: Realm::new(),
                 global_objects: vec![None],
+                shared_hooks_pending: false,
+                saved_shared_global: None,
                 pending_host: Vec::new(),
                 pending_node: Vec::new(),
                 rejections: Rejections::default(),
