@@ -33,6 +33,44 @@ fn two_lanes_run_local_tasks_on_one_wall_reactor() {
     assert_ne!(first[0], first[1], "two lanes used different OS threads");
 }
 
+#[test]
+fn local_task_wakes_a_scheduler_lane_without_parking_it() {
+    struct LaneWake(std::sync::atomic::AtomicUsize);
+    impl std::task::Wake for LaneWake {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    let executor = Executor::on_reactor(Reactor::shared_wall().expect("reactor"));
+    let wake = std::sync::Arc::new(LaneWake(std::sync::atomic::AtomicUsize::new(0)));
+    let waker = std::task::Waker::from(std::sync::Arc::clone(&wake));
+    let lane = std::thread::current().id();
+    let (signal, receive) = tokio::sync::oneshot::channel::<()>();
+    let observed = std::rc::Rc::new(std::cell::Cell::new(None));
+    executor.scope(|| {
+        let observed = std::rc::Rc::clone(&observed);
+        tokio::task::spawn_local(async move {
+            receive.await.expect("signal arrives");
+            observed.set(Some(std::thread::current().id()));
+        });
+    });
+
+    executor.poll_local_once(&waker);
+    assert_eq!(observed.get(), None);
+    let before = wake.0.load(std::sync::atomic::Ordering::SeqCst);
+    signal.send(()).expect("receiver still alive");
+    assert!(
+        wake.0.load(std::sync::atomic::Ordering::SeqCst) > before,
+        "the local task wakes the scheduler ticket"
+    );
+    executor.poll_local_once(&waker);
+    assert_eq!(observed.get(), Some(lane));
+}
+
 #[cfg(unix)]
 #[test]
 fn tokio_host_runs_process_with_bidirectional_pipes_and_preserves_status() {

@@ -843,6 +843,19 @@ impl Executor {
         self.local.block_on(&self.reactor.runtime, future)
     }
 
+    /// Poll this lane's local tasks once without parking it. The scheduler supplies a waker
+    /// that queues the owning realm's next turn when a local task becomes ready.
+    ///
+    /// Tokio's `LocalSet::run_until` retains unfinished local tasks after its borrowed future
+    /// is dropped. Polling a never-ready future once therefore drives a bounded task batch and
+    /// registers `waker` with the LocalSet while leaving the scheduler in charge of parking.
+    pub fn poll_local_once(&self, waker: &std::task::Waker) {
+        let _runtime = self.reactor.runtime.enter();
+        let mut future = std::pin::pin!(self.local.run_until(std::future::pending::<()>()));
+        let mut context = std::task::Context::from_waker(waker);
+        let _ = future.as_mut().poll(&mut context);
+    }
+
     /// Make this executor ambient for `operation` without running it or parking the thread.
     ///
     /// Realm operations that spawn onto the `LocalSet` or register with the I/O driver
