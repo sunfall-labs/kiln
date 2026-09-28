@@ -106,11 +106,10 @@ static int kiln_c99_typed_prototype_own_key(kiln_value target, const kiln_string
         kiln_value store;
         if (kiln_c99_callable_store(target, &store, 0) == KILN_C99_OK &&
             store.tag == KILN_VALUE_OBJECT) {
-            kiln_object *properties = kiln_c99_object_of(store);
-            size_t index = kiln_c99_own_index_key(properties, canonical, key);
-            if (index != properties->count) {
+            kiln_property property;
+            if (kiln_c99_property_read_own_value(store, key, canonical, &property)) {
                 *found = 1;
-                *enumerable = properties->properties[index].enumerable;
+                *enumerable = property.enumerable;
             }
         }
     }

@@ -52,6 +52,13 @@ static kiln_value kiln_c99_stable_key_value(const kiln_string *stable) {
     return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)stable, stable->unit_len);
 }
 
+static int kiln_c99_store_has(kiln_value store, const kiln_string *key,
+                              const kiln_string *ikey) {
+    kiln_property property;
+    return store.tag == KILN_VALUE_OBJECT &&
+           kiln_c99_property_read_own_value(store, key, ikey, &property);
+}
+
 /* A read the instance path could not answer, tried against the prototype built-in's own store.
  * That store is where the runtime bootstrap defines the members it writes in TypeScript
  * (design.md §5): `RegExp.prototype[@@replace]`, `Date.prototype[@@toPrimitive]`,
@@ -68,14 +75,10 @@ static int kiln_c99_prototype_store_read(kiln_host *host, uint64_t prototype,
     *found = 0;
     if (status != KILN_C99_OK) return status;
     if (store.tag == KILN_VALUE_OBJECT) {
-        kiln_object *properties = kiln_c99_object_of(store);
-        size_t index;
-        if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
-        for (index = 0; index < properties->count; ++index) {
-            if (kiln_c99_same_key_view(&properties->properties[index], key)) {
-                *found = 1;
-                return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
-            }
+        kiln_property property;
+        if (kiln_c99_property_read_own_value(store, key, ikey, &property)) {
+            *found = 1;
+            return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
         }
     }
     return KILN_C99_OK;
@@ -322,7 +325,6 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
          * the walk is on the C stack, and a program can build a chain long enough to exhaust
          * it. */
         for (steps = 0; walk && steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
-            kiln_object *object;
             /* A constructor's statics live in its own store, so a chain that reaches one
              * continues *into* that store rather than stopping at the function. */
             if (current.tag == KILN_VALUE_FUNCTION) {
@@ -334,12 +336,11 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 }
                 break;
             }
-            object = kiln_c99_object_of(current);
             getter = kiln_c99_undefined();
             {
                 kiln_property property;
-                if (!kiln_c99_property_read_own(object, key, ikey, &property)) {
-                    current = object->prototype;
+                if (!kiln_c99_property_read_own_value(current, key, ikey, &property)) {
+                    current = kiln_c99_object_prototype_read(current);
                     continue;
                 }
                 /* A published name with nothing behind it stops the program and lets the
@@ -373,8 +374,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
          * falls through to the ordinary object answer below, which is undefined. That last
          * distinction is the whole point -- `it.nope` is undefined on any object and must stay
          * so, while `it.chunks` reading undefined would quietly fail a feature test. */
-        if (kiln_c99_object_of(target)->prototype.tag == KILN_VALUE_BUILTIN &&
-            kiln_c99_object_of(target)->prototype.bits == KILN_C99_BUILTIN_ITERATOR_PROTOTYPE) {
+        kiln_value target_prototype = kiln_c99_object_prototype_read(target);
+        if (target_prototype.tag == KILN_VALUE_BUILTIN &&
+            target_prototype.bits == KILN_C99_BUILTIN_ITERATOR_PROTOTYPE) {
             int found;
             int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_ITERATOR_PROTOTYPE,
                                                        key, ikey, out, depth, thrown, &found);
@@ -394,7 +396,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         /* The chain ends at `Object.prototype`, whose members every object has -- unless the
          * program asked for a bare dictionary with `Object.create(null)`, which is exactly what
          * that asks for. */
-        if (kiln_c99_object_of(target)->prototype.tag != KILN_VALUE_NULL) {
+        if (target_prototype.tag != KILN_VALUE_NULL) {
             uint64_t inherited;
             (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
                                                 &intrinsic_len);
@@ -443,7 +445,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             }
         }
         if (kiln_c99_same_name_key(key, "__proto__") &&
-            kiln_c99_object_of(target)->prototype.tag != KILN_VALUE_NULL) {
+            target_prototype.tag != KILN_VALUE_NULL) {
             /* An accessor on `Object.prototype`, not a property, which is why it is answered
              * here rather than stored: it reports the same link `Object.getPrototypeOf` does and
              * has to keep reporting it after a `setPrototypeOf` moves it. Reading undefined for
@@ -476,20 +478,11 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             *out = kiln_c99_number((double)closure->arity);
             return KILN_C99_OK;
         }
-        if (kiln_c99_closure_store(closure).tag == KILN_VALUE_OBJECT) {
-            kiln_object *store = kiln_c99_object_of(kiln_c99_closure_store(closure));
-            size_t index;
-            if (store->shape != NULL) {
-                kiln_c99_ensure_dictionary(store);
-            }
-            for (index = 0; index < store->count; ++index) {
-                if (kiln_c99_same_key_view(&store->properties[index], key)) {
-                    /* An assigned property wins, exactly as an own property shadows an
-                     * inherited one -- which is what `Function.prototype.call` is. */
-                    return kiln_c99_get_key(host, kiln_c99_closure_store(closure), key, ikey, out, depth,
-                                        thrown);
-                }
-            }
+        if (kiln_c99_store_has(kiln_c99_closure_store(closure), key, ikey)) {
+            /* An assigned property wins, exactly as an own property shadows an
+             * inherited one -- which is what `Function.prototype.call` is. */
+            return kiln_c99_get_key(host, kiln_c99_closure_store(closure), key, ikey, out,
+                                    depth, thrown);
         }
         if (kiln_c99_same_name_key(key, "@@species")) {
             *out = target;
@@ -888,16 +881,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             kiln_value proto;
             int proto_status = kiln_c99_buffer_prototype(host, &proto, depth, thrown);
             if (proto_status != KILN_C99_OK) return proto_status;
-            if (proto.tag == KILN_VALUE_OBJECT) {
-                kiln_object *properties = kiln_c99_object_of(proto);
-                size_t pidx;
-                if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
-                for (pidx = 0; pidx < properties->count; ++pidx) {
-                    if (kiln_c99_same_key_view(&properties->properties[pidx], key)) {
-                        return kiln_c99_get_key(host, proto, key, ikey, out, depth, thrown);
-                    }
-                }
-            }
+            if (kiln_c99_store_has(proto, key, ikey))
+                return kiln_c99_get_key(host, proto, key, ikey, out, depth, thrown);
         }
         if (view->is_buffer && kiln_c99_same_name_key(key, "toString")) {
             *out = kiln_c99_method(KILN_C99_METHOD_BUFFER_TO_STRING);
@@ -1355,17 +1340,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             kiln_bound *bound = (kiln_bound *)(uintptr_t)target.bits;
             stored = kiln_c99_callable_store(target, &store, 0);
             if (stored != KILN_C99_OK) return stored;
-            if (store.tag == KILN_VALUE_OBJECT) {
-                kiln_object *properties = kiln_c99_object_of(store);
-                size_t index;
-                if (properties->shape != NULL) {
-                    kiln_c99_ensure_dictionary(properties);
-                }
-                for (index = 0; index < properties->count; ++index) {
-                    if (kiln_c99_same_key_view(&properties->properties[index], key))
-                        return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
-                }
-            }
+            if (kiln_c99_store_has(store, key, ikey))
+                return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
             if (kiln_c99_same_name_key(key, "name")) {
                 kiln_value inner;
                 int status = kiln_c99_get(host, bound->target, "name", 4, &inner, depth, thrown);
@@ -1442,18 +1418,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         }
         stored = kiln_c99_callable_store(target, &store, 0);
         if (stored != KILN_C99_OK) return stored;
-        if (store.tag == KILN_VALUE_OBJECT) {
-            kiln_object *properties = kiln_c99_object_of(store);
-            size_t index;
-            if (properties->shape != NULL) {
-                kiln_c99_ensure_dictionary(properties);
-            }
-            for (index = 0; index < properties->count; ++index) {
-                if (kiln_c99_same_key_view(&properties->properties[index], key)) {
-                    return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
-                }
-            }
-        }
+        if (kiln_c99_store_has(store, key, ikey))
+            return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
         /* `parseInt.name`. A method has no other property worth answering, and a wrong answer
          * here reads as a missing function three frames later. */
         if (kiln_c99_same_name_key(key, "name")) {
@@ -1469,17 +1435,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         kiln_value store;
         int stored = kiln_c99_callable_store(target, &store, 0);
         if (stored != KILN_C99_OK) return stored;
-        if (store.tag == KILN_VALUE_OBJECT) {
-            kiln_object *properties = kiln_c99_object_of(store);
-            size_t index;
-            if (properties->shape != NULL) {
-                kiln_c99_ensure_dictionary(properties);
-            }
-            for (index = 0; index < properties->count; ++index) {
-                if (kiln_c99_same_key_view(&properties->properties[index], key))
-                    return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
-            }
-        }
+        if (kiln_c99_store_has(store, key, ikey))
+            return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
         /* `Temporal` first, because the namespace tables below are keyed by method name and every
          * name here is a *value*: `Temporal.PlainDate` is a constructor, not a function to call. */
 #if KILN_RETAIN_GROUP_TEMPORAL
@@ -1772,16 +1729,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         if (kiln_c99_same_name_key(key, "prototype")) {
             kiln_value store;
             if (kiln_c99_callable_store(target, &store, 0) == KILN_C99_OK &&
-                store.tag == KILN_VALUE_OBJECT) {
-                kiln_object *properties = kiln_c99_object_of(store);
-                size_t pidx;
-                if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
-                for (pidx = 0; pidx < properties->count; ++pidx) {
-                    if (kiln_c99_same_key_view(&properties->properties[pidx], key)) {
-                        return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
-                    }
-                }
-            }
+                kiln_c99_store_has(store, key, ikey))
+                return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
             /* Reached for its methods rather than as an object: these are not yet the objects the
              * chains actually end at, which is what `Object.getPrototypeOf` would need.
              *

@@ -2663,7 +2663,7 @@ static int kiln_c99_worker_op_raw(kiln_value *result, const kiln_value *args, si
             words[0] = call;
             words[1] = reply;
             if (kiln_worker_op((uint32_t)op, first, words) == 0)
-                state = (int)(int64_t)words[0];
+                state = words[0] == 0 ? 0 : words[0] == 1 ? 1 : -1;
         }
         if (state == 1) {
             if (realm->graph_inbox_state != KILN_C99_GRAPH_INBOX_PUBLISHED ||
