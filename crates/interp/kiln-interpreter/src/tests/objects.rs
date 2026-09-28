@@ -1649,6 +1649,34 @@ fn shared_facades_keep_aliases_cycles_holes_and_frozen_descriptors() {
 }
 
 #[test]
+fn weak_ref_does_not_keep_a_shared_graph_alive() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: Default::default(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let shared = vm
+        .share_value(Value::Object(Rc::new(RefCell::new(ObjectData::default()))))
+        .unwrap();
+    let Value::Shared(facade) = &shared else {
+        panic!("sharing an object must return a facade");
+    };
+    let weak = Rc::downgrade(facade);
+    let reference = vm.construct_weak_ref(&[shared.clone()], 0).unwrap();
+    assert_eq!(vm.weak_ref_deref(&reference, 0), Ok(shared.clone()));
+    drop(shared);
+    assert!(
+        weak.upgrade().is_none(),
+        "WeakRef must not hold the facade or graph"
+    );
+    assert_eq!(vm.weak_ref_deref(&reference, 0), Ok(Value::Undefined));
+}
+
+#[test]
 fn spread_reads_every_own_property_including_symbol_keyed_ones() {
     let symbol = Symbol::Unique(Rc::new(UniqueSymbol {
         serial: 1,

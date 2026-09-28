@@ -239,6 +239,8 @@ impl InterpreterInspector {
             || object.node_object.is_some()
             || object.buffer_brand
             || object.shadow_realm.is_some()
+            || object.weak_shared_target.is_some()
+            || !object.finalization_cells.is_empty()
         {
             return Err(UnsupportedKind::InternalSlots);
         }

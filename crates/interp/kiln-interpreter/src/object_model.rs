@@ -154,8 +154,42 @@ impl<'a> PropertyKeyRef<'a> {
 }
 
 #[derive(Clone, Debug)]
+pub(super) enum WeakCellValue {
+    Shared(Weak<SharedFacade>),
+    Other(Value),
+}
+
+impl WeakCellValue {
+    pub(super) fn new(value: Value) -> Self {
+        match value {
+            Value::Shared(facade) => Self::Shared(Rc::downgrade(&facade)),
+            value => Self::Other(value),
+        }
+    }
+
+    pub(super) fn upgrade(&self) -> Option<Value> {
+        match self {
+            Self::Shared(facade) => facade.upgrade().map(Value::Shared),
+            Self::Other(value) => Some(value.clone()),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct FinalizationCell {
+    pub(super) target: WeakCellValue,
+    pub(super) held: Value,
+    pub(super) token: Option<WeakCellValue>,
+}
+
+#[derive(Clone, Debug)]
 pub struct ObjectData {
     pub(super) properties: Vec<Slot>,
+    /// Shared graph targets are weak even though this interpreter keeps ordinary WeakRef targets
+    /// in a reserved property. The facade owns the graph lease, so storing it as a Value here
+    /// would make WeakRef itself keep an otherwise unreachable shared graph alive.
+    pub(super) weak_shared_target: Option<Weak<SharedFacade>>,
+    pub(super) finalization_cells: Vec<FinalizationCell>,
     /// The built-in Error brand. This is an internal slot, not a reserved property: program code
     /// may read, write and delete every string key, including ones beginning with `@@`.
     pub(super) error_brand: bool,
@@ -244,6 +278,8 @@ impl Default for ObjectData {
     fn default() -> Self {
         Self {
             properties: Vec::new(),
+            weak_shared_target: None,
+            finalization_cells: Vec::new(),
             error_brand: false,
             arguments_brand: false,
             buffer_brand: false,

@@ -18,7 +18,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     }
 
     /// `new WeakRef(target)`.
-    pub(super) fn construct_weak_ref(
+    pub(crate) fn construct_weak_ref(
         &mut self,
         arguments: &[Value],
         _current: usize,
@@ -30,7 +30,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             });
         }
         let mut data = ObjectData::default();
-        data.set_non_enumerable(WEAK_REF_TARGET, target);
+        if let Value::Shared(facade) = target {
+            data.weak_shared_target = Some(Rc::downgrade(&facade));
+            data.set_non_enumerable(WEAK_REF_TARGET, Value::Undefined);
+        } else {
+            data.set_non_enumerable(WEAK_REF_TARGET, target);
+        }
         data.set_prototype(Value::Native(
             Native::PrototypeOf(PrototypeTable::WeakRef),
             RealmId::PRIMARY,
@@ -53,7 +58,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         let mut data = ObjectData::default();
         data.set_non_enumerable(REGISTRY_CALLBACK, callback);
-        data.set_non_enumerable(REGISTRY_CELLS, Value::Array(ArrayData::new(Vec::new())));
+        data.set_non_enumerable(REGISTRY_CELLS, Value::Undefined);
         data.set_prototype(Value::Native(
             Native::PrototypeOf(PrototypeTable::FinalizationRegistry),
             RealmId::PRIMARY,
@@ -82,12 +87,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     }
 
     /// `WeakRef.prototype.deref()`.
-    pub(super) fn weak_ref_deref(
+    pub(crate) fn weak_ref_deref(
         &mut self,
         receiver: &Value,
         _instruction: usize,
     ) -> Result<Value, ExecutionError> {
-        self.weak_slot(receiver, WEAK_REF_TARGET, "WeakRef.prototype.deref")
+        let stored = self.weak_slot(receiver, WEAK_REF_TARGET, "WeakRef.prototype.deref")?;
+        if let Value::Object(object) = receiver
+            && let Some(target) = &object.borrow().weak_shared_target
+        {
+            return Ok(target
+                .upgrade()
+                .map(Value::Shared)
+                .unwrap_or(Value::Undefined));
+        }
+        Ok(stored)
     }
 
     /// `FinalizationRegistry.prototype.register(target, heldValue, unregisterToken)`.
@@ -97,7 +111,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         arguments: &[Value],
         _instruction: usize,
     ) -> Result<Value, ExecutionError> {
-        let cells = self.weak_slot(
+        self.weak_slot(
             receiver,
             REGISTRY_CELLS,
             "FinalizationRegistry.prototype.register",
@@ -126,10 +140,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .to_owned(),
             });
         }
-        if let Value::Array(cells) = cells {
-            cells
+        if let Value::Object(object) = receiver {
+            object
                 .borrow_mut()
-                .push(Value::Array(ArrayData::new(vec![target, held, token])));
+                .finalization_cells
+                .push(FinalizationCell {
+                    target: WeakCellValue::new(target),
+                    held,
+                    token: (!matches!(token, Value::Undefined)).then(|| WeakCellValue::new(token)),
+                });
         }
         Ok(Value::Undefined)
     }
@@ -145,7 +164,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         arguments: &[Value],
         _instruction: usize,
     ) -> Result<Value, ExecutionError> {
-        let cells = self.weak_slot(
+        self.weak_slot(
             receiver,
             REGISTRY_CELLS,
             "FinalizationRegistry.prototype.unregister",
@@ -157,18 +176,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .to_owned(),
             });
         }
-        let Value::Array(cells) = cells else {
+        let Value::Object(object) = receiver else {
             return Ok(Value::Boolean(false));
         };
-        let mut held = cells.borrow_mut();
-        let before = held.len();
-        held.retain(|cell| {
-            let Value::Array(cell) = cell else {
-                return true;
-            };
-            let recorded = cell.borrow().get(2).cloned().unwrap_or(Value::Undefined);
-            !same_value(&recorded, &token)
+        let mut object = object.borrow_mut();
+        let before = object.finalization_cells.len();
+        object.finalization_cells.retain(|cell| {
+            !cell
+                .token
+                .as_ref()
+                .and_then(WeakCellValue::upgrade)
+                .is_some_and(|recorded| same_value(&recorded, &token))
         });
-        Ok(Value::Boolean(held.len() != before))
+        Ok(Value::Boolean(object.finalization_cells.len() != before))
     }
 }
