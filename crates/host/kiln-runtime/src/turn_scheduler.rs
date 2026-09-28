@@ -143,13 +143,24 @@ pub struct PinnedTurnScheduler {
 impl PinnedTurnScheduler {
     pub fn new(lane_count: usize) -> std::io::Result<Self> {
         let reactor = Reactor::shared_wall().map_err(|error| error.0)?;
+        Self::with_reactor(lane_count.max(1), reactor)
+    }
+
+    /// One FIFO lane with its own pausable reactor for reproducible realm turns.
+    /// The factory may pause this reactor before it schedules deterministic tasks.
+    pub fn deterministic() -> std::io::Result<Self> {
+        let reactor = Reactor::current_thread().map_err(|error| error.0)?;
+        Self::with_reactor(1, reactor)
+    }
+
+    fn with_reactor(lane_count: usize, reactor: Arc<Reactor>) -> std::io::Result<Self> {
         let mut scheduler = Self {
             reactor,
             lanes: Vec::new(),
             threads: Vec::new(),
             next_realm_id: AtomicU64::new(1),
         };
-        for index in 0..lane_count.max(1) {
+        for index in 0..lane_count {
             let queue = ReadyQueue::new();
             let lane = Arc::new(LaneControl {
                 control: queue.ticket(0),
@@ -459,5 +470,42 @@ mod tests {
                 .iter()
                 .all(|realm| realm.status() == PinnedTurnStatus::Complete)
         );
+    }
+
+    #[test]
+    fn deterministic_scheduler_uses_one_pausable_lane() {
+        let scheduler = PinnedTurnScheduler::deterministic().expect("lane starts");
+        assert_eq!(scheduler.lane_count(), 1);
+        let lanes = Arc::new(Mutex::new(Vec::new()));
+        let realms = (0..20)
+            .map(|_| {
+                let lanes = Arc::clone(&lanes);
+                scheduler.spawn_pinned(move |reactor, _| {
+                    let executor = crate::Executor::on_reactor(reactor);
+                    executor.pause_time();
+                    move |_: &Waker| {
+                        assert!(executor.is_time_paused());
+                        lanes.lock().unwrap().push(std::thread::current().id());
+                        TurnOutcome::Done
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while realms
+            .iter()
+            .any(|realm| realm.status() == PinnedTurnStatus::Active)
+        {
+            assert!(Instant::now() < deadline, "deterministic turns complete");
+            std::thread::yield_now();
+        }
+        assert!(
+            realms
+                .iter()
+                .all(|realm| realm.status() == PinnedTurnStatus::Complete)
+        );
+        let lanes = lanes.lock().unwrap();
+        assert_eq!(lanes.len(), 20);
+        assert!(lanes.iter().all(|lane| *lane == lanes[0]));
     }
 }
