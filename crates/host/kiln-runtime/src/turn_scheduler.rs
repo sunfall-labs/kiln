@@ -329,6 +329,7 @@ impl PinnedTurnScheduler {
             let movable_for_thread = Arc::clone(&scheduler.movable);
             let thread = std::thread::Builder::new()
                 .name(format!("kiln-turn-{index}"))
+                .stack_size(crate::workers::WORKER_STACK)
                 .spawn(move || {
                     run_lane(
                         lane_for_thread,
@@ -384,6 +385,7 @@ impl PinnedTurnScheduler {
         let handoff = Arc::clone(&self.lanes[owner]);
         let thread = std::thread::Builder::new()
             .name(format!("kiln-turn-replacement-{slot}"))
+            .stack_size(crate::workers::WORKER_STACK)
             .spawn(move || run_lane(lane_for_thread, reactor, movable, Some(handoff)))?;
         *place = Some(thread);
         Ok(BlockingTurnGuard {
