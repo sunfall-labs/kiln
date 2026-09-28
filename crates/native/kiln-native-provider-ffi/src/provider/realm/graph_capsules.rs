@@ -82,6 +82,18 @@ impl CapsuleRegistry {
         0
     }
 
+    fn peek(&self, reservation: u64, sender: u64, active: u64, request: u64) -> Option<usize> {
+        let entry = self.by_reservation.get(&reservation)?;
+        if entry.sender != sender
+            || entry.request != request
+            || entry.phase != Phase::Prepared
+            || (active != sender && active != entry.receiver)
+        {
+            return None;
+        }
+        Some(entry.pointer_bits)
+    }
+
     fn cancel(&mut self, reservation: u64, sender: u64, request: u64) -> i32 {
         let Some(entry) = self.by_reservation.get(&reservation) else {
             return INVALID_ARGUMENT;
@@ -143,6 +155,33 @@ pub extern "C" fn kiln_realm_graph_capsule_stage(
     )
 }
 
+/// Borrow the staged C capsule on either claimed owner lane before sender unlink. Only the
+/// prepared phase is visible here; the detached capsule moves by exact receiver `take`.
+/// The pair coordinator must keep both mutators stopped while the returned pointer is used.
+///
+/// # Safety
+/// `out` must be a writable pointer slot. The returned capsule belongs to C, and Rust never
+/// dereferences it. On failure the slot is set to null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_graph_capsule_peek(
+    reservation: u64,
+    sender: u64,
+    request: u64,
+    out: *mut *mut c_void,
+) -> i32 {
+    if out.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    // SAFETY: the caller provides a writable slot as documented.
+    unsafe { out.write(std::ptr::null_mut()) };
+    let Some(pointer_bits) = capsules().peek(reservation, sender, active_realm_id(), request)
+    else {
+        return INVALID_ARGUMENT;
+    };
+    unsafe { out.write(pointer_bits as *mut c_void) };
+    0
+}
+
 /// Advance a staged capsule after C has unlinked its chunk. The coordinator must treat a
 /// nonzero result as a fatal transaction invariant failure: rollback is impossible now.
 #[unsafe(no_mangle)]
@@ -184,8 +223,8 @@ pub unsafe extern "C" fn kiln_realm_graph_capsule_take(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::{kiln_realm_create, kiln_realm_destroy, kiln_realm_enter};
+    use super::*;
 
     #[repr(C)]
     struct RealmProbe {
@@ -259,10 +298,16 @@ mod tests {
         assert_eq!(registry.stage(17, 3, 8, 11, 0x2345), INVALID_ARGUMENT);
         assert_eq!(registry.stage(18, 3, 8, 11, 0x2345), INVALID_ARGUMENT);
         assert_eq!(registry.stage(18, 4, 8, 12, 0x1234), INVALID_ARGUMENT);
+        assert_eq!(registry.peek(17, 3, 3, 11), Some(0x1234));
+        assert_eq!(registry.peek(17, 3, 8, 11), Some(0x1234));
+        assert_eq!(registry.peek(17, 3, 7, 11), None);
+        assert_eq!(registry.peek(17, 4, 8, 11), None);
+        assert_eq!(registry.peek(17, 3, 8, 12), None);
         assert_eq!(registry.take(17, 3, 8, 11), None);
         assert_eq!(registry.detached(17, 4, 11), INVALID_ARGUMENT);
         assert_eq!(registry.detached(17, 3, 12), INVALID_ARGUMENT);
         assert_eq!(registry.detached(17, 3, 11), 0);
+        assert_eq!(registry.peek(17, 3, 8, 11), None);
         assert_eq!(registry.detached(17, 3, 11), INVALID_ARGUMENT);
         assert_eq!(registry.cancel(17, 3, 11), INVALID_ARGUMENT);
         assert_eq!(registry.take(17, 4, 8, 11), None);

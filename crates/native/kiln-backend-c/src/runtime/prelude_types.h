@@ -650,6 +650,8 @@ extern void *kiln_realm_process_shared(uint64_t size);
  * capsule before unlink on the sender lane or after detach on the receiver lane. */
 extern int kiln_realm_graph_capsule_stage(uint64_t reservation, uint64_t receiver,
                                           uint64_t request, void *capsule);
+extern int kiln_realm_graph_capsule_peek(uint64_t reservation, uint64_t sender,
+                                         uint64_t request, void **out);
 extern int kiln_realm_graph_capsule_detached(uint64_t reservation, uint64_t request);
 extern int kiln_realm_graph_capsule_cancel(uint64_t reservation, uint64_t request);
 extern int kiln_realm_graph_capsule_take(uint64_t reservation, uint64_t sender,
