@@ -186,23 +186,35 @@ mod emission_fingerprint {
     include!(concat!(env!("CARGO_MANIFEST_DIR"), "/build.rs"));
 
     #[test]
-    fn fixture_edits_do_not_invalidate_emission_but_production_edits_do() {
+    fn fixture_and_runtime_edits_preserve_module_emission_identity() {
         let directory = super::Directory::new();
         let source = directory.0.join("src");
         std::fs::create_dir_all(source.join("tests")).unwrap();
+        let runtime = source.join("runtime");
+        std::fs::create_dir_all(&runtime).unwrap();
         std::fs::write(source.join("emitter.rs"), "production").unwrap();
         std::fs::write(source.join("tests.rs"), "tests").unwrap();
         std::fs::write(source.join("tests/fixture.rs"), "fixture").unwrap();
+        std::fs::write(runtime.join("helper.c"), "runtime before").unwrap();
         let mut before = Vec::new();
-        fingerprint(&source, &mut before);
+        fingerprint(&source, &mut before, None);
+        let mut module_before = Vec::new();
+        fingerprint(&source, &mut module_before, Some(&runtime));
         std::fs::write(source.join("tests.rs"), "changed test module").unwrap();
         std::fs::write(source.join("tests/fixture.rs"), "changed fixture").unwrap();
         let mut after = Vec::new();
-        fingerprint(&source, &mut after);
+        fingerprint(&source, &mut after, None);
         assert_eq!(before, after);
-        std::fs::write(source.join("emitter.rs"), "changed production emission").unwrap();
+        std::fs::write(runtime.join("helper.c"), "runtime after").unwrap();
         after.clear();
-        fingerprint(&source, &mut after);
+        fingerprint(&source, &mut after, None);
         assert_ne!(before, after);
+        let mut module_after = Vec::new();
+        fingerprint(&source, &mut module_after, Some(&runtime));
+        assert_eq!(module_before, module_after);
+        std::fs::write(source.join("emitter.rs"), "changed production emission").unwrap();
+        module_after.clear();
+        fingerprint(&source, &mut module_after, Some(&runtime));
+        assert_ne!(module_before, module_after);
     }
 }
