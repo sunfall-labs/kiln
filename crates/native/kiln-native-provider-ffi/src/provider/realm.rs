@@ -1326,6 +1326,16 @@ pub(crate) fn current_scheduler() -> Option<Arc<PinnedTurnScheduler>> {
     SCHEDULED_POOL.with(|slot| slot.borrow().as_ref().and_then(Weak::upgrade))
 }
 
+/// Temporarily replace a scheduled lane before a synchronous foreign wait occupies it.
+/// A dedicated-thread realm has no scheduler lane to replace.
+pub(crate) fn enter_blocking_scheduler()
+-> std::io::Result<Option<kiln_runtime::turn_scheduler::BlockingTurnGuard>> {
+    match current_scheduler() {
+        Some(scheduler) if !scheduler.is_deterministic() => scheduler.enter_blocking().map(Some),
+        _ => Ok(None),
+    }
+}
+
 struct ScheduledPoolGuard(Option<Weak<PinnedTurnScheduler>>);
 
 impl ScheduledPoolGuard {
@@ -1675,7 +1685,8 @@ fn drive_scheduled_inner(realm: &NativeRealm, waker: &Waker) -> ScheduledStep {
     // The LocalSet runs only on this realm's lane. Its waker is the ticket, so a host task
     // becoming ready while another realm runs queues this realm without a parked OS thread.
     realm.runtime.executor().poll_local_once(waker);
-    if let Some(wait) = realm.scheduled_wait.borrow_mut().take() {
+    let pending_wait = { realm.scheduled_wait.borrow_mut().take() };
+    if let Some(wait) = pending_wait {
         let Some(wake) = wait.wake.get() else {
             realm.scheduled_wait.replace(Some(wait));
             return ScheduledStep::Parked;

@@ -519,6 +519,8 @@ pub unsafe extern "C" fn kiln_ffi_call(
             Ok::<_, String>(prepared)
         })?;
         let _active = ActiveLibrary(prepared.library);
+        let _replacement = crate::realm::enter_blocking_scheduler()
+            .map_err(|error| format!("node:ffi call: {error}"))?;
         let result = call(&prepared, arguments)?;
         // SAFETY: checked non-null and owned by the caller.
         unsafe { out_result.write(result) };

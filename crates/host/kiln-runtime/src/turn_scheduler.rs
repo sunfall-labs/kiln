@@ -1,11 +1,13 @@
-//! Pinned scheduler lanes for realm turns.
+//! Shared scheduler lanes for pinned and movable realm turns (ADR 0070).
 //!
-//! A lane constructs and owns its `!Send` realm bodies. Other threads hold only tickets and
-//! send factories or cancellation commands. This is the first scheduling mode: migration waits
-//! for the provider's realm-registry, GC and affinity audit (ADR 0070).
+//! A lane constructs and owns its `!Send` bodies. Movable bodies cross lanes only between
+//! turns under an exclusive ticket lease. Other threads hold tickets and commands, never a
+//! borrowed realm pointer.
 
+use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -58,6 +60,8 @@ enum Command {
         factory: MovableFactory,
     },
     Remove(u64),
+    Drain,
+    Deadlines(BinaryHeap<Reverse<(Instant, u64, u64)>>),
 }
 
 struct LaneControl {
@@ -92,6 +96,26 @@ struct MovableEntry {
 }
 
 type MovableRealms = Arc<Mutex<HashMap<u64, Arc<MovableEntry>>>>;
+
+std::thread_local! {
+    // A replacement hands its deadlines to the lane whose blocking call created it.
+    static ACTIVE_LANE: Cell<Option<(usize, usize)>> = const { Cell::new(None) };
+}
+
+struct ActiveLaneGuard(Option<(usize, usize)>);
+
+impl ActiveLaneGuard {
+    fn enter(queue: &Arc<ReadyQueue>, lane: usize) -> Self {
+        let identity = Arc::as_ptr(queue) as usize;
+        Self(ACTIVE_LANE.with(|slot| slot.replace(Some((identity, lane)))))
+    }
+}
+
+impl Drop for ActiveLaneGuard {
+    fn drop(&mut self) {
+        ACTIVE_LANE.with(|slot| slot.set(self.0.take()));
+    }
+}
 
 /// Observable state of a scheduler turn body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,27 +252,56 @@ pub struct PinnedTurnScheduler {
     reactor: Arc<Reactor>,
     movable: MovableRealms,
     lanes: Arc<Vec<Arc<LaneControl>>>,
+    base_lanes: usize,
+    deterministic: bool,
     threads: Vec<std::thread::JoinHandle<()>>,
+    replacements: Mutex<Vec<Option<std::thread::JoinHandle<()>>>>,
     next_realm_id: AtomicU64,
+}
+
+/// A synchronous operation holds this until it returns. Dropping it drains the replacement
+/// lane; a realm that pinned there keeps that lane alive until its body is destroyed.
+pub struct BlockingTurnGuard {
+    _scheduler: Arc<PinnedTurnScheduler>,
+    lane: Arc<LaneControl>,
+}
+
+impl Drop for BlockingTurnGuard {
+    fn drop(&mut self) {
+        self.lane.command(Command::Drain);
+    }
 }
 
 impl PinnedTurnScheduler {
     pub fn new(lane_count: usize) -> std::io::Result<Self> {
         let reactor = Reactor::shared_wall().map_err(|error| error.0)?;
-        Self::with_reactor(lane_count.max(1), reactor)
+        let base_lanes = lane_count.max(1);
+        let max_replacements = std::env::var("KILN_SCHEDULER_REPLACEMENTS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(base_lanes)
+            .min(64);
+        Self::with_reactor(base_lanes, max_replacements, reactor)
     }
 
     /// One FIFO lane with its own pausable reactor for reproducible realm turns.
     /// The factory may pause this reactor before it schedules deterministic tasks.
     pub fn deterministic() -> std::io::Result<Self> {
         let reactor = Reactor::current_thread().map_err(|error| error.0)?;
-        Self::with_reactor(1, reactor)
+        let mut scheduler = Self::with_reactor(1, 0, reactor)?;
+        scheduler.deterministic = true;
+        Ok(scheduler)
     }
 
-    fn with_reactor(lane_count: usize, reactor: Arc<Reactor>) -> std::io::Result<Self> {
-        let queue = ReadyQueue::with_lanes(lane_count);
+    fn with_reactor(
+        lane_count: usize,
+        max_replacements: usize,
+        reactor: Arc<Reactor>,
+    ) -> std::io::Result<Self> {
+        let total_lanes = lane_count.saturating_add(max_replacements);
+        let queue = ReadyQueue::with_lanes(total_lanes);
         let lanes = Arc::new(
-            (0..lane_count)
+            (0..total_lanes)
                 .map(|index| {
                     Arc::new(LaneControl {
                         index,
@@ -263,7 +316,10 @@ impl PinnedTurnScheduler {
             reactor,
             movable: Arc::new(Mutex::new(HashMap::new())),
             lanes,
+            base_lanes: lane_count,
+            deterministic: false,
             threads: Vec::new(),
+            replacements: Mutex::new((0..max_replacements).map(|_| None).collect()),
             next_realm_id: AtomicU64::new(1),
         };
         for index in 0..lane_count {
@@ -273,14 +329,67 @@ impl PinnedTurnScheduler {
             let movable_for_thread = Arc::clone(&scheduler.movable);
             let thread = std::thread::Builder::new()
                 .name(format!("kiln-turn-{index}"))
-                .spawn(move || run_lane(lane_for_thread, reactor_for_thread, movable_for_thread))?;
+                .spawn(move || {
+                    run_lane(
+                        lane_for_thread,
+                        reactor_for_thread,
+                        movable_for_thread,
+                        None,
+                    )
+                })?;
             scheduler.threads.push(thread);
         }
         Ok(scheduler)
     }
 
     pub fn lane_count(&self) -> usize {
-        self.lanes.len()
+        self.base_lanes
+    }
+
+    pub fn is_deterministic(&self) -> bool {
+        self.deterministic
+    }
+
+    /// Supply one temporary lane for movable work while a scheduled turn blocks its OS thread.
+    /// The configured replacement limit is a hard bound; exhaustion is returned to the caller.
+    pub fn enter_blocking(self: &Arc<Self>) -> io::Result<BlockingTurnGuard> {
+        let mut replacements = self
+            .replacements
+            .lock()
+            .expect("scheduler replacement lock poisoned");
+        for slot in replacements.iter_mut() {
+            if slot.as_ref().is_some_and(|thread| thread.is_finished()) {
+                let _ = slot.take().expect("finished replacement exists").join();
+            }
+        }
+        let Some((slot, place)) = replacements
+            .iter_mut()
+            .enumerate()
+            .find(|(_, place)| place.is_none())
+        else {
+            return Err(io::Error::other(
+                "scheduler replacement lane limit exhausted",
+            ));
+        };
+        let lane = Arc::clone(&self.lanes[self.base_lanes + slot]);
+        let lane_for_thread = Arc::clone(&lane);
+        let reactor = Arc::clone(&self.reactor);
+        let movable = Arc::clone(&self.movable);
+        let queue_identity = Arc::as_ptr(&self.lanes[0].queue) as usize;
+        let owner = ACTIVE_LANE.with(|slot| {
+            slot.get()
+                .and_then(|(identity, lane)| (identity == queue_identity).then_some(lane))
+                .unwrap_or(0)
+        });
+        let handoff = Arc::clone(&self.lanes[owner]);
+        let thread = std::thread::Builder::new()
+            .name(format!("kiln-turn-replacement-{slot}"))
+            .spawn(move || run_lane(lane_for_thread, reactor, movable, Some(handoff)))?;
+        *place = Some(thread);
+        Ok(BlockingTurnGuard {
+            _scheduler: Arc::clone(self),
+            lane,
+        })
     }
 
     /// Construct a realm on one lane and queue its first turn. The factory is sent across
@@ -291,7 +400,7 @@ impl PinnedTurnScheduler {
         T: PinnedTurn + 'static,
     {
         let id = self.next_realm_id.fetch_add(1, Ordering::Relaxed);
-        let lane = Arc::clone(&self.lanes[(id as usize - 1) % self.lanes.len()]);
+        let lane = Arc::clone(&self.lanes[(id as usize - 1) % self.base_lanes]);
         let ticket = lane.queue.ticket_on_lane(id, lane.index);
         let status = Arc::new(AtomicU8::new(TurnStatus::Active as u8));
         lane.command(Command::Install {
@@ -341,7 +450,7 @@ impl PinnedTurnScheduler {
         T: MovableTurn + 'static,
     {
         let id = self.next_realm_id.fetch_add(1, Ordering::Relaxed);
-        let lane = Arc::clone(&self.lanes[(id as usize - 1) % self.lanes.len()]);
+        let lane = Arc::clone(&self.lanes[(id as usize - 1) % self.base_lanes]);
         let entry = Arc::new(MovableEntry {
             body: Mutex::new(None),
             status: Arc::new(AtomicU8::new(TurnStatus::Active as u8)),
@@ -372,14 +481,32 @@ impl Drop for PinnedTurnScheduler {
                 let _ = thread.join();
             }
         }
+        for thread in self
+            .replacements
+            .get_mut()
+            .expect("scheduler replacement lock poisoned")
+            .iter_mut()
+            .filter_map(Option::take)
+        {
+            if thread.thread().id() != std::thread::current().id() {
+                let _ = thread.join();
+            }
+        }
     }
 }
 
-fn run_lane(lane: Arc<LaneControl>, reactor: Arc<Reactor>, movable: MovableRealms) {
+fn run_lane(
+    lane: Arc<LaneControl>,
+    reactor: Arc<Reactor>,
+    movable: MovableRealms,
+    handoff: Option<Arc<LaneControl>>,
+) {
+    let _active_lane = ActiveLaneGuard::enter(&lane.queue, lane.index);
     let mut realms = HashMap::<u64, RealmEntry>::new();
     // One heap per lane schedules all pure realm timers without a Tokio task or OS thread per
     // realm. The epoch invalidates an old deadline when an external wake runs that realm first.
     let mut deadlines = BinaryHeap::<Reverse<(Instant, u64, u64)>>::new();
+    let mut draining = false;
     loop {
         let now = Instant::now();
         while let Some(&Reverse((at, realm_id, epoch))) = deadlines.peek() {
@@ -403,6 +530,12 @@ fn run_lane(lane: Arc<LaneControl>, reactor: Arc<Reactor>, movable: MovableRealm
                     realm.ticket.wake();
                 }
             }
+        }
+        if draining && realms.is_empty() {
+            if let Some(handoff) = &handoff {
+                handoff.command(Command::Deadlines(std::mem::take(&mut deadlines)));
+            }
+            break;
         }
         let lease = match deadlines.peek() {
             Some(&Reverse((at, _, _))) => lane
@@ -505,6 +638,8 @@ fn run_lane(lane: Arc<LaneControl>, reactor: Arc<Reactor>, movable: MovableRealm
                     Command::Remove(realm_id) => {
                         realms.remove(&realm_id);
                     }
+                    Command::Drain => draining = true,
+                    Command::Deadlines(other) => deadlines.extend(other),
                 }
             }
             lease.finish(TurnOutcome::Parked);
@@ -1007,6 +1142,182 @@ mod tests {
             std::thread::yield_now();
         }
         assert_eq!(handle.status(), TurnStatus::Cancelled);
+    }
+
+    #[test]
+    fn a_blocked_lane_gets_one_bounded_replacement_for_movable_work() {
+        let reactor = Reactor::shared_wall().expect("reactor starts");
+        let scheduler = Arc::new(
+            PinnedTurnScheduler::with_reactor(1, 1, reactor).expect("scheduler lanes start"),
+        );
+        let (blocked_tx, blocked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocking_scheduler = Arc::clone(&scheduler);
+        let blocker = scheduler.spawn_pinned(move |_, _| {
+            move |_: &Waker| {
+                let guard = blocking_scheduler
+                    .enter_blocking()
+                    .expect("replacement starts");
+                blocked_tx.send(std::thread::current().id()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                drop(guard);
+                TurnOutcome::Done
+            }
+        });
+        let original_lane = blocked_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(
+            scheduler.enter_blocking().is_err(),
+            "replacement limit is hard"
+        );
+        let (moved_tx, moved_rx) = std::sync::mpsc::channel();
+        let movable = scheduler.spawn_movable(move |_: &Waker| {
+            moved_tx.send(std::thread::current().id()).unwrap();
+            TurnOutcome::Done
+        });
+        let replacement_lane = moved_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_ne!(original_lane, replacement_lane);
+        release_tx.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while blocker.status() == TurnStatus::Active
+            || movable.status() == TurnStatus::Active
+            || !scheduler.replacements.lock().unwrap()[0]
+                .as_ref()
+                .is_some_and(|thread| thread.is_finished())
+        {
+            assert!(Instant::now() < deadline, "replacement did not drain");
+            std::thread::yield_now();
+        }
+        assert_eq!(blocker.status(), TurnStatus::Complete);
+        assert_eq!(movable.status(), TurnStatus::Complete);
+    }
+
+    #[test]
+    fn a_draining_replacement_hands_off_a_movable_deadline() {
+        let reactor = Reactor::shared_wall().expect("reactor starts");
+        let scheduler = Arc::new(
+            PinnedTurnScheduler::with_reactor(1, 1, reactor).expect("scheduler lanes start"),
+        );
+        let (blocked_tx, blocked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocking_scheduler = Arc::clone(&scheduler);
+        let blocker = scheduler.spawn_pinned(move |_, _| {
+            move |_: &Waker| {
+                let guard = blocking_scheduler
+                    .enter_blocking()
+                    .expect("replacement starts");
+                blocked_tx.send(std::thread::current().id()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                drop(guard);
+                TurnOutcome::Done
+            }
+        });
+        let original_lane = blocked_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let (first_tx, first_rx) = std::sync::mpsc::channel();
+        let (second_tx, second_rx) = std::sync::mpsc::channel();
+        let mut first = true;
+        let movable = scheduler.spawn_movable(move |_: &Waker| {
+            if first {
+                first = false;
+                first_tx.send(std::thread::current().id()).unwrap();
+                TurnOutcome::ParkedUntil(Instant::now() + Duration::from_millis(500))
+            } else {
+                second_tx.send(std::thread::current().id()).unwrap();
+                TurnOutcome::Done
+            }
+        });
+        let replacement_lane = first_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_ne!(original_lane, replacement_lane);
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            second_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            original_lane
+        );
+        assert_eq!(blocker.status(), TurnStatus::Complete);
+        assert_eq!(movable.status(), TurnStatus::Complete);
+    }
+
+    #[test]
+    fn a_replacement_stays_with_a_realm_that_pins_on_it() {
+        struct PinningBody {
+            ticket: Arc<std::sync::OnceLock<Arc<TurnTicket>>>,
+            seen: std::sync::mpsc::Sender<std::thread::ThreadId>,
+            first: bool,
+        }
+
+        impl PinnedTurn for PinningBody {
+            fn run_turn(&mut self, _waker: &Waker) -> TurnOutcome {
+                unreachable!("lane identity is needed for pinning")
+            }
+
+            fn run_turn_on(&mut self, _waker: &Waker, lane: usize) -> TurnOutcome {
+                let ticket = loop {
+                    if let Some(ticket) = self.ticket.get() {
+                        break ticket;
+                    }
+                    std::thread::yield_now();
+                };
+                assert!(ticket.pin_to_lane(lane));
+                self.seen.send(std::thread::current().id()).unwrap();
+                if self.first {
+                    self.first = false;
+                    TurnOutcome::Parked
+                } else {
+                    TurnOutcome::Done
+                }
+            }
+        }
+
+        let reactor = Reactor::shared_wall().expect("reactor starts");
+        let scheduler = Arc::new(
+            PinnedTurnScheduler::with_reactor(1, 1, reactor).expect("scheduler lanes start"),
+        );
+        let (blocked_tx, blocked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocking_scheduler = Arc::clone(&scheduler);
+        let blocker = scheduler.spawn_pinned(move |_, _| {
+            move |_: &Waker| {
+                let guard = blocking_scheduler
+                    .enter_blocking()
+                    .expect("replacement starts");
+                blocked_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                drop(guard);
+                TurnOutcome::Done
+            }
+        });
+        blocked_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let ticket = Arc::new(std::sync::OnceLock::new());
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel();
+        let movable = scheduler.spawn_movable(PinningBody {
+            ticket: Arc::clone(&ticket),
+            seen: seen_tx,
+            first: true,
+        });
+        assert!(ticket.set(Arc::clone(&movable.entry.ticket)).is_ok());
+        let first_lane = seen_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        release_tx.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while blocker.status() == TurnStatus::Active {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert!(
+            !scheduler.replacements.lock().unwrap()[0]
+                .as_ref()
+                .expect("replacement exists")
+                .is_finished(),
+            "a pinned realm keeps its replacement lane"
+        );
+        assert!(movable.wake());
+        assert_eq!(
+            seen_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            first_lane
+        );
+        while movable.status() == TurnStatus::Active {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert_eq!(movable.status(), TurnStatus::Complete);
     }
 
     #[test]
