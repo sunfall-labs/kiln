@@ -295,6 +295,29 @@ static void kiln_c99_builtin_bootstrap_done(void) {
                                          KILN_C99_BUILTIN_OBJECT_PROTOTYPE,
                                          kiln_c99_object_of(store));
     }
+    {
+        static const uint32_t wide_builtin_stores[] = {
+            KILN_C99_BUILTIN_DATE_PROTOTYPE,
+            KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE,
+        };
+        size_t index;
+        for (index = 0; index < sizeof wide_builtin_stores / sizeof wide_builtin_stores[0];
+             ++index) {
+            kiln_value store;
+            uint32_t code = wide_builtin_stores[index];
+            if (kiln_c99_callable_store(kiln_c99_builtin(code), &store, 0) == KILN_C99_OK &&
+                store.tag == KILN_VALUE_OBJECT)
+                kiln_c99_sealed_layout_publish(KILN_VALUE_BUILTIN, code,
+                                               kiln_c99_object_of(store));
+        }
+    }
+    {
+        kiln_value *global = NULL;
+        if (kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_GLOBALS, &global) == KILN_C99_OK &&
+            global != NULL && global->tag == KILN_VALUE_OBJECT)
+            kiln_c99_sealed_layout_publish(KILN_VALUE_OBJECT, KILN_C99_SEALED_GLOBAL_CODE,
+                                           kiln_c99_object_of(*global));
+    }
     /* The bootstrap's frames are gone; the pages they touched need not stay the realm's. */
     kiln_c99_stack_release_below();
     __atomic_sub_fetch(&kiln_c99_builtin_store_epoch, heap->builtin_stores, __ATOMIC_RELAXED);

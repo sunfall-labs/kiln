@@ -1035,6 +1035,29 @@ typedef struct kiln_property {
     };
 } kiln_property;
 
+/* A complete built-in store layout, published once per process. The entries own no realm
+ * values: keys are canonical process strings, and attributes are immutable descriptor bits.
+ * A realm may use this table only after its store's complete key/attribute sequence validates. */
+typedef struct kiln_sealed_property {
+    const kiln_string *key;
+    uint8_t enumerable;
+    uint8_t writable;
+    uint8_t configurable;
+    uint8_t symbol_hidden;
+} kiln_sealed_property;
+
+typedef struct kiln_sealed_layout {
+    struct kiln_sealed_layout *next;
+    uint32_t tag;
+    uint64_t code;
+    size_t count;
+    kiln_sealed_property entries[];
+} kiln_sealed_layout;
+
+/* The global object's stable site in the complete descriptor table. Other ordinary-object
+ * sites will use compiler-assigned identities, never a realm pointer. */
+#define KILN_C99_SEALED_GLOBAL_CODE UINT64_MAX
+
 /* Most bootstrap objects have fewer than eight shaped properties. Keeping sixteen slots in
  * every kiln_object made the many small per-realm objects pay for unused values. Wider objects
  * already grow into a separate slot array, so this reduces their inline prefix without changing

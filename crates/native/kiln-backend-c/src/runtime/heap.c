@@ -592,6 +592,10 @@ typedef struct kiln_shared_state {
         uint64_t code;
         kiln_shape *shape;
     } final_builtin_layout;
+    /* Complete wide built-in descriptors. A node is inserted only after its entire sequence
+     * has been copied and validated; readers take the head with acquire and never see a prefix.
+     * Values and prototype links stay on each realm's objects. */
+    kiln_sealed_layout *sealed_layouts;
     /* The shared immutable region (ADR 0070 primitive B; see "The shared immutable region"
      * below). `region_state` is one of `KILN_C99_REGION_*`; the rest is written by the one realm
      * that builds the region, before the release store that seals it. */

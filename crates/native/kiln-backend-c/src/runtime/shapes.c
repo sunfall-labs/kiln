@@ -905,6 +905,65 @@ static void kiln_c99_final_builtin_store(uint32_t tag, uint64_t code, kiln_objec
     object->shape = shape;
 }
 
+static const kiln_sealed_layout *kiln_c99_sealed_layout_find(uint32_t tag, uint64_t code) {
+    kiln_shared_state *process = kiln_c99_process();
+    kiln_sealed_layout *node = __atomic_load_n(&process->sealed_layouts, __ATOMIC_ACQUIRE);
+    for (; node != NULL; node = node->next) {
+        if (node->tag == tag && node->code == code) return node;
+    }
+    return NULL;
+}
+
+/* Record a complete wide store after bootstrap. This table is process-owned metadata only:
+ * every key is already canonical and shared, and neither a property value nor a realm object
+ * pointer crosses the publication boundary. The candidate is built privately; the process
+ * lock publishes a whole immutable node or discards it if another realm won the race. */
+static void kiln_c99_sealed_layout_publish(uint32_t tag, uint64_t code,
+                                            const kiln_object *object) {
+    kiln_shared_state *process;
+    kiln_sealed_layout *candidate;
+    kiln_sealed_layout *known;
+    size_t index;
+    size_t bytes;
+    if (kiln_c99_sealed_layout_find(tag, code) != NULL || object == NULL ||
+        object->shape != NULL || object->properties == NULL ||
+        object->count == 0 || object->count > (SIZE_MAX - sizeof *candidate) /
+                                              sizeof(kiln_sealed_property)) return;
+    bytes = sizeof *candidate + object->count * sizeof(kiln_sealed_property);
+    candidate = (kiln_sealed_layout *)malloc(bytes);
+    if (candidate == NULL) return;
+    candidate->next = NULL;
+    candidate->tag = tag;
+    candidate->code = code;
+    candidate->count = object->count;
+    for (index = 0; index < object->count; ++index) {
+        const kiln_property *property = &object->properties[index];
+        kiln_sealed_property *entry = &candidate->entries[index];
+        if (property->key == NULL || !kiln_c99_key_is_shared(property->key) ||
+            property->refused || property->accessor) {
+            free(candidate);
+            return;
+        }
+        entry->key = property->key;
+        entry->enumerable = (uint8_t)property->enumerable;
+        entry->writable = (uint8_t)property->writable;
+        entry->configurable = (uint8_t)property->configurable;
+        entry->symbol_hidden = (uint8_t)property->symbol_hidden;
+    }
+    process = kiln_c99_process();
+    kiln_c99_process_lock(process);
+    for (known = process->sealed_layouts; known != NULL; known = known->next) {
+        if (known->tag == tag && known->code == code) break;
+    }
+    if (known == NULL) {
+        candidate->next = process->sealed_layouts;
+        __atomic_store_n(&process->sealed_layouts, candidate, __ATOMIC_RELEASE);
+        candidate = NULL;
+    }
+    kiln_c99_process_unlock(process);
+    free(candidate);
+}
+
 static int kiln_c99_new_object(kiln_value *out) {
     /* Every field is written below before anything can observe the object, so the block is
      * taken unzeroed: the zeroing was a second pass over two hundred bytes per object. */
