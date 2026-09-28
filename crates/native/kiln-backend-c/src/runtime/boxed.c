@@ -2513,6 +2513,16 @@ static int kiln_c99_val_make_cell(kiln_val *slot) {
     return KILN_C99_OK;
 }
 
+/* A shared-region unit's once-made binding already has a permanent realm-owned root in its
+ * unit block. Its cell payload can live in an appended slot there: every closure reaches the
+ * binding through the unit block, which also marks this value on collection. The block never
+ * reallocates and dies only after the realm's frames are gone. Keep the ordinary cell tag and
+ * dereference path; only the ownership of its eight-byte payload differs. */
+static void kiln_c99_val_make_unit_cell(kiln_val *slot, kiln_val *storage) {
+    *storage = *slot;
+    *slot = KILN_VAL_TAG_PTR(KILN_TAG_CELL_PREFIX, storage);
+}
+
 /* The frame registers (ADR 0041; `builtins.c`), which are marked rather than cleared so a stale
  * read after a collection still names live memory. The realm's own roots -- its symbols, the
  * built-in objects it made lazily, every unit's module block -- are its heap's (ADR 0070,

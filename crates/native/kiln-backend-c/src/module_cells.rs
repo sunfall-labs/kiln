@@ -55,6 +55,9 @@ pub(crate) struct RegionPlan {
     /// Function index -> its region site, for the functions whose one closure-making operation
     /// is in a once body, on no cycle, capturing nothing.
     pub sites: HashMap<u32, usize>,
+    /// Once-made cells stored in compact, realm-owned unit slots instead of GC slab blocks.
+    /// The key is the body and its local; the value indexes appended unit slots.
+    pub compact_cells: HashMap<(Option<u32>, u32), usize>,
 }
 
 impl RegionPlan {
@@ -105,6 +108,14 @@ pub(crate) fn region_site(index: u32) -> Option<usize> {
 /// How many region sites the unit being emitted has.
 pub(crate) fn region_site_count() -> usize {
     with_current(RegionPlan::site_count).unwrap_or(0)
+}
+
+pub(crate) fn compact_cell_count() -> usize {
+    with_current(|plan| plan.compact_cells.len()).unwrap_or(0)
+}
+
+pub(crate) fn compact_cell_slot(owner: Option<u32>, local: u32) -> Option<usize> {
+    with_current(|plan| plan.compact_cells.get(&(owner, local)).copied()).flatten()
 }
 
 fn entry_proto(program: &Program) -> FunctionProto {
@@ -399,6 +410,14 @@ pub(crate) fn plan(program: &Program) -> Option<(Program, RegionPlan)> {
             };
             block_slot.insert((*owner, slot), global);
         }
+    }
+    // These cells are made once for this realm, and every closure capture is rewritten below
+    // to the realm's unit block. Keep their payloads in that same stable block. Assign storage
+    // deterministically so the emitted descriptor and every chunk agree on its size.
+    let mut compact: Vec<_> = block_slot.iter().collect();
+    compact.sort_by_key(|(_, global)| **global);
+    for (index, (key, _)) in compact.into_iter().enumerate() {
+        plan.compact_cells.insert(*key, index);
     }
     // Each upvalue, resolved to the block slot its cell moved to.
     let count = program.functions.len();

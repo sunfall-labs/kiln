@@ -279,6 +279,7 @@ globalThis.top = function top() { counter += 1; return shared.n + counter; };
     // `install` publishes the cell of `local` to the block; `inner` reads through it.
     assert!(c.contains("kiln_mg["), "{c}");
     assert!(c.contains("] = locals["), "{c}");
+    assert!(c.contains("kiln_c99_val_make_unit_cell("), "{c}");
     // Without the policy nothing changes: every closure captures its cells.
     let plain = kiln_backend_c::emit_module_with_logical_path_and_policy(
         &program,
@@ -291,7 +292,28 @@ globalThis.top = function top() { counter += 1; return shared.n + counter; };
     )
     .expect("emits");
     assert!(!plain.source.contains("KU_REGION_CLOSURE("));
+    assert!(!plain.source.contains("kiln_c99_val_make_unit_cell("));
     assert_eq!(protos(&plain.source, "KU_CLOSURE(").len(), 4);
+
+    // An exported binding can cross to another generated unit as a cell pointer, so that
+    // module must retain GC-backed cells even when its closures qualify for the region.
+    let exported = kiln_ir::compile_module(&kiln_frontend_oxc::parse(
+        "exported-region.js",
+        &source.replace("let counter = 0;", "export let counter = 0;"),
+    ))
+    .expect("compiles export");
+    let guarded = kiln_backend_c::emit_module_with_logical_path_and_policy(
+        &exported,
+        "exported-region.js",
+        EmissionPolicy {
+            decoupled_prelude: true,
+            compact: true,
+            shared_region: true,
+            ..Default::default()
+        },
+    )
+    .expect("emits export");
+    assert!(!guarded.source.contains("kiln_c99_val_make_unit_cell("));
 }
 
 /// Realms issue 08: nearly every closure the core bootstrap makes is a region closure.

@@ -577,7 +577,14 @@ pub fn emit_module_with_logical_path_and_policy(
         .flatten();
     let rewritten;
     let (module, region) = match region {
-        Some((program, plan)) => {
+        Some((program, mut plan)) => {
+            // A module import/export can pass a cell pointer through the boundary ABI to a
+            // different unit. Compact unit-owned cells have no GC block header, so retain the
+            // ordinary GC representation whenever such a seam exists. The concatenated
+            // runtime bootstrap has neither imports nor exports.
+            if !module.imports.is_empty() || !module.exports.is_empty() {
+                plan.compact_cells.clear();
+            }
             rewritten = ModuleProgram {
                 program,
                 ..module.clone()
@@ -3614,10 +3621,11 @@ fn render_unit_state(
     symbol: &str,
     globals: usize,
     template_sites: usize,
+    compact_cells: usize,
     should_chunk: bool,
     extern_only: bool,
 ) {
-    if globals + template_sites == 0 {
+    if globals + template_sites + compact_cells == 0 {
         return;
     }
     if extern_only {
@@ -3627,7 +3635,7 @@ fn render_unit_state(
         writeln!(
             output,
             "{linkage}kiln_c99_unit {symbol}_unit = {{ 0, {} }};",
-            globals + template_sites
+            globals + template_sites + compact_cells
         )
         .unwrap();
     }
@@ -3644,6 +3652,14 @@ fn render_unit_state(
         writeln!(
             output,
             "#define {symbol}_template_sites ({symbol}_unit_vals() + {globals})"
+        )
+        .unwrap();
+    }
+    if compact_cells > 0 {
+        writeln!(
+            output,
+            "#define {symbol}_cell_slots ({symbol}_unit_vals() + {})",
+            globals + template_sites
         )
         .unwrap();
     }
@@ -4404,6 +4420,7 @@ fn render_positioned(
         symbol,
         unit_global_count(program),
         program.template_sites.len(),
+        module_cells::compact_cell_count(),
         false,
         false,
     );
@@ -4694,6 +4711,7 @@ fn render_module_positioned(
         unit_symbol,
         unit_global_count(program),
         program.template_sites.len(),
+        module_cells::compact_cell_count(),
         should_chunk,
         false,
     );
@@ -4951,6 +4969,7 @@ fn render_module_positioned(
             unit_symbol,
             unit_global_count(program),
             program.template_sites.len(),
+            module_cells::compact_cell_count(),
             true,
             true,
         );

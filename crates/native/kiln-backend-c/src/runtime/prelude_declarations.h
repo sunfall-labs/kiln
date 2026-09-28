@@ -427,6 +427,7 @@ extern int kiln_c99_val_new(kiln_host *host, kiln_val callee, const kiln_val *ar
 extern int kiln_c99_val_to_property_key(kiln_host *host, kiln_val target, kiln_val key, int depth, kiln_value *thrown, kiln_val *out);
 extern int kiln_c99_val_check_tdz(kiln_val val, kiln_value *thrown);
 extern int kiln_c99_val_make_cell(kiln_val *slot);
+extern void kiln_c99_val_make_unit_cell(kiln_val *slot, kiln_val *storage);
 extern kiln_val kiln_c99_val_from_double(double d);
 extern size_t kiln_c99_val_string_length(kiln_val v);
 extern int kiln_c99_val_array_push_fast(kiln_val receiver, kiln_val arg, kiln_val *out);

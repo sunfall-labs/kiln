@@ -655,11 +655,19 @@ pub(super) fn emit_graph_op(
             }
         }
         GraphOp::MakeCell(slot) => {
-            writeln!(
-                output,
-                "    {{ int status = kiln_c99_val_make_cell(&locals[{slot}]); if (status != KILN_C99_OK) return status; }}"
-            )
-            .unwrap();
+            if let Some(index) = crate::module_cells::compact_cell_slot(self_index, *slot) {
+                writeln!(
+                    output,
+                    "    kiln_c99_val_make_unit_cell(&locals[{slot}], &{symbol}_cell_slots[{index}]);"
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    output,
+                    "    {{ int status = kiln_c99_val_make_cell(&locals[{slot}]); if (status != KILN_C99_OK) return status; }}"
+                )
+                .unwrap();
+            }
             // A function the runtime bootstrap's top level calls once publishes the cell to the
             // realm's unit block, where the functions it makes read it (`module_cells`).
             if let Some(global) = crate::module_cells::published_slot(self_index, *slot) {
