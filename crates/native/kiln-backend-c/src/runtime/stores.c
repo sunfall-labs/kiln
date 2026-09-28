@@ -325,6 +325,7 @@ static void kiln_c99_builtin_bootstrap_done(void) {
                                                 kiln_c99_object_of(*global));
         }
     }
+    heap->bootstrap_complete = 1;
     /* The bootstrap's frames are gone; the pages they touched need not stay the realm's. */
     kiln_c99_stack_release_below();
     __atomic_sub_fetch(&kiln_c99_builtin_store_epoch, heap->builtin_stores, __ATOMIC_RELAXED);
@@ -461,6 +462,14 @@ static int kiln_c99_callable_store_lookup(kiln_value callable, kiln_value *out, 
     if (kiln_c99_new_object(&entry->properties) != KILN_C99_OK) {
         kiln_c99_gc_release(entry);
         return KILN_C99_OUT_OF_MEMORY;
+    }
+    if (callable.tag == KILN_VALUE_BUILTIN &&
+        (callable.bits == KILN_C99_BUILTIN_DATE_PROTOTYPE ||
+         callable.bits == KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE)) {
+        kiln_gc_heap *heap = kiln_c99_gc_heap();
+        if (heap != NULL && !heap->bootstrap_complete)
+            (void)kiln_c99_sealed_layout_attach_empty(KILN_VALUE_BUILTIN, callable.bits,
+                                                       kiln_c99_object_of(entry->properties));
     }
     {
         kiln_method_store *published = NULL;

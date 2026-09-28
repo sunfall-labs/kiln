@@ -1072,6 +1072,42 @@ static int kiln_c99_sealed_layout_attach(uint32_t tag, uint64_t code,
     return 1;
 }
 
+/* Later realms construct a known callable store straight into their own compact values. A
+ * missing layout or an unexpected bootstrap write declines to ordinary dictionary storage;
+ * no partial descriptor is ever published to the process. */
+static int kiln_c99_sealed_layout_attach_empty(uint32_t tag, uint64_t code,
+                                                kiln_object *object) {
+    const kiln_sealed_layout *layout = kiln_c99_sealed_layout_find(tag, code);
+    kiln_sealed_values *values;
+    uint32_t *orders;
+    size_t count;
+    size_t bytes;
+    size_t index;
+    if (getenv("KILN_DISABLE_SEALED_LAYOUTS") != NULL ||
+        getenv("KILN_DISABLE_SEALED_DIRECT") != NULL || layout == NULL || object == NULL ||
+        object->sealed != NULL || object->shape != kiln_c99_shape_root() ||
+        object->properties != NULL || object->count != 0 || object->elements != NULL ||
+        object->slots != object->inline_slots || layout->count >= UINT32_MAX) return 0;
+    count = layout->count;
+    if (count > (SIZE_MAX - sizeof *values) / (sizeof(kiln_val) + sizeof(uint32_t)))
+        return 0;
+    bytes = sizeof *values + count * (sizeof(kiln_val) + sizeof(uint32_t));
+    values = malloc(bytes);
+    if (values == NULL) return 0;
+    values->next_order = 1;
+    values->extra_capacity = 0;
+    orders = (uint32_t *)(values->values + count);
+    for (index = 0; index < count; ++index) {
+        values->values[index] = KILN_VAL_UNDEFINED;
+        orders[index] = 0;
+    }
+    object->shape = NULL;
+    object->slots = values->values;
+    object->slot_capacity = count;
+    object->sealed = layout;
+    return 1;
+}
+
 /* Record a complete wide store after bootstrap. This table is process-owned metadata only:
  * every key is already canonical and shared, and neither a property value nor a realm object
  * pointer crosses the publication boundary. The candidate is built privately; the process

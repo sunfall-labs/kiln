@@ -462,6 +462,9 @@ typedef struct kiln_gc_heap {
     /* How much of `kiln_c99_builtin_store_epoch` this realm added and has not yet taken back
      * (`kiln_c99_builtin_bootstrap_done`). */
     uint64_t builtin_stores;
+    /* Bootstrap-only direct construction of sealed callable stores stops before program code
+     * runs. Zero-initialized with the heap and set by `kiln_c99_builtin_bootstrap_done`. */
+    uint8_t bootstrap_complete;
     /* This realm's Object.prototype own-property store once it exists (`kiln_c99_callable_store`),
      * kept alive by the realm's registry; read live by `kiln_c99_object_prototype_lacks`. */
     const struct kiln_object *object_prototype_store;

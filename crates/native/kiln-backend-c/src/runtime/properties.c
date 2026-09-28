@@ -1073,16 +1073,52 @@ static int kiln_c99_own_slot_key(kiln_value target, const kiln_string *key,
     return KILN_C99_OK;
 }
 
+/* A sealed store can take a complete data descriptor without allocating a dictionary record.
+ * Keys and final attributes come from the immutable process table; only the value and its
+ * insertion ordinal change in this realm. An unrecognized key or reconfiguration falls back to
+ * the ordinary dictionary through `kiln_c99_own_slot_key`. */
+static int kiln_c99_sealed_storage_commit(kiln_object *object, const kiln_string *key,
+                                           const kiln_string *ikey,
+                                           const kiln_property *desired) {
+    size_t index;
+    uint32_t *orders;
+    kiln_sealed_values *values;
+    if (object->sealed == NULL || desired->accessor || desired->refused) return 0;
+    orders = kiln_c99_sealed_orders(object);
+    values = kiln_c99_sealed_values_of(object);
+    for (index = 0; index < object->sealed->count; ++index) {
+        const kiln_sealed_property *entry = &object->sealed->entries[index];
+        kiln_property candidate = {.key = entry->key};
+        if (!((ikey != NULL && entry->key == ikey) ||
+              (key != NULL && kiln_c99_same_key_view(&candidate, key)))) continue;
+        if (desired->enumerable != entry->enumerable ||
+            desired->writable != entry->writable ||
+            desired->configurable != entry->configurable ||
+            desired->symbol_hidden != entry->symbol_hidden ||
+            (orders[index] == 0 && (object->not_extensible || object->frozen ||
+                                     values->next_order == 0))) return 0;
+        if (orders[index] == 0) orders[index] = values->next_order++;
+        object->slots[index] = kiln_val_from_boundary(desired->value);
+        if (!entry->writable) object->read_only_seen = 1;
+        kiln_c99_prototype_touched(object);
+        return 1;
+    }
+    return 0;
+}
+
 /* The storage-side commit for a complete own descriptor. The caller computes and validates a
- * value copy; no pointer into the mutable list escapes to descriptor semantics. A sealed
- * descriptor/value store can replace this one operation with a realm-local overlay write. */
+ * value copy; no pointer into the mutable list escapes to descriptor semantics. */
 static int kiln_c99_property_storage_commit(kiln_value target, const kiln_string *key,
                                              const kiln_string *ikey,
                                              const kiln_property *desired) {
     kiln_property *slot;
     kiln_object *object;
     const kiln_string *canonical;
-    int status = kiln_c99_own_slot_key(target, key, ikey, &slot);
+    int status;
+    if (target.tag == KILN_VALUE_OBJECT &&
+        kiln_c99_sealed_storage_commit(kiln_c99_object_of(target), key, ikey, desired))
+        return KILN_C99_OK;
+    status = kiln_c99_own_slot_key(target, key, ikey, &slot);
     if (status != KILN_C99_OK) return status;
     object = kiln_c99_object_of(target);
     canonical = slot->key;
@@ -1176,9 +1212,28 @@ static int kiln_c99_commit_method_key(kiln_value target, const kiln_string *key,
                                       kiln_value method) {
     kiln_object *object;
     size_t index;
-    int status = kiln_c99_put_mode_key(NULL, target, key, NULL, method, 0, 0, NULL);
-    if (status != KILN_C99_OK) return status;
+    int status;
     object = kiln_c99_object_of(target);
+    if (object->sealed != NULL && object->prototype.tag == KILN_VALUE_UNDEFINED &&
+        !object->frozen && !object->not_extensible && !object->module_namespace &&
+        !kiln_c99_same_name_key(key, "__proto__")) {
+        kiln_property current;
+        kiln_property desired = {0};
+        kiln_value symbol;
+        int existing = kiln_c99_property_read_own(object, key, NULL, &current);
+        if (!existing || (!current.accessor && current.writable)) {
+            desired.value = method;
+            desired.enumerable = 0;
+            desired.writable = 1;
+            desired.configurable = 1;
+            desired.symbol_hidden = kiln_c99_key_is_reserved(key) &&
+                                    kiln_c99_symbol_of_key_view(key, &symbol);
+            if (kiln_c99_sealed_storage_commit(object, key, NULL, &desired))
+                return KILN_C99_OK;
+        }
+    }
+    status = kiln_c99_put_mode_key(NULL, target, key, NULL, method, 0, 0, NULL);
+    if (status != KILN_C99_OK) return status;
     if (object->shape != NULL) {
         kiln_c99_ensure_dictionary(object);
         object->shape = NULL;
