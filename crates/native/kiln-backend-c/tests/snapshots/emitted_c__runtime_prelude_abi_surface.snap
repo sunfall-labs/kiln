@@ -2182,7 +2182,12 @@ static int kiln_c99_graph_val_in_batch(const kiln_gc_heap *heap,
 static int kiln_c99_graph_value_in_batch(const kiln_gc_heap *heap,
 static int kiln_c99_actor_isolated_escrow_begin(kiln_gc_heap *heap, kiln_value handle) {
 static int kiln_c99_actor_isolated_escrow_rollback(kiln_gc_heap *heap) {
+static int kiln_c99_actor_isolated_request_begin(kiln_gc_heap *heap, kiln_value handle,
+static int kiln_c99_actor_isolated_request_escrow(kiln_gc_heap *heap, uint64_t id) {
+static int kiln_c99_actor_isolated_request_rollback(kiln_gc_heap *heap, uint64_t id) {
+static int kiln_c99_graph_has_c_root_alias_except(const kiln_gc_heap *heap,
 static int kiln_c99_graph_has_c_root_alias(const kiln_gc_heap *heap,
+static int kiln_c99_graph_has_c_root_alias_for_request(const kiln_gc_heap *heap,
 static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_nursery_chunk(
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_outside_heap(
@@ -2464,6 +2469,9 @@ static int kiln_c99_own_slot_key(kiln_value target, const kiln_string *key,
 static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_own_slot_ikey(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_own_slot_key(kiln_value target, const kiln_string *key,
+static int kiln_c99_commit_own_data_key(kiln_value target, const kiln_string *key,
+static int kiln_c99_commit_own_data(kiln_value target, const char *key, size_t key_len,
+static int kiln_c99_commit_method_key(kiln_value target, const kiln_string *key,
 static int kiln_c99_own_data(kiln_value target, const char *key, size_t key_len,
 static const kiln_string *kiln_c99_hot_key(int id) {
 static int kiln_c99_put_hot_key(kiln_host *host, kiln_value target, int id, kiln_value value,
