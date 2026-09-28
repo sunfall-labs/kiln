@@ -19,6 +19,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 
@@ -178,13 +179,95 @@ pub struct Daemon<E: QueryEngine = MemoEngine> {
 impl Daemon<MemoEngine> {
     /// Bind `socket`, serving a fresh [`MemoEngine`] backed by the Oxc frontend.
     pub fn bind(socket: &Path) -> Result<Self, DaemonError> {
-        Self::bind_with(
-            socket,
-            MemoEngine::with_summary_query(
-                kiln_frontend_oxc::parse,
-                kiln_backend_c::summarize_program,
-            ),
+        Self::bind_with(socket, production_engine())
+    }
+}
+
+fn production_engine() -> MemoEngine {
+    MemoEngine::with_summary_query(kiln_frontend_oxc::parse, kiln_backend_c::summarize_program)
+}
+
+/// A private request channel to the same handler used by socket clients. A one-shot CLI owns
+/// one of these instead of binding a Unix socket: it needs no cross-process address, and peers
+/// still share the source view, graph cache and conformance catalog. Each channel has its own
+/// staging transaction and a full-size request stack, just like a daemon connection.
+pub struct LocalClient {
+    sender: Option<mpsc::Sender<(Request, mpsc::SyncSender<Response>)>>,
+    serving: Option<JoinHandle<()>>,
+    state: Arc<Mutex<DaemonState<MemoEngine>>>,
+    tests: Arc<crate::testing::ConformanceCoordinator>,
+}
+
+impl LocalClient {
+    pub fn new() -> io::Result<Self> {
+        Self::spawn(
+            Arc::new(Mutex::new(DaemonState {
+                engine: production_engine(),
+                source_view: SourceView(0),
+                resolutions: None,
+                graph_cache: GraphCache::default(),
+            })),
+            Arc::new(crate::testing::ConformanceCoordinator::default()),
         )
+    }
+
+    pub fn peer(&self) -> io::Result<Self> {
+        Self::spawn(Arc::clone(&self.state), Arc::clone(&self.tests))
+    }
+
+    fn spawn(
+        state: Arc<Mutex<DaemonState<MemoEngine>>>,
+        tests: Arc<crate::testing::ConformanceCoordinator>,
+    ) -> io::Result<Self> {
+        let (sender, receiver) = mpsc::channel::<(Request, mpsc::SyncSender<Response>)>();
+        let lane_state = Arc::clone(&state);
+        let lane_tests = Arc::clone(&tests);
+        let serving = thread::Builder::new()
+            .stack_size(crate::SERVE_STACK_BYTES)
+            .spawn(move || {
+                let mut pending = None;
+                let mut next_sync_id = 0;
+                while let Ok((request, reply)) = receiver.recv() {
+                    let (response, next) = handle(
+                        &lane_state,
+                        &lane_tests,
+                        &mut pending,
+                        &mut next_sync_id,
+                        request,
+                    );
+                    let _ = reply.send(response);
+                    if next != Next::Continue {
+                        break;
+                    }
+                }
+            })?;
+        Ok(Self {
+            sender: Some(sender),
+            serving: Some(serving),
+            state,
+            tests,
+        })
+    }
+
+    pub fn request(&mut self, request: Request) -> io::Result<Response> {
+        let (reply, answer) = mpsc::sync_channel(1);
+        self.sender
+            .as_ref()
+            .ok_or_else(|| io::Error::new(ErrorKind::BrokenPipe, "local engine is closed"))?
+            .send((request, reply))
+            .map_err(|_| io::Error::new(ErrorKind::BrokenPipe, "local engine stopped"))?;
+        answer.recv().map_err(|_| {
+            io::Error::new(ErrorKind::UnexpectedEof, "local engine dropped its answer")
+        })
+    }
+}
+
+impl Drop for LocalClient {
+    fn drop(&mut self) {
+        self.sender.take();
+        if let Some(serving) = self.serving.take() {
+            let _ = serving.join();
+        }
     }
 }
 
@@ -401,7 +484,13 @@ fn serve_connection<E: QueryEngine>(
         };
 
         let (response, next) = match serde_json::from_str::<Request>(&frame) {
-            Ok(request) => handle(state, shared, &mut pending, &mut next_sync_id, request),
+            Ok(request) => handle(
+                state,
+                &shared.tests,
+                &mut pending,
+                &mut next_sync_id,
+                request,
+            ),
             // Line framing resynchronises on its own, so a garbled request costs one response,
             // not the connection.
             Err(error) => (
@@ -701,7 +790,7 @@ fn next_source_view(current: SourceView) -> Result<SourceView, String> {
 /// recomputable, so the next query rebuilds them.
 fn handle<E: QueryEngine>(
     state: &Mutex<DaemonState<E>>,
-    shared: &Shared,
+    tests: &crate::testing::ConformanceCoordinator,
     pending: &mut Option<PendingSync>,
     next_sync_id: &mut u64,
     request: Request,
@@ -757,13 +846,13 @@ fn handle<E: QueryEngine>(
             source_view,
         } => handle_run(state, path, project_root, args, node, steps, source_view),
         Request::TestInventory { root } => {
-            run_without_engine_lock(|| match shared.tests.inventory(&root) {
+            run_without_engine_lock(|| match tests.inventory(&root) {
                 Ok(tests) => Response::TestInventory(tests),
                 Err(message) => Response::Error { message },
             })
         }
         Request::TestBatch { root, mode, ids } => {
-            run_without_engine_lock(|| match shared.tests.batch(&root, mode, ids) {
+            run_without_engine_lock(|| match tests.batch(&root, mode, ids) {
                 Ok(summary) => Response::Tested(summary),
                 Err(message) => Response::Error { message },
             })
@@ -777,10 +866,7 @@ fn handle<E: QueryEngine>(
         } => run_without_engine_lock(|| {
             #[cfg(test)]
             crate::dispatch::wait_for_test_gate(&root);
-            match shared
-                .tests
-                .run(&root, mode, changed_root, changed_paths, previously_failed)
-            {
+            match tests.run(&root, mode, changed_root, changed_paths, previously_failed) {
                 Ok(summary) => Response::Tested(summary),
                 Err(message) => Response::Error { message },
             }

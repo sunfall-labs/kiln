@@ -70,5 +70,5 @@ pub const SERVE_STACK_BYTES: usize = 16 * 1024 * 1024;
 pub use client::Client;
 pub use framing::MAX_MESSAGE_BYTES;
 pub use output::{default_native_output, default_native_shared_output};
-pub use server::{Daemon, DaemonError, ShutdownHandle};
+pub use server::{Daemon, DaemonError, LocalClient, ShutdownHandle};
 pub use socket::{build_identity, socket_path};

@@ -4,103 +4,43 @@
 //! cold, or holding someone else's edits, so every command can be run against a database that
 //! is created and destroyed by the invocation itself.
 //!
-//! The engine runs in this process, but it is still reached over a private socket in a private
-//! temporary directory rather than by calling the dispatcher directly, because `kiln-daemon`
-//! does not export one: `dispatch` is crate-private and `MemoEngine` is not re-exported, so a
-//! direct in-process call is not available to a client that only depends on `kiln-daemon`. The
-//! loopback costs a few microseconds per request against a check that takes milliseconds, and
-//! it has the compensating virtue that one-shot and daemon mode exercise exactly the same
-//! code path. If `kiln-daemon` later exports its dispatcher, this type shrinks to a wrapper
-//! around it and nothing else in the CLI changes.
+//! `kiln-daemon::LocalClient` calls the same request handler as the socket server over a private
+//! in-process channel. It keeps the handler's full-size stack, source-view transactions and peer
+//! connections without requiring a Unix socket or leaving a directory behind.
 
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread::JoinHandle;
-
-use kiln_daemon::{Daemon, ShutdownHandle};
+use kiln_daemon::LocalClient;
 use kiln_proto::{Request, Response};
 
-use crate::backend::Backend;
-use crate::client::DaemonClient;
+use crate::backend::{Backend, interpret};
 use crate::error::{Error, Result};
 
 pub struct OneShot {
-    client: DaemonClient,
-    socket: PathBuf,
-    stop: ShutdownHandle,
-    serving: Option<JoinHandle<()>>,
-    dir: PathBuf,
+    client: LocalClient,
 }
-
-static NEXT_ONE_SHOT: AtomicU64 = AtomicU64::new(0);
 
 impl OneShot {
     pub fn start() -> Result<OneShot> {
-        // PID separates processes; the serial separates concurrent sessions in this process.
-        // The latter matters to embedders and to parallel tests, where PID alone made one session
-        // delete another's live socket directory.
-        let serial = NEXT_ONE_SHOT.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("kiln-1s-{}-{serial}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let socket = dir.join("daemon.sock");
-
-        let daemon = Daemon::bind(&socket).map_err(|source| {
-            Error::Daemon(format!("cannot start an in-process engine: {source}"))
-        })?;
-        let stop = daemon.shutdown_handle();
-        // Built rather than `spawn`ed, for the stack: a default 2 MiB thread overflows on an
-        // ordinary project, and a stack overflow aborts the process rather than reporting.
-        // See `kiln_daemon::SERVE_STACK_BYTES`.
-        let serving = std::thread::Builder::new()
-            .stack_size(kiln_daemon::SERVE_STACK_BYTES)
-            .spawn(move || daemon.serve())
-            .map_err(|source| {
-                Error::Daemon(format!("cannot start an in-process engine: {source}"))
-            })?;
-
-        // `bind` already returned, so the socket is accepting: no polling needed here.
-        match DaemonClient::connect(&socket).and_then(|mut client| {
-            client.handshake()?;
-            Ok(client)
-        }) {
-            Ok(client) => Ok(OneShot {
-                client,
-                socket,
-                stop,
-                serving: Some(serving),
-                dir,
-            }),
-            Err(error) => {
-                stop.shutdown();
-                let _ = serving.join();
-                let _ = std::fs::remove_dir_all(&dir);
-                Err(error)
-            }
-        }
+        let client = LocalClient::new()
+            .map_err(|source| Error::io("cannot start an in-process engine", source))?;
+        Ok(OneShot { client })
     }
 }
 
 impl Backend for OneShot {
     fn peer(&self) -> Result<Box<dyn Backend>> {
-        let mut peer = DaemonClient::connect(&self.socket)?;
-        peer.handshake()?;
-        Ok(Box::new(peer))
+        let peer = self
+            .client
+            .peer()
+            .map_err(|source| Error::io("cannot open an in-process peer", source))?;
+        Ok(Box::new(OneShot { client: peer }))
     }
 
     fn request(&mut self, request: Request) -> Result<Response> {
-        self.client.request(request)
-    }
-}
-
-impl Drop for OneShot {
-    fn drop(&mut self) {
-        self.stop.shutdown();
-        if let Some(serving) = self.serving.take() {
-            let _ = serving.join();
-        }
-        // The engine was private to this invocation; leaving its socket directory behind
-        // would turn "reproducible" into "accumulates litter in $TMPDIR".
-        let _ = std::fs::remove_dir_all(&self.dir);
+        let response = self
+            .client
+            .request(request)
+            .map_err(|source| Error::io("cannot reach the in-process engine", source))?;
+        interpret(response)
     }
 }
 
@@ -113,6 +53,7 @@ mod tests {
         NodeModuleFormat, NodeRequestKind, NodeSourceFormat, PackageResolution, ResolutionMap,
         SourceHash, StepBudget, source_digest,
     };
+    use std::path::PathBuf;
 
     // These tests exercise native behavior from fresh project roots. Their assertions cover
     // runtime behavior, not cache misses, so sharing content-addressed native artifacts avoids
@@ -135,12 +76,38 @@ mod tests {
     fn share_native_semantic_cache(_fixture: &std::path::Path) {}
 
     #[test]
-    fn concurrent_one_shot_sessions_have_private_socket_directories() {
-        let first = OneShot::start().expect("start first engine");
-        let second = OneShot::start().expect("start second engine");
-        assert_ne!(first.dir, second.dir);
-        assert!(first.socket.exists());
-        assert!(second.socket.exists());
+    fn concurrent_one_shot_sessions_have_private_engines() {
+        let mut first = OneShot::start().expect("start first engine");
+        let mut second = OneShot::start().expect("start second engine");
+        let Response::Stats(initial) = first.request(Request::Stats).expect("first stats") else {
+            panic!("expected stats");
+        };
+        assert_eq!(initial.revision, 0);
+        let Response::SourceUpdated { .. } = first
+            .request(Request::SetSource {
+                path: "a.js".into(),
+                text: "export const a = 1;".into(),
+                source_view: kiln_proto::SourceView(0),
+            })
+            .expect("set source")
+        else {
+            panic!("expected source update");
+        };
+        let Response::Stats(changed) = first.request(Request::Stats).expect("first stats") else {
+            panic!("expected stats");
+        };
+        let Response::Stats(independent) = second.request(Request::Stats).expect("second stats")
+        else {
+            panic!("expected stats");
+        };
+        assert!(changed.revision > 0);
+        assert_eq!(independent.revision, 0);
+
+        let mut peer = first.peer().expect("open peer");
+        let Response::Stats(shared) = peer.request(Request::Stats).expect("peer stats") else {
+            panic!("expected stats");
+        };
+        assert_eq!(shared.revision, changed.revision);
     }
 
     #[test]
@@ -152,7 +119,7 @@ mod tests {
         let source = fixture.join("a.js");
         std::fs::write(&source, "export const a = 1;\n").expect("write source");
 
-        let dir = {
+        {
             let mut session = OneShot::start().expect("start an in-process engine");
             let out = commands::check(&mut session, &source, &fixture, false)
                 .expect("check")
@@ -160,14 +127,12 @@ mod tests {
             assert!(out.contains("a.js  r"), "{out}");
             // A fresh database has computed nothing before, so this check is all new work.
             assert!(out.contains("recomputed      parse 1"), "{out}");
-            session.dir.clone()
+        }
+        let mut fresh = OneShot::start().expect("start a fresh engine");
+        let Response::Stats(stats) = fresh.request(Request::Stats).expect("fresh stats") else {
+            panic!("expected stats");
         };
-
-        assert!(
-            !dir.exists(),
-            "{} should have been cleaned up",
-            dir.display()
-        );
+        assert_eq!(stats.revision, 0);
         let _ = std::fs::remove_dir_all(&fixture);
     }
 
