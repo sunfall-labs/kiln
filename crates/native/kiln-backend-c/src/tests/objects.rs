@@ -1835,12 +1835,71 @@ int main(void) {
     free(heap_b.large_table.table);
     return 0;
 }
-
 "#;
     let run = run_with_main(&generated, wrapper, "gc-splice-test");
     assert!(
         run.status.success(),
         "executable gc block sublist splice test failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_gc_chunk_handoff_validates_membership_and_preserves_payload() {
+    let program = program(vec![], vec![Instruction::Return], 0);
+    let generated = emit(&program).expect("program emits");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap sender, receiver;
+    kiln_c99_par_arena arena;
+    kiln_nursery_chunk *first, *second;
+    kiln_nursery_chunk *batch[2];
+    void *first_value, *second_value;
+    kiln_c99_gc_heap_init(&sender);
+    kiln_c99_gc_heap_init(&receiver);
+    memset(&arena, 0, sizeof arena);
+    arena.heap = &sender;
+    arena.budget = 2 * sender.nursery.capacity;
+    first_value = kiln_c99_par_alloc(&arena, KILN_GC_BYTES, 8);
+    if (first_value == NULL) return 1;
+    memset(first_value, 0x51, 8);
+    first = arena.current;
+    kiln_c99_par_arena_seal(&arena);
+    second_value = kiln_c99_par_alloc(&arena, KILN_GC_BYTES, 8);
+    if (second_value == NULL) return 2;
+    memset(second_value, 0x52, 8);
+    second = arena.current;
+    kiln_c99_par_arena_seal(&arena);
+    second->next = first;
+    if (!kiln_c99_heap_adopt_chunks(&sender, second)) return 3;
+    batch[0] = first;
+    batch[1] = first;
+    if (kiln_c99_heap_move_chunks(&sender, &receiver, batch, 2)) return 4;
+    if (sender.count != 2 || receiver.count != 0) return 5;
+    batch[1] = (kiln_nursery_chunk *)sender.nursery.region;
+    if (kiln_c99_heap_move_chunks(&sender, &receiver, batch, 2)) return 6;
+    if (sender.count != 2 || receiver.count != 0) return 7;
+    batch[1] = second;
+    if (!kiln_c99_heap_move_chunks(&sender, &receiver, batch, 2)) return 8;
+    if (sender.count != 0 || receiver.count != 2 || sender.nursery.full != NULL) return 9;
+    if (receiver.nursery.full_bytes != 2 * (size_t)(second->limit - second->base)) return 10;
+    if (kiln_c99_gc_lookup(&sender, first_value) != NULL ||
+        kiln_c99_gc_lookup(&sender, second_value) != NULL) return 11;
+    if (kiln_c99_gc_lookup(&receiver, first_value) == NULL ||
+        kiln_c99_gc_lookup(&receiver, second_value) == NULL) return 12;
+    if (((unsigned char *)first_value)[0] != 0x51 ||
+        ((unsigned char *)second_value)[0] != 0x52) return 13;
+    if (kiln_c99_heap_move_chunks(&sender, &receiver, batch, 2)) return 14;
+    kiln_c99_nursery_destroy(&sender.nursery);
+    kiln_c99_nursery_destroy(&receiver.nursery);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "gc-chunk-handoff");
+    assert!(
+        run.status.success(),
+        "exclusive chunk handoff failed ({:?}):\n{}",
         run.status.code(),
         String::from_utf8_lossy(&run.stderr)
     );

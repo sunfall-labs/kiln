@@ -2157,6 +2157,7 @@ static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
 static kiln_nursery_chunk *kiln_c99_arena_chunk(size_t capacity, size_t bitmap_words) {
 static void kiln_c99_arena_chunks_free(kiln_nursery_chunk *chunks) {
 static int kiln_c99_heap_adopt_chunks(kiln_gc_heap *heap, kiln_nursery_chunk *chunks) {
+static int kiln_c99_heap_move_chunks(kiln_gc_heap *from, kiln_gc_heap *to,
 struct kiln_c99_par_arena {
 static size_t kiln_c99_par_arena_budget_bytes;
 static size_t kiln_c99_par_arena_budget(void) {
@@ -2560,6 +2561,7 @@ static int kiln_c99_global_object(kiln_value *out) {
 static _Thread_local int kiln_c99_kiln_shared_hooks_active;
 static int kiln_c99_kiln_shared_hook_read(kiln_value target, const kiln_string *key,
 int kiln_realm_kiln_shared_hooks(int begin) {
+int kiln_realm_kiln_extensions_on(void) {
 static int kiln_c99_global_object_val(kiln_val *out) {
 int kiln_c99_bootstrap_global(kiln_value *out, const char *name, size_t name_len) {
 static int kiln_c99_global_binding(kiln_value *out, const char *name, size_t name_len, int *found) {
@@ -3024,6 +3026,10 @@ int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code
 #define KILN_C99_WORKER_OP_SIGNAL_UNHANDLED 18
 #define KILN_C99_WORKER_OP_KILL 19
 #define KILN_C99_WORKER_OP_POST_PLAIN 21
+#define KILN_C99_WORKER_OP_ACTOR_REGISTER 22
+#define KILN_C99_WORKER_OP_ACTOR_LOOKUP 23
+#define KILN_C99_WORKER_OP_ACTOR_CLOSE 24
+#define KILN_C99_WORKER_OP_ACTOR_REQUEST_ID 25
 static uint64_t kiln_c99_worker_word(const kiln_value *args, size_t argc, size_t at) {
 static int kiln_c99_worker_tokens(kiln_value list, int copy, kiln_worker_token **out,
 static int kiln_c99_worker_value(kiln_worker_token *token, kiln_value *out) {

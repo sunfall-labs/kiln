@@ -3084,6 +3084,110 @@ static int kiln_c99_heap_adopt_chunks(kiln_gc_heap *heap, kiln_nursery_chunk *ch
     return 1;
 }
 
+/* The inverse of adoption for chunks whose entire contents have already passed an ownership
+ * proof. `chunks` is an array because `next` still links every candidate into the sender's
+ * `full` or `promoted` list. Validate the complete batch and reserve the receiver's region set
+ * before changing either heap. In particular, never transfer the current bump chunk: another
+ * allocation in the sender could otherwise write into memory the receiver now owns.
+ *
+ * This is only a storage primitive. A caller must additionally prove that every allocated block
+ * in these chunks belongs to one closed graph, that no sender root or outside object reaches it,
+ * and that no block has realm-local side ownership (weak-list membership, external-byte balance,
+ * provider/host handle, finalizer, or mutable shape). It must publish the destination root with
+ * no mutator or collection between proof and this call. A TypeScript ticket is not that proof.
+ */
+static int kiln_c99_heap_move_chunks(kiln_gc_heap *from, kiln_gc_heap *to,
+                                     kiln_nursery_chunk *const *chunks, size_t count) {
+    size_t index;
+    size_t moved_count = 0;
+    size_t moved_bytes = 0;
+    size_t moved_filled = 0;
+    size_t sender_full_bytes = 0;
+    if (from == NULL || to == NULL || from == to || (count != 0 && chunks == NULL) ||
+        from->collecting || to->collecting || from->parallel_paused || to->parallel_paused ||
+        from->nursery.capacity != to->nursery.capacity ||
+        from->nursery.bitmap_words != to->nursery.bitmap_words) return 0;
+    if (count == 0) return 1;
+    if (count > SIZE_MAX - to->nursery.regions.count) return 0;
+    for (index = 0; index < count; ++index) {
+        kiln_nursery_chunk *chunk = chunks[index];
+        kiln_nursery_chunk *it;
+        size_t prior;
+        int found = 0;
+        if (chunk == NULL || (char *)chunk == from->nursery.region ||
+            !kiln_c99_gc_ptrset_contains(&from->nursery.regions, chunk) ||
+            kiln_c99_gc_ptrset_contains(&to->nursery.regions, chunk) ||
+            chunk->bitmap_words != from->nursery.bitmap_words ||
+            chunk->limit < chunk->base ||
+            chunk->limit > (char *)chunk + from->nursery.capacity) return 0;
+        for (it = from->nursery.full; it != NULL; it = it->next) {
+            if (it == chunk) { found = 1; break; }
+        }
+        if (found) {
+            size_t filled = (size_t)(chunk->limit - chunk->base);
+            if (sender_full_bytes > SIZE_MAX - filled) return 0;
+            sender_full_bytes += filled;
+        }
+        if (!found) {
+            for (it = from->nursery.promoted; it != NULL; it = it->next) {
+                if (it == chunk) { found = 1; break; }
+            }
+        }
+        if (!found) return 0;
+        for (prior = 0; prior < index; ++prior) if (chunks[prior] == chunk) return 0;
+        if (moved_count > SIZE_MAX - chunk->alloc_count ||
+            moved_bytes > SIZE_MAX - chunk->alloc_bytes ||
+            moved_filled > SIZE_MAX - (size_t)(chunk->limit - chunk->base)) return 0;
+        moved_count += chunk->alloc_count;
+        moved_bytes += chunk->alloc_bytes;
+        moved_filled += (size_t)(chunk->limit - chunk->base);
+    }
+    if (moved_count > from->count || moved_bytes > from->bytes ||
+        sender_full_bytes > from->nursery.full_bytes ||
+        moved_count > SIZE_MAX - to->count || moved_bytes > SIZE_MAX - to->bytes ||
+        moved_bytes > SIZE_MAX - to->since_collection ||
+        moved_filled > SIZE_MAX - to->nursery.full_bytes ||
+        (to->nursery.regions.count + count) > SIZE_MAX / 2) return 0;
+    if ((to->nursery.regions.count + count) * 2 > to->nursery.regions.capacity &&
+        kiln_c99_gc_ptrset_grow(&to->nursery.regions, to->nursery.regions.count + count) !=
+            KILN_C99_OK) return 0;
+
+    /* All validation and possible allocation have completed. The sender and receiver must both
+     * be stopped at the caller's safepoint until the destination root is published. */
+    for (index = 0; index < count; ++index) {
+        kiln_nursery_chunk *chunk = chunks[index];
+        kiln_nursery_chunk **link = &from->nursery.full;
+        int was_full = 1;
+        while (*link != NULL && *link != chunk) link = &(*link)->next;
+        if (*link == NULL) {
+            link = &from->nursery.promoted;
+            was_full = 0;
+            while (*link != chunk) link = &(*link)->next;
+        }
+        *link = chunk->next;
+        if (was_full) from->nursery.full_bytes -= (size_t)(chunk->limit - chunk->base);
+        kiln_c99_gc_ptrset_remove(&from->nursery.regions, chunk);
+        (void)kiln_c99_gc_ptrset_insert(&to->nursery.regions, chunk);
+        if (to->nursery.lo == NULL || (char *)chunk < to->nursery.lo)
+            to->nursery.lo = (char *)chunk;
+        if (to->nursery.hi == NULL || (char *)chunk + to->nursery.capacity > to->nursery.hi)
+            to->nursery.hi = (char *)chunk + to->nursery.capacity;
+        kiln_c99_gc_bound(to, chunk, to->nursery.capacity);
+        chunk->mark_epoch = 0;
+        chunk->marked_count = 0;
+        chunk->marked_bytes = 0;
+        chunk->next = to->nursery.full;
+        to->nursery.full = chunk;
+    }
+    from->count -= moved_count;
+    from->bytes -= moved_bytes;
+    to->count += moved_count;
+    to->bytes += moved_bytes;
+    to->since_collection += moved_bytes;
+    to->nursery.full_bytes += moved_filled;
+    return 1;
+}
+
 /* ---- Worker arenas (ADR 0069; parallel issue 08) --------------------------------------------
  *
  * A tier-3 callback allocates: an object literal, `{ ...r, total }`, an array literal, a string
