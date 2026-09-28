@@ -4021,6 +4021,7 @@ static int kiln_c99_graph_receiver_move_and_publish(kiln_gc_heap *from, kiln_gc_
     kiln_nursery_chunk *const *chunks, size_t count, kiln_value root, uint64_t reservation_id) {
     kiln_c99_realm_state *realm;
     const kiln_gc_block *block;
+    const void *payload;
     uint32_t kind;
     if (from == NULL || to == NULL || chunks == NULL || count == 0 || reservation_id == 0)
         return 0;
@@ -4032,15 +4033,23 @@ static int kiln_c99_graph_receiver_move_and_publish(kiln_gc_heap *from, kiln_gc_
         realm->graph_inbox_region_count != to->nursery.regions.count ||
         realm->graph_inbox_epoch != to->epoch ||
         root.bits == 0 || !kiln_c99_graph_value_in_batch(from, chunks, count, &root)) return 0;
-    block = kiln_c99_gc_lookup(from, (const void *)(uintptr_t)root.bits);
-    if (block == NULL || (const void *)(block + 1) != (const void *)(uintptr_t)root.bits)
-        return 0;
+    block = kiln_c99_gc_lookup_interior(from, (uintptr_t)root.bits);
+    if (block == NULL) return 0;
+    payload = block + 1;
     kind = block->kind & KILN_GC_KIND_MASK;
-    if (!((root.tag == KILN_VALUE_CELL && kind == KILN_GC_CELL) ||
-          (root.tag == KILN_VALUE_STRING &&
-           (kind == KILN_GC_STRING || kind == KILN_GC_SLICED_STRING)))) return 0;
-    if (!kiln_c99_graph_candidate_closed(from, chunks, count,
-                                          (const void *)(uintptr_t)root.bits)) return 0;
+    if (root.tag == KILN_VALUE_CELL) {
+        if (kind != KILN_GC_CELL || payload != (const void *)(uintptr_t)root.bits) return 0;
+    } else if (root.tag == KILN_VALUE_STRING) {
+        const kiln_string *string = (const kiln_string *)payload;
+        /* Boundary strings name their bytes, not the string header. A slice's bytes name its
+         * parent, so admit only an inline root until slice identity has a separate mover. */
+        if (kind != KILN_GC_STRING || !kiln_c99_graph_inline_string(block) ||
+            string->data != (const void *)(uintptr_t)root.bits ||
+            string->unit_len != root.len) return 0;
+    } else {
+        return 0;
+    }
+    if (!kiln_c99_graph_candidate_closed(from, chunks, count, payload)) return 0;
     if (!kiln_c99_heap_move_chunks(from, to, chunks, count)) return 0;
     realm->graph_inbox_root = root;
     realm->graph_inbox_state = KILN_C99_GRAPH_INBOX_PUBLISHED;

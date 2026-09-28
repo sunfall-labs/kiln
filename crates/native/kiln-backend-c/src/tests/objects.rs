@@ -2185,6 +2185,64 @@ int main(void) {
 }
 
 #[test]
+fn executable_graph_receiver_accepts_an_inline_string_data_pointer() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap sender, receiver;
+    kiln_c99_par_arena candidate;
+    kiln_nursery_chunk *batch[1], *chunk;
+    kiln_string *string;
+    kiln_value root, wrong;
+    uint64_t id = 0;
+    kiln_c99_gc_heap_init(&sender);
+    kiln_c99_gc_heap_init(&receiver);
+    if (!kiln_c99_graph_candidate_open(&candidate, &sender,
+                                        sender.nursery.capacity)) return 1;
+    string = (kiln_string *)kiln_c99_par_alloc(&candidate, KILN_GC_STRING,
+                                               sizeof *string + 4);
+    if (string == NULL) return 2;
+    string->unit_len = 4;
+    string->flags = KILN_STRING_LATIN1;
+    string->data = string + 1;
+    memcpy((void *)string->data, "root", 4);
+    kiln_c99_par_arena_seal(&candidate);
+    chunk = candidate.filled;
+    if (chunk == NULL || !kiln_c99_heap_adopt_chunks(&sender, chunk)) return 3;
+    batch[0] = chunk;
+    root = kiln_c99_value(KILN_VALUE_STRING, 0, string->data, string->unit_len);
+    if (!kiln_c99_graph_receiver_reserve(&receiver, 1, &id)) return 4;
+    wrong = root;
+    wrong.len--;
+    if (kiln_c99_graph_receiver_move_and_publish(&sender, &receiver, batch, 1, wrong, id))
+        return 5;
+    wrong = root;
+    wrong.bits = (uint64_t)(uintptr_t)string;
+    if (kiln_c99_graph_receiver_move_and_publish(&sender, &receiver, batch, 1, wrong, id))
+        return 6;
+    if (!kiln_c99_graph_receiver_move_and_publish(&sender, &receiver, batch, 1, root, id))
+        return 7;
+    if (sender.count != 0 || receiver.count != 1 ||
+        receiver.realm.graph_inbox_root.bits != root.bits ||
+        memcmp(receiver.realm.graph_inbox_root.ptr, "root", 4) != 0) return 8;
+    kiln_c99_gc_mark_realm(&receiver);
+    if (((kiln_gc_block *)string - 1)->mark != receiver.epoch) return 9;
+    kiln_c99_nursery_destroy(&sender.nursery);
+    kiln_c99_nursery_destroy(&receiver.nursery);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "graph-receiver-inline-string");
+    assert!(
+        run.status.success(),
+        "graph receiver string root check failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_graph_candidate_closure_rejects_external_and_unreachable_edges() {
     let program = program(vec![], vec![Instruction::Return], 0);
     let generated = emit(&program).expect("program emits");
