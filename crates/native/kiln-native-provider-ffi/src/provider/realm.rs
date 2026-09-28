@@ -23,7 +23,7 @@ use std::hash::{Hash, Hasher};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::task::Waker;
 use std::time::{Duration, Instant};
@@ -1418,6 +1418,7 @@ std::thread_local! {
     static SCHEDULED_WAKER: RefCell<Option<Waker>> = const { RefCell::new(None) };
     /// The same lane pool that runs this generated turn also accepts parallel chunks it calls.
     static SCHEDULED_POOL: RefCell<Option<Weak<PinnedTurnScheduler>>> = const { RefCell::new(None) };
+    static SCHEDULED_GRAPH_COORDINATOR: RefCell<Option<std::sync::mpsc::Sender<ScheduledEvent>>> = const { RefCell::new(None) };
 }
 
 pub(crate) fn current_scheduler() -> Option<Arc<PinnedTurnScheduler>> {
@@ -1570,6 +1571,10 @@ fn attach_realm(handle: u64, detached: DetachedRealm) {
 
 fn active_realm() -> Option<Rc<NativeRealm>> {
     ACTIVE_REALM_RC.with(|slot| slot.borrow().clone())
+}
+
+pub(crate) fn active_realm_id() -> u64 {
+    ACTIVE_REALM.with(Cell::get)
 }
 
 /// Wake the active realm's drive if it is parked: a callback run inside a connection task has
@@ -4890,8 +4895,22 @@ pub extern "C" fn kiln_realm_destroy(handle: u64) -> i32 {
                 INVALID_ARGUMENT
             }
         });
-        if status == 0 && let Ok(mut registry) = scheduled_realms().lock() {
+        if status == 0
+            && let Ok(mut registry) = scheduled_realms().lock()
+        {
             registry.remove(&handle);
+        }
+        if status == 0
+            && let Ok(mut requests) = pending_graph_requests().lock()
+        {
+            requests.retain(|(sender, _), request| {
+                if *sender == handle {
+                    request.store(GRAPH_REQUEST_CANCELLED, Ordering::Release);
+                    false
+                } else {
+                    true
+                }
+            });
         }
         status
     })
@@ -4922,12 +4941,128 @@ type ScheduledIdentify = unsafe extern "C" fn(*mut c_void) -> u64;
 type ScheduledAdvance = unsafe extern "C" fn(*mut c_void, *mut u64) -> i32;
 type ScheduledFinish = unsafe extern "C" fn(*mut c_void) -> i32;
 
+const GRAPH_REQUEST_PENDING: u8 = 0;
+const GRAPH_REQUEST_REFUSED: u8 = 1;
+const GRAPH_REQUEST_CANCELLED: u8 = 2;
+const GRAPH_REQUEST_REFUSED_AFTER_PAUSE: u8 = 3;
+
+pub(crate) enum ScheduledEvent {
+    Complete(usize, i32),
+    GraphRequest {
+        sender: u64,
+        receiver: u64,
+        status: Arc<AtomicU8>,
+    },
+}
+
+pub(crate) type GraphCoordinatorSender = std::sync::mpsc::Sender<ScheduledEvent>;
+
+pub(crate) fn current_graph_coordinator() -> Option<GraphCoordinatorSender> {
+    SCHEDULED_GRAPH_COORDINATOR.with(|slot| slot.borrow().clone())
+}
+
+pub(crate) struct ScheduledGraphCoordinatorGuard(Option<GraphCoordinatorSender>);
+
+impl ScheduledGraphCoordinatorGuard {
+    pub(crate) fn enter(sender: GraphCoordinatorSender) -> Self {
+        Self(SCHEDULED_GRAPH_COORDINATOR.with(|slot| slot.replace(Some(sender))))
+    }
+}
+
+impl Drop for ScheduledGraphCoordinatorGuard {
+    fn drop(&mut self) {
+        SCHEDULED_GRAPH_COORDINATOR.with(|slot| {
+            slot.replace(self.0.take());
+        });
+    }
+}
+
+type PendingGraphRequests = HashMap<(u64, u64), Arc<AtomicU8>>;
+static PENDING_GRAPH_REQUESTS: OnceLock<Mutex<PendingGraphRequests>> = OnceLock::new();
+
+fn pending_graph_requests() -> &'static Mutex<PendingGraphRequests> {
+    PENDING_GRAPH_REQUESTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Called from the sender's generated grant callback. Only IDs cross to the coordinator; the
+/// C heap keeps the handle root in its own pending request until the sender rolls it back.
+pub(crate) fn submit_graph_claim_request(receiver: u64, request: u64) -> bool {
+    let sender = active_realm_id();
+    if sender == 0 || receiver == 0 || request == 0 {
+        return false;
+    }
+    let Some(coordinator) = SCHEDULED_GRAPH_COORDINATOR.with(|slot| slot.borrow().clone()) else {
+        return false;
+    };
+    let Ok(mut requests) = pending_graph_requests().lock() else {
+        return false;
+    };
+    if requests.contains_key(&(sender, request)) {
+        return false;
+    }
+    let status = Arc::new(AtomicU8::new(GRAPH_REQUEST_PENDING));
+    requests.insert((sender, request), Arc::clone(&status));
+    if coordinator
+        .send(ScheduledEvent::GraphRequest {
+            sender,
+            receiver,
+            status,
+        })
+        .is_err()
+    {
+        requests.remove(&(sender, request));
+        return false;
+    }
+    true
+}
+
+/// Poll or cancel only the active sender's matching opaque request.
+pub(crate) fn graph_claim_request_status(request: u64) -> u8 {
+    let sender = active_realm_id();
+    pending_graph_requests()
+        .lock()
+        .ok()
+        .and_then(|requests| requests.get(&(sender, request)).cloned())
+        .map_or(GRAPH_REQUEST_CANCELLED, |status| {
+            status.load(Ordering::Acquire)
+        })
+}
+
+pub(crate) fn graph_claim_request_remove(request: u64) {
+    let sender = active_realm_id();
+    if let Ok(mut requests) = pending_graph_requests().lock()
+        && let Some(status) = requests.remove(&(sender, request))
+    {
+        status.store(GRAPH_REQUEST_CANCELLED, Ordering::Release);
+    }
+}
+
+fn refuse_graph_claim_request(sender: u64, receiver: u64, status: Arc<AtomicU8>) {
+    if status.load(Ordering::Acquire) != GRAPH_REQUEST_PENDING {
+        return;
+    }
+    let paused = if let Ok(claim) = claim_scheduled_realm_pair(sender, receiver) {
+        // A successful wait proves only that both bodies stopped at turn boundaries. Native
+        // and JavaScript inbox publication are still incomplete, so every request is refused.
+        claim.wait(Duration::from_secs(1))
+    } else {
+        false
+    };
+    status.store(
+        if paused {
+            GRAPH_REQUEST_REFUSED_AFTER_PAUSE
+        } else {
+            GRAPH_REQUEST_REFUSED
+        },
+        Ordering::Release,
+    );
+}
+
 /// Host realm IDs are process-unique; scheduler IDs are local to one scheduler. This registry
 /// connects them without moving or borrowing the lane-local `Rc<NativeRealm>` across threads.
 /// Only migrating sessions register: dedicated-thread and legacy pinned launchers have no
 /// verified pair-pause target and must refuse a graph request.
 struct ScheduledRealmTarget {
-    #[allow(dead_code)] // Used when the graph coordinator begins claiming mapped realms.
     scheduler: Weak<PinnedTurnScheduler>,
     target: TurnPauseTarget,
 }
@@ -4938,13 +5073,13 @@ fn scheduled_realms() -> &'static Mutex<HashMap<u64, ScheduledRealmTarget>> {
     SCHEDULED_REALMS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-struct ScheduledRealmRegistration {
+pub(crate) struct ScheduledRealmRegistration {
     realm: u64,
     target_id: u64,
 }
 
 impl ScheduledRealmRegistration {
-    fn new(
+    pub(crate) fn new(
         realm_handle: u64,
         scheduler: Weak<PinnedTurnScheduler>,
         target: TurnPauseTarget,
@@ -4978,7 +5113,6 @@ impl Drop for ScheduledRealmRegistration {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Admission remains disabled until the graph proof is complete.
 pub(crate) enum ScheduledRealmClaimError {
     UnknownRealm,
     DifferentScheduler,
@@ -4987,7 +5121,6 @@ pub(crate) enum ScheduledRealmClaimError {
 
 /// Resolve only opaque provider realm IDs. The returned claim pauses both scheduler bodies;
 /// it is not a graph ownership certificate and carries no C heap or realm pointer.
-#[allow(dead_code)] // The actor request has not yet reached a sender-turn safepoint.
 pub(crate) fn claim_scheduled_realm_pair(
     sender: u64,
     receiver: u64,
@@ -5029,7 +5162,7 @@ struct ScheduledRun {
     registration: Option<ScheduledRealmRegistration>,
     advance: ScheduledAdvance,
     finish: ScheduledFinish,
-    result: std::sync::mpsc::Sender<(usize, i32)>,
+    result: std::sync::mpsc::Sender<ScheduledEvent>,
     index: usize,
 }
 
@@ -5075,9 +5208,10 @@ impl ScheduledRun {
             // remains live from its last advance, even if an earlier turn ran on another lane.
             unsafe { (self.finish)(session) }
         };
-        let _ = self
-            .result
-            .send((self.index, override_status.unwrap_or(status)));
+        let _ = self.result.send(ScheduledEvent::Complete(
+            self.index,
+            override_status.unwrap_or(status),
+        ));
     }
 }
 
@@ -5088,6 +5222,7 @@ impl PinnedTurn for ScheduledRun {
 
     fn run_turn_on(&mut self, waker: &Waker, lane: usize) -> TurnOutcome {
         let _pool = ScheduledPoolGuard::enter(self.scheduler.clone());
+        let _graph_coordinator = ScheduledGraphCoordinatorGuard::enter(self.result.clone());
         if self.session.is_null() {
             self.complete(Some(RUNTIME_ERROR));
             return TurnOutcome::Done;
@@ -5208,12 +5343,23 @@ pub unsafe extern "C" fn kiln_realm_run_scheduled(
         drop(sender);
         let mut received = 0;
         while received < count {
-            let Ok((index, status)) = receiver.recv() else {
+            let Ok(event) = receiver.recv() else {
                 break;
             };
-            // SAFETY: `index` originated in the bounded spawn loop above.
-            unsafe { statuses.add(index).write(status) };
-            received += 1;
+            match event {
+                ScheduledEvent::Complete(index, status) => {
+                    // SAFETY: `index` originated in the bounded spawn loop above.
+                    unsafe { statuses.add(index).write(status) };
+                    received += 1;
+                }
+                ScheduledEvent::GraphRequest {
+                    sender,
+                    receiver,
+                    status,
+                } => {
+                    refuse_graph_claim_request(sender, receiver, status);
+                }
+            }
         }
         drop(handles);
         if received == count { 0 } else { RUNTIME_ERROR }
@@ -5313,12 +5459,23 @@ pub unsafe extern "C" fn kiln_realm_run_migrating(
         drop(sender);
         let mut received = 0;
         while received < count {
-            let Ok((index, status)) = receiver.recv() else {
+            let Ok(event) = receiver.recv() else {
                 break;
             };
-            // SAFETY: `index` originated in the bounded spawn loop above.
-            unsafe { statuses.add(index).write(status) };
-            received += 1;
+            match event {
+                ScheduledEvent::Complete(index, status) => {
+                    // SAFETY: `index` originated in the bounded spawn loop above.
+                    unsafe { statuses.add(index).write(status) };
+                    received += 1;
+                }
+                ScheduledEvent::GraphRequest {
+                    sender,
+                    receiver,
+                    status,
+                } => {
+                    refuse_graph_claim_request(sender, receiver, status);
+                }
+            }
         }
         drop(handles);
         if received == count { 0 } else { RUNTIME_ERROR }

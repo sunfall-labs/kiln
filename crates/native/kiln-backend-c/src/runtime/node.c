@@ -2278,6 +2278,10 @@ int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code
 #define KILN_C99_WORKER_OP_ACTOR_ISOLATED_HAS 27
 #define KILN_C99_WORKER_OP_ACTOR_CANDIDATE_BEGIN 28
 #define KILN_C99_WORKER_OP_ACTOR_CANDIDATE_END 29
+#define KILN_C99_WORKER_OP_ACTOR_GRAPH_REQUEST 30
+#define KILN_C99_WORKER_OP_ACTOR_GRAPH_STATUS 31
+#define KILN_C99_WORKER_OP_ACTOR_GRAPH_CANCEL 32
+#define KILN_C99_WORKER_OP_ACTOR_BIND_RECEIVER 33
 
 static uint64_t kiln_c99_worker_word(const kiln_value *args, size_t argc, size_t at) {
     double number;
@@ -2630,6 +2634,49 @@ static int kiln_c99_worker_op_raw(kiln_value *result, const kiln_value *args, si
     case KILN_C99_WORKER_OP_ACTOR_CANDIDATE_END:
         *result = kiln_c99_boolean(kiln_c99_actor_candidate_end(
             kiln_c99_gc_heap(), argc > 1 && kiln_c99_truthy(args[1])));
+        return KILN_C99_OK;
+    case KILN_C99_WORKER_OP_ACTOR_BIND_RECEIVER:
+        words[0] = 0;
+        if (kiln_worker_op((uint32_t)op, first, words) != 0) return KILN_C99_INVALID_ARGUMENT;
+        *result = kiln_c99_boolean(words[0] != 0);
+        return KILN_C99_OK;
+    case KILN_C99_WORKER_OP_ACTOR_GRAPH_REQUEST: {
+        uint64_t request = 0;
+        kiln_gc_heap *heap = kiln_c99_gc_heap();
+        if (argc < 3 || args[2].tag != KILN_VALUE_OBJECT ||
+            !kiln_c99_actor_isolated_request_begin(heap, args[2], &request)) {
+            *result = kiln_c99_number(0);
+            return KILN_C99_OK;
+        }
+        /* JavaScript will poll this opaque ID as a Number; a rounded ID could cancel a newer
+         * request, so refuse before posting it to the scheduler. */
+        words[0] = request;
+        if (request > 9007199254740991ULL ||
+            kiln_worker_op((uint32_t)op, first, words) != 0 || words[0] == 0) {
+            (void)kiln_c99_actor_isolated_request_rollback(heap, request);
+            *result = kiln_c99_number(0);
+            return KILN_C99_OK;
+        }
+        *result = kiln_c99_number((double)request);
+        return KILN_C99_OK;
+    }
+    case KILN_C99_WORKER_OP_ACTOR_GRAPH_STATUS:
+        if (first == 0 || kiln_worker_op((uint32_t)op, first, words) != 0)
+            return KILN_C99_INVALID_ARGUMENT;
+        if (words[0] != 0) {
+            if (!kiln_c99_actor_isolated_request_rollback(kiln_c99_gc_heap(), first))
+                return KILN_C99_INVALID_ARGUMENT;
+            (void)kiln_worker_op(KILN_C99_WORKER_OP_ACTOR_GRAPH_CANCEL, first, NULL);
+        }
+        *result = kiln_c99_number((double)words[0]);
+        return KILN_C99_OK;
+    case KILN_C99_WORKER_OP_ACTOR_GRAPH_CANCEL:
+        if (first == 0 || !kiln_c99_actor_isolated_request_rollback(kiln_c99_gc_heap(), first)) {
+            *result = kiln_c99_boolean(0);
+            return KILN_C99_OK;
+        }
+        (void)kiln_worker_op((uint32_t)op, first, NULL);
+        *result = kiln_c99_boolean(1);
         return KILN_C99_OK;
     case KILN_C99_WORKER_OP_ACTOR_REGISTER:
     case KILN_C99_WORKER_OP_ACTOR_LOOKUP:

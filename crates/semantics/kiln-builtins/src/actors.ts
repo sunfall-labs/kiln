@@ -19,6 +19,9 @@ const REGISTER = 22;
 const LOOKUP = 23;
 const CLOSE = 24;
 const REQUEST_ID = 25;
+const GRAPH_REQUEST = 30;
+const GRAPH_STATUS = 31;
+const GRAPH_CANCEL = 32;
 
 declare const actorAddressBrand: unique symbol;
 export type ActorAddress<T extends Actor = Actor> = Readonly<{ readonly [actorAddressBrand]: T }>;
@@ -64,16 +67,21 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
       const reply = new MessageChannel();
       return new Promise((resolve, reject) => {
         let settled = false;
+        let pendingGraphRequest = 0;
         const finish = (error: any, value?: any): void => {
           if (settled) return;
           settled = true;
+          if (pendingGraphRequest) {
+            try { internals.workerOp(GRAPH_CANCEL, pendingGraphRequest); } catch {}
+            pendingGraphRequest = 0;
+          }
           options?.signal?.removeEventListener("abort", abort);
           reply.port1.close();
           if (error) reject(error);
           else resolve(value);
         };
         const abort = (): void => {
-          sender.postMessage({ kind: "cancel", id });
+          try { sender.postMessage({ kind: "cancel", id }); } catch {}
           finish(options!.signal!.reason || namedError("AbortError", "actor call aborted"));
         };
         options?.signal?.addEventListener("abort", abort, { once: true });
@@ -83,13 +91,38 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
             const buffers: ArrayBuffer[] = [];
             const consumed: Ticket[] = [];
             try {
-              const snapshot = prepareActorMessage(args, buffers, consumed);
+              const snapshot = prepareActorMessage(args, buffers, consumed, new Map(), (handle: any): never => {
+                try {
+                  const endpoint = internals.portEndpoint(sender);
+                  const request = internals.workerOp(GRAPH_REQUEST, endpoint, handle);
+                  if (Number.isSafeInteger(request) && request > 0) pendingGraphRequest = request;
+                } catch { /* A runtime without a graph coordinator retains the refusal. */ }
+                throw namedError("DataCloneError", "graph transfer needs ownership proof");
+              });
               const sent = sender.postMessage({ kind: "invoke", id, method, args: snapshot }, buffers);
               consumeActorTickets(consumed);
               if (sent === undefined) throw namedError("ActorClosedError", "actor mailbox closed");
             } catch (error) {
-              sender.postMessage({ kind: "cancel", id });
-              finish(error);
+              if (pendingGraphRequest) {
+                const poll = (): void => {
+                  if (settled) return;
+                  try {
+                    if (internals.workerOp(GRAPH_STATUS, pendingGraphRequest) === 0) {
+                      setTimeout(poll, 0);
+                      return;
+                    }
+                    pendingGraphRequest = 0; // GRAPH_STATUS rolled the C request back.
+                  } catch (failure) {
+                    error = failure;
+                  }
+                  try { sender.postMessage({ kind: "cancel", id }); } catch {}
+                  finish(error);
+                };
+                setTimeout(poll, 0);
+              } else {
+                try { sender.postMessage({ kind: "cancel", id }); } catch {}
+                finish(error);
+              }
             }
           } else if (message?.kind === "resolve") finish(null, message.value);
           else if (message?.kind === "reject") {

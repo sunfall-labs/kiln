@@ -82,6 +82,10 @@ const OP_ACTOR_REGISTER: u32 = 22;
 const OP_ACTOR_LOOKUP: u32 = 23;
 const OP_ACTOR_CLOSE: u32 = 24;
 const OP_ACTOR_REQUEST_ID: u32 = 25;
+const OP_ACTOR_GRAPH_REQUEST: u32 = 30;
+const OP_ACTOR_GRAPH_STATUS: u32 = 31;
+const OP_ACTOR_GRAPH_REMOVE: u32 = 32;
+const OP_ACTOR_BIND_RECEIVER: u32 = 33;
 
 /// Borrowed, read-only description of one native heap value. The callback may reuse its
 /// scratch on the next call; the provider copies strings before asking for another field.
@@ -637,6 +641,27 @@ pub unsafe extern "C" fn kiln_worker_op(op: u32, a: u64, out: *mut u64) -> i32 {
                 write(0, answer);
             }
             OP_ACTOR_REQUEST_ID => write(0, workers::actor_request_id()),
+            OP_ACTOR_GRAPH_REQUEST => {
+                if out.is_null() {
+                    return INVALID_ARGUMENT;
+                }
+                let request = unsafe { out.read() };
+                let queued = workers::actor_receiver_for_sender(a).is_some_and(|receiver| {
+                    super::realm::submit_graph_claim_request(receiver, request)
+                });
+                write(0, u64::from(queued));
+            }
+            OP_ACTOR_GRAPH_STATUS => {
+                write(0, u64::from(super::realm::graph_claim_request_status(a)))
+            }
+            OP_ACTOR_GRAPH_REMOVE => super::realm::graph_claim_request_remove(a),
+            OP_ACTOR_BIND_RECEIVER => write(
+                0,
+                u64::from(workers::actor_bind_receiver(
+                    a,
+                    super::realm::active_realm_id(),
+                )),
+            ),
             _ => return INVALID_ARGUMENT,
         }
         0
@@ -728,6 +753,8 @@ struct WorkerTurnSession {
     session: *mut c_void,
     runner: WorkerTurnRunner,
     pool: Weak<PinnedTurnScheduler>,
+    registration: Option<super::realm::ScheduledRealmRegistration>,
+    graph_coordinator: Option<super::realm::GraphCoordinatorSender>,
     failed_advance: bool,
 }
 
@@ -737,6 +764,10 @@ impl ScheduledWorkerBody for WorkerTurnSession {
             return TurnOutcome::Done;
         }
         let _pool = super::realm::ScheduledPoolGuard::enter(Some(self.pool.clone()));
+        let _graph_coordinator = self
+            .graph_coordinator
+            .clone()
+            .map(super::realm::ScheduledGraphCoordinatorGuard::enter);
         let _waker = super::realm::ScheduledWakerGuard::enter(waker.clone());
         let mut delay_ns = 0;
         // SAFETY: the launcher owns this session until finish and the scheduler lease gives this
@@ -755,6 +786,7 @@ impl ScheduledWorkerBody for WorkerTurnSession {
     }
 
     fn finish(&mut self) -> i32 {
+        self.registration.take();
         let session = std::mem::replace(&mut self.session, std::ptr::null_mut());
         if session.is_null() {
             return super::RUNTIME_ERROR;
@@ -879,10 +911,11 @@ pub unsafe extern "C" fn kiln_worker_spawn(
         };
         let started = if let Some((scheduler, turn_runner)) = scheduled {
             let pool = Arc::downgrade(&scheduler);
-            Ok(workers::spawn_scheduled(
+            let graph_coordinator = super::realm::current_graph_coordinator();
+            Ok(workers::spawn_scheduled_with_target(
                 spec,
                 scheduler,
-                move |worker, reactor, _ticket| {
+                move |worker, reactor, _ticket, target| {
                     let _reactor = super::realm::ScheduledReactorGuard::enter(reactor);
                     let _pool = super::realm::ScheduledPoolGuard::enter(Some(pool.clone()));
                     let (text, eval, argv) = worker_arguments(&worker);
@@ -899,15 +932,20 @@ pub unsafe extern "C" fn kiln_worker_spawn(
                             pointers.as_ptr(),
                         )
                     };
-                    if !session.is_null() {
+                    let registration = if !session.is_null() {
                         // SAFETY: the graph launcher returned a live session. The realm ID is
-                        // currently used only for the future migration handoff.
-                        let _ = unsafe { (turn_runner.identify)(session) };
-                    }
+                        // used only as a cross-thread name, never to borrow its lane-local Rc.
+                        let realm = unsafe { (turn_runner.identify)(session) };
+                        super::realm::ScheduledRealmRegistration::new(realm, pool.clone(), target)
+                    } else {
+                        None
+                    };
                     WorkerTurnSession {
                         session,
                         runner: turn_runner,
                         pool,
+                        registration,
+                        graph_coordinator,
                         failed_advance: false,
                     }
                 },

@@ -87,7 +87,10 @@ export function transfer<T>(value: Isolated<T> | ArrayBuffer): TransferTicket<T>
   return ticket;
 }
 
-export function prepareActorMessage(value: any, buffers: ArrayBuffer[], consumed: Ticket[], seen = new Map<any, any>()): any {
+export function prepareActorMessage(
+  value: any, buffers: ArrayBuffer[], consumed: Ticket[], seen = new Map<any, any>(),
+  onGraphTicket?: (handle: any) => never,
+): any {
   if (value === null || typeof value !== "object") return value;
   // The symbol bridges separate dynamic-import plans, but user code can forge a symbol
   // property. Treat it only as a hint: object graphs are refused until the runtime proves
@@ -96,7 +99,10 @@ export function prepareActorMessage(value: any, buffers: ArrayBuffer[], consumed
   if (ticket) {
     if (typeof ticket !== "object" || ticket === null) throw dataCloneError("invalid transfer ticket");
     if (ticket.consumed) throw dataCloneError("transfer ticket was already consumed");
-    if (ticket.graph) throw dataCloneError("graph transfer needs ownership proof");
+    if (ticket.graph) {
+      if (onGraphTicket) onGraphTicket(ticket.value);
+      throw dataCloneError("graph transfer needs ownership proof");
+    }
     if (!(ticket.value instanceof ArrayBuffer)) throw dataCloneError("transfer ticket has no ArrayBuffer");
     buffers.push(ticket.value);
     consumed.push(ticket);
@@ -109,7 +115,7 @@ export function prepareActorMessage(value: any, buffers: ArrayBuffer[], consumed
   if (Array.isArray(value)) {
     const copy: any[] = [];
     seen.set(value, copy);
-    for (let index = 0; index < value.length; index++) if (index in value) copy[index] = prepareActorMessage(value[index], buffers, consumed, seen);
+    for (let index = 0; index < value.length; index++) if (index in value) copy[index] = prepareActorMessage(value[index], buffers, consumed, seen, onGraphTicket);
     return copy;
   }
   // Preserve special cloneable objects and their own semantics. Tickets nested in those objects
@@ -117,7 +123,7 @@ export function prepareActorMessage(value: any, buffers: ArrayBuffer[], consumed
   if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return value;
   const copy: any = {};
   seen.set(value, copy);
-  for (const key of Object.keys(value)) copy[key] = prepareActorMessage(value[key], buffers, consumed, seen);
+  for (const key of Object.keys(value)) copy[key] = prepareActorMessage(value[key], buffers, consumed, seen, onGraphTicket);
   return copy;
 }
 

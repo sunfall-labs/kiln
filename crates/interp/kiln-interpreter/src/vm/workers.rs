@@ -144,6 +144,10 @@ const OP_ACTOR_ISOLATE: u32 = 26;
 const OP_ACTOR_ISOLATED_HAS: u32 = 27;
 const OP_ACTOR_CANDIDATE_BEGIN: u32 = 28;
 const OP_ACTOR_CANDIDATE_END: u32 = 29;
+const OP_ACTOR_GRAPH_REQUEST: u32 = 30;
+const OP_ACTOR_GRAPH_STATUS: u32 = 31;
+const OP_ACTOR_GRAPH_CANCEL: u32 = 32;
+const OP_ACTOR_BIND_RECEIVER: u32 = 33;
 
 /// A moved `ArrayBuffer`'s store, as this engine boxes it into a [`Token::Moved`].
 struct MovedBytes(Vec<u8>);
@@ -264,6 +268,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // Only the native collector owns movable candidate chunks. The interpreter
             // retains actor graphs in its private realm table without claiming provenance.
             OP_ACTOR_CANDIDATE_BEGIN | OP_ACTOR_CANDIDATE_END => Value::Boolean(false),
+            // The interpreter has no native candidate chunks or two-realm claim coordinator.
+            // These reserved operations fail closed while preserving the shared actor module's
+            // DataCloneError and unconsumed-ticket behavior.
+            OP_ACTOR_GRAPH_REQUEST => Value::Number(0.0),
+            OP_ACTOR_GRAPH_STATUS => Value::Number(1.0),
+            OP_ACTOR_GRAPH_CANCEL | OP_ACTOR_BIND_RECEIVER => Value::Boolean(false),
             OP_TAKE => match workers::take(endpoint_of(first)) {
                 Some(message) => {
                     let realm = self.current_realm;

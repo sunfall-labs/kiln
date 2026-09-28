@@ -677,15 +677,30 @@ impl PinnedTurnScheduler {
         F: FnOnce(Arc<Reactor>, Arc<TurnTicket>) -> T + Send + 'static,
         T: PinnedTurn + 'static,
     {
+        self.spawn_pinned_with_target(move |reactor, ticket, _| factory(reactor, ticket))
+    }
+
+    /// Construct a pinned body with its cross-thread pause identity. The target has no
+    /// reference to the lane-local body and is safe to register under a provider realm ID.
+    pub fn spawn_pinned_with_target<F, T>(&self, factory: F) -> PinnedTurnHandle
+    where
+        F: FnOnce(Arc<Reactor>, Arc<TurnTicket>, TurnPauseTarget) -> T + Send + 'static,
+        T: PinnedTurn + 'static,
+    {
         let id = self.next_realm_id.fetch_add(1, Ordering::Relaxed);
         let lane = Arc::clone(&self.lanes[(id as usize - 1) % self.base_lanes]);
         let ticket = lane.queue.ticket_on_lane(id, lane.index);
         let status = Arc::new(AtomicU8::new(TurnStatus::Active as u8));
+        let target = TurnPauseTarget {
+            ticket: Arc::clone(&ticket),
+            status: Arc::clone(&status),
+            coordinator: Arc::clone(&self.pause),
+        };
         lane.command(Command::Install {
             realm_id: id,
             ticket: Arc::clone(&ticket),
             status: Arc::clone(&status),
-            factory: Box::new(move |reactor, ticket| Box::new(factory(reactor, ticket))),
+            factory: Box::new(move |reactor, ticket| Box::new(factory(reactor, ticket, target))),
         });
         PinnedTurnHandle {
             ticket,

@@ -4,6 +4,7 @@ import { isMainThread, parentPort, workerData, MessagePort } from "node:worker_t
 import { prepareActorMessage, consumeActorTickets } from "kiln:actors/core";
 
 export const actorWorkerEntry = "kiln:actors/worker";
+const BIND_RECEIVER = 33;
 
 type Reservation = {
   id: number;
@@ -42,6 +43,11 @@ function serve(): void {
   control = parentPort;
   const init: any = workerData;
   inbox = init.mailbox;
+  // Name this inbox's actual provider realm for a future opaque graph request. A failed bind
+  // leaves graph requests unavailable; ordinary cloned actor messages keep working.
+  const internals: any = (MessagePort as any)[Symbol.for("kiln.messagePort")];
+  try { if (internals) internals.workerOp(BIND_RECEIVER, internals.portEndpoint(inbox)); }
+  catch { /* An interpreter or unscheduled realm has no pair-claim coordinator. */ }
   capacity = init.capacity;
 
   function answer(request: Reservation, kind: string, value?: any): void {

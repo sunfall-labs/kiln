@@ -398,6 +398,125 @@ fn provider_maps_realm_handles_to_pair_claims_without_cross_lane_realm_borrows()
     );
 }
 
+struct GraphCoordinatorFixture {
+    realms: std::sync::Mutex<[u64; 2]>,
+    paused_refusals: AtomicUsize,
+}
+
+struct GraphCoordinatorSession {
+    state: Arc<GraphCoordinatorFixture>,
+    realm: u64,
+    index: usize,
+    turns: usize,
+}
+
+unsafe extern "C" fn graph_coordinator_begin(context: *mut c_void, index: u64) -> *mut c_void {
+    let state = unsafe { &*context.cast::<Arc<GraphCoordinatorFixture>>() };
+    let mut realm = 0;
+    if unsafe { kiln_realm_create(&raw mut realm) } != 0 || kiln_realm_use_wall_clock(realm) != 0 {
+        return ptr::null_mut();
+    }
+    state.realms.lock().unwrap()[index as usize] = realm;
+    Box::into_raw(Box::new(GraphCoordinatorSession {
+        state: Arc::clone(state),
+        realm,
+        index: index as usize,
+        turns: 0,
+    }))
+    .cast()
+}
+
+unsafe extern "C" fn graph_coordinator_identify(session: *mut c_void) -> u64 {
+    unsafe { &*session.cast::<GraphCoordinatorSession>() }.realm
+}
+
+unsafe extern "C" fn graph_coordinator_submit(context: *mut c_void) -> i32 {
+    let receiver = unsafe { *context.cast::<u64>() };
+    i32::from(!submit_graph_claim_request(receiver, 41))
+}
+
+unsafe extern "C" fn graph_coordinator_poll(context: *mut c_void) -> i32 {
+    let observed = unsafe { &mut *context.cast::<u8>() };
+    *observed = graph_claim_request_status(41);
+    graph_claim_request_remove(41);
+    0
+}
+
+unsafe extern "C" fn graph_coordinator_advance(session: *mut c_void, delay: *mut u64) -> i32 {
+    let session = unsafe { &mut *session.cast::<GraphCoordinatorSession>() };
+    let realms = *session.state.realms.lock().unwrap();
+    if realms.contains(&0) {
+        return 1;
+    }
+    if session.turns == 0 {
+        if session.index == 0
+            && unsafe {
+                kiln_realm_enter(
+                    session.realm,
+                    Some(graph_coordinator_submit),
+                    (&raw const realms[1]).cast_mut().cast(),
+                )
+            } != 0
+        {
+            return -1;
+        }
+        session.turns = 1;
+        unsafe { delay.write(2_000_000_000) };
+        return 3;
+    }
+    if session.index == 0 {
+        let mut observed = 0;
+        if unsafe {
+            kiln_realm_enter(
+                session.realm,
+                Some(graph_coordinator_poll),
+                (&raw mut observed).cast(),
+            )
+        } != 0
+            || observed != GRAPH_REQUEST_REFUSED_AFTER_PAUSE
+        {
+            return -1;
+        }
+        session
+            .state
+            .paused_refusals
+            .fetch_add(1, AtomicOrdering::SeqCst);
+    }
+    0
+}
+
+unsafe extern "C" fn graph_coordinator_finish(session: *mut c_void) -> i32 {
+    let session = unsafe { Box::from_raw(session.cast::<GraphCoordinatorSession>()) };
+    kiln_realm_destroy(session.realm)
+}
+
+#[test]
+fn opaque_graph_request_claims_both_realms_then_refuses_without_publication() {
+    let state = Arc::new(GraphCoordinatorFixture {
+        realms: std::sync::Mutex::new([0; 2]),
+        paused_refusals: AtomicUsize::new(0),
+    });
+    let mut statuses = [-1; 2];
+    assert_eq!(
+        unsafe {
+            kiln_realm_run_migrating(
+                2,
+                2,
+                1,
+                Some(graph_coordinator_begin),
+                Some(graph_coordinator_identify),
+                Some(graph_coordinator_advance),
+                Some(graph_coordinator_finish),
+                (&raw const state).cast_mut().cast(),
+                statuses.as_mut_ptr(),
+            )
+        },
+        0
+    );
+    assert_eq!(statuses, [0, 0]);
+    assert_eq!(state.paused_refusals.load(AtomicOrdering::SeqCst), 1);
+}
+
 #[cfg(feature = "ffi")]
 #[test]
 fn ffi_library_open_pins_subsequent_turns_to_its_os_lane() {

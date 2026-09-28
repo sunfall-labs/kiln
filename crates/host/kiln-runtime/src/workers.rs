@@ -283,6 +283,9 @@ struct Endpoint {
     /// does not close this end, because the runtime still has the worker's `exit` to deliver
     /// through it.
     awaits_exit: bool,
+    /// Set only by the actor worker while this endpoint is its inbox. An actor route names
+    /// the opposite sending endpoint; graph requests use this ID to find its scheduler body.
+    actor_realm: Option<u64>,
 }
 
 impl Endpoint {
@@ -294,6 +297,7 @@ impl Endpoint {
             peer_closed: false,
             group: None,
             awaits_exit: false,
+            actor_realm: None,
         }
     }
 
@@ -420,6 +424,35 @@ pub fn actor_sender(address: &SharedHandle) -> Option<u64> {
         return None;
     }
     Some(route.sender)
+}
+
+/// Bind the actual receiving endpoint from inside its native realm. A transferred port cannot
+/// rebind the endpoint to another realm; closing the port removes the binding with the port.
+pub fn actor_bind_receiver(endpoint: u64, realm: u64) -> bool {
+    if endpoint == 0 || realm == 0 {
+        return false;
+    }
+    let mut ports = ports();
+    let Some(port) = ports.endpoints.get_mut(&endpoint) else {
+        return false;
+    };
+    if port.peer == 0 || port.actor_realm.is_some() {
+        return false;
+    }
+    port.actor_realm = Some(realm);
+    true
+}
+
+/// Resolve a registered actor sender to the realm that currently owns its inbox. This returns
+/// an opaque ID only; a later scheduler lookup must still prove that realm is live.
+pub fn actor_receiver_for_sender(sender: u64) -> Option<u64> {
+    let routes = lock(actor_routes());
+    if !routes.routes.values().any(|route| route.sender == sender) {
+        return None;
+    }
+    let ports = ports();
+    let receiver = ports.endpoints.get(&sender)?.peer;
+    ports.endpoints.get(&receiver)?.actor_realm
 }
 
 /// Revoke call authority after a stop or an unexpected realm exit.
@@ -1120,6 +1153,29 @@ where
         + 'static,
     T: ScheduledWorkerBody + 'static,
 {
+    spawn_scheduled_with_target(spec, scheduler, move |worker, reactor, ticket, _| {
+        factory(worker, reactor, ticket)
+    })
+}
+
+/// Variant for a generated worker that registers its provider realm under the scheduler's
+/// pause target after its session is initialized on the owning lane.
+pub fn spawn_scheduled_with_target<F, T>(
+    spec: WorkerSpec,
+    scheduler: Arc<crate::turn_scheduler::PinnedTurnScheduler>,
+    factory: F,
+) -> (u64, u64)
+where
+    F: FnOnce(
+            Arc<WorkerContext>,
+            Arc<crate::Reactor>,
+            Arc<crate::turn_queue::TurnTicket>,
+            crate::turn_scheduler::TurnPauseTarget,
+        ) -> T
+        + Send
+        + 'static,
+    T: ScheduledWorkerBody + 'static,
+{
     let context = prepare_worker(spec);
     let key = context.key;
     let thread_id = context.thread_id;
@@ -1129,7 +1185,7 @@ where
         signal_program: signal_program.clone(),
         completed: false,
     };
-    let handle = scheduler.spawn_pinned(move |reactor, ticket| {
+    let handle = scheduler.spawn_pinned_with_target(move |reactor, ticket, target| {
         let scope = Rc::new(RefCell::new(RealmScopeState::for_worker(
             Arc::clone(&context),
             signal_program,
@@ -1141,7 +1197,7 @@ where
                 Message::new(kind::ONLINE, value_tokens(Token::Undefined)),
             );
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                factory(Arc::clone(&context), reactor, ticket)
+                factory(Arc::clone(&context), reactor, ticket, target)
             }))
             .ok()
         };
@@ -1850,6 +1906,11 @@ mod tests {
         assert!(actor_register(&address, &owner, sender));
         assert!(!actor_register(&address, &owner, sender));
         assert_eq!(actor_sender(&address), Some(sender));
+        assert_eq!(actor_receiver_for_sender(sender), None);
+        assert!(!actor_bind_receiver(receiver, 0));
+        assert!(actor_bind_receiver(receiver, 71));
+        assert!(!actor_bind_receiver(receiver, 72));
+        assert_eq!(actor_receiver_for_sender(sender), Some(71));
         assert_eq!(actor_sender(&impostor), None);
         let token = address.opaque();
         drop(address);
@@ -1858,6 +1919,7 @@ mod tests {
         assert!(!actor_close(&delegated, &impostor));
         assert!(actor_close(&delegated, &owner));
         assert_eq!(actor_sender(&delegated), None);
+        assert_eq!(actor_receiver_for_sender(sender), None);
         assert!(!actor_register(&delegated, &owner, sender));
         close(sender);
         close(receiver);
