@@ -2961,6 +2961,10 @@ extern int kiln_realm_run_migrating(uint64_t count, uint64_t lanes, int determin
                                     uint64_t (*identify)(void *session),
                                     int (*advance)(void *session, uint64_t *delay_ns),
                                     int (*finish)(void *session), void *context, int *statuses);
+extern int kiln_realm_set_graph_control(int (*control)(uint32_t kind, uint64_t first,
+                                                       uint64_t second, uint64_t third));
+extern int kiln_c99_graph_paused_control(uint32_t kind, uint64_t first,
+                                         uint64_t second, uint64_t third);
 /* `KILN_WORKERS` thread mode: the worker index of the realm this thread runs (-1 on any other
  * thread, a `node:worker_threads` worker's included) and the count, which the realm's
  * `process.env` gets as KILN_WORKER_INDEX and KILN_WORKER_COUNT. */
@@ -5496,6 +5500,7 @@ int main(int argc, char **argv) {
     long workers, realms;
     kiln_cli_grow_main_stack();
     if (setlocale(LC_NUMERIC, "C") == NULL) return 1;
+    if (kiln_realm_set_graph_control(kiln_c99_graph_paused_control) != 0) return 1;
     if (kiln_cli_http3_enabled(argc, argv)) {
 #ifndef _WIN32
         setenv("KILN_HTTP3", "1", 1);

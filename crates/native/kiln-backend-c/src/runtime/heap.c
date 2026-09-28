@@ -3973,26 +3973,36 @@ enum {
 /* Reserve the receiver's native inbox slot and all region-set capacity before sender unlink.
  * This is one slot, distinct from the actor's JS mailbox grant. A future coordinator must
  * reserve both while the receiver mutator is paused, and keep it paused through publication. */
-static int kiln_c99_graph_receiver_reserve(kiln_gc_heap *to, size_t chunk_count,
-                                           uint64_t *out_id) {
+static int kiln_c99_graph_receiver_reserve_id(kiln_gc_heap *to, size_t chunk_count,
+                                              uint64_t reservation_id) {
     kiln_c99_realm_state *realm;
     size_t wanted;
-    if (to == NULL || out_id == NULL || chunk_count == 0 || to->collecting ||
+    if (to == NULL || reservation_id == 0 || chunk_count == 0 || to->collecting ||
         to->parallel_paused || chunk_count > SIZE_MAX - to->nursery.regions.count) return 0;
     realm = &to->realm;
     wanted = to->nursery.regions.count + chunk_count;
     if (realm->graph_inbox_state != KILN_C99_GRAPH_INBOX_EMPTY ||
         realm->graph_inbox_root.tag != KILN_VALUE_UNDEFINED ||
-        realm->graph_inbox_next_id == UINT64_MAX || wanted > SIZE_MAX / 2) return 0;
+        wanted > SIZE_MAX / 2) return 0;
     if (wanted * 2 > to->nursery.regions.capacity &&
         kiln_c99_gc_ptrset_grow(&to->nursery.regions, wanted) != KILN_C99_OK) return 0;
-    realm->graph_inbox_reservation_id = ++realm->graph_inbox_next_id;
+    realm->graph_inbox_reservation_id = reservation_id;
     realm->graph_inbox_reserved_chunks = chunk_count;
     realm->graph_inbox_region_count = to->nursery.regions.count;
     realm->graph_inbox_epoch = to->epoch;
     realm->graph_inbox_root = kiln_c99_undefined();
     realm->graph_inbox_state = KILN_C99_GRAPH_INBOX_RESERVED;
-    *out_id = realm->graph_inbox_reservation_id;
+    return 1;
+}
+
+static int kiln_c99_graph_receiver_reserve(kiln_gc_heap *to, size_t chunk_count,
+                                           uint64_t *out_id) {
+    uint64_t id;
+    if (to == NULL || out_id == NULL || to->realm.graph_inbox_next_id == UINT64_MAX) return 0;
+    id = to->realm.graph_inbox_next_id + 1;
+    if (!kiln_c99_graph_receiver_reserve_id(to, chunk_count, id)) return 0;
+    to->realm.graph_inbox_next_id = id;
+    *out_id = id;
     return 1;
 }
 
@@ -4011,6 +4021,38 @@ static int kiln_c99_graph_receiver_rollback(kiln_gc_heap *to, uint64_t id) {
     realm->graph_inbox_epoch = 0;
     realm->graph_inbox_root = kiln_c99_undefined();
     return 1;
+}
+
+/* Called only through the claimed scheduler lane's control callback. The sender probe is a
+ * negative witness: even a clear scan returns Incomplete and rolls its escrow back. One-chunk
+ * receiver reservation is the first supported transfer subset; publication stays disabled. */
+int kiln_c99_graph_paused_control(uint32_t kind, uint64_t first,
+                                  uint64_t second, uint64_t third) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    (void)second;
+    (void)third;
+    if (heap == NULL || first == 0) return 3;
+    switch (kind) {
+    case 1: {
+        kiln_c99_graph_incoming_result result = kiln_c99_graph_incoming_request_probe(heap, first);
+        switch (result) {
+        case KILN_C99_GRAPH_C_ROOT_ALIAS:
+        case KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS:
+        case KILN_C99_GRAPH_PROVIDER_ROOT_ALIAS:
+        case KILN_C99_GRAPH_MACHINE_ALIAS:
+            return 1;
+        case KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE:
+            return 3;
+        default:
+            return 2;
+        }
+    }
+    case 2:
+        if (!kiln_c99_graph_receiver_reserve_id(heap, 1, first)) return 3;
+        return kiln_c99_graph_receiver_rollback(heap, first) ? 0 : 3;
+    default:
+        return 3;
+    }
 }
 
 /* Low-level publication primitive, not an ownership certificate. The caller must have already

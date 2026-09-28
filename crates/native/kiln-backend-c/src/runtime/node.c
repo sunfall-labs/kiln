@@ -2706,8 +2706,13 @@ static int kiln_c99_worker_op_raw(kiln_value *result, const kiln_value *args, si
         if (first == 0 || kiln_worker_op((uint32_t)op, first, words) != 0)
             return KILN_C99_INVALID_ARGUMENT;
         if (words[0] != 0) {
-            if (!kiln_c99_actor_isolated_request_rollback(kiln_c99_gc_heap(), first))
-                return KILN_C99_INVALID_ARGUMENT;
+            kiln_gc_heap *heap = kiln_c99_gc_heap();
+            /* A paused sender probe may already have restored this request's escrow. Never
+             * roll back a different request created after that turn boundary. */
+            if (heap->realm.isolated_request_id != 0 &&
+                (heap->realm.isolated_request_id != first ||
+                 !kiln_c99_actor_isolated_request_rollback(heap, first)))
+                    return KILN_C99_INVALID_ARGUMENT;
             (void)kiln_worker_op(KILN_C99_WORKER_OP_ACTOR_GRAPH_CANCEL, first, NULL);
         }
         *result = kiln_c99_number((double)words[0]);

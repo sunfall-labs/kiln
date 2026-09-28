@@ -16,7 +16,7 @@ use super::{INVALID_ARGUMENT, KilnString, validate_string};
 use core::ffi::{c_char, c_void};
 use kiln_runtime::signals;
 use kiln_runtime::turn_queue::TurnOutcome;
-use kiln_runtime::turn_scheduler::PinnedTurnScheduler;
+use kiln_runtime::turn_scheduler::{PausedTurnCommand, PausedTurnResult, PinnedTurnScheduler};
 use kiln_runtime::workers::{
     self, Message, ScheduledWorkerBody, Token, WorkerContext, WorkerEntry, WorkerSpec,
 };
@@ -661,7 +661,7 @@ pub unsafe extern "C" fn kiln_worker_op(op: u32, a: u64, out: *mut u64) -> i32 {
                     workers::actor_claim_reservation(a, reservation, call, reply, sender, request)
                 };
                 let queued = receiver.is_some_and(|receiver| {
-                    super::realm::submit_graph_claim_request(receiver, request)
+                    super::realm::submit_graph_claim_request(receiver, request, reservation)
                 });
                 if !queued && reservation != 0 {
                     workers::actor_unclaim_reservation(reservation, sender, request);
@@ -801,6 +801,7 @@ pub extern "C" fn kiln_worker_set_turn_runner(
 
 struct WorkerTurnSession {
     session: *mut c_void,
+    realm: u64,
     runner: WorkerTurnRunner,
     pool: Weak<PinnedTurnScheduler>,
     registration: Option<super::realm::ScheduledRealmRegistration>,
@@ -850,6 +851,14 @@ impl ScheduledWorkerBody for WorkerTurnSession {
         } else {
             status
         }
+    }
+
+    fn paused_control(&mut self, command: PausedTurnCommand) -> PausedTurnResult {
+        if self.session.is_null() || self.realm == 0 {
+            return PausedTurnResult::Unavailable;
+        }
+        let _pool = super::realm::ScheduledPoolGuard::enter(Some(self.pool.clone()));
+        super::realm::run_paused_graph_control(self.realm, command)
     }
 }
 
@@ -982,16 +991,18 @@ pub unsafe extern "C" fn kiln_worker_spawn(
                             pointers.as_ptr(),
                         )
                     };
-                    let registration = if !session.is_null() {
+                    let realm = if !session.is_null() {
                         // SAFETY: the graph launcher returned a live session. The realm ID is
                         // used only as a cross-thread name, never to borrow its lane-local Rc.
-                        let realm = unsafe { (turn_runner.identify)(session) };
-                        super::realm::ScheduledRealmRegistration::new(realm, pool.clone(), target)
+                        unsafe { (turn_runner.identify)(session) }
                     } else {
-                        None
+                        0
                     };
+                    let registration =
+                        super::realm::ScheduledRealmRegistration::new(realm, pool.clone(), target);
                     WorkerTurnSession {
                         session,
+                        realm,
                         runner: turn_runner,
                         pool,
                         registration,

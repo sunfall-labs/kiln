@@ -5,7 +5,8 @@ use kiln_host_abi::{
 };
 use kiln_runtime::turn_queue::TurnOutcome;
 use kiln_runtime::turn_scheduler::{
-    PinnedTurn, PinnedTurnScheduler, TurnClaimError, TurnPairClaim, TurnPauseTarget,
+    PausedTurnCommand, PausedTurnResult, PinnedTurn, PinnedTurnScheduler, TurnClaimError,
+    TurnPairClaim, TurnPauseTarget,
 };
 use kiln_runtime::{
     Executor, Realm, RealmCapabilities, RealmState, RuntimeTurn, TimerId, TokioHost, WorkItem,
@@ -1348,8 +1349,18 @@ struct ActiveRealm {
 
 impl ActiveRealm {
     fn enter(handle: u64, realm: Rc<NativeRealm>) -> Option<Self> {
+        Self::enter_with_clock(handle, realm, true)
+    }
+
+    fn enter_paused(handle: u64, realm: Rc<NativeRealm>) -> Option<Self> {
+        Self::enter_with_clock(handle, realm, false)
+    }
+
+    fn enter_with_clock(handle: u64, realm: Rc<NativeRealm>, tick: bool) -> Option<Self> {
         // Entering the realm is a turn boundary for a wall-clock realm (ADR 0044).
-        tick_clock(&realm);
+        if tick {
+            tick_clock(&realm);
+        }
         if realm.entered.replace(true) {
             return None;
         }
@@ -4940,6 +4951,51 @@ type ScheduledBegin = unsafe extern "C" fn(*mut c_void, u64) -> *mut c_void;
 type ScheduledIdentify = unsafe extern "C" fn(*mut c_void) -> u64;
 type ScheduledAdvance = unsafe extern "C" fn(*mut c_void, *mut u64) -> i32;
 type ScheduledFinish = unsafe extern "C" fn(*mut c_void) -> i32;
+type GraphControl = unsafe extern "C" fn(u32, u64, u64, u64) -> i32;
+
+static GRAPH_CONTROL: OnceLock<GraphControl> = OnceLock::new();
+
+/// Register the native runtime's bounded, non-JavaScript paused-claim callback. A second
+/// image may register the identical function, but cannot replace it with different C code.
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_realm_set_graph_control(control: Option<GraphControl>) -> i32 {
+    let Some(control) = control else {
+        return INVALID_ARGUMENT;
+    };
+    if GRAPH_CONTROL.set(control).is_ok()
+        || GRAPH_CONTROL
+            .get()
+            .is_some_and(|existing| *existing as usize == control as usize)
+    {
+        0
+    } else {
+        INVALID_ARGUMENT
+    }
+}
+
+pub(crate) fn run_paused_graph_control(
+    realm_id: u64,
+    command: PausedTurnCommand,
+) -> PausedTurnResult {
+    let Some(control) = GRAPH_CONTROL.get().copied() else {
+        return PausedTurnResult::Unavailable;
+    };
+    let Some(realm) = realm(realm_id) else {
+        return PausedTurnResult::Unavailable;
+    };
+    let Some(_active) = ActiveRealm::enter_paused(realm_id, realm) else {
+        return PausedTurnResult::Unavailable;
+    };
+    // SAFETY: the launcher registered a process-lifetime callback. The scheduler holds this
+    // realm's exclusive ticket and both claimed mutators remain stopped until it returns.
+    let status = unsafe { control(command.kind, command.ids[0], command.ids[1], command.ids[2]) };
+    match status {
+        0 => PausedTurnResult::Ready,
+        1 => PausedTurnResult::Alias,
+        2 => PausedTurnResult::Incomplete,
+        _ => PausedTurnResult::Unavailable,
+    }
+}
 
 const GRAPH_REQUEST_PENDING: u8 = 0;
 const GRAPH_REQUEST_REFUSED: u8 = 1;
@@ -4951,6 +5007,8 @@ pub(crate) enum ScheduledEvent {
     GraphRequest {
         sender: u64,
         receiver: u64,
+        request: u64,
+        reservation: u64,
         status: Arc<AtomicU8>,
     },
 }
@@ -4986,7 +5044,7 @@ fn pending_graph_requests() -> &'static Mutex<PendingGraphRequests> {
 
 /// Called from the sender's generated grant callback. Only IDs cross to the coordinator; the
 /// C heap keeps the handle root in its own pending request until the sender rolls it back.
-pub(crate) fn submit_graph_claim_request(receiver: u64, request: u64) -> bool {
+pub(crate) fn submit_graph_claim_request(receiver: u64, request: u64, reservation: u64) -> bool {
     let sender = active_realm_id();
     if sender == 0 || receiver == 0 || request == 0 {
         return false;
@@ -5006,6 +5064,8 @@ pub(crate) fn submit_graph_claim_request(receiver: u64, request: u64) -> bool {
         .send(ScheduledEvent::GraphRequest {
             sender,
             receiver,
+            request,
+            reservation,
             status,
         })
         .is_err()
@@ -5037,14 +5097,42 @@ pub(crate) fn graph_claim_request_remove(request: u64) {
     }
 }
 
-fn refuse_graph_claim_request(sender: u64, receiver: u64, status: Arc<AtomicU8>) {
+fn refuse_graph_claim_request(
+    sender: u64,
+    receiver: u64,
+    request: u64,
+    reservation: u64,
+    status: Arc<AtomicU8>,
+) {
     if status.load(Ordering::Acquire) != GRAPH_REQUEST_PENDING {
         return;
     }
     let paused = if let Ok(claim) = claim_scheduled_realm_pair(sender, receiver) {
-        // A successful wait proves only that both bodies stopped at turn boundaries. Native
-        // and JavaScript inbox publication are still incomplete, so every request is refused.
-        claim.wait(Duration::from_secs(1))
+        if claim.wait(Duration::from_secs(1)) {
+            if reservation != 0 {
+                // This receiver callback reserves and rolls back in one lane-local operation.
+                // A separate rollback could time out behind unrelated work and strand the slot.
+                let _ = claim.control(
+                    receiver,
+                    PausedTurnCommand {
+                        kind: 2,
+                        ids: [reservation, 0, 0],
+                    },
+                );
+                // The sender probe is a negative witness only. It always restores its escrow;
+                // even a clear root walk cannot authorize a transfer here.
+                let _ = claim.control(
+                    sender,
+                    PausedTurnCommand {
+                        kind: 1,
+                        ids: [request, 0, 0],
+                    },
+                );
+            }
+            true
+        } else {
+            false
+        }
     } else {
         false
     };
@@ -5256,6 +5344,22 @@ impl PinnedTurn for ScheduledRun {
             }
         }
     }
+
+    fn paused_control(&mut self, command: PausedTurnCommand, lane: usize) -> PausedTurnResult {
+        if self.session.is_null() || self.realm == 0 {
+            return PausedTurnResult::Unavailable;
+        }
+        let _pool = ScheduledPoolGuard::enter(self.scheduler.clone());
+        let was_detached = self.detached.is_some();
+        self.attach_if_detached();
+        let result = run_paused_graph_control(self.realm, command);
+        if was_detached {
+            // If control creates affinity, park_ownership pins this body to the lane that
+            // actually executed it before another turn can move it.
+            self.park_ownership(lane);
+        }
+        result
+    }
 }
 
 impl Drop for ScheduledRun {
@@ -5355,9 +5459,11 @@ pub unsafe extern "C" fn kiln_realm_run_scheduled(
                 ScheduledEvent::GraphRequest {
                     sender,
                     receiver,
+                    request,
+                    reservation,
                     status,
                 } => {
-                    refuse_graph_claim_request(sender, receiver, status);
+                    refuse_graph_claim_request(sender, receiver, request, reservation, status);
                 }
             }
         }
@@ -5471,9 +5577,11 @@ pub unsafe extern "C" fn kiln_realm_run_migrating(
                 ScheduledEvent::GraphRequest {
                     sender,
                     receiver,
+                    request,
+                    reservation,
                     status,
                 } => {
-                    refuse_graph_claim_request(sender, receiver, status);
+                    refuse_graph_claim_request(sender, receiver, request, reservation, status);
                 }
             }
         }
@@ -5699,6 +5807,9 @@ macro_rules! assert_provider_export {
         };
         (realm, kiln_realm_run_migrating, realm_run_migrating) => {
             const _: unsafe extern "C" fn(u64, u64, i32, Option<ScheduledBegin>, Option<ScheduledIdentify>, Option<ScheduledAdvance>, Option<ScheduledFinish>, *mut c_void, *mut i32) -> i32 = kiln_realm_run_migrating;
+        };
+        (realm, kiln_realm_set_graph_control, realm_set_graph_control) => {
+            const _: extern "C" fn(Option<GraphControl>) -> i32 = kiln_realm_set_graph_control;
         };
         (realm, kiln_realm_gc_attach, realm_gc_attach) => {
             const _: unsafe extern "C" fn(*const GcHooks, *mut c_void, *mut *mut c_void) -> i32 = kiln_realm_gc_attach;

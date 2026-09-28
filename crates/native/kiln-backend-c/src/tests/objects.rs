@@ -2185,6 +2185,41 @@ int main(void) {
 }
 
 #[test]
+fn executable_actor_paused_receiver_probe_clears_its_slot() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int paused_receiver_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    (void)context;
+    if (heap == NULL || kiln_c99_graph_paused_control(2, 0, 0, 0) != 3) return 1;
+    if (kiln_c99_graph_paused_control(2, 73, 0, 0) != 0) return 2;
+    if (heap->realm.graph_inbox_state != KILN_C99_GRAPH_INBOX_EMPTY ||
+        heap->realm.graph_inbox_reservation_id != 0 ||
+        heap->realm.graph_inbox_root.tag != KILN_VALUE_UNDEFINED) return 3;
+    if (kiln_c99_graph_paused_control(2, 73, 0, 0) != 0) return 4;
+    if (heap->realm.graph_inbox_state != KILN_C99_GRAPH_INBOX_EMPTY) return 5;
+    return 0;
+}
+int main(void) {
+    uint64_t realm = 0;
+    int status;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 6;
+    status = kiln_realm_enter(realm, paused_receiver_entry, NULL);
+    if (status != KILN_C99_OK) return status;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 7;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "actor-paused-receiver-probe");
+    assert!(
+        run.status.success(),
+        "actor paused receiver probe failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_graph_receiver_accepts_an_inline_string_data_pointer() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");

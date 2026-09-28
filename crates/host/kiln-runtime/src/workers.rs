@@ -1270,6 +1270,12 @@ where
 pub trait ScheduledWorkerBody {
     fn advance(&mut self, waker: &Waker) -> crate::turn_queue::TurnOutcome;
     fn finish(&mut self) -> i32;
+    fn paused_control(
+        &mut self,
+        _command: crate::turn_scheduler::PausedTurnCommand,
+    ) -> crate::turn_scheduler::PausedTurnResult {
+        crate::turn_scheduler::PausedTurnResult::Unavailable
+    }
 }
 
 struct ScheduledWorker<T: ScheduledWorkerBody> {
@@ -1342,6 +1348,21 @@ impl<T: ScheduledWorkerBody> crate::turn_scheduler::PinnedTurn for ScheduledWork
             self.complete(false);
         }
         outcome
+    }
+
+    fn paused_control(
+        &mut self,
+        command: crate::turn_scheduler::PausedTurnCommand,
+        _lane: usize,
+    ) -> crate::turn_scheduler::PausedTurnResult {
+        if self.completion.context.terminate_requested() {
+            return crate::turn_scheduler::PausedTurnResult::Unavailable;
+        }
+        let Some(body) = self.body.as_mut() else {
+            return crate::turn_scheduler::PausedTurnResult::Unavailable;
+        };
+        let _scope = RealmScopeGuard::enter(Rc::clone(&self.scope));
+        body.paused_control(command)
     }
 }
 
