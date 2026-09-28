@@ -50,7 +50,8 @@ def measure(kind, count, port, binary, work, lanes):
         output_dir = tempfile.TemporaryDirectory(prefix="realm-outputs-", dir=work)
         env.update(KILN_REALMS=str(count), KILN_REALMS_OUT=output_dir.name,
                    KILN_REALM_SCHEDULER="0" if kind == "pinned" else "1",
-                   KILN_REALM_MIGRATE="1", KILN_PARALLELISM=str(lanes))
+                   KILN_REALM_MIGRATE=os.environ.get("KILN_REALM_MIGRATE", "1"),
+                   KILN_PARALLELISM=str(lanes))
         command = [str(binary)]
     with SERVER_LOCK:
         SERVER_EVENTS.clear()
@@ -88,9 +89,12 @@ def measure(kind, count, port, binary, work, lanes):
             events = list(SERVER_EVENTS)
         if len(events) != count:
             raise RuntimeError(f"{kind} {count}: server handled {len(events)} connections")
+        accept_ms = sorted((start - started) * 1000 for start, _ in events)
         response_ms = sorted((end - start) * 1000 for start, end in events)
         return dict(runtime=kind, realms=count, wall_ms=round(elapsed, 2),
-                    first_accept_ms=round((min(start for start, _ in events) - started) * 1000, 2),
+                    first_accept_ms=round(accept_ms[0], 2),
+                    median_accept_ms=round(statistics.median(accept_ms), 2),
+                    last_accept_ms=round(accept_ms[-1], 2),
                     last_response_ms=round((max(end for _, end in events) - started) * 1000, 2),
                     response_span_ms=round((max(end for _, end in events)
                                             - min(start for start, _ in events)) * 1000, 2),
@@ -110,6 +114,8 @@ def main():
     parser.add_argument("--kiln", type=Path, default=REPO / "target/release/kiln")
     parser.add_argument("--binary", type=Path, help="existing native client binary")
     parser.add_argument("--lanes", type=int, default=os.cpu_count() or 1)
+    parser.add_argument("--backlog", type=int, default=4096,
+                        help="loopback listen backlog; keep above the largest client count")
     parser.add_argument("--quick", action="store_true", help="one round, 1 and 100 clients")
     parser.add_argument("--counts", type=int, nargs="+", help="override client counts")
     parser.add_argument("--rounds", type=int, help="override interleaved round count")
@@ -118,6 +124,8 @@ def main():
     args = parser.parse_args()
     if args.lanes < 1:
         parser.error("--lanes must be positive")
+    if args.backlog < 1:
+        parser.error("--backlog must be positive")
     if args.rounds is not None and args.rounds < 1:
         parser.error("--rounds must be positive")
     if args.counts and any(count < 1 for count in args.counts):
@@ -131,7 +139,7 @@ def main():
     thread = threading.Thread(target=loop.run_forever, daemon=True)
     thread.start()
     server = asyncio.run_coroutine_threadsafe(
-        asyncio.start_server(reply, "127.0.0.1", 0), loop).result()
+        asyncio.start_server(reply, "127.0.0.1", 0, backlog=args.backlog), loop).result()
     port = server.sockets[0].getsockname()[1]
     records = []
     try:
