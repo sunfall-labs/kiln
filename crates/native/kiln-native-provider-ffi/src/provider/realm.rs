@@ -5105,7 +5105,10 @@ pub(crate) fn submit_graph_claim_request(receiver: u64, request: u64, reservatio
     if sender == 0 || receiver == 0 || request == 0 {
         return false;
     }
-    let Some(coordinator) = SCHEDULED_GRAPH_COORDINATOR.with(|slot| slot.borrow().clone()) else {
+    let coordinator = SCHEDULED_GRAPH_COORDINATOR
+        .with(|slot| slot.borrow().clone())
+        .or_else(dedicated_graph_coordinator);
+    let Some(coordinator) = coordinator else {
         return false;
     };
     let Ok(mut requests) = pending_graph_requests().lock() else {
@@ -5192,13 +5195,96 @@ fn refuse_graph_claim_request(
     } else {
         false
     };
-    status.store(
+    let _ = status.compare_exchange(
+        GRAPH_REQUEST_PENDING,
         if paused {
             GRAPH_REQUEST_REFUSED_AFTER_PAUSE
         } else {
             GRAPH_REQUEST_REFUSED
         },
         Ordering::Release,
+        Ordering::Relaxed,
+    );
+}
+
+/// Dedicated worker realms have no migrating-run coordinator. One process-lifetime control
+/// thread claims their owner-thread gates, leaving both generated stacks on their own lanes.
+/// It carries only IDs and a status cell; the heap and actor inbox remain lane-local.
+fn dedicated_graph_coordinator() -> Option<GraphCoordinatorSender> {
+    static COORDINATOR: OnceLock<Option<GraphCoordinatorSender>> = OnceLock::new();
+    COORDINATOR
+        .get_or_init(|| {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            std::thread::Builder::new()
+                .name("kiln-graph-control".into())
+                .spawn(move || {
+                    for event in receiver {
+                        if let ScheduledEvent::GraphRequest {
+                            sender,
+                            receiver,
+                            request,
+                            reservation,
+                            status,
+                        } = event
+                        {
+                            refuse_dedicated_graph_claim_request(
+                                sender,
+                                receiver,
+                                request,
+                                reservation,
+                                status,
+                            );
+                        }
+                    }
+                })
+                .ok()
+                .map(|_| sender)
+        })
+        .clone()
+}
+
+fn refuse_dedicated_graph_claim_request(
+    sender: u64,
+    receiver: u64,
+    request: u64,
+    reservation: u64,
+    status: Arc<AtomicU8>,
+) {
+    if status.load(Ordering::Acquire) != GRAPH_REQUEST_PENDING {
+        return;
+    }
+    let paused = if let Some(claim) =
+        dedicated_claim::claim_pair(sender, receiver, Duration::from_secs(1))
+    {
+        if reservation != 0 {
+            let _ = claim.control(
+                receiver,
+                PausedTurnCommand {
+                    kind: 2,
+                    ids: [reservation, 0, 0],
+                },
+            );
+            let _ = claim.control(
+                sender,
+                PausedTurnCommand {
+                    kind: 1,
+                    ids: [request, 0, 0],
+                },
+            );
+        }
+        true
+    } else {
+        false
+    };
+    let _ = status.compare_exchange(
+        GRAPH_REQUEST_PENDING,
+        if paused {
+            GRAPH_REQUEST_REFUSED_AFTER_PAUSE
+        } else {
+            GRAPH_REQUEST_REFUSED
+        },
+        Ordering::Release,
+        Ordering::Relaxed,
     );
 }
 

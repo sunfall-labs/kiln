@@ -251,8 +251,9 @@ pub(crate) fn claim_pair(
 #[cfg(test)]
 mod tests {
     use super::super::{
+        GRAPH_REQUEST_REFUSED_AFTER_PAUSE, graph_claim_request_remove, graph_claim_request_status,
         kiln_realm_create, kiln_realm_destroy, kiln_realm_drive, kiln_realm_enter,
-        kiln_realm_set_timeout, kiln_realm_use_wall_clock,
+        kiln_realm_set_timeout, kiln_realm_use_wall_clock, submit_graph_claim_request,
     };
     use super::*;
     use core::ffi::c_void;
@@ -380,7 +381,10 @@ mod tests {
                 break;
             }
             drop(ready);
-            assert!(Instant::now() < deadline, "both newly created realms register");
+            assert!(
+                Instant::now() < deadline,
+                "both newly created realms register"
+            );
             std::thread::yield_now();
         }
         let claim = claim_pair(a, b, Duration::from_secs(1)).expect("both drives pause");
@@ -389,5 +393,98 @@ mod tests {
         drop(claim);
         first.join().expect("first drive completes");
         second.join().expect("second drive completes");
+    }
+
+    #[test]
+    fn dedicated_request_from_initial_entry_claims_both_realms() {
+        unsafe extern "C" fn noop(_: *mut c_void, _: *mut c_void, _: *mut c_void) -> i32 {
+            0
+        }
+        unsafe extern "C" fn no_drop(_: *mut c_void) {}
+        unsafe extern "C" fn arm(context: *mut c_void) -> i32 {
+            let mut id = 0;
+            unsafe {
+                kiln_realm_set_timeout(
+                    750.0,
+                    Some(noop),
+                    Some(no_drop),
+                    context,
+                    &raw mut id,
+                )
+            }
+        }
+        unsafe extern "C" fn submit(context: *mut c_void) -> i32 {
+            let receiver = unsafe { *context.cast::<u64>() };
+            i32::from(!submit_graph_claim_request(receiver, 73, 1))
+        }
+        unsafe extern "C" fn poll(context: *mut c_void) -> i32 {
+            let observed = unsafe { &mut *context.cast::<u8>() };
+            *observed = graph_claim_request_status(73);
+            graph_claim_request_remove(73);
+            0
+        }
+        let (started, ids) = mpsc::channel();
+        let (route, routed) = mpsc::channel();
+        let sender = {
+            let started = started.clone();
+            std::thread::spawn(move || {
+                let mut realm = 0;
+                let mut timer_context = 0u8;
+                assert_eq!(unsafe { kiln_realm_create(&raw mut realm) }, 0);
+                assert_eq!(kiln_realm_use_wall_clock(realm), 0);
+                started.send((true, realm)).expect("publish sender ID");
+                let receiver: u64 = routed.recv().expect("receiver ID");
+                assert_eq!(
+                    unsafe {
+                        kiln_realm_enter(
+                            realm,
+                            Some(submit),
+                            (&raw const receiver).cast_mut().cast(),
+                        )
+                    },
+                    0
+                );
+                assert_eq!(
+                    unsafe { kiln_realm_enter(realm, Some(arm), (&raw mut timer_context).cast()) },
+                    0
+                );
+                assert_eq!(
+                    unsafe { kiln_realm_drive(realm, std::ptr::null_mut(), std::ptr::null_mut()) },
+                    0
+                );
+                let mut observed = 0;
+                assert_eq!(
+                    unsafe { kiln_realm_enter(realm, Some(poll), (&raw mut observed).cast()) },
+                    0
+                );
+                assert_eq!(kiln_realm_destroy(realm), 0);
+                observed
+            })
+        };
+        let receiver = std::thread::spawn(move || {
+            let mut realm = 0;
+            let mut timer_context = 0u8;
+            assert_eq!(unsafe { kiln_realm_create(&raw mut realm) }, 0);
+            assert_eq!(kiln_realm_use_wall_clock(realm), 0);
+            started.send((false, realm)).expect("publish receiver ID");
+            assert_eq!(
+                unsafe { kiln_realm_enter(realm, Some(arm), (&raw mut timer_context).cast()) },
+                0
+            );
+            assert_eq!(
+                unsafe { kiln_realm_drive(realm, std::ptr::null_mut(), std::ptr::null_mut()) },
+                0
+            );
+            assert_eq!(kiln_realm_destroy(realm), 0);
+        });
+        let first = ids.recv_timeout(Duration::from_secs(2)).expect("first ID");
+        let second = ids.recv_timeout(Duration::from_secs(2)).expect("second ID");
+        let b = if first.0 { second.1 } else { first.1 };
+        route.send(b).expect("route request");
+        assert_eq!(
+            sender.join().expect("sender thread"),
+            GRAPH_REQUEST_REFUSED_AFTER_PAUSE
+        );
+        receiver.join().expect("receiver thread");
     }
 }
