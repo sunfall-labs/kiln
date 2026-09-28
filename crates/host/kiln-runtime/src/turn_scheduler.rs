@@ -1791,6 +1791,139 @@ mod tests {
     }
 
     #[test]
+    fn pinned_http_callbacks_stay_on_the_attachment_lane() {
+        use crate::{HostTransport, HttpDispatch, HttpEvent, HttpEventKind, HttpServerEngine};
+        use kiln_host_abi::ResourceId;
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        struct HttpTurn {
+            executor: crate::Executor,
+            done: Rc<Cell<bool>>,
+            owner: std::thread::ThreadId,
+        }
+        impl PinnedTurn for HttpTurn {
+            fn run_turn(&mut self, waker: &Waker) -> TurnOutcome {
+                assert_eq!(std::thread::current().id(), self.owner);
+                self.executor.poll_local_once(waker);
+                if self.done.get() {
+                    TurnOutcome::Done
+                } else {
+                    TurnOutcome::Parked
+                }
+            }
+        }
+
+        struct LaneDispatch {
+            engine: Rc<RefCell<HttpServerEngine>>,
+            resource: ResourceId,
+            done: Rc<Cell<bool>>,
+            owner: std::thread::ThreadId,
+            events: Arc<Mutex<Vec<HttpEventKind>>>,
+        }
+        impl HttpDispatch for LaneDispatch {
+            fn event(&self, event: &HttpEvent<'_>) -> i32 {
+                assert_eq!(std::thread::current().id(), self.owner);
+                self.events.lock().expect("event lock").push(event.kind);
+                if event.kind == HttpEventKind::RequestHead {
+                    let mut engine = self.engine.borrow_mut();
+                    assert!(engine.start_response(self.resource, event.id, 200, b"", 1));
+                    engine
+                        .end_response(self.resource, event.id, b"lane-owned")
+                        .expect("response ends");
+                }
+                if event.kind == HttpEventKind::Closed {
+                    self.done.set(true);
+                }
+                0
+            }
+
+            fn checkpoint(&self) -> i32 {
+                assert_eq!(std::thread::current().id(), self.owner);
+                0
+            }
+        }
+
+        let scheduler = PinnedTurnScheduler::new(2).expect("lanes start");
+        let (client_tx, client_rx) = mpsc::sync_channel(1);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let handle = scheduler.spawn_pinned({
+            let events = Arc::clone(&events);
+            move |reactor, _| {
+                let owner = std::thread::current().id();
+                let executor = crate::Executor::on_reactor(reactor);
+                let engine = Rc::new(RefCell::new(HttpServerEngine::default()));
+                let done = Rc::new(Cell::new(false));
+                let resource = ResourceId::new(91);
+                let (client, server) = tokio::io::duplex(4096);
+                let dispatch = Rc::new(LaneDispatch {
+                    engine: Rc::clone(&engine),
+                    resource,
+                    done: Rc::clone(&done),
+                    owner,
+                    events,
+                });
+                executor.scope(|| {
+                    assert!(engine.borrow_mut().attach(
+                        resource,
+                        HostTransport(Box::new(server)),
+                        false,
+                        dispatch,
+                    ));
+                });
+                client_tx.send(client).expect("client reaches test thread");
+                HttpTurn {
+                    executor,
+                    done,
+                    owner,
+                }
+            }
+        });
+        let mut client = client_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("HTTP transport is attached");
+        let response = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("client runtime");
+            runtime.block_on(async move {
+                tokio::time::timeout(Duration::from_secs(5), async move {
+                    client
+                        .write_all(b"GET / HTTP/1.1\r\nHost: kiln\r\nConnection: close\r\n\r\n")
+                        .await
+                        .expect("request writes");
+                    let mut bytes = Vec::new();
+                    client
+                        .read_to_end(&mut bytes)
+                        .await
+                        .expect("response reads");
+                    bytes
+                })
+                .await
+                .expect("HTTP exchange completes")
+            })
+        })
+        .join()
+        .expect("client thread completes");
+        assert!(
+            response
+                .windows(b"lane-owned".len())
+                .any(|w| w == b"lane-owned")
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while handle.status() == TurnStatus::Active {
+            assert!(Instant::now() < deadline, "HTTP realm completes");
+            std::thread::yield_now();
+        }
+        assert_eq!(handle.status(), TurnStatus::Complete);
+        let events = events.lock().expect("event lock");
+        assert!(events.contains(&HttpEventKind::RequestHead));
+        assert!(events.contains(&HttpEventKind::Closed));
+    }
+
+    #[test]
     fn deterministic_scheduler_uses_one_pausable_lane() {
         let scheduler = PinnedTurnScheduler::deterministic().expect("lane starts");
         assert_eq!(scheduler.lane_count(), 1);
