@@ -177,11 +177,10 @@ pub(crate) fn call_native(
             // and `Array.prototype[1] = 2` would make every array claim an own `1`.
             | Value::Array(_)
             | Value::TypedArray(_) => {
-                let key = match arguments.first() {
-                    Some(value) => value.property_key_units_checked()?,
-                    None => StringUnits::default(),
-                };
-                own_attributes_key(intrinsics, receiver, PropertyKeyRef::Units(&key)).is_some()
+                let value = arguments.first().unwrap_or(&Value::Undefined);
+                let key = value.property_key_units_checked()?;
+                own_attributes_key(intrinsics, receiver, PropertyKeyRef::from_value(value, &key))
+                    .is_some()
             }
             other => has_property_checked(intrinsics, other, arguments.first().unwrap_or(&Value::Undefined))?,
         }),
@@ -207,12 +206,10 @@ pub(crate) fn call_native(
         // Own *and* enumerable, which is the pair that separates this from `hasOwnProperty`:
         // `new Error("x").propertyIsEnumerable("message")` is false and `hasOwnProperty` is true.
         Native::ObjectPropertyIsEnumerable => {
-            let key = match arguments.first() {
-                Some(value) => value.property_key_units_checked()?,
-                None => StringUnits::default(),
-            };
+            let value = arguments.first().unwrap_or(&Value::Undefined);
+            let key = value.property_key_units_checked()?;
             Value::Boolean(
-                own_attributes_key(intrinsics, receiver, PropertyKeyRef::Units(&key))
+                own_attributes_key(intrinsics, receiver, PropertyKeyRef::from_value(value, &key))
                     .is_some_and(|attributes| attributes.enumerable),
             )
         }
@@ -505,11 +502,10 @@ pub(crate) fn call_native(
         }),
         Native::ObjectHasOwn => Value::Boolean(match arguments.first() {
             Some(target) => {
-                let key = match arguments.get(1) {
-                    Some(value) => value.property_key_units_checked()?,
-                    None => StringUnits::default(),
-                };
-                own_attributes_key(intrinsics, target, PropertyKeyRef::Units(&key)).is_some()
+                let value = arguments.get(1).unwrap_or(&Value::Undefined);
+                let key = value.property_key_units_checked()?;
+                own_attributes_key(intrinsics, target, PropertyKeyRef::from_value(value, &key))
+                    .is_some()
             }
             None => false,
         }),
