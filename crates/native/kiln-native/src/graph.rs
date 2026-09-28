@@ -2518,7 +2518,7 @@ pub(super) fn render_graph_roots(
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
 ) {
     output.push_str(
-        "static void kiln_graph_gc_roots(void *heap, void *context, int phase) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    size_t index;\n    if (phase == KILN_GC_PHASE_RESET || graph == NULL) return;\n",
+        "static void kiln_graph_gc_roots(void *heap, void *context, int phase) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    size_t index;\n    if (phase == KILN_GC_PHASE_RESET || phase == KILN_GC_PHASE_LANE_RESET || graph == NULL) return;\n",
     );
     for (index, (node, _)) in modules.iter().enumerate() {
         let export_count = native_graph_export_count(node);
@@ -2797,6 +2797,11 @@ extern int kiln_realm_run_scheduled(uint64_t count, uint64_t lanes, int determin
                                     void *(*begin)(void *context, uint64_t index),
                                     int (*advance)(void *session, uint64_t *delay_ns),
                                     int (*finish)(void *session), void *context, int *statuses);
+extern int kiln_realm_run_migrating(uint64_t count, uint64_t lanes, int deterministic,
+                                    void *(*begin)(void *context, uint64_t index),
+                                    uint64_t (*identify)(void *session),
+                                    int (*advance)(void *session, uint64_t *delay_ns),
+                                    int (*finish)(void *session), void *context, int *statuses);
 /* `KILN_WORKERS` thread mode: the worker index of the realm this thread runs (-1 on any other
  * thread, a `node:worker_threads` worker's included) and the count, which the realm's
  * `process.env` gets as KILN_WORKER_INDEX and KILN_WORKER_COUNT. */
@@ -2829,6 +2834,7 @@ extern int kiln_realm_gc_unregister_roots(kiln_gc_roots_fn roots, void *context)
 extern int kiln_realm_gc_mark_value(void *heap, const void *value);
 #define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
 #define KILN_GC_PHASE_RESET 2
+#define KILN_GC_PHASE_LANE_RESET 3
 #define KILN_C99_THROWN (-7)
 #define KILN_C99_CONTROL_ERROR (-2)
 #define KILN_C99_HOST_ERROR (-3)
@@ -4347,6 +4353,11 @@ static void *kiln_cli_scheduled_begin(void *context, uint64_t index) {
     return session;
 }
 
+static uint64_t kiln_cli_scheduled_identify(void *opaque) {
+    kiln_cli_scheduled_realm *session = (kiln_cli_scheduled_realm *)opaque;
+    return session->run->realm;
+}
+
 static int kiln_cli_scheduled_advance(void *opaque, uint64_t *delay_ns) {
     kiln_cli_scheduled_realm *session = (kiln_cli_scheduled_realm *)opaque;
     int progress = kiln_cli_realm_step(session->run);
@@ -4434,11 +4445,19 @@ static int kiln_cli_run_realms(int argc, char **argv, long count) {
     }
     statuses = (int *)calloc((size_t)count, sizeof *statuses);
     if (statuses == NULL) return 1;
-    if (kiln_cli_scheduler_enabled())
-        status = kiln_realm_run_scheduled((uint64_t)count,
-                    (uint64_t)kiln_cli_scheduler_lanes(), kiln_cli_virtual_clock,
-                    kiln_cli_scheduled_begin, kiln_cli_scheduled_advance,
-                    kiln_cli_scheduled_finish, &realms, statuses);
+    if (kiln_cli_scheduler_enabled()) {
+        const char *migrate = getenv("KILN_REALM_MIGRATE");
+        if (migrate != NULL && *migrate != '\0' && strcmp(migrate, "0") != 0)
+            status = kiln_realm_run_migrating((uint64_t)count,
+                        (uint64_t)kiln_cli_scheduler_lanes(), kiln_cli_virtual_clock,
+                        kiln_cli_scheduled_begin, kiln_cli_scheduled_identify,
+                        kiln_cli_scheduled_advance, kiln_cli_scheduled_finish, &realms, statuses);
+        else
+            status = kiln_realm_run_scheduled((uint64_t)count,
+                        (uint64_t)kiln_cli_scheduler_lanes(), kiln_cli_virtual_clock,
+                        kiln_cli_scheduled_begin, kiln_cli_scheduled_advance,
+                        kiln_cli_scheduled_finish, &realms, statuses);
+    }
     else
         status = kiln_realm_run_pinned((uint64_t)count, kiln_cli_run_hosted_realm, &realms, statuses);
     for (index = 0; index < count; ++index)

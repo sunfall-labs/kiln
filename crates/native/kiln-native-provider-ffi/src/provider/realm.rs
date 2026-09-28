@@ -746,6 +746,16 @@ struct ScheduledWait {
     yield_first: bool,
 }
 
+/// Reasons a scheduled realm must keep its current OS lane. These are deliberately lifetime
+/// pins: an operation can leave a callback or Tokio task reachable after the submitting turn,
+/// and proving its final release requires an owner-specific audit.
+const AFFINITY_LOCAL_TASK: u32 = 1 << 0;
+const AFFINITY_HOST_OP: u32 = 1 << 1;
+const AFFINITY_HTTP: u32 = 1 << 2;
+#[cfg(feature = "ffi")]
+const AFFINITY_FFI: u32 = 1 << 3;
+pub(crate) const AFFINITY_ATOMICS_WAIT: u32 = 1 << 4;
+
 struct NativeRealm {
     runtime: NativeRuntime,
     work: RefCell<Realm<NativeMicrotask, NativeWork>>,
@@ -783,6 +793,8 @@ struct NativeRealm {
     /// A scheduled drive's local waiter. Only its owning lane polls the task or reads this
     /// state; the shared reactor can wake its ticket without seeing the realm itself.
     scheduled_wait: RefCell<Option<ScheduledWait>>,
+    /// Zero only while a realm has never published thread-affine state.
+    affinity: Cell<u32>,
     /// The realm's `node:ffi` libraries, prepared functions and callback closures (ADR 0070):
     /// released at teardown before the heap their callbacks name is torn down.
     #[cfg(feature = "ffi")]
@@ -892,6 +904,7 @@ const INTROSPECT_ARMED: i32 = 1;
 const GC_PHASE_MARK: i32 = 0;
 const GC_PHASE_TEARDOWN: i32 = 1;
 const GC_PHASE_RESET: i32 = 2;
+const GC_PHASE_LANE_RESET: i32 = 3;
 const GC_ROOT_SURVIVES_TEARDOWN: u32 = 1;
 
 struct GcRoot {
@@ -1127,20 +1140,27 @@ impl Drop for CallableStore {
 }
 
 impl NativeRealm {
+    fn pin(&self, reason: u32) {
+        self.affinity.set(self.affinity.get() | reason);
+    }
+
     fn new() -> Result<Self, kiln_runtime::RuntimeBuildError> {
-        Self::with_executor(Executor::new()?)
+        Self::with_reactor(kiln_runtime::Reactor::current_thread()?)
     }
 
     fn on_reactor(
         reactor: Arc<kiln_runtime::Reactor>,
     ) -> Result<Self, kiln_runtime::RuntimeBuildError> {
-        Self::with_executor(Executor::on_reactor(reactor))
+        Self::with_reactor(reactor)
     }
 
-    fn with_executor(executor: Executor) -> Result<Self, kiln_runtime::RuntimeBuildError> {
+    fn with_reactor(
+        reactor: Arc<kiln_runtime::Reactor>,
+    ) -> Result<Self, kiln_runtime::RuntimeBuildError> {
         Ok(Self {
             runtime: NativeRuntime {
-                executor: Rc::new(executor),
+                executor: RefCell::new(Some(Executor::on_reactor(Arc::clone(&reactor)))),
+                reactor,
                 state: RefCell::new(RealmState::new(
                     TokioHost::new(),
                     RealmCapabilities::default(),
@@ -1169,6 +1189,7 @@ impl NativeRealm {
             promise_lane: Cell::new(None),
             introspect_armed: Cell::new(false),
             scheduled_wait: RefCell::new(None),
+            affinity: Cell::new(0),
             #[cfg(feature = "ffi")]
             ffi: RefCell::new(crate::ffi::State::default()),
             gc: RefCell::new(GcState::default()),
@@ -1177,11 +1198,40 @@ impl NativeRealm {
 }
 
 struct NativeRuntime {
-    executor: Rc<Executor>,
+    reactor: Arc<kiln_runtime::Reactor>,
+    executor: RefCell<Option<Executor>>,
     state: RefCell<RealmState<TokioHost>>,
 }
 
 impl NativeRuntime {
+    fn executor(&self) -> std::cell::Ref<'_, Executor> {
+        std::cell::Ref::map(self.executor.borrow(), |executor| {
+            executor
+                .as_ref()
+                .expect("realm executor is installed on this lane")
+        })
+    }
+
+    /// Drop the empty task set on its old lane before the realm record crosses threads.
+    fn detach_executor(&self) {
+        let executor = self
+            .executor
+            .borrow_mut()
+            .take()
+            .expect("executor was attached");
+        drop(executor);
+    }
+
+    fn attach_executor(&self) {
+        let previous = self
+            .executor
+            .replace(Some(Executor::on_reactor(Arc::clone(&self.reactor))));
+        assert!(
+            previous.is_none(),
+            "realm was detached before a lane installs its executor"
+        );
+    }
+
     fn state_mut(&self) -> Option<std::cell::RefMut<'_, RealmState<TokioHost>>> {
         self.state.try_borrow_mut().ok()
     }
@@ -1189,7 +1239,12 @@ impl NativeRuntime {
 
 impl Drop for NativeRuntime {
     fn drop(&mut self) {
-        self.executor.shut_down(self.state.get_mut());
+        let executor = self
+            .executor
+            .get_mut()
+            .take()
+            .unwrap_or_else(|| Executor::on_reactor(Arc::clone(&self.reactor)));
+        executor.shut_down(self.state.get_mut());
     }
 }
 
@@ -1330,6 +1385,59 @@ fn realm(handle: u64) -> Option<Rc<NativeRealm>> {
     REALMS.with(|realms| realms.borrow().get(&handle).cloned())
 }
 
+/// Exclusive ownership of a realm between language turns. Its constructor removes the only
+/// strong realm reference from the source lane's registry and drops that lane's empty LocalSet.
+/// A destination lane installs a fresh LocalSet before it makes the realm visible again.
+struct DetachedRealm(Rc<NativeRealm>);
+
+// SAFETY: `detach_realm` is the sole constructor. It checks there is exactly one strong owner,
+// no active drive, no local waiter and no operation that could publish a thread-affine callback.
+// The executor's LocalSet is destroyed on the old lane before this crosses a thread. The
+// remaining `Rc`/`RefCell` graph has no concurrent observer; only `attach_realm` may publish it
+// again, into one destination lane's thread-local registry.
+unsafe impl Send for DetachedRealm {}
+
+fn reset_lane_frame_roots(realm: &NativeRealm) {
+    // Generated module callbacks delegate LANE_RESET to the C prelude's frame-register reset. Those
+    // registers are TLS rather than realm fields: neither the source lane nor the destination
+    // lane may retain a prior realm's value after an exclusive lease changes lanes.
+    let gc = realm.gc.borrow();
+    for root in &gc.roots {
+        // SAFETY: LANE_RESET has no heap argument and the registered callback and context remain
+        // valid for this realm's life. Unlike teardown RESET, it preserves fallback key owners.
+        unsafe { (root.roots)(ptr::null_mut(), root.context, GC_PHASE_LANE_RESET) };
+    }
+}
+
+fn detach_realm(handle: u64) -> Option<DetachedRealm> {
+    REALMS.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        let realm = registry.get(&handle)?;
+        if realm.entered.get()
+            || realm.affinity.get() != 0
+            || realm.scheduled_wait.borrow().is_some()
+            || !matches!(realm.clock.get(), NativeClock::Wall { .. })
+            || Rc::strong_count(realm) != 1
+        {
+            return None;
+        }
+        let realm = registry.remove(&handle).expect("realm was inspected above");
+        reset_lane_frame_roots(&realm);
+        realm.runtime.detach_executor();
+        Some(DetachedRealm(realm))
+    })
+}
+
+fn attach_realm(handle: u64, detached: DetachedRealm) {
+    let DetachedRealm(realm) = detached;
+    realm.runtime.attach_executor();
+    reset_lane_frame_roots(&realm);
+    REALMS.with(|registry| {
+        let old = registry.borrow_mut().insert(handle, realm);
+        assert!(old.is_none(), "a detached realm has one registry owner");
+    });
+}
+
 fn active_realm() -> Option<Rc<NativeRealm>> {
     ACTIVE_REALM_RC.with(|slot| slot.borrow().clone())
 }
@@ -1350,7 +1458,18 @@ pub(crate) fn wake_active_drive() {
 pub(crate) fn with_active_ffi_state<R>(
     operation: impl FnOnce(&RefCell<crate::ffi::State>) -> R,
 ) -> Option<R> {
-    active_realm().map(|realm| operation(&realm.ffi))
+    active_realm().map(|realm| {
+        realm.pin(AFFINITY_FFI);
+        operation(&realm.ffi)
+    })
+}
+
+/// Mark the current realm as permanently bound before a synchronous provider operation can
+/// retain or block on a thread-affine pointer.
+pub(crate) fn pin_active_realm(reason: u32) {
+    if let Some(realm) = active_realm() {
+        realm.pin(reason);
+    }
 }
 
 fn active_handle(handle: u64) -> Option<Rc<NativeRealm>> {
@@ -1499,7 +1618,7 @@ fn drive(realm: &NativeRealm, host: *mut c_void, thrown: *mut c_void) -> i32 {
     // tasks call the language while this future is parked, so no RefCell of the realm may be
     // held across an await here.
     realm.drive_context.set((host, thrown));
-    let status = realm.runtime.executor.block_on(drive_async(realm));
+    let status = realm.runtime.executor().block_on(drive_async(realm));
     realm
         .drive_context
         .set((std::ptr::null_mut(), std::ptr::null_mut()));
@@ -1533,7 +1652,7 @@ enum ScheduledStep {
 fn drive_scheduled_inner(realm: &NativeRealm, waker: &Waker) -> ScheduledStep {
     // The LocalSet runs only on this realm's lane. Its waker is the ticket, so a host task
     // becoming ready while another realm runs queues this realm without a parked OS thread.
-    realm.runtime.executor.poll_local_once(waker);
+    realm.runtime.executor().poll_local_once(waker);
     if let Some(wait) = realm.scheduled_wait.borrow_mut().take() {
         let Some(wake) = wait.wake.get() else {
             realm.scheduled_wait.replace(Some(wait));
@@ -1549,7 +1668,10 @@ fn drive_scheduled_inner(realm: &NativeRealm, waker: &Waker) -> ScheduledStep {
             }
         }
     }
-    let step = realm.runtime.executor.scope(|| drive_one_ready_turn(realm));
+    let step = realm
+        .runtime
+        .executor()
+        .scope(|| drive_one_ready_turn(realm));
     match step {
         DriveStep::Ready => ScheduledStep::Ready,
         DriveStep::Done(status) => ScheduledStep::Done(status),
@@ -1573,7 +1695,8 @@ fn drive_scheduled_inner(realm: &NativeRealm, waker: &Waker) -> ScheduledStep {
                 .then_some(delay)
                 .flatten();
             let ticket = waker.clone();
-            realm.runtime.executor.spawn_local(async move {
+            realm.pin(AFFINITY_LOCAL_TASK);
+            realm.runtime.executor().spawn_local(async move {
                 if yield_first {
                     kiln_runtime::yield_to_tasks().await;
                 }
@@ -1585,12 +1708,12 @@ fn drive_scheduled_inner(realm: &NativeRealm, waker: &Waker) -> ScheduledStep {
                 wake: Rc::clone(&wake),
                 yield_first,
             }));
-            realm.runtime.executor.poll_local_once(waker);
+            realm.runtime.executor().poll_local_once(waker);
             if let Some(delay) = virtual_delay
                 && wake.get().is_none()
             {
-                realm.runtime.executor.advance_virtual_time(delay);
-                realm.runtime.executor.poll_local_once(waker);
+                realm.runtime.executor().advance_virtual_time(delay);
+                realm.runtime.executor().poll_local_once(waker);
             }
             ScheduledStep::Parked
         }
@@ -1676,7 +1799,7 @@ fn drive_one_ready_turn(realm: &NativeRealm) -> DriveStep {
         return DriveStep::Done(status);
     }
     if matches!(realm.clock.get(), NativeClock::Virtual) {
-        realm.runtime.executor.pause_time();
+        realm.runtime.executor().pause_time();
     }
     let turn = realm
         .runtime
@@ -1907,7 +2030,7 @@ pub unsafe extern "C" fn enter(handle: u64, entry: Option<Entry>, context: *mut 
         }
         realm
             .runtime
-            .executor
+            .executor()
             .block_on(async move { unsafe { entry(context) } })
     })
 }
@@ -3003,7 +3126,7 @@ pub unsafe extern "C" fn kiln_realm_runtime_report(
         let Some(runtime) = realm.runtime.state_mut() else {
             return RUNTIME_ERROR;
         };
-        let metrics = realm.runtime.executor.sample_runtime_metrics();
+        let metrics = realm.runtime.executor().sample_runtime_metrics();
         let fields: [u64; RUNTIME_REPORT_FIELDS] = [
             metrics.live_tasks as u64,
             metrics.park_count,
@@ -3519,6 +3642,7 @@ pub unsafe extern "C" fn kiln_realm_start_host_op(
         if http_trace_enabled() {
             eprintln!("[kiln-host] start {operation:?} referenced={referenced}");
         }
+        realm.pin(AFFINITY_HOST_OP);
         let request = runtime.start_host_op(operation, referenced);
         std::mem::drop(runtime);
         let continuation = AsyncContinuation {
@@ -3809,6 +3933,7 @@ fn attach_http(
         let Some(mut runtime) = realm.runtime.state_mut() else {
             return RUNTIME_ERROR;
         };
+        realm.pin(AFFINITY_HTTP);
         let attached = match role {
             HttpRole::Server => runtime.server_attach(resource, allow_half_close, dispatch),
             HttpRole::Client => runtime.client_attach(resource, dispatch),
@@ -4513,24 +4638,58 @@ impl SharedContext {
 }
 
 type ScheduledBegin = unsafe extern "C" fn(*mut c_void, u64) -> *mut c_void;
+type ScheduledIdentify = unsafe extern "C" fn(*mut c_void) -> u64;
 type ScheduledAdvance = unsafe extern "C" fn(*mut c_void, *mut u64) -> i32;
 type ScheduledFinish = unsafe extern "C" fn(*mut c_void) -> i32;
 
 struct ScheduledRun {
     session: *mut c_void,
+    realm: u64,
+    detached: Option<DetachedRealm>,
+    ticket: Option<Arc<kiln_runtime::turn_queue::TurnTicket>>,
     advance: ScheduledAdvance,
     finish: ScheduledFinish,
     result: std::sync::mpsc::Sender<(usize, i32)>,
     index: usize,
 }
 
+// SAFETY: a `ScheduledRun` is submitted to the movable scheduler only after its realm has
+// detached its empty executor and sole registry reference, or after its ticket has pinned it to
+// the constructing lane. At every later turn boundary it repeats that choice. The scheduler
+// promotes a newly pinned body into the lane-private map before publishing its successor and
+// destroys it on that lane. The generated session's C allocation has no live frame across a
+// turn; only the exclusive ticket lease may call its callbacks.
+unsafe impl Send for ScheduledRun {}
+
 impl ScheduledRun {
+    fn attach_if_detached(&mut self) {
+        if let Some(detached) = self.detached.take() {
+            attach_realm(self.realm, detached);
+        }
+    }
+
+    fn park_ownership(&mut self, lane: usize) {
+        let Some(ticket) = &self.ticket else {
+            return;
+        };
+        if self.realm != 0 {
+            self.detached = detach_realm(self.realm);
+        }
+        if self.detached.is_none() {
+            // If cancellation raced this turn, `pin_to_lane` may reject a retired ticket; the
+            // scheduler then drops this body on the running lane rather than publishing it.
+            let _ = ticket.pin_to_lane(lane);
+        }
+    }
+
     fn complete(&mut self, override_status: Option<i32>) {
+        self.attach_if_detached();
         let session = std::mem::replace(&mut self.session, std::ptr::null_mut());
         let status = if session.is_null() {
             RUNTIME_ERROR
         } else {
-            // SAFETY: `begin` produced this session on this lane; no generated frame is live.
+            // SAFETY: this lane owns the session's exclusive turn lease and no generated frame
+            // remains live from its last advance, even if an earlier turn ran on another lane.
             unsafe { (self.finish)(session) }
         };
         let _ = self
@@ -4541,23 +4700,37 @@ impl ScheduledRun {
 
 impl PinnedTurn for ScheduledRun {
     fn run_turn(&mut self, waker: &Waker) -> TurnOutcome {
+        self.run_turn_on(waker, 0)
+    }
+
+    fn run_turn_on(&mut self, waker: &Waker, lane: usize) -> TurnOutcome {
         if self.session.is_null() {
             self.complete(Some(RUNTIME_ERROR));
             return TurnOutcome::Done;
         }
+        self.attach_if_detached();
         let _ticket = ScheduledWakerGuard::enter(waker.clone());
         let mut delay_ns = 0;
-        // SAFETY: the session belongs to this lane, and the callback returns with every
-        // generated C frame unwound. `delay_ns` is a writable result slot.
+        // SAFETY: the ticket grants this lane exclusive access to the session, and the callback
+        // returns with every generated C frame unwound. `delay_ns` is a writable result slot.
         let kind = unsafe { (self.advance)(self.session, &mut delay_ns) };
         match kind {
             0 => {
                 self.complete(None);
                 TurnOutcome::Done
             }
-            1 => TurnOutcome::Ready,
-            2 => TurnOutcome::Parked,
-            3 => TurnOutcome::ParkedUntil(Instant::now() + Duration::from_nanos(delay_ns)),
+            1 => {
+                self.park_ownership(lane);
+                TurnOutcome::Ready
+            }
+            2 => {
+                self.park_ownership(lane);
+                TurnOutcome::Parked
+            }
+            3 => {
+                self.park_ownership(lane);
+                TurnOutcome::ParkedUntil(Instant::now() + Duration::from_nanos(delay_ns))
+            }
             _ => {
                 self.complete(Some(RUNTIME_ERROR));
                 TurnOutcome::Done
@@ -4631,6 +4804,106 @@ pub unsafe extern "C" fn kiln_realm_run_scheduled(
                     let session = unsafe { shared.begin(begin, index as u64) };
                     ScheduledRun {
                         session,
+                        realm: 0,
+                        detached: None,
+                        ticket: None,
+                        advance,
+                        finish,
+                        result: sender,
+                        index,
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        drop(sender);
+        let mut received = 0;
+        while received < count {
+            let Ok((index, status)) = receiver.recv() else {
+                break;
+            };
+            // SAFETY: `index` originated in the bounded spawn loop above.
+            unsafe { statuses.add(index).write(status) };
+            received += 1;
+        }
+        drop(handles);
+        if received == count { 0 } else { RUNTIME_ERROR }
+    })
+}
+
+/// Run generated sessions on scheduler lanes, moving an unpinned realm's exclusive turn lease
+/// between lanes. `identify` names the realm created by `begin`; it may answer zero only for a
+/// failed initialization. A realm that publishes thread-affine work pins its ticket permanently
+/// before its next turn. The session's generated C frames return before any detach.
+///
+/// # Safety
+///
+/// `begin` and `context` permit concurrent calls; `identify`, `advance` and `finish` refer to
+/// the same live session. All callbacks return with no retained C frame or borrowed lane pointer.
+/// `statuses` holds `count` writable entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_run_migrating(
+    count: u64,
+    lanes: u64,
+    deterministic: i32,
+    begin: Option<ScheduledBegin>,
+    identify: Option<ScheduledIdentify>,
+    advance: Option<ScheduledAdvance>,
+    finish: Option<ScheduledFinish>,
+    context: *mut c_void,
+    statuses: *mut i32,
+) -> i32 {
+    ffi(|| {
+        let (Ok(count), Ok(lanes), Some(begin), Some(identify), Some(advance), Some(finish)) = (
+            usize::try_from(count),
+            usize::try_from(lanes),
+            begin,
+            identify,
+            advance,
+            finish,
+        ) else {
+            return INVALID_ARGUMENT;
+        };
+        if count == 0 || lanes == 0 || statuses.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        let scheduler = if deterministic != 0 {
+            PinnedTurnScheduler::deterministic()
+        } else {
+            PinnedTurnScheduler::new(lanes)
+        };
+        let Ok(scheduler) = scheduler else {
+            return RUNTIME_ERROR;
+        };
+        for index in 0..count {
+            // SAFETY: caller supplied `count` writable status slots.
+            unsafe { statuses.add(index).write(RUNTIME_ERROR) };
+        }
+        let shared = SharedContext(context);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let handles = (0..count)
+            .map(|index| {
+                let sender = sender.clone();
+                let shared = shared;
+                scheduler.spawn_movable_with(move |reactor, ticket, lane| {
+                    let _reactor = ScheduledReactorGuard::enter(reactor);
+                    // SAFETY: the caller's callback contract; this first runs on a scheduler
+                    // lane and returns with every generated frame unwound.
+                    let session = unsafe { shared.begin(begin, index as u64) };
+                    let realm = if session.is_null() {
+                        0
+                    } else {
+                        // SAFETY: `begin` returned this live session.
+                        unsafe { identify(session) }
+                    };
+                    let detached = (realm != 0).then(|| detach_realm(realm)).flatten();
+                    if detached.is_none() {
+                        let _ = ticket.pin_to_lane(lane);
+                    }
+                    ScheduledRun {
+                        session,
+                        realm,
+                        detached,
+                        ticket: Some(ticket),
                         advance,
                         finish,
                         result: sender,
@@ -4853,6 +5126,9 @@ macro_rules! assert_provider_export {
         };
         (realm, kiln_realm_run_scheduled, realm_run_scheduled) => {
             const _: unsafe extern "C" fn(u64, u64, i32, Option<ScheduledBegin>, Option<ScheduledAdvance>, Option<ScheduledFinish>, *mut c_void, *mut i32) -> i32 = kiln_realm_run_scheduled;
+        };
+        (realm, kiln_realm_run_migrating, realm_run_migrating) => {
+            const _: unsafe extern "C" fn(u64, u64, i32, Option<ScheduledBegin>, Option<ScheduledIdentify>, Option<ScheduledAdvance>, Option<ScheduledFinish>, *mut c_void, *mut i32) -> i32 = kiln_realm_run_migrating;
         };
         (realm, kiln_realm_gc_attach, realm_gc_attach) => {
             const _: unsafe extern "C" fn(*const GcHooks, *mut c_void, *mut *mut c_void) -> i32 = kiln_realm_gc_attach;

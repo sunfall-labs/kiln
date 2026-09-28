@@ -2455,11 +2455,12 @@ static int kiln_c99_val_make_cell(kiln_val *slot) {
  * read after a collection still names live memory. The realm's own roots -- its symbols, the
  * built-in objects it made lazily, every unit's module block -- are its heap's (ADR 0070,
  * `kiln_c99_gc_mark_realm`) and die with it; nothing here holds one. At teardown the registers
- * are reset, on the thread tearing the realm down, so that thread's next realm starts idle. */
+ * are reset on teardown, and at a scheduled realm's lane handoff so neither lane retains a
+ * stale value from its previous turn. */
 static void kiln_c99_gc_unit_roots(void *opaque, void *context, int phase) {
     kiln_gc_heap *heap = (kiln_gc_heap *)opaque;
     (void)context;
-    if (phase == KILN_GC_PHASE_RESET) {
+    if (phase == KILN_GC_PHASE_RESET || phase == KILN_GC_PHASE_LANE_RESET) {
         kiln_c99_new_target = kiln_c99_undefined();
         kiln_c99_adopted_this = kiln_c99_undefined();
         kiln_c99_captured_arguments = kiln_c99_undefined();

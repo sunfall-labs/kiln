@@ -31,6 +31,7 @@
 #define KILN_GC_PHASE_MARK 0
 #define KILN_GC_PHASE_TEARDOWN 1
 #define KILN_GC_PHASE_RESET 2
+#define KILN_GC_PHASE_LANE_RESET 3
 #define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
 #define KILN_GC_HOOKS_VERSION 2u
 #define KILN_GC_DEFAULT_FLOOR ((size_t)256 * 1024)
@@ -5227,7 +5228,7 @@ static const kiln_gc_hooks kiln_c99_gc_hooks = {
 /* A borrowed result slot: marked during collection and again at teardown, so the value a caller
  * reads after `kiln_realm_destroy` is never freed by it (ADR 0034's borrowed-result contract). */
 static void kiln_c99_gc_result_roots(void *opaque, void *context, int phase) {
-    if (phase == KILN_GC_PHASE_RESET || context == NULL) return;
+    if (phase == KILN_GC_PHASE_RESET || phase == KILN_GC_PHASE_LANE_RESET || context == NULL) return;
     kiln_c99_gc_mark_value((kiln_gc_heap *)opaque, (const kiln_value *)context);
 }
 

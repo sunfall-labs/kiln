@@ -1864,6 +1864,7 @@ static KILN_ALWAYS_INLINE inline int kiln_c99_stack_exhausted(void) {
 #define KILN_GC_PHASE_MARK 0
 #define KILN_GC_PHASE_TEARDOWN 1
 #define KILN_GC_PHASE_RESET 2
+#define KILN_GC_PHASE_LANE_RESET 3
 #define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
 #define KILN_GC_HOOKS_VERSION 2u
 #define KILN_GC_DEFAULT_FLOOR ((size_t)256 * 1024)

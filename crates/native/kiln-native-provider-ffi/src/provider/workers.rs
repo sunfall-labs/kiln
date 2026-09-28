@@ -946,6 +946,7 @@ pub unsafe extern "C" fn kiln_atomics_wait(
         let limit = (timeout.is_finite() && timeout >= 0.0)
             .then(|| std::time::Duration::from_secs_f64(timeout / 1_000.0));
         let key = (handle as usize, offset);
+        crate::realm::pin_active_realm(crate::realm::AFFINITY_ATOMICS_WAIT);
         match workers::wait(key, still_expected, limit) {
             workers::WaitOutcome::Ok => 0,
             workers::WaitOutcome::NotEqual => 1,

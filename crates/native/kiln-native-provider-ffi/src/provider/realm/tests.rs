@@ -19,6 +19,56 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEST_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[test]
+fn unpinned_realm_rebinds_its_executor_on_another_thread() {
+    static LANE_RESETS: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "C" fn roots(_heap: *mut c_void, _context: *mut c_void, phase: i32) {
+        match phase {
+            GC_PHASE_LANE_RESET => {
+                LANE_RESETS.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+            GC_PHASE_RESET => {}
+            _ => panic!("unexpected root phase"),
+        }
+    }
+    unsafe extern "C" fn register_roots(_context: *mut c_void) -> i32 {
+        unsafe { kiln_realm_gc_register_roots(Some(roots), ptr::null_mut(), 0) }
+    }
+    unsafe extern "C" fn read_clock(context: *mut c_void) -> i32 {
+        unsafe { kiln_realm_now(context.cast()) }
+    }
+
+    LANE_RESETS.store(0, AtomicOrdering::SeqCst);
+    let reactor = kiln_runtime::Reactor::shared_wall().expect("shared reactor");
+    let _scheduled = ScheduledReactorGuard::enter(reactor);
+    let mut handle = 0;
+    assert_eq!(unsafe { kiln_realm_create(&mut handle) }, 0);
+    assert_eq!(kiln_realm_use_wall_clock(handle), 0);
+    assert_eq!(
+        unsafe { kiln_realm_enter(handle, Some(register_roots), ptr::null_mut()) },
+        0
+    );
+    let detached = detach_realm(handle).expect("realm has no affine work");
+    assert!(
+        realm(handle).is_none(),
+        "source lane released the registry entry"
+    );
+    let reading = std::thread::spawn(move || {
+        attach_realm(handle, detached);
+        let mut now = 0.0;
+        assert_eq!(
+            unsafe { kiln_realm_enter(handle, Some(read_clock), (&raw mut now).cast()) },
+            0
+        );
+        assert_eq!(kiln_realm_destroy(handle), 0);
+        now
+    })
+    .join()
+    .expect("destination lane completes");
+    assert!(reading > 0.0);
+    assert_eq!(LANE_RESETS.load(AtomicOrdering::SeqCst), 2);
+}
+
 struct ScheduledFixture {
     realm: u64,
 }
@@ -93,6 +143,84 @@ fn scheduled_provider_runs_many_realms_over_two_lanes() {
             .len(),
         2
     );
+}
+
+struct MigratingFixture {
+    realm: u64,
+    turns: usize,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<(u64, std::thread::ThreadId)>>>,
+}
+
+unsafe extern "C" fn migrating_fixture_begin(context: *mut c_void, _index: u64) -> *mut c_void {
+    let seen = unsafe {
+        &*context.cast::<std::sync::Arc<std::sync::Mutex<Vec<(u64, std::thread::ThreadId)>>>>()
+    };
+    let mut realm = 0;
+    if unsafe { kiln_realm_create(&mut realm) } != 0 || kiln_realm_use_wall_clock(realm) != 0 {
+        return ptr::null_mut();
+    }
+    Box::into_raw(Box::new(MigratingFixture {
+        realm,
+        turns: 0,
+        seen: std::sync::Arc::clone(seen),
+    }))
+    .cast()
+}
+
+unsafe extern "C" fn migrating_fixture_identify(session: *mut c_void) -> u64 {
+    unsafe { &*session.cast::<MigratingFixture>() }.realm
+}
+
+unsafe extern "C" fn migrating_fixture_advance(session: *mut c_void, _delay: *mut u64) -> i32 {
+    unsafe extern "C" fn enter(_: *mut c_void) -> i32 {
+        0
+    }
+    let session = unsafe { &mut *session.cast::<MigratingFixture>() };
+    if unsafe { kiln_realm_enter(session.realm, Some(enter), ptr::null_mut()) } != 0 {
+        return -1;
+    }
+    session
+        .seen
+        .lock()
+        .unwrap()
+        .push((session.realm, std::thread::current().id()));
+    session.turns += 1;
+    if session.turns == 3 { 0 } else { 1 }
+}
+
+unsafe extern "C" fn migrating_fixture_finish(session: *mut c_void) -> i32 {
+    let session = unsafe { Box::from_raw(session.cast::<MigratingFixture>()) };
+    kiln_realm_destroy(session.realm)
+}
+
+#[test]
+fn provider_moves_pure_realm_turns_between_lanes() {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut statuses = vec![-1; 100];
+    assert_eq!(
+        unsafe {
+            kiln_realm_run_migrating(
+                statuses.len() as u64,
+                2,
+                0,
+                Some(migrating_fixture_begin),
+                Some(migrating_fixture_identify),
+                Some(migrating_fixture_advance),
+                Some(migrating_fixture_finish),
+                (&raw const seen).cast_mut().cast(),
+                statuses.as_mut_ptr(),
+            )
+        },
+        0
+    );
+    assert!(statuses.iter().all(|status| *status == 0));
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), statuses.len() * 3);
+    let mut lanes_by_realm = HashMap::<u64, HashSet<std::thread::ThreadId>>::new();
+    for &(realm, lane) in seen.iter() {
+        lanes_by_realm.entry(realm).or_default().insert(lane);
+    }
+    assert!(lanes_by_realm.values().any(|lanes| lanes.len() > 1));
 }
 
 unsafe extern "C" fn exercises_realm_value_slots(context: *mut c_void) -> i32 {
@@ -2669,7 +2797,10 @@ fn realms_on_two_threads_are_active_at_once_and_each_sees_only_its_own() {
     let second = second.join().expect("second realm thread");
     assert_eq!((first.0, first.1), (0, 11));
     assert_eq!((second.0, second.1), (0, 22));
-    assert_ne!(first.2, second.2, "each thread has its own realm generation");
+    assert_ne!(
+        first.2, second.2,
+        "each thread has its own realm generation"
+    );
 }
 
 #[cfg(all(feature = "ffi", any(target_os = "linux", target_os = "macos")))]
@@ -2712,22 +2843,40 @@ mod realm_ffi {
         let (mut first, mut second) = (0, 0);
         assert_eq!(unsafe { kiln_realm_create(&raw mut first) }, 0);
         assert_eq!(unsafe { kiln_realm_create(&raw mut second) }, 0);
-        let mut in_first = FfiProbe { close: 0, close_status: 0, opened: 0 };
+        let mut in_first = FfiProbe {
+            close: 0,
+            close_status: 0,
+            opened: 0,
+        };
         assert_eq!(
             unsafe { kiln_realm_enter(first, Some(ffi_probe), (&raw mut in_first).cast()) },
             0
         );
         assert_ne!(in_first.opened, 0);
-        let mut in_second = FfiProbe { close: in_first.opened, close_status: 0, opened: 0 };
+        let mut in_second = FfiProbe {
+            close: in_first.opened,
+            close_status: 0,
+            opened: 0,
+        };
         assert_eq!(
             unsafe { kiln_realm_enter(second, Some(ffi_probe), (&raw mut in_second).cast()) },
             0
         );
-        assert_ne!(in_second.close_status, 0, "the second realm cannot close the first's library");
-        assert_eq!(in_second.opened, in_first.opened, "handles are numbered per realm");
+        assert_ne!(
+            in_second.close_status, 0,
+            "the second realm cannot close the first's library"
+        );
+        assert_eq!(
+            in_second.opened, in_first.opened,
+            "handles are numbered per realm"
+        );
         // Tearing the first realm down releases its library and leaves the second's open.
         assert_eq!(kiln_realm_destroy(first), 0);
-        let mut again = FfiProbe { close: in_second.opened, close_status: -1, opened: 1 };
+        let mut again = FfiProbe {
+            close: in_second.opened,
+            close_status: -1,
+            opened: 1,
+        };
         assert_eq!(
             unsafe { kiln_realm_enter(second, Some(ffi_probe), (&raw mut again).cast()) },
             0
