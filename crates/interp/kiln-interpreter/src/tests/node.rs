@@ -554,7 +554,16 @@ fn node_events_builtin_exposes_event_emitter() {
     );
     assert_eq!(
         kiln_builtins::builtin_exports_for_specifier("events"),
-        Some(&["EventEmitter", "once", "on", "getEventListeners", "default"][..])
+        Some(
+            &[
+                "EventEmitter",
+                "EventEmitterAsyncResource",
+                "once",
+                "on",
+                "getEventListeners",
+                "default",
+            ][..]
+        )
     );
 }
 
