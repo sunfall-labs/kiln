@@ -2386,6 +2386,7 @@ static int kiln_c99_final_builtin_matches(const kiln_shape *shape, const kiln_ob
 static void kiln_c99_final_builtin_store(uint32_t tag, uint64_t code, kiln_object *object) {
 static const kiln_sealed_layout *kiln_c99_sealed_layout_find(uint32_t tag, uint64_t code) {
 static int kiln_c99_sealed_layout_attach(uint32_t tag, uint64_t code,
+static int kiln_c99_sealed_layout_attach_empty(uint32_t tag, uint64_t code,
 static void kiln_c99_sealed_layout_publish(uint32_t tag, uint64_t code,
 static int kiln_c99_new_object(kiln_value *out) {
 static int kiln_c99_new_shared_facade(uint32_t graph, uint32_t generation, uint32_t node,
@@ -2521,6 +2522,7 @@ static int kiln_c99_own_slot_key(kiln_value target, const kiln_string *key,
 static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_own_slot_ikey(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_own_slot_key(kiln_value target, const kiln_string *key,
+static int kiln_c99_sealed_storage_commit(kiln_object *object, const kiln_string *key,
 static int kiln_c99_property_storage_commit(kiln_value target, const kiln_string *key,
 static int kiln_c99_property_storage_delete(kiln_object *object, const kiln_string *key,
 static int kiln_c99_property_storage_integrity(kiln_object *object, int freeze) {

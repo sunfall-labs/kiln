@@ -1073,8 +1073,10 @@ fn runtime_prelude_size() {
     // bring the measured prelude to 61,877 lines.
     // The detached one-chunk graph capsule, process bootstrap descriptor table and projected
     // bootstrap readers (issues 10 and 08) bring the measured prelude to 62,166 lines.
+    // Direct sealed-store construction and shared-shape incoming-edge inspection bring it to
+    // 62,449 lines. The provider capsule registry adds only declarations here.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 62_400;
+    const CEILING_LINES: usize = 63_000;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
