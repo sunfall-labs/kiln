@@ -2220,6 +2220,59 @@ int main(void) {
 }
 
 #[test]
+fn executable_actor_candidate_scope_contains_ordinary_inline_graph() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int candidate_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_value root, child;
+    kiln_object *object;
+    kiln_shape *shape;
+    kiln_gc_block *block;
+    kiln_nursery_chunk *chunk;
+    kiln_c99_graph_capsule capsule;
+    (void)context;
+    if (heap == NULL) return 1;
+    /* This fixture provider refuses heap attachment. Use its fallback as a normal collector
+     * heap, as the source-level candidate fixture above does. */
+    heap->fallback = 0;
+    heap->enabled = 1;
+    if (!kiln_c99_actor_candidate_begin(heap)) return 9;
+    if (kiln_c99_new_object(&root) != KILN_C99_OK ||
+        kiln_c99_new_array(&child) != KILN_C99_OK) return 2;
+    object = (kiln_object *)(uintptr_t)root.bits;
+    if (!kiln_c99_shape_transition(object->shape, kiln_c99_key_empty, 0, &shape)) return 3;
+    object->shape = shape;
+    object->slots[0] = KILN_VAL_TAG_PTR(KILN_TAG_BUFFER_PREFIX,
+                                         (const void *)(uintptr_t)child.bits);
+    if (!kiln_c99_actor_candidate_end(heap, 1)) return 4;
+    block = kiln_c99_gc_lookup(heap, object);
+    if (block == NULL || (block->kind & KILN_GC_FLAG_NURSERY) == 0) return 5;
+    chunk = kiln_c99_nursery_chunk_of(heap, block);
+    if (chunk->candidate_id == 0 || chunk->alloc_count != 2 ||
+        !kiln_c99_graph_capsule_prepare(heap, chunk, root, &capsule)) return 6;
+    return 0;
+}
+int main(void) {
+    uint64_t realm = 0;
+    int status;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 7;
+    status = kiln_realm_enter(realm, candidate_entry, NULL);
+    if (kiln_realm_destroy(realm) != KILN_C99_OK) return 8;
+    return status;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "actor-inline-candidate-scope");
+    assert!(
+        run.status.success(),
+        "actor inline candidate scope failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_graph_capsule_moves_inline_object_and_array() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
