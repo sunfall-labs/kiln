@@ -754,11 +754,77 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
     return KILN_C99_OK;
 }
 
-/* An own-property walk sees either a shared shape's ordered descriptors and this object's
- * values, or its realm-owned dictionary. A mixed dense/list store still converts, since its
- * integer ordering is represented by the existing dictionary conversion. Mutations continue
- * to call `kiln_c99_ensure_dictionary` before taking a writable property pointer. */
+static uint32_t *kiln_c99_sealed_orders(const kiln_object *object) {
+    return (uint32_t *)(object->slots + object->sealed->count);
+}
+
+static uint32_t *kiln_c99_sealed_extra_orders(const kiln_object *object) {
+    return kiln_c99_sealed_orders(object) + object->sealed->count;
+}
+
+static void kiln_c99_sealed_property(const kiln_object *object, size_t slot,
+                                      kiln_property *out) {
+    const kiln_sealed_property *entry = &object->sealed->entries[slot];
+    memset(out, 0, sizeof *out);
+    out->key = entry->key;
+    out->enumerable = entry->enumerable;
+    out->writable = entry->writable;
+    out->configurable = entry->configurable;
+    out->symbol_hidden = entry->symbol_hidden;
+    out->value = kiln_val_to_boundary(object->slots[slot]);
+}
+
+/* Return the nth visible record in insertion order, including realm-only keys added between
+ * descriptor keys. The common completed layout has no extras and follows descriptor order;
+ * the general selection keeps bootstrap hook insertions/deletions observable until they leave. */
+static int kiln_c99_sealed_property_nth(const kiln_object *object, size_t at,
+                                         kiln_property *out) {
+    uint32_t after = 0;
+    uint32_t *orders = kiln_c99_sealed_orders(object);
+    uint32_t *extras = kiln_c99_sealed_extra_orders(object);
+    size_t rank;
+    for (rank = 0; rank <= at; ++rank) {
+        uint32_t best = UINT32_MAX;
+        size_t best_index = 0;
+        int best_extra = 0;
+        size_t index;
+        for (index = 0; index < object->sealed->count; ++index) {
+            if (orders[index] > after && orders[index] < best) {
+                best = orders[index];
+                best_index = index;
+                best_extra = 0;
+            }
+        }
+        for (index = 0; index < object->count; ++index) {
+            if (extras[index] > after && extras[index] < best) {
+                best = extras[index];
+                best_index = index;
+                best_extra = 1;
+            }
+        }
+        if (best == UINT32_MAX) return 0;
+        after = best;
+        if (rank == at) {
+            if (best_extra) *out = object->properties[best_index];
+            else kiln_c99_sealed_property(object, best_index, out);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* An own-property walk sees a process-sealed descriptor with realm-owned values, a shared
+ * shape, or a realm-owned dictionary. Mixed dense/shape storage still converts as before. */
 static int kiln_c99_property_walk(kiln_object *object, size_t *count) {
+    if (object->sealed != NULL) {
+        size_t index;
+        size_t visible = object->count;
+        uint32_t *orders = kiln_c99_sealed_orders(object);
+        for (index = 0; index < object->sealed->count; ++index)
+            visible += orders[index] != 0;
+        *count = visible;
+        return KILN_C99_OK;
+    }
     if (object->shape != NULL &&
         (object->elements != NULL || object->properties != NULL || object->count != 0)) {
         int status = kiln_c99_ensure_dictionary(object);
@@ -770,6 +836,8 @@ static int kiln_c99_property_walk(kiln_object *object, size_t *count) {
 
 static const kiln_property *kiln_c99_property_view(const kiln_object *object, size_t index,
                                                     kiln_property *scratch) {
+    if (object->sealed != NULL)
+        return kiln_c99_sealed_property_nth(object, index, scratch) ? scratch : NULL;
     if (object->shape == NULL) return &object->properties[index];
     kiln_c99_shape_property(object, (uint32_t)index, scratch);
     return scratch;
@@ -795,7 +863,14 @@ static int kiln_c99_property_view_value(kiln_value owner, size_t index,
     size_t count;
     if (owner.tag != KILN_VALUE_OBJECT || out == NULL) return 0;
     object = kiln_c99_object_of(owner);
-    count = object->shape != NULL ? object->shape->property_count : object->count;
+    if (object->sealed != NULL) {
+        uint32_t *orders = kiln_c99_sealed_orders(object);
+        size_t slot;
+        count = object->count;
+        for (slot = 0; slot < object->sealed->count; ++slot) count += orders[slot] != 0;
+    } else {
+        count = object->shape != NULL ? object->shape->property_count : object->count;
+    }
     if (index >= count) return 0;
     *out = *kiln_c99_property_view(object, index, out);
     return 1;
@@ -981,6 +1056,7 @@ static int kiln_c99_new_object(kiln_value *out) {
     object->arguments_brand = 0;
     object->error_brand = 0;
     object->layout_token = 0;
+    object->sealed = NULL;
     object->accessor_count = 0;
     object->read_only_seen = 0;
     object->shape = kiln_c99_shape_root();
@@ -1283,6 +1359,7 @@ static int kiln_c99_new_object_tenured(kiln_value *out) {
     object->arguments_brand = 0;
     object->error_brand = 0;
     object->layout_token = 0;
+    object->sealed = NULL;
     object->accessor_count = 0;
     object->read_only_seen = 0;
     object->shape = kiln_c99_shape_root();

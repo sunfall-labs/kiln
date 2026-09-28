@@ -1054,6 +1054,16 @@ typedef struct kiln_sealed_layout {
     kiln_sealed_property entries[];
 } kiln_sealed_layout;
 
+/* Realm-owned values and insertion order for a sealed layout. Value slots are followed by one
+ * ordinal per descriptor and then ordinals for realm-only appended keys. Zero means absent.
+ * The header stays immediately before `kiln_object.slots`, so reallocating the tail can move
+ * the block without changing the object's identity. */
+typedef struct kiln_sealed_values {
+    uint32_t next_order;
+    uint32_t extra_capacity;
+    kiln_val values[];
+} kiln_sealed_values;
+
 /* The global object's stable site in the complete descriptor table. Other ordinary-object
  * sites will use compiler-assigned identities, never a realm pointer. */
 #define KILN_C99_SEALED_GLOBAL_CODE UINT64_MAX
@@ -1133,7 +1143,16 @@ typedef struct kiln_object {
      * past the shape limits, or one a deletion, `defineProperty`, a freeze or a reconfiguration
      * moved out of shape mode. Occupies what was padding after the last member. */
     uint32_t layout_token;
+    /* NULL for ordinary shape/list storage. A non-NULL process descriptor changes only storage:
+     * this full object and its prototype remain owned by the realm. Reads project the descriptor
+     * and this object's slots; mutation can materialize the ordinary list in place. */
+    const kiln_sealed_layout *sealed;
 } kiln_object;
+
+static inline kiln_sealed_values *kiln_c99_sealed_values_of(const kiln_object *object) {
+    return (kiln_sealed_values *)((char *)object->slots -
+                                  offsetof(kiln_sealed_values, values));
+}
 
 /* The only realm-heap state for a sealed graph node. Its lease retains the graph in the Rust
  * registry; the opaque ID is copied into message tokens, never interpreted as a pointer. */

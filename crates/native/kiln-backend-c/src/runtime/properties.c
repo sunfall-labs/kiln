@@ -173,6 +173,18 @@ static size_t kiln_c99_own_index_key(const kiln_object *object, const kiln_strin
 static int kiln_c99_property_read_own(const kiln_object *object, const kiln_string *key,
                                       const kiln_string *ikey, kiln_property *out) {
     size_t index;
+    if (object->sealed != NULL) {
+        uint32_t *orders = kiln_c99_sealed_orders(object);
+        for (index = 0; index < object->sealed->count; ++index) {
+            kiln_property candidate = {.key = object->sealed->entries[index].key};
+            if (orders[index] != 0 &&
+                ((ikey != NULL && candidate.key == ikey) ||
+                 (key != NULL && kiln_c99_same_key_view(&candidate, key)))) {
+                kiln_c99_sealed_property(object, index, out);
+                return 1;
+            }
+        }
+    }
     if (object->shape != NULL) {
         uint32_t slot;
         if (ikey != NULL && kiln_c99_shape_find_slot(object->shape, ikey, &slot) &&
@@ -237,7 +249,9 @@ static int kiln_c99_property_read_own_value(kiln_value owner, const kiln_string 
 static void kiln_c99_gc_trace_object_properties(kiln_gc_heap *heap,
                                                  const kiln_object *object) {
     size_t index;
-    if (object->shape != NULL) {
+    if (object->sealed != NULL) {
+        kiln_c99_gc_mark_vals(heap, object->slots, object->sealed->count);
+    } else if (object->shape != NULL) {
         for (index = 0; index < object->shape->property_count; ++index) {
             kiln_c99_gc_mark_block(heap, object->shape->keys[index]);
             if (object->slots != NULL) kiln_c99_gc_mark_val(heap, object->slots[index]);

@@ -3634,8 +3634,16 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
         if (object->shape != NULL || object->count > object->capacity ||
             object->element_count > object->element_capacity ||
             (object->count != 0 && object->properties == NULL) ||
-            (object->element_count != 0 && object->elements == NULL))
+            (object->element_count != 0 && object->elements == NULL) ||
+            (object->sealed != NULL &&
+             (object->slots == NULL || object->slot_capacity < object->sealed->count)))
             return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        if (object->sealed != NULL) {
+            for (index = 0; index < object->sealed->count; ++index) {
+                if (kiln_c99_graph_val_in_batch(heap, chunks, count, object->slots[index]))
+                    return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+            }
+        }
         for (index = 0; index < object->count; ++index) {
             const kiln_property *property = &object->properties[index];
             if (kiln_c99_graph_in_batch(heap, chunks, count, property->key) ||
@@ -5698,7 +5706,9 @@ static void kiln_c99_gc_finalize(kiln_gc_heap *heap, kiln_gc_block *block) {
     }
     case KILN_GC_OBJECT:
         free(((kiln_object *)payload)->properties);
-        if (((kiln_object *)payload)->slots != ((kiln_object *)payload)->inline_slots) {
+        if (((kiln_object *)payload)->sealed != NULL) {
+            free(kiln_c99_sealed_values_of((kiln_object *)payload));
+        } else if (((kiln_object *)payload)->slots != ((kiln_object *)payload)->inline_slots) {
             free(((kiln_object *)payload)->slots);
         }
         free(((kiln_object *)payload)->elements);
