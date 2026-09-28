@@ -129,15 +129,25 @@ sys.exit(8 if mismatch == 'status' else 7)
             kiln.write_text("""#!/usr/bin/env python3
 import os, pathlib, sys
 output = pathlib.Path(sys.argv[sys.argv.index('--output') + 1])
+pathlib.Path(os.environ['FIXTURE_BUILD_ENV_LOG']).write_text(
+    __import__('json').dumps({'tmpdir': os.environ.get('TMPDIR'), 'output': str(output)}))
 output.write_text('''#!/usr/bin/env python3\nimport os\nwith open(os.environ["FIXTURE_BINARY_LOG"], "a") as stream: stream.write("run\\\\n")\n''')
 output.chmod(0o755)
 """)
             kiln.chmod(0o755)
             marker = root / "release"
             binary_log = root / "binary.calls"
+            runtime_tmpdir = root / "runtime-tmp"
+            stage_dir = root / "stage"
+            runtime_tmpdir.mkdir()
+            stage_dir.mkdir()
+            build_env_log = root / "build-env.json"
             environment = dict(os.environ, KILN_BIN=str(kiln), KILN_THIRDPARTY_DIR=str(root),
                                KILN_THIRDPARTY_NATIVE="0", KILN_JOBS="1",
-                               KILN_THIRDPARTY_BUILD_JOBS="1", FIXTURE_BINARY_LOG=str(binary_log))
+                               KILN_THIRDPARTY_BUILD_JOBS="1", FIXTURE_BINARY_LOG=str(binary_log),
+                               TMPDIR=str(runtime_tmpdir),
+                               KILN_THIRDPARTY_WORK_TMPDIR=str(stage_dir),
+                               FIXTURE_BUILD_ENV_LOG=str(build_env_log))
             process = subprocess.Popen(
                 [str(Path(__file__).resolve().with_name("thirdparty.sh")), "--bench",
                  "--bundles", "fixture", "--passes", "1", "--warmup", "0",
@@ -171,6 +181,9 @@ output.chmod(0o755)
                     break
             self.assertTrue(reached_barrier, "\n".join(output))
             self.assertFalse(binary_log.exists(), "binary ran before the correctness-lane release")
+            build_environment = json.loads(build_env_log.read_text())
+            self.assertEqual(build_environment["tmpdir"], str(runtime_tmpdir))
+            Path(build_environment["output"]).relative_to(stage_dir)
             temporary_marker = marker.with_suffix(".tmp")
             temporary_marker.write_text("measure\n")
             temporary_marker.replace(marker)

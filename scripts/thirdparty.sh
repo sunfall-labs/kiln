@@ -186,7 +186,9 @@ elif (( JOBS < 1 )); then
 	JOBS=1
 fi
 
-WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kiln-thirdparty-results.XXXXXXXX")"
+WORK_TMPDIR="${KILN_THIRDPARTY_WORK_TMPDIR:-${TMPDIR:-/tmp}}"
+mkdir -p "$WORK_TMPDIR"
+WORK_DIR="$(mktemp -d "$WORK_TMPDIR/kiln-thirdparty-results.XXXXXXXX")"
 cleanup() {
 	if [[ ${BASHPID:-$$} -eq $$ ]]; then
 		rm -rf "$WORK_DIR"

@@ -225,7 +225,7 @@ THIRDPARTY_STAGED=0
 if [[ $THIRDPARTY_PREP_JOBS -eq 1 ]]; then
 	THIRDPARTY_STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kiln-gate-thirdparty.XXXXXXXX")"
 	THIRDPARTY_RELEASE_MARKER="$THIRDPARTY_STAGE_DIR/release"
-	step "thirdparty baseline" env TMPDIR="$THIRDPARTY_STAGE_DIR" \
+	step "thirdparty baseline" env KILN_THIRDPARTY_WORK_TMPDIR="$THIRDPARTY_STAGE_DIR" \
 		KILN_THIRDPARTY_BUILD_JOBS=1 KILN_JOBS=1 RAYON_NUM_THREADS=1 \
 		./scripts/thirdparty.sh "${THIRDPARTY_BENCH_ARGS[@]}" --wait-for-release "$THIRDPARTY_RELEASE_MARKER" &
 	THIRDPARTY_PID=$!
