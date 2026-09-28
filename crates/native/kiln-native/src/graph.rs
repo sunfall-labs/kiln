@@ -2822,7 +2822,7 @@ extern int kiln_realm_run_migrating(uint64_t count, uint64_t lanes, int determin
  * `process.env` gets as KILN_WORKER_INDEX and KILN_WORKER_COUNT. */
 static _Thread_local long kiln_cli_thread_worker = -1;
 static long kiln_cli_thread_workers = 0;
-extern void kiln_c99_realm_capture_output(int fd) __attribute__((visibility("hidden")));
+extern void kiln_c99_realm_capture_output(FILE *output, FILE *error) __attribute__((visibility("hidden")));
 /* `node:worker_threads` (realms issue 06): the runtime starts a worker's thread and calls the
  * launcher back there to run one module of this program as the worker's realm. */
 typedef int (*kiln_worker_runner_fn)(const uint8_t *entry, uint64_t entry_len, int32_t eval,
@@ -3570,7 +3570,8 @@ static int kiln_graph_enter(void *opaque) {
         if (status != 0) return status;
         graph->roots_registered = 1;
         /* A realm hosted beside others writes its standard streams where its host said. */
-        if (graph->cli.output != NULL) kiln_c99_realm_capture_output(fileno(graph->cli.output));
+        if (graph->cli.output != NULL)
+            kiln_c99_realm_capture_output(graph->cli.output, graph->cli.error_output);
         status = kiln_install_native_modules(host);
         if (status != 0) return status;
         if (kiln_cli_thread_worker >= 0 && graph->worker_entry == 0) {

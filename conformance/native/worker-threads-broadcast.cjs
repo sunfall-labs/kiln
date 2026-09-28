@@ -7,10 +7,23 @@ if (isMainThread) {
   const channel = new BroadcastChannel("probe");
   const listener = new BroadcastChannel("probe");
   const heard = [];
-  listener.onmessage = (event) => heard.push(`main heard ${JSON.stringify(event.data)}`);
   const workers = [1, 2].map((n) => new Worker(__filename, { workerData: n }));
   let ready = 0;
   let replies = 0;
+  let mainReceived = false;
+  // The listener and the two workers run on different realms. Their deliveries have no
+  // relative order, so wait for all three before comparing the printed transcript.
+  const finishIfDone = () => {
+    if (!mainReceived || replies !== workers.length) return;
+    console.log(heard.sort().join("\n"));
+    channel.close();
+    listener.close();
+  };
+  listener.onmessage = (event) => {
+    heard.push(`main heard ${JSON.stringify(event.data)}`);
+    mainReceived = true;
+    finishIfDone();
+  };
   for (const worker of workers) {
     worker.on("message", (message) => {
       if (message === "ready") {
@@ -18,11 +31,8 @@ if (isMainThread) {
         return;
       }
       heard.push(message);
-      if (++replies === workers.length) {
-        console.log(heard.sort().join("\n"));
-        channel.close();
-        listener.close();
-      }
+      replies++;
+      finishIfDone();
     });
   }
 } else {

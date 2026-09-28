@@ -734,8 +734,8 @@ static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, s
 
 /* Realm stream semantics. The transport adapters only feed data and lifecycle events into these
  * ordinary objects; no socket, reactor, clock, or scheduler state is duplicated here. */
-/* The descriptor a write aimed at `fd` goes to in the current realm (`kiln_c99_realm_state`). */
-static int kiln_c99_realm_output(int fd);
+/* Route a process-stream write through the current realm's host stream when one is installed. */
+static void kiln_c99_realm_stream_write(int fd, const void *bytes, size_t length);
 
 static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t code,
                                 kiln_value receiver, const kiln_value *args, size_t argc,
@@ -873,7 +873,7 @@ static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t co
             kiln_value fd_val;
             if (kiln_c99_get(host, receiver, "fd", 2, &fd_val, depth, NULL) == KILN_C99_OK &&
                 fd_val.tag == KILN_VALUE_NUMBER) {
-                int fd = kiln_c99_realm_output((int)kiln_c99_as_number(fd_val));
+                int fd = (int)kiln_c99_as_number(fd_val);
                 if (fd >= 0) {
                     kiln_value data_val = argc > 0 ? args[0] : kiln_c99_undefined();
                     if (data_val.tag == KILN_VALUE_STRING) {
@@ -881,7 +881,7 @@ static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t co
                         size_t bytes_len = 0;
                         if (kiln_c99_string_to_utf8_lossy(data_val, &data_owned, &bytes_len) == KILN_C99_OK) {
                             if (bytes_len > 0) {
-                                (void)write(fd, data_owned, bytes_len);
+                                kiln_c99_realm_stream_write(fd, data_owned, bytes_len);
                             }
                             free(data_owned);
                         }
@@ -890,7 +890,7 @@ static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t co
                         size_t width = kiln_c99_typed_width(view->kind);
                         if (view->length <= SIZE_MAX / width) {
                             const uint8_t *b = view->buffer->bytes + view->byte_offset;
-                            (void)write(fd, b, view->length * width);
+                            kiln_c99_realm_stream_write(fd, b, view->length * width);
                         }
                     }
                 }
@@ -977,9 +977,10 @@ typedef struct kiln_c99_realm_state {
     /* Every compiled unit's block, by the unit's process-wide id; NULL until the realm enters it. */
     kiln_c99_unit_block **units;
     size_t unit_capacity;
-    /* Where the realm's standard streams go when its host gave it a descriptor of its own -- a
-     * realm hosted beside others in one process (realms issue 05) -- or 0 for the process's. */
-    int output_fd;
+    /* The host's standard streams for this realm. A scheduled realm may capture them with
+     * fopencookie/funopen, which has no descriptor for process.stdout.write to target. */
+    FILE *output_stream;
+    FILE *error_stream;
     /* The realm's own half of each region closure it has given a prototype or a property to
      * (realms issue 08; `kiln_c99_region_own_slot`): a chained table keyed by the closure, whose
      * entries never move, so a slot pointer stays valid while the table grows. */
@@ -999,15 +1000,22 @@ typedef struct kiln_c99_region_own {
 /* This thread's realm's context: its heap's, or the fallback heap's outside a realm. */
 static kiln_c99_realm_state *kiln_c99_realm(void);
 
-/* The launcher, inside the realm before any module runs: both standard streams go to `fd`. */
-static void kiln_c99_realm_capture_output(int fd) {
-    kiln_c99_realm()->output_fd = fd;
+/* The launcher installs these before any module runs. A NULL error stream shares stdout, as
+ * the multi-realm parity harness does; a worker may supply two distinct streams. */
+static void kiln_c99_realm_capture_output(FILE *output, FILE *error) {
+    kiln_c99_realm_state *realm = kiln_c99_realm();
+    realm->output_stream = output;
+    realm->error_stream = error != NULL ? error : output;
 }
 
-/* The descriptor a write the program aims at `fd` goes to. */
-static int kiln_c99_realm_output(int fd) {
-    int output = kiln_c99_realm()->output_fd;
-    return (fd == 1 || fd == 2) && output > 0 ? output : fd;
+/* Node's process streams must use the same FILE as console output. `fileno` is -1 on a
+ * cookie-backed scheduled stream, and writing to the process descriptor loses realm output. */
+static void kiln_c99_realm_stream_write(int fd, const void *bytes, size_t length) {
+    kiln_c99_realm_state *realm = kiln_c99_realm();
+    FILE *stream = fd == 1 ? realm->output_stream :
+                   fd == 2 ? realm->error_stream : NULL;
+    if (stream != NULL) (void)fwrite(bytes, 1, length, stream);
+    else (void)write(fd, bytes, length);
 }
 
 typedef struct kiln_ffi_function_meta {
