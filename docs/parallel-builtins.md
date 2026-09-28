@@ -68,13 +68,14 @@ make a property read observable and keep the call sequential.
 
 ## Thread budget
 
-The native backend currently uses a pool started when a call first needs it.
-It measures a prefix of the call on the realm thread and sends the remainder
-to the pool only when the estimated work justifies it. By default, each
-`KILN_WORKERS` process gets approximately `available cores / worker processes`
-pool threads, with a minimum of one. Set `KILN_PARALLELISM=<n>` to override
-that count; `KILN_PARALLELISM=1` runs calls inline. The planned realm scheduler
-will replace this interim pool.
+The native backend measures a prefix of the call on the realm thread and
+submits the remainder to scheduler lanes only when the estimated work
+justifies it. With the optional realm turn scheduler enabled, collection
+chunks use that realm's scheduler queue. Otherwise, a process-wide scheduler
+pool starts when the first parallel call needs it. By default, a process gets
+approximately `available cores / KILN_WORKER_COUNT` lanes, with a minimum of
+one. Set `KILN_PARALLELISM=<n>` to override that budget;
+`KILN_PARALLELISM=1` runs calls inline.
 
 ## Remove kiln extensions
 
