@@ -77,6 +77,18 @@ else
 	COUNTS="${KILN_REALMS_COUNTS:-1 2 $CORES}"
 fi
 
+declare -a PROBES=("$@")
+if ((${#PROBES[@]} == 0)); then
+	shopt -s nullglob
+	PROBES=(conformance/native/*.ts conformance/native/*.js conformance/native/*.cjs conformance/native/*.mjs)
+fi
+for probe in "${PROBES[@]}"; do
+	if [[ ! -f $probe ]]; then
+		echo "native-realms.sh: no such probe: $probe" >&2
+		exit 2
+	fi
+done
+
 KILN="${KILN_BIN:-}"
 if [[ -z $KILN ]]; then
 	if [[ -x "$(kiln_repo_root)/target/release/kiln" ]]; then
@@ -85,12 +97,6 @@ if [[ -z $KILN ]]; then
 		kiln_cargo build --locked -p kiln-cli >&2
 		KILN="$(kiln_repo_root)/target/debug/kiln"
 	fi
-fi
-
-declare -a PROBES=("$@")
-if ((${#PROBES[@]} == 0)); then
-	shopt -s nullglob
-	PROBES=(conformance/native/*.ts conformance/native/*.js conformance/native/*.cjs conformance/native/*.mjs)
 fi
 
 # A run of N realms already keeps N cores busy; a few probes at once keeps the builds overlapped.
