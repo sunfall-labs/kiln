@@ -2652,12 +2652,12 @@ pub(super) fn graph_launcher_source_with_imports(
 #define _GNU_SOURCE
 #endif
 #include <locale.h>
+#include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #ifndef _WIN32
-#include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
@@ -4399,15 +4399,36 @@ static int kiln_cli_scheduled_finish(void *opaque) {
 }
 
 static long kiln_cli_scheduler_lanes(void) {
-    const char *setting = getenv("KILN_SCHEDULER_LANES");
+    /* One budget for realm turns and parallel chunks. The explicit parallelism setting also
+     * selects a single deterministic lane for sequential comparisons. */
+    const char *setting = getenv("KILN_PARALLELISM");
     char *end = NULL;
     long lanes = 0;
     if (setting != NULL && *setting != '\0') {
+        errno = 0;
         lanes = strtol(setting, &end, 10);
-        if (end == setting || *end != '\0' || lanes < 1) lanes = 0;
+        if (errno == ERANGE || end == setting || *end != '\0' || lanes < 1) lanes = 1;
+    } else {
+        setting = getenv("KILN_SCHEDULER_LANES");
+        if (setting != NULL && *setting != '\0') {
+            errno = 0;
+            lanes = strtol(setting, &end, 10);
+            if (errno == ERANGE || end == setting || *end != '\0' || lanes < 1) lanes = 0;
+        }
     }
 #ifndef _WIN32
-    if (lanes == 0) lanes = sysconf(_SC_NPROCESSORS_ONLN);
+    if (lanes == 0) {
+        long cores = sysconf(_SC_NPROCESSORS_ONLN);
+        const char *workers_setting = getenv("KILN_WORKER_COUNT");
+        long workers = 1;
+        if (workers_setting != NULL && *workers_setting != '\0') {
+            end = NULL;
+            errno = 0;
+            workers = strtol(workers_setting, &end, 10);
+            if (errno == ERANGE || end == workers_setting || *end != '\0' || workers < 1) workers = 1;
+        }
+        lanes = cores > 0 ? cores / workers : 1;
+    }
 #endif
     if (lanes < 1) lanes = 1;
     return lanes > 1024 ? 1024 : lanes;
