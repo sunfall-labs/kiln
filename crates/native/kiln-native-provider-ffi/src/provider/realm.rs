@@ -3,6 +3,8 @@ use core::ffi::{CStr, c_char, c_void};
 use kiln_host_abi::{
     AsyncHostError, AsyncHostOp, AsyncHostValue, RequestId, ResourceId, ResourceKind,
 };
+use kiln_runtime::turn_queue::TurnOutcome;
+use kiln_runtime::turn_scheduler::{PinnedTurn, PinnedTurnScheduler};
 use kiln_runtime::{
     Executor, Realm, RealmCapabilities, RealmState, RuntimeTurn, TimerId, TokioHost, WorkItem,
 };
@@ -18,7 +20,10 @@ use std::hash::{Hash, Hasher};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::Waker;
+use std::time::{Duration, Instant};
 
 #[path = "realm/reclaim.rs"]
 mod reclaim;
@@ -736,6 +741,11 @@ impl hashbrown::Equivalent<StringUnits> for BorrowedStringView<'_> {
     }
 }
 
+struct ScheduledWait {
+    wake: Rc<Cell<Option<kiln_runtime::DriveWake>>>,
+    yield_first: bool,
+}
+
 struct NativeRealm {
     runtime: NativeRuntime,
     work: RefCell<Realm<NativeMicrotask, NativeWork>>,
@@ -770,6 +780,9 @@ struct NativeRealm {
     /// A wall-clock realm bounds its park when this is set, so an idle server answers a
     /// signal promptly instead of at its next request.
     introspect_armed: Cell<bool>,
+    /// A scheduled drive's local waiter. Only its owning lane polls the task or reads this
+    /// state; the shared reactor can wake its ticket without seeing the realm itself.
+    scheduled_wait: RefCell<Option<ScheduledWait>>,
     /// The realm's `node:ffi` libraries, prepared functions and callback closures (ADR 0070):
     /// released at teardown before the heap their callbacks name is torn down.
     #[cfg(feature = "ffi")]
@@ -1115,9 +1128,19 @@ impl Drop for CallableStore {
 
 impl NativeRealm {
     fn new() -> Result<Self, kiln_runtime::RuntimeBuildError> {
+        Self::with_executor(Executor::new()?)
+    }
+
+    fn on_reactor(
+        reactor: Arc<kiln_runtime::Reactor>,
+    ) -> Result<Self, kiln_runtime::RuntimeBuildError> {
+        Self::with_executor(Executor::on_reactor(reactor))
+    }
+
+    fn with_executor(executor: Executor) -> Result<Self, kiln_runtime::RuntimeBuildError> {
         Ok(Self {
             runtime: NativeRuntime {
-                executor: Rc::new(Executor::new()?),
+                executor: Rc::new(executor),
                 state: RefCell::new(RealmState::new(
                     TokioHost::new(),
                     RealmCapabilities::default(),
@@ -1145,6 +1168,7 @@ impl NativeRealm {
             clock: Cell::new(NativeClock::Virtual),
             promise_lane: Cell::new(None),
             introspect_armed: Cell::new(false),
+            scheduled_wait: RefCell::new(None),
             #[cfg(feature = "ffi")]
             ffi: RefCell::new(crate::ffi::State::default()),
             gc: RefCell::new(GcState::default()),
@@ -1233,6 +1257,44 @@ std::thread_local! {
     /// thread's life. A generation rather than the heap pointer itself, because a heap
     /// address can be freed and reused by the next realm on the same thread.
     static ACTIVE_GENERATION: Cell<u64> = const { Cell::new(1) };
+    /// Set only while a scheduler lane constructs a realm, so `kiln_realm_create` puts its
+    /// LocalSet on that lane while all lanes share the scheduler's reactor.
+    static SCHEDULED_REACTOR: RefCell<Option<Arc<kiln_runtime::Reactor>>> = const { RefCell::new(None) };
+    /// Set only across a scheduled C step. A nested provider drive uses this ticket to park
+    /// without exposing the scheduler's Rust types through the private C ABI.
+    static SCHEDULED_WAKER: RefCell<Option<Waker>> = const { RefCell::new(None) };
+}
+
+struct ScheduledReactorGuard(Option<Arc<kiln_runtime::Reactor>>);
+
+impl ScheduledReactorGuard {
+    fn enter(reactor: Arc<kiln_runtime::Reactor>) -> Self {
+        Self(SCHEDULED_REACTOR.with(|slot| slot.replace(Some(reactor))))
+    }
+}
+
+impl Drop for ScheduledReactorGuard {
+    fn drop(&mut self) {
+        SCHEDULED_REACTOR.with(|slot| {
+            slot.replace(self.0.take());
+        });
+    }
+}
+
+struct ScheduledWakerGuard(Option<Waker>);
+
+impl ScheduledWakerGuard {
+    fn enter(waker: Waker) -> Self {
+        Self(SCHEDULED_WAKER.with(|slot| slot.replace(Some(waker))))
+    }
+}
+
+impl Drop for ScheduledWakerGuard {
+    fn drop(&mut self) {
+        SCHEDULED_WAKER.with(|slot| {
+            slot.replace(self.0.take());
+        });
+    }
 }
 
 fn bump_generation() {
@@ -1442,6 +1504,97 @@ fn drive(realm: &NativeRealm, host: *mut c_void, thrown: *mut c_void) -> i32 {
         .drive_context
         .set((std::ptr::null_mut(), std::ptr::null_mut()));
     status
+}
+
+/// Poll exactly one language turn on a scheduler lane. A local task waits on the host signal
+/// and wakes the realm's ticket; the lane itself is free to run other realms while this one is
+/// parked. The caller enters `ActiveRealm` and keeps the generated host/result slots alive.
+fn drive_scheduled(
+    realm: &NativeRealm,
+    host: *mut c_void,
+    thrown: *mut c_void,
+    waker: &Waker,
+) -> ScheduledStep {
+    realm.drive_context.set((host, thrown));
+    let step = drive_scheduled_inner(realm, waker);
+    realm
+        .drive_context
+        .set((std::ptr::null_mut(), std::ptr::null_mut()));
+    step
+}
+
+enum ScheduledStep {
+    Ready,
+    Parked,
+    ParkedUntil(std::time::Instant),
+    Done(i32),
+}
+
+fn drive_scheduled_inner(realm: &NativeRealm, waker: &Waker) -> ScheduledStep {
+    // The LocalSet runs only on this realm's lane. Its waker is the ticket, so a host task
+    // becoming ready while another realm runs queues this realm without a parked OS thread.
+    realm.runtime.executor.poll_local_once(waker);
+    if let Some(wait) = realm.scheduled_wait.borrow_mut().take() {
+        let Some(wake) = wait.wake.get() else {
+            realm.scheduled_wait.replace(Some(wait));
+            return ScheduledStep::Parked;
+        };
+        if wait.yield_first
+            && wake == kiln_runtime::DriveWake::Timer
+            && matches!(realm.clock.get(), NativeClock::Virtual)
+        {
+            let status = run_one_timer(realm);
+            if status != 0 {
+                return ScheduledStep::Done(status);
+            }
+        }
+    }
+    let step = realm.runtime.executor.scope(|| drive_one_ready_turn(realm));
+    match step {
+        DriveStep::Ready => ScheduledStep::Ready,
+        DriveStep::Done(status) => ScheduledStep::Done(status),
+        DriveStep::Parked {
+            signal,
+            delay,
+            yield_first,
+        } => {
+            let delay = introspect_park(realm, delay);
+            // With no host operation to wake us, a wall-clock timer belongs to the lane's
+            // deadline heap. It needs no Tokio task, even when thousands of realms are idle.
+            if !yield_first
+                && matches!(realm.clock.get(), NativeClock::Wall { .. })
+                && let Some(delay) = delay
+            {
+                return ScheduledStep::ParkedUntil(std::time::Instant::now() + delay);
+            }
+            let wake = Rc::new(Cell::new(None));
+            let wake_for_task = Rc::clone(&wake);
+            let virtual_delay = matches!(realm.clock.get(), NativeClock::Virtual)
+                .then_some(delay)
+                .flatten();
+            let ticket = waker.clone();
+            realm.runtime.executor.spawn_local(async move {
+                if yield_first {
+                    kiln_runtime::yield_to_tasks().await;
+                }
+                let result = kiln_runtime::wait_for_turn(signal, delay).await;
+                wake_for_task.set(Some(result));
+                ticket.wake();
+            });
+            realm.scheduled_wait.replace(Some(ScheduledWait {
+                wake: Rc::clone(&wake),
+                yield_first,
+            }));
+            realm.runtime.executor.poll_local_once(waker);
+            if let Some(delay) = virtual_delay
+                && wake.get().is_none()
+            {
+                realm.runtime.executor.advance_virtual_time(delay);
+                realm.runtime.executor.poll_local_once(waker);
+            }
+            ScheduledStep::Parked
+        }
+    }
 }
 
 async fn drive_async(realm: &NativeRealm) -> i32 {
@@ -1713,7 +1866,12 @@ pub unsafe extern "C" fn kiln_realm_create(out: *mut u64) -> i32 {
         if out.is_null() {
             return INVALID_ARGUMENT;
         }
-        let Ok(realm) = NativeRealm::new() else {
+        let reactor = SCHEDULED_REACTOR.with(|slot| slot.borrow().clone());
+        let created = match reactor {
+            Some(reactor) => NativeRealm::on_reactor(reactor),
+            None => NativeRealm::new(),
+        };
+        let Ok(realm) = created else {
             return RUNTIME_ERROR;
         };
         let Ok(handle) = NEXT_REALM.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
@@ -4255,6 +4413,63 @@ pub unsafe extern "C" fn kiln_realm_drive(
     })
 }
 
+/// Advance one scheduled language turn and return before waiting for host work. `kind` is
+/// 0 ready, 1 parked for a task wake, 2 parked until `delay_ns`, or 3 done. The returned status
+/// is meaningful for kind 3; otherwise it is zero. The scheduler sets the lane ticket waker
+/// before entering this callback, and the launcher keeps both C slots alive until teardown.
+///
+/// # Safety
+///
+/// `host`, `thrown`, `kind` and `delay_ns` follow the same lifetime and writable-slot contracts
+/// as `kiln_realm_drive` and the generated launcher's synchronous callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_drive_step(
+    handle: u64,
+    host: *mut c_void,
+    thrown: *mut c_void,
+    kind: *mut u32,
+    delay_ns: *mut u64,
+) -> i32 {
+    ffi(|| {
+        if kind.is_null() || delay_ns.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        // SAFETY: the caller supplied writable slots and null was rejected above.
+        unsafe {
+            kind.write(3);
+            delay_ns.write(0);
+        }
+        let Some(realm) = realm(handle) else {
+            return INVALID_ARGUMENT;
+        };
+        let Some(waker) = SCHEDULED_WAKER.with(|slot| slot.borrow().clone()) else {
+            return INVALID_ARGUMENT;
+        };
+        let Some(_active) = ActiveRealm::enter(handle, Rc::clone(&realm)) else {
+            return INVALID_ARGUMENT;
+        };
+        match drive_scheduled(&realm, host, thrown, &waker) {
+            ScheduledStep::Ready => {
+                unsafe { kind.write(0) };
+                0
+            }
+            ScheduledStep::Parked => {
+                unsafe { kind.write(1) };
+                0
+            }
+            ScheduledStep::ParkedUntil(at) => {
+                let nanos = at.saturating_duration_since(Instant::now()).as_nanos();
+                unsafe {
+                    kind.write(2);
+                    delay_ns.write(nanos.min(u128::from(u64::MAX)) as u64);
+                }
+                0
+            }
+            ScheduledStep::Done(status) => status,
+        }
+    })
+}
+
 /// Destroys a Realm Runtime on its owning thread.
 #[unsafe(no_mangle)]
 pub extern "C" fn kiln_realm_destroy(handle: u64) -> i32 {
@@ -4287,6 +4502,157 @@ struct SharedContext(*mut c_void);
 
 // SAFETY: `kiln_realm_run_pinned`'s contract: `run` may be called with it from several threads.
 unsafe impl Send for SharedContext {}
+
+impl SharedContext {
+    /// # Safety
+    ///
+    /// The launcher's callback contract permits concurrent calls with this context.
+    unsafe fn begin(self, callback: ScheduledBegin, index: u64) -> *mut c_void {
+        unsafe { callback(self.0, index) }
+    }
+}
+
+type ScheduledBegin = unsafe extern "C" fn(*mut c_void, u64) -> *mut c_void;
+type ScheduledAdvance = unsafe extern "C" fn(*mut c_void, *mut u64) -> i32;
+type ScheduledFinish = unsafe extern "C" fn(*mut c_void) -> i32;
+
+struct ScheduledRun {
+    session: *mut c_void,
+    advance: ScheduledAdvance,
+    finish: ScheduledFinish,
+    result: std::sync::mpsc::Sender<(usize, i32)>,
+    index: usize,
+}
+
+impl ScheduledRun {
+    fn complete(&mut self, override_status: Option<i32>) {
+        let session = std::mem::replace(&mut self.session, std::ptr::null_mut());
+        let status = if session.is_null() {
+            RUNTIME_ERROR
+        } else {
+            // SAFETY: `begin` produced this session on this lane; no generated frame is live.
+            unsafe { (self.finish)(session) }
+        };
+        let _ = self
+            .result
+            .send((self.index, override_status.unwrap_or(status)));
+    }
+}
+
+impl PinnedTurn for ScheduledRun {
+    fn run_turn(&mut self, waker: &Waker) -> TurnOutcome {
+        if self.session.is_null() {
+            self.complete(Some(RUNTIME_ERROR));
+            return TurnOutcome::Done;
+        }
+        let _ticket = ScheduledWakerGuard::enter(waker.clone());
+        let mut delay_ns = 0;
+        // SAFETY: the session belongs to this lane, and the callback returns with every
+        // generated C frame unwound. `delay_ns` is a writable result slot.
+        let kind = unsafe { (self.advance)(self.session, &mut delay_ns) };
+        match kind {
+            0 => {
+                self.complete(None);
+                TurnOutcome::Done
+            }
+            1 => TurnOutcome::Ready,
+            2 => TurnOutcome::Parked,
+            3 => TurnOutcome::ParkedUntil(Instant::now() + Duration::from_nanos(delay_ns)),
+            _ => {
+                self.complete(Some(RUNTIME_ERROR));
+                TurnOutcome::Done
+            }
+        }
+    }
+}
+
+impl Drop for ScheduledRun {
+    fn drop(&mut self) {
+        if !self.session.is_null() {
+            self.complete(Some(RUNTIME_ERROR));
+        }
+    }
+}
+
+/// Run many generated realm sessions over a fixed number of scheduler lanes. Each C callback
+/// begins, advances or ends one session on its assigned lane; only its opaque context crosses
+/// threads. Deterministic mode uses one FIFO lane and its own paused reactor.
+///
+/// # Safety
+///
+/// `begin` must be callable concurrently with `context`, `advance` and `finish` must operate
+/// only on the session's owning lane, and `statuses` must hold `count` writable entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_run_scheduled(
+    count: u64,
+    lanes: u64,
+    deterministic: i32,
+    begin: Option<ScheduledBegin>,
+    advance: Option<ScheduledAdvance>,
+    finish: Option<ScheduledFinish>,
+    context: *mut c_void,
+    statuses: *mut i32,
+) -> i32 {
+    ffi(|| {
+        let (Ok(count), Ok(lanes), Some(begin), Some(advance), Some(finish)) = (
+            usize::try_from(count),
+            usize::try_from(lanes),
+            begin,
+            advance,
+            finish,
+        ) else {
+            return INVALID_ARGUMENT;
+        };
+        if count == 0 || lanes == 0 || statuses.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        let scheduler = if deterministic != 0 {
+            PinnedTurnScheduler::deterministic()
+        } else {
+            PinnedTurnScheduler::new(lanes)
+        };
+        let Ok(scheduler) = scheduler else {
+            return RUNTIME_ERROR;
+        };
+        for index in 0..count {
+            // SAFETY: caller supplied `count` writable status slots.
+            unsafe { statuses.add(index).write(RUNTIME_ERROR) };
+        }
+        let shared = SharedContext(context);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let handles = (0..count)
+            .map(|index| {
+                let sender = sender.clone();
+                let shared = shared;
+                scheduler.spawn_pinned(move |reactor, _| {
+                    let _reactor = ScheduledReactorGuard::enter(reactor);
+                    // SAFETY: the caller's `begin`/context contract; this executes on the
+                    // lane that will own the returned session and eventually call `finish`.
+                    let session = unsafe { shared.begin(begin, index as u64) };
+                    ScheduledRun {
+                        session,
+                        advance,
+                        finish,
+                        result: sender,
+                        index,
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        drop(sender);
+        let mut received = 0;
+        while received < count {
+            let Ok((index, status)) = receiver.recv() else {
+                break;
+            };
+            // SAFETY: `index` originated in the bounded spawn loop above.
+            unsafe { statuses.add(index).write(status) };
+            received += 1;
+        }
+        drop(handles);
+        if received == count { 0 } else { RUNTIME_ERROR }
+    })
+}
 
 /// Runs `run(context, index)` for every index below `count` at once, each on its own realm thread
 /// of one `WorkerPool` (realms issue 05: several pinned realms in one process), waits for all of
@@ -4485,6 +4851,9 @@ macro_rules! assert_provider_export {
         (realm, kiln_realm_run_workers, realm_run_pinned) => {
             const _: unsafe extern "C" fn(u64, Option<PinnedRun>, *mut c_void, *mut i32) -> i32 = kiln_realm_run_workers;
         };
+        (realm, kiln_realm_run_scheduled, realm_run_scheduled) => {
+            const _: unsafe extern "C" fn(u64, u64, i32, Option<ScheduledBegin>, Option<ScheduledAdvance>, Option<ScheduledFinish>, *mut c_void, *mut i32) -> i32 = kiln_realm_run_scheduled;
+        };
         (realm, kiln_realm_gc_attach, realm_gc_attach) => {
             const _: unsafe extern "C" fn(*const GcHooks, *mut c_void, *mut *mut c_void) -> i32 = kiln_realm_gc_attach;
         };
@@ -4533,6 +4902,9 @@ macro_rules! assert_provider_export {
         };
         (realm, kiln_realm_drive, realm_drive) => {
             const _: unsafe extern "C" fn(u64, *mut c_void, *mut c_void) -> i32 = kiln_realm_drive;
+        };
+        (realm, kiln_realm_drive_step, realm_drive_step) => {
+            const _: unsafe extern "C" fn(u64, *mut c_void, *mut c_void, *mut u32, *mut u64) -> i32 = kiln_realm_drive_step;
         };
         (realm, kiln_realm_destroy, realm_destroy) => {
             const _: extern "C" fn(u64) -> i32 = kiln_realm_destroy;

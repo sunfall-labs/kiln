@@ -2786,11 +2786,17 @@ extern int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *con
 extern int kiln_realm_set_argv(uint64_t realm, uint64_t argc, const char *const *argv);
 extern int kiln_realm_use_wall_clock(uint64_t realm);
 extern int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
+extern int kiln_realm_drive_step(uint64_t realm, void *host, void *thrown,
+                                  uint32_t *kind, uint64_t *delay_ns);
 extern int kiln_realm_destroy(uint64_t realm);
 extern int kiln_realm_run_pinned(uint64_t count, int (*run)(void *context, uint64_t index),
                                  void *context, int *statuses);
 extern int kiln_realm_run_workers(uint64_t count, int (*run)(void *context, uint64_t index),
                                   void *context, int *statuses);
+extern int kiln_realm_run_scheduled(uint64_t count, uint64_t lanes, int deterministic,
+                                    void *(*begin)(void *context, uint64_t index),
+                                    int (*advance)(void *session, uint64_t *delay_ns),
+                                    int (*finish)(void *session), void *context, int *statuses);
 /* `KILN_WORKERS` thread mode: the worker index of the realm this thread runs (-1 on any other
  * thread, a `node:worker_threads` worker's included) and the count, which the realm's
  * `process.env` gets as KILN_WORKER_INDEX and KILN_WORKER_COUNT. */
@@ -3981,6 +3987,8 @@ typedef struct kiln_cli_realm_run {
     int status;
     int final_drive;
     int settling_driven;
+    int scheduled;
+    uint64_t park_delay_ns;
 } kiln_cli_realm_run;
 
 /* `worker_entry` is one plus the index of the module a worker's realm runs (0 for the program's
@@ -4020,9 +4028,32 @@ static void kiln_cli_realm_begin(kiln_cli_realm_run *run, int argc, char **argv,
     output.push_str("    run->realm = realm;\n    run->status = status;\n}\n");
     writeln!(
         output,
+        "static const int kiln_cli_virtual_clock = {};",
+        i32::from(!policy.host_clock)
+    )
+    .unwrap();
+    writeln!(
+        output,
         r#"
-/* Advance at most one module body or one drive. A drive still waits to quiescence today; its
- * synchronous one-turn provider entry will replace that call when the scheduler owns waking. */
+/* One provider drive answers 4 when quiescent, 1 for another ready turn, 2 for an I/O wake,
+ * 3 for a pure timer deadline, and 0 for failure. The continuous launcher uses the same state
+ * machine but lets its provider call wait until quiescence. */
+static int kiln_cli_realm_drive_step(kiln_cli_realm_run *run) {{
+    kiln_graph_context *graph = run->graph;
+    if (!run->scheduled) {{
+        run->status = kiln_realm_drive(run->realm, &graph->host, &graph->result);
+        return run->status == 0 ? 4 : 0;
+    }}
+    uint32_t kind = 3;
+    uint64_t delay_ns = 0;
+    run->status = kiln_realm_drive_step(run->realm, &graph->host, &graph->result,
+                                        &kind, &delay_ns);
+    if (run->status != 0) return 0;
+    run->park_delay_ns = delay_ns;
+    return kind == 0 ? 1 : kind == 1 ? 2 : kind == 2 ? 3 : kind == 3 ? 4 : 0;
+}}
+
+/* Advance at most one generated module body or one provider language turn. */
 static int kiln_cli_realm_step(kiln_cli_realm_run *run) {{
     kiln_graph_context *graph = run->graph;
     uint64_t realm = run->realm;
@@ -4030,9 +4061,10 @@ static int kiln_cli_realm_step(kiln_cli_realm_run *run) {{
     if (graph->current_module < (size_t){} || !graph->roots_registered) {{
         if (!run->settling_driven && graph->current_module < (size_t){} &&
             graph->module_states[kiln_graph_startup_indices[graph->current_module]].module_settling) {{
-            run->settling_driven = 1;
             run->phase = "the turn loop";
-            run->status = kiln_realm_drive(realm, &graph->host, &graph->result);
+            int progress = kiln_cli_realm_drive_step(run);
+            if (progress == 4) {{ run->settling_driven = 1; return 1; }}
+            return progress;
         }} else {{
             run->settling_driven = 0;
             run->phase = "module body";
@@ -4041,22 +4073,16 @@ static int kiln_cli_realm_step(kiln_cli_realm_run *run) {{
         return run->status == 0;
     }}
     if (!run->final_drive) {{
-        run->final_drive = 1;
         run->phase = "the turn loop";
-        run->status = kiln_realm_drive(realm, &graph->host, &graph->result);
+        int progress = kiln_cli_realm_drive_step(run);
+        if (progress == 4) {{ run->final_drive = 1; return 0; }}
+        return progress;
     }}
     return 0;
 }}
 
-static int kiln_cli_run_realm_as(int argc, char **argv, int writes_result, FILE *output,
-                                 FILE *error_output, size_t worker_entry) {{
-    kiln_cli_realm_run *run = (kiln_cli_realm_run *)calloc(1, sizeof *run);
-    if (run == NULL) {{
-        kiln_cli_warn("kiln: out of memory for the realm session", NULL);
-        return 1;
-    }}
-    kiln_cli_realm_begin(run, argc, argv, output, error_output, worker_entry);
-    while (kiln_cli_realm_step(run)) {{}}
+static int kiln_cli_realm_finish(kiln_cli_realm_run *run, int writes_result,
+                                  size_t worker_entry) {{
     kiln_graph_context *graph = run->graph;
     uint64_t realm = run->realm;
     const char *phase = run->phase;
@@ -4163,6 +4189,18 @@ static int kiln_cli_run_realm_as(int argc, char **argv, int writes_result, FILE 
     if (unsettled_entry) return 13;
     if (status == 0) status = destroy_status;
     return status == 0 ? 0 : 1;
+}
+
+static int kiln_cli_run_realm_as(int argc, char **argv, int writes_result, FILE *output,
+                                 FILE *error_output, size_t worker_entry) {
+    kiln_cli_realm_run *run = (kiln_cli_realm_run *)calloc(1, sizeof *run);
+    if (run == NULL) {
+        kiln_cli_warn("kiln: out of memory for the realm session", NULL);
+        return 1;
+    }
+    kiln_cli_realm_begin(run, argc, argv, output, error_output, worker_entry);
+    while (kiln_cli_realm_step(run)) {}
+    return kiln_cli_realm_finish(run, writes_result, worker_entry);
 }
 
 /* A worker's standard streams (`node:worker_threads`): each write goes to the parent as a message,
@@ -4274,6 +4312,71 @@ static int kiln_cli_run_hosted_realm(void *context, uint64_t index) {
     return status;
 }
 
+typedef struct kiln_cli_scheduled_realm {
+    kiln_cli_realm_run *run;
+    const kiln_cli_realms *realms;
+    FILE *output;
+    uint64_t index;
+} kiln_cli_scheduled_realm;
+
+static void *kiln_cli_scheduled_begin(void *context, uint64_t index) {
+    const kiln_cli_realms *realms = (const kiln_cli_realms *)context;
+    kiln_cli_scheduled_realm *session = (kiln_cli_scheduled_realm *)calloc(1, sizeof *session);
+    char path[4096];
+    if (session == NULL) return NULL;
+    session->run = (kiln_cli_realm_run *)calloc(1, sizeof *session->run);
+    if (session->run == NULL) { free(session); return NULL; }
+    snprintf(path, sizeof path, "%s/%llu.out", realms->directory, (unsigned long long)index);
+    session->output = fopen(path, "wb");
+    if (session->output == NULL) { free(session->run); free(session); return NULL; }
+    session->realms = realms;
+    session->index = index;
+    kiln_cli_realm_begin(session->run, realms->argc, realms->argv, session->output, NULL, 0);
+    session->run->scheduled = 1;
+    return session;
+}
+
+static int kiln_cli_scheduled_advance(void *opaque, uint64_t *delay_ns) {
+    kiln_cli_scheduled_realm *session = (kiln_cli_scheduled_realm *)opaque;
+    int progress = kiln_cli_realm_step(session->run);
+    *delay_ns = session->run->park_delay_ns;
+    return progress;
+}
+
+static int kiln_cli_scheduled_finish(void *opaque) {
+    kiln_cli_scheduled_realm *session = (kiln_cli_scheduled_realm *)opaque;
+    char path[4096];
+    FILE *written;
+    int status = kiln_cli_realm_finish(session->run, 0, 0);
+    if (fclose(session->output) != 0 && status == 0) status = 1;
+    snprintf(path, sizeof path, "%s/%llu.status", session->realms->directory,
+             (unsigned long long)session->index);
+    written = fopen(path, "wb");
+    if (written == NULL) {
+        status = 1;
+    } else {
+        if (fprintf(written, "%d\n", status) < 0) status = 1;
+        if (fclose(written) != 0) status = 1;
+    }
+    free(session);
+    return status;
+}
+
+static long kiln_cli_scheduler_lanes(void) {
+    const char *setting = getenv("KILN_SCHEDULER_LANES");
+    char *end = NULL;
+    long lanes = 0;
+    if (setting != NULL && *setting != '\0') {
+        lanes = strtol(setting, &end, 10);
+        if (end == setting || *end != '\0' || lanes < 1) lanes = 0;
+    }
+#ifndef _WIN32
+    if (lanes == 0) lanes = sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+    if (lanes < 1) lanes = 1;
+    return lanes > 1024 ? 1024 : lanes;
+}
+
 static long kiln_cli_realm_count(void) {
     const char *setting = getenv("KILN_REALMS");
     char *end = NULL;
@@ -4298,7 +4401,14 @@ static int kiln_cli_run_realms(int argc, char **argv, long count) {
     }
     statuses = (int *)calloc((size_t)count, sizeof *statuses);
     if (statuses == NULL) return 1;
-    status = kiln_realm_run_pinned((uint64_t)count, kiln_cli_run_hosted_realm, &realms, statuses);
+    const char *scheduled = getenv("KILN_REALM_SCHEDULER");
+    if (scheduled != NULL && *scheduled != '\0' && strcmp(scheduled, "0") != 0)
+        status = kiln_realm_run_scheduled((uint64_t)count,
+                    (uint64_t)kiln_cli_scheduler_lanes(), kiln_cli_virtual_clock,
+                    kiln_cli_scheduled_begin, kiln_cli_scheduled_advance,
+                    kiln_cli_scheduled_finish, &realms, statuses);
+    else
+        status = kiln_realm_run_pinned((uint64_t)count, kiln_cli_run_hosted_realm, &realms, statuses);
     for (index = 0; index < count; ++index)
         if (statuses[index] != 0) status = 1;
     free(statuses);

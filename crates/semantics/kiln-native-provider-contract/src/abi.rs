@@ -108,6 +108,7 @@ macro_rules! provider_abi_registry {
             (realm, kiln_realm_retire, realm_retire);
             (realm, kiln_realm_run_pinned, realm_run_pinned);
             (realm, kiln_realm_run_workers, realm_run_pinned);
+            (realm, kiln_realm_run_scheduled, realm_run_scheduled);
             (realm, kiln_realm_gc_attach, realm_gc_attach);
             (realm, kiln_realm_gc_register_roots, realm_gc_register_roots);
             (realm, kiln_realm_gc_unregister_roots, realm_gc_unregister_roots);
@@ -127,6 +128,7 @@ macro_rules! provider_abi_registry {
             (realm, kiln_realm_queue_io, realm_queue_macrotask);
             (realm, kiln_realm_clear_timer, realm_clear_timer);
             (realm, kiln_realm_drive, realm_drive);
+            (realm, kiln_realm_drive_step, realm_drive_step);
             (realm, kiln_realm_destroy, realm_destroy);
             (realm, kiln_realm_read_file, realm_read_file);
             (realm, kiln_realm_start_host_op, realm_start_host_op);
@@ -232,7 +234,7 @@ macro_rules! provider_export_names {
 }
 
 /// Version of the private provider ABI represented by [`provider_abi_registry!`].
-pub const PROVIDER_ABI_VERSION: u32 = 50;
+pub const PROVIDER_ABI_VERSION: u32 = 51;
 
 /// Canonical ordered export names required in a packaged provider manifest.
 pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_names);
@@ -251,6 +253,9 @@ mod tests {
 
     #[test]
     fn registry_has_the_packaged_contract_shape() {
+        // 51 and 143 exports: the scheduled launcher drives one realm turn at a time and
+        // multiplexes pinned realm sessions over fixed scheduler lanes. Before that, 50 and
+        // 141 exports: the plain-message builder moved to the shared Rust codec. Before that,
         // 49 and 140 exports: `kiln_parallel_threads` joined so a parallel call site can ask
         // the pool's size before it takes its pooled lowering -- a one-thread pool runs the
         // sequential method's own loop (parallel issue 22) -- and a tier-3 site can size its
@@ -294,8 +299,8 @@ mod tests {
         // one realm the other's cache. A shipped archive built before any of these does not export
         // the newer symbol, and the version is how a resolver knows to rebuild rather than to fail
         // at link time.
-        assert_eq!(PROVIDER_ABI_VERSION, 50);
-        assert_eq!(PROVIDER_EXPORTS.len(), 141);
+        assert_eq!(PROVIDER_ABI_VERSION, 51);
+        assert_eq!(PROVIDER_EXPORTS.len(), 143);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_ffi_last_error"));
     }

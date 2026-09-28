@@ -1353,6 +1353,7 @@ int kiln_realm_set_immediate(kiln_realm_work_fn run, kiln_realm_drop_fn drop, vo
 int kiln_realm_queue_io(kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work, uint64_t *out_id);
 int kiln_realm_clear_timer(uint64_t id);
 int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
+int kiln_realm_drive_step(uint64_t realm, void *host, void *thrown, uint32_t *kind, uint64_t *delay_ns);
 int kiln_realm_destroy(uint64_t realm);
 int kiln_realm_read_file(uint64_t realm, const uint8_t *path, uint64_t path_len, kiln_realm_completion_fn run, kiln_realm_drop_fn drop, void *work, uint64_t *out_request);
 int kiln_realm_start_host_op(uint64_t realm, const kiln_async_host_op *operation, kiln_realm_completion_fn run, kiln_realm_drop_fn drop, void *work, uint64_t *out_request);

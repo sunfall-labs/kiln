@@ -278,6 +278,9 @@ macro_rules! provider_c_declaration {
     ($group:ident, $name:ident, realm_drive) => {
         concat!("int ", stringify!($name), "(uint64_t realm, void *host, void *thrown);\n")
     };
+    ($group:ident, $name:ident, realm_drive_step) => {
+        concat!("int ", stringify!($name), "(uint64_t realm, void *host, void *thrown, uint32_t *kind, uint64_t *delay_ns);\n")
+    };
     ($group:ident, $name:ident, realm_enter) => {
         concat!("int ", stringify!($name), "(uint64_t realm, kiln_realm_entry_fn entry, void *context);\n")
     };

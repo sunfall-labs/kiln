@@ -871,6 +871,25 @@ impl Executor {
         operation()
     }
 
+    /// Queue a lane-local task without exposing Tokio's task set to the native provider.
+    /// The task is polled on this executor's lane and may wake its realm's scheduler ticket.
+    pub fn spawn_local(&self, future: impl Future<Output = ()> + 'static) {
+        self.scope(|| {
+            tokio::task::spawn_local(future);
+        });
+    }
+
+    /// Move a deterministic reactor's paused clock to its next realm timer without waiting
+    /// for wall time. The scheduler polls local tasks again afterward so the timer can wake
+    /// the parked realm ticket.
+    pub fn advance_virtual_time(&self, duration: Duration) {
+        assert!(
+            self.reactor.pause_supported,
+            "only deterministic reactors advance virtual time"
+        );
+        self.block_on(tokio::time::advance(duration));
+    }
+
     /// Pause Tokio time for a deterministic clock, once for this runtime.
     pub fn pause_time(&self) {
         assert!(

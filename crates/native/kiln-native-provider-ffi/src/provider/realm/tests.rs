@@ -19,6 +19,82 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEST_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+struct ScheduledFixture {
+    realm: u64,
+}
+
+unsafe extern "C" fn scheduled_fixture_begin(context: *mut c_void, _index: u64) -> *mut c_void {
+    let lanes =
+        unsafe { &*context.cast::<std::sync::Arc<std::sync::Mutex<Vec<std::thread::ThreadId>>>>() };
+    let mut realm = 0;
+    if unsafe { kiln_realm_create(&mut realm) } != 0 || kiln_realm_use_wall_clock(realm) != 0 {
+        return ptr::null_mut();
+    }
+    lanes.lock().unwrap().push(std::thread::current().id());
+    Box::into_raw(Box::new(ScheduledFixture { realm })).cast()
+}
+
+unsafe extern "C" fn scheduled_fixture_advance(session: *mut c_void, delay: *mut u64) -> i32 {
+    let session = unsafe { &*session.cast::<ScheduledFixture>() };
+    let mut kind = 3;
+    let status = unsafe {
+        kiln_realm_drive_step(
+            session.realm,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut kind,
+            delay,
+        )
+    };
+    if status != 0 {
+        return 0;
+    }
+    match kind {
+        0 => 1,
+        1 => 2,
+        2 => 3,
+        3 => 0,
+        _ => -1,
+    }
+}
+
+unsafe extern "C" fn scheduled_fixture_finish(session: *mut c_void) -> i32 {
+    let session = unsafe { Box::from_raw(session.cast::<ScheduledFixture>()) };
+    kiln_realm_destroy(session.realm)
+}
+
+#[test]
+fn scheduled_provider_runs_many_realms_over_two_lanes() {
+    let lanes = std::sync::Arc::new(std::sync::Mutex::new(Vec::<std::thread::ThreadId>::new()));
+    let mut statuses = vec![-1; 200];
+    assert_eq!(
+        unsafe {
+            kiln_realm_run_scheduled(
+                statuses.len() as u64,
+                2,
+                0,
+                Some(scheduled_fixture_begin),
+                Some(scheduled_fixture_advance),
+                Some(scheduled_fixture_finish),
+                (&raw const lanes).cast_mut().cast(),
+                statuses.as_mut_ptr(),
+            )
+        },
+        0
+    );
+    assert!(statuses.iter().all(|status| *status == 0));
+    let lanes = lanes.lock().unwrap();
+    assert_eq!(lanes.len(), 200);
+    assert_eq!(
+        lanes
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        2
+    );
+}
+
 unsafe extern "C" fn exercises_realm_value_slots(context: *mut c_void) -> i32 {
     let slots = unsafe { &mut *context.cast::<[*mut c_void; 3]>() };
     if unsafe { kiln_realm_value_slot(1, &raw mut slots[0]) } != 0
