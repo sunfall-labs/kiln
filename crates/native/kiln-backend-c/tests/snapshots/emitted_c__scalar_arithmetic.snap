@@ -15,7 +15,7 @@ static int kiln_module_e0b783c06c598cf90ee52413aff9791c_gc_visit_roots(void *con
     return KILN_C99_OK;
 }
 int kiln_module_e0b783c06c598cf90ee52413aff9791c(kiln_host *host, kiln_value *result) {
-    (void)kiln_realm_gc_register_roots_with_visitor(kiln_module_e0b783c06c598cf90ee52413aff9791c_gc_roots, kiln_module_e0b783c06c598cf90ee52413aff9791c_gc_visit_roots, NULL, 0);
+    if (kiln_realm_is_active()) { int roots_status = kiln_realm_gc_register_roots_with_visitor(kiln_module_e0b783c06c598cf90ee52413aff9791c_gc_roots, kiln_module_e0b783c06c598cf90ee52413aff9791c_gc_visit_roots, NULL, 0); if (roots_status != KILN_C99_OK) return roots_status; }
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
     double d2 = 0.0, d3 = 0.0;

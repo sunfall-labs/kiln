@@ -44,7 +44,7 @@ kiln_refusal:;
     return KILN_C99_CONTROL_ERROR;
 }
 static int kiln_module_a565026db870a77a306e28a6a100fa79_body(kiln_host *host, kiln_value *result) {
-    (void)kiln_realm_gc_register_roots_with_visitor(kiln_module_a565026db870a77a306e28a6a100fa79_gc_roots, kiln_module_a565026db870a77a306e28a6a100fa79_gc_visit_roots, NULL, 0);
+    if (kiln_realm_is_active()) { int roots_status = kiln_realm_gc_register_roots_with_visitor(kiln_module_a565026db870a77a306e28a6a100fa79_gc_roots, kiln_module_a565026db870a77a306e28a6a100fa79_gc_visit_roots, NULL, 0); if (roots_status != KILN_C99_OK) return roots_status; }
     kiln_val *locals = kiln_module_a565026db870a77a306e28a6a100fa79_globals;
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();

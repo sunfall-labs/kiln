@@ -67,7 +67,7 @@ kiln_block_0:;
     *result = v3; return KILN_C99_OK;
 }
 static int kiln_module_28c488eb61184e73093ffbb78484535e_body(kiln_host *host, kiln_value *result) {
-    (void)kiln_realm_gc_register_roots_with_visitor(kiln_module_28c488eb61184e73093ffbb78484535e_gc_roots, kiln_module_28c488eb61184e73093ffbb78484535e_gc_visit_roots, NULL, 0);
+    if (kiln_realm_is_active()) { int roots_status = kiln_realm_gc_register_roots_with_visitor(kiln_module_28c488eb61184e73093ffbb78484535e_gc_roots, kiln_module_28c488eb61184e73093ffbb78484535e_gc_visit_roots, NULL, 0); if (roots_status != KILN_C99_OK) return roots_status; }
     int depth = 0;
     kiln_value thrown_value = kiln_c99_undefined();
     kiln_value *thrown = &thrown_value;

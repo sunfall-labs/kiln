@@ -92,7 +92,7 @@ kiln_refusal:;
     return KILN_C99_CONTROL_ERROR;
 }
 static int kiln_module_59a72d05a23a0c8ab2fcab3810349835_body(kiln_host *host, kiln_value *result) {
-    (void)kiln_realm_gc_register_roots_with_visitor(kiln_module_59a72d05a23a0c8ab2fcab3810349835_gc_roots, kiln_module_59a72d05a23a0c8ab2fcab3810349835_gc_visit_roots, NULL, 0);
+    if (kiln_realm_is_active()) { int roots_status = kiln_realm_gc_register_roots_with_visitor(kiln_module_59a72d05a23a0c8ab2fcab3810349835_gc_roots, kiln_module_59a72d05a23a0c8ab2fcab3810349835_gc_visit_roots, NULL, 0); if (roots_status != KILN_C99_OK) return roots_status; }
     if (!kiln_module_59a72d05a23a0c8ab2fcab3810349835_keys_shared) { int keyed = kiln_module_59a72d05a23a0c8ab2fcab3810349835_intern_keys(); if (keyed != KILN_C99_OK) return keyed; }
     int depth = 0;
     kiln_value thrown_value = kiln_c99_undefined();

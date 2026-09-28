@@ -957,6 +957,7 @@ typedef int (*kiln_gc_visit_root_fn)(void *context, const void *pointer, uint32_
 extern int kiln_realm_gc_visit_provider_roots(void *heap, kiln_gc_visit_root_fn visit,
 typedef int (*kiln_gc_visit_roots_fn)(void *context, kiln_gc_visit_root_fn visit,
 extern int kiln_realm_gc_register_roots_with_visitor(kiln_gc_roots_fn roots,
+extern int kiln_realm_is_active(void);
 struct kiln_closure;
 struct kiln_generator;
 typedef struct kiln_call_context {
