@@ -1,4 +1,4 @@
-// kiln-native: profile=native-release
+// kiln-native: profile=native-release stress=skip
 //
 // The release build of `deep-recursion.js`: typed and specialized bodies recurse 5,000 deep.
 // (Parallel-builtins issue 30, item 4.)

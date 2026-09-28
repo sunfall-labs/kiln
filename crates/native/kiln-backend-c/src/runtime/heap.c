@@ -288,6 +288,9 @@ typedef struct kiln_nursery_chunk {
      * provenance, not a graph or incoming-root proof. */
     uint32_t candidate_epoch;
     uint64_t candidate_id;
+    /* Provisional between CANDIDATE_END and ISOLATE, sealed after the latter proves closure.
+     * Both states keep the original bitmap/layout while a live root still names this chunk. */
+    uint8_t candidate_state;
     struct kiln_nursery_chunk *next;
 } kiln_nursery_chunk;
 
@@ -310,6 +313,7 @@ typedef struct kiln_gc_nursery {
      * nursery. `full_bytes` against `budget` is what makes a collection due inside a turn. */
     kiln_nursery_chunk *full;
     size_t full_bytes;
+    size_t held_bytes;
     size_t budget;
     /* The budget the next chunk collection waits for. A pass whose chunks mostly promoted says
      * the turn is building a structure, not churning; collecting again after one more budget
@@ -376,6 +380,7 @@ typedef struct kiln_gc_heap {
      * can enter a chunk tagged with this ID. Nested factories use the outer scope and cannot
      * claim an independent movable candidate. */
     uint64_t actor_candidate_id;
+    uint64_t actor_candidate_pending_id;
     int actor_candidate_collected;
     int mark_failed;
     int fallback;
@@ -741,6 +746,7 @@ static kiln_nursery_chunk *kiln_c99_chunk_lay_out(char *region, size_t bitmap_wo
     chunk->mark_epoch = 0;
     chunk->candidate_epoch = 0;
     chunk->candidate_id = 0;
+    chunk->candidate_state = 0;
     chunk->next = NULL;
     return chunk;
 }
@@ -762,6 +768,7 @@ static void kiln_c99_nursery_use(kiln_gc_nursery *nursery, kiln_nursery_chunk *c
     nursery->bytes = 0;
     chunk->candidate_id = 0;
     chunk->candidate_epoch = 0;
+    chunk->candidate_state = 0;
 }
 
 /* Write the current region's fill into its header, ready for one of the lists. */
@@ -2795,7 +2802,7 @@ static void kiln_c99_gc_unnote_moved_external(size_t size) {
  * allocation and turn-boundary collection so the two entry points cannot drift. */
 static inline int kiln_c99_nursery_pressure_due(const kiln_gc_heap *heap) {
     return heap->nursery.full != NULL &&
-           heap->nursery.full_bytes >= heap->nursery.budget_now &&
+           heap->nursery.full_bytes - heap->nursery.held_bytes >= heap->nursery.budget_now &&
            heap->survived <= heap->nursery.budget * KILN_NURSERY_SMALL_LIVE_BUDGETS;
 }
 
@@ -4687,7 +4694,7 @@ static int kiln_c99_graph_candidate_open(kiln_c99_par_arena *arena, const kiln_g
 static int kiln_c99_actor_candidate_begin(kiln_gc_heap *heap) {
     uint64_t id;
     if (heap == NULL || heap->fallback || !heap->nursery.active || heap->nursery.region == NULL ||
-        heap->actor_candidate_id != 0) return 0;
+        heap->actor_candidate_id != 0 || heap->actor_candidate_pending_id != 0) return 0;
     id = kiln_c99_graph_candidate_new_id();
     if (id == 0) return 0;
     heap->actor_candidate_id = id;
@@ -4707,10 +4714,19 @@ static int kiln_c99_actor_candidate_begin(kiln_gc_heap *heap) {
  * already have exposed some of them outside the factory. Collection may run during the scope
  * after the nursery runs out of chunks or exceeds its 64 MiB defer ceiling. Such a collection
  * invalidates the whole candidate ID, including promoted chunks, at this boundary. */
+static void kiln_c99_actor_candidate_finish(kiln_gc_heap *heap, int sealed);
+
 static int kiln_c99_actor_candidate_end(kiln_gc_heap *heap, int completed) {
     uint64_t id;
     kiln_nursery_chunk *chunk;
-    if (heap == NULL || heap->actor_candidate_id == 0) return 0;
+    if (heap == NULL) return 0;
+    if (heap->actor_candidate_id == 0) {
+        if (!completed && heap->actor_candidate_pending_id != 0) {
+            kiln_c99_actor_candidate_finish(heap, 0);
+            return 1;
+        }
+        return 0;
+    }
     id = heap->actor_candidate_id;
     if (heap->nursery.active && heap->nursery.bump > heap->nursery.base)
         kiln_c99_nursery_turn_chunk(heap);
@@ -4735,9 +4751,40 @@ static int kiln_c99_actor_candidate_end(kiln_gc_heap *heap, int completed) {
                 chunk->candidate_epoch = 0;
             }
         }
+    } else {
+        for (chunk = heap->nursery.full; chunk != NULL; chunk = chunk->next) {
+            if (chunk->candidate_id == id) {
+                chunk->candidate_state = 1;
+                heap->nursery.held_bytes += (size_t)(chunk->limit - chunk->base);
+            }
+        }
+        heap->actor_candidate_pending_id = id;
     }
     heap->actor_candidate_collected = 0;
     return 1;
+}
+
+/* The provisional hold spans only the generated C bridge from CANDIDATE_END to ISOLATE.
+ * The latter either proves closure and seals it or releases it. A sealed group stays intact
+ * only while the collector sees live blocks; an abandoned handle costs no permanent space. */
+static void kiln_c99_actor_candidate_finish(kiln_gc_heap *heap, int sealed) {
+    kiln_nursery_chunk *chunk;
+    uint64_t id;
+    if (heap == NULL || (id = heap->actor_candidate_pending_id) == 0) return;
+    for (chunk = heap->nursery.full; chunk != NULL; chunk = chunk->next) {
+        if (chunk->candidate_id != id || chunk->candidate_state != 1) continue;
+        if (!sealed) {
+            size_t filled = (size_t)(chunk->limit - chunk->base);
+            if (filled > heap->nursery.held_bytes) abort();
+            heap->nursery.held_bytes -= filled;
+            chunk->candidate_state = 0;
+            chunk->candidate_id = 0;
+            chunk->candidate_epoch = 0;
+        } else {
+            chunk->candidate_state = 2;
+        }
+    }
+    heap->actor_candidate_pending_id = 0;
 }
 
 /* Read once per process: `KILN_PARALLEL_ARENA_KIB`, else 256 MiB. 0 not yet read. */
@@ -6606,6 +6653,7 @@ static void kiln_c99_nursery_spare(kiln_gc_heap *heap, kiln_nursery_chunk *chunk
     chunk->mark_epoch = 0;
     chunk->candidate_id = 0;
     chunk->candidate_epoch = 0;
+    chunk->candidate_state = 0;
     chunk->next = nursery->spare;
     nursery->spare = chunk;
     nursery->spare_count += 1;
@@ -6746,9 +6794,23 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
             size_t promoted_bytes = 0;
             heap->nursery.full = NULL;
             heap->nursery.full_bytes = 0;
+            heap->nursery.held_bytes = 0;
             while (chunk != NULL) {
                 kiln_nursery_chunk *next = chunk->next;
                 size_t filled = (size_t)(chunk->limit - chunk->base);
+                if (chunk->candidate_state != 0 && chunk->mark_epoch == heap->epoch &&
+                    chunk->marked_count != 0) {
+                    /* Preserve the exact allocation layout until the graph is moved or dies.
+                     * Marking has already traced the reachable blocks. */
+                    chunk->candidate_epoch = heap->epoch;
+                    chunk->next = heap->nursery.full;
+                    heap->nursery.full = chunk;
+                    heap->nursery.full_bytes += filled;
+                    heap->nursery.held_bytes += filled;
+                    chunk = next;
+                    continue;
+                }
+                chunk->candidate_state = 0;
                 size_t survivors = kiln_c99_nursery_settle(heap, chunk, 0);
                 if (survivors == 0) {
                     reset_bytes += filled;

@@ -70,7 +70,14 @@ export function isolate<T>(factory: () => T): Isolated<T> {
   if (candidate && candidateWorkerOp(CANDIDATE_END, true) !== true) {
     throw new Error("could not seal isolated graph candidate");
   }
-  if (candidateWorkerOp(ISOLATE, handle, value) !== true) throw new Error("could not retain isolated graph");
+  try {
+    if (candidateWorkerOp(ISOLATE, handle, value) !== true) throw new Error("could not retain isolated graph");
+  } catch (error) {
+    if (candidate) {
+      try { candidateWorkerOp(CANDIDATE_END, false); } catch {}
+    }
+    throw error;
+  }
   // Dynamic import plans may evaluate this module separately in one realm. This marker only
   // identifies a handle for fail-closed graph transfer; it must never expose the graph itself.
   Object.defineProperty(handle, isolatedMark, { value: true });

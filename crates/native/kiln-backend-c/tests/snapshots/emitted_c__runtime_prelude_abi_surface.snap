@@ -2233,7 +2233,9 @@ static uint64_t kiln_c99_graph_candidate_next_id;
 static uint64_t kiln_c99_graph_candidate_new_id(void) {
 static int kiln_c99_graph_candidate_open(kiln_c99_par_arena *arena, const kiln_gc_heap *heap,
 static int kiln_c99_actor_candidate_begin(kiln_gc_heap *heap) {
+static void kiln_c99_actor_candidate_finish(kiln_gc_heap *heap, int sealed);
 static int kiln_c99_actor_candidate_end(kiln_gc_heap *heap, int completed) {
+static void kiln_c99_actor_candidate_finish(kiln_gc_heap *heap, int sealed) {
 static size_t kiln_c99_par_arena_budget_bytes;
 static size_t kiln_c99_par_arena_budget(void) {
 static void kiln_c99_par_arena_seal(kiln_c99_par_arena *arena) {
@@ -2334,7 +2336,11 @@ static char *kiln_c99_gc_alloc_text_tenured(size_t len) {
 static size_t kiln_c99_gc_alloc_text_run(size_t count, const size_t *lens, char **out) {
 typedef struct kiln_c99_graph_capsule_requirements {
 typedef struct kiln_c99_graph_capsule {
+static kiln_nursery_chunk *kiln_c99_graph_capsule_chunk(
+static void kiln_c99_graph_capsule_dispose(kiln_c99_graph_capsule *capsule) {
 static int kiln_c99_graph_capsule_prepare(const kiln_gc_heap *from, kiln_nursery_chunk *chunk,
+fail:
+static void kiln_c99_actor_candidate_seal(kiln_gc_heap *heap, kiln_value root) {
 static int kiln_c99_graph_capsule_certify_request(kiln_gc_heap *heap, uint64_t request_id,
 static int kiln_c99_graph_capsule_receiver_preflight(
 static int kiln_c99_graph_capsule_detach(kiln_gc_heap *from, kiln_c99_graph_capsule *capsule) {

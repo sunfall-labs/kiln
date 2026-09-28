@@ -2479,6 +2479,77 @@ int main(void) {
 }
 
 #[test]
+fn executable_graph_capsule_moves_two_closed_chunks() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap sender, receiver;
+    kiln_c99_par_arena candidate;
+    kiln_nursery_chunk *first, *second;
+    kiln_c99_graph_capsule capsule;
+    kiln_val *root_cell, *child_cell;
+    kiln_value root;
+    uint64_t reservation = 94;
+    size_t filler = 0;
+    kiln_c99_gc_heap_init(&sender);
+    kiln_c99_gc_heap_init(&receiver);
+    if (!kiln_c99_graph_candidate_open(&candidate, &sender,
+                                        sender.nursery.capacity * 3)) return 1;
+    root_cell = (kiln_val *)kiln_c99_par_alloc(&candidate, KILN_GC_CELL, sizeof *root_cell);
+    if (root_cell == NULL) return 2;
+    first = candidate.current;
+    while (candidate.current == first && filler++ < 10000) {
+        kiln_array *orphan = (kiln_array *)kiln_c99_par_alloc(
+            &candidate, KILN_GC_ARRAY, sizeof(kiln_array));
+        if (orphan == NULL) return 3;
+        memset(orphan, 0, sizeof *orphan);
+        orphan->properties = kiln_c99_undefined();
+        orphan->match_input = kiln_c99_undefined();
+        orphan->match_groups = kiln_c99_undefined();
+        orphan->match_index = -1;
+    }
+    second = candidate.current;
+    if (second == NULL || second == first) return 4;
+    child_cell = (kiln_val *)kiln_c99_par_alloc(&candidate, KILN_GC_CELL, sizeof *child_cell);
+    if (child_cell == NULL || candidate.current != second) return 5;
+    *root_cell = KILN_VAL_TAG_PTR(KILN_TAG_CELL_PREFIX, child_cell);
+    *child_cell = KILN_VAL_UNDEFINED;
+    kiln_c99_par_arena_seal(&candidate);
+    if (!kiln_c99_heap_adopt_chunks(&sender, candidate.filled)) return 6;
+    root = kiln_c99_value(KILN_VALUE_CELL, (uint64_t)(uintptr_t)root_cell, NULL, 0);
+    if (!kiln_c99_graph_capsule_prepare(&sender, first, root, &capsule) ||
+        capsule.needs.regions != 2 || capsule.chunks == NULL) return 7;
+    if (!kiln_c99_graph_capsule_receiver_preflight(&receiver, &capsule.needs,
+                                                    reservation)) return 8;
+    if (!kiln_c99_graph_capsule_detach(&sender, &capsule) ||
+        sender.count != 0 || sender.nursery.full != NULL ||
+        kiln_c99_gc_lookup(&sender, root_cell) != NULL ||
+        kiln_c99_gc_lookup(&receiver, root_cell) != NULL) return 9;
+    kiln_c99_graph_capsule_adopt(&receiver, &capsule, reservation);
+    if (receiver.count != capsule.needs.objects || capsule.chunk != NULL ||
+        kiln_c99_gc_lookup(&receiver, root_cell) == NULL ||
+        kiln_c99_gc_lookup(&receiver, child_cell) == NULL ||
+        receiver.realm.graph_inbox_root.bits != root.bits) return 10;
+    kiln_c99_gc_mark_realm(&receiver);
+    if (((kiln_gc_block *)root_cell - 1)->mark != receiver.epoch ||
+        ((kiln_gc_block *)child_cell - 1)->mark != receiver.epoch) return 11;
+    kiln_c99_graph_capsule_dispose(&capsule);
+    kiln_c99_nursery_destroy(&sender.nursery);
+    kiln_c99_nursery_destroy(&receiver.nursery);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "graph-two-chunks");
+    assert!(
+        run.status.success(),
+        "graph two-chunk capsule failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_graph_capsule_moves_inline_object_and_array() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
@@ -3036,6 +3107,14 @@ static int actor_candidate_entry(void *context) {
     orphan->elements = orphan->inline_elements;
     free(side_elements);
     if (!kiln_c99_graph_candidate_closed(heap, batch, 1, root)) return 20;
+    heap->realm.graph_inbox_root = kiln_c99_value(
+        KILN_VALUE_CELL, (uint64_t)(uintptr_t)root, NULL, 0);
+    kiln_c99_gc_collect(heap, 1); /* a collection in the registration window preserves it */
+    if (candidate->candidate_state != 1 || candidate->candidate_epoch != heap->epoch ||
+        !kiln_c99_graph_candidate_closed(heap, batch, 1, root)) return 21;
+    kiln_c99_actor_candidate_finish(heap, 1);
+    if (candidate->candidate_state != 2 || heap->actor_candidate_pending_id != 0) return 22;
+    heap->realm.graph_inbox_root = kiln_c99_undefined();
     args[0] = kiln_c99_number(28);
     if (kiln_c99_worker_op_raw(&result, args, 1, &thrown) != KILN_C99_OK ||
         !kiln_c99_truthy(result)) return 11;

@@ -29,6 +29,8 @@
 # script's cleanup trap deletes the shared results directory instead of its own while the script
 # still exits 0 -- two full corpus runs were lost to that on 2026-09-05. Re-exec once under a bash
 # that has them, the way scripts/gate.sh does, rather than leaving it to the caller's environment.
+# A probe whose first lines declare `kiln-native: stress=skip` still runs in ordinary parity.
+# The stress summary counts it as skipped; a bounded companion covers its rooting shape.
 if [[ ${BASH_VERSINFO[0]} -lt 4 ]]; then
 	for candidate in /opt/homebrew/bin/bash /usr/local/bin/bash "$(command -v bash)"; do
 		# shellcheck disable=SC2016
@@ -143,6 +145,14 @@ run_probe() {
 	native_directive="$(head -5 -- "$probe" | grep -m1 -oE 'kiln-native:.*' || true)"
 	if [[ $native_directive =~ profile=([a-z-]+) ]]; then
 		profile="${BASH_REMATCH[1]}"
+	fi
+	# Full-depth recursion, broad differential probes and long multi-realm/messaging sweeps
+	# become quadratic or worse when every allocation walks the whole live stack/heap. Small
+	# stress companions cover their rooting shapes; keep the large cases in ordinary parity and
+	# report each as skipped, never matched.
+	if [[ -n $STRESS && $native_directive =~ stress=skip ]]; then
+		touch "$WORK_DIR/$name.stress-skipped"
+		return 0
 	fi
 	if [[ $native_directive =~ parallelism=([0-9a-z,]+) ]]; then
 		parallelism="${BASH_REMATCH[1]//,/ }"
@@ -268,7 +278,7 @@ for probe in "$PROBES"/*.ts "$PROBES"/*.js "$PROBES"/*.cjs "$PROBES"/*.mjs; do
 	fi
 done
 
-kiln_say "native: $matched matched, ${#REFUSALS[@]} refused, $diverged diverged${STRESS:+ (KILN_GC_STRESS=$STRESS; $stress_skipped parallelism probes skipped)}"
+kiln_say "native: $matched matched, ${#REFUSALS[@]} refused, $diverged diverged${STRESS:+ (KILN_GC_STRESS=$STRESS; $stress_skipped stress probes skipped)}"
 
 if ((${#REFUSALS[@]} > 0)); then
 	kiln_say ""

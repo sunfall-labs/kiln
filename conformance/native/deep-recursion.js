@@ -1,3 +1,4 @@
+// kiln-native: stress=skip
 // Parallel-builtins issue 30, item 4. A recursion 5,000 calls deep finishes natively as it does
 // in the interpreter and node: plain recursion, a method recursing through its receiver chain, a
 // recursion through `Function.prototype.call` (150 deep: the interpreter re-enters itself for

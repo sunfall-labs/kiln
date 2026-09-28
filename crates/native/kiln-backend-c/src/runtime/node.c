@@ -2607,15 +2607,26 @@ static int kiln_c99_worker_op_raw(kiln_value *result, const kiln_value *args, si
         return KILN_C99_OK;
     case KILN_C99_WORKER_OP_ACTOR_ISOLATE: {
         kiln_c99_realm_state *realm = kiln_c99_realm();
-        if (argc < 3 || args[1].tag != KILN_VALUE_OBJECT) return KILN_C99_INVALID_ARGUMENT;
+        kiln_gc_heap *heap = kiln_c99_gc_heap();
+        if (argc < 3 || args[1].tag != KILN_VALUE_OBJECT) {
+            kiln_c99_actor_candidate_finish(heap, 0);
+            return KILN_C99_INVALID_ARGUMENT;
+        }
         if (realm->isolated_graphs.tag != KILN_VALUE_COLLECTION) {
             kiln_value registry;
             status = kiln_c99_new_collection(&registry, 1, 1);
-            if (status != KILN_C99_OK) return status;
+            if (status != KILN_C99_OK) {
+                kiln_c99_actor_candidate_finish(heap, 0);
+                return status;
+            }
             realm->isolated_graphs = registry;
         }
         status = kiln_c99_collection_put(realm->isolated_graphs, args[1], args[2]);
-        if (status != KILN_C99_OK) return status;
+        if (status != KILN_C99_OK) {
+            kiln_c99_actor_candidate_finish(heap, 0);
+            return status;
+        }
+        kiln_c99_actor_candidate_seal(heap, args[2]);
         /* Any registry write while an opaque request waits makes its prior lookup stale.
          * Refuse that request at the turn boundary, even if this was another handle. */
         if (realm->isolated_request_id != 0) realm->isolated_request_invalidated = 1;

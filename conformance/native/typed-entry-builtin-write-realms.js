@@ -1,4 +1,4 @@
-// kiln-native: profile=native-release
+// kiln-native: profile=native-release stress=skip
 //
 // Realms and concurrency issue 20, for `scripts/native-realms.sh`: typed bodies that inline
 // `Math.sqrt` run a long stretch against the pristine built-ins and only then does the program

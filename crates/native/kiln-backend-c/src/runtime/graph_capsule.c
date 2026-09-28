@@ -1,4 +1,4 @@
-/* One-chunk actor graph transaction primitives. Only the host pair coordinator calls the
+/* Actor graph transaction primitives. Only the host pair coordinator calls the
  * paused controls below. Public ticket admission still needs a successful source-side poll and
  * a verified JavaScript inbox slot; neither a C capsule nor a registry entry grants that alone. */
 
@@ -13,6 +13,7 @@ typedef struct kiln_c99_graph_capsule_requirements {
 
 typedef struct kiln_c99_graph_capsule {
     kiln_nursery_chunk *chunk;
+    kiln_nursery_chunk **chunks;
     kiln_value root;
     kiln_c99_graph_capsule_requirements needs;
     uint64_t candidate_id;
@@ -21,15 +22,27 @@ typedef struct kiln_c99_graph_capsule {
     int adopted;
 } kiln_c99_graph_capsule;
 
+static kiln_nursery_chunk *kiln_c99_graph_capsule_chunk(
+    const kiln_c99_graph_capsule *capsule, size_t index) {
+    return capsule->needs.regions == 1 ? capsule->chunk : capsule->chunks[index];
+}
+
+static void kiln_c99_graph_capsule_dispose(kiln_c99_graph_capsule *capsule) {
+    free(capsule->chunks);
+    capsule->chunks = NULL;
+}
+
 /* All fallible closure and root-kind checks run on the sender before its ownership proof. Only
  * exact cell/object/array payloads and inline string bytes are supported; the returned
  * requirements contain numbers only and may cross lanes before either heap is changed. */
 static int kiln_c99_graph_capsule_prepare(const kiln_gc_heap *from, kiln_nursery_chunk *chunk,
                                           kiln_value root, kiln_c99_graph_capsule *out) {
     kiln_nursery_chunk *it;
+    kiln_nursery_chunk **chunks = NULL;
     const kiln_gc_block *block;
     const void *payload;
     uint32_t kind;
+    size_t count = 0, index = 0, objects = 0, bytes = 0, filled = 0;
     if (from == NULL || chunk == NULL || out == NULL || from->collecting || from->parallel_paused ||
         chunk == (kiln_nursery_chunk *)from->nursery.region ||
         !kiln_c99_gc_ptrset_contains(&from->nursery.regions, chunk) ||
@@ -37,8 +50,7 @@ static int kiln_c99_graph_capsule_prepare(const kiln_gc_heap *from, kiln_nursery
         chunk->candidate_id == 0 || chunk->candidate_epoch != from->epoch ||
         !kiln_c99_chunk_sealed_for_move(&from->nursery, chunk)) return 0;
     for (it = from->nursery.full; it != NULL && it != chunk; it = it->next) {}
-    if (it == NULL || root.bits == 0 ||
-        !kiln_c99_graph_value_in_batch(from, &chunk, 1, &root)) return 0;
+    if (it == NULL || root.bits == 0) return 0;
     block = kiln_c99_gc_lookup_interior(from, (uintptr_t)root.bits);
     if (block == NULL) return 0;
     payload = block + 1;
@@ -57,21 +69,70 @@ static int kiln_c99_graph_capsule_prepare(const kiln_gc_heap *from, kiln_nursery
     } else {
         return 0;
     }
-    if (!kiln_c99_graph_candidate_closed(from, &chunk, 1, payload) ||
-        chunk->alloc_count > from->count || chunk->alloc_bytes > from->bytes ||
-        (size_t)(chunk->limit - chunk->base) > from->nursery.full_bytes) return 0;
+    for (it = from->nursery.full; it != NULL; it = it->next)
+        if (it->candidate_id == chunk->candidate_id) ++count;
+    if (count == 0 || count > SIZE_MAX / sizeof *chunks) return 0;
+    if (count > 1) {
+        chunks = (kiln_nursery_chunk **)malloc(count * sizeof *chunks);
+        if (chunks == NULL) return 0;
+    }
+    for (it = from->nursery.full; it != NULL; it = it->next) {
+        size_t used;
+        if (it->candidate_id != chunk->candidate_id) continue;
+        if (it->limit < it->base ||
+            it->limit > (char *)it + from->nursery.capacity ||
+            objects > SIZE_MAX - it->alloc_count || bytes > SIZE_MAX - it->alloc_bytes) goto fail;
+        used = (size_t)(it->limit - it->base);
+        if (filled > SIZE_MAX - used) goto fail;
+        objects += it->alloc_count;
+        bytes += it->alloc_bytes;
+        filled += used;
+        if (count > 1) chunks[index] = it;
+        ++index;
+    }
+    if (index != count || objects > from->count || bytes > from->bytes ||
+        filled > from->nursery.full_bytes ||
+        !kiln_c99_graph_candidate_closed(from, count == 1 ? &chunk : chunks, count, payload) ||
+        !kiln_c99_graph_value_in_batch(from, count == 1 ? &chunk : chunks, count, &root)) goto fail;
     memset(out, 0, sizeof *out);
     out->chunk = chunk;
+    out->chunks = chunks;
     out->root = root;
     out->candidate_id = chunk->candidate_id;
     out->sender_epoch = from->epoch;
-    out->needs.regions = 1;
-    out->needs.objects = chunk->alloc_count;
-    out->needs.bytes = chunk->alloc_bytes;
-    out->needs.filled = (size_t)(chunk->limit - chunk->base);
+    out->needs.regions = count;
+    out->needs.objects = objects;
+    out->needs.bytes = bytes;
+    out->needs.filled = filled;
     out->needs.region_capacity = from->nursery.capacity;
     out->needs.bitmap_words = from->nursery.bitmap_words;
     return 1;
+fail:
+    free(chunks);
+    return 0;
+}
+
+/* ISOLATE is the first operation after the factory boundary. Collection may have occurred
+ * while its generated bridge prepared the arguments, so the provisional chunks stay intact
+ * until this exact root has passed the outgoing closure proof. Sender aliases are checked
+ * separately at the later two-realm handoff. */
+static void kiln_c99_actor_candidate_seal(kiln_gc_heap *heap, kiln_value root) {
+    kiln_gc_block *block;
+    kiln_nursery_chunk *chunk;
+    kiln_c99_graph_capsule capsule;
+    int closed = 0;
+    if (heap == NULL || heap->actor_candidate_pending_id == 0) return;
+    block = kiln_c99_gc_lookup_interior(heap, (uintptr_t)root.bits);
+    if (block != NULL && (block->kind & KILN_GC_FLAG_NURSERY) != 0) {
+        chunk = kiln_c99_nursery_chunk_of(heap, block);
+        if (chunk != NULL && chunk->candidate_id == heap->actor_candidate_pending_id &&
+            chunk->candidate_state == 1 &&
+            kiln_c99_graph_capsule_prepare(heap, chunk, root, &capsule)) {
+            closed = 1;
+            kiln_c99_graph_capsule_dispose(&capsule);
+        }
+    }
+    kiln_c99_actor_candidate_finish(heap, closed);
 }
 
 /* This is the sole positive certificate for the narrow capsule kinds. The machine boundary is
@@ -110,8 +171,11 @@ static int kiln_c99_graph_capsule_certify_request(kiln_gc_heap *heap, uint64_t r
  * not a caller-supplied graph pointer. It allocates region-set capacity before sender unlink. */
 static int kiln_c99_graph_capsule_receiver_preflight(
     kiln_gc_heap *to, const kiln_c99_graph_capsule_requirements *needs, uint64_t reservation_id) {
-    if (to == NULL || needs == NULL || needs->regions != 1 || needs->objects == 0 ||
-        needs->filled > needs->region_capacity || needs->bytes > needs->filled ||
+    if (to == NULL || needs == NULL || needs->regions == 0 || needs->objects == 0 ||
+        needs->region_capacity == 0 ||
+        needs->regions > SIZE_MAX / needs->region_capacity ||
+        needs->filled > needs->regions * needs->region_capacity ||
+        needs->bytes > needs->filled ||
         needs->region_capacity != to->nursery.capacity ||
         needs->bitmap_words != to->nursery.bitmap_words ||
         needs->objects > SIZE_MAX - to->count || needs->bytes > SIZE_MAX - to->bytes ||
@@ -123,25 +187,47 @@ static int kiln_c99_graph_capsule_receiver_preflight(
 /* This is the last sender-only operation. The caller's external certificate must still be
  * valid, and its escrow root must be consumed before the sender can run or collect again. */
 static int kiln_c99_graph_capsule_detach(kiln_gc_heap *from, kiln_c99_graph_capsule *capsule) {
-    kiln_nursery_chunk *chunk;
-    kiln_nursery_chunk **link;
+    size_t index, objects = 0, bytes = 0, filled = 0;
     if (from == NULL || capsule == NULL || capsule->detached || from->collecting ||
         from->parallel_paused || from->epoch != capsule->sender_epoch) return 0;
-    chunk = capsule->chunk;
-    if (chunk == NULL || chunk->candidate_id != capsule->candidate_id ||
-        chunk->candidate_epoch != from->epoch ||
-        chunk->alloc_count != capsule->needs.objects ||
-        chunk->alloc_bytes != capsule->needs.bytes ||
-        (size_t)(chunk->limit - chunk->base) != capsule->needs.filled ||
-        !kiln_c99_gc_ptrset_contains(&from->nursery.regions, chunk) ||
-        !kiln_c99_chunk_sealed_for_move(&from->nursery, chunk)) return 0;
-    for (link = &from->nursery.full; *link != NULL && *link != chunk; link = &(*link)->next) {}
-    if (*link == NULL || capsule->needs.objects > from->count ||
-        capsule->needs.bytes > from->bytes ||
-        capsule->needs.filled > from->nursery.full_bytes) return 0;
-    *link = chunk->next;
-    chunk->next = NULL;
-    kiln_c99_gc_ptrset_remove(&from->nursery.regions, chunk);
+    if (capsule->needs.regions == 0 || capsule->chunk == NULL ||
+        (capsule->needs.regions > 1 && capsule->chunks == NULL)) return 0;
+    /* Validate the complete batch while the sender still owns it. After the first unlink no
+     * fallible check may leave a partly detached graph behind. */
+    for (index = 0; index < capsule->needs.regions; ++index) {
+        kiln_nursery_chunk *chunk = kiln_c99_graph_capsule_chunk(capsule, index);
+        kiln_nursery_chunk *it;
+        size_t used;
+        if (chunk == NULL || chunk == (kiln_nursery_chunk *)from->nursery.region ||
+            chunk->candidate_id != capsule->candidate_id ||
+            chunk->candidate_epoch != from->epoch ||
+            !kiln_c99_gc_ptrset_contains(&from->nursery.regions, chunk) ||
+            !kiln_c99_chunk_sealed_for_move(&from->nursery, chunk)) return 0;
+        for (it = from->nursery.full; it != NULL && it != chunk; it = it->next) {}
+        if (it == NULL || objects > SIZE_MAX - chunk->alloc_count ||
+            bytes > SIZE_MAX - chunk->alloc_bytes) return 0;
+        used = (size_t)(chunk->limit - chunk->base);
+        if (filled > SIZE_MAX - used) return 0;
+        objects += chunk->alloc_count;
+        bytes += chunk->alloc_bytes;
+        filled += used;
+    }
+    if (objects != capsule->needs.objects || bytes != capsule->needs.bytes ||
+        filled != capsule->needs.filled || objects > from->count ||
+        bytes > from->bytes || filled > from->nursery.full_bytes) return 0;
+    for (index = 0; index < capsule->needs.regions; ++index) {
+        kiln_nursery_chunk *chunk = kiln_c99_graph_capsule_chunk(capsule, index);
+        kiln_nursery_chunk **link = &from->nursery.full;
+        while (*link != chunk) link = &(*link)->next;
+        *link = chunk->next;
+        chunk->next = NULL;
+        kiln_c99_gc_ptrset_remove(&from->nursery.regions, chunk);
+        if (chunk->candidate_state != 0) {
+            size_t used = (size_t)(chunk->limit - chunk->base);
+            if (used > from->nursery.held_bytes) abort();
+            from->nursery.held_bytes -= used;
+        }
+    }
     from->nursery.full_bytes -= capsule->needs.filled;
     from->count -= capsule->needs.objects;
     from->bytes -= capsule->needs.bytes;
@@ -154,9 +240,10 @@ static int kiln_c99_graph_capsule_detach(kiln_gc_heap *from, kiln_c99_graph_caps
  * unlink. The native inbox root is installed before either realm resumes or may collect. */
 static void kiln_c99_graph_capsule_adopt(kiln_gc_heap *to, kiln_c99_graph_capsule *capsule,
                                          uint64_t reservation_id) {
-    kiln_nursery_chunk *chunk = capsule->chunk;
     kiln_c99_realm_state *realm = &to->realm;
-    if (!capsule->detached || chunk == NULL || reservation_id == 0 ||
+    size_t index;
+    if (!capsule->detached || capsule->chunk == NULL ||
+        (capsule->needs.regions > 1 && capsule->chunks == NULL) || reservation_id == 0 ||
         to->collecting || to->parallel_paused ||
         realm->graph_inbox_state != KILN_C99_GRAPH_INBOX_RESERVED ||
         realm->graph_inbox_reservation_id != reservation_id ||
@@ -170,21 +257,31 @@ static void kiln_c99_graph_capsule_adopt(kiln_gc_heap *to, kiln_c99_graph_capsul
         capsule->needs.bytes > SIZE_MAX - to->bytes ||
         capsule->needs.bytes > SIZE_MAX - to->since_collection ||
         capsule->needs.filled > SIZE_MAX - to->nursery.full_bytes ||
-        kiln_c99_gc_ptrset_contains(&to->nursery.regions, chunk) ||
-        (to->nursery.regions.count + 1) * 2 > to->nursery.regions.capacity ||
-        kiln_c99_gc_ptrset_insert(&to->nursery.regions, chunk) != KILN_C99_OK) abort();
-    if (to->nursery.lo == NULL || (char *)chunk < to->nursery.lo)
-        to->nursery.lo = (char *)chunk;
-    if (to->nursery.hi == NULL || (char *)chunk + to->nursery.capacity > to->nursery.hi)
-        to->nursery.hi = (char *)chunk + to->nursery.capacity;
-    kiln_c99_gc_bound(to, chunk, to->nursery.capacity);
-    chunk->mark_epoch = 0;
-    chunk->candidate_epoch = 0;
-    chunk->candidate_id = 0;
-    chunk->marked_count = 0;
-    chunk->marked_bytes = 0;
-    chunk->next = to->nursery.full;
-    to->nursery.full = chunk;
+        capsule->needs.regions > SIZE_MAX - to->nursery.regions.count ||
+        to->nursery.regions.count + capsule->needs.regions > SIZE_MAX / 2 ||
+        (to->nursery.regions.count + capsule->needs.regions) * 2 >
+            to->nursery.regions.capacity) abort();
+    for (index = 0; index < capsule->needs.regions; ++index) {
+        kiln_nursery_chunk *chunk = kiln_c99_graph_capsule_chunk(capsule, index);
+        if (chunk == NULL || kiln_c99_gc_ptrset_contains(&to->nursery.regions, chunk)) abort();
+    }
+    for (index = 0; index < capsule->needs.regions; ++index) {
+        kiln_nursery_chunk *chunk = kiln_c99_graph_capsule_chunk(capsule, index);
+        if (kiln_c99_gc_ptrset_insert(&to->nursery.regions, chunk) != KILN_C99_OK) abort();
+        if (to->nursery.lo == NULL || (char *)chunk < to->nursery.lo)
+            to->nursery.lo = (char *)chunk;
+        if (to->nursery.hi == NULL || (char *)chunk + to->nursery.capacity > to->nursery.hi)
+            to->nursery.hi = (char *)chunk + to->nursery.capacity;
+        kiln_c99_gc_bound(to, chunk, to->nursery.capacity);
+        chunk->mark_epoch = 0;
+        chunk->candidate_epoch = 0;
+        chunk->candidate_id = 0;
+        chunk->candidate_state = 0;
+        chunk->marked_count = 0;
+        chunk->marked_bytes = 0;
+        chunk->next = to->nursery.full;
+        to->nursery.full = chunk;
+    }
     to->count += capsule->needs.objects;
     to->bytes += capsule->needs.bytes;
     to->since_collection += capsule->needs.bytes;
@@ -229,11 +326,13 @@ static int kiln_c99_graph_capsule_paused_control(uint32_t kind, uint64_t first,
             return 3;
         }
         if (!kiln_c99_graph_capsule_certify_request(heap, first, capsule)) {
+            kiln_c99_graph_capsule_dispose(capsule);
             free(capsule);
             return 2;
         }
         if (kiln_realm_graph_capsule_stage(second, third, first, capsule) != 0) {
             (void)kiln_c99_actor_isolated_request_rollback(heap, first);
+            kiln_c99_graph_capsule_dispose(capsule);
             free(capsule);
             return 3;
         }
@@ -271,6 +370,7 @@ static int kiln_c99_graph_capsule_paused_control(uint32_t kind, uint64_t first,
         kiln_c99_graph_capsule_commit_sender(heap, capsule, first);
         realm->graph_outgoing_capsule = NULL;
         realm->graph_outgoing_reservation = 0;
+        kiln_c99_graph_capsule_dispose(capsule);
         free(capsule);
         return 0;
     case 8: /* receiver pre-unlink rollback: reservation */
@@ -283,6 +383,7 @@ static int kiln_c99_graph_capsule_paused_control(uint32_t kind, uint64_t first,
             kiln_realm_graph_capsule_cancel(second, first) != 0) abort();
         realm->graph_outgoing_capsule = NULL;
         realm->graph_outgoing_reservation = 0;
+        kiln_c99_graph_capsule_dispose(capsule);
         free(capsule);
         return kiln_c99_actor_isolated_request_rollback(heap, first) ? 0 : 3;
     default:

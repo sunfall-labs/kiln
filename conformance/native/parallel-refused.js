@@ -1,3 +1,4 @@
+// kiln-native: stress=skip
 // The parallel/sequential differential harness (.scratch/parallel-builtins issue 02): callbacks
 // that do not qualify for the pool -- they read properties, allocate, build strings, call
 // functions, have side effects, read `this` or `arguments`, get a `thisArg`, or meet holes and
