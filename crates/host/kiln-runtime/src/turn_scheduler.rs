@@ -729,6 +729,18 @@ impl PinnedTurnScheduler {
         F: FnOnce(Arc<Reactor>, Arc<TurnTicket>, usize) -> T + Send + 'static,
         T: MovableTurn + 'static,
     {
+        self.spawn_movable_with_target(move |reactor, ticket, lane, _| {
+            factory(reactor, ticket, lane)
+        })
+    }
+
+    /// Construct a movable body with its cross-thread pause identity. The target contains only
+    /// scheduler state and may be registered under a host realm ID during construction.
+    pub fn spawn_movable_with_target<F, T>(&self, factory: F) -> MovableTurnHandle
+    where
+        F: FnOnce(Arc<Reactor>, Arc<TurnTicket>, usize, TurnPauseTarget) -> T + Send + 'static,
+        T: MovableTurn + 'static,
+    {
         let id = self.next_realm_id.fetch_add(1, Ordering::Relaxed);
         let lane = Arc::clone(&self.lanes[(id as usize - 1) % self.base_lanes]);
         let entry = Arc::new(MovableEntry {
@@ -737,10 +749,15 @@ impl PinnedTurnScheduler {
             ticket: lane.queue.ticket(id),
             deadline_epoch: AtomicU64::new(0),
         });
+        let target = TurnPauseTarget {
+            ticket: Arc::clone(&entry.ticket),
+            status: Arc::clone(&entry.status),
+            coordinator: Arc::clone(&self.pause),
+        };
         lane.command(Command::InstallMovable {
             entry: Arc::clone(&entry),
             factory: Box::new(move |reactor, ticket, lane| {
-                Box::new(factory(reactor, ticket, lane))
+                Box::new(factory(reactor, ticket, lane, target))
             }),
         });
         MovableTurnHandle {

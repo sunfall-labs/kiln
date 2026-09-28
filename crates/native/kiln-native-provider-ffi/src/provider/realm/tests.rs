@@ -289,6 +289,115 @@ fn provider_moves_pure_realm_turns_between_lanes() {
     assert!(lanes_by_realm.values().any(|lanes| lanes.len() > 1));
 }
 
+struct ClaimFixtureState {
+    realms: std::sync::Mutex<Vec<u64>>,
+    advances: AtomicUsize,
+}
+
+struct ClaimFixture {
+    realm: u64,
+    turns: usize,
+    state: Arc<ClaimFixtureState>,
+}
+
+unsafe extern "C" fn claim_fixture_begin(context: *mut c_void, _index: u64) -> *mut c_void {
+    let state = unsafe { &*context.cast::<Arc<ClaimFixtureState>>() };
+    let mut realm = 0;
+    if unsafe { kiln_realm_create(&raw mut realm) } != 0 || kiln_realm_use_wall_clock(realm) != 0 {
+        return ptr::null_mut();
+    }
+    state.realms.lock().unwrap().push(realm);
+    Box::into_raw(Box::new(ClaimFixture {
+        realm,
+        turns: 0,
+        state: Arc::clone(state),
+    }))
+    .cast()
+}
+
+unsafe extern "C" fn claim_fixture_identify(session: *mut c_void) -> u64 {
+    unsafe { &*session.cast::<ClaimFixture>() }.realm
+}
+
+unsafe extern "C" fn claim_fixture_advance(session: *mut c_void, delay: *mut u64) -> i32 {
+    let session = unsafe { &mut *session.cast::<ClaimFixture>() };
+    session.state.advances.fetch_add(1, AtomicOrdering::SeqCst);
+    session.turns += 1;
+    if session.turns == 1 {
+        // A long deadline keeps each body parked until the pair claim wakes it. The deadline
+        // still lets the launcher finish if an assertion fails before the claim is made.
+        unsafe { delay.write(2_000_000_000) };
+        3
+    } else {
+        0
+    }
+}
+
+unsafe extern "C" fn claim_fixture_finish(session: *mut c_void) -> i32 {
+    let session = unsafe { Box::from_raw(session.cast::<ClaimFixture>()) };
+    kiln_realm_destroy(session.realm)
+}
+
+#[test]
+fn provider_maps_realm_handles_to_pair_claims_without_cross_lane_realm_borrows() {
+    let state = Arc::new(ClaimFixtureState {
+        realms: std::sync::Mutex::new(Vec::new()),
+        advances: AtomicUsize::new(0),
+    });
+    let run_state = Arc::clone(&state);
+    let launcher = std::thread::spawn(move || {
+        let mut statuses = [-1; 2];
+        let result = unsafe {
+            kiln_realm_run_migrating(
+                2,
+                1,
+                1,
+                Some(claim_fixture_begin),
+                Some(claim_fixture_identify),
+                Some(claim_fixture_advance),
+                Some(claim_fixture_finish),
+                (&raw const run_state).cast_mut().cast(),
+                statuses.as_mut_ptr(),
+            )
+        };
+        (result, statuses)
+    });
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let realms = loop {
+        let realms = state.realms.lock().unwrap().clone();
+        if realms.len() == 2 {
+            break realms;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "both provider realms should register"
+        );
+        std::thread::yield_now();
+    };
+    while state.advances.load(AtomicOrdering::SeqCst) < 2 {
+        assert!(Instant::now() < deadline, "both first turns should park");
+        std::thread::yield_now();
+    }
+    let claim = claim_scheduled_realm_pair(realms[1], realms[0]).expect("live realm mapping");
+    assert!(claim.wait(Duration::from_secs(1)));
+    assert_eq!(state.advances.load(AtomicOrdering::SeqCst), 2);
+    assert_eq!(
+        claim_scheduled_realm_pair(realms[0], realms[1]).err(),
+        Some(ScheduledRealmClaimError::Scheduler(TurnClaimError::Busy))
+    );
+    assert_eq!(
+        claim_scheduled_realm_pair(0, realms[1]).err(),
+        Some(ScheduledRealmClaimError::UnknownRealm)
+    );
+    drop(claim);
+    assert_eq!(launcher.join().unwrap(), (0, [0, 0]));
+    assert_eq!(state.advances.load(AtomicOrdering::SeqCst), 4);
+    assert_eq!(
+        claim_scheduled_realm_pair(realms[0], realms[1]).err(),
+        Some(ScheduledRealmClaimError::UnknownRealm)
+    );
+}
+
 #[cfg(feature = "ffi")]
 #[test]
 fn ffi_library_open_pins_subsequent_turns_to_its_os_lane() {

@@ -4,7 +4,9 @@ use kiln_host_abi::{
     AsyncHostError, AsyncHostOp, AsyncHostValue, RequestId, ResourceId, ResourceKind,
 };
 use kiln_runtime::turn_queue::TurnOutcome;
-use kiln_runtime::turn_scheduler::{PinnedTurn, PinnedTurnScheduler};
+use kiln_runtime::turn_scheduler::{
+    PinnedTurn, PinnedTurnScheduler, TurnClaimError, TurnPairClaim, TurnPauseTarget,
+};
 use kiln_runtime::{
     Executor, Realm, RealmCapabilities, RealmState, RuntimeTurn, TimerId, TokioHost, WorkItem,
 };
@@ -22,7 +24,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::task::Waker;
 use std::time::{Duration, Instant};
 
@@ -4881,13 +4883,17 @@ pub extern "C" fn kiln_realm_destroy(handle: u64) -> i32 {
         }
         // Teardown makes the realm's sites forget its local shapes, reading shared cache state.
         let _online = reclaim::online();
-        REALMS.with(|realms| {
+        let status = REALMS.with(|realms| {
             if realms.borrow_mut().remove(&handle).is_some() {
                 0
             } else {
                 INVALID_ARGUMENT
             }
-        })
+        });
+        if status == 0 && let Ok(mut registry) = scheduled_realms().lock() {
+            registry.remove(&handle);
+        }
+        status
     })
 }
 
@@ -4916,12 +4922,111 @@ type ScheduledIdentify = unsafe extern "C" fn(*mut c_void) -> u64;
 type ScheduledAdvance = unsafe extern "C" fn(*mut c_void, *mut u64) -> i32;
 type ScheduledFinish = unsafe extern "C" fn(*mut c_void) -> i32;
 
+/// Host realm IDs are process-unique; scheduler IDs are local to one scheduler. This registry
+/// connects them without moving or borrowing the lane-local `Rc<NativeRealm>` across threads.
+/// Only migrating sessions register: dedicated-thread and legacy pinned launchers have no
+/// verified pair-pause target and must refuse a graph request.
+struct ScheduledRealmTarget {
+    #[allow(dead_code)] // Used when the graph coordinator begins claiming mapped realms.
+    scheduler: Weak<PinnedTurnScheduler>,
+    target: TurnPauseTarget,
+}
+
+static SCHEDULED_REALMS: OnceLock<Mutex<HashMap<u64, ScheduledRealmTarget>>> = OnceLock::new();
+
+fn scheduled_realms() -> &'static Mutex<HashMap<u64, ScheduledRealmTarget>> {
+    SCHEDULED_REALMS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+struct ScheduledRealmRegistration {
+    realm: u64,
+    target_id: u64,
+}
+
+impl ScheduledRealmRegistration {
+    fn new(
+        realm_handle: u64,
+        scheduler: Weak<PinnedTurnScheduler>,
+        target: TurnPauseTarget,
+    ) -> Option<Self> {
+        if realm_handle == 0 || realm(realm_handle).is_none() {
+            return None;
+        }
+        let target_id = target.id();
+        let mut registry = scheduled_realms().lock().ok()?;
+        if registry.contains_key(&realm_handle) {
+            return None;
+        }
+        registry.insert(realm_handle, ScheduledRealmTarget { scheduler, target });
+        Some(Self {
+            realm: realm_handle,
+            target_id,
+        })
+    }
+}
+
+impl Drop for ScheduledRealmRegistration {
+    fn drop(&mut self) {
+        if let Ok(mut registry) = scheduled_realms().lock()
+            && registry
+                .get(&self.realm)
+                .is_some_and(|entry| entry.target.id() == self.target_id)
+        {
+            registry.remove(&self.realm);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Admission remains disabled until the graph proof is complete.
+pub(crate) enum ScheduledRealmClaimError {
+    UnknownRealm,
+    DifferentScheduler,
+    Scheduler(TurnClaimError),
+}
+
+/// Resolve only opaque provider realm IDs. The returned claim pauses both scheduler bodies;
+/// it is not a graph ownership certificate and carries no C heap or realm pointer.
+#[allow(dead_code)] // The actor request has not yet reached a sender-turn safepoint.
+pub(crate) fn claim_scheduled_realm_pair(
+    sender: u64,
+    receiver: u64,
+) -> Result<TurnPairClaim, ScheduledRealmClaimError> {
+    let (scheduler, from, to) = {
+        let registry = scheduled_realms()
+            .lock()
+            .map_err(|_| ScheduledRealmClaimError::UnknownRealm)?;
+        let from = registry
+            .get(&sender)
+            .ok_or(ScheduledRealmClaimError::UnknownRealm)?;
+        let to = registry
+            .get(&receiver)
+            .ok_or(ScheduledRealmClaimError::UnknownRealm)?;
+        let scheduler = from
+            .scheduler
+            .upgrade()
+            .ok_or(ScheduledRealmClaimError::UnknownRealm)?;
+        let receiver_scheduler = to
+            .scheduler
+            .upgrade()
+            .ok_or(ScheduledRealmClaimError::UnknownRealm)?;
+        if !Arc::ptr_eq(&scheduler, &receiver_scheduler) {
+            return Err(ScheduledRealmClaimError::DifferentScheduler);
+        }
+        (scheduler, from.target.clone(), to.target.clone())
+    };
+    scheduler
+        .claim_pair(&from, &to)
+        .map_err(ScheduledRealmClaimError::Scheduler)
+}
+
 struct ScheduledRun {
     session: *mut c_void,
     realm: u64,
     detached: Option<DetachedRealm>,
     ticket: Option<Arc<kiln_runtime::turn_queue::TurnTicket>>,
     scheduler: Option<Weak<PinnedTurnScheduler>>,
+    registration: Option<ScheduledRealmRegistration>,
     advance: ScheduledAdvance,
     finish: ScheduledFinish,
     result: std::sync::mpsc::Sender<(usize, i32)>,
@@ -4959,6 +5064,9 @@ impl ScheduledRun {
 
     fn complete(&mut self, override_status: Option<i32>) {
         self.attach_if_detached();
+        // Remove the external name before `finish` destroys the realm. An already acquired
+        // claim still owns its scheduler targets and will observe completion/cancellation.
+        self.registration.take();
         let session = std::mem::replace(&mut self.session, std::ptr::null_mut());
         let status = if session.is_null() {
             RUNTIME_ERROR
@@ -5088,6 +5196,7 @@ pub unsafe extern "C" fn kiln_realm_run_scheduled(
                         detached: None,
                         ticket: None,
                         scheduler: Some(weak_scheduler),
+                        registration: None,
                         advance,
                         finish,
                         result: sender,
@@ -5168,7 +5277,7 @@ pub unsafe extern "C" fn kiln_realm_run_migrating(
                 let sender = sender.clone();
                 let shared = shared;
                 let weak_scheduler = weak_scheduler.clone();
-                scheduler.spawn_movable_with(move |reactor, ticket, lane| {
+                scheduler.spawn_movable_with_target(move |reactor, ticket, lane, target| {
                     let _reactor = ScheduledReactorGuard::enter(reactor);
                     let _pool = ScheduledPoolGuard::enter(Some(weak_scheduler.clone()));
                     // SAFETY: the caller's callback contract; this first runs on a scheduler
@@ -5180,6 +5289,8 @@ pub unsafe extern "C" fn kiln_realm_run_migrating(
                         // SAFETY: `begin` returned this live session.
                         unsafe { identify(session) }
                     };
+                    let registration =
+                        ScheduledRealmRegistration::new(realm, weak_scheduler.clone(), target);
                     let detached = (realm != 0).then(|| detach_realm(realm)).flatten();
                     if detached.is_none() {
                         let _ = ticket.pin_to_lane(lane);
@@ -5190,6 +5301,7 @@ pub unsafe extern "C" fn kiln_realm_run_migrating(
                         detached,
                         ticket: Some(ticket),
                         scheduler: Some(weak_scheduler),
+                        registration,
                         advance,
                         finish,
                         result: sender,
