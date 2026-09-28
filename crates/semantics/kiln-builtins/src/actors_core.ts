@@ -53,10 +53,15 @@ export function transfer<T>(value: Isolated<T> | ArrayBuffer): TransferTicket<T>
 
 export function prepareActorMessage(value: any, buffers: ArrayBuffer[], consumed: Ticket[], seen = new Map<any, any>()): any {
   if (value === null || typeof value !== "object") return value;
+  // The symbol bridges separate dynamic-import plans, but user code can forge a symbol
+  // property. Treat it only as a hint: object graphs are refused until the runtime proves
+  // ownership, and the only accepted payload is an actual transferable ArrayBuffer.
   const ticket = tickets.get(value) || value[ticketMark];
   if (ticket) {
+    if (typeof ticket !== "object" || ticket === null) throw dataCloneError("invalid transfer ticket");
     if (ticket.consumed) throw dataCloneError("transfer ticket was already consumed");
     if (ticket.graph) throw dataCloneError("graph transfer needs ownership proof");
+    if (!(ticket.value instanceof ArrayBuffer)) throw dataCloneError("transfer ticket has no ArrayBuffer");
     buffers.push(ticket.value);
     consumed.push(ticket);
     return ticket.value;
