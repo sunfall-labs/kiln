@@ -5169,13 +5169,9 @@ fn refuse_graph_claim_request(
     }
     let result = if let Ok(claim) = claim_scheduled_realm_pair(sender, receiver) {
         if claim.wait(Duration::from_secs(1)) {
-            coordinate_claimed_graph_request(
-                sender,
-                receiver,
-                request,
-                reservation,
-                |realm, command| claim.control(realm, command),
-            )
+            probe_claimed_graph_request(sender, receiver, request, reservation, |realm, command| {
+                claim.control(realm, command)
+            })
         } else {
             GRAPH_REQUEST_REFUSED
         }
@@ -5283,7 +5279,7 @@ fn coordinate_mixed_graph_request(
     if !scheduled_claim.wait(Duration::from_secs(1)) {
         return Some(GRAPH_REQUEST_REFUSED);
     }
-    Some(coordinate_claimed_graph_request(
+    Some(probe_claimed_graph_request(
         sender,
         receiver,
         request,
@@ -5296,6 +5292,34 @@ fn coordinate_mixed_graph_request(
             }
         },
     ))
+}
+
+/// A scheduled control may sit behind an unrelated turn on its lane. Refuse before unlink until
+/// the scheduler can place both post-unlink callbacks on executing lanes concurrently.
+fn probe_claimed_graph_request(
+    sender: u64,
+    receiver: u64,
+    request: u64,
+    reservation: u64,
+    mut control: impl FnMut(u64, PausedTurnCommand) -> PausedTurnResult,
+) -> u8 {
+    if reservation != 0 {
+        let _ = control(
+            receiver,
+            PausedTurnCommand {
+                kind: 2,
+                ids: [reservation, 0, 0],
+            },
+        );
+        let _ = control(
+            sender,
+            PausedTurnCommand {
+                kind: 1,
+                ids: [request, 0, 0],
+            },
+        );
+    }
+    GRAPH_REQUEST_REFUSED_AFTER_PAUSE
 }
 
 /// All C operations are lane-local and carry IDs only. The host lease pins the authenticated
