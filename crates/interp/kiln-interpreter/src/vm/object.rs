@@ -656,67 +656,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(Value::Boolean(true))
     }
 
-    /// The own enumerable keys of a proxy paired with what reading each one answers.
-    ///
-    /// A proxy has no property store to walk, so the only way to ask what it holds is the three
-    /// traps the specification uses: `ownKeys` for the names, `getOwnPropertyDescriptor` for
-    /// which of them are enumerable, and `get` for the value. Every one of those is observable,
-    /// and a handler that counts its calls can tell the difference -- so this asks the proxy
-    /// rather than reaching past it to the target, even where the handler has no trap of its own.
-    ///
-    /// Shared by `Object.assign` and object spread because the two copy the same set: the
-    /// spread was reading the store directly, found none, and produced `{}` from a proxy that
-    /// `Object.assign` beside it copied correctly.
-    /// Walk a proxy source's own enumerable properties, handing each to `visit` as soon as it is
-    /// read.
-    ///
-    /// The visit happens inside the walk rather than after it because `Object.assign` writes
-    /// through this and the order is observable. `CopyDataProperties` reads and writes one key
-    /// at a time -- `[[GetOwnProperty]]`, `[[Get]]`, `Set` -- so a proxy source feeding a proxy
-    /// target sees `desc:b, get:b, set:b, desc:a, get:a, set:a`. Collecting every value first and
-    /// writing them afterwards produced `desc:b, get:b, desc:a, get:a, set:b, set:a`, which is
-    /// the same properties in the same order and still the wrong trace: a handler that decides
-    /// what to return from a later `get` based on an earlier `set` observes the difference.
-    pub(crate) fn for_each_proxy_own_enumerable(
-        &mut self,
-        source: &Value,
-        instruction: usize,
-        mut visit: impl FnMut(&mut Self, StringUnits, Value) -> Result<(), ExecutionError>,
-    ) -> Result<(), ExecutionError> {
-        for key in self.own_keys(source, instruction)? {
-            let descriptor =
-                self.proxy_descriptor(source, &Value::String(key.clone()), instruction)?;
-            if matches!(descriptor, Value::Undefined)
-                || !self
-                    .read_property(&descriptor, "enumerable", instruction)?
-                    .is_truthy()
-            {
-                continue;
-            }
-            // The read is the `get` trap, not the descriptor's `value`: a proxy is free to
-            // answer a read with something its descriptor did not mention, and a spread copies
-            // what a read produces.
-            let value = self.read_property_key(source, PropertyKeyRef::Units(&key), instruction)?;
-            visit(self, key, value)?;
-        }
-        Ok(())
-    }
-
-    /// The same walk, collected.  An object spread builds a fresh object with no traps on it, so
-    /// nothing can observe when the writes happen relative to the reads.
-    pub(crate) fn proxy_own_enumerable(
-        &mut self,
-        source: &Value,
-        instruction: usize,
-    ) -> Result<Vec<(StringUnits, Value)>, ExecutionError> {
-        let mut copied = Vec::new();
-        self.for_each_proxy_own_enumerable(source, instruction, |_, key, value| {
-            copied.push((key, value));
-            Ok(())
-        })?;
-        Ok(copied)
-    }
-
     /// What a `set` trap that answered truthily may not have claimed.
     ///
     /// A handler is free to route a write anywhere it likes -- that is the point of the trap --
@@ -2256,6 +2195,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return Ok(facade.own_keys().into_iter().map(Value::String).collect());
         }
         let names = match target {
+            // CopyDataProperties boxes a primitive string before listing its own keys.
+            // Its UTF-16 code units are enumerable indexed properties of that box.
+            Value::String(text) => (0..text.unit_len())
+                .map(|index| StringUnits::from(index.to_string()))
+                .collect(),
             // A proxy answers with a trap rather than a store, and the trap already reports
             // both kinds in the trap result's order.
             Value::Proxy(_) => {

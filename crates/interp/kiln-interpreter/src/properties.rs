@@ -850,17 +850,12 @@ pub(super) fn has_prototype_property(closure: &Closure) -> bool {
 /// Own-only on purpose: the presence of the name on the object *is* the brand check, so a
 /// prototype walk would hand one class's private member to another class's instance.
 pub(super) fn own_private_element(target: &Value, key: &str) -> Option<(Property, Attributes)> {
-    let read = |data: &ObjectData| {
-        Some((
-            data.get_own_property(key)?.clone(),
-            data.get_own_attributes(key)?,
-        ))
-    };
-    match target {
-        Value::Object(object) => read(&object.borrow()),
-        Value::Function(closure) => read(&closure.properties.borrow()),
-        _ => None,
-    }
+    let store = prototype_slot(target)?;
+    let data = store.borrow();
+    Some((
+        data.get_own_property(key)?.clone(),
+        data.get_own_attributes(key)?,
+    ))
 }
 
 /// A private name as the program spelled it, without the scope-numbered reservation it is keyed

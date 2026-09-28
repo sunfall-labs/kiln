@@ -636,8 +636,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.proxy_descriptor(target, key, instruction)?
         } else {
             let key_units = key.property_key_units_checked()?;
-            own_descriptor_key(&self.intrinsics, target, PropertyKeyRef::Units(&key_units))
-                .unwrap_or(Value::Undefined)
+            own_descriptor_key(
+                &self.intrinsics,
+                target,
+                PropertyKeyRef::from_value(key, &key_units),
+            )
+            .unwrap_or(Value::Undefined)
         };
         Ok((!matches!(descriptor, Value::Undefined)).then_some(descriptor))
     }

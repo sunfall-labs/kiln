@@ -35,3 +35,10 @@ console.log(Object.getPrototypeOf(Q) === P, Object.getPrototypeOf(Q.prototype));
 class R extends Array {}
 const r = new R(); r.push(1, 2);
 console.log(r.length, r instanceof Array, Object.getPrototypeOf(R) === Array);
+class BrandedArray extends Array {
+  #answer = 7;
+  #twice() { return this.#answer * 2; }
+  read() { this.#answer += 1; return this.#twice(); }
+}
+const branded = new BrandedArray();
+console.log(Array.isArray(branded), branded.read(), branded.read(), Object.keys(branded).length);

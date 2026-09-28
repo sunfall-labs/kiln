@@ -1003,36 +1003,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // Spreading `null` or `undefined` contributes nothing rather than throwing,
                     // which is the one place object spread is more forgiving than array spread.
                     let object = Rc::clone(object);
-                    // A proxy answers "what do you hold" with traps, not with a store, so it
-                    // takes the same three-trap walk `Object.assign` uses. Falling through to
-                    // the store walk below found nothing and produced `{}` in silence.
-                    if matches!(source, Value::Proxy(_)) {
-                        for (key, value) in self.proxy_own_enumerable(&source, current)? {
-                            object.borrow_mut().set_units(&key, value);
-                        }
-                        self.stack.push(target);
-                        continue;
-                    }
-                    for (key, property) in own_properties_units(&self.intrinsics, &source) {
-                        // A spread copies *values*: it reads each property, which for an
-                        // accessor means calling its getter, and the result is a plain data
-                        // property on the target.
-                        let value = match property {
-                            Property::Value(value) => value,
-                            Property::Accessor { get, .. } => match get {
-                                Some(getter) => {
-                                    self.call_value(&getter, source.clone(), Vec::new(), current)?
-                                }
-                                // Setter-only: reading it answers `undefined`, and `undefined`
-                                // is what a spread copies. Skipping the key instead left the
-                                // property *absent* -- `"gone" in { ...source }` said false
-                                // where node says true, because `CopyDataProperties` creates a
-                                // property for every enumerable own key it was given, whatever
-                                // the read produced.
-                                None => Value::Undefined,
-                            },
+                    // CopyDataProperties snapshots own keys, then checks each descriptor and
+                    // reads its value in order. The reflected key retains whether it was a
+                    // Symbol: a bare StringUnits name loses that distinction, so a spread of
+                    // an Event used to turn its four enumerable symbol slots into strings.
+                    // This operation path also runs proxy traps and later getters after any
+                    // changes an earlier getter made to the source.
+                    for key in self.own_keys_reflected(&source, current)? {
+                        let Some(descriptor) = self.own_descriptor_value(&source, &key, current)?
+                        else {
+                            continue;
                         };
-                        object.borrow_mut().set_units(&key, value);
+                        if !self
+                            .read_property(&descriptor, "enumerable", current)?
+                            .is_truthy()
+                        {
+                            continue;
+                        }
+                        let value = self.read_computed(&source, &key, current)?;
+                        let units = key.property_key_units_checked()?;
+                        object
+                            .borrow_mut()
+                            .set_key(PropertyKeyRef::from_value(&key, &units), value);
                     }
                     self.stack.push(target);
                 }
@@ -1392,13 +1384,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             )?;
                             continue;
                         }
-                        Property::Value(_) => match &target {
-                            Value::Object(object) => object.borrow_mut().set(&name, value.clone()),
-                            Value::Function(function) => {
-                                function.properties.borrow_mut().set(&name, value.clone())
-                            }
-                            _ => unreachable!("a private element has an object store"),
-                        },
+                        Property::Value(_) => {
+                            let Some(store) = prototype_slot(&target) else {
+                                return Err(ExecutionError::NotAnObject {
+                                    instruction: current,
+                                    value: target.type_name(),
+                                });
+                            };
+                            store.borrow_mut().set(&name, value.clone());
+                        }
                     }
                     self.stack.push(value);
                 }
@@ -1442,18 +1436,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             data.define_accessor(&name, None, Some(function.clone()), attributes);
                         }
                     };
-                    match &target {
-                        Value::Object(object) => install(&mut object.borrow_mut()),
-                        // A static private element lands on the constructor, whose properties
-                        // live in its own store rather than in an object.
-                        Value::Function(closure) => install(&mut closure.properties.borrow_mut()),
-                        other => {
-                            return Err(ExecutionError::NotAnObject {
-                                instruction: current,
-                                value: other.type_name(),
-                            });
-                        }
-                    }
+                    let Some(store) = prototype_slot(&target) else {
+                        return Err(ExecutionError::NotAnObject {
+                            instruction: current,
+                            value: target.type_name(),
+                        });
+                    };
+                    install(&mut store.borrow_mut());
                     self.stack.push(target);
                 }
                 Instruction::DefineAccessor { setter, enumerable } => {
@@ -1785,16 +1774,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .known_ascii()
                         .filter(|key| key.starts_with(PRIVATE_KEY_PREFIX))
                     {
-                        match &target {
-                            Value::Object(object) => {
-                                object.borrow_mut().set(&private, value.clone())
-                            }
-                            Value::Function(function) => function
-                                .properties
-                                .borrow_mut()
-                                .set(&private, value.clone()),
-                            _ => unreachable!("private initialization targets an object"),
-                        }
+                        let Some(store) = prototype_slot(&target) else {
+                            return Err(ExecutionError::NotAnObject {
+                                instruction: current,
+                                value: target.type_name(),
+                            });
+                        };
+                        store.borrow_mut().set(&private, value.clone());
                         self.stack.push(value);
                         continue;
                     }
@@ -1813,16 +1799,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .known_ascii()
                         .filter(|key| key.starts_with(PRIVATE_KEY_PREFIX))
                     {
-                        match &target {
-                            Value::Object(object) => {
-                                object.borrow_mut().set(&private, value.clone())
-                            }
-                            Value::Function(function) => function
-                                .properties
-                                .borrow_mut()
-                                .set(&private, value.clone()),
-                            _ => unreachable!("private initialization targets an object"),
-                        }
+                        let Some(store) = prototype_slot(&target) else {
+                            return Err(ExecutionError::NotAnObject {
+                                instruction: current,
+                                value: target.type_name(),
+                            });
+                        };
+                        store.borrow_mut().set(&private, value.clone());
                         self.stack.push(value);
                         continue;
                     }
