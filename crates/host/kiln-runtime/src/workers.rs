@@ -82,6 +82,8 @@ pub enum Token {
     Bool(bool),
     Number(f64),
     String(StringUnits),
+    /// A retained node of a sealed user graph. Queue discard drops this strong handle.
+    Graph(kiln_shared_graph::Handle),
     /// An `ArrayBuffer`'s backing store, detached from the sending realm and adopted by the
     /// receiving one (ADR 0070 primitive C). What is inside is the engine's own store type; a
     /// process runs one engine, so the receiver downcasts to what the sender boxed.
@@ -188,6 +190,7 @@ impl Token {
             Self::Bool(value) => Self::Bool(*value),
             Self::Number(value) => Self::Number(*value),
             Self::String(value) => Self::String(value.clone()),
+            Self::Graph(handle) => Self::Graph(handle.clone()),
             Self::Moved(_) => return None,
             Self::Bytes(bytes) => Self::Bytes(Arc::clone(bytes)),
             Self::Shared(store) => Self::Shared(Arc::clone(store)),
@@ -203,6 +206,7 @@ impl std::fmt::Debug for Token {
             Self::Bool(value) => write!(f, "Bool({value})"),
             Self::Number(value) => write!(f, "Number({value})"),
             Self::String(value) => write!(f, "String({:?})", value.to_lossy_string()),
+            Self::Graph(handle) => write!(f, "Graph({:?})", handle.opaque()),
             Self::Moved(_) => f.write_str("Moved(..)"),
             Self::Bytes(bytes) => write!(f, "Bytes({})", bytes.len()),
             Self::Shared(_) => f.write_str("Shared(..)"),

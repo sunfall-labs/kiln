@@ -28,6 +28,9 @@ use std::time::{Duration, Instant};
 #[path = "realm/reclaim.rs"]
 mod reclaim;
 
+#[path = "realm/shared_graph.rs"]
+mod shared_graph;
+
 type Entry = unsafe extern "C" fn(*mut c_void) -> i32;
 type RunWork = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> i32;
 type DropWork = unsafe extern "C" fn(*mut c_void);
@@ -5162,6 +5165,15 @@ macro_rules! assert_provider_export {
         };
         (realm, kiln_realm_retire, realm_retire) => {
             const _: unsafe extern "C" fn(*mut c_void) -> i32 = reclaim::kiln_realm_retire;
+        };
+        (realm, kiln_shared_graph_retain, shared_graph_retain) => {
+            const _: extern "C" fn(u32, u32, u32) -> u64 = shared_graph::kiln_shared_graph_retain;
+        };
+        (realm, kiln_shared_graph_release, shared_graph_release) => {
+            const _: extern "C" fn(u64) -> i32 = shared_graph::kiln_shared_graph_release;
+        };
+        (realm, kiln_shared_graph_info, shared_graph_info) => {
+            const _: unsafe extern "C" fn(u64, *mut shared_graph::SharedInfo) -> i32 = shared_graph::kiln_shared_graph_info;
         };
         (realm, kiln_realm_run_pinned, realm_run_pinned) => {
             const _: unsafe extern "C" fn(u64, Option<PinnedRun>, *mut c_void, *mut i32) -> i32 = kiln_realm_run_pinned;

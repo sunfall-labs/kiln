@@ -626,6 +626,15 @@ extern void *kiln_realm_process_shared(uint64_t size);
 extern uint64_t kiln_realm_retire_tag(void);
 extern int kiln_realm_retired_safe(uint64_t tag);
 extern int kiln_realm_retire(void *record);
+typedef struct kiln_shared_info {
+    uint32_t array;
+    uint32_t null_prototype;
+    uint32_t length;
+    uint64_t field_count;
+} kiln_shared_info;
+extern uint64_t kiln_shared_graph_retain(uint32_t graph, uint32_t generation, uint32_t node);
+extern int kiln_shared_graph_release(uint64_t lease);
+extern int kiln_shared_graph_info(uint64_t lease, kiln_shared_info *out);
 extern int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap);
 extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
 extern int kiln_realm_gc_mark_roots(void *heap);
@@ -995,6 +1004,15 @@ typedef struct kiln_object {
      * moved out of shape mode. Occupies what was padding after the last member. */
     uint32_t layout_token;
 } kiln_object;
+
+/* The only realm-heap state for a sealed graph node. Its lease retains the graph in the Rust
+ * registry; the opaque ID is copied into message tokens, never interpreted as a pointer. */
+typedef struct kiln_shared_facade {
+    uint64_t lease;
+    uint32_t graph;
+    uint32_t generation;
+    uint32_t node;
+} kiln_shared_facade;
 
 /* Nonzero once any realm in this process has written an own property onto some built-in's store
  * (`kiln_c99_callable_store` with `create`). It is only a process-wide summary: which built-ins
@@ -3133,6 +3151,7 @@ typedef int (*kiln_worker_plain_field)(void *context, uint64_t handle, size_t in
 #define KILN_WORKER_TOKEN_MOVED 5u
 #define KILN_WORKER_TOKEN_BYTES 6u
 #define KILN_WORKER_TOKEN_SHARED 7u
+#define KILN_WORKER_TOKEN_GRAPH 8u
 typedef struct kiln_async_host_op {
     uint32_t operation;
     uint32_t flags;

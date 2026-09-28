@@ -143,6 +143,23 @@ impl SealedArena {
         Some(StringUnits::from_units(&units))
     }
 
+    fn units_equal(&self, offset: u64, length: u64, wanted: &StringUnits) -> bool {
+        if length != wanted.len() as u64 {
+            return false;
+        }
+        let Some(bytes) = usize::try_from(length)
+            .ok()
+            .and_then(|count| count.checked_mul(2))
+            .and_then(|size| self.range(offset, size))
+        else {
+            return false;
+        };
+        bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
+            .eq(wanted.units())
+    }
+
     fn text(&self, offset: u64, length: u64) -> Option<String> {
         let bytes = self.range(offset, usize::try_from(length).ok()?)?;
         String::from_utf8(bytes.to_vec()).ok()
@@ -296,6 +313,78 @@ pub(super) fn seal(nodes: &[Node]) -> Result<(SealedArena, Vec<Handle>), ()> {
 }
 
 impl Graph {
+    fn record(&self, index: u32) -> Option<NodeRecord> {
+        if index >= self.node_count {
+            return None;
+        }
+        let offset = usize::try_from(index)
+            .ok()?
+            .checked_mul(size_of::<NodeRecord>())?;
+        self.arena.read(u64::try_from(offset).ok()?)
+    }
+
+    pub fn node_info(&self, index: u32) -> Option<(bool, bool, u32, usize)> {
+        let record = self.record(index)?;
+        let array = match record.kind {
+            ARRAY => true,
+            RECORD => false,
+            _ => return None,
+        };
+        Some((
+            array,
+            record.null_prototype != 0,
+            u32::try_from(record.length).ok()?,
+            usize::try_from(record.field_count).ok()?,
+        ))
+    }
+
+    fn raw_field(&self, node: u32, index: usize) -> Option<FieldRecord> {
+        let record = self.record(node)?;
+        if index >= usize::try_from(record.field_count).ok()? {
+            return None;
+        }
+        let offset = record
+            .fields
+            .checked_add(u64::try_from(index.checked_mul(size_of::<FieldRecord>())?).ok()?)?;
+        self.arena.read(offset)
+    }
+
+    pub fn field(&self, node: u32, index: usize) -> Option<super::Field> {
+        let field = self.raw_field(node, index)?;
+        let key = self.arena.units(field.key_offset, field.key_length)?;
+        let value = match field.kind {
+            UNDEFINED => Value::Undefined,
+            NULL => Value::Null,
+            BOOLEAN => Value::Boolean(field.payload != 0),
+            NUMBER => Value::Number(f64::from_bits(field.payload)),
+            BIGINT => Value::BigInt(self.arena.text(field.payload, field.value_length)?),
+            STRING => Value::String(self.arena.units(field.payload, field.value_length)?),
+            NODE => Value::Node(u32::try_from(field.payload).ok()?),
+            SHARED => Value::Shared(
+                self.externals
+                    .get(usize::try_from(field.payload).ok()?)?
+                    .clone(),
+            ),
+            _ => return None,
+        };
+        Some(super::Field {
+            key,
+            value,
+            enumerable: field.enumerable != 0,
+        })
+    }
+
+    pub fn find_field(&self, node: u32, key: &StringUnits) -> Option<super::Field> {
+        let count = self.node_info(node)?.3;
+        for index in 0..count {
+            let raw = self.raw_field(node, index)?;
+            if self.arena.units_equal(raw.key_offset, raw.key_length, key) {
+                return self.field(node, index);
+            }
+        }
+        None
+    }
+
     pub fn arena_ptr(&self) -> *const u8 {
         self.arena.as_ptr()
     }
@@ -305,41 +394,11 @@ impl Graph {
     }
 
     pub fn node(&self, index: u32) -> Option<Node> {
-        if index >= self.node_count {
-            return None;
-        }
-        let offset = usize::try_from(index)
-            .ok()?
-            .checked_mul(size_of::<NodeRecord>())?;
-        let record: NodeRecord = self.arena.read(u64::try_from(offset).ok()?)?;
+        let record = self.record(index)?;
         let count = usize::try_from(record.field_count).ok()?;
         let mut fields = Vec::with_capacity(count);
         for at in 0..count {
-            let offset = record
-                .fields
-                .checked_add(u64::try_from(at.checked_mul(size_of::<FieldRecord>())?).ok()?)?;
-            let field: FieldRecord = self.arena.read(offset)?;
-            let key = self.arena.units(field.key_offset, field.key_length)?;
-            let value = match field.kind {
-                UNDEFINED => Value::Undefined,
-                NULL => Value::Null,
-                BOOLEAN => Value::Boolean(field.payload != 0),
-                NUMBER => Value::Number(f64::from_bits(field.payload)),
-                BIGINT => Value::BigInt(self.arena.text(field.payload, field.value_length)?),
-                STRING => Value::String(self.arena.units(field.payload, field.value_length)?),
-                NODE => Value::Node(u32::try_from(field.payload).ok()?),
-                SHARED => Value::Shared(
-                    self.externals
-                        .get(usize::try_from(field.payload).ok()?)?
-                        .clone(),
-                ),
-                _ => return None,
-            };
-            fields.push(super::Field {
-                key,
-                value,
-                enumerable: field.enumerable != 0,
-            });
+            fields.push(self.field(index, at)?);
         }
         match record.kind {
             RECORD => Some(Node::Record {

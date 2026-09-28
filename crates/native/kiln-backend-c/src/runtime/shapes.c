@@ -796,6 +796,27 @@ static int kiln_c99_new_object(kiln_value *out) {
     return KILN_C99_OK;
 }
 
+/* Allocate a realm-local identity for one node. The graph is retained before the GC allocation,
+ * so a collection or allocation failure cannot observe an unowned arena pointer. A later weak
+ * cache will choose whether to return an existing facade before calling this constructor. */
+static int kiln_c99_new_shared_facade(uint32_t graph, uint32_t generation, uint32_t node,
+                                      kiln_value *out) {
+    uint64_t lease = kiln_shared_graph_retain(graph, generation, node);
+    kiln_shared_facade *facade;
+    if (lease == 0) return KILN_C99_INVALID_ARGUMENT;
+    facade = (kiln_shared_facade *)kiln_c99_gc_alloc_tenured(KILN_GC_SHARED_FACADE, sizeof *facade);
+    if (facade == NULL) {
+        (void)kiln_shared_graph_release(lease);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    facade->lease = lease;
+    facade->graph = graph;
+    facade->generation = generation;
+    facade->node = node;
+    *out = kiln_c99_value(KILN_VALUE_SHARED, (uint64_t)(uintptr_t)facade, NULL, 0);
+    return KILN_C99_OK;
+}
+
 /* An object whose property array is sized once, for a caller that already knows how many members
  * it is about to add.
  *

@@ -2227,7 +2227,7 @@ static inline int kiln_c99_gc_is_tenured_kind(uint32_t kind) {
     return k == KILN_GC_NODE_SERVER || k == KILN_GC_NODE_SOCKET ||
            k == KILN_GC_NODE_CLIENT_REQUEST || k == KILN_GC_NODE_RESPONSE ||
            k == KILN_GC_NODE_COMPLETION || k == KILN_GC_NODE_FS_COMPLETION ||
-           k == KILN_GC_TIMER;
+           k == KILN_GC_TIMER || k == KILN_GC_SHARED_FACADE;
 }
 
 #include <setjmp.h>
@@ -4525,6 +4525,9 @@ static void kiln_c99_gc_finalize(kiln_gc_heap *heap, kiln_gc_block *block) {
     case KILN_GC_STRING:
     case KILN_GC_SLICED_STRING:
     case KILN_GC_BYTES:
+        break;
+    case KILN_GC_SHARED_FACADE:
+        (void)kiln_shared_graph_release(((kiln_shared_facade *)payload)->lease);
         break;
     case KILN_GC_OBJECT:
         free(((kiln_object *)payload)->properties);

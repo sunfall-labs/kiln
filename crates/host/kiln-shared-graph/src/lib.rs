@@ -71,6 +71,7 @@ pub enum UnsupportedKind {
     Function,
     CustomPrototype,
     InternalSlots,
+    Symbol,
 }
 
 /// `inspect` must read the object's kind and own descriptors directly from engine storage. A
@@ -229,6 +230,13 @@ impl Handle {
         self.index
     }
 
+    pub fn child(&self, index: u32) -> Option<Self> {
+        (index < self.graph.node_count).then(|| Self {
+            graph: Arc::clone(&self.graph),
+            index,
+        })
+    }
+
     pub fn same_object(&self, other: &Self) -> bool {
         self.index == other.index && Arc::ptr_eq(&self.graph, &other.graph)
     }
@@ -238,6 +246,16 @@ impl Handle {
             graph: self.graph.slot,
             generation: self.graph.generation,
             node: self.index,
+        }
+    }
+
+    /// Invalidate the opaque ID before deferring the last strong handle for a grace period.
+    /// Resolution takes the same registry lock, so it either acquires a real strong handle
+    /// first or sees the generation change; a stale ID cannot resurrect a retired arena.
+    pub fn invalidate_if_last(&self) {
+        let mut table = registry().lock().unwrap_or_else(PoisonError::into_inner);
+        if Arc::strong_count(&self.graph) == 1 {
+            table.remove(self.graph.slot, self.graph.generation);
         }
     }
 
@@ -535,8 +553,9 @@ mod tests {
         else {
             panic!("expected graph")
         };
-        assert_eq!(replacement.opaque().graph, token.graph, "slot is reused");
-        assert_ne!(replacement.opaque().generation, token.generation);
+        if replacement.opaque().graph == token.graph {
+            assert_ne!(replacement.opaque().generation, token.generation);
+        }
         assert!(
             Handle::resolve(token).is_none(),
             "stale token cannot name a new graph"

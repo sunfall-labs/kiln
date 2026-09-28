@@ -24,12 +24,26 @@
 //! the caches did before realms could run concurrently.
 
 use core::ffi::c_void;
+use kiln_shared_graph::Handle;
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering, fence};
 use std::sync::{Arc, Mutex, PoisonError};
 
 /// A thread's seen epoch while it is offline: later than every tag.
 const OFFLINE: u64 = u64::MAX;
+
+enum Retired {
+    Malloc { tag: u64, pointer: usize },
+    Graph { tag: u64, handle: Handle },
+}
+
+impl Retired {
+    fn tag(&self) -> u64 {
+        match self {
+            Self::Malloc { tag, .. } | Self::Graph { tag, .. } => *tag,
+        }
+    }
+}
 
 /// The epochs, the threads and the records waiting to be freed: one per process ([`PROCESS`]),
 /// and one per unit test.
@@ -44,7 +58,7 @@ struct Domain {
     /// Every registered thread, by the word it publishes its seen epoch in.
     threads: Mutex<Vec<Arc<AtomicU64>>>,
     /// Records handed to [`kiln_realm_retire`] and not yet freed, with their tags.
-    retired: Mutex<Vec<(u64, usize)>>,
+    retired: Mutex<Vec<Retired>>,
     /// `retired`'s length, readable without the lock by every turn boundary.
     pending: AtomicUsize,
 }
@@ -151,7 +165,16 @@ impl Domain {
 
     fn retire(&self, tag: u64, record: *mut c_void) {
         let mut retired = self.retired.lock().unwrap_or_else(PoisonError::into_inner);
-        retired.push((tag, record as usize));
+        retired.push(Retired::Malloc {
+            tag,
+            pointer: record as usize,
+        });
+        self.pending.store(retired.len(), Ordering::Relaxed);
+    }
+
+    fn retire_graph(&self, tag: u64, handle: Handle) {
+        let mut retired = self.retired.lock().unwrap_or_else(PoisonError::into_inner);
+        retired.push(Retired::Graph { tag, handle });
         self.pending.store(retired.len(), Ordering::Relaxed);
     }
 
@@ -160,17 +183,29 @@ impl Domain {
             return;
         };
         let bound = self.lowest_seen();
-        retired.retain(|&(tag, record)| {
-            if tag < bound {
-                // SAFETY: the prelude allocated the record with `malloc` and gave it up at
-                // retirement; every thread that could have read it has since passed a boundary.
-                unsafe { free(record as *mut c_void) };
+        retired.retain(|record| {
+            if record.tag() < bound {
+                if let Retired::Malloc { pointer, .. } = record {
+                    // SAFETY: the prelude allocated the record with `malloc` and gave it up at
+                    // retirement; every thread that could have read it has passed a boundary.
+                    unsafe { free(*pointer as *mut c_void) };
+                }
                 false
             } else {
                 true
             }
         });
         self.pending.store(retired.len(), Ordering::Relaxed);
+    }
+}
+
+/// The native collector dropped its last facade lease. Hold the graph until every online lane
+/// has passed a turn boundary, even if another lane still has a raw read pointer into its arena.
+pub(super) fn retire_shared(handle: Handle) {
+    handle.invalidate_if_last();
+    match PROCESS.retire_tag(this_thread_online()) {
+        0 => drop(handle),
+        tag => PROCESS.retire_graph(tag, handle),
     }
 }
 

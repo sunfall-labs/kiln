@@ -553,6 +553,13 @@ uint64_t kiln_realm_retire_tag(void) {
 }
 int kiln_realm_retired_safe(uint64_t tag) { return tag == 0 || tag < kiln_test_safe_below; }
 int kiln_realm_retire(void *record) { free(record); return 0; }
+uint64_t kiln_shared_graph_retain(uint32_t graph, uint32_t generation, uint32_t node) {
+    (void)graph; (void)generation; (void)node; return 0;
+}
+int kiln_shared_graph_release(uint64_t lease) { (void)lease; return 0; }
+int kiln_shared_graph_info(uint64_t lease, kiln_shared_info *out) {
+    (void)lease; (void)out; return -1;
+}
 int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap) {
     /* The fixture has no realm heap: every unit collects nothing and keeps its fallback heap. */
     (void)hooks;

@@ -17,6 +17,7 @@ kiln-artifact-cache = { workspace = true }
 kiln-host-abi = { workspace = true }
 kiln-number-core = { workspace = true }
 kiln-string = { workspace = true }
+kiln-shared-graph = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tokio-metrics = { workspace = true }

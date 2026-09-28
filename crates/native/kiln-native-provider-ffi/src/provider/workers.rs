@@ -16,6 +16,7 @@ use super::{INVALID_ARGUMENT, KilnString, validate_string};
 use core::ffi::{c_char, c_void};
 use kiln_runtime::signals;
 use kiln_runtime::workers::{self, Message, Token, WorkerEntry, WorkerSpec};
+use kiln_shared_graph::{Handle, OpaqueHandle};
 use kiln_string::{StringUnits, StringView};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicPtr, AtomicUsize, Ordering};
@@ -49,6 +50,7 @@ const TOKEN_STRING: u32 = 4;
 const TOKEN_MOVED: u32 = 5;
 const TOKEN_BYTES: u32 = 6;
 const TOKEN_SHARED: u32 = 7;
+const TOKEN_GRAPH: u32 = 8;
 
 const OP_CHANNEL: u32 = 1;
 const OP_POST: u32 = 2;
@@ -293,6 +295,21 @@ unsafe fn tokens_from_c(tokens: *mut WorkerToken, count: u64) -> Option<Vec<Toke
                 };
                 Token::Shared(store)
             }
+            TOKEN_GRAPH => {
+                if !token.number.is_finite()
+                    || token.number < 0.0
+                    || token.number > f64::from(u32::MAX)
+                    || token.number.fract() != 0.0
+                {
+                    return None;
+                }
+                let opaque = OpaqueHandle {
+                    graph: token.flag,
+                    generation: u32::try_from(token.len).ok()?,
+                    node: token.number as u32,
+                };
+                Token::Graph(Handle::resolve(opaque)?)
+            }
             _ => return None,
         });
     }
@@ -363,6 +380,13 @@ fn token_to_c(token: &mut Token) -> WorkerToken {
                 out.data = shared.pointer.cast_const().cast();
                 out.handle = Arc::into_raw(shared).cast_mut().cast();
             }
+        }
+        Token::Graph(handle) => {
+            let opaque = handle.opaque();
+            out.kind = TOKEN_GRAPH;
+            out.flag = opaque.graph;
+            out.len = u64::from(opaque.generation);
+            out.number = f64::from(opaque.node);
         }
     }
     out
