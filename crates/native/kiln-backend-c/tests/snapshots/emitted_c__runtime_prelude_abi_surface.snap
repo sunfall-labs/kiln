@@ -2178,6 +2178,8 @@ static int kiln_c99_graph_in_batch(const kiln_gc_heap *heap,
 static int kiln_c99_graph_machine_words_alias(const kiln_gc_heap *heap,
 static int kiln_c99_graph_val_in_batch(const kiln_gc_heap *heap,
 static int kiln_c99_graph_value_in_batch(const kiln_gc_heap *heap,
+static int kiln_c99_actor_isolated_escrow_begin(kiln_gc_heap *heap, kiln_value handle) {
+static int kiln_c99_actor_isolated_escrow_rollback(kiln_gc_heap *heap) {
 static int kiln_c99_graph_has_c_root_alias(const kiln_gc_heap *heap,
 static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_nursery_chunk(
@@ -3066,6 +3068,8 @@ int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code
 #define KILN_C99_WORKER_OP_ACTOR_LOOKUP 23
 #define KILN_C99_WORKER_OP_ACTOR_CLOSE 24
 #define KILN_C99_WORKER_OP_ACTOR_REQUEST_ID 25
+#define KILN_C99_WORKER_OP_ACTOR_ISOLATE 26
+#define KILN_C99_WORKER_OP_ACTOR_ISOLATED_HAS 27
 static uint64_t kiln_c99_worker_word(const kiln_value *args, size_t argc, size_t at) {
 static int kiln_c99_worker_tokens(kiln_value list, int copy, kiln_worker_token **out,
 static int kiln_c99_worker_value(kiln_worker_token *token, kiln_value *out) {

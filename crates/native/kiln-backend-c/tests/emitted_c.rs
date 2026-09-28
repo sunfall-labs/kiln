@@ -1063,8 +1063,10 @@ fn runtime_prelude_size() {
     // Descriptor I/O for the pino transport adds about 130 lines (realms issue 06).
     // Shared graph facades, reflection, worker tokens and weak ephemerons (realms issue 11)
     // add about 1,050 more lines.
+    // Graph root visitors, transfer refusal checks and actor escrow (realms issue 10), plus
+    // compact realm-owned unit cells (issue 08), bring the measured prelude to 61,276 lines.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 61_200;
+    const CEILING_LINES: usize = 61_350;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
