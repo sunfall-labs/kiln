@@ -108,13 +108,12 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
     size_t index;
     if (value.tag == KILN_VALUE_ARRAY) {
         kiln_array *array = kiln_c99_array_of(value);
-        kiln_object *extra = array->properties.tag == KILN_VALUE_OBJECT
-                                 ? kiln_c99_object_of(array->properties)
-                                 : NULL;
-        if (extra != NULL && extra->shape != NULL) {
-            kiln_c99_ensure_dictionary(extra);
-        }
-        if (array->count == 0 && (extra == NULL || extra->count == 0)) {
+        size_t extra_count = 0;
+        size_t shown_extra = 0;
+        if (array->properties.tag == KILN_VALUE_OBJECT &&
+            kiln_c99_property_walk_value(array->properties, &extra_count) != KILN_C99_OK)
+            return KILN_C99_OUT_OF_MEMORY;
+        if (array->count == 0 && extra_count == 0) {
             return kiln_c99_text_append_c(text, "[]");
         }
         if (kiln_c99_text_append_c(text, "[ ") != KILN_C99_OK) {
@@ -147,17 +146,19 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
         }
         /* A property that is not an element is shown after the elements, which is where a console
          * puts the `index` and `input` a match result carries. */
-        for (index = 0; extra != NULL && index < extra->count; ++index) {
-            if (!extra->properties[index].enumerable) {
+        for (index = 0; index < extra_count; ++index) {
+            kiln_property property;
+            if (!kiln_c99_property_view_value(array->properties, index, &property)) break;
+            if (!property.enumerable) {
                 continue;
             }
-            if ((array->count != 0 || index != 0) &&
+            if ((array->count != 0 || shown_extra++ != 0) &&
                 kiln_c99_text_append_c(text, ", ") != KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            if (kiln_c99_inspect_key_units(text, extra->properties[index].key) != KILN_C99_OK ||
+            if (kiln_c99_inspect_key_units(text, property.key) != KILN_C99_OK ||
                 kiln_c99_text_append_c(text, ": ") != KILN_C99_OK ||
-                kiln_c99_inspect_into(text, extra->properties[index].value, depth + 1) !=
+                kiln_c99_inspect_into(text, property.value, depth + 1) !=
                     KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
@@ -165,45 +166,25 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
         return kiln_c99_text_append_c(text, " ]");
     }
     {
-        kiln_object *object = kiln_c99_object_of(value);
         size_t enumerated = 0;
-        if (object->shape != NULL) {
-            kiln_c99_ensure_dictionary(object);
-        }
+        size_t count = 0;
+        kiln_value prototype = kiln_c99_object_prototype_read(value);
+        if (kiln_c99_property_walk_value(value, &count) != KILN_C99_OK)
+            return KILN_C99_OUT_OF_MEMORY;
         /* A class instance shows the name of the class that made it, which is how a console
          * distinguishes two objects of the same shape. A plain object's constructor is `Object`,
          * and naming that would be noise rather than information. */
-        if (object->prototype.tag == KILN_VALUE_OBJECT) {
-            kiln_object *table = kiln_c99_object_of(object->prototype);
-            size_t slot;
-            size_t rows = table->count;
-            kiln_value shaped_maker = kiln_c99_undefined();
-            if (table->shape != NULL) {
-                /* A class prototype is shaped: its `constructor` is read from its slot, and the
-                 * prototype stays shaped for the method caches that walk through it. */
-                const kiln_string *name = kiln_c99_interned("constructor", 11);
-                uint32_t at;
-                rows = 0;
-                if (name != NULL && kiln_c99_shape_find_slot(table->shape, name, &at) &&
-                    at < table->slot_capacity && (table->shape->accessor_mask & (1u << at)) == 0) {
-                    shaped_maker = kiln_val_to_boundary(table->slots[at]);
-                    rows = 1;
-                }
-            }
-            for (slot = 0; slot < rows; ++slot) {
-                kiln_value maker =
-                    table->shape != NULL ? shaped_maker : table->properties[slot].value;
-                if ((table->shape == NULL &&
-                     !kiln_c99_same_key(&table->properties[slot], "constructor", 11)) ||
-                    maker.tag != KILN_VALUE_FUNCTION) {
-                    continue;
-                }
-                {
-                    kiln_closure *closure = kiln_c99_closure_of(maker);
-                    if (closure->name == NULL || closure->name->unit_len == 0 ||
-                        kiln_string_equals_ascii(closure->name, "Object", 6)) {
-                        break;
-                    }
+        if (prototype.tag == KILN_VALUE_OBJECT) {
+            kiln_string name_view = {.unit_len = 11, .flags = KILN_STRING_LATIN1,
+                                     .data = "constructor"};
+            kiln_property property;
+            if (kiln_c99_property_read_own_value(prototype, &name_view,
+                                                 kiln_c99_interned("constructor", 11),
+                                                 &property) && !property.accessor &&
+                property.value.tag == KILN_VALUE_FUNCTION) {
+                kiln_closure *closure = kiln_c99_closure_of(property.value);
+                if (closure->name != NULL && closure->name->unit_len != 0 &&
+                    !kiln_string_equals_ascii(closure->name, "Object", 6)) {
                     if (kiln_c99_text_append_string(
                             text, kiln_c99_value(KILN_VALUE_STRING, 0,
                                                  (const char *)closure->name,
@@ -212,11 +193,12 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
                         return KILN_C99_OUT_OF_MEMORY;
                     }
                 }
-                break;
             }
         }
-        for (index = 0; index < object->count; ++index) {
-            enumerated += (size_t)(object->properties[index].enumerable != 0);
+        for (index = 0; index < count; ++index) {
+            kiln_property property;
+            if (!kiln_c99_property_view_value(value, index, &property)) break;
+            enumerated += (size_t)(property.enumerable != 0);
         }
         if (enumerated == 0) {
             return kiln_c99_text_append_c(text, "{}");
@@ -225,32 +207,34 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
             return KILN_C99_OUT_OF_MEMORY;
         }
         enumerated = 0;
-        for (index = 0; index < object->count; ++index) {
-            if (!object->properties[index].enumerable) {
+        for (index = 0; index < count; ++index) {
+            kiln_property property;
+            if (!kiln_c99_property_view_value(value, index, &property)) break;
+            if (!property.enumerable) {
                 continue;
             }
             if (enumerated++ != 0 && kiln_c99_text_append_c(text, ", ") != KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            if (kiln_c99_inspect_key_units(text, object->properties[index].key) != KILN_C99_OK) {
+            if (kiln_c99_inspect_key_units(text, property.key) != KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
             if (kiln_c99_text_append_c(text, ": ") != KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            if (object->properties[index].accessor) {
+            if (property.accessor) {
                 /* Named rather than called: showing a value here would run the program's code
                  * because something was printed. */
                 const char *shown =
-                    object->properties[index].getter.tag == KILN_VALUE_UNDEFINED  ? "[Setter]"
-                    : object->properties[index].setter.tag == KILN_VALUE_UNDEFINED ? "[Getter]"
+                    property.getter.tag == KILN_VALUE_UNDEFINED  ? "[Setter]"
+                    : property.setter.tag == KILN_VALUE_UNDEFINED ? "[Getter]"
                                                                                    : "[Getter/Setter]";
                 if (kiln_c99_text_append_c(text, shown) != KILN_C99_OK) {
                     return KILN_C99_OUT_OF_MEMORY;
                 }
                 continue;
             }
-            if (kiln_c99_inspect_into(text, object->properties[index].value, depth + 1) !=
+            if (kiln_c99_inspect_into(text, property.value, depth + 1) !=
                 KILN_C99_OK) {
                 return KILN_C99_OUT_OF_MEMORY;
             }

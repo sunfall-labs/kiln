@@ -299,16 +299,9 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
     if (target.tag == KILN_VALUE_BUILTIN) {
         kiln_value store;
         if (kiln_c99_callable_store(target, &store, 0) == KILN_C99_OK &&
-            store.tag == KILN_VALUE_OBJECT) {
-            kiln_object *properties = kiln_c99_object_of(store);
-            size_t pidx;
-            if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
-            for (pidx = 0; pidx < properties->count; ++pidx) {
-                if (kiln_c99_same_key_view(&properties->properties[pidx], key)) {
-                    *answer = 1;
-                    return KILN_C99_OK;
-                }
-            }
+            kiln_c99_store_has(store, key, ikey)) {
+            *answer = 1;
+            return KILN_C99_OK;
         }
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         *answer = kiln_c99_builtin_has_member(target.bits, intrinsic_key, intrinsic_len);
@@ -396,16 +389,9 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
         kiln_value store;
         kiln_value proto = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE);
         if (kiln_c99_callable_store(proto, &store, 0) == KILN_C99_OK &&
-            store.tag == KILN_VALUE_OBJECT) {
-            kiln_object *properties = kiln_c99_object_of(store);
-            size_t pidx;
-            if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
-            for (pidx = 0; pidx < properties->count; ++pidx) {
-                if (kiln_c99_same_key_view(&properties->properties[pidx], key)) {
-                    *answer = 1;
-                    return KILN_C99_OK;
-                }
-            }
+            kiln_c99_store_has(store, key, ikey)) {
+            *answer = 1;
+            return KILN_C99_OK;
         }
         *answer = kiln_c99_same_name_key(key, "byteLength") ||
                   kiln_c99_same_name_key(key, "constructor") ||
@@ -452,32 +438,12 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
                     kiln_c99_builtin(kiln_c99_typed_prototype(view->kind));
                 kiln_value store;
                 if (kiln_c99_callable_store(concrete_proto, &store, 0) == KILN_C99_OK &&
-                    store.tag == KILN_VALUE_OBJECT) {
-                    kiln_object *properties = kiln_c99_object_of(store);
-                    size_t pidx;
-                    if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
-                    for (pidx = 0; pidx < properties->count; ++pidx) {
-                        if (kiln_c99_same_key_view(&properties->properties[pidx], key)) {
-                            *answer = 1;
-                            break;
-                        }
-                    }
-                }
+                    kiln_c99_store_has(store, key, ikey)) *answer = 1;
                 if (!*answer) {
                     kiln_value common_proto =
                         kiln_c99_builtin(KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE);
                     if (kiln_c99_callable_store(common_proto, &store, 0) == KILN_C99_OK &&
-                        store.tag == KILN_VALUE_OBJECT) {
-                        kiln_object *properties = kiln_c99_object_of(store);
-                        size_t pidx;
-                        if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
-                        for (pidx = 0; pidx < properties->count; ++pidx) {
-                            if (kiln_c99_same_key_view(&properties->properties[pidx], key)) {
-                                *answer = 1;
-                                break;
-                            }
-                        }
-                    }
+                        kiln_c99_store_has(store, key, ikey)) *answer = 1;
                 }
             }
         }
@@ -565,14 +531,7 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
             kiln_value store;
             if (kiln_c99_callable_store(kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_PROTOTYPE), &store,
                                         0) == KILN_C99_OK &&
-                store.tag == KILN_VALUE_OBJECT) {
-                kiln_object *properties = kiln_c99_object_of(store);
-                size_t pidx;
-                if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
-                for (pidx = 0; pidx < properties->count && !*answer; ++pidx) {
-                    *answer = kiln_c99_same_key_view(&properties->properties[pidx], key);
-                }
-            }
+                kiln_c99_store_has(store, key, ikey)) *answer = 1;
         }
         return KILN_C99_OK;
     }
@@ -606,43 +565,22 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
     }
     {
         kiln_gc_heap *heap = kiln_c99_gc_heap();
-        const kiln_string *ikey = kiln_c99_interned_key_in(heap, key);
+        const kiln_string *canonical = ikey != NULL ? ikey : kiln_c99_interned_key_in(heap, key);
         for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
-            kiln_object *object;
+            kiln_property property;
             if (current.tag != KILN_VALUE_OBJECT) {
                 break;
             }
-            object = kiln_c99_object_of(current);
-            if (object->elements != NULL) {
-                double index_num = kiln_c99_key_index_key(key);
-                if (index_num >= 0.0 && index_num < 100000.0) {
-                    size_t elem_idx = (size_t)index_num;
-                    if (elem_idx < object->element_count &&
-                        object->elements[elem_idx] != KILN_VAL_HOLE) {
-                        *answer = 1;
-                        return KILN_C99_OK;
-                    }
-                }
+            if (kiln_c99_property_read_own_value(current, key, canonical, &property)) {
+                *answer = 1;
+                return KILN_C99_OK;
             }
-            if (object->shape != NULL && ikey != NULL) {
-                uint32_t slot;
-                if (kiln_c99_shape_find_slot(object->shape, ikey, &slot)) {
-                    *answer = 1;
-                    return KILN_C99_OK;
-                }
-            }
-            if (object->properties != NULL || object->shape == NULL) {
-                if (kiln_c99_own_index_key(object, ikey, key) != object->count) {
-                    *answer = 1;
-                    return KILN_C99_OK;
-                }
-            }
-            current = object->prototype;
+            current = kiln_c99_object_prototype_read(current);
         }
     }
     /* `in` has to agree with the read about what the end of the chain carries. */
     if (target.tag == KILN_VALUE_OBJECT &&
-        kiln_c99_object_of(target)->prototype.tag != KILN_VALUE_NULL) {
+        kiln_c99_object_prototype_read(target).tag != KILN_VALUE_NULL) {
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         *answer = kiln_c99_lookup_method(intrinsic_key, intrinsic_len, KILN_C99_METHOD_HAS_OWN_PROPERTY,
                                          KILN_C99_METHOD_OBJECT_VALUE_OF) != 0 ||
@@ -650,17 +588,7 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
         if (!*answer) {
             kiln_value store;
             if (kiln_c99_callable_store(kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE), &store, 0) == KILN_C99_OK &&
-                store.tag == KILN_VALUE_OBJECT) {
-                kiln_object *properties = kiln_c99_object_of(store);
-                size_t pidx;
-                if (properties->shape != NULL) kiln_c99_ensure_dictionary(properties);
-                for (pidx = 0; pidx < properties->count; ++pidx) {
-                    if (kiln_c99_same_key_view(&properties->properties[pidx], key)) {
-                        *answer = 1;
-                        break;
-                    }
-                }
-            }
+                kiln_c99_store_has(store, key, ikey)) *answer = 1;
         }
     }
     return KILN_C99_OK;

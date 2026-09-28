@@ -295,10 +295,10 @@ static int kiln_c99_json_scalar(kiln_text *text, kiln_val value, int *status) {
  * rather than guess, and the caller falls back to the real `kiln_c99_get` walk exactly as before. */
 static int kiln_c99_json_lacks_tojson(kiln_value value) {
     const kiln_string *tojson_ikey = kiln_c99_interned("toJSON", 6);
+    kiln_string tojson_view = {.unit_len = 6, .flags = KILN_STRING_LATIN1, .data = "toJSON"};
     int hops = 0;
     for (;;) {
-        kiln_object *object;
-        size_t index;
+        kiln_property property;
         if (value.tag == KILN_VALUE_NULL || value.tag == KILN_VALUE_UNDEFINED) {
             return 1;
         }
@@ -308,19 +308,9 @@ static int kiln_c99_json_lacks_tojson(kiln_value value) {
         if (++hops > KILN_C99_MAX_PROTOTYPE_DEPTH) {
             return 0;
         }
-        object = kiln_c99_object_of(value);
-        if (object->shape != NULL) {
-            if (tojson_ikey != NULL) {
-                for (index = 0; index < object->shape->property_count; ++index) {
-                    if (object->shape->keys[index] == tojson_ikey) return 0;
-                }
-            }
-        } else {
-            for (index = 0; index < object->count; ++index) {
-                if (kiln_c99_same_name_key(object->properties[index].key, "toJSON")) return 0;
-            }
-        }
-        value = object->prototype;
+        if (kiln_c99_property_read_own_value(value, &tojson_view, tojson_ikey, &property))
+            return 0;
+        value = kiln_c99_object_prototype_read(value);
     }
 }
 
@@ -762,25 +752,24 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
                 written += 1;
             }
         } else {
-            status = kiln_c99_property_walk(object, &length);
+            status = kiln_c99_property_walk_value(value, &length);
             if (status != KILN_C99_OK) {
                 kiln_c99_json_drop_nested(&nested);
                 return status;
             }
             for (index = 0; index < length; ++index) {
                 size_t current_count;
-                kiln_property projected;
                 kiln_property property;
                 kiln_value member;
                 size_t mark;
                 int wrote;
-                status = kiln_c99_property_walk(object, &current_count);
+                status = kiln_c99_property_walk_value(value, &current_count);
                 if (status != KILN_C99_OK) {
                     kiln_c99_json_drop_nested(&nested);
                     return status;
                 }
                 if (index >= current_count) break;
-                property = *kiln_c99_property_view(object, index, &projected);
+                if (!kiln_c99_property_view_value(value, index, &property)) break;
                 if (!property.enumerable) {
                     continue;
                 }
