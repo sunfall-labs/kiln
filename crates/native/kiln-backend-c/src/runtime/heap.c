@@ -3322,7 +3322,8 @@ typedef enum kiln_c99_graph_incoming_result {
     KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS = 2,
     KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED = 3,
     KILN_C99_GRAPH_ROOTS_UNENUMERATED = 4,
-    KILN_C99_GRAPH_PROVIDER_ROOT_ALIAS = 5
+    KILN_C99_GRAPH_PROVIDER_ROOT_ALIAS = 5,
+    KILN_C99_GRAPH_PROVIDER_ROOTS_UNENUMERATED = 6
 } kiln_c99_graph_incoming_result;
 
 /* A root can hold an interior address, including a string's inline bytes. The collector accepts
@@ -3613,11 +3614,15 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_incoming_probe(
     }
     {
         kiln_c99_graph_provider_visit visit = { heap, chunks, count, 0 };
-        /* A nonzero provider status means registered module/launcher callbacks or another
-         * incomplete authority. The probe remains refused even when this walk is complete. */
-        (void)kiln_realm_gc_visit_provider_roots((void *)heap,
-                                                  kiln_c99_graph_visit_provider_root, &visit);
+        int status = kiln_realm_gc_visit_provider_roots((void *)heap,
+                                                        kiln_c99_graph_visit_provider_root,
+                                                        &visit);
+        /* A visitor may report both an alias and incomplete coverage. Preserve the positive
+         * alias witness, then refuse any legacy callback, invalid realm or visitor failure.
+         * In particular, a future safepoint must never mistake a failed provider walk for a
+         * fully enumerated sender. */
         if (visit.alias) return KILN_C99_GRAPH_PROVIDER_ROOT_ALIAS;
+        if (status != KILN_C99_OK) return KILN_C99_GRAPH_PROVIDER_ROOTS_UNENUMERATED;
     }
     return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
 }

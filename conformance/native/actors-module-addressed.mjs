@@ -32,12 +32,25 @@ for (const key of Reflect.ownKeys(isolated)) {
   if (value?.answer === 42 || value?.value?.answer === 42) throw new Error('isolated graph leaked through handle');
 }
 const graphTicket = transfer(isolated);
+const graphTicketState = Reflect.ownKeys(graphTicket)
+  .map(key => Object.getOwnPropertyDescriptor(graphTicket, key)?.value)
+  .find(value => value && typeof value === 'object' && 'consumed' in value);
+if (!graphTicketState || graphTicketState.consumed) throw new Error('new graph ticket is unusable');
 for (const key of Reflect.ownKeys(graphTicket)) {
   const value = Object.getOwnPropertyDescriptor(graphTicket, key)?.value;
   if (value?.answer === 42 || value?.value?.answer === 42) throw new Error('isolated graph leaked through ticket');
 }
-try { await owner.ref.call('echo', [graphTicket]); }
-catch (error) { console.log(error.name, error.message); }
+for (let attempt = 0; attempt < 2; attempt++) {
+  let refused = false;
+  try { await owner.ref.call('echo', [graphTicket]); }
+  catch (error) {
+    refused = error.name === 'DataCloneError' && error.message === 'graph transfer needs ownership proof';
+    if (attempt === 0) console.log(error.name, error.message);
+  }
+  if (!refused || graphTicketState.consumed) {
+    throw new Error('failed graph handoff consumed its ticket');
+  }
+}
 await owner.stop();
 try { await second.call('increment', [1]); }
 catch (error) { console.log(error.name); }

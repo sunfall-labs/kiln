@@ -2357,13 +2357,38 @@ static int graph_provider_entry(void *context) {
         KILN_C99_GRAPH_PROVIDER_ROOT_ALIAS) return 13;
     return 0;
 }
+static int graph_provider_incomplete(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_c99_par_arena candidate;
+    kiln_nursery_chunk *batch[1];
+    kiln_val *root;
+    (void)context;
+    if (heap == NULL || !kiln_c99_graph_candidate_open(&candidate, heap,
+                                                        heap->nursery.capacity)) return 14;
+    root = (kiln_val *)kiln_c99_par_alloc(&candidate, KILN_GC_CELL, sizeof *root);
+    if (root == NULL) return 15;
+    *root = KILN_VAL_UNDEFINED;
+    kiln_c99_par_arena_seal(&candidate);
+    if (candidate.filled == NULL || !kiln_c99_heap_adopt_chunks(heap, candidate.filled)) return 16;
+    batch[0] = candidate.filled;
+    /* A mark-only embedding callback cannot be interpreted as an empty root set, even when
+     * the callback happens to do nothing in this fixture. */
+    if (kiln_realm_gc_register_roots(graph_provider_mark, NULL, 0) != KILN_C99_OK) return 17;
+    if (kiln_c99_graph_incoming_probe(heap, batch, 1, root) !=
+        KILN_C99_GRAPH_PROVIDER_ROOTS_UNENUMERATED) return 18;
+    return 0;
+}
 int main(void) {
     uint64_t realm;
     int result;
     if (kiln_realm_create(&realm) != KILN_C99_OK) return 10;
     result = kiln_realm_enter(realm, graph_provider_entry, NULL);
     if (result != KILN_C99_OK) return result;
-    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 11;
+    if (kiln_realm_destroy(realm) != KILN_C99_OK) return 11;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 19;
+    result = kiln_realm_enter(realm, graph_provider_incomplete, NULL);
+    if (result != KILN_C99_OK) return result;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 20;
 }
 "#;
     let run = run_with_main(&generated, wrapper, "graph-provider-root-alias");
