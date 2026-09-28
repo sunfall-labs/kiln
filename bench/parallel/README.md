@@ -6,12 +6,12 @@ alternative a node user would write (a `worker_threads` pool), and against Go wi
 One command reproduces the table:
 
 ```sh
-bench/parallel/run.sh            # 3 interleaved rounds, about 7 minutes
-bench/parallel/run.sh --quick    # 1 round, shorter budget, about 2 minutes
+bench/parallel/run.sh            # 3 interleaved rounds, about 10 minutes
+bench/parallel/run.sh --quick    # 1 round, shorter budget
 bench/parallel/run.sh --only map-heavy,sort-array
 ```
 
-It builds a release `kiln` if there is none (`mbx build --release -p kiln-cli`), builds each kiln
+It refreshes the release `kiln` (`mbx build --release -p kiln-cli`) before measuring, builds each kiln
 program with `--node --profile native-release --explain-parallel` (three at a time) and the Go
 program once, all outside every measurement, and writes `results-<date>.md` here with the machine
 details, the load average and the compiler's per-site verdicts beside the numbers. The raw
@@ -19,8 +19,9 @@ records go to `target/bench-parallel/<timestamp>/raw.json`. It needs `node`, `bu
 on `PATH`; Go comes from `PATH` when a working `go` is there and otherwise from
 `mise exec go@latest`.
 
-This is issue 11 of `.scratch/parallel-builtins/`. It is extended as each tier lands: a row under
-"Waiting on tiers 2-4" becomes a measured row, and a "(partial)" cell loses the qualifier.
+This is issue 11 of `.scratch/parallel-builtins/`. The current complete table is
+[results-2026-09-27-refresh.md](results-2026-09-27-refresh.md); the earlier tier-1 baseline is
+preserved in [results-2026-09-27.md](results-2026-09-27.md).
 
 ## How it measures
 
@@ -66,12 +67,11 @@ from what the extra cores buy.
 The pool and Go are written the way a programmer who wanted the cores would write them, which is
 not always the same work as the methods:
 
-- The pool's inputs live in `SharedArrayBuffer`s built before the clock, so no call copies them to
-  the workers. `sort-records` cannot share its objects either: the pool sorts an index
-  permutation by the shared price column, and the main thread applies it to the records. Each call allocates its output (a fresh `SharedArrayBuffer` for map and sort;
-  per-worker `Float64Array`s transferred back and concatenated for filter), as `map` does.
-  Records as objects cannot be shared: each worker receives its slice once, at start-up, and
-  keeps it.
+- The pool's numeric inputs live in `SharedArrayBuffer`s built before the clock. Object records
+  and CSV lines are cloned to their workers once at start-up. `sort-records` sorts an index
+  permutation by the shared price column, and the main thread applies it to the records. Each
+  call allocates its output: a fresh `SharedArrayBuffer` for numeric map and sort, and per-worker
+  results returned and concatenated for filter and materialized rows.
 - **The pipelines are one fused loop per worker/goroutine** (score, test, add), where the methods
   make three passes and two intermediate arrays. That is what hand-written parallel code does,
   and it is why those two columns lead the pipeline rows.
@@ -100,17 +100,17 @@ All over 1,000,000 elements. The callbacks are written inline, identically, in e
 | `format-csv` | `records.map(r => `${r.id},${r.qty},${r.price}`)`: CSV lines | parallel (tier 3: number formatting and concatenation in arenas) |
 | `parse-csv` | `lines.map(l => l.trim().split(",").map(Number))`: parse CSV lines | parallel (tier 4: pure calls -- `trim`, `split`, `Number` on the workers) |
 
-The tier-3 and tier-4 rows have no `worker_threads` pool or Go twin yet (their cells read `--`): the
-comparison that matters for them is kiln's parallel method against its own and node's `map`.
+The tier-3 and tier-4 rows also have `worker_threads` pool and Go twins. They do the same
+per-element work and return new objects, arrays or strings on each call; the pool includes
+the cost of returning those results to its caller.
 
 The results file prints `kiln build --explain-parallel` for every program, so a reader sees which
 site ran parallel and, when one did not, the reason code.
 
-## What tiers 2-4 will add
+## Tier coverage
 
-Today's lowering (tier 1) takes a callback that reads numbers -- its parameters and captured
-constants -- and returns a number, calling only `Math`. The PRD's next tiers each move a
-realistic shape from "sequential" to "parallel":
+Tier 1 took callbacks that read numbers, captured constants and `Math`. The later tiers moved
+realistic workloads from the sequential fallback onto workers:
 
 - **Tier 2, read the heap** (issues 06, 07; landed): callbacks that read arrays, typed arrays,
   object properties and strings. `pipeline-records`' and `pipeline-objects`' score stage lost
@@ -122,8 +122,8 @@ realistic shape from "sequential" to "parallel":
   the built-ins marked pure (`split`, `trim`, `Number`, `toFixed`, `JSON.stringify`, ...), which
   text processing needs -- the `parse-csv` row.
 
-The results file's "Waiting on tiers 2-4" table lists the realistic workloads that need them;
-each becomes a measured row, with every column, when its tier lands.
+The refreshed results include every row above, with Node, Bun, a Node worker pool, Go and kiln
+columns. The compiler's per-site verdicts in that file show which sites actually used workers.
 
 ## Files
 

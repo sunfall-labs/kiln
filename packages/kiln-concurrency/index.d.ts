@@ -30,20 +30,21 @@ export function spawnActor<T extends Actor>(
 ): ActorRef<T>;
 
 /**
- * Phantom nominal brand denoting a disconnected, unaliased object subgraph.
+ * Phantom brand for the current identity helper. It is not an ownership proof.
  */
 declare const IsolatedBrand: unique symbol;
 export type Isolated<T> = T & { readonly [IsolatedBrand]: true };
 
 /**
- * Marks an expression or factory return as an isolated region; `kiln-hir` checks that the
- * value does not escape by another alias.
+ * Returns a value with the `Isolated` type brand. This does not establish graph ownership;
+ * the current implementation returns the same value.
  */
 export function isolate<T>(value: T): Isolated<T>;
 export function isolate<T>(factory: () => T): Isolated<T>;
 
 /**
- * Consumes an isolated region. Identity on every engine today.
+ * Returns the same value in kiln today. A caller-installed `__kiln_transfer_region` hook can
+ * change that behavior, but kiln does not install one or use it to move object graphs.
  */
 export function transfer<T>(value: Isolated<T>): T;
 

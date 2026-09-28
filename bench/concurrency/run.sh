@@ -5,7 +5,7 @@
 # usage: bench/concurrency/run.sh [--quick] [--only start,messages,shared,tasks,pmap,server]
 #                                 [--out results.md] [--kiln path/to/kiln] [--go "go"]
 #
-# Builds a release `kiln` if there is none (mbx, never bare cargo), then hands over to run.py,
+# Refreshes the release `kiln` (mbx, never bare cargo), then hands over to run.py,
 # which builds the native binaries (--profile native-release) and the Go program once, outside
 # every measurement, runs every job in interleaved rounds, and writes
 # bench/concurrency/results-<date>.md plus the raw records under target/bench-concurrency/.
@@ -25,13 +25,17 @@ for tool in node bun oha python3; do
 done
 
 kiln="$ROOT/target/release/kiln"
+custom_kiln=0
 for arg in "$@"; do
-	if [[ ${prev:-} == --kiln ]]; then kiln="$arg"; fi
+	if [[ ${prev:-} == --kiln ]]; then kiln="$arg"; custom_kiln=1; fi
 	prev="$arg"
 done
-if [[ ! -x $kiln ]]; then
+if (( ! custom_kiln )); then
 	echo "bench/concurrency: building $kiln (mbx build --release -p kiln-cli)" >&2
 	mbx build --release -p kiln-cli
+elif [[ ! -x $kiln ]]; then
+	echo "bench/concurrency: --kiln $kiln is not executable" >&2
+	exit 1
 fi
 
 exec python3 "$HERE/run.py" "$@"

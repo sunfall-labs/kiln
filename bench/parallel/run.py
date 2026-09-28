@@ -49,9 +49,6 @@ WORKLOADS = [
     ("parse-csv", "tier 4: `lines.map(l => l.trim().split(\",\").map(Number))`", None),
 ]
 
-# Tier-3 and tier-4 workloads have no `worker_threads` pool or Go twin yet: their pool and Go cells are `--`.
-KILN_NODE_ONLY = {"enrich-records", "flatmap-records", "format-csv", "parse-csv"}
-
 # Workloads a realistic program needs that no kiln parallel lowering can take yet. Not measured:
 # the row is kept so the table grows into it as each tier lands (PRD tiers 2-4).
 WAITING = []
@@ -164,9 +161,8 @@ def jobs_for(cfg, bins, gobin, cores):
         js = os.path.join(JS, name + ".mjs")
         jobs.append((name, "node", ["node", js, "seq", n, budget], base))
         jobs.append((name, "bun", ["bun", js, "seq", n, budget], base))
-        if name not in KILN_NODE_ONLY:
-            jobs.append((name, "pool", ["node", os.path.join(JS, "pool.mjs"), name, n, budget, str(cores)], base))
-        if gobin and name not in KILN_NODE_ONLY:
+        jobs.append((name, "pool", ["node", os.path.join(JS, "pool.mjs"), name, n, budget, str(cores)], base))
+        if gobin:
             jobs.append((name, "go", [gobin, name, n, budget], dict(base, GOMAXPROCS=str(cores))))
         binary = bins.get(name)
         if binary:
