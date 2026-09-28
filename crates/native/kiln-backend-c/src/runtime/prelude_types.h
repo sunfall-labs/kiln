@@ -1009,7 +1009,11 @@ typedef struct kiln_property {
     kiln_value setter;
 } kiln_property;
 
-#define KILN_C99_INLINE_SLOTS 16
+/* Most bootstrap objects have fewer than eight shaped properties. Keeping sixteen slots in
+ * every kiln_object made the many small per-realm objects pay for unused values. Wider objects
+ * already grow into a separate slot array, so this reduces their inline prefix without changing
+ * their layout or the shape's slot numbering. See realms issue 08's same-binary RSS comparison. */
+#define KILN_C99_INLINE_SLOTS 8
 
 typedef struct kiln_object {
     kiln_property *properties;

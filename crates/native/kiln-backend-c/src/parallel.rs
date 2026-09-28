@@ -464,7 +464,7 @@ impl HeapShape {
 /// The most members an object literal a pool thread builds may have: the inline slots every
 /// object starts with (`KILN_C99_INLINE_SLOTS`). More would `malloc` slots, which the sequential
 /// literal does.
-pub const PARALLEL_OBJECT_MEMBERS: usize = 16;
+pub const PARALLEL_OBJECT_MEMBERS: usize = 8;
 
 /// The most elements an array literal a pool thread builds may have: the elements an array keeps
 /// inside its own block (`KILN_C99_ARRAY_INBLOCK_MAX`).
