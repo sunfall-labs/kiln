@@ -2187,8 +2187,10 @@ int main(void) {
     stack_words[1] = (uintptr_t)((const char *)text->data + 1);
     if (!kiln_c99_graph_machine_words_alias(&heap, batch, 2, stack_words, 2)) return 42;
     if (((kiln_gc_block *)root - 1)->mark != root_mark) return 43;
+    /* This standalone heap has no active provider realm. The provider visitor must report
+     * incomplete coverage, rather than allowing a positive graph certificate. */
     if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
-        KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 16;
+        KILN_C99_GRAPH_PROVIDER_ROOTS_UNENUMERATED) return 16;
     heap.realm.array_unscopables.tag = KILN_VALUE_STRING;
     heap.realm.array_unscopables.bits = (uint64_t)(uintptr_t)text;
     if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
@@ -2230,7 +2232,7 @@ int main(void) {
         KILN_C99_GRAPH_OUTGOING_UNPROVEN) return 22;
     *next = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &slice->base);
     if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
-        KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 23;
+        KILN_C99_GRAPH_PROVIDER_ROOTS_UNENUMERATED) return 23;
     outside = (kiln_object *)kiln_c99_gc_nursery_bump(&heap, KILN_GC_OBJECT, sizeof *outside);
     if (outside == NULL) return 26;
     memset(outside, 0, sizeof *outside);
@@ -2245,7 +2247,7 @@ int main(void) {
         KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 28;
     outside->properties[0].value = kiln_c99_undefined();
     if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
-        KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 29;
+        KILN_C99_GRAPH_PROVIDER_ROOTS_UNENUMERATED) return 29;
     outside->shape = (kiln_shape *)(uintptr_t)1;
     if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
         KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED) return 30;
@@ -2287,7 +2289,7 @@ int main(void) {
         KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 37;
     *(kiln_val *)(large + 1) = KILN_VAL_UNDEFINED;
     if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
-        KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 38;
+        KILN_C99_GRAPH_PROVIDER_ROOTS_UNENUMERATED) return 38;
     kiln_c99_gc_ptrset_remove(&heap.large_table, large);
     free(heap.large_table.table);
     free(large);
