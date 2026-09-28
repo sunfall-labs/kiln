@@ -537,7 +537,7 @@ pub trait RealmHostProvider: AsyncHostOps {
     /// A signal that fires whenever a host operation completes, so a drive can wait for
     /// completions without borrowing the host across the wait (ADR 0046: language callbacks
     /// run inside I/O tasks while the drive is parked, and they borrow the realm).
-    fn completion_signal(&self) -> Option<Rc<tokio::sync::Notify>> {
+    fn completion_signal(&self) -> Option<Arc<tokio::sync::Notify>> {
         None
     }
 
@@ -942,7 +942,7 @@ impl Executor {
 }
 
 /// Wake signal a realm drive may hold across a turn boundary.
-pub type DriveSignal = Rc<tokio::sync::Notify>;
+pub type DriveSignal = Arc<tokio::sync::Notify>;
 
 /// What ended a drive's wait.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -955,7 +955,7 @@ pub enum DriveWake {
 
 /// Wait for a host completion or the next timer, whichever comes first, holding nothing. With
 /// a paused clock the sleep costs no wall time once no task can make progress (ADR 0028).
-pub async fn wait_for_turn(signal: Rc<tokio::sync::Notify>, delay: Option<Duration>) -> DriveWake {
+pub async fn wait_for_turn(signal: Arc<tokio::sync::Notify>, delay: Option<Duration>) -> DriveWake {
     match delay {
         Some(delay) => {
             tokio::select! {
@@ -1555,7 +1555,7 @@ impl<H: RealmHostProvider> RealmState<H> {
     }
 
     /// The host's completion signal, for a drive that waits outside any borrow of this state.
-    pub fn completion_signal(&self) -> Option<Rc<tokio::sync::Notify>> {
+    pub fn completion_signal(&self) -> Option<Arc<tokio::sync::Notify>> {
         self.host.completion_signal()
     }
 
@@ -2401,9 +2401,10 @@ pub struct TokioHost {
     resources: BTreeMap<ResourceId, HostResource>,
     ready: BTreeMap<u64, Completion>,
     tasks: JoinMap<RequestId, HostCompletion>,
+    port_waits: BTreeMap<RequestId, PortWait>,
     process_tasks: BTreeSet<RequestId>,
     process_cancellers: BTreeMap<RequestId, oneshot::Sender<()>>,
-    completed: Rc<tokio::sync::Notify>,
+    completed: Arc<tokio::sync::Notify>,
     failure: Option<RuntimeFailure>,
     shutdown: bool,
     fs: Option<Box<dyn kiln_host_abi::FileSystemOps>>,
@@ -2506,6 +2507,12 @@ struct PendingRequest {
     referenced: bool,
 }
 
+struct PortWait {
+    port: u64,
+    subscription: u64,
+    sequence: u64,
+}
+
 impl std::fmt::Debug for TokioHost {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -2536,6 +2543,14 @@ impl std::fmt::Debug for TokioHost {
     }
 }
 
+impl Drop for TokioHost {
+    fn drop(&mut self) {
+        for (_, wait) in std::mem::take(&mut self.port_waits) {
+            workers::unsubscribe(wait.port, wait.subscription);
+        }
+    }
+}
+
 impl TokioHost {
     /// Builds the request and completion state owned by a [`RealmRuntime`].
     pub fn new() -> Self {
@@ -2547,9 +2562,10 @@ impl TokioHost {
             resources: BTreeMap::new(),
             ready: BTreeMap::new(),
             tasks: JoinMap::new(),
+            port_waits: BTreeMap::new(),
             process_tasks: BTreeSet::new(),
             process_cancellers: BTreeMap::new(),
-            completed: Rc::new(tokio::sync::Notify::new()),
+            completed: Arc::new(tokio::sync::Notify::new()),
             failure: None,
             shutdown: false,
             fs: None,
@@ -2586,7 +2602,7 @@ impl TokioHost {
     where
         F: Future<Output = HostCompletion> + 'static,
     {
-        let completed = Rc::clone(&self.completed);
+        let completed = Arc::clone(&self.completed);
         self.tasks.spawn_local(request, async move {
             let completion = task.await;
             completed.notify_one();
@@ -2629,10 +2645,10 @@ impl TokioHost {
                 return request;
             }
             AsyncHostOp::PortWait { port } => {
-                // A cross-realm port (`workers`): done once something is queued for it or its
-                // peer has closed. The notifier keeps a permit when nothing is waiting, so a
-                // message posted between the check and the wait is not lost.
-                let Some(notify) = workers::notifier(port) else {
+                // Register under the port lock, so a post cannot race the initial state check.
+                // The port wakes this realm's drive directly; no Tokio task is needed per wait.
+                let Some(subscription) = workers::subscribe(port, Arc::clone(&self.completed))
+                else {
                     self.insert_immediate(
                         request,
                         sequence,
@@ -2641,17 +2657,21 @@ impl TokioHost {
                     );
                     return request;
                 };
-                self.spawn_task(request, sequence, referenced, async move {
-                    while !workers::readable(port) {
-                        notify.notified().await;
-                    }
-                    HostCompletion {
-                        request,
+                self.pending.insert(
+                    request,
+                    PendingRequest {
                         sequence,
-                        lifecycle: None,
-                        result: Ok(HostCompletionValue::Public(AsyncHostValue::Undefined)),
-                    }
-                });
+                        referenced,
+                    },
+                );
+                self.port_waits.insert(
+                    request,
+                    PortWait {
+                        port,
+                        subscription,
+                        sequence,
+                    },
+                );
                 return request;
             }
             AsyncHostOp::CloseResource { resource } => {
@@ -3333,6 +3353,24 @@ impl TokioHost {
     }
 
     fn collect_ready_nonblocking(&mut self) {
+        let ready_ports: Vec<_> = self
+            .port_waits
+            .iter()
+            .filter_map(|(&request, wait)| workers::readable(wait.port).then_some(request))
+            .collect();
+        for request in ready_ports {
+            let wait = self
+                .port_waits
+                .remove(&request)
+                .expect("ready port wait exists");
+            workers::unsubscribe(wait.port, wait.subscription);
+            self.promote_completion(HostCompletion {
+                request,
+                sequence: wait.sequence,
+                lifecycle: None,
+                result: Ok(HostCompletionValue::Public(AsyncHostValue::Undefined)),
+            });
+        }
         while let Some((request, result)) = self.tasks.try_join_next() {
             self.process_tasks.remove(&request);
             match result {
@@ -3566,7 +3604,9 @@ impl AsyncHostOps for TokioHost {
         let Some(pending) = self.pending.remove(&request) else {
             return false;
         };
-        if let Some(cancel) = self.process_cancellers.remove(&request) {
+        if let Some(wait) = self.port_waits.remove(&request) {
+            workers::unsubscribe(wait.port, wait.subscription);
+        } else if let Some(cancel) = self.process_cancellers.remove(&request) {
             let _ = cancel.send(());
         } else {
             self.tasks.abort(&request);
@@ -3620,6 +3660,9 @@ impl RealmHostProvider for TokioHost {
         self.shutdown = true;
         self.tasks.abort_all();
         self.tasks = JoinMap::new();
+        for (_, wait) in std::mem::take(&mut self.port_waits) {
+            workers::unsubscribe(wait.port, wait.subscription);
+        }
         self.pending.clear();
         self.ready.clear();
         self.resources.clear();
@@ -3656,8 +3699,8 @@ impl RealmHostProvider for TokioHost {
         self.set_resource_referenced(resource, referenced).is_ok()
     }
 
-    fn completion_signal(&self) -> Option<Rc<tokio::sync::Notify>> {
-        Some(Rc::clone(&self.completed))
+    fn completion_signal(&self) -> Option<Arc<tokio::sync::Notify>> {
+        Some(Arc::clone(&self.completed))
     }
 
     fn release_transport(&mut self, resource: ResourceId) -> bool {
@@ -3796,14 +3839,18 @@ impl RealmHostProvider for TokioHost {
                 if let Some(completion) = self.take_ready() {
                     return Ok(Some(completion));
                 }
-                if self.tasks.is_empty() {
+                if self.tasks.is_empty() && self.port_waits.is_empty() {
                     return Ok(None);
                 }
-                let (request, result) = self
-                    .tasks
-                    .join_next()
-                    .await
-                    .expect("a non-empty task map must yield a task exit");
+                if self.tasks.is_empty() {
+                    self.completed.notified().await;
+                    continue;
+                }
+                let (request, result) = tokio::select! {
+                    joined = self.tasks.join_next() =>
+                        joined.expect("a non-empty task map must yield a task exit"),
+                    _ = self.completed.notified(), if !self.port_waits.is_empty() => continue,
+                };
                 self.process_tasks.remove(&request);
                 match result {
                     Ok(completion) => {

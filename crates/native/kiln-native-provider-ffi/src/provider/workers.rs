@@ -97,6 +97,11 @@ struct NativePlainSource {
     context: *mut c_void,
     describe: WorkerPlainDescribe,
     field: WorkerPlainField,
+    compound_count: usize,
+    /// Repeated shape keys in a large graph can share their owned string units for this one
+    /// synchronous encode. Compare contents: a callback is allowed to reuse its scratch view.
+    keys: [Option<StringUnits>; 8],
+    key_count: usize,
 }
 
 impl workers::PlainSource for NativePlainSource {
@@ -122,14 +127,20 @@ impl workers::PlainSource for NativePlainSource {
                 let view = unsafe { validate_string(&*node.text) }?;
                 workers::PlainNode::String(StringUnits::from_view(view))
             }
-            8 => workers::PlainNode::Object {
-                identity: node.identity,
-                length: node.length,
-            },
-            9 => workers::PlainNode::Array {
-                identity: node.identity,
-                length: node.length,
-            },
+            8 => {
+                self.compound_count += 1;
+                workers::PlainNode::Object {
+                    identity: node.identity,
+                    length: node.length,
+                }
+            }
+            9 => {
+                self.compound_count += 1;
+                workers::PlainNode::Array {
+                    identity: node.identity,
+                    length: node.length,
+                }
+            }
             _ => return None,
         })
     }
@@ -143,9 +154,25 @@ impl workers::PlainSource for NativePlainSource {
         let key = if child.key.is_null() {
             None
         } else {
-            // SAFETY: copy before the next callback can reuse its scratch.
+            // SAFETY: copy before the next callback can reuse its scratch. The bounded cache
+            // begins only once the graph is large enough to repeat keys across many objects.
             let view = unsafe { validate_string(&*child.key) }?;
-            Some(StringUnits::from_view(view))
+            if self.compound_count < 16 {
+                Some(StringUnits::from_view(view))
+            } else if let Some(cached) = self.keys[..self.key_count]
+                .iter()
+                .flatten()
+                .find(|key| key.as_view().unit_len() == view.unit_len() && key.as_view() == view)
+            {
+                Some(cached.clone())
+            } else {
+                let owned = StringUnits::from_view(view);
+                if self.key_count < self.keys.len() {
+                    self.keys[self.key_count] = Some(owned.clone());
+                    self.key_count += 1;
+                }
+                Some(owned)
+            }
         };
         Some(workers::PlainChild {
             key,
@@ -399,6 +426,9 @@ pub unsafe extern "C" fn kiln_worker_post_plain(
             context,
             describe,
             field,
+            compound_count: 0,
+            keys: std::array::from_fn(|_| None),
+            key_count: 0,
         };
         let Some(tokens) = workers::encode_plain(&mut source, root) else {
             return 0;

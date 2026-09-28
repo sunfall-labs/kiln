@@ -12,7 +12,7 @@
 //! # Ports
 //!
 //! An endpoint is one end of a channel: a queue of messages its realm has not taken yet, and a
-//! [`Notify`] that wakes the realm's pending [`kiln_host_abi::AsyncHostOp::PortWait`]. Posting
+//! [`Notify`] subscribers that wake the realm's pending [`kiln_host_abi::AsyncHostOp::PortWait`]. Posting
 //! from an endpoint appends to its peer's queue. Closing an endpoint tells the peer, which sees
 //! the close after the messages already queued for it, as node's `close` event arrives after
 //! them. Who owns an endpoint is not recorded: a port transferred to another realm is its number
@@ -267,7 +267,9 @@ struct Endpoint {
     /// whose other end has closed).
     peer: u64,
     queue: VecDeque<Message>,
-    notify: Arc<Notify>,
+    /// Realm completion signals for pending PortWait requests. Posting wakes the realm drive
+    /// directly; it checks the endpoint state before completing the request.
+    waits: HashMap<u64, Arc<Notify>>,
     peer_closed: bool,
     group: Option<GroupName>,
     /// The parent's end of a running worker's channel: the worker closing its `parentPort`
@@ -281,10 +283,16 @@ impl Endpoint {
         Self {
             peer,
             queue: VecDeque::new(),
-            notify: Arc::new(Notify::new()),
+            waits: HashMap::new(),
             peer_closed: false,
             group: None,
             awaits_exit: false,
+        }
+    }
+
+    fn wake(&self) {
+        for signal in self.waits.values() {
+            signal.notify_one();
         }
     }
 }
@@ -295,6 +303,7 @@ type GroupName = (u64, String);
 #[derive(Default)]
 struct Ports {
     next: u64,
+    next_wait: u64,
     endpoints: HashMap<u64, Endpoint>,
     groups: HashMap<GroupName, Vec<u64>>,
 }
@@ -303,6 +312,11 @@ impl Ports {
     fn allocate(&mut self) -> u64 {
         self.next += 1;
         self.next
+    }
+
+    fn allocate_wait(&mut self) -> u64 {
+        self.next_wait += 1;
+        self.next_wait
     }
 }
 
@@ -353,7 +367,7 @@ pub fn post(from: u64, message: Message) -> bool {
         return false;
     };
     target.queue.push_back(message);
-    target.notify.notify_one();
+    target.wake();
     true
 }
 
@@ -367,7 +381,7 @@ pub fn enqueue(port: u64, message: Message) -> bool {
         return false;
     };
     target.queue.push_back(message);
-    target.notify.notify_one();
+    target.wake();
     true
 }
 
@@ -397,12 +411,25 @@ pub fn readable(port: u64) -> bool {
     state(port) != 0
 }
 
-/// What wakes a wait on `port`, `None` once it is gone.
-pub fn notifier(port: u64) -> Option<Arc<Notify>> {
-    ports()
-        .endpoints
-        .get(&port)
-        .map(|endpoint| Arc::clone(&endpoint.notify))
+/// Register one realm's PortWait while holding the queue lock. `None` means a message or close
+/// is already visible, including when the endpoint is gone. The same lock makes a post between
+/// this check and the registration impossible to miss.
+pub fn subscribe(port: u64, signal: Arc<Notify>) -> Option<u64> {
+    let mut ports = ports();
+    let endpoint = ports.endpoints.get(&port)?;
+    if !endpoint.queue.is_empty() || endpoint.peer_closed {
+        return None;
+    }
+    let id = ports.allocate_wait();
+    ports.endpoints.get_mut(&port)?.waits.insert(id, signal);
+    Some(id)
+}
+
+/// Remove a PortWait subscription after delivery, cancellation, or realm shutdown.
+pub fn unsubscribe(port: u64, id: u64) {
+    if let Some(endpoint) = ports().endpoints.get_mut(&port) {
+        endpoint.waits.remove(&id);
+    }
 }
 
 /// Close `port`: what was queued for it is dropped (a moved store is freed with it), and its
@@ -416,7 +443,7 @@ pub fn close(port: u64) {
         peer.peer = 0;
         if !peer.awaits_exit {
             peer.peer_closed = true;
-            peer.notify.notify_one();
+            peer.wake();
         }
     }
     if let Some(name) = &endpoint.group
@@ -428,7 +455,7 @@ pub fn close(port: u64) {
         }
     }
     // A wait still parked on this port ends, and finds it gone.
-    endpoint.notify.notify_one();
+    endpoint.wake();
     drop(ports);
     drop(endpoint);
 }
@@ -467,7 +494,7 @@ pub fn broadcast_post(from: u64, message: Message) -> usize {
         };
         if let Some(target) = ports.endpoints.get_mut(&member) {
             target.queue.push_back(copy);
-            target.notify.notify_one();
+            target.wake();
             delivered += 1;
         }
     }
@@ -799,7 +826,7 @@ where
         if let Some(endpoint) = ports.endpoints.get_mut(&context.parent) {
             endpoint.awaits_exit = false;
             endpoint.peer_closed = true;
-            endpoint.notify.notify_one();
+            endpoint.wake();
         }
     }
     close(context.spec.control);
@@ -1069,6 +1096,33 @@ mod tests {
         assert!(!post(b, Message::new(kind::USER, Vec::new())));
         close(b);
         assert_eq!(state(b), STATE_GONE);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_port_subscription_wakes_for_post_and_close_and_can_be_cancelled() {
+        let (a, b) = channel();
+        let signal = Arc::new(Notify::new());
+        let first = subscribe(b, Arc::clone(&signal)).expect("empty open port waits");
+        assert!(post(a, Message::new(kind::USER, Vec::new())));
+        signal.notified().await;
+        assert_eq!(state(b), STATE_QUEUED);
+        unsubscribe(b, first);
+        assert!(
+            !ports()
+                .endpoints
+                .get(&b)
+                .unwrap()
+                .waits
+                .contains_key(&first)
+        );
+        take(b);
+        let second = subscribe(b, Arc::clone(&signal)).expect("drained port waits again");
+        close(a);
+        signal.notified().await;
+        assert_eq!(state(b), STATE_PEER_CLOSED);
+        unsubscribe(b, second);
+        assert!(subscribe(b, signal).is_none());
+        close(b);
     }
 
     #[test]

@@ -25,10 +25,12 @@ delete (globalThis as any).__kilnJobsPending;
 delete (globalThis as any).__kilnQueueIo;
 // The runtime's cross-realm ports and workers (`kiln_runtime::workers`, realms issue 06):
 // `__kilnWorkerOp(op, ...)` is every synchronous operation on them, numbered below, and
-// `__kilnPortWait(endpoint, referenced)` the one that waits -- a host operation, answered
-// `{ requestId, promise }`, done once the endpoint has something queued or its peer has closed.
+// `__kilnPortWait(endpoint, referenced, callback)` the one that waits -- a host operation,
+// answered with a request ID for native callback delivery or `{ requestId, promise }` in the
+// interpreter, done once the endpoint has something queued or its peer has closed.
 const __kilnWorkerOp: (op: number, ...args: any[]) => any = (globalThis as any).__kilnWorkerOp;
-const __kilnPortWait: (endpoint: number, referenced: boolean) => { requestId: number; promise: Promise<any> } =
+const __kilnPortWait: (endpoint: number, referenced: boolean, callback: () => void) =>
+  number | { requestId: number; promise: Promise<any> } =
   (globalThis as any).__kilnPortWait;
 delete (globalThis as any).__kilnWorkerOp;
 delete (globalThis as any).__kilnPortWait;
@@ -815,6 +817,10 @@ delete (globalThis as any).__kilnPortWait;
     // The `message` listener list, once there is one: the table keeps one array per type and
     // edits it in place, so the lookup -- a string-keyed Map read per message -- is made once.
     #messageListeners: Listener[] | undefined = undefined;
+    // A sole Node-style message listener receives only data. Its MessageEvent and wrapper are
+    // unobservable, so delivery can call it directly while the listener table still decides
+    // whether this narrow case applies.
+    #nodeMessage: { listener: any; wrapper: any } | null = null;
     #onmessage: Listener | null = null;
     #onmessageerror: Listener | null = null;
 
@@ -983,6 +989,7 @@ delete (globalThis as any).__kilnPortWait;
       };
       entries.push({ type: key, listener, wrapper });
       this.addEventListener(key, wrapper, once ? { once: true } : undefined);
+      if (key === "message" && !once) this.#nodeMessage = { listener, wrapper };
       return this;
     }
     on(type: any, listener: any): this { return this.#addNodeStyle(type, listener, false); }
@@ -1098,7 +1105,12 @@ delete (globalThis as any).__kilnPortWait;
         let value: any;
         let ports: any[];
         try {
-          [value, ports] = decodeRemote(got);
+          if (got[2] === true) {
+            value = got[1];
+            ports = NO_PORTS;
+          } else {
+            [value, ports] = decodeMessage(got[1]);
+          }
         } catch (error) {
           const target = port.#target === null ? port : port.#target;
           if (port.#kinds !== null) port.#kinds(-1, error, NO_PORTS);
@@ -1112,7 +1124,15 @@ delete (globalThis as any).__kilnPortWait;
         const target = port.#target === null ? port : port.#target;
         let list = port.#messageListeners;
         if (list === undefined) list = port.#messageListeners = listenersOf(target).get("message");
-        dispatchTo(target, messageEvent(value, ports === NO_PORTS ? null : ports), list);
+        const direct = port.#nodeMessage;
+        if (ports === NO_PORTS && target === port && direct !== null && list !== undefined &&
+            list.length === 1 && list[0].callback === direct.wrapper &&
+            !list[0].removed && !list[0].once) {
+          try { direct.listener.call(target, value); }
+          catch (error) { reportUncaught(error); }
+        } else {
+          dispatchTo(target, messageEvent(value, ports === NO_PORTS ? null : ports), list);
+        }
         if (list === undefined || list.length === 0) port.#autoRef();
         return true;
       };
@@ -1208,8 +1228,17 @@ delete (globalThis as any).__kilnPortWait;
       // wait is the realm's reason to stay alive while the port is referenced.
       listen = (port: MessagePort) => {
         if (port.#closed || port.#remote === 0 || port.#wait !== null || !port.#started) return;
-        const pending = __kilnPortWait(port.#remote, !port.#unref);
+        const pending = __kilnPortWait(port.#remote, !port.#unref, () => {
+          if (port.#wait !== pending) return;
+          port.#wait = null;
+          if (port.#closed || port.#scheduled) return;
+          // The native completion already is this port's I/O turn. Dispatch here so a
+          // separate promise job and queued I/O turn are not needed for each wake.
+          port.#scheduled = true;
+          deliverNext(port);
+        });
         port.#wait = pending;
+        if (typeof pending === "number") return;
         pending.promise.then(() => {
           if (port.#wait !== pending) return;
           port.#wait = null;
@@ -1222,7 +1251,7 @@ delete (globalThis as any).__kilnPortWait;
         const pending = port.#wait;
         if (pending === null) return;
         port.#wait = null;
-        __kilnWorkerOp(OP_CANCEL_WAIT, pending.requestId);
+        __kilnWorkerOp(OP_CANCEL_WAIT, typeof pending === "number" ? pending : pending.requestId);
       };
       // In one realm a transferred port is a new object entangled with the old one's partner;
       // the old one is closed, and what was queued for it goes with the new one.

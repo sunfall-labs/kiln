@@ -2716,29 +2716,43 @@ static int kiln_c99_worker_report_error(kiln_value error) {
 static int kiln_c99_node_port_wait_complete(void *opaque, const kiln_async_completion *completion,
                                             void *host, void *thrown) {
     kiln_node_process_completion *work = (kiln_node_process_completion *)opaque;
-    (void)completion; (void)host; (void)thrown;
+    (void)completion;
     if (work == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (work->port_callback) {
+        kiln_value ignored;
+        return kiln_c99_call((kiln_host *)host, &ignored, work->promise, kiln_c99_undefined(),
+                             NULL, 0, 0, (kiln_value *)thrown);
+    }
     return kiln_c99_settle(work->promise, kiln_c99_undefined(), 0);
 }
 
-/* `__kilnPortWait(endpoint, referenced)`: `{ requestId, promise }`, the promise fulfilled once
- * the endpoint has a message or its peer has closed. */
+/* `__kilnPortWait(endpoint, referenced, callback)`: a native callback runs in the host I/O turn
+ * once the endpoint is readable. The promise form remains for callers without a callback. */
 static int kiln_c99_port_wait_raw(kiln_value *result, const kiln_value *args, size_t argc) {
     kiln_value promise, pair;
     kiln_node_process_completion *work;
     kiln_async_host_op operation = {0};
     uint64_t request = 0;
     int status;
-    if (kiln_c99_new_promise(&promise) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
+    int direct = argc > 2 && kiln_c99_is_callable(args[2]);
+    if (!direct && kiln_c99_new_promise(&promise) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
     work = (kiln_node_process_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_PROCESS_COMPLETION, sizeof *work);
     if (work == NULL) return KILN_C99_OUT_OF_MEMORY;
-    work->promise = promise;
+    work->promise = direct ? args[2] : promise;
+    work->port_callback = (uint8_t)direct;
     operation.operation = KILN_REALM_OP_PORT_WAIT;
     operation.flags = argc > 1 && kiln_c99_truthy(args[1]) ? 1u : 0u;
     operation.resource = kiln_c99_worker_word(args, argc, 0);
     status = kiln_realm_start_active_host_op(&operation, kiln_c99_node_port_wait_complete,
                                              kiln_c99_node_drop_process, work, &request);
-    if (status != KILN_C99_OK) return status;
+    if (status != KILN_C99_OK) {
+        kiln_c99_gc_release(work);
+        return status;
+    }
+    if (direct) {
+        *result = kiln_c99_number((double)request);
+        return KILN_C99_OK;
+    }
     if (kiln_c99_new_object(&pair) != KILN_C99_OK) {
         (void)kiln_realm_cancel_active_request(request);
         return KILN_C99_OUT_OF_MEMORY;

@@ -2979,6 +2979,7 @@ typedef struct kiln_node_process_completion {
     kiln_value result;
     kiln_value stdout_value;
     kiln_value stderr_value;
+    uint8_t port_callback;
 } kiln_node_process_completion;
 
 /* A cursor over JSON source, moved forward as text is consumed. */
