@@ -4316,6 +4316,9 @@ typedef struct kiln_cli_scheduled_realm {
     kiln_cli_realm_run *run;
     const kiln_cli_realms *realms;
     FILE *output;
+    char *captured;
+    size_t captured_len;
+    int memory_output;
     uint64_t index;
 } kiln_cli_scheduled_realm;
 
@@ -4327,7 +4330,15 @@ static void *kiln_cli_scheduled_begin(void *context, uint64_t index) {
     session->run = (kiln_cli_realm_run *)calloc(1, sizeof *session->run);
     if (session->run == NULL) { free(session); return NULL; }
     snprintf(path, sizeof path, "%s/%llu.out", realms->directory, (unsigned long long)index);
+    /* `KILN_REALMS` is a parity harness: keep each realm's output distinct, but do not hold
+     * one file descriptor per idle realm. Ten thousand parked realms must use the scheduler's
+     * fixed lane count rather than spending their descriptor budget on capture files. */
+#if defined(_WIN32)
     session->output = fopen(path, "wb");
+#else
+    session->output = open_memstream(&session->captured, &session->captured_len);
+    session->memory_output = session->output != NULL;
+#endif
     if (session->output == NULL) { free(session->run); free(session); return NULL; }
     session->realms = realms;
     session->index = index;
@@ -4349,6 +4360,20 @@ static int kiln_cli_scheduled_finish(void *opaque) {
     FILE *written;
     int status = kiln_cli_realm_finish(session->run, 0, 0);
     if (fclose(session->output) != 0 && status == 0) status = 1;
+    if (session->memory_output) {
+        snprintf(path, sizeof path, "%s/%llu.out", session->realms->directory,
+                 (unsigned long long)session->index);
+        written = fopen(path, "wb");
+        if (written == NULL) {
+            status = 1;
+        } else {
+            if (session->captured_len != 0 &&
+                fwrite(session->captured, 1, session->captured_len, written) != session->captured_len)
+                status = 1;
+            if (fclose(written) != 0) status = 1;
+        }
+    }
+    free(session->captured);
     snprintf(path, sizeof path, "%s/%llu.status", session->realms->directory,
              (unsigned long long)session->index);
     written = fopen(path, "wb");
@@ -4377,6 +4402,11 @@ static long kiln_cli_scheduler_lanes(void) {
     return lanes > 1024 ? 1024 : lanes;
 }
 
+static int kiln_cli_scheduler_enabled(void) {
+    const char *setting = getenv("KILN_REALM_SCHEDULER");
+    return setting != NULL && *setting != '\0' && strcmp(setting, "0") != 0;
+}
+
 static long kiln_cli_realm_count(void) {
     const char *setting = getenv("KILN_REALMS");
     char *end = NULL;
@@ -4384,7 +4414,10 @@ static long kiln_cli_realm_count(void) {
     if (setting == NULL || *setting == '\0') return 0;
     count = strtol(setting, &end, 10);
     if (end == setting || *end != '\0' || count < 1) return 0;
-    return count > 1024 ? 1024 : count;
+    /* The dedicated-thread launcher retains its bounded thread count. Scheduled realms share
+     * fixed lanes, so its acceptance and production workloads can hold 10,000 idle realms. */
+    long limit = kiln_cli_scheduler_enabled() ? 10000 : 1024;
+    return count > limit ? limit : count;
 }
 
 static int kiln_cli_run_realms(int argc, char **argv, long count) {
@@ -4401,8 +4434,7 @@ static int kiln_cli_run_realms(int argc, char **argv, long count) {
     }
     statuses = (int *)calloc((size_t)count, sizeof *statuses);
     if (statuses == NULL) return 1;
-    const char *scheduled = getenv("KILN_REALM_SCHEDULER");
-    if (scheduled != NULL && *scheduled != '\0' && strcmp(scheduled, "0") != 0)
+    if (kiln_cli_scheduler_enabled())
         status = kiln_realm_run_scheduled((uint64_t)count,
                     (uint64_t)kiln_cli_scheduler_lanes(), kiln_cli_virtual_clock,
                     kiln_cli_scheduled_begin, kiln_cli_scheduled_advance,
