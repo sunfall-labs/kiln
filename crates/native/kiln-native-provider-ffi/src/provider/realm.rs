@@ -35,6 +35,13 @@ mod reclaim;
 #[path = "realm/shared_graph.rs"]
 mod shared_graph;
 
+#[path = "realm/graph_capsules.rs"]
+mod graph_capsules;
+pub use graph_capsules::{
+    kiln_realm_graph_capsule_cancel, kiln_realm_graph_capsule_detached,
+    kiln_realm_graph_capsule_stage, kiln_realm_graph_capsule_take,
+};
+
 type Entry = unsafe extern "C" fn(*mut c_void) -> i32;
 type RunWork = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> i32;
 type DropWork = unsafe extern "C" fn(*mut c_void);
@@ -5819,6 +5826,18 @@ macro_rules! assert_provider_export {
         };
         (realm, kiln_realm_set_graph_control, realm_set_graph_control) => {
             const _: extern "C" fn(Option<GraphControl>) -> i32 = kiln_realm_set_graph_control;
+        };
+        (realm, kiln_realm_graph_capsule_stage, realm_graph_capsule_stage) => {
+            const _: extern "C" fn(u64, u64, u64, *mut c_void) -> i32 = kiln_realm_graph_capsule_stage;
+        };
+        (realm, kiln_realm_graph_capsule_detached, realm_graph_capsule_detached) => {
+            const _: extern "C" fn(u64, u64) -> i32 = kiln_realm_graph_capsule_detached;
+        };
+        (realm, kiln_realm_graph_capsule_cancel, realm_graph_capsule_cancel) => {
+            const _: extern "C" fn(u64, u64) -> i32 = kiln_realm_graph_capsule_cancel;
+        };
+        (realm, kiln_realm_graph_capsule_take, realm_graph_capsule_take) => {
+            const _: unsafe extern "C" fn(u64, u64, u64, *mut *mut c_void) -> i32 = kiln_realm_graph_capsule_take;
         };
         (realm, kiln_realm_gc_attach, realm_gc_attach) => {
             const _: unsafe extern "C" fn(*const GcHooks, *mut c_void, *mut *mut c_void) -> i32 = kiln_realm_gc_attach;

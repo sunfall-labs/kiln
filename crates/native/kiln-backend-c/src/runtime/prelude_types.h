@@ -645,6 +645,15 @@ extern const uint64_t *kiln_realm_generation_slot(void);
  * the process, or NULL when `size` exceeds what the provider reserved. The prelude is emitted per
  * translation unit with internal linkage, so a static of its own would be one table per unit. */
 extern void *kiln_realm_process_shared(uint64_t size);
+/* Opaque actor graph capsules live in a provider-owned registry while both realms are claimed.
+ * Rust stores only pointer bits and exact numeric identities; C owns and dereferences the
+ * capsule before unlink on the sender lane or after detach on the receiver lane. */
+extern int kiln_realm_graph_capsule_stage(uint64_t reservation, uint64_t receiver,
+                                          uint64_t request, void *capsule);
+extern int kiln_realm_graph_capsule_detached(uint64_t reservation, uint64_t request);
+extern int kiln_realm_graph_capsule_cancel(uint64_t reservation, uint64_t request);
+extern int kiln_realm_graph_capsule_take(uint64_t reservation, uint64_t sender,
+                                         uint64_t request, void **out);
 /* Quiescent-state reclamation of that shared state (ADR 0071, realms issue 04 step 4; see
  * `KILN_C99_SLOT_*` below). `retire_tag` is asked by a writer that has just unpublished some: the
  * tag to keep beside it, or 0 when no other thread is running a realm and it may be rewritten at
