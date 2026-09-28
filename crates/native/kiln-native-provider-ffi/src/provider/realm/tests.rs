@@ -579,6 +579,49 @@ fn missing_http_registration_never_falls_back_to_raw_close() {
     assert_eq!(kiln_realm_destroy(handle), 0);
 }
 
+#[cfg(feature = "realm-http")]
+unsafe extern "C" fn attempt_http_attachment(context: *mut c_void) -> i32 {
+    // The resource has no transport. This exercises the public attachment boundary without
+    // opening a socket: it must pin before trying to hand a transport to Hyper.
+    unsafe {
+        *context.cast::<i32>() = kiln_realm_http_server_attach_active(
+            42,
+            Some(ignore_http_event),
+            Some(retain_test_http_owner),
+            context,
+        );
+    }
+    0
+}
+
+#[test]
+#[cfg(feature = "realm-http")]
+fn http_attachment_pins_realm_before_dispatch() {
+    let reactor = kiln_runtime::Reactor::shared_wall().expect("shared reactor");
+    let _scheduled = ScheduledReactorGuard::enter(reactor);
+    let mut handle = 0;
+    let mut attachment = 0;
+    assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
+    assert_eq!(kiln_realm_use_wall_clock(handle), 0);
+    assert_eq!(
+        unsafe {
+            kiln_realm_enter(
+                handle,
+                Some(attempt_http_attachment),
+                (&raw mut attachment).cast(),
+            )
+        },
+        0
+    );
+    assert_eq!(attachment, INVALID_ARGUMENT, "resource has no transport");
+    assert_ne!(realm(handle).unwrap().affinity.get() & AFFINITY_HTTP, 0);
+    assert!(
+        detach_realm(handle).is_none(),
+        "a failed attachment conservatively keeps its realm on the original OS lane"
+    );
+    assert_eq!(kiln_realm_destroy(handle), 0);
+}
+
 unsafe extern "C" fn exercises_symbol_registry(context: *mut c_void) -> i32 {
     let output = unsafe { &mut *context.cast::<[u64; 3]>() };
     let key = b"fastify-error-generic";
