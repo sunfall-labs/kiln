@@ -4651,7 +4651,7 @@ static long kiln_cli_scheduler_lanes(void) {
 
 static int kiln_cli_scheduler_enabled(void) {
     const char *setting = getenv("KILN_REALM_SCHEDULER");
-    return setting != NULL && *setting != '\0' && strcmp(setting, "0") != 0;
+    return setting == NULL || *setting == '\0' || strcmp(setting, "0") != 0;
 }
 
 static long kiln_cli_realm_count(void) {
@@ -4683,7 +4683,7 @@ static int kiln_cli_run_realms(int argc, char **argv, long count) {
     if (statuses == NULL) return 1;
     if (kiln_cli_scheduler_enabled()) {
         const char *migrate = getenv("KILN_REALM_MIGRATE");
-        if (migrate != NULL && *migrate != '\0' && strcmp(migrate, "0") != 0)
+        if (migrate == NULL || *migrate == '\0' || strcmp(migrate, "0") != 0)
             status = kiln_realm_run_migrating((uint64_t)count,
                         (uint64_t)kiln_cli_scheduler_lanes(), kiln_cli_virtual_clock,
                         kiln_cli_scheduled_begin, kiln_cli_scheduled_identify,

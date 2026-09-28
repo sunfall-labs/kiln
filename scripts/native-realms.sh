@@ -12,8 +12,9 @@
 #
 # HOW. Each probe is built once by `kiln run --native`, which keeps the realm's virtual clock.
 # The binary runs alone, then with `KILN_REALMS=N`, which launches N realms at once. By default
-# each realm is pinned to its own `WorkerPool` thread. `KILN_REALM_SCHEDULER=1` uses shared
-# turn-scheduler lanes; `KILN_REALM_MIGRATE=1` permits eligible turns to move between lanes.
+# realms share turn-scheduler lanes, and eligible turns migrate between lanes. Set
+# `KILN_REALM_MIGRATE=0` to retain fixed scheduler lanes, or `KILN_REALM_SCHEDULER=0` to use
+# the older dedicated-thread launcher.
 # The launcher writes each realm's standard streams into one file (as `2>&1` does) and its exit
 # status to `$KILN_REALMS_OUT/<index>.{out,status}`. Every realm's pair must match the lone run
 # for N = 1, 2, and the core count.
