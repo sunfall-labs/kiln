@@ -70,9 +70,9 @@ make a property read observable and keep the call sequential.
 
 The native backend measures a prefix of the call on the realm thread and
 submits the remainder to scheduler lanes only when the estimated work
-justifies it. With the optional realm turn scheduler enabled, collection
-chunks use that realm's scheduler queue. Otherwise, a process-wide scheduler
-pool starts when the first parallel call needs it. By default, a process gets
+justifies it. In a scheduled realm, collection chunks use that realm's
+scheduler queue. Otherwise, a process-wide scheduler pool starts when the
+first parallel call needs it. By default, a process gets
 approximately `available cores / KILN_WORKER_COUNT` lanes, with a minimum of
 one. Set `KILN_PARALLELISM=<n>` to override that budget;
 `KILN_PARALLELISM=1` runs calls inline.

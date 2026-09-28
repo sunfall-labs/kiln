@@ -69,10 +69,12 @@ single-threaded. Measured while serving, bun runs twelve threads and node five, 
 kiln leads hello world and trails bun on the small service by four percent while doing *less* work
 per request than either (23.7 microseconds of CPU against bun's 26.7).
 
-A realm owns its thread, so the way kiln uses the other fifteen cores is `KILN_WORKERS`, which
-forks that many realms over one `SO_REUSEPORT` listener. Inside one realm, kiln's
+The server measurements below use `KILN_WORKERS`, which forks that many processes over one
+`SO_REUSEPORT` listener. For programs that run several top-level realms in one process,
+`KILN_REALMS` schedules their turns across a shared pool. Inside a realm, kiln's
 [parallel collection methods](docs/parallel-builtins.md) run callbacks that the compiler proves
-safe to parallelize on scheduler lanes in the native binary.
+safe to parallelize on those scheduler lanes in the native binary. The
+[actor guide](docs/actors.md) shows how to create a realm for an application object.
 `KILN_PARALLELISM=<n>` sizes that budget, defaulting to the machine's available parallelism divided
 among the `KILN_WORKERS` realms (so N workers share the cores rather than each taking all of them),
 and `KILN_PARALLELISM=1` runs every such map inline on the realm thread. A call whose measured work
