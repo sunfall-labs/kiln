@@ -35,19 +35,10 @@ fn two_lanes_run_local_tasks_on_one_wall_reactor() {
 
 #[test]
 fn local_task_wakes_a_scheduler_lane_without_parking_it() {
-    struct LaneWake(std::sync::atomic::AtomicUsize);
-    impl std::task::Wake for LaneWake {
-        fn wake(self: std::sync::Arc<Self>) {
-            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }
-        fn wake_by_ref(self: &std::sync::Arc<Self>) {
-            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-
     let executor = Executor::on_reactor(Reactor::shared_wall().expect("reactor"));
-    let wake = std::sync::Arc::new(LaneWake(std::sync::atomic::AtomicUsize::new(0)));
-    let waker = std::task::Waker::from(std::sync::Arc::clone(&wake));
+    let queue = crate::turn_queue::ReadyQueue::new();
+    let ticket = queue.ticket(42);
+    let waker = std::task::Waker::from(std::sync::Arc::clone(&ticket));
     let lane = std::thread::current().id();
     let (signal, receive) = tokio::sync::oneshot::channel::<()>();
     let observed = std::rc::Rc::new(std::cell::Cell::new(None));
@@ -59,16 +50,20 @@ fn local_task_wakes_a_scheduler_lane_without_parking_it() {
         });
     });
 
+    ticket.wake();
+    let lease = queue.take().expect("first turn");
     executor.poll_local_once(&waker);
     assert_eq!(observed.get(), None);
-    let before = wake.0.load(std::sync::atomic::Ordering::SeqCst);
+    lease.finish(crate::turn_queue::TurnOutcome::Parked);
+    assert!(queue.take_timeout(std::time::Duration::from_millis(1)).is_none());
     signal.send(()).expect("receiver still alive");
-    assert!(
-        wake.0.load(std::sync::atomic::Ordering::SeqCst) > before,
-        "the local task wakes the scheduler ticket"
-    );
+    let lease = queue
+        .take_timeout(std::time::Duration::from_millis(100))
+        .expect("the local task wakes the scheduler ticket");
+    assert_eq!(lease.realm_id(), 42);
     executor.poll_local_once(&waker);
     assert_eq!(observed.get(), Some(lane));
+    lease.finish(crate::turn_queue::TurnOutcome::Done);
 }
 
 #[cfg(unix)]
