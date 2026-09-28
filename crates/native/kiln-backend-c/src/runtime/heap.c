@@ -3592,6 +3592,46 @@ static int kiln_c99_actor_isolated_request_rollback(kiln_gc_heap *heap, uint64_t
     return 1;
 }
 
+/* Called only after receiver adoption has published the native inbox root while both realms
+ * remain stopped. No error may return from this point: an unlinked capsule cannot be restored
+ * to a running sender. Delete exactly the entry that escrow exchanged, without allocation. */
+static void kiln_c99_actor_isolated_request_commit_published(kiln_gc_heap *heap, uint64_t id,
+                                                               kiln_value published_root) {
+    kiln_c99_realm_state *realm;
+    kiln_collection *registry;
+    kiln_entry *entry;
+    size_t index;
+    if (heap == NULL || id == 0) abort();
+    realm = &heap->realm;
+    entry = realm->isolated_escrow_entry;
+    if (realm->isolated_request_id != id || realm->isolated_request_invalidated ||
+        realm->isolated_graphs.tag != KILN_VALUE_COLLECTION || entry == NULL ||
+        realm->isolated_escrow_value.tag != published_root.tag ||
+        realm->isolated_escrow_value.bits != published_root.bits ||
+        realm->isolated_escrow_value.ptr != published_root.ptr ||
+        realm->isolated_escrow_value.len != published_root.len ||
+        realm->isolated_request_handle.tag != realm->isolated_escrow_key.tag ||
+        realm->isolated_request_handle.bits != realm->isolated_escrow_key.bits) abort();
+    registry = kiln_c99_collection_of(realm->isolated_graphs);
+    if (registry->entries == NULL || registry->live == 0) abort();
+    for (index = 0; index < registry->count && &registry->entries[index] != entry; ++index) {}
+    if (index == registry->count || entry->dead ||
+        entry->key.tag != realm->isolated_escrow_key.tag ||
+        entry->key.bits != realm->isolated_escrow_key.bits ||
+        entry->value.tag != KILN_VALUE_UNDEFINED) abort();
+    kiln_c99_collection_hash_remove(registry, index, entry->key);
+    entry->dead = 1;
+    entry->key = kiln_c99_undefined();
+    entry->value = kiln_c99_undefined();
+    registry->live -= 1;
+    realm->isolated_escrow_entry = NULL;
+    realm->isolated_escrow_key = kiln_c99_undefined();
+    realm->isolated_escrow_value = kiln_c99_undefined();
+    realm->isolated_request_handle = kiln_c99_undefined();
+    realm->isolated_request_id = 0;
+    realm->isolated_request_invalidated = 0;
+}
+
 /* Inspect C-owned direct roots and key-table side pointers. Unpinned canonical keys are weak
  * for GC, but they still contain an address until purge and cannot point into a moved chunk.
  * This is a useful negative witness, not a complete root enumeration: the provider, generated

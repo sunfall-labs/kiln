@@ -2382,7 +2382,11 @@ int main(void) {
     kiln_c99_graph_capsule capsule;
     kiln_c99_graph_capsule_requirements wrong;
     kiln_val *cell;
-    kiln_value root;
+    kiln_collection registry;
+    kiln_entry entry;
+    kiln_object handle;
+    kiln_value root, handle_value;
+    uint64_t request = 0;
     uint64_t reservation = 83;
     kiln_c99_gc_heap_init(&sender);
     kiln_c99_gc_heap_init(&receiver);
@@ -2396,6 +2400,20 @@ int main(void) {
     if (chunk == NULL || !kiln_c99_heap_adopt_chunks(&sender, chunk)) return 3;
     root = kiln_c99_value(KILN_VALUE_CELL, (uint64_t)(uintptr_t)cell, NULL, 0);
     if (!kiln_c99_graph_capsule_prepare(&sender, chunk, root, &capsule)) return 4;
+    memset(&registry, 0, sizeof registry);
+    memset(&entry, 0, sizeof entry);
+    memset(&handle, 0, sizeof handle);
+    handle_value = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)&handle, NULL, 0);
+    entry.key = handle_value;
+    entry.value = root;
+    registry.entries = &entry;
+    registry.capacity = registry.count = registry.live = 1;
+    registry.is_weak = 1;
+    sender.realm.isolated_graphs = kiln_c99_value(KILN_VALUE_COLLECTION,
+        (uint64_t)(uintptr_t)&registry, NULL, 0);
+    if (!kiln_c99_actor_isolated_request_begin(&sender, handle_value, &request) ||
+        !kiln_c99_actor_isolated_request_escrow(&sender, request) ||
+        entry.value.tag != KILN_VALUE_UNDEFINED) return 12;
     wrong = capsule.needs;
     wrong.region_capacity++;
     if (kiln_c99_graph_capsule_receiver_preflight(&receiver, &wrong, reservation) ||
@@ -2409,10 +2427,16 @@ int main(void) {
         kiln_c99_gc_lookup(&sender, cell) != NULL ||
         kiln_c99_gc_lookup(&receiver, cell) != NULL) return 9;
     kiln_c99_graph_capsule_adopt(&receiver, &capsule, reservation);
-    if (capsule.chunk != NULL || capsule.detached || receiver.count != 1 ||
+    if (capsule.chunk != NULL || capsule.detached || !capsule.adopted || receiver.count != 1 ||
         kiln_c99_gc_lookup(&receiver, cell) == NULL ||
         receiver.realm.graph_inbox_state != KILN_C99_GRAPH_INBOX_PUBLISHED ||
         receiver.realm.graph_inbox_root.bits != root.bits) return 10;
+    kiln_c99_graph_capsule_commit_sender(&sender, &capsule, request);
+    if (!entry.dead || registry.live != 0 || entry.key.tag != KILN_VALUE_UNDEFINED ||
+        entry.value.tag != KILN_VALUE_UNDEFINED ||
+        sender.realm.isolated_escrow_entry != NULL ||
+        sender.realm.isolated_escrow_value.tag != KILN_VALUE_UNDEFINED ||
+        sender.realm.isolated_request_id != 0) return 13;
     kiln_c99_gc_mark_realm(&receiver);
     if (((kiln_gc_block *)cell - 1)->mark != receiver.epoch) return 11;
     kiln_c99_nursery_destroy(&sender.nursery);

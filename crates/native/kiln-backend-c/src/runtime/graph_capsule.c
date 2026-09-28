@@ -19,6 +19,7 @@ typedef struct kiln_c99_graph_capsule {
     uint64_t candidate_id;
     uint64_t sender_epoch;
     int detached;
+    int adopted;
 } kiln_c99_graph_capsule;
 
 /* All fallible closure and root-kind checks run on the sender before its ownership proof. Only
@@ -193,4 +194,16 @@ static void kiln_c99_graph_capsule_adopt(kiln_gc_heap *to, kiln_c99_graph_capsul
     realm->graph_inbox_state = KILN_C99_GRAPH_INBOX_PUBLISHED;
     capsule->chunk = NULL;
     capsule->detached = 0;
+    capsule->adopted = 1;
+}
+
+/* Receiver adoption has already installed the exact root. The pair coordinator must synchronize
+ * the receiver callback's completion before calling this on the sender lane, and must keep both
+ * realms stopped throughout. The entry deletion and root clearing cannot allocate or fail. */
+static void kiln_c99_graph_capsule_commit_sender(kiln_gc_heap *from,
+                                                  const kiln_c99_graph_capsule *capsule,
+                                                  uint64_t request_id) {
+    if (capsule == NULL || !capsule->adopted || capsule->detached || capsule->chunk != NULL)
+        abort();
+    kiln_c99_actor_isolated_request_commit_published(from, request_id, capsule->root);
 }
