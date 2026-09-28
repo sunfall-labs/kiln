@@ -403,10 +403,24 @@ enum ActorReservationState {
 /// that can fail. The coordinator must keep both realm turns claimed for the whole lease.
 pub struct ActorPublicationLease {
     reservation: u64,
+    receiver: u64,
     finished: bool,
 }
 
 impl ActorPublicationLease {
+    fn wake_receiver(&self) {
+        // A graph invoke may already be parked in the actor's JavaScript mailbox. A numeric
+        // message is only a prompt to recheck its host-authenticated reservation, never proof
+        // of publication. PortWait wakes the realm without occupying a scheduler lane.
+        let _ = enqueue(
+            self.receiver,
+            Message::new(
+                kind::USER,
+                value_tokens(Token::Number(self.reservation as f64)),
+            ),
+        );
+    }
+
     pub fn finish(mut self) {
         let mut reservations = lock(actor_reservations());
         let entry = reservations
@@ -424,6 +438,8 @@ impl ActorPublicationLease {
             reservations.remove(&self.reservation);
         }
         self.finished = true;
+        drop(reservations);
+        self.wake_receiver();
     }
 }
 
@@ -431,6 +447,7 @@ impl Drop for ActorPublicationLease {
     fn drop(&mut self) {
         if !self.finished {
             lock(actor_reservations()).remove(&self.reservation);
+            self.wake_receiver();
         }
     }
 }
@@ -592,6 +609,7 @@ pub fn actor_begin_publish(
     entry.state = ActorReservationState::Publishing;
     Some(ActorPublicationLease {
         reservation,
+        receiver: entry.receiver,
         finished: false,
     })
 }
@@ -2232,8 +2250,25 @@ mod tests {
         assert_eq!(state(b), STATE_GONE);
     }
 
-    #[test]
-    fn actor_address_routes_by_shared_identity_and_revokes() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn actor_address_routes_by_shared_identity_and_revokes() {
+        fn expect_actor_wake(receiver: u64, reservation: u64) {
+            let wake = ports()
+                .endpoints
+                .get_mut(&receiver)
+                .unwrap()
+                .queue
+                .pop_front()
+                .expect("publication queues an actor inbox wake");
+            assert_eq!(wake.kind, kind::USER);
+            match wake.tokens.as_slice() {
+                [Token::Number(ports), Token::Number(tag), Token::Number(id)] => {
+                    assert_eq!((*ports, *tag, *id), (0.0, 4.0, reservation as f64));
+                }
+                _ => panic!("actor inbox wake has one numeric reservation"),
+            }
+        }
+
         struct Empty;
         impl kiln_shared_graph::Inspector for Empty {
             type Error = ();
@@ -2279,6 +2314,7 @@ mod tests {
         assert_eq!(actor_receiver_for_sender(sender), Some(71));
         assert!(post(sender, Message::new(kind::USER, Vec::new())));
         assert!(take(receiver).is_none()); // A realm without the worker key cannot drain it.
+        ports().endpoints.get_mut(&receiver).unwrap().queue.clear();
         let (reply_sender, reply_receiver) = channel();
         assert!((1..=MAX_JS_SAFE_INTEGER).contains(&actor_request_id()));
         assert!(actor_reserve_for_worker(receiver, 71, 92, 42, reply_receiver).is_none());
@@ -2346,7 +2382,14 @@ mod tests {
             Some(81),
             "publishing lease cannot lose its sender claim"
         );
+        let aborted_wake = Arc::new(Notify::new());
+        let aborted_subscription = subscribe(receiver, Arc::clone(&aborted_wake)).unwrap();
         drop(abandoned);
+        tokio::time::timeout(Duration::from_secs(1), aborted_wake.notified())
+            .await
+            .expect("aborted publication wakes the actor inbox");
+        unsubscribe(receiver, aborted_subscription);
+        expect_actor_wake(receiver, other);
         assert!(!lock(actor_reservations()).contains_key(&other));
         close(other_sender);
         close(other_receiver);
@@ -2366,7 +2409,14 @@ mod tests {
                 .unwrap()
                 .closing
         );
+        let published_wake = Arc::new(Notify::new());
+        let published_subscription = subscribe(receiver, Arc::clone(&published_wake)).unwrap();
         publishing.finish();
+        tokio::time::timeout(Duration::from_secs(1), published_wake.notified())
+            .await
+            .expect("published graph wakes the actor inbox");
+        unsubscribe(receiver, published_subscription);
+        expect_actor_wake(receiver, reservation);
         assert!(lock(actor_reservations()).contains_key(&reservation));
         close(reply_receiver);
         assert!(lock(actor_reservations()).contains_key(&reservation));

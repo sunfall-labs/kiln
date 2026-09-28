@@ -125,7 +125,8 @@ function serve(): void {
       );
       if (!Array.isArray(answer) || answer.length !== 2) throw new Error("invalid graph receive result");
       if (answer[0] === 0) {
-        setTimeout(() => receiveGraph(request), 0);
+        // The publication lease sends a PortWait wake on this inbox when it commits or
+        // aborts. Retain the reservation without polling until that message arrives.
         return;
       }
       if (answer[0] !== 1) {
@@ -237,6 +238,17 @@ function serve(): void {
   }
 
   inbox.on("message", (message: any) => {
+    if (typeof message === "number") {
+      // A private wake is advisory; GRAPH_RECEIVE still authenticates the reservation and
+      // native inbox root. An unrelated or forged number cannot grant a graph to a caller.
+      for (const request of pending) {
+        if (request.graphWaiting && request.graphReservation === message) {
+          receiveGraph(request);
+          break;
+        }
+      }
+      return;
+    }
     if (!message || typeof message !== "object") return;
     if (message.kind === "reserve") {
       if (!Number.isSafeInteger(message.id) || message.id <= 0
