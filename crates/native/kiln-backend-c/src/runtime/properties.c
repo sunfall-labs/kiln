@@ -222,6 +222,15 @@ static int kiln_c99_property_read_own(const kiln_object *object, const kiln_stri
     return 0;
 }
 
+/* Read by language value so a future compact bootstrap object can project a process-sealed
+ * descriptor with realm-owned slots without becoming a mutable kiln_object dictionary. The
+ * result is always copied, never a borrowed pointer into either representation. */
+static int kiln_c99_property_read_own_value(kiln_value owner, const kiln_string *key,
+                                            const kiln_string *ikey, kiln_property *out) {
+    if (owner.tag != KILN_VALUE_OBJECT || out == NULL) return 0;
+    return kiln_c99_property_read_own(kiln_c99_object_of(owner), key, ikey, out);
+}
+
 /* The GC side of the same storage boundary. A projected read returns a temporary record, but
  * tracing must visit the underlying realm slots directly and must never allocate or convert a
  * shaped object. A future descriptor/value overlay adds its realm-owned values here. */

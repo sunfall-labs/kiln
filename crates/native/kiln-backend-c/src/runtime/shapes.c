@@ -775,6 +775,32 @@ static const kiln_property *kiln_c99_property_view(const kiln_object *object, si
     return scratch;
 }
 
+/* Value-based, copied projections are the read contract for a future compact bootstrap handle.
+ * A read site must not need a mutable `kiln_object *` or retain a borrowed dictionary pointer:
+ * the compact handle will carry its own identity while descriptors live in process storage and
+ * values remain in this realm. Ordinary objects still use their existing storage here. */
+static kiln_value kiln_c99_object_prototype_read(kiln_value owner) {
+    if (owner.tag != KILN_VALUE_OBJECT) return kiln_c99_undefined();
+    return kiln_c99_object_of(owner)->prototype;
+}
+
+static int kiln_c99_property_walk_value(kiln_value owner, size_t *count) {
+    if (owner.tag != KILN_VALUE_OBJECT) return KILN_C99_INVALID_ARGUMENT;
+    return kiln_c99_property_walk(kiln_c99_object_of(owner), count);
+}
+
+static int kiln_c99_property_view_value(kiln_value owner, size_t index,
+                                        kiln_property *out) {
+    kiln_object *object;
+    size_t count;
+    if (owner.tag != KILN_VALUE_OBJECT || out == NULL) return 0;
+    object = kiln_c99_object_of(owner);
+    count = object->shape != NULL ? object->shape->property_count : object->count;
+    if (index >= count) return 0;
+    *out = *kiln_c99_property_view(object, index, out);
+    return 1;
+}
+
 /* The first complete, prefix-free built-in layout. Keep this activation deliberately narrow:
  * Object.prototype's bootstrap store has four ordinary data properties and a stable BUILTIN
  * code. Every reader already understands a shaped object, and every value stays in this realm's
