@@ -164,6 +164,8 @@ pub(super) fn native_js_name(native: &Native) -> String {
         Native::ArrayBufferResizeRaw => "__kilnArrayBufferResize".to_owned(),
         Native::TypedArrayOutOfBoundsRaw => "__kilnTypedArrayOutOfBounds".to_owned(),
         Native::CloneDataRaw => "__kilnCloneData".to_owned(),
+        Native::ShareRaw => "__kilnShare".to_owned(),
+        Native::SharedIsRaw => "__kilnSharedIs".to_owned(),
         Native::TypedArrayCopyRaw => "__kilnTypedArrayCopy".to_owned(),
         Native::TypedArraySortRaw => "__kilnTypedArraySort".to_owned(),
         Native::JobsPendingRaw => "__kilnJobsPending".to_owned(),

@@ -797,6 +797,8 @@ pub(crate) fn call_native(
                     .unwrap_or(Value::Undefined)
             }
         }
+        Native::SharedIsRaw => Value::Boolean(matches!(arguments.first(), Some(Value::Shared(_)))),
+        Native::ShareRaw => unreachable!("share needs the VM's realm facade cache"),
         // `__kilnArrayBufferResize(buffer, length)`: the storage half of `resize` and `grow`. The
         // receiver, the conversion of the length, detachment and the ceiling are all checked
         // above it in `kiln-builtins/src/arraybuffer.ts`; the buffer's own checks here only keep a

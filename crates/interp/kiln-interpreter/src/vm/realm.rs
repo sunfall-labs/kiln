@@ -832,6 +832,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // The structured clone's plain-data fast path: measured for the native backend
             // only, so here it always answers "not handled" and the shared TypeScript clone runs.
             ("__kilnCloneData", Native::CloneDataRaw),
+            ("__kilnSharedIs", Native::SharedIsRaw),
             // Whether a microtask checkpoint would run anything now, which message delivery
             // (`kiln-builtins/src/web_events_streams.ts`) asks before its next message.
             ("__kilnJobsPending", Native::JobsPendingRaw),

@@ -8,6 +8,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         arguments: &[Value],
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        if native == Native::ShareRaw {
+            return self.share_value(arguments.first().cloned().unwrap_or(Value::Undefined));
+        }
         // Ahead of the wrapper and proxy preambles below: a `Temporal` value is neither a boxed
         // primitive nor a shape-inspecting built-in, and its own dispatch decides which of the
         // eight types a method belongs to.

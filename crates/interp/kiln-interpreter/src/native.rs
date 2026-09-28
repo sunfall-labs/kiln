@@ -753,6 +753,10 @@ pub enum Native {
     /// `__kilnCloneData(value)`: the structured clone's plain-data fast path, which this engine
     /// never takes (it answers `undefined`, "not handled").
     CloneDataRaw,
+    /// Engine-backed immutable graph snapshot, installed only through `kiln:shared`.
+    ShareRaw,
+    /// Test whether a value is a shared graph facade without inspecting user properties.
+    SharedIsRaw,
     /// `__kilnJobsPending()`: whether a microtask checkpoint would run anything now, and whether a
     /// rejection nothing handled is waiting to be reported.
     JobsPendingRaw,

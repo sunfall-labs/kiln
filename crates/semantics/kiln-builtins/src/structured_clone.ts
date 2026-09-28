@@ -22,6 +22,8 @@
 // nothing it reads can run program code, so answering `undefined` half way leaves nothing to undo.
 const __kilnCloneData: (value: any, mode?: number) => any = (globalThis as any).__kilnCloneData;
 delete (globalThis as any).__kilnCloneData;
+const __kilnSharedIs: (value: any) => boolean = (globalThis as any).__kilnSharedIs;
+delete (globalThis as any).__kilnSharedIs;
 
 const __kilnStructuredClone = (function installStructuredClone() {
   const G = globalThis as any;
@@ -100,6 +102,7 @@ const __kilnStructuredClone = (function installStructuredClone() {
       if (typeof value === "function" || typeof value === "symbol") throw notCloneable(value);
       return value;
     }
+    if (__kilnSharedIs(value)) return value;
     const found = seen.get(value);
     if (found !== undefined) return found;
     if (isArray(value)) {
@@ -343,6 +346,7 @@ const __kilnStructuredClone = (function installStructuredClone() {
   function serialize(value: any, transfer: any[] | undefined, host?: (item: any) => (() => any) | undefined): any {
     if (transfer === undefined || transfer.length === 0) {
       if (typeof value === "object" && value !== null) {
+        if (__kilnSharedIs(value)) return value;
         const copy = __kilnCloneData(value);
         if (copy !== undefined) return copy;
       }
@@ -352,6 +356,7 @@ const __kilnStructuredClone = (function installStructuredClone() {
     const state: TransferState = { pending: [], fixups: [] };
     for (let i = 0; i < transfer.length; i++) {
       const item = transfer[i];
+      if (__kilnSharedIs(item)) throw dataCloneError("Shared values cannot be transferred.");
       if (item instanceof ArrayBuffer) {
         if (seen.has(item)) throw dataCloneError("Transfer list contains duplicate ArrayBuffer");
         if ((item as any).detached || untransferable.has(item)) {

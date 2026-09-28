@@ -1113,6 +1113,8 @@ method_ids! {
     (KILN_C99_METHOD_ATOMICS_RAW, 542, Direct; 0, 0),
     // File descriptor I/O below node:fs's TypeScript checks and callback adapters.
     (KILN_C99_METHOD_FS_DESCRIPTOR_RAW, 543, Direct; 0, 0),
+    (KILN_C99_METHOD_SHARE_RAW, 544, Direct; 0, 0),
+    (KILN_C99_METHOD_SHARED_IS_RAW, 545, Direct; 0, 0),
     (KILN_C99_METHOD_PROCESS_EXIT, 513, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC, 514, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC, 515, Direct; 0, 0),
@@ -3757,6 +3759,8 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_SHARED_BUFFER_RAW),
     emit_method_define!(KILN_C99_METHOD_ATOMICS_RAW),
     emit_method_define!(KILN_C99_METHOD_FS_DESCRIPTOR_RAW),
+    emit_method_define!(KILN_C99_METHOD_SHARE_RAW),
+    emit_method_define!(KILN_C99_METHOD_SHARED_IS_RAW),
     emit_method_define!(KILN_C99_METHOD_PROCESS_EXIT),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC),

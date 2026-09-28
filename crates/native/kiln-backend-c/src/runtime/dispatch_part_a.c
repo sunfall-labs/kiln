@@ -1463,6 +1463,17 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         return kiln_c99_array_buffer_detach_raw(result, args, argc, thrown);
     if (code == KILN_C99_METHOD_CLONE_DATA_RAW)
         return kiln_c99_clone_data_raw(result, args, argc);
+    if (code == KILN_C99_METHOD_SHARED_IS_RAW) {
+        *result = kiln_c99_boolean(argc > 0 && args[0].tag == KILN_VALUE_SHARED);
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_SHARE_RAW) {
+        int status = kiln_c99_share_value(argc > 0 ? args[0] : kiln_c99_undefined(), result);
+        if (status == KILN_C99_INVALID_ARGUMENT)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "cannot share this value or property graph");
+        return status;
+    }
     if (code == KILN_C99_METHOD_TYPED_ARRAY_COPY_RAW)
         return kiln_c99_typed_array_copy_raw(result, args, argc);
     if (code == KILN_C99_METHOD_TYPED_ARRAY_SORT_RAW)
