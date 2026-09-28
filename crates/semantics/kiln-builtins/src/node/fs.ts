@@ -13,6 +13,12 @@ const nativePromises =
       (process as any).__kilnNativeModules?.fs?.promises || null
     : null;
 
+// The native backend's private OS descriptor operations. This is a byte/handle
+// transport; public overloads, conversion and callback timing stay in TypeScript.
+const descriptorOp: ((op: number, a: any, b?: any, c?: any) => any) | undefined =
+  (process as any).__kilnFsDescriptor;
+delete (process as any).__kilnFsDescriptor;
+
 function unmaterialized(name: string): any {
   if (nativeModule && typeof nativeModule[name] === "function") {
     return nativeModule[name];
@@ -32,11 +38,24 @@ export function existsSync(...args: any[]): any {
 export const accessSync = unmaterialized("accessSync");
 export const appendFileSync = unmaterialized("appendFileSync");
 export const chmodSync = unmaterialized("chmodSync");
-export const closeSync = unmaterialized("closeSync");
+export function closeSync(fd: any): void {
+  if (nativeModule && typeof nativeModule.closeSync === "function") return nativeModule.closeSync(fd);
+  if (typeof descriptorOp !== "function") return unmaterialized("closeSync")(fd);
+  descriptorOp(3, Number(fd));
+}
 export const copyFileSync = unmaterialized("copyFileSync");
 export const lstatSync = unmaterialized("lstatSync");
 export const mkdirSync = unmaterialized("mkdirSync");
-export const openSync = unmaterialized("openSync");
+export function openSync(path: any, flags: any = "r", mode: any = 0o666): number {
+  if (nativeModule && typeof nativeModule.openSync === "function") return nativeModule.openSync(path, flags, mode);
+  if (typeof descriptorOp !== "function") return unmaterialized("openSync")(path, flags, mode);
+  const names = ["r", "r+", "w", "wx", "w+", "wx+", "a", "ax", "a+", "ax+"];
+  const alias: Record<string, string> = { rs: "r", "rs+": "r+", xw: "wx", "xw+": "wx+", xa: "ax", "xa+": "ax+" };
+  const spelling = String(flags);
+  const which = names.indexOf(alias[spelling] || spelling);
+  if (which < 0) throw new TypeError(`Unknown file open flag: ${spelling}`);
+  return descriptorOp(1, String(path), which, Number(mode));
+}
 export const readFileSync = unmaterialized("readFileSync");
 export const readSync = unmaterialized("readSync");
 export const readdirSync = unmaterialized("readdirSync");
@@ -251,7 +270,11 @@ export const createWriteStream = unmaterialized("createWriteStream");
 export const fstatSync = unmaterialized("fstatSync");
 export const glob = unmaterialized("glob");
 export const fdatasyncSync = unmaterialized("fdatasyncSync");
-export const fsyncSync = unmaterialized("fsyncSync");
+export function fsyncSync(fd: any): void {
+  if (nativeModule && typeof nativeModule.fsyncSync === "function") return nativeModule.fsyncSync(fd);
+  if (typeof descriptorOp !== "function") return unmaterialized("fsyncSync")(fd);
+  descriptorOp(4, Number(fd));
+}
 export const ftruncateSync = unmaterialized("ftruncateSync");
 export const globSync = unmaterialized("globSync");
 // `prefix` plus six characters of `[a-z0-9]`, retried while the directory already exists.
@@ -274,7 +297,34 @@ export const truncateSync = unmaterialized("truncateSync");
 export const unwatchFile = unmaterialized("unwatchFile");
 export const watch = unmaterialized("watch");
 export const watchFile = unmaterialized("watchFile");
-export const writeSync = unmaterialized("writeSync");
+export function writeSync(fd: any, data: any, offsetOrPosition?: any,
+                          lengthOrEncoding?: any, position?: any): number {
+  if (nativeModule && typeof nativeModule.writeSync === "function") {
+    return nativeModule.writeSync(fd, data, offsetOrPosition, lengthOrEncoding, position);
+  }
+  if (typeof descriptorOp !== "function") {
+    return unmaterialized("writeSync")(fd, data, offsetOrPosition, lengthOrEncoding, position);
+  }
+  let bytes: Uint8Array;
+  let at = -1;
+  if (typeof data === "string") {
+    const encoding = typeof offsetOrPosition === "string" ? offsetOrPosition
+      : typeof lengthOrEncoding === "string" ? lengthOrEncoding : "utf8";
+    bytes = Buffer.from(data, encoding);
+    if (typeof offsetOrPosition === "number") at = offsetOrPosition;
+  } else if (ArrayBuffer.isView(data) && !(data instanceof DataView)) {
+    const offset = offsetOrPosition === undefined ? 0 : Number(offsetOrPosition);
+    const length = lengthOrEncoding === undefined ? data.byteLength - offset : Number(lengthOrEncoding);
+    if (!Number.isInteger(offset) || !Number.isInteger(length) || offset < 0 || length < 0 || offset + length > data.byteLength) {
+      throw new RangeError("The value of offset or length is out of range");
+    }
+    bytes = new Uint8Array(data.buffer, data.byteOffset + offset, length);
+    if (typeof position === "number") at = position;
+  } else {
+    throw new TypeError("The \"buffer\" argument must be a string or an ArrayBuffer view");
+  }
+  return descriptorOp(2, Number(fd), bytes, at);
+}
 
 export class FSWatcher {
   close(): void {}

@@ -53,10 +53,22 @@ function FallbackAsyncLocalStorage(this: any) {
   };
 }
 
-function FallbackAsyncResource(this: any, _type?: string, _triggerAsyncId?: any) {
+let nextAsyncResourceId = 2;
+
+function FallbackAsyncResource(this: any, _type?: string, options?: any) {
   if (!(this instanceof FallbackAsyncResource)) {
     throw new TypeError("Class constructor AsyncResource cannot be invoked without 'new'");
   }
+  const id = nextAsyncResourceId++;
+  const triggerId = options && options.triggerAsyncId !== undefined ? options.triggerAsyncId : 1;
+  this.asyncId = function asyncId() { return id; };
+  this.triggerAsyncId = function triggerAsyncId() { return triggerId; };
+  this.runInAsyncScope = function runInAsyncScope(fn: (...args: any[]) => any, thisArg?: any, ...args: any[]) {
+    if (typeof fn !== "function") {
+      throw new TypeError("The \"fn\" argument must be of type function");
+    }
+    return fn.apply(thisArg, args);
+  };
   this.bind = function bind(fn: (...args: any[]) => any, thisArg?: any) {
     if (typeof fn !== "function") {
       throw new TypeError("The \"fn\" argument must be of type function");
@@ -84,10 +96,7 @@ export const AsyncLocalStorage: any =
     ? nativeModule.AsyncLocalStorage
     : FallbackAsyncLocalStorage;
 
-export const AsyncResource: any =
-  nativeModule && typeof nativeModule.AsyncResource === "function"
-    ? nativeModule.AsyncResource
-    : FallbackAsyncResource;
+export const AsyncResource: any = FallbackAsyncResource;
 
 const asyncHooks = {
   AsyncLocalStorage,

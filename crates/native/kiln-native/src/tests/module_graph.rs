@@ -921,6 +921,34 @@ fn native_graph_reserves_commonjs_wrapper_bindings_for_the_launcher() {
         )
         .expect("native repeated CommonJS require graph builds and runs");
     assert_eq!(cached.stdout, b"true 1\n42\n");
+
+    fs::write(
+        root.path.join("pkg/index.js"),
+        "if (false) require('./dep.js'); console.log('lazy'); module.exports = 42;",
+    )
+    .expect("write conditional CommonJS require");
+    fs::write(root.path.join("pkg/dep.js"), "throw new Error('eager require');")
+        .expect("write dependency that must stay unevaluated");
+    let lazy_graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build conditional CommonJS graph");
+    let lazy = builder
+        .run_graph(
+            &lazy_graph,
+            &NativeBuildOptions {
+                output: root.path.join("lazy-program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("untaken CommonJS require must not evaluate its module");
+    assert_eq!(lazy.stdout, b"lazy\n42\n");
 }
 
 #[test]
@@ -1036,8 +1064,9 @@ fn native_commonjs_require_receives_the_builtin_projection_on_both_graph_paths()
         .expect("CommonJS module");
     let default_index = native_commonjs_projection_index(modules[util_index].0)
         .expect("builtin CommonJS projection");
-    let expected_standalone =
-        format!("*result = kiln_exports_{util_index}[{default_index}]; return 0;");
+    let expected_standalone = format!(
+        "*result = kiln_exports_{util_index}[{default_index}]; return KILN_C99_OK;"
+    );
     let expected_shared =
         format!("*result = graph->exports[{util_index}][{default_index}]; return KILN_C99_OK;");
     let launcher = graph_launcher_source(&graph, &modules, &NativeRealmPolicy::default())

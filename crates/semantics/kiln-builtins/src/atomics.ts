@@ -126,8 +126,29 @@ delete (globalThis as any).__kilnAtomics;
       const limit = timeout === undefined ? Infinity : +timeout;
       return primitive(WAIT, view, at, expected, limit !== limit ? Infinity : Math.max(limit, 0));
     } }.wait,
-    waitAsync: { waitAsync(_view: any, _index: any, _value: any, _timeout: any): any {
-      throw new Error("Atomics.waitAsync is not supported by the native backend yet");
+    waitAsync: { waitAsync(view: any, index: any, value: any, timeout: any): any {
+      const kind = validate(view, true);
+      if (objectTag.call(view.buffer) !== "[object SharedArrayBuffer]") {
+        throw new TypeError(`${objectTag.call(view)} is not a shared typed array.`);
+      }
+      const at = accessIndex(view, index);
+      const expected = operand(kind, value);
+      const limit = timeout === undefined ? Infinity : +timeout;
+      const duration = limit !== limit ? Infinity : Math.max(limit, 0);
+      if (primitive(LOAD, view, at) !== expected) return { async: false, value: "not-equal" };
+      if (duration === 0) return { async: false, value: "timed-out" };
+      // The turn loop cannot park a realm on the provider's synchronous waiter list.
+      // Observe the shared element from later turns so another realm can advance it.
+      // This also keeps a thread-stream worker alive while its parent flushes.
+      return { async: true, value: new Promise<string>((resolve) => {
+        const deadline = duration === Infinity ? Infinity : Date.now() + duration;
+        const check = () => {
+          if (primitive(LOAD, view, at) !== expected) { resolve("ok"); return; }
+          if (Date.now() >= deadline) { resolve("timed-out"); return; }
+          setTimeout(check, Math.min(10, deadline - Date.now()));
+        };
+        setTimeout(check, 1);
+      }) };
     } }.waitAsync,
     xor: { xor(view: any, index: any, value: any): any { return readModifyWrite(XOR, view, index, value); } }.xor,
   };

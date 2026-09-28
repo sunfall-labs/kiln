@@ -2946,6 +2946,11 @@ static int kiln_c99_throw_node_fs_error(kiln_value *thrown, const char *syscall,
         code_len = 6;
         msg_reason = "permission denied";
         reason_len = 17;
+    } else if (error_code == 4) {
+        code_str = "EBADF";
+        code_len = 5;
+        msg_reason = "bad file descriptor";
+        reason_len = 19;
     }
     char buf[1024];
     size_t len = 0;
@@ -2972,6 +2977,106 @@ static int kiln_c99_throw_node_fs_error(kiln_value *thrown, const char *syscall,
     }
     if (thrown != NULL) *thrown = err_val;
     return KILN_C99_THROWN;
+}
+
+/* A private descriptor transport for node:fs's TypeScript open/write/close/fsync methods.
+ * The module validates overloads and arguments; this primitive only moves bytes to an OS fd.
+ * The fd is process-wide, as Node's is, so a worker may write while its parent runs. */
+static int kiln_c99_fs_descriptor_raw(kiln_value *result, const kiln_value *args, size_t argc,
+                                       kiln_value *thrown) {
+#if defined(_WIN32)
+    (void)result; (void)args; (void)argc; (void)thrown;
+    KILN_C99_REFUSE("file descriptor I/O on Windows");
+#else
+    int op, fd, failed, error_code;
+    if (argc < 2 || args[0].tag != KILN_VALUE_NUMBER)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "invalid file descriptor operation");
+    op = (int)kiln_c99_as_number(args[0]);
+    if (op == 1) {
+        static const int flags[] = {
+            O_RDONLY, O_RDWR, O_WRONLY | O_CREAT | O_TRUNC,
+            O_WRONLY | O_CREAT | O_EXCL, O_RDWR | O_CREAT | O_TRUNC,
+            O_RDWR | O_CREAT | O_EXCL, O_WRONLY | O_CREAT | O_APPEND,
+            O_WRONLY | O_CREAT | O_APPEND | O_EXCL, O_RDWR | O_CREAT | O_APPEND,
+            O_RDWR | O_CREAT | O_APPEND | O_EXCL
+        };
+        uint8_t *path_bytes = NULL;
+        size_t path_len = 0;
+        char *path;
+        int which, mode, status;
+        if (args[1].tag != KILN_VALUE_STRING || argc < 4 ||
+            args[2].tag != KILN_VALUE_NUMBER || args[3].tag != KILN_VALUE_NUMBER)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "invalid file open arguments");
+        which = (int)kiln_c99_as_number(args[2]);
+        if (which < 0 || (size_t)which >= sizeof(flags) / sizeof(flags[0]))
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "invalid file open flags");
+        mode = (int)kiln_c99_as_number(args[3]);
+        status = kiln_c99_string_to_utf8_lossy(args[1], &path_bytes, &path_len);
+        if (status != KILN_C99_OK) return status;
+        path = (char *)malloc(path_len + 1);
+        if (path == NULL) { free(path_bytes); return KILN_C99_OUT_OF_MEMORY; }
+        memcpy(path, path_bytes, path_len);
+        path[path_len] = '\0';
+        fd = open(path, flags[which], (mode_t)mode);
+        error_code = errno;
+        free(path_bytes);
+        if (fd < 0) {
+            status = kiln_c99_throw_node_fs_error(thrown, "open", 4, path, path_len,
+                      error_code == ENOENT ? 1 : error_code == EEXIST ? 2 :
+                      error_code == EACCES ? 3 : error_code == EBADF ? 4 : 0);
+            free(path);
+            return status;
+        }
+        free(path);
+        *result = kiln_c99_number((double)fd);
+        return KILN_C99_OK;
+    }
+    if (args[1].tag != KILN_VALUE_NUMBER)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "invalid file descriptor");
+    fd = (int)kiln_c99_as_number(args[1]);
+    if (op == 2) {
+        kiln_typed_array *view;
+        const uint8_t *bytes;
+        size_t length;
+        ssize_t written;
+        double position;
+        if (argc < 4 || args[2].tag != KILN_VALUE_TYPED_ARRAY ||
+            args[3].tag != KILN_VALUE_NUMBER)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "invalid file write arguments");
+        view = kiln_c99_typed_array_of(args[2]);
+        if (view->kind != KILN_TYPED_UINT8)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "file write requires bytes");
+        bytes = view->buffer->bytes + view->byte_offset;
+        length = view->length;
+        position = kiln_c99_as_number(args[3]);
+        written = position < 0 ? write(fd, bytes, length)
+                               : pwrite(fd, bytes, length, (off_t)position);
+        if (written < 0) {
+            error_code = errno;
+            return kiln_c99_throw_node_fs_error(thrown, "write", 5, NULL, 0,
+                   error_code == EBADF ? 4 : error_code == EACCES ? 3 : 0);
+        }
+        *result = kiln_c99_number((double)written);
+        return KILN_C99_OK;
+    }
+    if (op == 3) failed = close(fd);
+    else if (op == 4) failed = fsync(fd);
+    else return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                     "invalid file descriptor operation");
+    if (failed != 0) {
+        error_code = errno;
+        return kiln_c99_throw_node_fs_error(thrown, op == 3 ? "close" : "fsync",
+               op == 3 ? 5 : 5, NULL, 0, error_code == EBADF ? 4 : 0);
+    }
+    *result = kiln_c99_undefined();
+    return KILN_C99_OK;
+#endif
 }
 
 static int kiln_c99_node_fs_sync(kiln_host *host, kiln_value *result, uint64_t code,

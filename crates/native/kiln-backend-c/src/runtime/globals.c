@@ -107,6 +107,9 @@ static int kiln_c99_process_object(kiln_value *out) {
         return KILN_C99_OK;
     }
     status = kiln_c99_new_object(process);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, *process, "__kilnFsDescriptor", 18,
+                              kiln_c99_method(KILN_C99_METHOD_FS_DESCRIPTOR_RAW), 0, NULL);
     /* Demand-driven prelude: `process` is an emitter only in builds that
      * retain the event group (see `retained_method_groups`). Reaching this
      * initializer requires the `process` global, which retains the group,

@@ -1111,6 +1111,8 @@ method_ids! {
     // deleted by `kiln-builtins/src/arraybuffer.ts` and `atomics.ts`.
     (KILN_C99_METHOD_SHARED_BUFFER_RAW, 541, Direct; 0, 0),
     (KILN_C99_METHOD_ATOMICS_RAW, 542, Direct; 0, 0),
+    // File descriptor I/O below node:fs's TypeScript checks and callback adapters.
+    (KILN_C99_METHOD_FS_DESCRIPTOR_RAW, 543, Direct; 0, 0),
     (KILN_C99_METHOD_PROCESS_EXIT, 513, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC, 514, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC, 515, Direct; 0, 0),
@@ -2695,6 +2697,7 @@ macro_rules! header_prefix {
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include <ctype.h>
+#include <errno.h>
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -2704,6 +2707,7 @@ macro_rules! header_prefix {
 /* The SIGUSR1 introspection dump. `signal.h` is C89 everywhere, but `sigaction`, `SIGUSR1` and
  * `write` are POSIX, so a non-POSIX target compiles the same prelude with the dump inert. */
 #if defined(__unix__) || defined(__APPLE__)
+#include <fcntl.h>
 #include <signal.h>
 #include <unistd.h>
 #endif
@@ -3743,6 +3747,7 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_PORT_WAIT_RAW),
     emit_method_define!(KILN_C99_METHOD_SHARED_BUFFER_RAW),
     emit_method_define!(KILN_C99_METHOD_ATOMICS_RAW),
+    emit_method_define!(KILN_C99_METHOD_FS_DESCRIPTOR_RAW),
     emit_method_define!(KILN_C99_METHOD_PROCESS_EXIT),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC),

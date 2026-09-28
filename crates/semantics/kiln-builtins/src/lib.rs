@@ -156,6 +156,7 @@ declare_ts_builtins! {
         compilation_test: events_builtin_compiles_cleanly,
         exports: [
             "EventEmitter",
+            "EventEmitterAsyncResource",
             "once",
             "on",
             "getEventListeners",
@@ -1294,6 +1295,11 @@ pub const REGEXP_BOOTSTRAP_SOURCE: &str = include_str!("regexp.ts");
 /// `ArrayBuffer.prototype` and `SharedArrayBuffer.prototype` extensions.
 pub const ARRAYBUFFER_BOOTSTRAP_SOURCE: &str = include_str!("arraybuffer.ts");
 
+/// FinalizationRegistry's language checks for the native backend. The interpreter already
+/// provides this builtin; native installs the TypeScript constructor before arraybuffer.ts
+/// captures its native-backend marker.
+pub const WEAK_REFS_BOOTSTRAP_SOURCE: &str = include_str!("weak_refs.ts");
+
 /// `Atomics` over the native backend's element primitive and the runtime's waiter list (realms
 /// issue 06); installs nothing in the interpreter, whose `Atomics` is its own.
 pub const ATOMICS_BOOTSTRAP_SOURCE: &str = include_str!("atomics.ts");
@@ -1333,6 +1339,7 @@ pub fn common_bootstrap_source() -> String {
         ANNEXB_BOOTSTRAP_SOURCE,
         DISPOSABLE_BOOTSTRAP_SOURCE,
         REGEXP_BOOTSTRAP_SOURCE,
+        WEAK_REFS_BOOTSTRAP_SOURCE,
         ARRAYBUFFER_BOOTSTRAP_SOURCE,
         ATOMICS_BOOTSTRAP_SOURCE,
         STRUCTURED_CLONE_BOOTSTRAP_SOURCE,

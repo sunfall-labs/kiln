@@ -493,14 +493,15 @@ static int kiln_c99_shared_buffer_raw(kiln_value *out, const kiln_value *args, s
 #define KILN_C99_ATOMICS_WAIT 10
 #define KILN_C99_ATOMICS_NOTIFY 11
 
-/* The element bits a number operand stands for: `ToIntegerOrInfinity` was the caller's, and the
- * store is modulo 2^64 before the element's width cuts it, as a typed array's own store is. */
+/* Number-backed atomic views are at most 32 bits wide. Reduce at that width: adding 2^64 to a
+ * negative remainder rounds small values (including -1) to 2^64 in double precision, turning
+ * the end marker of a shared Int32Array into zero. */
 static uint64_t kiln_c99_atomics_number_bits(double number) {
     double wrapped;
     if (!isfinite(number)) return 0;
-    wrapped = fmod(trunc(number), 18446744073709551616.0);
-    if (wrapped < 0) wrapped += 18446744073709551616.0;
-    return wrapped >= 18446744073709551616.0 ? 0 : (uint64_t)wrapped;
+    wrapped = fmod(trunc(number), 4294967296.0);
+    if (wrapped < 0) wrapped += 4294967296.0;
+    return (uint64_t)wrapped;
 }
 
 static int kiln_c99_atomics_operand(kiln_typed_kind kind, kiln_value value, uint64_t *out,

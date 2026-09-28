@@ -1,5 +1,7 @@
 // kiln-builtins: node:events implementation (Phase 5.2, ADR 0005)
 
+import { AsyncResource } from "node:async_hooks";
+
 export class EventEmitter {
   static defaultMaxListeners: number = 10;
   static captureRejectionSymbol: symbol = Symbol.for("nodejs.rejection");
@@ -272,9 +274,38 @@ export class EventEmitter {
   }
 }
 
+// The emitter owns an AsyncResource so listeners run in the context in which the
+// emitter was created. Piscina also passes this resource's asyncId to each task.
+export class EventEmitterAsyncResource extends EventEmitter {
+  #resource: any;
+
+  constructor(options: any = {}) {
+    super();
+    if (options === null || typeof options !== "object") {
+      throw new TypeError("The \"options\" argument must be of type object");
+    }
+    const name = options.name === undefined ? new.target.name : options.name;
+    this.#resource = new AsyncResource(name, options);
+    this.#resource.eventEmitter = this;
+  }
+
+  emit(type: string | symbol, ...args: any[]): boolean {
+    return this.#resource.runInAsyncScope(EventEmitter.prototype.emit, this, type, ...args);
+  }
+
+  emitDestroy(): void {
+    this.#resource.emitDestroy();
+  }
+
+  get asyncId(): number { return this.#resource.asyncId(); }
+  get triggerAsyncId(): number { return this.#resource.triggerAsyncId(); }
+  get asyncResource(): any { return this.#resource; }
+}
+
 // Aliases
 EventEmitter.EventEmitter = EventEmitter;
 EventEmitter.default = EventEmitter;
+(EventEmitter as any).EventEmitterAsyncResource = EventEmitterAsyncResource;
 
 // Ensure addListener and on reference the exact same function object
 EventEmitter.prototype.on = EventEmitter.prototype.addListener;

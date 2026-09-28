@@ -3083,6 +3083,7 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
         writeln!(output, "    if ({matches}) {{ *matched = 1; return kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, thrown); }}").unwrap();
     }
     output.push_str("    (void)graph; (void)specifier; (void)result; (void)thrown;\n    return KILN_C99_OK;\n}\n");
+    output.push_str("static int kiln_graph_ensure_module(kiln_graph_context *graph, size_t index);\n");
     for (index, (node, _)) in modules.iter().enumerate() {
         writeln!(
             output,
@@ -3116,7 +3117,7 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
                 };
                 writeln!(
                     output,
-                    "    if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ *result = kiln_exports_{provider_index}[{commonjs_export}]; return 0; }}"
+                    "    if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->module_states[{provider_index}].result; return status; }} *result = kiln_exports_{provider_index}[{commonjs_export}]; return KILN_C99_OK; }}"
                 )
                 .unwrap();
             }
@@ -3682,17 +3683,24 @@ static int kiln_graph_enter(void *opaque) {
             );
         }
 
-        let static_dependencies: Vec<usize> = node
-            .dependencies
-            .iter()
-            .filter(|dependency| {
-                node.program
-                    .dependencies
-                    .iter()
-                    .any(|specifier| specifier == &dependency.specifier)
-            })
-            .filter_map(|dependency| indices.get(&dependency.target).copied())
-            .collect();
+        // ESM imports are evaluated before the module body. CommonJS `require()` calls
+        // are expressions: a literal inside a function or an untaken branch must wait
+        // until that call actually runs. The CommonJS loader below ensures the target
+        // at the call site.
+        let static_dependencies: Vec<usize> = if node.source == ModuleSource::CommonJs {
+            Vec::new()
+        } else {
+            node.dependencies
+                .iter()
+                .filter(|dependency| {
+                    node.program
+                        .dependencies
+                        .iter()
+                        .any(|specifier| specifier == &dependency.specifier)
+                })
+                .filter_map(|dependency| indices.get(&dependency.target).copied())
+                .collect()
+        };
         for (dependency_cursor, provider_index) in static_dependencies.iter().enumerate() {
             writeln!(
                 evaluation,
@@ -3943,7 +3951,12 @@ static int kiln_graph_enter(void *opaque) {
     );
     for index in 0..modules.len() {
         writeln!(output, "        case {index}: {{").unwrap();
-        for (dependency_index, dependency) in modules[index].0.dependencies.iter().enumerate() {
+        let dependencies = if modules[index].0.source == ModuleSource::CommonJs {
+            &[][..]
+        } else {
+            &modules[index].0.dependencies[..]
+        };
+        for (dependency_index, dependency) in dependencies.iter().enumerate() {
             if let Some(&provider) = indices.get(&dependency.target) {
                 writeln!(
                     output,

@@ -1477,6 +1477,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         return kiln_c99_shared_buffer_raw(result, args, argc, thrown);
     if (code == KILN_C99_METHOD_ATOMICS_RAW)
         return kiln_c99_atomics_raw(result, args, argc, thrown);
+    if (code == KILN_C99_METHOD_FS_DESCRIPTOR_RAW)
+        return kiln_c99_fs_descriptor_raw(result, args, argc, thrown);
     if (code == KILN_C99_METHOD_PROMISE_REJECTIONS_RAW)
         return kiln_c99_promise_rejections_raw(result, args, argc);
     if ((code & KILN_C99_FFI_DYNAMIC_BASE) != 0 ||

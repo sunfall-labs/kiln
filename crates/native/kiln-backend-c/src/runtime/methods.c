@@ -207,6 +207,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_PORT_WAIT_RAW: return "__kilnPortWait";
     case KILN_C99_METHOD_SHARED_BUFFER_RAW: return "__kilnSharedBuffer";
     case KILN_C99_METHOD_ATOMICS_RAW: return "__kilnAtomics";
+    case KILN_C99_METHOD_FS_DESCRIPTOR_RAW: return "__kilnFsDescriptor";
     case KILN_C99_METHOD_JOBS_PENDING_RAW: return "__kilnJobsPending";
     case KILN_C99_METHOD_QUEUE_IO_RAW: return "__kilnQueueIo";
     case KILN_C99_METHOD_PROMISE_REJECTIONS_RAW: return "__kilnPromiseRejections";

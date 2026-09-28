@@ -1060,8 +1060,9 @@ fn runtime_prelude_size() {
     // walker (realms issue 21); the resulting prelude has 59,001 lines. Leave a small margin.
     // Realm-local moved-buffer GC accounting and safe heap splicing (realms issue 21) bring it
     // to 59,088 lines.
+    // Descriptor I/O for the pino transport adds about 130 lines (realms issue 06).
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 59_200;
+    const CEILING_LINES: usize = 59_400;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
