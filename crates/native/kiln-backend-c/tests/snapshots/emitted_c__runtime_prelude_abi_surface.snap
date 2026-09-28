@@ -980,6 +980,9 @@ typedef struct kiln_shape_edge_table {
 #define KILN_C99_ATTR_FIXED 4u       /* not configurable */
 #define KILN_C99_ATTR_ACCESSOR 8u    /* the slot holds an accessor pair */
 typedef struct kiln_property {
+typedef struct kiln_sealed_property {
+typedef struct kiln_sealed_layout {
+#define KILN_C99_SEALED_GLOBAL_CODE UINT64_MAX
 #define KILN_C99_INLINE_SLOTS 8
 typedef struct kiln_object {
 typedef struct kiln_shared_facade {
@@ -2314,6 +2317,12 @@ static void kiln_c99_gc_result_roots(void *opaque, void *context, int phase) {
 static char *kiln_c99_gc_alloc_text(size_t len) {
 static char *kiln_c99_gc_alloc_text_tenured(size_t len) {
 static size_t kiln_c99_gc_alloc_text_run(size_t count, const size_t *lens, char **out) {
+typedef struct kiln_c99_graph_capsule_requirements {
+typedef struct kiln_c99_graph_capsule {
+static int kiln_c99_graph_capsule_prepare(const kiln_gc_heap *from, kiln_nursery_chunk *chunk,
+static int kiln_c99_graph_capsule_receiver_preflight(
+static int kiln_c99_graph_capsule_detach(kiln_gc_heap *from, kiln_c99_graph_capsule *capsule) {
+static void kiln_c99_graph_capsule_adopt(kiln_gc_heap *to, kiln_c99_graph_capsule *capsule,
 static int kiln_c99_accessor_pair_new(kiln_value getter, kiln_value setter, kiln_val *out) {
 static kiln_value kiln_c99_accessor_pair_half(kiln_val pair, int which) {
 static inline struct kiln_shape *kiln_c99_shape_root(void) {
@@ -2354,9 +2363,14 @@ static void kiln_c99_shape_property(const kiln_object *object, uint32_t slot,
 static int kiln_c99_ensure_dictionary(kiln_object *object) {
 static int kiln_c99_property_walk(kiln_object *object, size_t *count) {
 static const kiln_property *kiln_c99_property_view(const kiln_object *object, size_t index,
+static kiln_value kiln_c99_object_prototype_read(kiln_value owner) {
+static int kiln_c99_property_walk_value(kiln_value owner, size_t *count) {
+static int kiln_c99_property_view_value(kiln_value owner, size_t index,
 static int kiln_c99_final_builtin_attrs(const kiln_property *property, uint8_t *attrs,
 static int kiln_c99_final_builtin_matches(const kiln_shape *shape, const kiln_object *object) {
 static void kiln_c99_final_builtin_store(uint32_t tag, uint64_t code, kiln_object *object) {
+static const kiln_sealed_layout *kiln_c99_sealed_layout_find(uint32_t tag, uint64_t code) {
+static void kiln_c99_sealed_layout_publish(uint32_t tag, uint64_t code,
 static int kiln_c99_new_object(kiln_value *out) {
 static int kiln_c99_new_shared_facade(uint32_t graph, uint32_t generation, uint32_t node,
 static int kiln_c99_shared_field_key(uint64_t lease, uint64_t index, kiln_value *out,
@@ -2458,6 +2472,7 @@ static int kiln_c99_same_key_view(const kiln_property *property, const kiln_stri
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len) {
 static size_t kiln_c99_own_index_key(const kiln_object *object, const kiln_string *ikey,
 static int kiln_c99_property_read_own(const kiln_object *object, const kiln_string *key,
+static int kiln_c99_property_read_own_value(kiln_value owner, const kiln_string *key,
 static void kiln_c99_gc_trace_object_properties(kiln_gc_heap *heap,
 static int kiln_c99_property_key_snapshot(kiln_object *object, kiln_value *out) {
 static size_t kiln_c99_own_index(const kiln_object *object, const kiln_string *ikey,
@@ -2932,6 +2947,7 @@ static int kiln_c99_intrinsic_ascii_view(const kiln_string *key, char buffer[256
 static kiln_value kiln_c99_key_value(const kiln_string *view, const kiln_string **canonical) {
 #include <assert.h>
 static kiln_value kiln_c99_stable_key_value(const kiln_string *stable) {
+static int kiln_c99_store_has(kiln_value store, const kiln_string *key,
 static int kiln_c99_prototype_store_read(kiln_host *host, uint64_t prototype,
 static int kiln_c99_written_prototype_read(kiln_host *host, uint64_t prototype,
 #define KILN_C99_WRITTEN_MEMBER_FIRST(prototype)                                                   \

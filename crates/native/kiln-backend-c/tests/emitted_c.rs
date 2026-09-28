@@ -1071,8 +1071,10 @@ fn runtime_prelude_size() {
     // bring the measured prelude to 61,502 lines.
     // Actor grant registration and the claimed-lane graph refusal callback (issue 10)
     // bring the measured prelude to 61,877 lines.
+    // The detached one-chunk graph capsule, process bootstrap descriptor table and projected
+    // bootstrap readers (issues 10 and 08) bring the measured prelude to 62,166 lines.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 62_000;
+    const CEILING_LINES: usize = 62_400;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
