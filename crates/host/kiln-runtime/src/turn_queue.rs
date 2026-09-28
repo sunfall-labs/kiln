@@ -1,7 +1,7 @@
 //! Coalesced ready tickets for the realm turn scheduler (ADR 0070).
 //!
 //! A ticket is the only cross-thread name for a realm. Its owner stores the realm itself behind
-//! an exclusive lane lease; this queue never contains a pointer into language state. A wake that
+//! an exclusive turn lease; this queue never contains a pointer into language state. A wake that
 //! races the end of a running turn is remembered and queues exactly one successor turn.
 
 use std::collections::VecDeque;
@@ -11,30 +11,56 @@ use std::time::{Duration, Instant};
 /// One source of ready tickets, shared by scheduler lanes.
 pub struct ReadyQueue {
     state: Mutex<QueueState>,
-    changed: Condvar,
+    changed: Vec<Condvar>,
 }
 
 struct QueueState {
-    tickets: VecDeque<(Arc<TurnTicket>, u64)>,
+    movable: VecDeque<(Arc<TurnTicket>, u64)>,
+    pinned: Vec<VecDeque<(Arc<TurnTicket>, u64)>>,
+    waiting: Vec<bool>,
+    prefer_pinned: Vec<bool>,
+    next_wake: usize,
     closed: bool,
 }
 
 impl ReadyQueue {
     /// Create an empty queue. The caller owns its lanes and closes it at shutdown.
     pub fn new() -> Arc<Self> {
+        Self::with_lanes(1)
+    }
+
+    /// Create one ready source with a private queue and condition variable for each lane.
+    /// Movable tickets can be claimed by any lane; pinned tickets wake their owner directly.
+    pub fn with_lanes(lanes: usize) -> Arc<Self> {
+        let lanes = lanes.max(1);
         Arc::new(Self {
             state: Mutex::new(QueueState {
-                tickets: VecDeque::new(),
+                movable: VecDeque::new(),
+                pinned: (0..lanes).map(|_| VecDeque::new()).collect(),
+                waiting: vec![false; lanes],
+                prefer_pinned: vec![true; lanes],
+                next_wake: 0,
                 closed: false,
             }),
-            changed: Condvar::new(),
+            changed: (0..lanes).map(|_| Condvar::new()).collect(),
         })
     }
 
     /// Register an opaque realm identity. Its first turn is queued by calling `wake`.
     pub fn ticket(self: &Arc<Self>, realm_id: u64) -> Arc<TurnTicket> {
+        self.make_ticket(realm_id, None)
+    }
+
+    /// Register a ticket whose owner may only run on `lane`.
+    pub fn ticket_on_lane(self: &Arc<Self>, realm_id: u64, lane: usize) -> Arc<TurnTicket> {
+        assert!(lane < self.changed.len(), "scheduler lane exists");
+        self.make_ticket(realm_id, Some(lane))
+    }
+
+    fn make_ticket(self: &Arc<Self>, realm_id: u64, lane: Option<usize>) -> Arc<TurnTicket> {
         Arc::new(TurnTicket {
             realm_id,
+            lane,
             queue: Arc::downgrade(self),
             state: Mutex::new(TicketState {
                 generation: 1,
@@ -49,22 +75,46 @@ impl ReadyQueue {
         if state.closed {
             return false;
         }
-        state.tickets.push_back((ticket, generation));
-        self.changed.notify_one();
+        if let Some(lane) = ticket.lane {
+            state.pinned[lane].push_back((ticket, generation));
+            self.changed[lane].notify_one();
+        } else {
+            state.movable.push_back((ticket, generation));
+            let lanes = state.waiting.len();
+            for offset in 0..lanes {
+                let lane = (state.next_wake + offset) % lanes;
+                if state.waiting[lane] {
+                    state.next_wake = (lane + 1) % lanes;
+                    self.changed[lane].notify_one();
+                    break;
+                }
+            }
+        }
         true
     }
 
     /// Wait for a ready ticket. Stale generations and cancelled tickets are discarded.
     pub fn take(&self) -> Option<TurnLease> {
-        self.take_until(None)
+        self.take_until(0, None)
     }
 
     /// Wait no longer than `timeout` for a ready ticket.
     pub fn take_timeout(&self, timeout: Duration) -> Option<TurnLease> {
-        self.take_until(Some(Instant::now() + timeout))
+        self.take_until(0, Some(Instant::now() + timeout))
     }
 
-    fn take_until(&self, deadline: Option<Instant>) -> Option<TurnLease> {
+    /// Wait for either a movable ticket or one pinned to this lane.
+    pub fn take_for_lane(&self, lane: usize) -> Option<TurnLease> {
+        self.take_until(lane, None)
+    }
+
+    /// Wait no longer than `timeout` for a ticket runnable on this lane.
+    pub fn take_timeout_for_lane(&self, lane: usize, timeout: Duration) -> Option<TurnLease> {
+        self.take_until(lane, Some(Instant::now() + timeout))
+    }
+
+    fn take_until(&self, lane: usize, deadline: Option<Instant>) -> Option<TurnLease> {
+        assert!(lane < self.changed.len(), "scheduler lane exists");
         loop {
             // Release the queue lock before taking the ticket lock. Wake takes the locks in the
             // other order, so holding both here would deadlock at a turn boundary.
@@ -74,21 +124,38 @@ impl ReadyQueue {
                     if state.closed {
                         return None;
                     }
-                    if let Some(entry) = state.tickets.pop_front() {
+                    let entry = if state.prefer_pinned[lane] {
+                        state.pinned[lane]
+                            .pop_front()
+                            .map(|entry| (entry, true))
+                            .or_else(|| state.movable.pop_front().map(|entry| (entry, false)))
+                    } else {
+                        state
+                            .movable
+                            .pop_front()
+                            .map(|entry| (entry, false))
+                            .or_else(|| state.pinned[lane].pop_front().map(|entry| (entry, true)))
+                    };
+                    if let Some((entry, was_pinned)) = entry {
+                        state.prefer_pinned[lane] = !was_pinned;
+                        state.waiting[lane] = false;
                         break entry;
                     }
+                    state.waiting[lane] = true;
                     if let Some(deadline) = deadline {
                         let remaining = deadline.saturating_duration_since(Instant::now());
                         if remaining.is_zero() {
+                            state.waiting[lane] = false;
                             return None;
                         }
-                        let (next, _) = self
-                            .changed
+                        let (next, _) = self.changed[lane]
                             .wait_timeout(state, remaining)
                             .expect("ready queue lock poisoned");
                         state = next;
                     } else {
-                        state = self.changed.wait(state).expect("ready queue lock poisoned");
+                        state = self.changed[lane]
+                            .wait(state)
+                            .expect("ready queue lock poisoned");
                     }
                 }
             };
@@ -111,8 +178,13 @@ impl ReadyQueue {
     pub fn close(&self) {
         let mut state = self.state.lock().expect("ready queue lock poisoned");
         state.closed = true;
-        state.tickets.clear();
-        self.changed.notify_all();
+        state.movable.clear();
+        for pinned in &mut state.pinned {
+            pinned.clear();
+        }
+        for changed in &self.changed {
+            changed.notify_all();
+        }
     }
 }
 
@@ -133,6 +205,7 @@ struct TicketState {
 /// An opaque realm identity and generation, never a language-state pointer.
 pub struct TurnTicket {
     realm_id: u64,
+    lane: Option<usize>,
     queue: Weak<ReadyQueue>,
     state: Mutex<TicketState>,
 }
@@ -364,5 +437,47 @@ mod tests {
             assert!(queue.take_timeout(Duration::from_millis(1)).is_none());
         }
         lease.finish(TurnOutcome::Done);
+    }
+
+    #[test]
+    fn pinned_tickets_stay_on_their_lane_and_movable_tickets_can_be_claimed_elsewhere() {
+        let queue = ReadyQueue::with_lanes(3);
+        let pinned = queue.ticket_on_lane(7, 2);
+        let movable = queue.ticket(8);
+        pinned.wake();
+        assert!(
+            queue
+                .take_timeout_for_lane(0, Duration::from_millis(1))
+                .is_none()
+        );
+        movable.wake();
+        let lease = queue
+            .take_timeout_for_lane(0, Duration::from_millis(10))
+            .expect("movable ticket can run on lane zero");
+        assert_eq!(lease.realm_id(), 8);
+        lease.finish(TurnOutcome::Done);
+        let lease = queue
+            .take_timeout_for_lane(2, Duration::from_millis(10))
+            .expect("pinned ticket reaches its owner");
+        assert_eq!(lease.realm_id(), 7);
+        lease.finish(TurnOutcome::Done);
+    }
+
+    #[test]
+    fn movable_ticket_wakes_a_waiting_lane() {
+        let queue = ReadyQueue::with_lanes(2);
+        let ticket = queue.ticket(11);
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let lease = queue
+                    .take_timeout_for_lane(1, Duration::from_secs(1))
+                    .expect("second lane is notified");
+                assert_eq!(lease.realm_id(), 11);
+                lease.finish(TurnOutcome::Done);
+            });
+            std::thread::sleep(Duration::from_millis(10));
+            ticket.wake();
+            worker.join().unwrap();
+        });
     }
 }
