@@ -104,7 +104,7 @@ fn native_shared_facade_reads_copied_fields_and_realm_prototype() {
         .expect("empty program emits runtime prelude");
     let wrapper = r#"
 int main(void) {
-    kiln_value shared, answer;
+    kiln_value shared, answer, keys;
     int status;
     if (kiln_c99_new_shared_facade(17, 1, 0, &shared) != KILN_C99_OK) return 1;
     status = kiln_c99_get(NULL, shared, "x", 1, &answer, 0, NULL);
@@ -113,7 +113,15 @@ int main(void) {
     status = kiln_c99_get(NULL, shared, "toString", 8, &answer, 0, NULL);
     if (status != KILN_C99_OK || answer.tag != KILN_VALUE_METHOD) return 3;
     status = kiln_c99_get(NULL, shared, "absent", 6, &answer, 0, NULL);
-    return status == KILN_C99_OK && answer.tag == KILN_VALUE_UNDEFINED ? 0 : 4;
+    if (status != KILN_C99_OK || answer.tag != KILN_VALUE_UNDEFINED) return 4;
+    status = kiln_c99_all_own_keys(NULL, shared, &keys, 0, NULL);
+    if (status != KILN_C99_OK || keys.tag != KILN_VALUE_ARRAY ||
+        kiln_c99_array_of(keys)->count != 1 ||
+        !kiln_test_units_equal(kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[0]),
+                               "x", 1)) return 5;
+    status = kiln_c99_own_keys(NULL, shared, &keys, 0, NULL);
+    return status == KILN_C99_OK && keys.tag == KILN_VALUE_ARRAY &&
+           kiln_c99_array_of(keys)->count == 1 ? 0 : 6;
 }
 "#;
     let run = run_with_main(&generated, wrapper, "shared-facade-read");

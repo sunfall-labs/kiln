@@ -248,6 +248,23 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
     if (status != KILN_C99_OK) {
         return status;
     }
+    if (target.tag == KILN_VALUE_SHARED) {
+        kiln_shared_facade *facade = (kiln_shared_facade *)(uintptr_t)target.bits;
+        kiln_shared_info node;
+        uint64_t lease = kiln_shared_graph_retain(facade->graph, facade->generation, facade->node);
+        if (lease == 0) return KILN_C99_INVALID_ARGUMENT;
+        status = kiln_shared_graph_info(lease, &node) == 0 ? KILN_C99_OK : KILN_C99_INVALID_ARGUMENT;
+        for (uint64_t at = 0; status == KILN_C99_OK && at < node.field_count; ++at) {
+            kiln_value key;
+            status = kiln_c99_shared_field_key(lease, at, &key, NULL);
+            if (status == KILN_C99_OK) status = kiln_c99_array_push(built, key);
+        }
+        if (status == KILN_C99_OK && node.array)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("length", 6));
+        (void)kiln_shared_graph_release(lease);
+        if (status == KILN_C99_OK) *out = built;
+        return status;
+    }
     if (target.tag == KILN_VALUE_TYPED_ARRAY) {
         kiln_typed_array *view = kiln_c99_typed_array_of(target);
         for (index = 0; index < view->length && status == KILN_C99_OK; ++index) {

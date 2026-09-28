@@ -828,6 +828,30 @@ static int kiln_c99_new_shared_facade(uint32_t graph, uint32_t generation, uint3
     return KILN_C99_OK;
 }
 
+/* Copy one graph key into this realm. Provider field reads never return an arena pointer; the
+ * facade lease protects the graph while both copies are made. */
+static int kiln_c99_shared_field_key(uint64_t lease, uint64_t index, kiln_value *out,
+                                     int *enumerable) {
+    kiln_shared_field_info field;
+    uint16_t small[64];
+    uint16_t *units = small;
+    int status;
+    if (kiln_shared_graph_field(lease, index, &field, NULL, 0, NULL, 0) != 0 ||
+        field.key_length > SIZE_MAX / sizeof(uint16_t)) return KILN_C99_INVALID_ARGUMENT;
+    if (field.key_length > sizeof small / sizeof small[0]) {
+        units = (uint16_t *)malloc((size_t)field.key_length * sizeof(uint16_t));
+        if (units == NULL) return KILN_C99_OUT_OF_MEMORY;
+    }
+    status = kiln_shared_graph_field(lease, index, &field, units, field.key_length, NULL, 0);
+    if (status == 0) {
+        *out = kiln_c99_from_units(units, (size_t)field.key_length);
+        if (out->tag != KILN_VALUE_STRING) status = -1;
+        if (enumerable != NULL) *enumerable = field.enumerable != 0;
+    }
+    if (units != small) free(units);
+    return status == 0 ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+}
+
 /* The source IDs passed to the Rust builder identify a live C heap object during this one
  * synchronous call. The low bits distinguish arrays from records without giving Rust a C
  * pointer layout. No callback allocates in the C heap or calls JavaScript. */

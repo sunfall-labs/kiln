@@ -182,6 +182,9 @@ static int kiln_c99_shared_own_read(kiln_value target, const kiln_string *key,
     *found = 0;
     if (facade == NULL || facade->lease == 0 || kiln_shared_graph_info(facade->lease, &node) != 0)
         return KILN_C99_INVALID_ARGUMENT;
+    /* A sealed graph has only string keys. A Symbol whose private key has the same code units
+     * must not read the string field. */
+    if (kiln_c99_key_is_symbol(key)) return KILN_C99_OK;
     if (node.array && kiln_c99_same_name_key(key, "length")) {
         *out = kiln_c99_number((double)node.length);
         *found = 1;
