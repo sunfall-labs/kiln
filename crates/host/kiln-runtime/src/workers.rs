@@ -523,16 +523,27 @@ pub fn actor_claim_reservation(
         return None;
     }
     let receiver_realm = actor_receiver_for_sender(sender)?;
-    let receiver = {
-        let ports = ports();
-        ports.endpoints.get(&sender)?.peer
+    let ports = ports();
+    let receiver = ports.endpoints.get(&sender)?.peer;
+    // The sender names its own reply endpoint. The grant records the receiver's
+    // transferred endpoint; both must still be the live ends of one channel.
+    let reply_peer = {
+        let endpoint = ports.endpoints.get(&reply)?;
+        if endpoint.peer == 0 || endpoint.peer_closed {
+            return None;
+        }
+        let peer = ports.endpoints.get(&endpoint.peer)?;
+        if peer.peer != reply || peer.peer_closed {
+            return None;
+        }
+        endpoint.peer
     };
     let mut reservations = lock(actor_reservations());
     let entry = reservations.get_mut(&reservation)?;
     if entry.receiver != receiver
         || entry.receiver_realm != receiver_realm
         || entry.request != request
-        || entry.reply != reply
+        || entry.reply != reply_peer
         || entry.sender_realm.is_some()
         || entry.state != ActorReservationState::Pending
         || entry.closing
@@ -2277,19 +2288,31 @@ mod tests {
         assert!((1..=MAX_JS_SAFE_INTEGER).contains(&reservation));
         assert!(actor_reserve_for_worker(receiver, 71, 91, 42, reply_receiver).is_none());
         assert_eq!(
-            actor_claim_reservation(sender, reservation, 43, reply_receiver, 81, 1),
+            actor_claim_reservation(sender, reservation, 43, reply_sender, 81, 1),
             None
         );
         assert_eq!(
             actor_claim_reservation(sender, reservation, 42, reply_sender, 81, 1),
-            None
+            Some(71)
         );
+        actor_unclaim_reservation(reservation, 81, 1);
         assert_eq!(
             actor_claim_reservation(sender, reservation, 42, reply_receiver, 81, 1),
+            None
+        );
+        let (unrelated_sender, unrelated_receiver) = channel();
+        assert_eq!(
+            actor_claim_reservation(sender, reservation, 42, unrelated_sender, 81, 1),
+            None
+        );
+        close(unrelated_sender);
+        close(unrelated_receiver);
+        assert_eq!(
+            actor_claim_reservation(sender, reservation, 42, reply_sender, 81, 1),
             Some(71)
         );
         assert_eq!(
-            actor_claim_reservation(sender, reservation, 42, reply_receiver, 82, 2),
+            actor_claim_reservation(sender, reservation, 42, reply_sender, 82, 2),
             None
         );
         actor_unclaim_reservation(reservation, 82, 2);
@@ -2312,7 +2335,7 @@ mod tests {
         let (other_sender, other_receiver) = channel();
         let other = actor_reserve_for_worker(receiver, 71, 91, 43, other_receiver).unwrap();
         assert_eq!(
-            actor_claim_reservation(sender, other, 43, other_receiver, 81, 2),
+            actor_claim_reservation(sender, other, 43, other_sender, 81, 2),
             Some(71)
         );
         let abandoned = actor_begin_publish(other, 81, 2, 71).expect("exact pair can publish");
@@ -2329,7 +2352,7 @@ mod tests {
         close(other_receiver);
 
         assert_eq!(
-            actor_claim_reservation(sender, reservation, 42, reply_receiver, 81, 1),
+            actor_claim_reservation(sender, reservation, 42, reply_sender, 81, 1),
             Some(71)
         );
         assert!(actor_begin_publish(reservation, 82, 1, 71).is_none());
