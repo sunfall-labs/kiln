@@ -1,0 +1,206 @@
+import { Worker, MessageChannel, MessagePort } from "node:worker_threads";
+import { Actor, prepareActorMessage, consumeActorTickets } from "kiln:actors/core";
+import { actorWorkerEntry } from "kiln:actors/worker";
+
+export { Actor, isolate, transfer } from "kiln:actors/core";
+export type { Isolated, TransferTicket } from "kiln:actors/core";
+
+// The evaluator lends these hooks only while the engine-owned module initializes. Capture
+// them just as kiln:shared does; the actor module gives its own unavailable-module diagnostic.
+const G = globalThis as any;
+const share: (value: any) => any = G.__kilnShare;
+const isShared: (value: any) => boolean = G.__kilnSharedIs;
+if (typeof share !== "function" || typeof isShared !== "function") {
+  throw new Error("kiln:actors requires enabled Kiln extensions");
+}
+
+const internals: any = (MessagePort as any)[Symbol.for("kiln.messagePort")];
+const REGISTER = 22;
+const LOOKUP = 23;
+const CLOSE = 24;
+const REQUEST_ID = 25;
+
+declare const actorAddressBrand: unique symbol;
+export type ActorAddress<T extends Actor = Actor> = Readonly<{ readonly [actorAddressBrand]: T }>;
+type Methods<T> = { [K in keyof T & string]: T[K] extends (...args: any[]) => any ? K : never }[keyof T & string];
+export interface ActorRef<T extends Actor> {
+  readonly address: ActorAddress<T>;
+  call<K extends Methods<T>>(
+    method: K,
+    args: T[K] extends (...args: infer A) => any ? A : never,
+    options?: { signal?: AbortSignal },
+  ): Promise<T[K] extends (...args: any[]) => infer R ? Awaited<R> : never>;
+}
+export interface ActorOwner<T extends Actor> {
+  readonly ref: ActorRef<T>;
+  stop(options?: { force?: boolean }): Promise<void>;
+}
+
+function namedError(name: string, message: string): Error {
+  const error = new Error(message);
+  error.name = name;
+  return error;
+}
+
+function senderFor(address: any): MessagePort {
+  if (!isShared(address)) throw new TypeError("actor address is not a capability");
+  const endpoint = internals.workerOp(LOOKUP, address);
+  if (!endpoint) throw namedError("ActorClosedError", "actor address is closed or invalid");
+  return internals.internalPort(endpoint, null, null, false);
+}
+
+function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
+  const ref: ActorRef<T> = {
+    address,
+    call(method: any, args: any, options?: { signal?: AbortSignal }): Promise<any> {
+      if (typeof method !== "string" || !Array.isArray(args)) {
+        return Promise.reject(new TypeError("actor call requires a method and argument array"));
+      }
+      if (options?.signal?.aborted) return Promise.reject(options.signal.reason);
+      let sender: MessagePort;
+      try { sender = senderFor(address); }
+      catch (error) { return Promise.reject(error); }
+      const id = internals.workerOp(REQUEST_ID);
+      const reply = new MessageChannel();
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (error: any, value?: any): void => {
+          if (settled) return;
+          settled = true;
+          options?.signal?.removeEventListener("abort", abort);
+          reply.port1.close();
+          if (error) reject(error);
+          else resolve(value);
+        };
+        const abort = (): void => {
+          sender.postMessage({ kind: "cancel", id });
+          finish(options!.signal!.reason || namedError("AbortError", "actor call aborted"));
+        };
+        options?.signal?.addEventListener("abort", abort, { once: true });
+        reply.port1.on("message", (message: any) => {
+          if (settled) return;
+          if (message?.kind === "grant") {
+            const buffers: ArrayBuffer[] = [];
+            const consumed: Ticket[] = [];
+            try {
+              const snapshot = prepareActorMessage(args, buffers, consumed);
+              const sent = sender.postMessage({ kind: "invoke", id, method, args: snapshot }, buffers);
+              consumeActorTickets(consumed);
+              if (sent === undefined) throw namedError("ActorClosedError", "actor mailbox closed");
+            } catch (error) {
+              sender.postMessage({ kind: "cancel", id });
+              finish(error);
+            }
+          } else if (message?.kind === "resolve") finish(null, message.value);
+          else if (message?.kind === "reject") {
+            const error = namedError("ActorRemoteError", message.value?.message || "actor call failed");
+            (error as any).remoteName = message.value?.name || "Error";
+            (error as any).cause = message.value?.cause;
+            finish(error);
+          } else if (message?.kind === "cloneError") finish(namedError("DataCloneError", message.value?.message || "actor result could not be cloned"));
+          else if (message?.kind === "closed") finish(namedError("ActorClosedError", "actor stopped"));
+        });
+        reply.port1.on("close", () => finish(namedError("ActorClosedError", "actor realm exited")));
+        reply.port1.start();
+        try {
+          if (sender.postMessage({ kind: "reserve", id, reply: reply.port2 }, [reply.port2]) === undefined) {
+            finish(namedError("ActorClosedError", "actor address is closed"));
+          }
+        }
+        catch (error) { finish(error); }
+      });
+    },
+  };
+  return ref;
+}
+
+export function connectActor<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
+  senderFor(address);
+  return reference(address);
+}
+
+export async function spawnActor<T extends Actor>(options: {
+  module: string | URL;
+  export: string;
+  args?: unknown[];
+  mailboxCapacity?: number;
+}): Promise<ActorOwner<T>> {
+  if (!options || typeof options !== "object" || typeof options.export !== "string" || !options.export) {
+    throw new TypeError("spawnActor requires { module, export }");
+  }
+  const module = options.module instanceof URL ? options.module.href : options.module;
+  if (typeof module !== "string" || !module) throw new TypeError("actor module must be a URL or specifier");
+  const absolutePath = module.startsWith("/") ||
+    (module.length > 2 && module[1] === ":" && (module[2] === "\\" || module[2] === "/"));
+  if (!module.startsWith("file:") && !absolutePath) {
+    throw new TypeError("actor module must be an absolute path or URL; resolve relative paths with new URL(path, import.meta.url)");
+  }
+  const capacity = options.mailboxCapacity === undefined ? 64 : options.mailboxCapacity;
+  if (!Number.isSafeInteger(capacity) || capacity <= 0) throw new RangeError("mailboxCapacity must be a positive integer");
+  const buffers: ArrayBuffer[] = [];
+  const consumed: Ticket[] = [];
+  const args = prepareActorMessage(options.args === undefined ? [] : options.args, buffers, consumed);
+  const mailbox = new MessageChannel();
+  const address = share({}) as ActorAddress<T>;
+  const ownerKey = share({});
+  const worker = new Worker(actorWorkerEntry, {
+    workerData: { __kilnActorVersion: 1, module, exportName: options.export, args, capacity, mailbox: mailbox.port2 },
+    transferList: [mailbox.port2, ...buffers],
+  });
+  consumeActorTickets(consumed);
+  const endpoint = internals.portEndpoint(mailbox.port1);
+  if (!endpoint || !internals.workerOp(REGISTER, address, endpoint, ownerKey)) {
+    void worker.terminate();
+    throw new Error("actor mailbox registration failed");
+  }
+  return new Promise((resolve, reject) => {
+    let ready = false;
+    let exited = false;
+    let stopping: Promise<void> | undefined;
+    const close = (): void => {
+      internals.workerOp(CLOSE, address, ownerKey);
+      mailbox.port1.close();
+    };
+    worker.on("error", (error: any) => { close(); if (!ready) reject(error); });
+    worker.on("exit", () => {
+      exited = true;
+      close();
+      if (!ready) reject(namedError("ActorClosedError", "actor realm exited during spawn"));
+    });
+    worker.on("message", (message: any) => {
+      if (message?.kind === "spawnError") {
+        close();
+        void worker.terminate();
+        const error = namedError(message.value?.name || "Error", message.value?.message || "actor constructor failed");
+        reject(error);
+      } else if (message?.kind === "ready" && !ready) {
+        ready = true;
+        resolve({
+          ref: reference(address),
+          stop({ force = false }: { force?: boolean } = {}): Promise<void> {
+            if (stopping) return stopping;
+            if (exited) return Promise.resolve();
+            stopping = new Promise((done, fail) => {
+              let finished = false;
+              const finish = (error?: any): void => {
+                if (finished) return;
+                finished = true;
+                close();
+                if (error) fail(error);
+                else done();
+              };
+              worker.on("message", (event: any) => {
+                if (event?.kind === "stopped") void worker.terminate().then(() => finish(), finish);
+              });
+              worker.on("exit", () => finish());
+              worker.on("error", finish);
+              try { worker.postMessage({ kind: "stop", force }); }
+              catch (error) { finish(error); }
+            });
+            return stopping;
+          },
+        });
+      }
+    });
+  });
+}

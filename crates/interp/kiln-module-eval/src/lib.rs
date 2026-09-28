@@ -127,6 +127,11 @@ struct GraphWorkers {
 
 impl kiln_interpreter::WorkerHost for GraphWorkers {
     fn has_module(&self, path: &str) -> bool {
+        if path == "kiln:actors/worker" {
+            let entry = kiln_module_resolver::NodeBuiltin::ActorsWorker
+                .virtual_path(self.graph.project_root());
+            return self.graph.module(entry).is_some();
+        }
         self.graph.module(path).is_some()
     }
 
@@ -135,7 +140,12 @@ impl kiln_interpreter::WorkerHost for GraphWorkers {
         let graph = match &worker.spec.entry {
             WorkerEntry::File(path) => self
                 .graph
-                .with_entry(path)
+                .with_entry(if path == "kiln:actors/worker" {
+                    kiln_module_resolver::NodeBuiltin::ActorsWorker
+                        .virtual_path(self.graph.project_root())
+                } else {
+                    PathBuf::from(path)
+                })
                 .ok_or_else(|| format!("Cannot find module '{path}'")),
             WorkerEntry::Eval(source) => eval_graph(source),
         };
@@ -372,6 +382,12 @@ impl ModuleLoaderService for GraphModuleLoader {
                 }
             })
             .or_else(|| {
+                if request.specifier.starts_with("file:") {
+                    return url::Url::parse(&request.specifier)
+                        .ok()
+                        .and_then(|url| url.to_file_path().ok())
+                        .filter(|path| self.graph.module_map().contains_key(path));
+                }
                 let direct = PathBuf::from(&request.specifier);
                 if self.graph.module_map().contains_key(&direct) {
                     return Some(direct);
@@ -774,7 +790,10 @@ impl GraphExecutor<'_> {
             modules.push(PlannedModule {
                 key: path.to_string_lossy().into_owned(),
                 program: std::rc::Rc::new(plan_program),
-                kiln_shared: node.source == ModuleSource::NodeBuiltin(NodeBuiltin::Shared),
+                kiln_shared: matches!(
+                    node.source,
+                    ModuleSource::NodeBuiltin(NodeBuiltin::Shared | NodeBuiltin::Actors)
+                ),
                 bindings,
             });
         }
@@ -1253,8 +1272,10 @@ impl GraphExecutor<'_> {
                 max_steps: limits.max_steps - total_steps,
                 ..limits
             };
-            let shared_builtin =
-                module_node.source == ModuleSource::NodeBuiltin(NodeBuiltin::Shared);
+            let shared_builtin = matches!(
+                module_node.source,
+                ModuleSource::NodeBuiltin(NodeBuiltin::Shared | NodeBuiltin::Actors)
+            );
             if shared_builtin {
                 node_session
                     .as_mut()
@@ -1634,7 +1655,10 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
                 })?,
             );
         }
-        let shared_builtin = module_node.source == ModuleSource::NodeBuiltin(NodeBuiltin::Shared);
+        let shared_builtin = matches!(
+            module_node.source,
+            ModuleSource::NodeBuiltin(NodeBuiltin::Shared | NodeBuiltin::Actors)
+        );
         if shared_builtin {
             unsafe {
                 (&mut *self.node_session)

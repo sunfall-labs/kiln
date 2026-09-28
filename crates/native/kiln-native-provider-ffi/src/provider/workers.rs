@@ -70,6 +70,12 @@ const OP_KILL: u32 = 19;
 /// Not the TypeScript's: the thread-mode launcher's signal thread handing a signal to the
 /// realms that listen for it.
 const OP_SIGNAL_DELIVER: u32 = 20;
+// ADR 0072: `a` packs graph slot and generation, while `out[0]` carries its node. Register
+// reads the sender endpoint from `out[1]`; lookup writes it to `out[0]` (zero means closed).
+const OP_ACTOR_REGISTER: u32 = 22;
+const OP_ACTOR_LOOKUP: u32 = 23;
+const OP_ACTOR_CLOSE: u32 = 24;
+const OP_ACTOR_REQUEST_ID: u32 = 25;
 
 /// Borrowed, read-only description of one native heap value. The callback may reuse its
 /// scratch on the next call; the provider copies strings before asking for another field.
@@ -587,6 +593,44 @@ pub unsafe extern "C" fn kiln_worker_op(op: u32, a: u64, out: *mut u64) -> i32 {
                 let delivered = signals::deliver(i32::try_from(a).unwrap_or(-1));
                 write(0, delivered as u64);
             }
+            OP_ACTOR_REGISTER | OP_ACTOR_LOOKUP | OP_ACTOR_CLOSE => {
+                if out.is_null() {
+                    return INVALID_ARGUMENT;
+                }
+                // SAFETY: these operations require a two-word input/output block.
+                let node = unsafe { out.read() };
+                let token = OpaqueHandle {
+                    graph: (a >> 32) as u32,
+                    generation: a as u32,
+                    node: u32::try_from(node).unwrap_or(u32::MAX),
+                };
+                let owner = if op == OP_ACTOR_LOOKUP {
+                    None
+                } else {
+                    let packed = unsafe { out.add(2).read() };
+                    let node = unsafe { out.add(3).read() };
+                    Handle::resolve(OpaqueHandle {
+                        graph: (packed >> 32) as u32,
+                        generation: packed as u32,
+                        node: u32::try_from(node).unwrap_or(u32::MAX),
+                    })
+                };
+                let answer = Handle::resolve(token).map_or(0, |address| match op {
+                    OP_ACTOR_REGISTER => {
+                        let sender = unsafe { out.add(1).read() };
+                        owner.as_ref().map_or(0, |owner| {
+                            u64::from(workers::actor_register(&address, owner, sender))
+                        })
+                    }
+                    OP_ACTOR_LOOKUP => workers::actor_sender(&address).unwrap_or(0),
+                    OP_ACTOR_CLOSE => owner
+                        .as_ref()
+                        .map_or(0, |owner| u64::from(workers::actor_close(&address, owner))),
+                    _ => 0,
+                });
+                write(0, answer);
+            }
+            OP_ACTOR_REQUEST_ID => write(0, workers::actor_request_id()),
             _ => return INVALID_ARGUMENT,
         }
         0

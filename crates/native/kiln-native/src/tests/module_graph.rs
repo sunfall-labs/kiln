@@ -927,8 +927,11 @@ fn native_graph_reserves_commonjs_wrapper_bindings_for_the_launcher() {
         "if (false) require('./dep.js'); console.log('lazy'); module.exports = 42;",
     )
     .expect("write conditional CommonJS require");
-    fs::write(root.path.join("pkg/dep.js"), "throw new Error('eager require');")
-        .expect("write dependency that must stay unevaluated");
+    fs::write(
+        root.path.join("pkg/dep.js"),
+        "throw new Error('eager require');",
+    )
+    .expect("write dependency that must stay unevaluated");
     let lazy_graph = ModuleGraph::build_node(
         &entry,
         NodeRuntimeResolver::new(&root.path).expect("node resolver"),
@@ -979,8 +982,11 @@ fn native_declared_worker_starts_lazily_and_undeclared_sibling_stays_unavailable
         "const { parentPort } = require('node:worker_threads'); parentPort.postMessage(42); parentPort.close();",
     )
     .expect("write worker target");
-    fs::write(&sibling, "console.log('sibling evaluated'); module.exports = 99;")
-        .expect("write undeclared sibling");
+    fs::write(
+        &sibling,
+        "console.log('sibling evaluated'); module.exports = 99;",
+    )
+    .expect("write undeclared sibling");
     let graph = ModuleGraph::build_node_with_includes(
         &entry,
         NodeRuntimeResolver::new(&project.path).expect("node resolver"),
@@ -1010,7 +1016,67 @@ fn native_declared_worker_starts_lazily_and_undeclared_sibling_stays_unavailable
         "worker process failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(output.stdout, b"parent\nsibling MODULE_NOT_FOUND\nworker 42\n");
+    assert_eq!(
+        output.stdout,
+        b"parent\nsibling MODULE_NOT_FOUND\nworker 42\n"
+    );
+}
+
+#[test]
+fn native_module_addressed_actor_calls_and_transfers() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-actor");
+    let entry = project.path.join("main.mjs");
+    let actor = project.path.join("actor.mjs");
+    fs::write(
+        &actor,
+        "import { Actor, transfer } from 'kiln:actors'; export class Counter extends Actor { constructor() { super(); this.n = 1; } add(x) { this.n += x; return this.n; } bounce(value) { return transfer(value); } fail() { throw new RangeError('remote problem'); } }",
+    )
+    .expect("write actor module");
+    fs::write(
+        &entry,
+        "import { spawnActor, connectActor, transfer } from 'kiln:actors'; const owner = await spawnActor({ module: new URL('./actor.mjs', import.meta.url), export: 'Counter', mailboxCapacity: 1 }); const other = connectActor(structuredClone(owner.ref.address)); console.log(await owner.ref.call('add', [2]), await other.call('add', [3])); const bytes = new ArrayBuffer(2); new Uint8Array(bytes)[0] = 23; const bounced = await other.call('bounce', [transfer(bytes)]); console.log(bytes.byteLength, new Uint8Array(bounced)[0]); try { await other.call('fail', []); } catch (error) { console.log(error.name, error.remoteName); } const controller = new AbortController(); controller.abort(); const retained = new ArrayBuffer(2); try { await other.call('bounce', [transfer(retained)], { signal: controller.signal }); } catch (error) { console.log(error.name, retained.byteLength); } await owner.stop(); try { await other.call('add', [1]); } catch (error) { console.log(error.name); }",
+    )
+    .expect("write actor entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build actor graph");
+    let built = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(project.path.join("program"), NativeProfile::Dev)
+                .with_node(true),
+        )
+        .expect("build native actor graph");
+    let output = Command::new(&built.output)
+        .output_when_launchable()
+        .expect("run native actor graph");
+    assert!(
+        output.status.success(),
+        "actor process failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"3 6\n0 23\nActorRemoteError RangeError\nAbortError 2\nActorClosedError\n");
+    let disabled = Command::new(&built.output)
+        .env("KILN_EXTENSIONS", "0")
+        .output_when_launchable()
+        .expect("run actor with extensions disabled");
+    assert!(!disabled.status.success());
+    assert!(
+        String::from_utf8_lossy(&disabled.stderr)
+            .contains("kiln:actors requires enabled Kiln extensions"),
+        "{}",
+        String::from_utf8_lossy(&disabled.stderr)
+    );
 }
 
 #[test]
@@ -1064,9 +1130,8 @@ fn native_commonjs_require_receives_the_builtin_projection_on_both_graph_paths()
         .expect("CommonJS module");
     let default_index = native_commonjs_projection_index(modules[util_index].0)
         .expect("builtin CommonJS projection");
-    let expected_standalone = format!(
-        "*result = kiln_exports_{util_index}[{default_index}]; return KILN_C99_OK;"
-    );
+    let expected_standalone =
+        format!("*result = kiln_exports_{util_index}[{default_index}]; return KILN_C99_OK;");
     let expected_shared =
         format!("*result = graph->exports[{util_index}][{default_index}]; return KILN_C99_OK;");
     let launcher = graph_launcher_source(&graph, &modules, &NativeRealmPolicy::default())

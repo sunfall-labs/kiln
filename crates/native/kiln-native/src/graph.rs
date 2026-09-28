@@ -2170,6 +2170,19 @@ import_attributes_valid:
                 resolutions.insert((url.to_string(), modules.len()));
             }
         }
+        // `spawnActor({ module })` includes its statically named target as a lazy graph node.
+        // The actor worker loads that node by the absolute URL passed from the spawning realm;
+        // it may not load arbitrary files missing from the closed graph.
+        if matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs)
+            && let Some(actor_worker) = modules.iter().position(|(candidate, _)| {
+                candidate.source == ModuleSource::NodeBuiltin(NodeBuiltin::ActorsWorker)
+            })
+        {
+            resolutions.insert((node.path.to_string_lossy().into_owned(), actor_worker));
+            if let Ok(url) = Url::from_file_path(&node.path) {
+                resolutions.insert((url.to_string(), actor_worker));
+            }
+        }
         for (spec, importer_index) in resolutions {
             let c_spec = native_c_string(&spec);
             let len = spec.len();
@@ -2830,6 +2843,7 @@ typedef struct kiln_worker_token {
 } kiln_worker_token;
 extern int kiln_worker_post(uint32_t op, uint64_t port, uint32_t kind, kiln_worker_token *tokens, uint64_t count);
 extern int kiln_c99_worker_report_error(kiln_value error) __attribute__((visibility("hidden")));
+extern int kiln_realm_kiln_extensions_on(void);
 typedef void (*kiln_gc_roots_fn)(void *heap, void *context, int phase);
 extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
 extern int kiln_realm_gc_unregister_roots(kiln_gc_roots_fn roots, void *context);
@@ -3085,7 +3099,9 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
         writeln!(output, "    if ({matches}) {{ *matched = 1; return kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, thrown); }}").unwrap();
     }
     output.push_str("    (void)graph; (void)specifier; (void)result; (void)thrown;\n    return KILN_C99_OK;\n}\n");
-    output.push_str("static int kiln_graph_ensure_module(kiln_graph_context *graph, size_t index);\n");
+    output.push_str(
+        "static int kiln_graph_ensure_module(kiln_graph_context *graph, size_t index);\n",
+    );
     for (index, (node, _)) in modules.iter().enumerate() {
         writeln!(
             output,
@@ -3310,7 +3326,20 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
     // absolute path and a sibling checkout reuses it, as it does the rest of the launcher.
     output.push_str("static long kiln_graph_module_index(const uint8_t *path, uint64_t len) {\n    long best = -1;\n    uint64_t best_len = 0;\n");
     for (index, (node, _)) in modules.iter().enumerate() {
-        if !matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs) {
+        if !matches!(
+            node.source,
+            ModuleSource::Source
+                | ModuleSource::CommonJs
+                | ModuleSource::NodeBuiltin(NodeBuiltin::ActorsWorker)
+        ) {
+            continue;
+        }
+        if node.source == ModuleSource::NodeBuiltin(NodeBuiltin::ActorsWorker) {
+            let path = NodeBuiltin::ActorsWorker.specifier();
+            writeln!(output,
+                "    if (len == (uint64_t){n} && memcmp(path, {text}, (size_t){n}) == 0) return {index};",
+                n = path.len(), text = native_c_string(&path),
+            ).unwrap();
             continue;
         }
         match logical_module_path(graph.project_root(), &node.path) {
@@ -3706,7 +3735,7 @@ static int kiln_graph_enter(void *opaque) {
         for (dependency_cursor, provider_index) in static_dependencies.iter().enumerate() {
             writeln!(
                 evaluation,
-                "            if (state->dependency_cursor == (size_t){dependency_cursor}) {{ status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) return status; state->dependency_cursor++; if (kiln_graph_module_promise(graph, (size_t){provider_index})->tag == 16 /* KILN_VALUE_PROMISE */) {{ status = kiln_graph_prepare_completion(graph, (size_t){index}); if (status != KILN_C99_OK) return status; status = kiln_c99_module_completion(host, *kiln_graph_module_promise(graph, (size_t){provider_index}), (uint32_t){index}, &continuation_promise, 1, NULL); if (status != KILN_C99_OK) return status; state->module_settling = 1; return 0; }} }}"
+                "            if (state->dependency_cursor == (size_t){dependency_cursor}) {{ status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ *result = graph->module_states[{provider_index}].result; return status; }} state->dependency_cursor++; if (kiln_graph_module_promise(graph, (size_t){provider_index})->tag == 16 /* KILN_VALUE_PROMISE */) {{ status = kiln_graph_prepare_completion(graph, (size_t){index}); if (status != KILN_C99_OK) return status; status = kiln_c99_module_completion(host, *kiln_graph_module_promise(graph, (size_t){provider_index}), (uint32_t){index}, &continuation_promise, 1, NULL); if (status != KILN_C99_OK) return status; state->module_settling = 1; return 0; }} }}"
             )
             .unwrap();
         }
@@ -3796,13 +3825,22 @@ static int kiln_graph_enter(void *opaque) {
             export_count
         )
         .unwrap();
-        if node.source == ModuleSource::NodeBuiltin(NodeBuiltin::Shared) {
+        if node.source == ModuleSource::NodeBuiltin(NodeBuiltin::Actors) {
+            evaluation.push_str("            if (!kiln_realm_kiln_extensions_on()) return kiln_c99_throw_error(result, UINT64_C(10), \"kiln:actors requires enabled Kiln extensions\");\n");
+        }
+        if matches!(
+            node.source,
+            ModuleSource::NodeBuiltin(NodeBuiltin::Shared | NodeBuiltin::Actors)
+        ) {
             evaluation.push_str("            status = kiln_realm_kiln_shared_hooks(1);\n            if (status != 0) return status;\n");
         }
         evaluation.push_str(
             "            state->body_started = 1;\n            status = context.module(context.host, context.result, context.imports, context.import_count, context.exports, context.export_count);\n",
         );
-        if node.source == ModuleSource::NodeBuiltin(NodeBuiltin::Shared) {
+        if matches!(
+            node.source,
+            ModuleSource::NodeBuiltin(NodeBuiltin::Shared | NodeBuiltin::Actors)
+        ) {
             evaluation.push_str("            { int hook_status = kiln_realm_kiln_shared_hooks(0); if (status == 0) status = hook_status; }\n");
         }
         if node.path == graph.entry() && !is_async {

@@ -1,46 +1,25 @@
+// Run with `kiln --one-shot --node run packages/kiln-concurrency/test.js`.
 import assert from "node:assert";
-import { Actor, spawnActor, isolate, transfer } from "./index.js";
+import { spawnActor, connectActor, isolate, transfer } from "./index.js";
 
-class Counter extends Actor {
-  #count = 0;
-  
-  increment(amount = 1) {
-    this.#count += amount;
-    return this.#count;
-  }
-  
-  getCount() {
-    return this.#count;
-  }
-}
+const owner = await spawnActor({
+  module: new URL("./test-counter.js", import.meta.url),
+  export: "Counter",
+  args: [2],
+  mailboxCapacity: 1,
+});
+assert.strictEqual(await owner.ref.call("increment", [5]), 7);
+const delegated = connectActor(structuredClone(owner.ref.address));
+assert.strictEqual(await delegated.call("increment", [3]), 10);
 
-async function run() {
-  const counter = spawnActor(Counter);
-  assert.strictEqual(typeof counter.increment, "function");
-  
-  const c1 = await counter.increment(5);
-  assert.strictEqual(c1, 5);
-  
-  const c2 = await counter.increment(3);
-  assert.strictEqual(c2, 8);
-  
-  const total = await counter.getCount();
-  assert.strictEqual(total, 8);
+const bytes = new ArrayBuffer(4);
+new Uint8Array(bytes)[0] = 23;
+const returned = await delegated.call("echo", [transfer(bytes)]);
+assert.strictEqual(bytes.byteLength, 0);
+assert.strictEqual(new Uint8Array(returned)[0], 23);
 
-  // Region isolation & transfer
-  const data = { x: 10, y: 20 };
-  const iso = isolate(data);
-  const transferred = transfer(iso);
-  assert.deepStrictEqual(transferred, { x: 10, y: 20 });
-
-  // parallelMap
-  const arr = [1, 2, 3, 4];
-  const squares = arr.parallelMap((x, i) => x * x + i);
-  assert.ok(Array.isArray(squares), "parallelMap answers an array, not a promise");
-  assert.deepStrictEqual(squares, [1, 5, 11, 19]);
-  assert.strictEqual(typeof arr.parallelMap(x => x).then, "undefined");
-
-  console.log("All @kiln/concurrency tests passed!");
-}
-
-run();
+const isolated = isolate(() => ({ value: 1 }));
+await assert.rejects(delegated.call("echo", [transfer(isolated)]), { name: "DataCloneError" });
+await owner.stop();
+await assert.rejects(delegated.call("increment", [1]), { name: "ActorClosedError" });
+console.log("All @kiln/concurrency tests passed!");

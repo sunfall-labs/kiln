@@ -136,6 +136,10 @@ const OP_SIGNAL_LISTEN: u32 = 17;
 const OP_SIGNAL_UNHANDLED: u32 = 18;
 const OP_KILL: u32 = 19;
 const OP_POST_PLAIN: u32 = 21;
+const OP_ACTOR_REGISTER: u32 = 22;
+const OP_ACTOR_LOOKUP: u32 = 23;
+const OP_ACTOR_CLOSE: u32 = 24;
+const OP_ACTOR_REQUEST_ID: u32 = 25;
 
 /// A moved `ArrayBuffer`'s store, as this engine boxes it into a [`Token::Moved`].
 struct MovedBytes(Vec<u8>);
@@ -199,6 +203,31 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                 }
             }
+            OP_ACTOR_REGISTER | OP_ACTOR_LOOKUP | OP_ACTOR_CLOSE => {
+                let Some(Value::Shared(address)) = first else {
+                    return Ok(Value::Number(0.0));
+                };
+                let result = match op {
+                    OP_ACTOR_REGISTER => match arguments.get(3) {
+                        Some(Value::Shared(owner)) => workers::actor_register(
+                            &address.handle,
+                            &owner.handle,
+                            endpoint_of(arguments.get(2)),
+                        ) as u64,
+                        _ => 0,
+                    },
+                    OP_ACTOR_LOOKUP => workers::actor_sender(&address.handle).unwrap_or(0),
+                    OP_ACTOR_CLOSE => match arguments.get(2) {
+                        Some(Value::Shared(owner)) => {
+                            workers::actor_close(&address.handle, &owner.handle) as u64
+                        }
+                        _ => 0,
+                    },
+                    _ => 0,
+                };
+                Value::Number(result as f64)
+            }
+            OP_ACTOR_REQUEST_ID => Value::Number(workers::actor_request_id() as f64),
             OP_TAKE => match workers::take(endpoint_of(first)) {
                 Some(message) => {
                     let realm = self.current_realm;

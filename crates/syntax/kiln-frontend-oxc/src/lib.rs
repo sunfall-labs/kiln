@@ -527,6 +527,47 @@ fn discover_node_runtime_requests_from_semantic(
             });
         }
     }
+    // An actor names code in its destination realm with `{ module: "..." }`, rather than
+    // handing a constructor across. Retain statically named targets as lazy graph nodes, just
+    // as for `new Worker(path)`. Runtime still refuses a computed module absent from the graph.
+    for node in semantic.nodes() {
+        let AstKind::CallExpression(call) = node.kind() else {
+            continue;
+        };
+        let names_spawn = match &call.callee {
+            Expression::Identifier(name) => name.name == "spawnActor",
+            Expression::StaticMemberExpression(member) => member.property.name == "spawnActor",
+            _ => false,
+        };
+        if !names_spawn {
+            continue;
+        }
+        let Some(Expression::ObjectExpression(options)) =
+            call.arguments.first().and_then(Argument::as_expression)
+        else {
+            continue;
+        };
+        for entry in &options.properties {
+            let ObjectPropertyKind::ObjectProperty(property) = entry else {
+                continue;
+            };
+            if property
+                .key
+                .static_name()
+                .is_none_or(|name| name != "module")
+            {
+                continue;
+            }
+            let mut specifiers = Vec::new();
+            worker_script_specifiers(&property.value, semantic, 0, &mut specifiers);
+            for specifier in specifiers {
+                requests.push(NodeRuntimeRequest {
+                    specifier,
+                    importer: path.to_owned(),
+                });
+            }
+        }
+    }
     requests.sort_by(|left, right| left.specifier.cmp(&right.specifier));
     requests.dedup_by(|left, right| {
         left.specifier == right.specifier && left.importer == right.importer
@@ -3945,6 +3986,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["node:path", "node:url", "node:util"]
         );
+    }
+
+    #[test]
+    fn actor_module_literal_is_a_lazy_graph_request() {
+        let requests = discover_node_runtime_requests(
+            "app/main.mjs",
+            "import { spawnActor } from 'kiln:actors';\n\
+             spawnActor({ module: new URL('./counter.mjs', import.meta.url), export: 'Counter' });",
+        );
+        assert!(requests.iter().any(|request| {
+            request.specifier == "./counter.mjs" && request.importer == "app/main.mjs"
+        }));
     }
 
     #[test]

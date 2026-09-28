@@ -1,7 +1,7 @@
 {
   "name": "@kiln/concurrency",
   "version": "0.1.0",
-  "description": "Native in-process multicore actors, zero-copy region transfer, and parallel data processing for Kiln and Node.js.",
+  "description": "Compatibility import for Kiln's engine-owned actor API.",
   "type": "module",
   "main": "index.js",
   "types": "index.d.ts",

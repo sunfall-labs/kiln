@@ -82,8 +82,11 @@ extending the engine's `Actor` base. The runtime validates this and the public m
 every call. It does not invoke getters, setters, `constructor`, `Object.prototype` members or
 private methods as actor calls.
 
-`module` is a `URL` or module specifier string resolved relative to the calling module with the
-same resolution policy as an ordinary import. `export` is mandatory, including for `default`.
+`module` is a `URL`, a file URL string or an absolute file path. A relative target is written
+`new URL("./counter.js", import.meta.url)` at the call site. A string such as `"./counter.js"`
+is rejected: an ordinary library function cannot recover the caller's module URL, and resolving
+it from the engine's worker entry would silently select the wrong file. `export` is mandatory,
+including for `default`.
 Native closed-world builds include statically named actor modules in their module graph; a
 runtime-only target absent from that graph refuses at spawn with a named module-not-linked error.
 The interpreter applies its ordinary module resolver. No source text, function, closure or class

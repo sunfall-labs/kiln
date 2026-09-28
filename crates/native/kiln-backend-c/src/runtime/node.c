@@ -2270,6 +2270,10 @@ int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code
 #define KILN_C99_WORKER_OP_SIGNAL_UNHANDLED 18
 #define KILN_C99_WORKER_OP_KILL 19
 #define KILN_C99_WORKER_OP_POST_PLAIN 21
+#define KILN_C99_WORKER_OP_ACTOR_REGISTER 22
+#define KILN_C99_WORKER_OP_ACTOR_LOOKUP 23
+#define KILN_C99_WORKER_OP_ACTOR_CLOSE 24
+#define KILN_C99_WORKER_OP_ACTOR_REQUEST_ID 25
 
 static uint64_t kiln_c99_worker_word(const kiln_value *args, size_t argc, size_t at) {
     double number;
@@ -2569,7 +2573,7 @@ static int kiln_c99_worker_op_raw(kiln_value *result, const kiln_value *args, si
                                   kiln_value *thrown) {
     uint64_t op = kiln_c99_worker_word(args, argc, 0);
     uint64_t first = kiln_c99_worker_word(args, argc, 1);
-    uint64_t words[2] = {0, 0};
+    uint64_t words[4] = {0, 0, 0, 0};
     kiln_value built;
     int status;
     switch (op) {
@@ -2586,6 +2590,46 @@ static int kiln_c99_worker_op_raw(kiln_value *result, const kiln_value *args, si
                                     argc > 3 ? args[3] : kiln_c99_undefined(), result, thrown);
     case KILN_C99_WORKER_OP_POST_PLAIN:
         return kiln_c99_worker_post_plain(first, argc > 2 ? args[2] : kiln_c99_undefined(), result);
+    case KILN_C99_WORKER_OP_ACTOR_REQUEST_ID:
+        if (kiln_worker_op((uint32_t)op, 0, words) != 0) return KILN_C99_INVALID_ARGUMENT;
+        *result = kiln_c99_number((double)words[0]);
+        return KILN_C99_OK;
+    case KILN_C99_WORKER_OP_ACTOR_REGISTER:
+    case KILN_C99_WORKER_OP_ACTOR_LOOKUP:
+    case KILN_C99_WORKER_OP_ACTOR_CLOSE: {
+        kiln_shared_facade *address;
+        kiln_shared_facade *owner;
+        uint64_t packed;
+        if (argc < 2 || args[1].tag != KILN_VALUE_SHARED || args[1].bits == 0) {
+            *result = kiln_c99_number(0);
+            return KILN_C99_OK;
+        }
+        address = (kiln_shared_facade *)(uintptr_t)args[1].bits;
+        if (address->lease == 0) {
+            *result = kiln_c99_number(0);
+            return KILN_C99_OK;
+        }
+        packed = ((uint64_t)address->graph << 32) | (uint64_t)address->generation;
+        words[0] = address->node;
+        words[1] = kiln_c99_worker_word(args, argc, 2);
+        if (op != KILN_C99_WORKER_OP_ACTOR_LOOKUP) {
+            size_t owner_index = op == KILN_C99_WORKER_OP_ACTOR_REGISTER ? 3 : 2;
+            if (argc <= owner_index || args[owner_index].tag != KILN_VALUE_SHARED || args[owner_index].bits == 0) {
+                *result = kiln_c99_number(0);
+                return KILN_C99_OK;
+            }
+            owner = (kiln_shared_facade *)(uintptr_t)args[owner_index].bits;
+            if (owner->lease == 0) {
+                *result = kiln_c99_number(0);
+                return KILN_C99_OK;
+            }
+            words[2] = ((uint64_t)owner->graph << 32) | (uint64_t)owner->generation;
+            words[3] = owner->node;
+        }
+        if (kiln_worker_op((uint32_t)op, packed, words) != 0) words[0] = 0;
+        *result = kiln_c99_number((double)words[0]);
+        return KILN_C99_OK;
+    }
     case KILN_C99_WORKER_OP_BROADCAST_POST:
         return kiln_c99_worker_post((uint32_t)op, first, 0, argc > 2 ? args[2] : kiln_c99_undefined(),
                                     result, thrown);

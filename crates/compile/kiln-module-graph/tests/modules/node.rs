@@ -1,6 +1,38 @@
 use super::*;
 
 #[test]
+fn module_addressed_actor_runs_in_a_worker_realm() {
+    let project = TempProject::new();
+    project.write(
+        "actor.mjs",
+        "import { Actor, transfer } from 'kiln:actors'; export class Counter extends Actor { constructor() { super(); this.n = 1; } add(x) { this.n += x; return this.n; } bounce(value) { return transfer(value); } fail() { throw new RangeError('remote problem'); } }",
+    );
+    let entry = project.write(
+        "main.mjs",
+        "import { spawnActor, connectActor, transfer } from 'kiln:actors'; const owner = await spawnActor({ module: new URL('./actor.mjs', import.meta.url), export: 'Counter', mailboxCapacity: 1 }); const other = connectActor(structuredClone(owner.ref.address)); console.log(await owner.ref.call('add', [2]), await other.call('add', [3])); const bytes = new ArrayBuffer(2); new Uint8Array(bytes)[0] = 23; const bounced = await other.call('bounce', [transfer(bytes)]); console.log(bytes.byteLength, new Uint8Array(bounced)[0]); try { await other.call('fail', []); } catch (error) { console.log(error.name, error.remoteName); } const controller = new AbortController(); controller.abort(); const retained = new ArrayBuffer(2); try { await other.call('bounce', [transfer(retained)], { signal: controller.signal }); } catch (error) { console.log(error.name, retained.byteLength); } await owner.stop(); try { await other.call('add', [1]); } catch (error) { console.log(error.name); }",
+    );
+    let graph = Arc::new(
+        ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&project.root).expect("Node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build actor graph"),
+    );
+    let loader = GraphModuleLoader::new(Arc::clone(&graph));
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default().with_module_loader_service(Arc::new(loader)),
+        )
+        .expect("execute actor graph");
+    assert_eq!(host.output, ["3 6", "0 23", "ActorRemoteError RangeError", "AbortError 2", "ActorClosedError"]);
+}
+
+#[test]
 fn declared_node_include_is_linked_but_not_evaluated_with_the_entry() {
     let project = TempProject::new();
     project.write("data.json", r#"{"answer":42}"#);

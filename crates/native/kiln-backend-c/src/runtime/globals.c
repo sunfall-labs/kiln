@@ -662,6 +662,12 @@ int kiln_realm_kiln_shared_hooks(int begin) {
     return KILN_C99_OK;
 }
 
+/* The generated graph refuses an engine-owned extension module before entering its body when
+ * the runtime switch or the build policy withheld extensions. */
+int kiln_realm_kiln_extensions_on(void) {
+    return kiln_c99_kiln_extensions_on();
+}
+
 static int kiln_c99_global_object_val(kiln_val *out) {
     kiln_value g;
     int status = kiln_c99_global_object(&g);

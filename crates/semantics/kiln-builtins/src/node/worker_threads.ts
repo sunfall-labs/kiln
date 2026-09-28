@@ -149,6 +149,8 @@ function stringList(value: any, name: string): string[] {
 // against the working directory), or a `file:` URL.
 function scriptPath(filename: any): string {
   if (typeof filename === "string") {
+    // Engine-owned actor entry: it is a linked virtual module rather than a file on disk.
+    if (filename === "kiln:actors/worker") return filename;
     if (filename.startsWith("file:")) return scriptPath(new URL(filename));
     if (filename.startsWith("/") || filename.startsWith("./") || filename.startsWith("../") ||
         (filename.length > 2 && filename[1] === ":" && (filename[2] === "\\" || filename[2] === "/"))) {
@@ -269,7 +271,9 @@ export class Worker extends EventEmitter {
     this.#limits = reported;
     this.#port = internals.internalPort(channel[0], (kind: number, value: any) => this.#receive(kind, value), null, false);
     // A running worker keeps its parent alive until it exits or is unreferenced.
-    this.#port.start();
+    // Worker events may already be queued when the native realm finishes starting. Deliver
+    // them after the constructor returns so callers can attach their listeners first.
+    G.process.nextTick(() => this.#port.start());
   }
 
   #receive(kind: number, value: any): void {

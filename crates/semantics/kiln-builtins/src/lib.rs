@@ -102,6 +102,39 @@ macro_rules! declare_ts_builtins {
 }
 
 declare_ts_builtins! {
+    Actors {
+        variant: Actors,
+        file: "actors.ts",
+        logical_path: "kiln:actors.ts",
+        source_const: ACTORS_SOURCE,
+        exports_const: ACTORS_EXPORTS,
+        sample_source_check: "export async function spawnActor",
+        presence_test: actors_builtin_source_is_present,
+        compilation_test: actors_builtin_compiles_cleanly,
+        exports: ["Actor", "spawnActor", "connectActor", "isolate", "transfer"],
+    },
+    ActorsCore {
+        variant: ActorsCore,
+        file: "actors_core.ts",
+        logical_path: "kiln:actors/core.ts",
+        source_const: ACTORS_CORE_SOURCE,
+        exports_const: ACTORS_CORE_EXPORTS,
+        sample_source_check: "export abstract class Actor",
+        presence_test: actors_core_builtin_source_is_present,
+        compilation_test: actors_core_builtin_compiles_cleanly,
+        exports: ["Actor", "isolate", "transfer", "prepareActorMessage", "consumeActorTickets"],
+    },
+    ActorsWorker {
+        variant: ActorsWorker,
+        file: "actors_worker.ts",
+        logical_path: "kiln:actors/worker.ts",
+        source_const: ACTORS_WORKER_SOURCE,
+        exports_const: ACTORS_WORKER_EXPORTS,
+        sample_source_check: "export const actorWorkerEntry",
+        presence_test: actors_worker_builtin_source_is_present,
+        compilation_test: actors_worker_builtin_compiles_cleanly,
+        exports: ["actorWorkerEntry"],
+    },
     Shared {
         variant: Shared,
         file: "shared.ts",

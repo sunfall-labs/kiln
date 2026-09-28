@@ -42,11 +42,12 @@
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
+use kiln_shared_graph::{Handle as SharedHandle, OpaqueHandle};
 use kiln_string::StringUnits;
 use tokio::sync::Notify;
 
@@ -335,6 +336,106 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Actor addresses are sealed graph identities. The registry retains the graph and routes only
+/// an address whose generation-checked handle is exactly the one registered at spawn. A program
+/// can make another shared graph with identical contents, but it cannot manufacture this ID.
+struct ActorRoute {
+    _address: SharedHandle,
+    _owner: SharedHandle,
+    sender: u64,
+}
+
+static NEXT_ACTOR_REQUEST: AtomicU64 = AtomicU64::new(1);
+
+/// One request namespace is shared by every realm that can call a delegated actor address.
+pub fn actor_request_id() -> u64 {
+    NEXT_ACTOR_REQUEST.fetch_add(1, Ordering::Relaxed)
+}
+
+#[derive(Default)]
+struct ActorRegistry {
+    routes: HashMap<OpaqueHandle, ActorRoute>,
+    // A revoked address cannot be rebound while another realm still holds its graph. Dead
+    // graph generations can be discarded, so actor churn does not grow this set forever.
+    used: HashSet<OpaqueHandle>,
+    closed_since_prune: usize,
+}
+
+impl ActorRegistry {
+    fn prune_closed(&mut self) {
+        if self.closed_since_prune < 1024 {
+            return;
+        }
+        self.used.retain(|token| {
+            self.routes.contains_key(token) || SharedHandle::resolve(*token).is_some()
+        });
+        self.closed_since_prune = 0;
+    }
+}
+
+fn actor_routes() -> &'static Mutex<ActorRegistry> {
+    static ROUTES: OnceLock<Mutex<ActorRegistry>> = OnceLock::new();
+    ROUTES.get_or_init(|| Mutex::new(ActorRegistry::default()))
+}
+
+/// Bind a fresh capability to one mailbox sender. Once bound, it cannot be redirected.
+pub fn actor_register(address: &SharedHandle, owner: &SharedHandle, sender: u64) -> bool {
+    if address.opaque() == owner.opaque() || sender == 0 {
+        return false;
+    }
+    let mut registry = actor_routes()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if state(sender) & (STATE_GONE | STATE_PEER_CLOSED) != 0 {
+        return false;
+    }
+    if !registry.used.insert(address.opaque()) {
+        return false;
+    }
+    registry.routes.insert(
+        address.opaque(),
+        ActorRoute {
+            _address: address.clone(),
+            _owner: owner.clone(),
+            sender,
+        },
+    );
+    true
+}
+
+/// Return the sending endpoint only while the actor remains registered and its port is open.
+pub fn actor_sender(address: &SharedHandle) -> Option<u64> {
+    let mut registry = actor_routes()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let route = registry.routes.get(&address.opaque())?;
+    if state(route.sender) & (STATE_GONE | STATE_PEER_CLOSED) != 0 {
+        registry.routes.remove(&address.opaque());
+        registry.closed_since_prune += 1;
+        registry.prune_closed();
+        return None;
+    }
+    Some(route.sender)
+}
+
+/// Revoke call authority after a stop or an unexpected realm exit.
+pub fn actor_close(address: &SharedHandle, owner: &SharedHandle) -> bool {
+    let mut registry = actor_routes()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if registry
+        .routes
+        .get(&address.opaque())
+        .is_none_or(|route| route._owner.opaque() != owner.opaque())
+    {
+        return false;
+    }
+    registry.routes.remove(&address.opaque());
+    registry.closed_since_prune += 1;
+    registry.prune_closed();
+    true
 }
 
 /// A new channel: two entangled endpoints.
@@ -1114,6 +1215,56 @@ mod tests {
         assert!(!post(b, Message::new(kind::USER, Vec::new())));
         close(b);
         assert_eq!(state(b), STATE_GONE);
+    }
+
+    #[test]
+    fn actor_address_routes_by_shared_identity_and_revokes() {
+        struct Empty;
+        impl kiln_shared_graph::Inspector for Empty {
+            type Error = ();
+            fn inspect(&mut self, _: u64) -> Result<kiln_shared_graph::SourceNode, ()> {
+                Ok(kiln_shared_graph::SourceNode::Record {
+                    null_prototype: false,
+                    properties: Vec::new(),
+                })
+            }
+        }
+        let address =
+            match kiln_shared_graph::share(kiln_shared_graph::InputValue::Object(1), &mut Empty)
+                .expect("address graph")
+            {
+                kiln_shared_graph::Snapshot::Shared(address) => address,
+                _ => panic!("address must be shared"),
+            };
+        let impostor =
+            match kiln_shared_graph::share(kiln_shared_graph::InputValue::Object(1), &mut Empty)
+                .expect("another empty graph")
+            {
+                kiln_shared_graph::Snapshot::Shared(address) => address,
+                _ => panic!("address must be shared"),
+            };
+        let (sender, receiver) = channel();
+        let owner =
+            match kiln_shared_graph::share(kiln_shared_graph::InputValue::Object(1), &mut Empty)
+                .expect("owner graph")
+            {
+                kiln_shared_graph::Snapshot::Shared(owner) => owner,
+                _ => panic!("owner must be shared"),
+            };
+        assert!(actor_register(&address, &owner, sender));
+        assert!(!actor_register(&address, &owner, sender));
+        assert_eq!(actor_sender(&address), Some(sender));
+        assert_eq!(actor_sender(&impostor), None);
+        let token = address.opaque();
+        drop(address);
+        let delegated = kiln_shared_graph::Handle::resolve(token).expect("route retains address");
+        assert_eq!(actor_sender(&delegated), Some(sender));
+        assert!(!actor_close(&delegated, &impostor));
+        assert!(actor_close(&delegated, &owner));
+        assert_eq!(actor_sender(&delegated), None);
+        assert!(!actor_register(&delegated, &owner, sender));
+        close(sender);
+        close(receiver);
     }
 
     #[tokio::test(flavor = "current_thread")]
