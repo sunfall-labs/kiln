@@ -163,6 +163,91 @@ static size_t kiln_c99_own_index_key(const kiln_object *object, const kiln_strin
     return found;
 }
 
+/* A read-only own-property projection. The returned record is a value copy: no caller may
+ * retain a pointer into a dictionary or assume that a shaped slot has one. A later sealed
+ * descriptor/value layout can answer this boundary without constructing a dictionary.
+ *
+ * Shape keys precede dense elements in the ordinary read path; integer keys cannot be shape
+ * transitions, so the ordering matters only for a mixed store. A list, when present beside a
+ * shape, is checked last without calling own_index_key (which would materialize that shape). */
+static int kiln_c99_property_read_own(const kiln_object *object, const kiln_string *key,
+                                      const kiln_string *ikey, kiln_property *out) {
+    size_t index;
+    if (object->shape != NULL) {
+        uint32_t slot;
+        if (ikey != NULL && kiln_c99_shape_find_slot(object->shape, ikey, &slot) &&
+            slot < object->slot_capacity) {
+            kiln_c99_shape_property(object, slot, out);
+            return 1;
+        }
+        if (ikey == NULL) {
+            for (index = 0; index < object->shape->property_count; ++index) {
+                kiln_property candidate = {.key = object->shape->keys[index]};
+                if (index < object->slot_capacity &&
+                    kiln_c99_same_key_view(&candidate, key)) {
+                    kiln_c99_shape_property(object, (uint32_t)index, out);
+                    return 1;
+                }
+            }
+        }
+    }
+    if (object->elements != NULL) {
+        double number = kiln_c99_key_index_key(key);
+        if (number >= 0.0 && number < (double)object->element_count &&
+            number < 100000.0 && object->elements[(size_t)number] != KILN_VAL_HOLE) {
+            memset(out, 0, sizeof *out);
+            out->key = ikey != NULL ? ikey : key;
+            out->enumerable = 1;
+            out->writable = 1;
+            out->configurable = 1;
+            out->value = kiln_val_to_boundary(object->elements[(size_t)number]);
+            return 1;
+        }
+    }
+    if (object->properties == NULL) return 0;
+    if (object->shape == NULL) {
+        index = kiln_c99_own_index_key(object, ikey, key);
+        if (index == object->count) return 0;
+        *out = object->properties[index];
+        return 1;
+    }
+    for (index = 0; index < object->count; ++index) {
+        const kiln_property *property = &object->properties[index];
+        if ((ikey != NULL && property->key == ikey) ||
+            (ikey == NULL && kiln_c99_same_key_view(property, key))) {
+            *out = *property;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* The GC side of the same storage boundary. A projected read returns a temporary record, but
+ * tracing must visit the underlying realm slots directly and must never allocate or convert a
+ * shaped object. A future descriptor/value overlay adds its realm-owned values here. */
+static void kiln_c99_gc_trace_object_properties(kiln_gc_heap *heap,
+                                                 const kiln_object *object) {
+    size_t index;
+    if (object->shape != NULL) {
+        for (index = 0; index < object->shape->property_count; ++index) {
+            kiln_c99_gc_mark_block(heap, object->shape->keys[index]);
+            if (object->slots != NULL) kiln_c99_gc_mark_val(heap, object->slots[index]);
+        }
+    }
+    if (object->elements != NULL)
+        kiln_c99_gc_mark_vals(heap, object->elements, object->element_count);
+    for (index = 0; index < object->count; ++index) {
+        const kiln_property *property = &object->properties[index];
+        kiln_c99_gc_mark_block(heap, property->key);
+        if (property->accessor) {
+            kiln_c99_gc_mark_value(heap, &property->getter);
+            kiln_c99_gc_mark_value(heap, &property->setter);
+        } else {
+            kiln_c99_gc_mark_value(heap, &property->value);
+        }
+    }
+}
+
 static size_t kiln_c99_own_index(const kiln_object *object, const kiln_string *ikey,
                                  const char *key, size_t key_len) {
     kiln_string view;

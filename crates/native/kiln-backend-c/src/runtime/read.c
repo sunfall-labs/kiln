@@ -336,51 +336,22 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             }
             object = kiln_c99_object_of(current);
             getter = kiln_c99_undefined();
-            if (object->shape != NULL) {
-                if (ikey != NULL) {
-                    uint32_t slot;
-                    if (kiln_c99_shape_find_slot(object->shape, ikey, &slot)) {
-                        if (slot < object->slot_capacity) {
-                            if (KILN_LIKELY((object->shape->accessor_mask & (1u << slot)) == 0)) {
-                                *out = kiln_val_to_boundary(object->slots[slot]);
-                                return KILN_C99_OK;
-                            }
-                            /* An accessor of a shaped object: its pair is in the slot. */
-                            getter = kiln_c99_accessor_pair_half(object->slots[slot], 0);
-                            goto read_accessor;
-                        }
-                    }
-                }
-                if (object->elements != NULL) {
-                    double index_num = kiln_c99_key_index_key(key);
-                    if (index_num >= 0.0 && index_num < 100000.0) {
-                        size_t elem_idx = (size_t)index_num;
-                        if (elem_idx < object->element_count &&
-                            object->elements[elem_idx] != KILN_VAL_HOLE) {
-                            *out = kiln_val_to_boundary(object->elements[elem_idx]);
-                            return KILN_C99_OK;
-                        }
-                    }
-                }
-                if (object->properties == NULL) {
+            {
+                kiln_property property;
+                if (!kiln_c99_property_read_own(object, key, ikey, &property)) {
                     current = object->prototype;
                     continue;
                 }
-                kiln_c99_ensure_dictionary(object);
-            }
-            index = kiln_c99_own_index_key(object, ikey, key);
-            if (index != object->count) {
                 /* A published name with nothing behind it stops the program and lets the
                  * instruction say which one. See `kiln_property::refused`. */
-                if (object->properties[index].refused) {
+                if (property.refused) {
                     KILN_C99_REFUSE("a member this backend declares and has not implemented");
                 }
-                if (!object->properties[index].accessor) {
-                    *out = object->properties[index].value;
+                if (!property.accessor) {
+                    *out = property.value;
                     return KILN_C99_OK;
                 }
-                getter = object->properties[index].getter;
-            read_accessor:
+                getter = property.getter;
                 /* Reading an accessor is a call, and the receiver is the object the read
                  * started from -- not the one the accessor was found on. */
                 if (getter.tag == KILN_VALUE_UNDEFINED) {
@@ -390,7 +361,6 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 }
                 return kiln_c99_call(host, out, getter, target, NULL, 0, depth, thrown);
             }
-            current = object->prototype;
         }
         /* An iterator helper's chain ends at `Iterator.prototype`, which is a method table rather
          * than an object, so the walk above stopped the moment it reached it. Answer the helpers

@@ -1067,8 +1067,10 @@ fn runtime_prelude_size() {
     // compact realm-owned unit cells (issue 08), bring the measured prelude to 61,276 lines.
     // Source-level actor candidate chunk boundaries and stress invalidation (issue 10) bring
     // it to 61,384 lines.
+    // The read-only object property projection and its GC edge boundary (realms issue 08)
+    // bring the measured prelude to 61,502 lines.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 61_500;
+    const CEILING_LINES: usize = 61_750;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

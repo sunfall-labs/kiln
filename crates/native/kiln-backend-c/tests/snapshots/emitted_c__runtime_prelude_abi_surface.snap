@@ -2268,6 +2268,7 @@ static void kiln_c99_gc_mark_value(kiln_gc_heap *heap, const kiln_value *value) 
 static void kiln_c99_gc_mark_values(kiln_gc_heap *heap, const kiln_value *values,
 static void kiln_c99_gc_mark_val(kiln_gc_heap *heap, kiln_val v) {
 static void kiln_c99_gc_mark_vals(kiln_gc_heap *heap, const kiln_val *values,
+static void kiln_c99_gc_trace_object_properties(kiln_gc_heap *heap,
 static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
 static void kiln_c99_gc_finalize(kiln_gc_heap *heap, kiln_gc_block *block) {
 static void kiln_c99_gc_drain(kiln_gc_heap *heap) {
@@ -2441,6 +2442,8 @@ static int kiln_c99_is_node_hidden_key_key(const kiln_string *key) {
 static int kiln_c99_same_key_view(const kiln_property *property, const kiln_string *key) {
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len) {
 static size_t kiln_c99_own_index_key(const kiln_object *object, const kiln_string *ikey,
+static int kiln_c99_property_read_own(const kiln_object *object, const kiln_string *key,
+static void kiln_c99_gc_trace_object_properties(kiln_gc_heap *heap,
 static size_t kiln_c99_own_index(const kiln_object *object, const kiln_string *ikey,
 static int kiln_c99_has_inherited_setter_or_readonly(kiln_value proto) {
 #define KILN_C99_LEVEL_NONE 0

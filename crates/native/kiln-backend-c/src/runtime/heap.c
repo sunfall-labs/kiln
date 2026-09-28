@@ -5301,33 +5301,17 @@ static void kiln_c99_gc_mark_vals(kiln_gc_heap *heap, const kiln_val *values,
  * Adding a field to one of these kinds that this switch must start marking means it can no
  * longer allocate through `kiln_c99_gc_alloc_pointer_free` -- move its case out of `default` and
  * its allocation back onto `kiln_c99_gc_alloc` in the same change. */
+/* Property storage supplies the edges for every ordinary-object representation. It must not
+ * allocate or materialize a dictionary: collection can arrive inside a property write. */
+static void kiln_c99_gc_trace_object_properties(kiln_gc_heap *heap,
+                                                 const kiln_object *object);
+
 static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
     void *payload = block + 1;
     switch (block->kind & KILN_GC_KIND_MASK) {
     case KILN_GC_OBJECT: {
         kiln_object *object = (kiln_object *)payload;
-        size_t index;
-        if (object->shape != NULL) {
-            for (index = 0; index < object->shape->property_count; ++index) {
-                kiln_c99_gc_mark_block(heap, object->shape->keys[index]);
-                if (object->slots != NULL) {
-                    kiln_c99_gc_mark_val(heap, object->slots[index]);
-                }
-            }
-        }
-        if (object->elements != NULL) {
-            kiln_c99_gc_mark_vals(heap, object->elements, object->element_count);
-        }
-        for (index = 0; index < object->count; ++index) {
-            const kiln_property *property = &object->properties[index];
-            kiln_c99_gc_mark_block(heap, property->key);
-            if (property->accessor) {
-                kiln_c99_gc_mark_value(heap, &property->getter);
-                kiln_c99_gc_mark_value(heap, &property->setter);
-            } else {
-                kiln_c99_gc_mark_value(heap, &property->value);
-            }
-        }
+        kiln_c99_gc_trace_object_properties(heap, object);
         kiln_c99_gc_mark_value(heap, &object->prototype);
         break;
     }

@@ -680,23 +680,20 @@ int kiln_c99_bootstrap_global(kiln_value *out, const char *name, size_t name_len
 
 static int kiln_c99_global_binding(kiln_value *out, const char *name, size_t name_len, int *found) {
     kiln_value globals;
-    kiln_object *object;
-    size_t slot;
+    kiln_property property;
+    kiln_string view;
     int status = kiln_c99_global_object(&globals);
     *found = 0;
     if (status != KILN_C99_OK) {
         return status;
     }
-    object = kiln_c99_object_of(globals);
-    if (object->shape != NULL) {
-        kiln_c99_ensure_dictionary(object);
-    }
-    for (slot = 0; slot < object->count; ++slot) {
-        if (kiln_string_equals_ascii(object->properties[slot].key, name, name_len)) {
-            *out = object->properties[slot].value;
-            *found = 1;
-            return KILN_C99_OK;
-        }
+    if (name_len > UINT32_MAX) return KILN_C99_OUT_OF_MEMORY;
+    view.unit_len = (uint32_t)name_len;
+    view.flags = kiln_c99_fixed_key_flags(name, name_len);
+    view.data = name;
+    if (kiln_c99_property_read_own(kiln_c99_object_of(globals), &view, NULL, &property)) {
+        *out = property.value;
+        *found = 1;
     }
     return KILN_C99_OK;
 }
@@ -706,23 +703,15 @@ static int kiln_c99_global_binding(kiln_value *out, const char *name, size_t nam
  * comparison cannot spell. */
 static int kiln_c99_global_binding_key(kiln_value *out, const kiln_string *name, int *found) {
     kiln_value globals;
-    kiln_object *object;
-    size_t slot;
+    kiln_property property;
     int status = kiln_c99_global_object(&globals);
     *found = 0;
     if (status != KILN_C99_OK) {
         return status;
     }
-    object = kiln_c99_object_of(globals);
-    if (object->shape != NULL) {
-        kiln_c99_ensure_dictionary(object);
-    }
-    for (slot = 0; slot < object->count; ++slot) {
-        if (kiln_string_equal(object->properties[slot].key, name)) {
-            *out = object->properties[slot].value;
-            *found = 1;
-            return KILN_C99_OK;
-        }
+    if (kiln_c99_property_read_own(kiln_c99_object_of(globals), name, NULL, &property)) {
+        *out = property.value;
+        *found = 1;
     }
     return KILN_C99_OK;
 }
