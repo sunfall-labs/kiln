@@ -1368,32 +1368,81 @@ pub const ITERATOR_BOOTSTRAP_SOURCE: &str = include_str!("iterator.ts");
 /// `Object.seal`, `Object.isSealed`, `Reflect.isExtensible`, `Reflect.preventExtensions`, `Reflect.setPrototypeOf`.
 pub const OBJECT_REFLECT_BOOTSTRAP_SOURCE: &str = include_str!("object_reflect.ts");
 
+/// Families whose bootstrap state can be omitted from a closed-world native executable when
+/// liveness proves that neither the intrinsic nor its prototype can be reached. The interpreter
+/// executes the complete bootstrap; native source selection only removes work a program cannot
+/// observe. Groups with implicit literal or iterator reachability remain unconditional.
+pub mod native_bootstrap_family {
+    pub const DATE: u32 = 1 << 0;
+    pub const TYPED_ARRAY: u32 = 1 << 1;
+    pub const DISPOSABLE: u32 = 1 << 2;
+    pub const WEAK_REFS: u32 = 1 << 3;
+    pub const ARRAY_BUFFER: u32 = 1 << 4;
+    pub const ATOMICS: u32 = 1 << 5;
+    pub const STRUCTURED_CLONE: u32 = 1 << 6;
+    pub const MAP_UPSERT: u32 = 1 << 7;
+    pub const PROMISE: u32 = 1 << 8;
+    pub const OBJECT_REFLECT: u32 = 1 << 9;
+    pub const ALL: u32 = (1 << 10) - 1;
+}
+
+/// Keep the script order and lexical dependencies identical to the full bootstrap. An omitted
+/// installer must still hide the private host primitive it would have captured and deleted:
+/// leaving one on `globalThis` changes both reflection and feature detection.
+pub fn common_bootstrap_source_selected(families: u32) -> String {
+    use native_bootstrap_family as family;
+    let selected = |bit: u32, source: &'static str| {
+        if families & bit != 0 { source } else { "" }
+    };
+    let mut source = [
+        EXTENSIONS_BOOTSTRAP_SOURCE,
+        selected(family::DATE, DATE_BOOTSTRAP_SOURCE),
+        selected(family::TYPED_ARRAY, TYPEDARRAY_BOOTSTRAP_SOURCE),
+        PARALLEL_BOOTSTRAP_SOURCE,
+        ERRORS_BOOTSTRAP_SOURCE,
+        ANNEXB_BOOTSTRAP_SOURCE,
+        selected(family::DISPOSABLE, DISPOSABLE_BOOTSTRAP_SOURCE),
+        REGEXP_BOOTSTRAP_SOURCE,
+        selected(family::WEAK_REFS, WEAK_REFS_BOOTSTRAP_SOURCE),
+        selected(family::ARRAY_BUFFER, ARRAYBUFFER_BOOTSTRAP_SOURCE),
+        selected(family::ATOMICS, ATOMICS_BOOTSTRAP_SOURCE),
+        selected(family::STRUCTURED_CLONE, STRUCTURED_CLONE_BOOTSTRAP_SOURCE),
+        selected(family::MAP_UPSERT, MAPUPSERT_BOOTSTRAP_SOURCE),
+        selected(family::PROMISE, PROMISE_BOOTSTRAP_SOURCE),
+        REJECTIONS_BOOTSTRAP_SOURCE,
+        ITERATOR_BOOTSTRAP_SOURCE,
+        selected(family::OBJECT_REFLECT, OBJECT_REFLECT_BOOTSTRAP_SOURCE),
+    ]
+    .join("\n");
+    let cleanup: &[(u32, &str)] = &[
+        (family::TYPED_ARRAY, "__kilnTypedArrayOutOfBounds"),
+        (family::TYPED_ARRAY, "__kilnTypedArrayCopy"),
+        (family::TYPED_ARRAY, "__kilnTypedArraySort"),
+        (family::WEAK_REFS, "__kilnSharedWeak"),
+        (family::ARRAY_BUFFER, "__kilnArrayBufferDetach"),
+        (family::ARRAY_BUFFER, "__kilnArrayBufferResize"),
+        (family::ARRAY_BUFFER, "__kilnSharedBuffer"),
+        (family::ATOMICS, "__kilnAtomics"),
+        (family::STRUCTURED_CLONE, "__kilnCloneData"),
+        (family::STRUCTURED_CLONE, "__kilnSharedIs"),
+        (family::OBJECT_REFLECT, "__kilnSetPrototypeOf"),
+        (family::OBJECT_REFLECT, "__kilnPreventExtensions"),
+    ];
+    for &(bit, name) in cleanup {
+        if families & bit == 0 {
+            source.push_str("\ndelete (globalThis as any).");
+            source.push_str(name);
+            source.push(';');
+        }
+    }
+    source
+}
+
 /// Part of every realm's bootstrap, in both interpreter and native execution.
 /// Includes Date.prototype, %TypedArray%.prototype, Error subclasses, Annex B, DisposableStack,
 /// RegExp.prototype, ArrayBuffer/SharedArrayBuffer, structuredClone, Map.upsert, Promise extensions, unhandled-rejection tracking, Iterator extensions, and Object/Reflect extensions.
 pub fn common_bootstrap_source() -> String {
-    // A list rather than a format string, so adding a source cannot leave the placeholders and
-    // the arguments out of step (two branches adding one each once merged into a mismatch).
-    [
-        EXTENSIONS_BOOTSTRAP_SOURCE,
-        DATE_BOOTSTRAP_SOURCE,
-        TYPEDARRAY_BOOTSTRAP_SOURCE,
-        PARALLEL_BOOTSTRAP_SOURCE,
-        ERRORS_BOOTSTRAP_SOURCE,
-        ANNEXB_BOOTSTRAP_SOURCE,
-        DISPOSABLE_BOOTSTRAP_SOURCE,
-        REGEXP_BOOTSTRAP_SOURCE,
-        WEAK_REFS_BOOTSTRAP_SOURCE,
-        ARRAYBUFFER_BOOTSTRAP_SOURCE,
-        ATOMICS_BOOTSTRAP_SOURCE,
-        STRUCTURED_CLONE_BOOTSTRAP_SOURCE,
-        MAPUPSERT_BOOTSTRAP_SOURCE,
-        PROMISE_BOOTSTRAP_SOURCE,
-        REJECTIONS_BOOTSTRAP_SOURCE,
-        ITERATOR_BOOTSTRAP_SOURCE,
-        OBJECT_REFLECT_BOOTSTRAP_SOURCE,
-    ]
-    .join("\n")
+    common_bootstrap_source_selected(native_bootstrap_family::ALL)
 }
 
 #[cfg(test)]
@@ -1407,6 +1456,25 @@ mod web_tests {
         let program = kiln_ir::compile_module(&hir)
             .expect("common bootstrap should compile to IR as a single unit without error");
         assert!(!program.program.code.is_empty());
+    }
+
+    #[test]
+    fn selected_native_bootstrap_hides_unretained_host_primitives() {
+        let source = common_bootstrap_source_selected(0);
+        assert!(!source.contains("installDatePrototype"));
+        assert!(!source.contains("installTypedArrayPrototype"));
+        for name in [
+            "__kilnTypedArrayCopy",
+            "__kilnArrayBufferDetach",
+            "__kilnSharedWeak",
+            "__kilnAtomics",
+            "__kilnCloneData",
+            "__kilnSetPrototypeOf",
+        ] {
+            assert!(source.contains(&format!("delete (globalThis as any).{name};")));
+        }
+        let hir = kiln_frontend_oxc::parse("@kiln/selected-bootstrap.ts", &source);
+        kiln_ir::compile_module(&hir).expect("selected bootstrap should compile");
     }
 
     #[test]

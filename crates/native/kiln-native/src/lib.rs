@@ -2441,6 +2441,7 @@ impl NativeBuilder {
                 &emission,
                 options.node,
                 group_mask & kiln_graph::method_groups::URL != 0,
+                graph::native_bootstrap_families(&members, options.node, group_mask),
                 (options.profile == NativeProfile::Release && release_bootstrap_specialized())
                     .then_some(RELEASE_BOOTSTRAP_UNIT_BYTES),
             )?;

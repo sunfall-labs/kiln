@@ -913,24 +913,31 @@ pub(super) fn emit_native_graph_module_with_policy(
 }
 
 struct NativeBuiltinBootstrapProgram {
-    program: Result<kiln_ir::ModuleProgram, Vec<kiln_ir::CompileDiagnostic>>,
+    program: Result<std::sync::Arc<kiln_ir::ModuleProgram>, Vec<kiln_ir::CompileDiagnostic>>,
     source_digest: Digest,
     program_digest: Digest,
     provider_capabilities: ProviderCapabilities,
 }
 
-static NATIVE_BOOTSTRAP_NODE: OnceLock<NativeBuiltinBootstrapProgram> = OnceLock::new();
-static NATIVE_BOOTSTRAP_URL: OnceLock<NativeBuiltinBootstrapProgram> = OnceLock::new();
-static NATIVE_BOOTSTRAP_CORE: OnceLock<NativeBuiltinBootstrapProgram> = OnceLock::new();
+type NativeBootstrapKey = (bool, bool, u32);
+type NativeBootstrapCache = (
+    BTreeMap<NativeBootstrapKey, std::sync::Arc<NativeBuiltinBootstrapProgram>>,
+    std::collections::VecDeque<NativeBootstrapKey>,
+);
+static NATIVE_BOOTSTRAPS: OnceLock<std::sync::Mutex<NativeBootstrapCache>> = OnceLock::new();
 
-fn compile_native_builtin_bootstrap(node: bool, retain_url: bool) -> NativeBuiltinBootstrapProgram {
+fn compile_native_builtin_bootstrap(
+    node: bool,
+    retain_url: bool,
+    families: u32,
+) -> NativeBuiltinBootstrapProgram {
     const LOGICAL_PATH: &str = "@kiln/runtime-bootstrap.ts";
     let url = if retain_url || node {
         kiln_builtins::URL_BOOTSTRAP_SOURCE
     } else {
         ""
     };
-    let common_ts_builtins = kiln_builtins::common_bootstrap_source();
+    let common_ts_builtins = kiln_builtins::common_bootstrap_source_selected(families);
     let source = if node {
         format!(
             "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{common_ts_builtins}\n{url}\n{}",
@@ -943,7 +950,7 @@ fn compile_native_builtin_bootstrap(node: bool, retain_url: bool) -> NativeBuilt
     };
     let source_digest = Digest::hash(source.as_bytes());
     let hir = kiln_frontend_oxc::parse(LOGICAL_PATH, &source);
-    let program = kiln_ir::compile_module(&hir);
+    let program = kiln_ir::compile_module(&hir).map(std::sync::Arc::new);
     let program_digest = program
         .as_ref()
         .map(|program| Digest::hash(format!("{program:?}").as_bytes()))
@@ -960,42 +967,159 @@ fn compile_native_builtin_bootstrap(node: bool, retain_url: bool) -> NativeBuilt
     }
 }
 
+/// A native executable with no open-world access constructs only the intrinsic families it can
+/// reach. Unknown computed/global access keeps the full surface. The remaining conditions are
+/// deliberately conservative: a constructor or prototype reached through a stored value, for
+/// example, defeats a direct-global-only proof. Each retained family still runs its ordinary
+/// TypeScript bootstrap, so its identity and descriptors have exactly the full-build semantics.
+pub(super) fn native_bootstrap_families(
+    members: &kiln_graph::DemandedMembers,
+    node: bool,
+    group_mask: u32,
+) -> u32 {
+    use kiln_builtins::native_bootstrap_family as family;
+    let full_groups = kiln_graph::CORE_METHOD_GROUPS | kiln_graph::PRUNABLE_METHOD_GROUPS;
+    if node
+        || members.has_open_world
+        || members.has_computed_access
+        || members.builtins.contains("GlobalThis")
+        || members.globals.contains("globalThis")
+        || members
+            .names
+            .iter()
+            .any(|name| matches!(name.as_str(), "constructor" | "__proto__" | "prototype"))
+        || group_mask == full_groups
+    {
+        return family::ALL;
+    }
+    let names = |values: &[&str]| values.iter().any(|name| members.names.contains(*name));
+    let builtin = |values: &[&str]| {
+        values
+            .iter()
+            .any(|name| members.builtins.contains(*name) || members.globals.contains(*name))
+    };
+    let mut selected = 0;
+    if builtin(&["Date", "Intl"]) || names(&["getTime", "setTime", "toISOString", "toUTCString"]) {
+        selected |= family::DATE;
+    }
+    let typed_array = builtin(&[
+        "Int8Array",
+        "Uint8Array",
+        "Uint8ClampedArray",
+        "Int16Array",
+        "Uint16Array",
+        "Int32Array",
+        "Uint32Array",
+        "Float16Array",
+        "Float32Array",
+        "Float64Array",
+        "BigInt64Array",
+        "BigUint64Array",
+        "DataView",
+        "TextEncoder",
+        "TextDecoder",
+        "Buffer",
+    ]) || names(&[
+        "BYTES_PER_ELEMENT",
+        "byteOffset",
+        "buffer",
+        "subarray",
+        "copyWithin",
+    ]);
+    if typed_array {
+        selected |= family::TYPED_ARRAY;
+    }
+    if builtin(&[
+        "Symbol",
+        "DisposableStack",
+        "AsyncDisposableStack",
+        "SuppressedError",
+    ]) || names(&["dispose", "asyncDispose", "defer", "adopt", "move"])
+    {
+        selected |= family::DISPOSABLE;
+    }
+    if builtin(&["WeakRef", "FinalizationRegistry"]) {
+        selected |= family::WEAK_REFS;
+    }
+    if builtin(&["Atomics", "SharedArrayBuffer"]) {
+        selected |= family::ATOMICS;
+    }
+    if builtin(&["structuredClone"]) || members.globals.contains("structuredClone") {
+        selected |= family::STRUCTURED_CLONE;
+    }
+    if builtin(&["Map"]) || names(&["getOrInsert", "getOrInsertComputed"]) {
+        selected |= family::MAP_UPSERT;
+    }
+    if builtin(&["Promise"]) || names(&["try", "allKeyed", "allSettledKeyed"]) {
+        selected |= family::PROMISE;
+    }
+    if builtin(&["Object", "Reflect"])
+        || names(&[
+            "seal",
+            "isSealed",
+            "isExtensible",
+            "preventExtensions",
+            "setPrototypeOf",
+        ])
+    {
+        selected |= family::OBJECT_REFLECT;
+    }
+    if typed_array
+        || selected & (family::ATOMICS | family::WEAK_REFS | family::STRUCTURED_CLONE) != 0
+        || builtin(&["ArrayBuffer", "SharedArrayBuffer"])
+    {
+        selected |= family::ARRAY_BUFFER;
+    }
+    selected
+}
+
 pub(super) fn native_builtin_bootstrap_module(
     cache: &ArtifactCache,
     target: &str,
     policy: &EmissionPolicy,
     node: bool,
     retain_url: bool,
+    families: u32,
     specialized_unit_bytes: Option<usize>,
 ) -> Result<
     (
         kiln_backend_c::CModule,
-        &'static kiln_ir::ModuleProgram,
+        std::sync::Arc<kiln_ir::ModuleProgram>,
         ProviderCapabilities,
         bool,
     ),
     NativeError,
 > {
     const LOGICAL_PATH: &str = "@kiln/runtime-bootstrap.ts";
-    // `URL` rides the retain group liveness computed: a program that names neither it nor
-    // anything built on it gets no class, and the prelude behind it compiled out. `--node`
-    // always has it, because `fetch` is built on it.
-    let compiled = if node {
-        NATIVE_BOOTSTRAP_NODE.get_or_init(|| compile_native_builtin_bootstrap(true, true))
-    } else if retain_url {
-        NATIVE_BOOTSTRAP_URL.get_or_init(|| compile_native_builtin_bootstrap(false, true))
-    } else {
-        NATIVE_BOOTSTRAP_CORE.get_or_init(|| compile_native_builtin_bootstrap(false, false))
+    // Key source compilation by the complete surface selection. A long-lived build daemon can
+    // see many of the 10-bit family masks, so retain only the latest 16 variants. An Arc held
+    // through emission keeps an evicted program alive until that build has finished using it.
+    let key = (node, retain_url, families);
+    let programs = NATIVE_BOOTSTRAPS.get_or_init(|| {
+        std::sync::Mutex::new((BTreeMap::new(), std::collections::VecDeque::new()))
+    });
+    let compiled = {
+        let mut cache = programs.lock().expect("bootstrap cache lock");
+        if let Some(program) = cache.0.get(&key) {
+            std::sync::Arc::clone(program)
+        } else {
+            let program =
+                std::sync::Arc::new(compile_native_builtin_bootstrap(node, retain_url, families));
+            cache.0.insert(key, std::sync::Arc::clone(&program));
+            cache.1.push_back(key);
+            if cache.1.len() > 16 {
+                let oldest = cache.1.pop_front().expect("nonempty bootstrap cache");
+                cache.0.remove(&oldest);
+            }
+            program
+        }
     };
-    // The only source variants are fixed by the process build and runtime surface choice. Keep
-    // compiled immutable bytecode and its source/provider analysis once per variant; every realm
-    // still executes it into its own mutable objects.
-    let program = compiled.program.as_ref().map_err(|diagnostics| {
+    let program = std::sync::Arc::clone(compiled.program.as_ref().map_err(|diagnostics| {
         NativeError::Graph(ModuleGraphError::Compile {
             path: PathBuf::from(LOGICAL_PATH),
             diagnostics: diagnostics.clone(),
         })
-    })?;
+    })?);
     // The bootstrap is code every binary carries -- the console methods, the Set algebra, the
     // URL class -- and emitted like hot user code, with a fast clone and a typed clone per
     // function, it once put 0.9 MB on a hello world; so by default it is emitted generic-only.
@@ -1008,7 +1132,7 @@ pub(super) fn native_builtin_bootstrap_module(
     bootstrap_policy.unit_chunk_bytes = specialized_unit_bytes;
     if !bootstrap_policy.decoupled_prelude {
         let module =
-            emit_module_with_logical_path_and_policy(program, LOGICAL_PATH, bootstrap_policy)?;
+            emit_module_with_logical_path_and_policy(&program, LOGICAL_PATH, bootstrap_policy)?;
         return Ok((module, program, compiled.provider_capabilities, false));
     }
     // Bind cached emission to both source text and the parsed/compiled IR. The full bootstraps
@@ -1029,7 +1153,7 @@ pub(super) fn native_builtin_bootstrap_module(
     );
     let (c_module, hit) =
         cached_emitted_module(cache, target, input, *bootstrap_emitter::EMITTER_ID, || {
-            bootstrap_emitter::emit(program, LOGICAL_PATH, &bootstrap_policy)
+            bootstrap_emitter::emit(&program, LOGICAL_PATH, &bootstrap_policy)
         })?;
     Ok((c_module, program, compiled.provider_capabilities, hit))
 }

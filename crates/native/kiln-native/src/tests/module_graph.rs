@@ -182,18 +182,32 @@ fn bootstrap_emission_cache_reopens_and_separates_surface_and_policy() {
         ..Default::default()
     };
     let cache = ArtifactCache::new(&cache_path);
-    let (first, program, capabilities, hit) =
-        native_builtin_bootstrap_module(&cache, "test-target", &policy, false, false, None)
-            .unwrap();
+    let (first, program, capabilities, hit) = native_builtin_bootstrap_module(
+        &cache,
+        "test-target",
+        &policy,
+        false,
+        false,
+        kiln_builtins::native_bootstrap_family::ALL,
+        None,
+    )
+    .unwrap();
     assert!(!hit);
     let reopened = ArtifactCache::new(&cache_path);
-    let (again, again_program, again_capabilities, hit) =
-        native_builtin_bootstrap_module(&reopened, "test-target", &policy, false, false, None)
-            .unwrap();
+    let (again, again_program, again_capabilities, hit) = native_builtin_bootstrap_module(
+        &reopened,
+        "test-target",
+        &policy,
+        false,
+        false,
+        kiln_builtins::native_bootstrap_family::ALL,
+        None,
+    )
+    .unwrap();
     assert!(hit);
     assert_eq!(first, again);
     assert_eq!(program, again_program);
-    assert!(std::ptr::eq(program, again_program));
+    assert!(std::sync::Arc::ptr_eq(&program, &again_program));
     assert_eq!(capabilities, again_capabilities);
     // A surface change and an emission-policy change must not return the earlier bootstrap.
     for (policy, url) in [
@@ -206,11 +220,25 @@ fn bootstrap_emission_cache_reopens_and_separates_surface_and_policy() {
             false,
         ),
     ] {
-        let (_, _, _, hit) =
-            native_builtin_bootstrap_module(&reopened, "test-target", &policy, false, url, None)
-                .unwrap();
+        let (_, _, _, hit) = native_builtin_bootstrap_module(
+            &reopened,
+            "test-target",
+            &policy,
+            false,
+            url,
+            kiln_builtins::native_bootstrap_family::ALL,
+            None,
+        )
+        .unwrap();
         assert!(!hit);
     }
+    let (_, _, _, selected_hit) =
+        native_builtin_bootstrap_module(&reopened, "test-target", &policy, false, false, 0, None)
+            .unwrap();
+    assert!(
+        !selected_hit,
+        "selected source needs its own emission record"
+    );
     // Issue 17: a release build's specialized bootstrap is its own entry, split into units.
     let (specialized, _, _, hit) = native_builtin_bootstrap_module(
         &reopened,
@@ -218,6 +246,7 @@ fn bootstrap_emission_cache_reopens_and_separates_surface_and_policy() {
         &policy,
         false,
         false,
+        kiln_builtins::native_bootstrap_family::ALL,
         Some(1 << 20),
     )
     .unwrap();
@@ -228,6 +257,38 @@ fn bootstrap_emission_cache_reopens_and_separates_surface_and_policy() {
         specialized.chunks.len() > 1,
         "split into units: {}",
         specialized.chunks.len()
+    );
+}
+
+#[test]
+fn native_bootstrap_family_selection_closes_over_dependencies_and_open_world() {
+    use kiln_builtins::native_bootstrap_family as family;
+    let mut members = kiln_graph::DemandedMembers::default();
+    assert_eq!(
+        native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
+        0
+    );
+    members.builtins.insert("Date".to_owned());
+    assert_eq!(
+        native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
+        family::DATE
+    );
+    members.builtins.clear();
+    members.builtins.insert("Uint8Array".to_owned());
+    assert_eq!(
+        native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
+        family::TYPED_ARRAY | family::ARRAY_BUFFER
+    );
+    members.has_computed_access = true;
+    assert_eq!(
+        native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
+        family::ALL
+    );
+    members.has_computed_access = false;
+    members.builtins.insert("GlobalThis".to_owned());
+    assert_eq!(
+        native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
+        family::ALL
     );
 }
 
@@ -325,9 +386,16 @@ fn the_core_bootstraps_closures_are_region_closures() {
         compact: true,
         ..Default::default()
     };
-    let (bootstrap, _, _, _) =
-        native_builtin_bootstrap_module(&root.cache(), "test-target", &policy, false, false, None)
-            .expect("builtin bootstrap emits");
+    let (bootstrap, _, _, _) = native_builtin_bootstrap_module(
+        &root.cache(),
+        "test-target",
+        &policy,
+        false,
+        false,
+        kiln_builtins::native_bootstrap_family::ALL,
+        None,
+    )
+    .expect("builtin bootstrap emits");
     let region = bootstrap.source.matches("KU_REGION_CLOSURE(").count();
     let captured = bootstrap.source.matches("KU_CLOSURE(").count();
     assert!(
@@ -687,6 +755,7 @@ fn native_graph_wiring_uses_resolved_star_export_origins() {
         &NativeRealmPolicy::default().emission(),
         false,
         true,
+        kiln_builtins::native_bootstrap_family::ALL,
         None,
     )
     .expect("builtin bootstrap emits");
@@ -1087,7 +1156,10 @@ fn native_module_addressed_actor_calls_and_transfers() {
         "actor process failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(output.stdout, b"3 6\n0 23\nActorRemoteError RangeError\nAbortError 2\nActorClosedError\n");
+    assert_eq!(
+        output.stdout,
+        b"3 6\n0 23\nActorRemoteError RangeError\nAbortError 2\nActorClosedError\n"
+    );
     let disabled = Command::new(&built.output)
         .env("KILN_EXTENSIONS", "0")
         .output_when_launchable()
