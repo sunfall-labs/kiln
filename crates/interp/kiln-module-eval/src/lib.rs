@@ -357,6 +357,10 @@ impl ModuleLoaderService for GraphModuleLoader {
         let target = dependency
             .map(|dependency| dependency.target.clone())
             .or_else(|| {
+                self.graph
+                    .declared_target_for_runtime_specifier(&request.specifier)
+            })
+            .or_else(|| {
                 if let Some(builtin) = NodeBuiltin::parse(&request.specifier) {
                     self.graph.module_map().iter().find_map(|(path, node)| {
                         (node.source == ModuleSource::NodeBuiltin(builtin)).then(|| path.clone())
@@ -1721,7 +1725,10 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
         let module_object = ordinary_object([("exports".to_owned(), initial_exports.clone())]);
         let imports = vec![
             initial_exports,
-            Value::CommonJsRequire(std::rc::Rc::new(CommonJsRequire::new(targets))),
+            Value::CommonJsRequire(std::rc::Rc::new(CommonJsRequire::for_module(
+                path.to_string_lossy(),
+                targets,
+            ))),
             module_object.clone(),
             Value::String(path.to_string_lossy().into_owned().into()),
             Value::String(
@@ -1931,6 +1938,9 @@ impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
                     .cloned();
                 if let Some(dependency) = runtime_dependency {
                     return self.ensure_target_value(&dependency.target, instruction);
+                }
+                if let Some(target) = self.graph.declared_target_for_runtime_specifier(specifier) {
+                    return self.ensure_target_value(&target, instruction);
                 }
                 if NodeBuiltin::parse(specifier).is_some() {
                     return self.get_builtin(specifier, instruction)?.ok_or_else(|| {
