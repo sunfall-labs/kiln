@@ -285,6 +285,9 @@ static int kiln_c99_new_data_view(kiln_value *out, kiln_value source, size_t byt
                                   size_t byte_length, int has_length, kiln_value *thrown);
 static int kiln_c99_to_index(kiln_value value, size_t *out, kiln_value *thrown);
 static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size_t argc);
+#define KILN_C99_CLONE_BAIL 1
+static int kiln_c99_encode_message_data_raw(kiln_value *out, const kiln_value *args, size_t argc);
+static int kiln_c99_decode_message_data(kiln_worker_token *tokens, size_t count, kiln_value *out);
 static int kiln_c99_jobs_pending_raw(kiln_value *out);
 static int kiln_c99_promise_rejections_raw(kiln_value *out, const kiln_value *args, size_t argc);
 static int kiln_c99_promise_observe(kiln_promise *state);

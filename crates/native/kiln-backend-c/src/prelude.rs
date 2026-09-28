@@ -1111,6 +1111,9 @@ method_ids! {
     // deleted by `kiln-builtins/src/arraybuffer.ts` and `atomics.ts`.
     (KILN_C99_METHOD_SHARED_BUFFER_RAW, 541, Direct; 0, 0),
     (KILN_C99_METHOD_ATOMICS_RAW, 542, Direct; 0, 0),
+    // The native representation adapter for plain-data message tokens. The shared TypeScript
+    // structured clone remains the semantic owner and handles every value this path declines.
+    (KILN_C99_METHOD_ENCODE_MESSAGE_DATA_RAW, 543, Direct; 0, 0),
     (KILN_C99_METHOD_PROCESS_EXIT, 513, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC, 514, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC, 515, Direct; 0, 0),
@@ -3734,6 +3737,7 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_URL_ADOPT_RAW),
     emit_method_define!(KILN_C99_METHOD_ARRAY_BUFFER_DETACH_RAW),
     emit_method_define!(KILN_C99_METHOD_CLONE_DATA_RAW),
+    emit_method_define!(KILN_C99_METHOD_ENCODE_MESSAGE_DATA_RAW),
     emit_method_define!(KILN_C99_METHOD_JOBS_PENDING_RAW),
     emit_method_define!(KILN_C99_METHOD_QUEUE_IO_RAW),
     emit_method_define!(KILN_C99_METHOD_PROMISE_REJECTIONS_RAW),
