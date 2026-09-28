@@ -3145,6 +3145,154 @@ static int kiln_c99_chunk_sealed_for_move(const kiln_gc_nursery *nursery,
            bytes == chunk->alloc_bytes;
 }
 
+typedef struct kiln_c99_graph_walk {
+    const kiln_gc_heap *heap;
+    kiln_gc_ptrset members;
+    kiln_gc_ptrset reached;
+    kiln_gc_block **queue;
+    size_t queued;
+    size_t capacity;
+} kiln_c99_graph_walk;
+
+/* Every reference must resolve to a block in the same candidate. A static or process-wide
+ * pointer is refused too: this narrow walker has no certificate that it is shared immutable
+ * storage, and a raw pointer outside the sender heap is not proof of that fact. */
+static int kiln_c99_graph_follow(kiln_c99_graph_walk *walk, const void *payload) {
+    kiln_gc_block *block = kiln_c99_gc_lookup(walk->heap, payload);
+    if (block == NULL || !kiln_c99_gc_ptrset_contains(&walk->members, block)) return 0;
+    if (kiln_c99_gc_ptrset_contains(&walk->reached, block)) return 1;
+    if (walk->queued == walk->capacity ||
+        kiln_c99_gc_ptrset_insert(&walk->reached, block) != KILN_C99_OK) return 0;
+    walk->queue[walk->queued++] = block;
+    return 1;
+}
+
+static int kiln_c99_graph_follow_val(kiln_c99_graph_walk *walk, kiln_val value) {
+    if (KILN_VAL_IS_NUMBER(value) || value < KILN_TAG_STRING_PREFIX) return 1;
+    return kiln_c99_graph_follow(walk, KILN_VAL_PTR(value));
+}
+
+static int kiln_c99_graph_inline_string(const kiln_gc_block *block) {
+    const kiln_string *string = (const kiln_string *)(block + 1);
+    size_t width;
+    if (block->size < sizeof *string || (string->flags & KILN_STRING_SLICED) != 0 ||
+        (string->flags & ~(KILN_STRING_UTF16 | KILN_STRING_SYMBOL_KEY |
+                           KILN_STRING_PRIVATE_KEY)) != 0 ||
+        string->data != (const void *)(string + 1)) return 0;
+    width = (string->flags & KILN_STRING_UTF16) != 0 ? 2 : 1;
+    return string->unit_len <= (block->size - sizeof *string) / width;
+}
+
+/* This deliberately supports only layouts whose every edge and owner allocation is understood.
+ * It is independent of the collector's tracer: the tracer may silently ignore an external
+ * pointer, whereas an ownership proof must reject it. New GC kinds are refused by default. */
+static int kiln_c99_graph_walk_block(kiln_c99_graph_walk *walk, kiln_gc_block *block) {
+    switch (block->kind & KILN_GC_KIND_MASK) {
+    case KILN_GC_STRING:
+        return kiln_c99_graph_inline_string(block);
+    case KILN_GC_BYTES:
+        return 1;
+    case KILN_GC_SLICED_STRING: {
+        const kiln_sliced_string *string;
+        const kiln_gc_block *parent_block;
+        const kiln_string *parent;
+        uintptr_t start;
+        uintptr_t data;
+        size_t width;
+        size_t parent_bytes;
+        size_t slice_bytes;
+        if (block->size < sizeof(kiln_sliced_string)) return 0;
+        string = (const kiln_sliced_string *)(block + 1);
+        if (string->parent == NULL ||
+            (string->base.flags & KILN_STRING_SLICED) == 0) return 0;
+        parent_block = kiln_c99_gc_lookup(walk->heap, string->parent);
+        if (parent_block == NULL ||
+            (parent_block->kind & KILN_GC_KIND_MASK) != KILN_GC_STRING ||
+            !kiln_c99_graph_inline_string(parent_block)) return 0;
+        parent = string->parent;
+        if ((string->base.flags & KILN_STRING_UTF16) !=
+            (parent->flags & KILN_STRING_UTF16)) return 0;
+        width = (parent->flags & KILN_STRING_UTF16) != 0 ? 2 : 1;
+        parent_bytes = (size_t)parent->unit_len * width;
+        slice_bytes = (size_t)string->base.unit_len * width;
+        start = (uintptr_t)string->base.data;
+        data = (uintptr_t)parent->data;
+        if (start < data || start - data > parent_bytes ||
+            (start - data) % width != 0 || slice_bytes > parent_bytes - (start - data)) return 0;
+        return kiln_c99_graph_follow(walk, string->parent);
+    }
+    case KILN_GC_CELL:
+        if (block->size < sizeof(kiln_val)) return 0;
+        return kiln_c99_graph_follow_val(walk, *(const kiln_val *)(block + 1));
+    default:
+        return 0;
+    }
+}
+
+/* Prove the candidate's exact *outgoing* closure without changing GC marks. Every allocated
+ * block in the candidate must be reachable from `root`, and every pointer edge must stay inside
+ * those blocks. This says nothing about sender roots or outside-to-inside edges, so its success
+ * is not permission to move. The caller must hold the sender at a safepoint throughout proof
+ * and transfer; graph tickets remain disabled until the incoming proof and transaction exist. */
+static int kiln_c99_graph_candidate_closed(const kiln_gc_heap *heap,
+                                           kiln_nursery_chunk *const *chunks, size_t count,
+                                           const void *root) {
+    kiln_c99_graph_walk walk = {0};
+    size_t index;
+    size_t seen = 0;
+    uint64_t id = 0;
+    int result = 0;
+    if (heap == NULL || chunks == NULL || count == 0 || root == NULL || heap->collecting) return 0;
+    walk.heap = heap;
+    for (index = 0; index < count; ++index) {
+        const kiln_nursery_chunk *chunk = chunks[index];
+        const kiln_nursery_chunk *it;
+        const char *cursor;
+        int found = 0;
+        size_t previous;
+        if (chunk == NULL || chunk->candidate_id == 0 || chunk->candidate_epoch != heap->epoch ||
+            (id != 0 && chunk->candidate_id != id) ||
+            !kiln_c99_gc_ptrset_contains(&heap->nursery.regions, chunk) ||
+            !kiln_c99_chunk_sealed_for_move(&heap->nursery, chunk)) goto done;
+        id = chunk->candidate_id;
+        for (previous = 0; previous < index; ++previous) if (chunks[previous] == chunk) goto done;
+        for (it = heap->nursery.full; it != NULL; it = it->next) {
+            if (it == chunk) { found = 1; break; }
+        }
+        if (!found || seen > SIZE_MAX - chunk->alloc_count) goto done;
+        seen += chunk->alloc_count;
+        for (cursor = chunk->base; cursor < chunk->limit;) {
+            kiln_gc_block *block = (kiln_gc_block *)cursor;
+            size_t payload = block->size == 0 ? 1 : block->size;
+            size_t total = (sizeof(kiln_gc_block) + payload + 15) & ~(size_t)15;
+            if (kiln_c99_gc_ptrset_insert(&walk.members, block) != KILN_C99_OK) goto done;
+            cursor += total;
+        }
+    }
+    {
+        const kiln_nursery_chunk *it;
+        size_t group_count = 0;
+        for (it = heap->nursery.full; it != NULL; it = it->next) {
+            if (it->candidate_id == id) ++group_count;
+        }
+        if (group_count != count) goto done;
+    }
+    if (seen > SIZE_MAX / sizeof *walk.queue) goto done;
+    walk.queue = (kiln_gc_block **)malloc(seen * sizeof *walk.queue);
+    if (walk.queue == NULL) goto done;
+    walk.capacity = seen;
+    if (!kiln_c99_graph_follow(&walk, root)) goto done;
+    for (index = 0; index < walk.queued; ++index) {
+        if (!kiln_c99_graph_walk_block(&walk, walk.queue[index])) goto done;
+    }
+    result = walk.queued == seen;
+done:
+    free(walk.queue);
+    free(walk.members.table);
+    free(walk.reached.table);
+    return result;
+}
+
 /* The inverse of adoption for chunks whose entire contents have already passed an ownership
  * proof. `chunks` is an array because `next` still links every candidate into the sender's
  * `full` list. Validate the complete batch and reserve the receiver's region set before changing

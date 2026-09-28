@@ -2040,6 +2040,81 @@ int main(void) {
 }
 
 #[test]
+fn executable_graph_candidate_closure_rejects_external_and_unreachable_edges() {
+    let program = program(vec![], vec![Instruction::Return], 0);
+    let generated = emit(&program).expect("program emits");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap heap;
+    kiln_c99_par_arena candidate;
+    kiln_nursery_chunk *first, *second, *batch[2];
+    kiln_val *root, *next;
+    kiln_string *text;
+    kiln_sliced_string *slice;
+    const void *saved_data;
+    kiln_val saved_edge;
+    uint32_t saved_kind;
+    kiln_c99_gc_heap_init(&heap);
+    if (!kiln_c99_graph_candidate_open(&candidate, &heap, 2 * heap.nursery.capacity)) return 1;
+    root = (kiln_val *)kiln_c99_par_alloc(&candidate, KILN_GC_CELL, sizeof *root);
+    if (root == NULL) return 2;
+    first = candidate.current;
+    kiln_c99_par_arena_seal(&candidate);
+    next = (kiln_val *)kiln_c99_par_alloc(&candidate, KILN_GC_CELL, sizeof *next);
+    text = (kiln_string *)kiln_c99_par_alloc(&candidate, KILN_GC_STRING,
+                                              sizeof *text + 4);
+    slice = (kiln_sliced_string *)kiln_c99_par_alloc(&candidate, KILN_GC_SLICED_STRING,
+                                                      sizeof *slice);
+    if (next == NULL || text == NULL || slice == NULL) return 3;
+    second = candidate.current;
+    text->unit_len = 4;
+    text->flags = KILN_STRING_LATIN1;
+    text->data = text + 1;
+    memcpy((void *)text->data, "abcd", 4);
+    slice->base.unit_len = 2;
+    slice->base.flags = KILN_STRING_SLICED;
+    slice->base.data = (const char *)text->data + 1;
+    slice->parent = text;
+    *next = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &slice->base);
+    *root = KILN_VAL_TAG_PTR(KILN_TAG_CELL_PREFIX, next);
+    kiln_c99_par_arena_seal(&candidate);
+    second->next = first;
+    if (!kiln_c99_heap_adopt_chunks(&heap, second)) return 4;
+    batch[0] = first;
+    batch[1] = second;
+    if (!kiln_c99_graph_candidate_closed(&heap, batch, 2, root)) return 5;
+    if (kiln_c99_graph_candidate_closed(&heap, batch, 1, root)) return 6;
+    saved_edge = *next;
+    *next = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_c99_empty_string);
+    if (kiln_c99_graph_candidate_closed(&heap, batch, 2, root)) return 7;
+    *next = saved_edge;
+    saved_data = text->data;
+    text->data = &kiln_c99_empty_string;
+    if (kiln_c99_graph_candidate_closed(&heap, batch, 2, root)) return 8;
+    text->data = saved_data;
+    slice->base.data = (const char *)text->data + 3;
+    if (kiln_c99_graph_candidate_closed(&heap, batch, 2, root)) return 9;
+    slice->base.data = (const char *)text->data + 1;
+    saved_kind = ((kiln_gc_block *)next - 1)->kind;
+    ((kiln_gc_block *)next - 1)->kind = KILN_GC_PROXY | KILN_GC_FLAG_NURSERY;
+    if (kiln_c99_graph_candidate_closed(&heap, batch, 2, root)) return 10;
+    ((kiln_gc_block *)next - 1)->kind = saved_kind;
+    if (kiln_c99_graph_candidate_closed(&heap, batch, 2, next)) return 11;
+    if (!kiln_c99_graph_candidate_closed(&heap, batch, 2, root)) return 12;
+    kiln_c99_nursery_destroy(&heap.nursery);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "graph-candidate-closure");
+    assert!(
+        run.status.success(),
+        "graph candidate closure check failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_gc_boundary_defers_partial_nursery_but_forced_collects() {
     let program = program(vec![], vec![Instruction::Return], 0);
     let generated = emit(&program).expect("program emits");
