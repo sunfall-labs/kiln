@@ -3461,32 +3461,60 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 *result = built;
                 return status;
             }
-            if (object->shape != NULL) {
-                kiln_c99_ensure_dictionary(object);
-            }
-            status = kiln_c99_new_array(&built);
-            for (index = 0; index < object->count && status == KILN_C99_OK; ++index) {
-                kiln_value key;
-                if (!object->properties[index].enumerable) {
-                    continue;
-                }
-                key = kiln_c99_stable_key_value(object->properties[index].key);
+            {
+                kiln_value keys;
+                size_t count;
                 if (code == KILN_C99_METHOD_OBJECT_KEYS) {
-                    status = kiln_c99_array_push(built, key);
-                } else if (code == KILN_C99_METHOD_OBJECT_VALUES) {
-                    status = kiln_c99_array_push(built, object->properties[index].value);
-                } else {
-                    kiln_value pair;
-                    status = kiln_c99_new_array(&pair);
-                    if (status == KILN_C99_OK) {
-                        status = kiln_c99_array_push(pair, key);
+                    status = kiln_c99_property_walk(object, &count);
+                    if (status != KILN_C99_OK) return status;
+                    status = kiln_c99_new_array(&built);
+                    if (status != KILN_C99_OK) return status;
+                    for (index = 0; index < count; ++index) {
+                        kiln_property projected;
+                        const kiln_property *property =
+                            kiln_c99_property_view(object, index, &projected);
+                        if (!property->enumerable) continue;
+                        status = kiln_c99_array_push(
+                            built, kiln_c99_stable_key_value(property->key));
+                        if (status != KILN_C99_OK) return status;
                     }
-                    if (status == KILN_C99_OK) {
-                        status = kiln_c99_array_push(pair, object->properties[index].value);
+                    *result = built;
+                    return KILN_C99_OK;
+                }
+                status = kiln_c99_property_key_snapshot(object, &keys);
+                if (status != KILN_C99_OK) return status;
+                status = kiln_c99_new_array(&built);
+                if (status != KILN_C99_OK) return status;
+                for (index = 0; index < kiln_c99_array_of(keys)->count; ++index) {
+                    const kiln_string *name = (const kiln_string *)
+                        kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[index]).ptr;
+                    kiln_property property;
+                    kiln_value key;
+                    kiln_value value;
+                    if (!kiln_c99_property_read_own(object, name, name, &property) ||
+                        !property.enumerable) continue;
+                    key = kiln_c99_stable_key_value(name);
+                    if (property.accessor) {
+                        if (property.getter.tag == KILN_VALUE_UNDEFINED) {
+                            value = kiln_c99_undefined();
+                        } else {
+                            status = kiln_c99_call(host, &value, property.getter, args[0],
+                                                   NULL, 0, depth, thrown);
+                            if (status != KILN_C99_OK) return status;
+                        }
+                    } else {
+                        value = property.value;
                     }
-                    if (status == KILN_C99_OK) {
-                        status = kiln_c99_array_push(built, pair);
+                    if (code == KILN_C99_METHOD_OBJECT_VALUES) {
+                        status = kiln_c99_array_push(built, value);
+                    } else {
+                        kiln_value pair;
+                        status = kiln_c99_new_array(&pair);
+                        if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, key);
+                        if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, value);
+                        if (status == KILN_C99_OK) status = kiln_c99_array_push(built, pair);
                     }
+                    if (status != KILN_C99_OK) return status;
                 }
             }
             *result = built;

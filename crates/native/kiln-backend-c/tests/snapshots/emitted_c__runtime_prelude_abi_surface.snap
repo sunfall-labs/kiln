@@ -2457,6 +2457,7 @@ static int kiln_c99_same_key(const kiln_property *property, const char *key, siz
 static size_t kiln_c99_own_index_key(const kiln_object *object, const kiln_string *ikey,
 static int kiln_c99_property_read_own(const kiln_object *object, const kiln_string *key,
 static void kiln_c99_gc_trace_object_properties(kiln_gc_heap *heap,
+static int kiln_c99_property_key_snapshot(kiln_object *object, kiln_value *out) {
 static size_t kiln_c99_own_index(const kiln_object *object, const kiln_string *ikey,
 static int kiln_c99_has_inherited_setter_or_readonly(kiln_value proto) {
 #define KILN_C99_LEVEL_NONE 0

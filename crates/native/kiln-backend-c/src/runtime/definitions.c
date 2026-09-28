@@ -570,7 +570,9 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
 static int kiln_c99_define_properties(kiln_host *host, kiln_value target, kiln_value descriptors,
                                       int depth, kiln_value *thrown) {
     kiln_object *source;
+    kiln_value keys;
     size_t index;
+    int status;
     if (descriptors.tag == KILN_VALUE_UNDEFINED) {
         return KILN_C99_OK;
     }
@@ -578,30 +580,27 @@ static int kiln_c99_define_properties(kiln_host *host, kiln_value target, kiln_v
         KILN_C99_REFUSE("Object.defineProperties given descriptors that are not an object");
     }
     source = kiln_c99_object_of(descriptors);
-    if (source->shape != NULL) {
-        kiln_c99_ensure_dictionary(source);
-    }
-    for (index = 0; index < source->count; ++index) {
+    status = kiln_c99_property_key_snapshot(source, &keys);
+    if (status != KILN_C99_OK) return status;
+    for (index = 0; index < kiln_c99_array_of(keys)->count; ++index) {
         /* Only the enumerable own ones, which is what the language walks -- and the machine's
          * own `@@` keys are never among them. */
+        const kiln_string *key = (const kiln_string *)
+            kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[index]).ptr;
+        kiln_property property;
         kiln_value descriptor;
-        int status;
-        if (!source->properties[index].enumerable) {
+        if (!kiln_c99_property_read_own(source, key, key, &property) || !property.enumerable)
             continue;
-        }
-        status = kiln_c99_get_key(host, descriptors, source->properties[index].key,
-                                  source->properties[index].key, &descriptor, depth, thrown);
+        status = kiln_c99_get_key(host, descriptors, key, key, &descriptor, depth, thrown);
         if (status == KILN_C99_OK) {
-            status = kiln_c99_define_property_key(host, target, source->properties[index].key,
-                                                  source->properties[index].key, descriptor, depth, thrown);
+            status = kiln_c99_define_property_key(host, target, key, key, descriptor, depth,
+                                                  thrown);
         }
         if (status != KILN_C99_OK) {
             return status;
         }
-        /* A descriptor's getters may have grown the list; re-reading its length each time would
-         * be wrong for the opposite reason, so the snapshot the loop started with stands and a
-         * property added during it is not visited. */
-        source = kiln_c99_object_of(descriptors);
+        /* A descriptor getter may have changed the source; the next key remains the original
+         * snapshot's, while its current descriptor is rechecked above. */
     }
     return KILN_C99_OK;
 }

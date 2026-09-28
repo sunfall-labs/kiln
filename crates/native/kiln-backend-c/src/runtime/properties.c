@@ -248,6 +248,27 @@ static void kiln_c99_gc_trace_object_properties(kiln_gc_heap *heap,
     }
 }
 
+/* Snapshot all own named keys before an operation may invoke a getter. The array roots key
+ * headers through collection, while each operation re-reads the current descriptor by key.
+ * This also keeps the eventual sealed-descriptor walk behind one storage projection. */
+static int kiln_c99_property_key_snapshot(kiln_object *object, kiln_value *out) {
+    kiln_value keys;
+    size_t count;
+    size_t index;
+    int status = kiln_c99_property_walk(object, &count);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_new_array(&keys);
+    if (status != KILN_C99_OK) return status;
+    for (index = 0; index < count; ++index) {
+        kiln_property projected;
+        const kiln_property *property = kiln_c99_property_view(object, index, &projected);
+        status = kiln_c99_array_push(keys, kiln_c99_stable_key_value(property->key));
+        if (status != KILN_C99_OK) return status;
+    }
+    *out = keys;
+    return KILN_C99_OK;
+}
+
 static size_t kiln_c99_own_index(const kiln_object *object, const kiln_string *ikey,
                                  const char *key, size_t key_len) {
     kiln_string view;

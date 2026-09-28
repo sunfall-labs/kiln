@@ -892,16 +892,9 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
     {
         kiln_value keys;
         size_t length;
-        int status = kiln_c99_property_walk(object, &length);
+        int status = kiln_c99_property_key_snapshot(object, &keys);
         if (status != KILN_C99_OK) return status;
-        status = kiln_c99_new_array(&keys);
-        if (status != KILN_C99_OK) return status;
-        for (index = 0; index < length; ++index) {
-            kiln_property projected;
-            const kiln_property *property = kiln_c99_property_view(object, index, &projected);
-            status = kiln_c99_array_push(keys, kiln_c99_stable_key_value(property->key));
-            if (status != KILN_C99_OK) return status;
-        }
+        length = kiln_c99_array_of(keys)->count;
         for (index = 0; index < length; ++index) {
             const kiln_string *key = (const kiln_string *)
                 kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[index]).ptr;

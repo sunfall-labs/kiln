@@ -1001,12 +1001,14 @@ static int kiln_c99_enumerate_keys(kiln_host *host, kiln_value target, kiln_valu
                 if (status != KILN_C99_OK) return status;
             }
         } else {
-            if (object->shape != NULL) {
-                kiln_c99_ensure_dictionary(object);
-            }
-            for (index = 0; index < object->count; ++index) {
+            size_t count;
+            status = kiln_c99_property_walk(object, &count);
+            if (status != KILN_C99_OK) return status;
+            for (index = 0; index < count; ++index) {
+                kiln_property projected;
+                const kiln_string *key = kiln_c99_property_view(object, index, &projected)->key;
                 status = kiln_c99_array_push(
-                    shadowed, kiln_c99_stable_key_value(object->properties[index].key));
+                    shadowed, kiln_c99_stable_key_value(key));
                 if (status != KILN_C99_OK) {
                     return status;
                 }
@@ -1049,12 +1051,14 @@ static int kiln_c99_enumerate_keys(kiln_host *host, kiln_value target, kiln_valu
                 if (status != KILN_C99_OK) return status;
             }
         } else {
-            if (object->shape != NULL) {
-                kiln_c99_ensure_dictionary(object);
-            }
-            for (index = 0; index < object->count; ++index) {
-                const kiln_string *key = object->properties[index].key;
-                int enumerable = object->properties[index].enumerable;
+            size_t count;
+            status = kiln_c99_property_walk(object, &count);
+            if (status != KILN_C99_OK) return status;
+            for (index = 0; index < count; ++index) {
+                kiln_property projected;
+                const kiln_property *property = kiln_c99_property_view(object, index, &projected);
+                const kiln_string *key = property->key;
+                int enumerable = property->enumerable;
                 if (kiln_c99_keys_contain(shadowed, key)) {
                     continue;
                 }
