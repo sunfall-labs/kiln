@@ -3309,6 +3309,107 @@ done:
     return result;
 }
 
+typedef enum kiln_c99_graph_incoming_result {
+    KILN_C99_GRAPH_OUTGOING_UNPROVEN = 0,
+    KILN_C99_GRAPH_C_ROOT_ALIAS = 1,
+    KILN_C99_GRAPH_ROOTS_UNENUMERATED = 2
+} kiln_c99_graph_incoming_result;
+
+/* A root can hold an interior address, including a string's inline bytes. The collector accepts
+ * those from machine registers, so an incoming check must not accept only exact payload starts. */
+static int kiln_c99_graph_in_batch(const kiln_gc_heap *heap,
+                                   kiln_nursery_chunk *const *chunks, size_t count,
+                                   const void *pointer) {
+    uintptr_t address = (uintptr_t)pointer;
+    kiln_gc_block *block;
+    kiln_nursery_chunk *chunk;
+    size_t index;
+    if (address < heap->lo || address >= heap->hi) return 0;
+    block = kiln_c99_gc_lookup_interior(heap, address);
+    if (block == NULL || (block->kind & KILN_GC_FLAG_NURSERY) == 0) return 0;
+    chunk = kiln_c99_nursery_chunk_of(heap, block);
+    for (index = 0; index < count; ++index) {
+        if (chunks[index] == chunk) return 1;
+    }
+    return 0;
+}
+
+static int kiln_c99_graph_val_in_batch(const kiln_gc_heap *heap,
+                                       kiln_nursery_chunk *const *chunks, size_t count,
+                                       kiln_val value) {
+    if (KILN_VAL_IS_NUMBER(value) || value < KILN_TAG_STRING_PREFIX) return 0;
+    return kiln_c99_graph_in_batch(heap, chunks, count, KILN_VAL_PTR(value));
+}
+
+static int kiln_c99_graph_value_in_batch(const kiln_gc_heap *heap,
+                                         kiln_nursery_chunk *const *chunks, size_t count,
+                                         const kiln_value *value) {
+    return value->tag >= KILN_VALUE_STRING &&
+           kiln_c99_graph_in_batch(heap, chunks, count, (const void *)(uintptr_t)value->bits);
+}
+
+/* Inspect C-owned direct roots and key-table side pointers. Unpinned canonical keys are weak
+ * for GC, but they still contain an address until purge and cannot point into a moved chunk.
+ * This is a useful negative witness, not a complete root enumeration: the provider, generated
+ * modules, host handles, conservative stack and edges from outside blocks remain separate. */
+static int kiln_c99_graph_has_c_root_alias(const kiln_gc_heap *heap,
+                                           kiln_nursery_chunk *const *chunks, size_t count) {
+    const kiln_c99_realm_state *realm = &heap->realm;
+    size_t index;
+    size_t slot;
+    for (index = 0; index < realm->symbol_count; ++index) {
+        if (kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->symbols[index])) return 1;
+    }
+    if (kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->array_unscopables)) return 1;
+    for (index = 0; index < sizeof realm->native_prototypes / sizeof *realm->native_prototypes;
+         ++index) {
+        if (kiln_c99_graph_value_in_batch(heap, chunks, count,
+                                          &realm->native_prototypes[index])) return 1;
+    }
+    for (index = 0; index < realm->unit_capacity; ++index) {
+        const kiln_c99_unit_block *unit = realm->units[index];
+        if (unit == NULL) continue;
+        for (slot = 0; slot < unit->val_count; ++slot) {
+            if (kiln_c99_graph_val_in_batch(heap, chunks, count, unit->vals[slot])) return 1;
+        }
+    }
+    for (index = 0; index < realm->region_own_buckets; ++index) {
+        const kiln_c99_region_own *entry;
+        for (entry = realm->region_own[index]; entry != NULL; entry = entry->next) {
+            if (kiln_c99_graph_value_in_batch(heap, chunks, count, &entry->prototype) ||
+                kiln_c99_graph_value_in_batch(heap, chunks, count, &entry->store)) return 1;
+        }
+    }
+    for (index = heap->job_head; index < heap->job_tail; ++index) {
+        const kiln_microtask *job = &heap->jobs[index & heap->job_mask];
+        if (kiln_c99_graph_value_in_batch(heap, chunks, count, &job->handler) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &job->argument) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &job->derived)) return 1;
+    }
+    for (index = 0; index < heap->keys.capacity; ++index) {
+        const kiln_key_entry *entry = &heap->keys.entries[index];
+        if (kiln_c99_graph_in_batch(heap, chunks, count, entry->string)) return 1;
+    }
+    for (index = 0; index < KILN_C99_HOT_KEY_COUNT; ++index) {
+        if (kiln_c99_graph_in_batch(heap, chunks, count, heap->hot_keys[index])) return 1;
+    }
+    return kiln_c99_graph_in_batch(heap, chunks, count, heap->object_prototype_store);
+}
+
+/* A future actor transaction may call this at its sender turn safepoint, after its consuming
+ * handle has been detached. Today even a candidate with no C root is refused: the provider's
+ * root callbacks and every outside heap edge still need exact, non-mutating enumeration, and
+ * the machine stack must be scanned while excluding only the proof's own frames. Returning a
+ * positive ownership certificate here would make the current TypeScript handle an escape hatch. */
+static kiln_c99_graph_incoming_result kiln_c99_graph_incoming_probe(
+    const kiln_gc_heap *heap, kiln_nursery_chunk *const *chunks, size_t count, const void *root) {
+    if (!kiln_c99_graph_candidate_closed(heap, chunks, count, root))
+        return KILN_C99_GRAPH_OUTGOING_UNPROVEN;
+    if (kiln_c99_graph_has_c_root_alias(heap, chunks, count))
+        return KILN_C99_GRAPH_C_ROOT_ALIAS;
+    return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+}
+
 /* The inverse of adoption for chunks whose entire contents have already passed an ownership
  * proof. `chunks` is an array because `next` still links every candidate into the sender's
  * `full` list. Validate the complete batch and reserve the receiver's region set before changing

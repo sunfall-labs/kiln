@@ -2107,6 +2107,50 @@ int main(void) {
     *root = saved_edge;
     if (kiln_c99_graph_candidate_closed(&heap, batch, 2, (char *)root + 1)) return 14;
     if (!kiln_c99_graph_candidate_closed(&heap, batch, 2, root)) return 15;
+    if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
+        KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 16;
+    heap.realm.array_unscopables.tag = KILN_VALUE_STRING;
+    heap.realm.array_unscopables.bits = (uint64_t)(uintptr_t)text;
+    if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
+        KILN_C99_GRAPH_C_ROOT_ALIAS) return 17;
+    heap.realm.array_unscopables = kiln_c99_undefined();
+    heap.realm.native_prototypes[0].tag = KILN_VALUE_STRING;
+    heap.realm.native_prototypes[0].bits = (uint64_t)(uintptr_t)((const char *)text->data + 1);
+    if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
+        KILN_C99_GRAPH_C_ROOT_ALIAS) return 18;
+    heap.realm.native_prototypes[0] = kiln_c99_undefined();
+    heap.hot_keys[0] = (const kiln_string *)((const char *)text->data + 1);
+    if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
+        KILN_C99_GRAPH_C_ROOT_ALIAS) return 19;
+    heap.hot_keys[0] = NULL;
+    heap.jobs = (kiln_microtask *)calloc(1, sizeof *heap.jobs);
+    if (heap.jobs == NULL) return 20;
+    heap.job_head = 0;
+    heap.job_tail = 1;
+    heap.job_mask = 0;
+    heap.jobs[0].argument.tag = KILN_VALUE_STRING;
+    heap.jobs[0].argument.bits = (uint64_t)(uintptr_t)text;
+    if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
+        KILN_C99_GRAPH_C_ROOT_ALIAS) return 21;
+    heap.job_tail = 0;
+    free(heap.jobs);
+    heap.jobs = NULL;
+    heap.keys.entries = (kiln_key_entry *)calloc(1, sizeof *heap.keys.entries);
+    if (heap.keys.entries == NULL) return 24;
+    heap.keys.capacity = 1;
+    heap.keys.entries[0].string = text;
+    heap.keys.entries[0].pinned = 0;
+    if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
+        KILN_C99_GRAPH_C_ROOT_ALIAS) return 25;
+    free(heap.keys.entries);
+    heap.keys.entries = NULL;
+    heap.keys.capacity = 0;
+    *next = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_c99_empty_string);
+    if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
+        KILN_C99_GRAPH_OUTGOING_UNPROVEN) return 22;
+    *next = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &slice->base);
+    if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
+        KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 23;
     kiln_c99_nursery_destroy(&heap.nursery);
     return 0;
 }
