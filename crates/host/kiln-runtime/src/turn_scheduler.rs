@@ -10,6 +10,7 @@ use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::Waker;
 use std::time::{Duration, Instant};
@@ -27,6 +28,27 @@ pub trait PinnedTurn {
     fn run_turn_on(&mut self, waker: &Waker, _lane: usize) -> TurnOutcome {
         self.run_turn(waker)
     }
+
+    /// Run a bounded, non-JavaScript operation while this body is paused by a pair claim.
+    /// Implementations must not enter a language turn or retain a pointer from `command`.
+    fn paused_control(&mut self, _command: PausedTurnCommand) -> PausedTurnResult {
+        PausedTurnResult::Unavailable
+    }
+}
+
+/// Opaque numeric IDs for a lane-local operation. No realm heap pointer crosses the queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PausedTurnCommand {
+    pub kind: u32,
+    pub ids: [u64; 3],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PausedTurnResult {
+    Ready,
+    Alias,
+    Incomplete,
+    Unavailable,
 }
 
 impl<F> PinnedTurn for F
@@ -60,6 +82,12 @@ enum Command {
         factory: MovableFactory,
     },
     Remove(u64),
+    PausedControl {
+        realm_id: u64,
+        claim: u64,
+        command: PausedTurnCommand,
+        result: mpsc::SyncSender<PausedTurnResult>,
+    },
     Drain,
     Deadlines(BinaryHeap<Reverse<(Instant, u64, u64)>>),
 }
@@ -208,6 +236,15 @@ impl TurnPauseCoordinator {
         true
     }
 
+    fn acknowledged_for(&self, id: u64, claim: u64) -> bool {
+        self.state
+            .lock()
+            .expect("turn pause lock poisoned")
+            .entries
+            .get(&id)
+            .is_some_and(|entry| entry.claim == claim && entry.acknowledged)
+    }
+
     /// A cancellation may retire the ticket immediately, but dropping a claimed body would
     /// invalidate its paused heap. Defer only the body removal until the claim releases it.
     fn defer_cancel(
@@ -279,6 +316,40 @@ impl TurnPairClaim {
                 .expect("turn pause wait poisoned");
             state = next;
         }
+    }
+
+    /// Ask one paused body to perform a bounded control operation on its owner lane. Both
+    /// bodies must already have acknowledged this claim. The operation is synchronous and must
+    /// neither run JavaScript nor block on either realm; the claim stays held until it returns.
+    pub fn control(&self, realm_id: u64, command: PausedTurnCommand) -> PausedTurnResult {
+        let on_lane = ACTIVE_LANE.with(|slot| {
+            slot.get()
+                .is_some_and(|(queue, _)| queue == self.coordinator.queue_identity)
+        });
+        if on_lane
+            || !self.targets.iter().any(|target| target.id() == realm_id)
+            || !self
+                .targets
+                .iter()
+                .all(|target| self.coordinator.acknowledged_for(target.id(), self.claim))
+        {
+            return PausedTurnResult::Unavailable;
+        }
+        let Some(target) = self.targets.iter().find(|target| target.id() == realm_id) else {
+            return PausedTurnResult::Unavailable;
+        };
+        if TurnStatus::read(target.status.load(Ordering::Acquire)) != TurnStatus::Active {
+            return PausedTurnResult::Unavailable;
+        }
+        let lane = target.ticket.pinned_lane().unwrap_or(0);
+        let (result, received) = mpsc::sync_channel(1);
+        self._scheduler.lanes[lane].command(Command::PausedControl {
+            realm_id,
+            claim: self.claim,
+            command,
+            result,
+        });
+        received.recv().unwrap_or(PausedTurnResult::Unavailable)
     }
 }
 
@@ -952,6 +1023,88 @@ fn run_lane(
                     Command::Remove(realm_id) => {
                         realms.remove(&realm_id);
                     }
+                    Command::PausedControl {
+                        realm_id,
+                        claim,
+                        command,
+                        result,
+                    } => {
+                        let answer = if !pause.acknowledged_for(realm_id, claim) {
+                            PausedTurnResult::Unavailable
+                        } else if let Some(realm) = realms.get_mut(&realm_id) {
+                            if TurnStatus::read(realm.status.load(Ordering::Acquire))
+                                != TurnStatus::Active
+                            {
+                                PausedTurnResult::Unavailable
+                            } else {
+                                match catch_unwind(AssertUnwindSafe(|| {
+                                    realm.body.paused_control(command)
+                                })) {
+                                    Ok(answer) => answer,
+                                    Err(_) => {
+                                        realm
+                                            .status
+                                            .store(TurnStatus::Panicked as u8, Ordering::Release);
+                                        realm.ticket.cancel();
+                                        let owner = Arc::clone(&lane);
+                                        let action: Box<dyn FnOnce() + Send> =
+                                            Box::new(move || {
+                                                owner.command(Command::Remove(realm_id));
+                                            });
+                                        if let Err(action) = pause.defer_cancel(realm_id, action) {
+                                            action();
+                                        }
+                                        PausedTurnResult::Unavailable
+                                    }
+                                }
+                            }
+                        } else {
+                            let entry = movable
+                                .lock()
+                                .expect("movable realm lock poisoned")
+                                .get(&realm_id)
+                                .cloned();
+                            if let Some(entry) = entry
+                                && TurnStatus::read(entry.status.load(Ordering::Acquire))
+                                    == TurnStatus::Active
+                            {
+                                let answer = {
+                                    let mut body =
+                                        entry.body.lock().expect("movable body lock poisoned");
+                                    body.as_mut().map(|body| {
+                                        catch_unwind(AssertUnwindSafe(|| {
+                                            body.paused_control(command)
+                                        }))
+                                    })
+                                };
+                                match answer {
+                                    Some(Ok(answer)) => answer,
+                                    Some(Err(_)) => {
+                                        entry
+                                            .status
+                                            .store(TurnStatus::Panicked as u8, Ordering::Release);
+                                        entry.ticket.cancel();
+                                        let registry = Arc::clone(&movable);
+                                        let action: Box<dyn FnOnce() + Send> =
+                                            Box::new(move || {
+                                                registry
+                                                    .lock()
+                                                    .expect("movable realm lock poisoned")
+                                                    .remove(&realm_id);
+                                            });
+                                        if let Err(action) = pause.defer_cancel(realm_id, action) {
+                                            action();
+                                        }
+                                        PausedTurnResult::Unavailable
+                                    }
+                                    None => PausedTurnResult::Unavailable,
+                                }
+                            } else {
+                                PausedTurnResult::Unavailable
+                            }
+                        };
+                        let _ = result.send(answer);
+                    }
                     Command::Drain => draining = true,
                     Command::Deadlines(other) => deadlines.extend(other),
                 }
@@ -1120,6 +1273,71 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn pair_control_runs_on_paused_owner_lanes_without_resuming_turns() {
+        struct ControlledBody {
+            runs: Arc<AtomicUsize>,
+            observed: std::sync::mpsc::Sender<std::thread::ThreadId>,
+            owner: Option<std::thread::ThreadId>,
+        }
+        impl PinnedTurn for ControlledBody {
+            fn run_turn(&mut self, _waker: &Waker) -> TurnOutcome {
+                self.owner = Some(std::thread::current().id());
+                self.runs.fetch_add(1, Ordering::SeqCst);
+                self.observed.send(self.owner.unwrap()).unwrap();
+                TurnOutcome::Parked
+            }
+
+            fn paused_control(&mut self, command: PausedTurnCommand) -> PausedTurnResult {
+                assert_eq!(command.kind, 7);
+                assert_eq!(command.ids, [11, 12, 13]);
+                assert_eq!(self.owner, Some(std::thread::current().id()));
+                PausedTurnResult::Ready
+            }
+        }
+
+        let scheduler = Arc::new(PinnedTurnScheduler::new(2).expect("lanes start"));
+        let (pinned_tx, pinned_rx) = std::sync::mpsc::channel();
+        let (movable_tx, movable_rx) = std::sync::mpsc::channel();
+        let pinned_runs = Arc::new(AtomicUsize::new(0));
+        let movable_runs = Arc::new(AtomicUsize::new(0));
+        let pinned = scheduler.spawn_pinned({
+            let runs = Arc::clone(&pinned_runs);
+            move |_, _| ControlledBody {
+                runs,
+                observed: pinned_tx,
+                owner: None,
+            }
+        });
+        let movable = scheduler.spawn_movable(ControlledBody {
+            runs: Arc::clone(&movable_runs),
+            observed: movable_tx,
+            owner: None,
+        });
+        pinned_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        movable_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let claim = scheduler
+            .claim_pair(&pinned.pause_target(), &movable.pause_target())
+            .expect("pair claimed");
+        let command = PausedTurnCommand {
+            kind: 7,
+            ids: [11, 12, 13],
+        };
+        assert_eq!(
+            claim.control(pinned.id(), command),
+            PausedTurnResult::Unavailable
+        );
+        assert!(claim.wait(Duration::from_secs(1)));
+        assert_eq!(claim.control(pinned.id(), command), PausedTurnResult::Ready);
+        assert_eq!(
+            claim.control(movable.id(), command),
+            PausedTurnResult::Ready
+        );
+        assert_eq!(pinned_runs.load(Ordering::SeqCst), 1);
+        assert_eq!(movable_runs.load(Ordering::SeqCst), 1);
+        drop(claim);
+    }
 
     #[test]
     fn pair_claim_waits_for_turn_boundaries_and_defers_cancelled_body_drop() {
