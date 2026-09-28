@@ -196,6 +196,16 @@ impl MovableTurnHandle {
             if let Some(lane) = self.entry.ticket.pinned_lane() {
                 self.lanes[lane].command(Command::Remove(self.id()));
             } else {
+                // A running movable turn can put its body back just before it observes this
+                // cancellation. Both paths use the body lock, so either cancellation takes the
+                // returned body here or the turn sees Cancelled and drops it on its own lane.
+                let body = self
+                    .entry
+                    .body
+                    .lock()
+                    .expect("movable body lock poisoned")
+                    .take();
+                drop(body);
                 self.realms
                     .lock()
                     .expect("movable realm lock poisoned")
@@ -613,7 +623,10 @@ fn run_movable(
                         .expect("movable realm lock poisoned")
                         .remove(&id);
                 } else {
-                    *entry.body.lock().expect("movable body lock poisoned") = Some(body);
+                    let mut slot = entry.body.lock().expect("movable body lock poisoned");
+                    if entry.status.load(Ordering::Acquire) == TurnStatus::Active as u8 {
+                        *slot = Some(body);
+                    }
                 }
             }
             lease.finish(outcome);
@@ -951,6 +964,49 @@ mod tests {
         }
         assert_eq!(movable.status(), TurnStatus::Complete);
         drop(second_blocker);
+    }
+
+    #[test]
+    fn cancellation_drops_a_movable_body_that_is_running() {
+        struct RunningBody {
+            entered: std::sync::mpsc::Sender<()>,
+            release: std::sync::mpsc::Receiver<()>,
+            drops: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        impl PinnedTurn for RunningBody {
+            fn run_turn(&mut self, _waker: &Waker) -> TurnOutcome {
+                self.entered.send(()).unwrap();
+                self.release.recv_timeout(Duration::from_secs(2)).unwrap();
+                TurnOutcome::Parked
+            }
+        }
+
+        impl Drop for RunningBody {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::Release);
+            }
+        }
+
+        let scheduler = PinnedTurnScheduler::new(1).expect("lane starts");
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let body = RunningBody {
+            entered: entered_tx,
+            release: release_rx,
+            drops: Arc::clone(&drops),
+        };
+        let handle = scheduler.spawn_movable(body);
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        handle.cancel();
+        release_tx.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while drops.load(Ordering::Acquire) == 0 {
+            assert!(Instant::now() < deadline, "cancelled body was retained");
+            std::thread::yield_now();
+        }
+        assert_eq!(handle.status(), TurnStatus::Cancelled);
     }
 
     #[test]

@@ -1,7 +1,11 @@
 use super::INVALID_ARGUMENT;
+use kiln_runtime::turn_queue::TurnOutcome;
+use kiln_runtime::turn_scheduler::{PinnedTurn, PinnedTurnScheduler};
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::task::Waker;
 
 /// An emitted chunk worker: `[start, end)` of `in_` to the same range of `out`, with `ctx`
 /// handed back untouched.
@@ -9,11 +13,9 @@ pub type ChunkFn = unsafe extern "C" fn(*const c_void, *mut c_void, usize, usize
 
 // -- Interim cost model and thread budget ---------------------------------------------------
 //
-// Everything from here to `pool()` is the interim answer of parallel-builtins issue 04. ADR 0070
-// replaces this private pool with the realm scheduler (realms issue 09): chunks become scheduled
-// work, the budget becomes the scheduler's, and these constants and `pool_size` go with the pool.
-// The probe in `kiln_parallel_map` is the one piece worth keeping: whatever runs the chunks still
-// has to know whether a call is worth splitting and how finely.
+// The chunk cost probe remains from parallel-builtins issue 04. Map chunks use the realm
+// scheduler's queue; sort still uses the interim Rayon pool until its stable merge plan moves
+// onto that queue (realms issue 09).
 
 /// The probe's first batch, run on the calling thread: a call of at most this many elements
 /// runs there without reading the clock and never touches the pool.
@@ -119,6 +121,19 @@ fn pool() -> Option<&'static rayon::ThreadPool> {
     .as_ref()
 }
 
+/// The process fallback for parallel calls made outside a scheduled realm. In a scheduled
+/// realm, the caller borrows that realm's lane pool instead, so the call starts no extra worker
+/// threads. This pool is lazy for the same reason the older Rayon pool was.
+fn scheduler_pool() -> Option<Arc<PinnedTurnScheduler>> {
+    static POOL: OnceLock<Option<Arc<PinnedTurnScheduler>>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        (parallelism() > 1)
+            .then(|| PinnedTurnScheduler::new(parallelism()).ok().map(Arc::new))
+            .flatten()
+    })
+    .clone()
+}
+
 /// The pointers a worker needs, made `Send + Sync` for the closure Rayon runs. The C side
 /// guarantees the ranges are disjoint per chunk and the arrays outlive the call.
 #[derive(Clone, Copy)]
@@ -147,13 +162,107 @@ impl Job {
     }
 }
 
+struct ChunkGroup {
+    next: AtomicUsize,
+    running_bodies: AtomicUsize,
+    failed: AtomicBool,
+    chunks: usize,
+    start: usize,
+    chunk_size: usize,
+    count: usize,
+    done: Mutex<()>,
+    changed: Condvar,
+}
+
+impl ChunkGroup {
+    fn new(start: usize, chunk_size: usize, count: usize) -> Self {
+        Self {
+            next: AtomicUsize::new(0),
+            running_bodies: AtomicUsize::new(0),
+            failed: AtomicBool::new(false),
+            chunks: count.saturating_sub(start).div_ceil(chunk_size),
+            start,
+            chunk_size,
+            count,
+            done: Mutex::new(()),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn run_one(&self, job: Job) -> bool {
+        if self.failed.load(Ordering::Acquire) {
+            return false;
+        }
+        let index = self.next.fetch_add(1, Ordering::AcqRel);
+        if index >= self.chunks {
+            return false;
+        }
+        let start = self
+            .start
+            .saturating_add(index.saturating_mul(self.chunk_size));
+        let end = start.saturating_add(self.chunk_size).min(self.count);
+        if catch_unwind(AssertUnwindSafe(|| unsafe { job.run(start, end) })).is_err() {
+            self.failed.store(true, Ordering::Release);
+            return false;
+        }
+        true
+    }
+
+    fn join(&self) {
+        let mut guard = self.done.lock().expect("parallel join lock poisoned");
+        while self.running_bodies.load(Ordering::Acquire) != 0 {
+            guard = self
+                .changed
+                .wait(guard)
+                .expect("parallel join lock poisoned");
+        }
+    }
+}
+
+/// One scheduler ticket performs one chunk per turn, then yields its lane. A concurrent caller
+/// always claims chunks too, so calls made on every lane cannot deadlock waiting for free lanes.
+struct ChunkTurn {
+    group: Arc<ChunkGroup>,
+    job: Job,
+}
+
+impl ChunkTurn {
+    fn new(group: Arc<ChunkGroup>, job: Job) -> Self {
+        group.running_bodies.fetch_add(1, Ordering::AcqRel);
+        Self { group, job }
+    }
+}
+
+impl PinnedTurn for ChunkTurn {
+    fn run_turn(&mut self, _waker: &Waker) -> TurnOutcome {
+        if self.group.run_one(self.job) {
+            TurnOutcome::Ready
+        } else {
+            TurnOutcome::Done
+        }
+    }
+}
+
+impl Drop for ChunkTurn {
+    fn drop(&mut self) {
+        if self.group.running_bodies.fetch_sub(1, Ordering::AcqRel) == 1 {
+            // Synchronize with the joiner's predicate check before notifying it. Without this
+            // lock, the last drop could notify between that check and Condvar::wait.
+            let _guard = self.group.done.lock().expect("parallel join lock poisoned");
+            self.group.changed.notify_all();
+        }
+    }
+}
+
 /// How many threads [`kiln_parallel_map`] splits a call across: the pool's size, 1 when there is
 /// no pool. A call site asks before it takes its pooled lowering -- one thread cannot win
 /// anything, so the sequential method's own loop runs instead (parallel issue 22) -- and a tier-3
 /// site sizes its worker-arena table by it (one per pool thread, one for the calling thread).
 #[unsafe(no_mangle)]
 pub extern "C" fn kiln_parallel_threads() -> usize {
-    parallelism()
+    super::realm::current_scheduler()
+        .map(|scheduler| scheduler.lane_count())
+        .unwrap_or_else(parallelism)
 }
 
 /// Run `chunk` over `[0, count)` of `in_` into `out`, split across the pool.
@@ -185,7 +294,7 @@ pub unsafe extern "C" fn kiln_parallel_map(
         ctx,
         chunk,
     };
-    let threads = parallelism();
+    let threads = kiln_parallel_threads();
     if threads <= 1 {
         // SAFETY: the caller contract, for the whole range on this thread.
         unsafe { job.run(0, count) };
@@ -223,27 +332,35 @@ pub unsafe extern "C" fn kiln_parallel_map(
     };
     let remaining = count.saturating_sub(done);
     let plan = chunk_plan(per_element_ns, remaining, threads);
-    let Some((chunk, pool)) = plan.and_then(|chunk| Some((chunk, pool()?))) else {
+    let Some(chunk) = plan else {
         // SAFETY: `[done, count)` is the rest of the range, on this thread.
         unsafe { job.run(done, count) };
         return 0;
     };
-    let chunks = remaining.div_ceil(chunk);
-    let ran = catch_unwind(AssertUnwindSafe(|| {
-        pool.install(|| {
-            use rayon::prelude::*;
-            (0..chunks).into_par_iter().for_each(|k| {
-                let start = done.saturating_add(k.saturating_mul(chunk));
-                let end = start.saturating_add(chunk).min(count);
-                // SAFETY: `[start, end)` is this chunk's own disjoint range of a live array, past
-                // the prefix the probe already wrote.
-                unsafe { job.run(start, end) };
-            });
-        })
-    }));
-    match ran {
-        Ok(()) => 0,
-        Err(_) => -2,
+    let Some(scheduler) = super::realm::current_scheduler().or_else(scheduler_pool) else {
+        unsafe { job.run(done, count) };
+        return 0;
+    };
+    let group = Arc::new(ChunkGroup::new(done, chunk, count));
+    let worker_count = threads
+        .saturating_sub(1)
+        .min(group.chunks.saturating_sub(1));
+    let handles = (0..worker_count)
+        .map(|_| scheduler.spawn_movable(ChunkTurn::new(Arc::clone(&group), job)))
+        .collect::<Vec<_>>();
+    while group.run_one(job) {}
+    for handle in &handles {
+        handle.cancel();
+    }
+    // A racing turn may put its body back into an entry just as cancellation removes that entry
+    // from the scheduler registry. The handles themselves still own those entries; release them
+    // before waiting for every body destructor to report completion.
+    drop(handles);
+    group.join();
+    if group.failed.load(Ordering::Acquire) {
+        -2
+    } else {
+        0
     }
 }
 

@@ -20,8 +20,8 @@ use std::hash::{Hash, Hasher};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::task::Waker;
 use std::time::{Duration, Instant};
 
@@ -1318,6 +1318,28 @@ std::thread_local! {
     /// Set only across a scheduled C step. A nested provider drive uses this ticket to park
     /// without exposing the scheduler's Rust types through the private C ABI.
     static SCHEDULED_WAKER: RefCell<Option<Waker>> = const { RefCell::new(None) };
+    /// The same lane pool that runs this generated turn also accepts parallel chunks it calls.
+    static SCHEDULED_POOL: RefCell<Option<Weak<PinnedTurnScheduler>>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn current_scheduler() -> Option<Arc<PinnedTurnScheduler>> {
+    SCHEDULED_POOL.with(|slot| slot.borrow().as_ref().and_then(Weak::upgrade))
+}
+
+struct ScheduledPoolGuard(Option<Weak<PinnedTurnScheduler>>);
+
+impl ScheduledPoolGuard {
+    fn enter(pool: Option<Weak<PinnedTurnScheduler>>) -> Self {
+        Self(SCHEDULED_POOL.with(|slot| slot.replace(pool)))
+    }
+}
+
+impl Drop for ScheduledPoolGuard {
+    fn drop(&mut self) {
+        SCHEDULED_POOL.with(|slot| {
+            slot.replace(self.0.take());
+        });
+    }
 }
 
 struct ScheduledReactorGuard(Option<Arc<kiln_runtime::Reactor>>);
@@ -4647,6 +4669,7 @@ struct ScheduledRun {
     realm: u64,
     detached: Option<DetachedRealm>,
     ticket: Option<Arc<kiln_runtime::turn_queue::TurnTicket>>,
+    scheduler: Option<Weak<PinnedTurnScheduler>>,
     advance: ScheduledAdvance,
     finish: ScheduledFinish,
     result: std::sync::mpsc::Sender<(usize, i32)>,
@@ -4704,6 +4727,7 @@ impl PinnedTurn for ScheduledRun {
     }
 
     fn run_turn_on(&mut self, waker: &Waker, lane: usize) -> TurnOutcome {
+        let _pool = ScheduledPoolGuard::enter(self.scheduler.clone());
         if self.session.is_null() {
             self.complete(Some(RUNTIME_ERROR));
             return TurnOutcome::Done;
@@ -4787,6 +4811,8 @@ pub unsafe extern "C" fn kiln_realm_run_scheduled(
         let Ok(scheduler) = scheduler else {
             return RUNTIME_ERROR;
         };
+        let scheduler = Arc::new(scheduler);
+        let weak_scheduler = Arc::downgrade(&scheduler);
         for index in 0..count {
             // SAFETY: caller supplied `count` writable status slots.
             unsafe { statuses.add(index).write(RUNTIME_ERROR) };
@@ -4797,8 +4823,10 @@ pub unsafe extern "C" fn kiln_realm_run_scheduled(
             .map(|index| {
                 let sender = sender.clone();
                 let shared = shared;
+                let weak_scheduler = weak_scheduler.clone();
                 scheduler.spawn_pinned(move |reactor, _| {
                     let _reactor = ScheduledReactorGuard::enter(reactor);
+                    let _pool = ScheduledPoolGuard::enter(Some(weak_scheduler.clone()));
                     // SAFETY: the caller's `begin`/context contract; this executes on the
                     // lane that will own the returned session and eventually call `finish`.
                     let session = unsafe { shared.begin(begin, index as u64) };
@@ -4807,6 +4835,7 @@ pub unsafe extern "C" fn kiln_realm_run_scheduled(
                         realm: 0,
                         detached: None,
                         ticket: None,
+                        scheduler: Some(weak_scheduler),
                         advance,
                         finish,
                         result: sender,
@@ -4874,6 +4903,8 @@ pub unsafe extern "C" fn kiln_realm_run_migrating(
         let Ok(scheduler) = scheduler else {
             return RUNTIME_ERROR;
         };
+        let scheduler = Arc::new(scheduler);
+        let weak_scheduler = Arc::downgrade(&scheduler);
         for index in 0..count {
             // SAFETY: caller supplied `count` writable status slots.
             unsafe { statuses.add(index).write(RUNTIME_ERROR) };
@@ -4884,8 +4915,10 @@ pub unsafe extern "C" fn kiln_realm_run_migrating(
             .map(|index| {
                 let sender = sender.clone();
                 let shared = shared;
+                let weak_scheduler = weak_scheduler.clone();
                 scheduler.spawn_movable_with(move |reactor, ticket, lane| {
                     let _reactor = ScheduledReactorGuard::enter(reactor);
+                    let _pool = ScheduledPoolGuard::enter(Some(weak_scheduler.clone()));
                     // SAFETY: the caller's callback contract; this first runs on a scheduler
                     // lane and returns with every generated frame unwound.
                     let session = unsafe { shared.begin(begin, index as u64) };
@@ -4904,6 +4937,7 @@ pub unsafe extern "C" fn kiln_realm_run_migrating(
                         realm,
                         detached,
                         ticket: Some(ticket),
+                        scheduler: Some(weak_scheduler),
                         advance,
                         finish,
                         result: sender,

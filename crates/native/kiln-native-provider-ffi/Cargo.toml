@@ -34,10 +34,9 @@ json = ["dep:kiln-json"]
 # ICU4X segmentation behind the scalar provider ABI. The JavaScript-visible facade stays compiled
 # source; this feature supplies only the boundary engine it cannot implement cheaply itself.
 intl = ["dep:kiln-intl"]
-# `parallelMap`'s fork-join: a private Rayon pool that runs an emitted C chunk worker over index
-# ranges (ADR 0058, application 2). Rust owns the pool, its size and the cost model that decides
-# whether a call is split and how finely.
-parallel = ["dep:rayon"]
+# Parallel chunks share the realm scheduler's lanes and ready queue. The stable sort path still
+# uses Rayon while its merge plan is migrated; this feature always needs the realm scheduler.
+parallel = ["realm", "dep:rayon"]
 # Dynamic calls and same-thread callback closures for the native `node:ffi` capability. libffi is
 # linked into the one provider archive, never into compiler crates or generated application units.
 ffi = ["dep:libc", "dep:libffi"]
