@@ -89,6 +89,7 @@ PASSES="${PASSES:-21}"
 WARMUP="${WARMUP:-3}"
 TARGET_BUNDLES=""
 INCLUDE_POSTCSS=0
+WAIT_FOR_RELEASE=""
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -133,6 +134,10 @@ while [[ $# -gt 0 ]]; do
 			INCLUDE_POSTCSS=1
 			shift
 			;;
+		--wait-for-release)
+			WAIT_FOR_RELEASE="${2:?--wait-for-release requires a marker path}"
+			shift 2
+			;;
 		-h | --help)
 			echo "Usage: scripts/thirdparty.sh [options]"
 			echo ""
@@ -147,6 +152,7 @@ while [[ $# -gt 0 ]]; do
 			echo "  --warmup <count>                Warmup iterations per bundle (default: 3)"
 			echo "  --bundles <names>               Comma-separated list of bundle names to test"
 			echo "  --include-postcss               Include postcss in the otherwise routine benchmark selection"
+			echo "  --wait-for-release <path>       Wait for gate marker after compilation, before timing"
 			exit 0
 			;;
 		*)
@@ -155,6 +161,11 @@ while [[ $# -gt 0 ]]; do
 			;;
 	esac
 done
+
+if [[ -n $WAIT_FOR_RELEASE && $BENCH -eq 0 ]]; then
+	echo "thirdparty.sh: --wait-for-release requires --bench" >&2
+	exit 2
+fi
 
 # The four probes build.sh bundles as CommonJS for the *node* platform, because the libraries
 # behind them reach `path`, `fs`, `os` and `util` and cannot be bundled for the neutral one at
@@ -184,11 +195,11 @@ cleanup() {
 trap cleanup EXIT
 
 if [[ $BENCH -eq 1 ]]; then
-python3 - "$KILN" "$BUNDLES" "$BASELINE" "$WORK_DIR" "$UPDATE" "$THRESHOLD" "$MIN_DELTA_MS" "$PROFILE" "$PASSES" "$WARMUP" "$NODE_PLATFORM" "$TARGET_BUNDLES" "$INCLUDE_POSTCSS" <<'PY'
+python3 - "$KILN" "$BUNDLES" "$BASELINE" "$WORK_DIR" "$UPDATE" "$THRESHOLD" "$MIN_DELTA_MS" "$PROFILE" "$PASSES" "$WARMUP" "$NODE_PLATFORM" "$TARGET_BUNDLES" "$INCLUDE_POSTCSS" "$WAIT_FOR_RELEASE" <<'PY'
 import json, os, statistics, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-kiln, bundles_dir, baseline_path, work_dir, update_str, threshold_str, min_delta_str, profile, passes_str, warmup_str, node_platform_str, target_bundles_str, include_postcss_str = sys.argv[1:14]
+kiln, bundles_dir, baseline_path, work_dir, update_str, threshold_str, min_delta_str, profile, passes_str, warmup_str, node_platform_str, target_bundles_str, include_postcss_str, wait_for_release = sys.argv[1:15]
 
 update = update_str == "1"
 threshold = float(threshold_str)
@@ -280,6 +291,24 @@ with ThreadPoolExecutor(max_workers=max_workers) as executor:
             print(f"  build {name:16} {elapsed_ms / 1000.0:.2f}s", flush=True)
 build_elapsed = time.perf_counter() - build_started
 print(f"bundle build pool completed in {build_elapsed:.2f}s", flush=True)
+
+if wait_for_release:
+    print(f"waiting for gate release marker: {wait_for_release}", flush=True)
+    barrier_started = time.perf_counter()
+    deadline = barrier_started + 15 * 60
+    while not os.path.exists(wait_for_release):
+        if time.perf_counter() >= deadline:
+            sys.exit("timed out waiting for gate release marker")
+        time.sleep(0.1)
+    try:
+        with open(wait_for_release, encoding="utf-8") as marker:
+            release_state = marker.read().strip()
+    except OSError as exc:
+        sys.exit(f"cannot read gate release marker: {exc}")
+    barrier_elapsed = time.perf_counter() - barrier_started
+    print(f"gate barrier wait completed in {barrier_elapsed:.2f}s ({release_state or 'empty'})", flush=True)
+    if release_state != "measure":
+        sys.exit(f"gate did not release thirdparty timing (marker state: {release_state or 'empty'})")
 
 measurement_started = time.perf_counter()
 time.sleep(0.5)

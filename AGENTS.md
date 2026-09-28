@@ -106,10 +106,12 @@ then overlaps the remaining crate tests, native/thirdparty parity and Test262
 within one budget (at most 32 CPUs, or `KILN_GATE_JOBS` / `KILN_JOBS` if smaller). Test262 keeps
 one worker per GiB of its hard memory cap; the gate sizes that cap to its assigned workers, at
 most half physical memory or 16 GiB. An explicit `KILN_TEST262_MEMORY_MB` is respected.
-`KILN_GATE_SERIAL=1` runs the same checks serially for diagnosis. Performance baselines run only
-after the correctness lanes finish. The routine thirdparty performance baseline measures every
-present baseline bundle except `postcss`; `gate-full` adds `postcss`, whose native build is much
-slower. The benchmark log records selected and deferred bundle counts. Thirdparty correctness
+`KILN_GATE_SERIAL=1` runs the same checks serially for diagnosis. In a parallel non-quick gate, native
+thirdparty benchmark binaries compile with one reserved worker alongside correctness lanes, then
+wait at a gate-owned release marker; warmup and timed execution begin only after those lanes finish.
+The routine thirdparty performance baseline measures every present baseline bundle except
+`postcss`; `gate-full` adds `postcss`, whose native build is much slower. The benchmark log records
+selected and deferred bundle counts. Thirdparty correctness
 parity still covers every present probe in both gates. Every step records its elapsed seconds in
 the gate evidence;
 Test262 retains per-chunk result documents including individual case timings.

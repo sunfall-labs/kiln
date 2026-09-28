@@ -30,7 +30,12 @@ def budget(environment, cpus: int, memory_mb: int, *, quick: bool = False):
     if parallel:
         tests = min(8, max(1, total // 4))
         native = min(16, total - tests) if quick else min(8, max(1, total // 4))
-        test262 = max(1, total - tests - native)
+        # A full gate prepares native-release benchmark binaries while correctness lanes run.
+        # Reserve one worker for that compiler process; its execution remains behind a gate
+        # barrier and starts only after these lanes join. At three CPUs there is no spare worker,
+        # so the gate leaves preparation until after correctness instead.
+        benchmark_worker = 1 if not quick and total >= 4 else 0
+        test262 = max(1, total - tests - native - benchmark_worker)
     else:
         tests, native, test262 = min(8, total), min(16, total), total
     # The standalone Test262 runner retains its 4 GiB default. A full gate sizes its own

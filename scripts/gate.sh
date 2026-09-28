@@ -7,7 +7,8 @@
 # assembly, in the repository, where a fix to it is a fix for everyone.
 #
 # Build once, then overlap independent correctness lanes within one CPU/memory budget.
-# Throughput benchmarks run after those lanes finish, so tests cannot perturb their timings.
+# Thirdparty benchmark binaries may compile alongside those lanes; their warmups and timed runs
+# wait until every correctness lane has joined, so tests cannot perturb the measurements.
 # The lanes cover:
 #
 #   1. crate tests          -- seconds; catches a broken build, which the filtered output of a
@@ -59,9 +60,32 @@ GATE_STARTED=$SECONDS
 budget="$(python3 scripts/gate_budget.py "$@")"
 read -r GATE_PARALLEL GATE_JOBS TEST_JOBS NATIVE_JOBS TEST262_JOBS TEST262_MEMORY_MB <<<"$budget"
 export KILN_JOBS="$NATIVE_JOBS" RAYON_NUM_THREADS="$NATIVE_JOBS"
-printf 'gate budget: %s CPUs; crate tests %s, native %s, Test262 %s (%s MiB cap)\n' \
-    "$GATE_JOBS" "$TEST_JOBS" "$NATIVE_JOBS" "$TEST262_JOBS" "$TEST262_MEMORY_MB"
+THIRDPARTY_PREP_JOBS=0
+if [[ $QUICK -eq 0 && $GATE_PARALLEL -eq 1 && $GATE_JOBS -ge 4 ]]; then
+	THIRDPARTY_PREP_JOBS=1
+fi
+printf 'gate budget: %s CPUs; crate tests %s, native %s, Test262 %s (%s MiB cap), thirdparty prepare %s\n' \
+	"$GATE_JOBS" "$TEST_JOBS" "$NATIVE_JOBS" "$TEST262_JOBS" "$TEST262_MEMORY_MB" "$THIRDPARTY_PREP_JOBS"
 BACKGROUND_PIDS=()
+THIRDPARTY_PID=""
+THIRDPARTY_STAGE_DIR=""
+THIRDPARTY_RELEASE_MARKER=""
+
+cleanup_thirdparty_stage() {
+	if [[ -n $THIRDPARTY_PID ]]; then
+		if [[ -n $THIRDPARTY_RELEASE_MARKER && ! -e $THIRDPARTY_RELEASE_MARKER ]]; then
+			printf 'abort\n' >"$THIRDPARTY_RELEASE_MARKER.tmp"
+			mv -f "$THIRDPARTY_RELEASE_MARKER.tmp" "$THIRDPARTY_RELEASE_MARKER"
+		fi
+		wait "$THIRDPARTY_PID" 2>/dev/null || true
+		THIRDPARTY_PID=""
+	fi
+	if [[ -n $THIRDPARTY_STAGE_DIR ]]; then
+		rm -rf "$THIRDPARTY_STAGE_DIR"
+		THIRDPARTY_STAGE_DIR=""
+	fi
+}
+trap cleanup_thirdparty_stage EXIT
 
 record_elapsed() {
     python3 - "$1" "$2" <<'PYTIME'
@@ -190,6 +214,25 @@ CACHE_TEST_STARTED=$SECONDS
 mbx test -p kiln-artifact-cache --locked --jobs="$TEST_JOBS" -- --test-threads="$TEST_JOBS" >"$GATE_CACHE_TEST_LOG" 2>&1 || GATE_CACHE_TEST_STATUS=$?
 GATE_CACHE_TEST_SECONDS=$((SECONDS - CACHE_TEST_STARTED))
 
+# Compile native-release benchmark binaries while the correctness lanes use the rest of the
+# gate budget. The benchmark script blocks at the release marker after compilation; only after
+# all correctness work joins does the gate release it to warm and time binaries serially.
+THIRDPARTY_BENCH_ARGS=(--bench)
+if [[ $GATE_TEST262_SUITE == full ]]; then
+	THIRDPARTY_BENCH_ARGS+=(--include-postcss)
+fi
+THIRDPARTY_STAGED=0
+if [[ $THIRDPARTY_PREP_JOBS -eq 1 ]]; then
+	THIRDPARTY_STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kiln-gate-thirdparty.XXXXXXXX")"
+	THIRDPARTY_RELEASE_MARKER="$THIRDPARTY_STAGE_DIR/release"
+	step "thirdparty baseline" env TMPDIR="$THIRDPARTY_STAGE_DIR" \
+		KILN_THIRDPARTY_BUILD_JOBS=1 KILN_JOBS=1 RAYON_NUM_THREADS=1 \
+		./scripts/thirdparty.sh "${THIRDPARTY_BENCH_ARGS[@]}" --wait-for-release "$THIRDPARTY_RELEASE_MARKER" &
+	THIRDPARTY_PID=$!
+	GATE_STEP_NUMBER=$((GATE_STEP_NUMBER + 1))
+	THIRDPARTY_STAGED=1
+fi
+
 # `--test-threads` is bounded because several of `kiln-native`'s tests each shell out to a C
 # compiler, and this repository is routinely built by more than one agent at once: unbounded, they
 # starve each other -- eleven failed here while all eighty-nine passed when run alone. A gate that
@@ -258,14 +301,21 @@ fi
 wait_background
 # Timings are meaningful only after the CPU-heavy correctness lanes have joined.
 if [[ $QUICK -eq 0 ]]; then
-    # Bundle builds can spend the full released gate budget, while each nested kiln build stays
-    # single-worker. The benchmark harness still runs the built binaries serially for stable
-    # timing and comparison.
-    THIRDPARTY_BENCH_ARGS=(--bench)
-    if [[ $GATE_TEST262_SUITE == full ]]; then
-        THIRDPARTY_BENCH_ARGS+=(--include-postcss)
-    fi
-    step "thirdparty baseline" env KILN_THIRDPARTY_BUILD_JOBS="$GATE_JOBS" KILN_JOBS=1 RAYON_NUM_THREADS=1 ./scripts/thirdparty.sh "${THIRDPARTY_BENCH_ARGS[@]}"
+	if [[ $THIRDPARTY_STAGED -eq 1 ]]; then
+		printf 'measure\n' >"$THIRDPARTY_RELEASE_MARKER.tmp"
+		mv -f "$THIRDPARTY_RELEASE_MARKER.tmp" "$THIRDPARTY_RELEASE_MARKER"
+		# The background `step` stores command status in its envelope; aggregate validates that
+		# required envelope and verdict even though the step helper itself returns normally.
+		wait "$THIRDPARTY_PID" || FAILURES+=("thirdparty baseline (pid $THIRDPARTY_PID)")
+		THIRDPARTY_PID=""
+		rm -rf "$THIRDPARTY_STAGE_DIR"
+		THIRDPARTY_STAGE_DIR=""
+		THIRDPARTY_RELEASE_MARKER=""
+	else
+		# Serial gates and smaller budgets keep preparation after correctness and use the released
+		# CPU budget. Nested kiln builds remain single-worker; binary timing stays serial.
+		step "thirdparty baseline" env KILN_THIRDPARTY_BUILD_JOBS="$GATE_JOBS" KILN_JOBS=1 RAYON_NUM_THREADS=1 ./scripts/thirdparty.sh "${THIRDPARTY_BENCH_ARGS[@]}"
+	fi
     step "facts baseline" ./scripts/facts-baseline.sh --check
 fi
 
