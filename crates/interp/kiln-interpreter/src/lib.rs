@@ -1938,6 +1938,7 @@ struct ModuleRealmShared {
     symbols: Vec<Rc<UniqueSymbol>>,
     template_objects: TemplateObjectCache,
     intrinsics: Rc<Intrinsics>,
+    isolated_graphs: Rc<RefCell<Vec<(Weak<RefCell<ObjectData>>, Value)>>>,
 }
 
 impl Default for ModuleRealmSession {
@@ -1960,6 +1961,7 @@ impl Default for ModuleRealmSession {
                 symbols: Vec::new(),
                 template_objects: std::collections::HashMap::new(),
                 intrinsics: Rc::new(Intrinsics::default()),
+                isolated_graphs: Rc::new(RefCell::new(Vec::new())),
             })),
         }
     }

@@ -6,10 +6,23 @@ export abstract class Actor {}
 Object.defineProperty(Actor.prototype, Symbol.for("kiln.actor.base"), { value: true });
 
 export type Ticket = { readonly value: any; readonly consumed: boolean; readonly graph: boolean; consume(): void };
-const isolated = new WeakMap<object, any>();
 const tickets = new WeakMap<object, Ticket>();
 const isolatedMark = Symbol.for("kiln.actor.isolated");
 const ticketMark = Symbol.for("kiln.actor.ticket");
+const ISOLATE = 26;
+const ISOLATED_HAS = 27;
+
+function isolatedOp(operation: number, ...args: any[]): any {
+  const port = (globalThis as any).MessagePort;
+  const workerOp = port?.[Symbol.for("kiln.messagePort")]?.workerOp;
+  if (typeof workerOp !== "function") throw new Error("kiln:actors requires enabled worker messaging");
+  return workerOp(operation, ...args);
+}
+
+function isIsolated(value: any): boolean {
+  return value !== null && typeof value === "object" && value[isolatedMark] === true
+    && isolatedOp(ISOLATED_HAS, value) === true;
+}
 
 declare const isolatedBrand: unique symbol;
 declare const transferBrand: unique symbol;
@@ -26,7 +39,7 @@ export function isolate<T>(factory: () => T): Isolated<T> {
   if (typeof factory !== "function") throw new TypeError("isolate requires a factory");
   const handle: any = { __uncloneable: () => {} };
   const value = factory();
-  isolated.set(handle, value);
+  if (isolatedOp(ISOLATE, handle, value) !== true) throw new Error("could not retain isolated graph");
   // Dynamic import plans may evaluate this module separately in one realm. This marker only
   // identifies a handle for fail-closed graph transfer; it must never expose the graph itself.
   Object.defineProperty(handle, isolatedMark, { value: true });
@@ -36,7 +49,7 @@ export function isolate<T>(factory: () => T): Isolated<T> {
 export function transfer<T>(value: Isolated<T> | ArrayBuffer): TransferTicket<T> {
   const markedHandle = value !== null && typeof value === "object"
     && (value as any)[isolatedMark] === true;
-  const graph = isolated.has(value as object) || markedHandle;
+  const graph = isIsolated(value) || markedHandle;
   if (!graph && !(value instanceof ArrayBuffer)) {
     throw new TypeError("transfer requires an isolated handle or ArrayBuffer");
   }
@@ -70,7 +83,7 @@ export function prepareActorMessage(value: any, buffers: ArrayBuffer[], consumed
     consumed.push(ticket);
     return ticket.value;
   }
-  if (isolated.has(value) || value[isolatedMark] !== undefined) {
+  if (isIsolated(value) || value[isolatedMark] !== undefined) {
     throw dataCloneError("isolated handle needs transfer()");
   }
   if (seen.has(value)) return seen.get(value);

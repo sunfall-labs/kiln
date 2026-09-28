@@ -39,6 +39,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             mapped_arguments: false,
             current_realm: RealmId::PRIMARY,
             shared_facades: Rc::new(RefCell::new(SharedCache::default())),
+            isolated_graphs: Rc::new(RefCell::new(Vec::new())),
             async_context: AsyncContext::default(),
             esm_body_pending_checkpoint: false,
             this_value: Value::Undefined,

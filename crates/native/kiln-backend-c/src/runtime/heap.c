@@ -3378,6 +3378,44 @@ static int kiln_c99_graph_value_in_batch(const kiln_gc_heap *heap,
            kiln_c99_graph_in_batch(heap, chunks, count, (const void *)(uintptr_t)value->bits);
 }
 
+/* These are storage primitives for a future actor transaction, not transfer admission.
+ * Only a turn-safepoint coordinator may use them: no JS, GC or collection mutation may run
+ * between begin and rollback. Keep the original weak-map entry allocated, moving only its
+ * value into one explicit realm root. Restoring it then needs no allocator and cannot fail.
+ * There is deliberately no commit operation until the receiver publication protocol exists. */
+static int kiln_c99_actor_isolated_escrow_begin(kiln_gc_heap *heap, kiln_value handle) {
+    kiln_c99_realm_state *realm;
+    kiln_collection *registry;
+    kiln_entry *entry;
+    double at;
+    if (heap == NULL || handle.tag != KILN_VALUE_OBJECT) return 0;
+    realm = &heap->realm;
+    if (realm->isolated_escrow_entry != NULL ||
+        realm->isolated_graphs.tag != KILN_VALUE_COLLECTION) return 0;
+    registry = kiln_c99_collection_of(realm->isolated_graphs);
+    at = kiln_c99_collection_find(registry, handle);
+    if (at < 0.0 || at >= (double)registry->count) return 0;
+    entry = &registry->entries[(size_t)at];
+    if (entry->dead) return 0;
+    realm->isolated_escrow_key = entry->key;
+    realm->isolated_escrow_value = entry->value;
+    realm->isolated_escrow_entry = entry;
+    entry->value = kiln_c99_undefined();
+    return 1;
+}
+
+static int kiln_c99_actor_isolated_escrow_rollback(kiln_gc_heap *heap) {
+    kiln_c99_realm_state *realm;
+    if (heap == NULL) return 0;
+    realm = &heap->realm;
+    if (realm->isolated_escrow_entry == NULL) return 0;
+    realm->isolated_escrow_entry->value = realm->isolated_escrow_value;
+    realm->isolated_escrow_entry = NULL;
+    realm->isolated_escrow_key = kiln_c99_undefined();
+    realm->isolated_escrow_value = kiln_c99_undefined();
+    return 1;
+}
+
 /* Inspect C-owned direct roots and key-table side pointers. Unpinned canonical keys are weak
  * for GC, but they still contain an address until purge and cannot point into a moved chunk.
  * This is a useful negative witness, not a complete root enumeration: the provider, generated
@@ -3390,6 +3428,9 @@ static int kiln_c99_graph_has_c_root_alias(const kiln_gc_heap *heap,
     for (index = 0; index < realm->symbol_count; ++index) {
         if (kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->symbols[index])) return 1;
     }
+    if (kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->isolated_graphs)) return 1;
+    if (kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->isolated_escrow_key) ||
+        kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->isolated_escrow_value)) return 1;
     if (kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->array_unscopables)) return 1;
     for (index = 0; index < sizeof realm->native_prototypes / sizeof *realm->native_prototypes;
          ++index) {
@@ -5686,6 +5727,9 @@ static void kiln_c99_gc_mark_realm(kiln_gc_heap *heap) {
     kiln_c99_realm_state *realm = &heap->realm;
     size_t index;
     kiln_c99_gc_mark_values(heap, realm->symbols, realm->symbol_count);
+    kiln_c99_gc_mark_value(heap, &realm->isolated_graphs);
+    kiln_c99_gc_mark_value(heap, &realm->isolated_escrow_key);
+    kiln_c99_gc_mark_value(heap, &realm->isolated_escrow_value);
     kiln_c99_gc_mark_value(heap, &realm->array_unscopables);
     kiln_c99_gc_mark_values(heap, realm->native_prototypes,
                             sizeof realm->native_prototypes / sizeof *realm->native_prototypes);

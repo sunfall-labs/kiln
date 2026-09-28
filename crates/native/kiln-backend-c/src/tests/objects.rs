@@ -2309,6 +2309,61 @@ int main(void) {
 }
 
 #[test]
+fn executable_actor_isolated_registry_escrow_rolls_back_without_allocation() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int actor_escrow_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_value args[3], handle, graph, result, thrown;
+    kiln_collection *registry;
+    kiln_entry *entry;
+    double at;
+    (void)context;
+    if (heap == NULL || kiln_c99_new_object(&handle) != KILN_C99_OK ||
+        kiln_c99_new_object(&graph) != KILN_C99_OK) return 1;
+    args[0] = kiln_c99_number(26);
+    args[1] = handle;
+    args[2] = graph;
+    if (kiln_c99_worker_op_raw(&result, args, 3, &thrown) != KILN_C99_OK ||
+        !kiln_c99_truthy(result)) return 2;
+    registry = kiln_c99_collection_of(heap->realm.isolated_graphs);
+    at = kiln_c99_collection_find(registry, handle);
+    if (at < 0.0) return 3;
+    entry = &registry->entries[(size_t)at];
+    if (entry->value.tag != graph.tag || entry->value.bits != graph.bits) return 4;
+    if (!kiln_c99_actor_isolated_escrow_begin(heap, handle)) return 5;
+    if (kiln_c99_actor_isolated_escrow_begin(heap, handle)) return 6;
+    if (entry->value.tag != KILN_VALUE_UNDEFINED ||
+        heap->realm.isolated_escrow_value.bits != graph.bits) return 7;
+    if (!kiln_c99_actor_isolated_escrow_rollback(heap)) return 8;
+    if (kiln_c99_actor_isolated_escrow_rollback(heap)) return 9;
+    if (entry->value.tag != graph.tag || entry->value.bits != graph.bits ||
+        heap->realm.isolated_escrow_entry != NULL) return 10;
+    args[0] = kiln_c99_number(27);
+    if (kiln_c99_worker_op_raw(&result, args, 2, &thrown) != KILN_C99_OK ||
+        !kiln_c99_truthy(result)) return 11;
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int result;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 12;
+    result = kiln_realm_enter(realm, actor_escrow_entry, NULL);
+    if (result != KILN_C99_OK) return result;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 13;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "actor-isolated-escrow");
+    assert!(
+        run.status.success(),
+        "actor isolated escrow check failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_graph_incoming_probe_sees_provider_root_aliases() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");

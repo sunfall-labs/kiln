@@ -140,6 +140,8 @@ const OP_ACTOR_REGISTER: u32 = 22;
 const OP_ACTOR_LOOKUP: u32 = 23;
 const OP_ACTOR_CLOSE: u32 = 24;
 const OP_ACTOR_REQUEST_ID: u32 = 25;
+const OP_ACTOR_ISOLATE: u32 = 26;
+const OP_ACTOR_ISOLATED_HAS: u32 = 27;
 
 /// A moved `ArrayBuffer`'s store, as this engine boxes it into a [`Token::Moved`].
 struct MovedBytes(Vec<u8>);
@@ -228,6 +230,35 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Value::Number(result as f64)
             }
             OP_ACTOR_REQUEST_ID => Value::Number(workers::actor_request_id() as f64),
+            OP_ACTOR_ISOLATE => {
+                if let (Some(Value::Object(handle)), Some(graph)) =
+                    (arguments.get(1), arguments.get(2))
+                {
+                    let mut isolated = self.isolated_graphs.borrow_mut();
+                    isolated.retain(|(key, _)| key.strong_count() != 0);
+                    if isolated
+                        .iter()
+                        .any(|(key, _)| key.as_ptr() == Rc::as_ptr(handle))
+                    {
+                        Value::Boolean(false)
+                    } else {
+                        isolated.push((Rc::downgrade(handle), graph.clone()));
+                        Value::Boolean(true)
+                    }
+                } else {
+                    Value::Boolean(false)
+                }
+            }
+            OP_ACTOR_ISOLATED_HAS => {
+                let found = if let Some(Value::Object(handle)) = arguments.get(1) {
+                    self.isolated_graphs.borrow().iter().any(|(key, _)| {
+                        key.strong_count() != 0 && key.as_ptr() == Rc::as_ptr(handle)
+                    })
+                } else {
+                    false
+                };
+                Value::Boolean(found)
+            }
             OP_TAKE => match workers::take(endpoint_of(first)) {
                 Some(message) => {
                     let realm = self.current_realm;

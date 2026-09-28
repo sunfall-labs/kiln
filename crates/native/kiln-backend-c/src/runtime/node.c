@@ -2274,6 +2274,8 @@ int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code
 #define KILN_C99_WORKER_OP_ACTOR_LOOKUP 23
 #define KILN_C99_WORKER_OP_ACTOR_CLOSE 24
 #define KILN_C99_WORKER_OP_ACTOR_REQUEST_ID 25
+#define KILN_C99_WORKER_OP_ACTOR_ISOLATE 26
+#define KILN_C99_WORKER_OP_ACTOR_ISOLATED_HAS 27
 
 static uint64_t kiln_c99_worker_word(const kiln_value *args, size_t argc, size_t at) {
     double number;
@@ -2594,6 +2596,29 @@ static int kiln_c99_worker_op_raw(kiln_value *result, const kiln_value *args, si
         if (kiln_worker_op((uint32_t)op, 0, words) != 0) return KILN_C99_INVALID_ARGUMENT;
         *result = kiln_c99_number((double)words[0]);
         return KILN_C99_OK;
+    case KILN_C99_WORKER_OP_ACTOR_ISOLATE: {
+        kiln_c99_realm_state *realm = kiln_c99_realm();
+        if (argc < 3 || args[1].tag != KILN_VALUE_OBJECT) return KILN_C99_INVALID_ARGUMENT;
+        if (realm->isolated_graphs.tag != KILN_VALUE_COLLECTION) {
+            kiln_value registry;
+            status = kiln_c99_new_collection(&registry, 1, 1);
+            if (status != KILN_C99_OK) return status;
+            realm->isolated_graphs = registry;
+        }
+        status = kiln_c99_collection_put(realm->isolated_graphs, args[1], args[2]);
+        if (status != KILN_C99_OK) return status;
+        *result = kiln_c99_boolean(1);
+        return KILN_C99_OK;
+    }
+    case KILN_C99_WORKER_OP_ACTOR_ISOLATED_HAS: {
+        kiln_c99_realm_state *realm = kiln_c99_realm();
+        int found = argc >= 2 && args[1].tag == KILN_VALUE_OBJECT &&
+                    realm->isolated_graphs.tag == KILN_VALUE_COLLECTION &&
+                    kiln_c99_collection_find(kiln_c99_collection_of(realm->isolated_graphs),
+                                             args[1]) >= 0.0;
+        *result = kiln_c99_boolean(found);
+        return KILN_C99_OK;
+    }
     case KILN_C99_WORKER_OP_ACTOR_REGISTER:
     case KILN_C99_WORKER_OP_ACTOR_LOOKUP:
     case KILN_C99_WORKER_OP_ACTOR_CLOSE: {

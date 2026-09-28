@@ -963,6 +963,14 @@ typedef struct kiln_c99_realm_state {
     kiln_value *symbols;
     size_t symbol_count;
     size_t symbol_capacity;
+    /* Private actor handles: a weak-key collection rooted by the realm, never exposed to JS.
+     * Its values are the isolated graphs; the handle itself does not keep one alive. */
+    kiln_value isolated_graphs;
+    /* At most one paused actor handoff per realm. The entry remains allocated and its graph
+     * value is exchanged into this explicit root, so rollback is allocation-free. */
+    kiln_entry *isolated_escrow_entry;
+    kiln_value isolated_escrow_key;
+    kiln_value isolated_escrow_value;
     /* `node:ffi`: prepared-function and callback metadata, and the next value-slot key a
      * callback's root takes. The provider's half (libraries, closures) is the realm's too. */
     struct kiln_ffi_function_meta *ffi_functions;
