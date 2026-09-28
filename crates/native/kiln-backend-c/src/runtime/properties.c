@@ -417,6 +417,8 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
                                  const kiln_string *ikey, kiln_value value, int strict,
                                  int depth, kiln_value *thrown) {
     const kiln_string *stable_key = ikey;
+    if (target.tag == KILN_VALUE_SHARED)
+        return strict ? kiln_c99_throw_read_only_key(thrown, key) : KILN_C99_OK;
     if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     kiln_object *object;
     size_t index;

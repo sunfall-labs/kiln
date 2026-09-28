@@ -524,6 +524,10 @@ static int kiln_c99_reflect_set(kiln_host *host, kiln_value target, kiln_value k
     if (text.tag != KILN_VALUE_STRING) {
         KILN_C99_REFUSE("a computed property key that is neither a string nor a named symbol slot");
     }
+    if (target.tag == KILN_VALUE_SHARED) {
+        *accepted = 0;
+        return KILN_C99_OK;
+    }
     if (!kiln_c99_write_would_accept_key(target, (const kiln_string *)text.ptr, NULL)) {
         *accepted = 0;
         return KILN_C99_OK;

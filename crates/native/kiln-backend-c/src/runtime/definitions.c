@@ -1013,6 +1013,8 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
     case KILN_VALUE_PROXY:
         /* `[[GetOwnProperty]]` is a trap, so the handler answers and no store is read. */
         return kiln_c99_proxy_describe(host, target, name, &descriptor, found, depth, thrown);
+    case KILN_VALUE_SHARED:
+        return kiln_c99_shared_own_read(target, view, &descriptor, found, NULL);
     case KILN_VALUE_OBJECT:
         object = kiln_c99_object_of(target);
         if (object->shape != NULL) {

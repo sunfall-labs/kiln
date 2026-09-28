@@ -287,6 +287,15 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
         if (exposed.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
         return kiln_c99_proxy_has(host, target, exposed, answer, depth, thrown);
     }
+    if (target.tag == KILN_VALUE_SHARED) {
+        kiln_value ignored;
+        kiln_value prototype;
+        int status = kiln_c99_shared_own_read(target, key, &ignored, answer, NULL);
+        if (status != KILN_C99_OK || *answer) return status;
+        status = kiln_c99_shared_prototype(target, &prototype);
+        if (status != KILN_C99_OK || prototype.tag == KILN_VALUE_NULL) return status;
+        return kiln_c99_has_property_key(host, prototype, key, ikey, answer, depth, thrown);
+    }
     if (target.tag == KILN_VALUE_BUILTIN) {
         kiln_value store;
         if (kiln_c99_callable_store(target, &store, 0) == KILN_C99_OK &&
@@ -689,6 +698,13 @@ static int kiln_c99_delete_key(kiln_host *host, kiln_value target, const kiln_st
         kiln_value exposed = kiln_c99_key_value(key, &ikey);
         if (exposed.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
         return kiln_c99_proxy_delete(host, target, exposed, answer, depth, thrown);
+    }
+    if (target.tag == KILN_VALUE_SHARED) {
+        kiln_value ignored;
+        int found = 0;
+        int status = kiln_c99_shared_own_read(target, key, &ignored, &found, NULL);
+        *answer = !found;
+        return status;
     }
     if (target.tag == KILN_VALUE_STRING) {
         /* `delete "text".length` is false: the property is real and cannot be configured away.
