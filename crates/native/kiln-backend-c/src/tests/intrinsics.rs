@@ -79,13 +79,13 @@ int main(void) {
     if (kiln_c99_new_shared_facade(17, 1, 0, &same) != KILN_C99_OK) return 2;
     if (first.bits != same.bits || kiln_test_shared_retains != 1) return 3;
     payload = (kiln_shared_facade *)(uintptr_t)first.bits;
-    kiln_c99_gc_finalize(((kiln_gc_block *)payload) - 1);
+    kiln_c99_gc_finalize(kiln_c99_gc_heap(), ((kiln_gc_block *)payload) - 1);
     if (kiln_test_shared_releases != 1 ||
         kiln_c99_gc_heap()->shared_facades != NULL) return 4;
     if (kiln_c99_new_shared_facade(17, 1, 0, &after) != KILN_C99_OK) return 5;
     if (kiln_test_shared_retains != 2) return 6;
     payload = (kiln_shared_facade *)(uintptr_t)after.bits;
-    kiln_c99_gc_finalize(((kiln_gc_block *)payload) - 1);
+    kiln_c99_gc_finalize(kiln_c99_gc_heap(), ((kiln_gc_block *)payload) - 1);
     return kiln_test_shared_releases == 2 ? 0 : 7;
 }
 "#;
@@ -1088,7 +1088,9 @@ fn executable_array_string_iterator_and_named_enumeration_are_distinct() {
         r#"
 int main(void) {{
     kiln_value result;
-    if ({symbol}(NULL, &result) != KILN_C99_OK) return 2;
+    int status = {symbol}(NULL, &result);
+    if (status != KILN_C99_OK) {{ fprintf(stderr, "status=%d detail=%s\n", status,
+        kiln_c99_diagnostic_detail == NULL ? "none" : kiln_c99_diagnostic_detail); return 2; }}
     return result.tag == KILN_VALUE_UNDEFINED ? 0 : 1;
 }}
 "#,
@@ -1097,7 +1099,9 @@ int main(void) {{
     let run = run_with_main(&generated, &wrapper, "array-string-iterator");
     assert!(
         run.status.success(),
-        "an absent ordinary @@iterator key must not expose Symbol.iterator"
+        "an absent ordinary @@iterator key must not expose Symbol.iterator ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
     );
 
     let constants = vec![

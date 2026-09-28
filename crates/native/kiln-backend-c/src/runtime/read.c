@@ -6,6 +6,10 @@ static int kiln_c99_intrinsic_ascii_view(const kiln_string *key, char buffer[256
                                          const char **bytes, size_t *length) {
     size_t index;
     if (key == NULL) return 0;
+    /* Fixed built-in tables use @@ spellings only for Symbol and private keys. The same units
+     * in a program string are an ordinary property name and must miss those tables. */
+    if (key->unit_len >= 2 && kiln_string_unit_at(key, 0) == '@' &&
+        kiln_string_unit_at(key, 1) == '@' && !kiln_c99_key_is_reserved(key)) return 0;
     if (!kiln_string_is_utf16(key)) {
         const unsigned char *raw = (const unsigned char *)kiln_string_latin1(key);
         for (index = 0; index < key->unit_len; ++index) {
