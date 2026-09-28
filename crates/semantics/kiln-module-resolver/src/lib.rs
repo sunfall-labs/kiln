@@ -272,6 +272,21 @@ impl NodeBuiltin {
     }
 }
 
+// Engine-owned builtins may depend on other builtins without publishing Node's module surface
+// to user modules in a non-Node project. A real source file cannot claim this virtual path.
+fn engine_builtin_dependency(
+    specifier: &str,
+    importer: &Path,
+    project_root: &Path,
+) -> Option<NodeBuiltin> {
+    let dependency = NodeBuiltin::parse(specifier)?;
+    (!importer.exists()
+        && NodeBuiltin::ALL
+            .iter()
+            .any(|builtin| importer == builtin.virtual_path(project_root)))
+    .then_some(dependency)
+}
+
 impl ResolvedModule {
     pub fn builtin(&self) -> Option<NodeBuiltin> {
         if self.kind != ResolutionKind::Builtin {
@@ -614,6 +629,16 @@ impl ModuleResolver {
         specifier: &str,
         importer: impl AsRef<Path>,
     ) -> Result<ResolvedModule, ResolveError> {
+        // Engine-owned builtin dependencies remain available in the graph even when a program
+        // has not enabled the Node module adapter.
+        if let Some(builtin) =
+            engine_builtin_dependency(specifier, importer.as_ref(), self.project_root())
+        {
+            return Ok(ResolvedModule::new(
+                builtin.virtual_path(self.project_root()),
+                ResolutionKind::Builtin,
+            ));
+        }
         if matches!(
             specifier,
             "kiln:shared" | "kiln:actors" | "kiln:actors/core" | "kiln:actors/worker"
@@ -1182,7 +1207,13 @@ impl PinnedPackageResolver {
         request: NodeRequestKind,
     ) -> Result<ResolvedModule, ResolveError> {
         let importer = importer.as_ref();
-        if self.node_builtins
+        if let Some(builtin) = engine_builtin_dependency(specifier, importer, self.project_root()) {
+            return Ok(ResolvedModule::new(
+                builtin.virtual_path(self.project_root()),
+                ResolutionKind::Builtin,
+            ));
+        }
+        if (self.node_builtins || specifier.starts_with("kiln:"))
             && let Some(builtin) = NodeBuiltin::parse(specifier)
         {
             return Ok(ResolvedModule::new(
@@ -2292,6 +2323,49 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn engine_builtin_dependencies_do_not_expose_node_modules_to_ordinary_sources() {
+        let project = TempProject::new();
+        let source = project.write("main.ts", "");
+        let explicit = ModuleResolver::new(&project.root).expect("explicit resolver");
+        let pinned = PinnedPackageResolver::new(
+            &project.root,
+            std::iter::empty::<(PathBuf, String, PathBuf)>(),
+        )
+        .expect("ordinary pinned resolver");
+        let actor = NodeBuiltin::Actors.virtual_path(&project.root);
+        let worker = NodeBuiltin::WorkerThreads.virtual_path(&project.root);
+        for resolved in [
+            explicit.resolve("node:worker_threads", &actor),
+            pinned.resolve("node:worker_threads", &actor),
+        ] {
+            assert_eq!(
+                resolved.expect("actor transport").builtin(),
+                Some(NodeBuiltin::WorkerThreads)
+            );
+        }
+        for resolved in [
+            explicit.resolve("node:events", &worker),
+            pinned.resolve("node:events", &worker),
+        ] {
+            assert_eq!(
+                resolved.expect("builtin dependency").builtin(),
+                Some(NodeBuiltin::Events)
+            );
+        }
+        assert!(explicit.resolve("node:worker_threads", &source).is_err());
+        assert!(pinned.resolve("node:worker_threads", &source).is_err());
+        assert_eq!(
+            pinned
+                .resolve("kiln:actors/core", &actor)
+                .expect("Kiln namespace")
+                .builtin(),
+            Some(NodeBuiltin::ActorsCore)
+        );
+        let fake = project.write(".kiln/builtins/actors.builtin", "");
+        assert!(pinned.resolve("node:worker_threads", &fake).is_err());
     }
 
     #[test]

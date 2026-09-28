@@ -617,11 +617,12 @@ pub(crate) fn include_reachable_dependencies_with_includes(
         }
 
         for (specifier, request, required, request_importer) in requests {
-            if specifier == "kiln:shared"
-                || (node && kiln_module_resolver::NodeBuiltin::parse(&specifier).is_some())
+            if kiln_module_resolver::NodeBuiltin::parse(&specifier).is_some()
+                && (node || specifier.starts_with("kiln:"))
             {
                 // Builtins are typed virtual graph nodes. They have no source bytes or package
-                // metadata to synchronize, and the daemon's Node resolver materializes them.
+                // metadata to synchronize. Kiln namespaces are available without `--node`;
+                // the daemon's resolver materializes them in either mode.
                 continue;
             }
             let resolved = match resolver.resolve_with_metadata_for_request(
@@ -1548,6 +1549,38 @@ mod tests {
         )
         .expect_err("unknown builtin must fail closed");
         assert!(error.to_string().contains("node:not-real"));
+    }
+
+    #[test]
+    fn kiln_namespaces_reexported_by_a_package_need_no_disk_source_without_node() {
+        let tree = Tree::new("kiln-package-builtins");
+        tree.file("main.ts");
+        tree.file("compat.js");
+        let entry = tree.0.join("main.ts");
+        std::fs::write(&entry, "import './compat.js';\n").expect("write entry");
+        std::fs::write(
+            tree.0.join("compat.js"),
+            "export { spawnActor } from 'kiln:actors'; export { freeze } from 'kiln:shared';\n",
+        )
+        .expect("write package module");
+        let canonical = entry.canonicalize().expect("canonical entry");
+        let mut texts = vec![(
+            canonical.to_string_lossy().into_owned(),
+            std::fs::read_to_string(&entry).expect("read entry"),
+        )];
+        include_reachable_dependencies(
+            &tree.0,
+            canonical.to_str().expect("UTF-8 entry"),
+            &mut texts,
+            false,
+        )
+        .expect("kiln namespace imports are virtual even without --node");
+        assert_eq!(
+            texts.len(),
+            2,
+            "only the two real source files are synchronized"
+        );
+        assert!(texts.iter().any(|(path, _)| path.ends_with("compat.js")));
     }
 
     #[test]
