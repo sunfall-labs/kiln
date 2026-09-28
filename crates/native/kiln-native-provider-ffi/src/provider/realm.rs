@@ -5346,12 +5346,17 @@ fn coordinate_claimed_graph_request(
         return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
     }
     if control(receiver, command(4, [reservation, sender, request])) != PausedTurnResult::Ready {
-        let _ = control(sender, command(9, [request, reservation, 0]));
+        if control(sender, command(9, [request, reservation, 0])) != PausedTurnResult::Ready {
+            std::process::abort();
+        }
         return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
     }
     if control(sender, command(5, [reservation, sender, request])) != PausedTurnResult::Ready {
-        let _ = control(receiver, command(8, [reservation, 0, 0]));
-        let _ = control(sender, command(9, [request, reservation, 0]));
+        if control(receiver, command(8, [reservation, 0, 0])) != PausedTurnResult::Ready
+            || control(sender, command(9, [request, reservation, 0])) != PausedTurnResult::Ready
+        {
+            std::process::abort();
+        }
         return GRAPH_REQUEST_REFUSED_AFTER_PAUSE;
     }
     if control(receiver, command(6, [reservation, sender, request])) != PausedTurnResult::Ready

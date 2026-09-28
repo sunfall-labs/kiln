@@ -277,6 +277,42 @@ pub struct TurnPairClaim {
     targets: Vec<TurnPauseTarget>,
 }
 
+/// A queued paused-lane callback. Before it starts the caller may cancel it; once running,
+/// dropping the handle cannot release the pair claim safely until the callback has returned.
+pub struct PendingTurnControl {
+    permit: Arc<AtomicU8>,
+    result: mpsc::Receiver<PausedTurnResult>,
+}
+
+impl PendingTurnControl {
+    pub fn cancel_pending(&self) -> bool {
+        self.permit
+            .compare_exchange(
+                PAUSED_CONTROL_PENDING,
+                PAUSED_CONTROL_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    pub fn wait(self, timeout: Duration) -> PausedTurnResult {
+        match self.result.recv_timeout(timeout) {
+            Ok(answer) => answer,
+            Err(mpsc::RecvTimeoutError::Disconnected) => PausedTurnResult::Unavailable,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if self.cancel_pending() {
+                    PausedTurnResult::Unavailable
+                } else {
+                    // A started callback owns a realm under the claim. Wait for it rather than
+                    // letting its mutator resume beside a detached graph.
+                    self.result.recv().unwrap_or(PausedTurnResult::Unavailable)
+                }
+            }
+        }
+    }
+}
+
 impl TurnPairClaim {
     /// Wait only from a coordinator thread, never from a scheduler lane: a lane could own
     /// either claimed realm and cannot acknowledge while its OS thread is blocked here.
@@ -328,6 +364,42 @@ impl TurnPairClaim {
     /// bodies must already have acknowledged this claim. The operation is synchronous and must
     /// neither run JavaScript nor block on either realm; the claim stays held until it returns.
     pub fn control(&self, realm_id: u64, command: PausedTurnCommand) -> PausedTurnResult {
+        let Some(pending) = self.enqueue_control(realm_id, command, None) else {
+            return PausedTurnResult::Unavailable;
+        };
+        pending.wait(Duration::from_secs(1))
+    }
+
+    /// Choose distinct lanes for two callbacks that must both enter before either unlinks a
+    /// graph. A pinned pair on one lane, or a one-lane pool with two movable bodies, refuses.
+    pub fn concurrent_control_lanes(&self, first: u64, second: u64) -> Option<[usize; 2]> {
+        if first == second {
+            return None;
+        }
+        let a = self.targets.iter().find(|target| target.id() == first)?;
+        let b = self.targets.iter().find(|target| target.id() == second)?;
+        let a_pin = a.ticket.pinned_lane();
+        let b_pin = b.ticket.pinned_lane();
+        let choose = |avoid: usize| (0..self._scheduler.base_lanes).find(|lane| *lane != avoid);
+        match (a_pin, b_pin) {
+            (Some(a), Some(b)) if a != b => Some([a, b]),
+            (Some(_), Some(_)) => None,
+            (Some(a), None) => Some([a, choose(a)?]),
+            (None, Some(b)) => Some([choose(b)?, b]),
+            (None, None) if self._scheduler.base_lanes >= 2 => Some([0, 1]),
+            (None, None) => None,
+        }
+    }
+
+    /// Queue without waiting so two graph handoff callbacks can enter on distinct lanes.
+    /// `lane` is a reviewed concurrent-control choice for a movable body; a pinned body must
+    /// use its owner lane.
+    pub fn enqueue_control(
+        &self,
+        realm_id: u64,
+        command: PausedTurnCommand,
+        lane: Option<usize>,
+    ) -> Option<PendingTurnControl> {
         let on_lane = ACTIVE_LANE.with(|slot| {
             slot.get()
                 .is_some_and(|(queue, _)| queue == self.coordinator.queue_identity)
@@ -339,15 +411,21 @@ impl TurnPairClaim {
                 .iter()
                 .all(|target| self.coordinator.acknowledged_for(target.id(), self.claim))
         {
-            return PausedTurnResult::Unavailable;
+            return None;
         }
         let Some(target) = self.targets.iter().find(|target| target.id() == realm_id) else {
-            return PausedTurnResult::Unavailable;
+            return None;
         };
         if TurnStatus::read(target.status.load(Ordering::Acquire)) != TurnStatus::Active {
-            return PausedTurnResult::Unavailable;
+            return None;
         }
-        let lane = target.ticket.pinned_lane().unwrap_or(0);
+        let lane = match (target.ticket.pinned_lane(), lane) {
+            (Some(owner), Some(requested)) if owner != requested => return None,
+            (Some(owner), _) => owner,
+            (None, Some(requested)) if requested < self._scheduler.base_lanes => requested,
+            (None, Some(_)) => return None,
+            (None, None) => 0,
+        };
         let (result, received) = mpsc::sync_channel(1);
         let permit = Arc::new(AtomicU8::new(PAUSED_CONTROL_PENDING));
         self._scheduler.lanes[lane].command(Command::PausedControl {
@@ -357,28 +435,10 @@ impl TurnPairClaim {
             permit: Arc::clone(&permit),
             result,
         });
-        match received.recv_timeout(Duration::from_secs(1)) {
-            Ok(answer) => answer,
-            Err(mpsc::RecvTimeoutError::Disconnected) => PausedTurnResult::Unavailable,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                // An unrelated turn can occupy this lane indefinitely. Cancel only a command
-                // that has not started; an active callback still owns the pair claim until it
-                // returns, so releasing its heaps here would be unsafe.
-                if permit
-                    .compare_exchange(
-                        PAUSED_CONTROL_PENDING,
-                        PAUSED_CONTROL_CANCELLED,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    )
-                    .is_ok()
-                {
-                    PausedTurnResult::Unavailable
-                } else {
-                    received.recv().unwrap_or(PausedTurnResult::Unavailable)
-                }
-            }
-        }
+        Some(PendingTurnControl {
+            permit,
+            result: received,
+        })
     }
 }
 
@@ -1455,6 +1515,18 @@ mod tests {
             claim.control(movable.id(), command),
             PausedTurnResult::Ready
         );
+        let lanes = claim
+            .concurrent_control_lanes(pinned.id(), movable.id())
+            .expect("distinct control lanes");
+        assert_ne!(lanes[0], lanes[1]);
+        let first = claim
+            .enqueue_control(pinned.id(), command, Some(lanes[0]))
+            .expect("pinned control queued");
+        let second = claim
+            .enqueue_control(movable.id(), command, Some(lanes[1]))
+            .expect("movable control queued");
+        assert_eq!(first.wait(Duration::from_secs(1)), PausedTurnResult::Ready);
+        assert_eq!(second.wait(Duration::from_secs(1)), PausedTurnResult::Ready);
         assert_eq!(pinned_runs.load(Ordering::SeqCst), 1);
         assert_eq!(movable_runs.load(Ordering::SeqCst), 1);
         drop(claim);
