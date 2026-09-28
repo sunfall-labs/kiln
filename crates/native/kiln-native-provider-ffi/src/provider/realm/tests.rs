@@ -1035,6 +1035,152 @@ fn the_collector_seam_marks_registered_roots_and_tears_down_once() {
     assert_eq!(COLLECTS.load(AtomicOrdering::SeqCst), 0);
 }
 
+#[test]
+fn provider_root_visitor_finds_aliases_without_marking_or_invoking_root_callbacks() {
+    static MARKS: AtomicUsize = AtomicUsize::new(0);
+    static ROOT_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn collect(_heap: *mut c_void, _force: i32) {}
+    unsafe extern "C" fn teardown_begin(_heap: *mut c_void) {}
+    unsafe extern "C" fn teardown_end(heap: *mut c_void) {
+        // SAFETY: enter allocated this two-word fake heap.
+        drop(unsafe { Box::from_raw(heap.cast::<[*const GcHooks; 2]>()) });
+    }
+    unsafe extern "C" fn mark_value(_heap: *mut c_void, _value: *const c_void) {
+        MARKS.fetch_add(1, AtomicOrdering::SeqCst);
+    }
+    unsafe extern "C" fn mark_block(_heap: *mut c_void, _block: *mut c_void) {
+        MARKS.fetch_add(1, AtomicOrdering::SeqCst);
+    }
+    unsafe extern "C" fn introspect(_heap: *mut c_void) -> i32 {
+        0
+    }
+    unsafe extern "C" fn registered_roots(_heap: *mut c_void, _context: *mut c_void, _phase: i32) {
+        ROOT_CALLS.fetch_add(1, AtomicOrdering::SeqCst);
+    }
+    unsafe extern "C" fn drop_work(_pointer: *mut c_void) {}
+    unsafe extern "C" fn run_work(
+        _pointer: *mut c_void,
+        _host: *mut c_void,
+        _thrown: *mut c_void,
+    ) -> i32 {
+        0
+    }
+    static HOOKS: GcHooks = GcHooks {
+        version: GC_HOOKS_VERSION,
+        size: std::mem::size_of::<GcHooks>() as u32,
+        collect: Some(collect),
+        teardown_begin: Some(teardown_begin),
+        teardown_end: Some(teardown_end),
+        mark_value: Some(mark_value),
+        mark_block: Some(mark_block),
+        introspect: Some(introspect),
+    };
+
+    #[derive(Default)]
+    struct Probe {
+        slot: usize,
+        candidate: usize,
+        work: usize,
+        seen_slot: bool,
+        seen_candidate: bool,
+        seen_work: bool,
+    }
+    unsafe extern "C" fn visit(context: *mut c_void, pointer: *const c_void, kind: u32) -> i32 {
+        let probe = unsafe { &mut *context.cast::<Probe>() };
+        let address = pointer as usize;
+        if kind == GC_VISIT_VALUE && address == probe.slot {
+            probe.seen_slot = true;
+        }
+        if kind == GC_VISIT_BLOCK && address == probe.candidate {
+            probe.seen_candidate = true;
+        }
+        if kind == GC_VISIT_BLOCK && address == probe.work {
+            probe.seen_work = true;
+        }
+        0
+    }
+    unsafe extern "C" fn reject_visit(
+        _context: *mut c_void,
+        _pointer: *const c_void,
+        _kind: u32,
+    ) -> i32 {
+        1
+    }
+    unsafe extern "C" fn enter(context: *mut c_void) -> i32 {
+        let probe = unsafe { &mut *context.cast::<Probe>() };
+        let mut heap = ptr::null_mut();
+        let candidate_heap =
+            Box::into_raw(Box::new([&raw const HOOKS, ptr::null()])).cast::<c_void>();
+        assert_eq!(
+            unsafe { kiln_realm_gc_attach(&raw const HOOKS, candidate_heap, &raw mut heap) },
+            0
+        );
+        let mut slot = ptr::null_mut();
+        assert_eq!(unsafe { kiln_realm_value_slot(928, &raw mut slot) }, 0);
+        probe.slot = slot as usize;
+        let mut store = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                kiln_realm_callable_store(
+                    1,
+                    928,
+                    probe.candidate as *mut c_void,
+                    Some(drop_work),
+                    &raw mut store,
+                )
+            },
+            0
+        );
+        assert_eq!(store as usize, probe.candidate);
+        assert_eq!(
+            unsafe {
+                kiln_realm_queue_microtask(
+                    Some(run_work),
+                    Some(drop_work),
+                    probe.work as *mut c_void,
+                )
+            },
+            0
+        );
+        assert_eq!(
+            unsafe { kiln_realm_gc_visit_provider_roots(heap, Some(visit), context) },
+            0
+        );
+        assert!(probe.seen_slot && probe.seen_candidate && probe.seen_work);
+        assert_eq!(MARKS.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(ROOT_CALLS.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(
+            unsafe { kiln_realm_gc_register_roots(Some(registered_roots), context, 0) },
+            0
+        );
+        assert_eq!(
+            unsafe { kiln_realm_gc_visit_provider_roots(heap, Some(visit), context) },
+            GC_VISIT_REGISTERED_ROOTS_UNENUMERATED
+        );
+        assert_eq!(
+            unsafe { kiln_realm_gc_visit_provider_roots(heap, Some(reject_visit), context) },
+            RUNTIME_ERROR
+        );
+        assert_eq!(MARKS.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(ROOT_CALLS.load(AtomicOrdering::SeqCst), 0);
+        0
+    }
+
+    let mut handle = 0;
+    let mut probe = Probe {
+        candidate: opaque_test_pointer(0x9280) as usize,
+        work: opaque_test_pointer(0x9281) as usize,
+        ..Probe::default()
+    };
+    assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
+    assert_eq!(
+        unsafe { kiln_realm_enter(handle, Some(enter), (&raw mut probe).cast()) },
+        0
+    );
+    assert_eq!(kiln_realm_destroy(handle), 0);
+}
+
 /// Realms issue 24. Teardown runs prelude code -- a callable store's destructor releases its
 /// record, the collector's teardown hooks sweep -- and the prelude finds its heap by asking which
 /// one is current on the thread. A realm is destroyed outside `ActiveRealm`, so each of those

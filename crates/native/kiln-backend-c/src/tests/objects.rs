@@ -2296,6 +2296,62 @@ int main(void) {
 }
 
 #[test]
+fn executable_graph_incoming_probe_sees_provider_root_aliases() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static void graph_provider_noop_drop(void *pointer) { (void)pointer; }
+static int graph_provider_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_c99_par_arena candidate;
+    kiln_nursery_chunk *chunk, *batch[1];
+    kiln_val *root;
+    kiln_value *slot;
+    void *store = NULL;
+    (void)context;
+    if (heap == NULL || !kiln_c99_graph_candidate_open(&candidate, heap,
+                                                        heap->nursery.capacity)) return 1;
+    root = (kiln_val *)kiln_c99_par_alloc(&candidate, KILN_GC_CELL, sizeof *root);
+    if (root == NULL) return 2;
+    *root = KILN_VAL_UNDEFINED;
+    kiln_c99_par_arena_seal(&candidate);
+    chunk = candidate.filled;
+    if (chunk == NULL || !kiln_c99_heap_adopt_chunks(heap, chunk)) return 3;
+    batch[0] = chunk;
+    if (kiln_c99_graph_incoming_probe(heap, batch, 1, root) !=
+        KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 4;
+    if (kiln_realm_value_slot(5, (void **)&slot) != KILN_C99_OK) return 5;
+    slot->tag = KILN_VALUE_CELL;
+    slot->bits = (uint64_t)(uintptr_t)root;
+    if (kiln_c99_graph_incoming_probe(heap, batch, 1, root) !=
+        KILN_C99_GRAPH_PROVIDER_ROOT_ALIAS) return 6;
+    *slot = kiln_c99_undefined();
+    if (kiln_c99_graph_incoming_probe(heap, batch, 1, root) !=
+        KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 7;
+    if (kiln_realm_callable_store(1, 991, root, graph_provider_noop_drop, &store) !=
+        KILN_C99_OK || store != root) return 8;
+    if (kiln_c99_graph_incoming_probe(heap, batch, 1, root) !=
+        KILN_C99_GRAPH_PROVIDER_ROOT_ALIAS) return 9;
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int result;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 10;
+    result = kiln_realm_enter(realm, graph_provider_entry, NULL);
+    if (result != KILN_C99_OK) return result;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 11;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "graph-provider-root-alias");
+    assert!(
+        run.status.success(),
+        "provider root alias check failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+#[test]
 fn executable_gc_boundary_defers_partial_nursery_but_forced_collects() {
     let program = program(vec![], vec![Instruction::Return], 0);
     let generated = emit(&program).expect("program emits");

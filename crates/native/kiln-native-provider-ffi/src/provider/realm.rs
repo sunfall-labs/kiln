@@ -321,7 +321,7 @@ impl NativeMicrotask {
         }))
     }
 
-    fn mark_roots(&self, marker: &GcMarker) {
+    fn mark_roots(&self, marker: &impl GcRootSink) {
         match self.0.roots {
             WorkRoots::Block => marker.block(self.0.pointer),
             WorkRoots::Completion => {
@@ -371,7 +371,7 @@ impl NativeWork {
         }
     }
 
-    fn mark_roots(&self, marker: &GcMarker) {
+    fn mark_roots(&self, marker: &impl GcRootSink) {
         let owner = self.owner();
         match owner.roots {
             WorkRoots::Block => marker.block(owner.pointer),
@@ -943,7 +943,12 @@ struct GcMarker {
     hooks: GcHooks,
 }
 
-impl GcMarker {
+trait GcRootSink {
+    fn block(&self, pointer: *mut c_void);
+    fn value(&self, value: *const c_void);
+}
+
+impl GcRootSink for GcMarker {
     fn block(&self, pointer: *mut c_void) {
         if pointer.is_null() {
             return;
@@ -965,6 +970,39 @@ impl GcMarker {
     }
 }
 
+type GcVisitRoot = unsafe extern "C" fn(*mut c_void, *const c_void, u32) -> i32;
+const GC_VISIT_BLOCK: u32 = 1;
+const GC_VISIT_VALUE: u32 = 2;
+const GC_VISIT_REGISTERED_ROOTS_UNENUMERATED: i32 = 1;
+
+struct GcVisitor {
+    visit: GcVisitRoot,
+    context: *mut c_void,
+    failed: std::cell::Cell<bool>,
+}
+
+impl GcRootSink for GcVisitor {
+    fn block(&self, pointer: *mut c_void) {
+        if pointer.is_null() || self.failed.get() {
+            return;
+        }
+        // SAFETY: the caller guarantees the visitor and context remain valid for this call.
+        if unsafe { (self.visit)(self.context, pointer.cast_const(), GC_VISIT_BLOCK) } != 0 {
+            self.failed.set(true);
+        }
+    }
+
+    fn value(&self, value: *const c_void) {
+        if value.is_null() || self.failed.get() {
+            return;
+        }
+        // SAFETY: the caller guarantees the visitor and context remain valid for this call.
+        if unsafe { (self.visit)(self.context, value, GC_VISIT_VALUE) } != 0 {
+            self.failed.set(true);
+        }
+    }
+}
+
 fn gc_hooks_of(heap: *mut c_void) -> Option<GcHooks> {
     if heap.is_null() {
         return None;
@@ -980,6 +1018,27 @@ fn gc_hooks_of(heap: *mut c_void) -> Option<GcHooks> {
 
 /// Marks everything the archive keeps a JavaScript reference to, then the roots each
 /// translation unit and the launcher registered.
+fn for_each_provider_root(realm: &NativeRealm, sink: &impl GcRootSink) {
+    for slot in realm.value_slots.borrow().values() {
+        sink.value(slot.as_ptr().cast::<c_void>());
+    }
+    for store in realm.callable_stores.borrow().values() {
+        sink.block(store.pointer);
+    }
+    for continuation in realm.continuations.borrow().values() {
+        sink.block(continuation.pointer);
+    }
+    #[cfg(feature = "realm-http")]
+    for connection in realm.http_connections.borrow().values() {
+        sink.block(connection.events.pointer);
+    }
+    {
+        let work = realm.work.borrow();
+        work.for_each_queued(|item| item.mark_roots(sink));
+        work.for_each_timer(|item| item.mark_roots(sink));
+    }
+}
+
 fn mark_realm_roots(realm: &NativeRealm, heap: *mut c_void) -> i32 {
     let (hooks, roots) = {
         let gc = realm.gc.borrow();
@@ -997,24 +1056,7 @@ fn mark_realm_roots(realm: &NativeRealm, heap: *mut c_void) -> i32 {
         (hooks, roots)
     };
     let marker = GcMarker { heap, hooks };
-    for slot in realm.value_slots.borrow().values() {
-        marker.value(slot.as_ptr().cast::<c_void>());
-    }
-    for store in realm.callable_stores.borrow().values() {
-        marker.block(store.pointer);
-    }
-    for continuation in realm.continuations.borrow().values() {
-        marker.block(continuation.pointer);
-    }
-    #[cfg(feature = "realm-http")]
-    for connection in realm.http_connections.borrow().values() {
-        marker.block(connection.events.pointer);
-    }
-    {
-        let work = realm.work.borrow();
-        work.for_each_queued(|item| item.mark_roots(&marker));
-        work.for_each_timer(|item| item.mark_roots(&marker));
-    }
+    for_each_provider_root(realm, &marker);
     for (roots, context) in roots {
         // SAFETY: registration recorded a live root function and the context it asked for.
         unsafe { roots(heap, context, GC_PHASE_MARK) };
@@ -3428,6 +3470,54 @@ pub unsafe extern "C" fn kiln_realm_gc_mark_roots(heap: *mut c_void) -> i32 {
     })
 }
 
+/// Visits the provider's own GC roots without marking or allocating in the sender heap.
+/// The callback receives a live `kiln_value` slot (`GC_VISIT_VALUE`) or a block payload pointer
+/// (`GC_VISIT_BLOCK`). Return zero on complete provider-owned enumeration, one when registered
+/// module/launcher root callbacks remain unenumerated, or an error on invalid input/visitor
+/// failure. A caller must refuse ownership transfer on every nonzero result. Registered root
+/// functions accept only a mark hook today; invoking them here would mutate GC state.
+///
+/// # Safety
+///
+/// `heap` must be attached to the active realm; `visit` and `context` must remain valid through
+/// this call. The visitor may inspect but must not mutate roots or reenter the realm.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_gc_visit_provider_roots(
+    heap: *mut c_void,
+    visit: Option<GcVisitRoot>,
+    context: *mut c_void,
+) -> i32 {
+    ffi(|| {
+        let Some(visit) = visit else {
+            return INVALID_ARGUMENT;
+        };
+        let Some(realm) = active_realm() else {
+            return INVALID_ARGUMENT;
+        };
+        let registered_roots = {
+            let gc = realm.gc.borrow();
+            if heap.is_null() || gc.heap != heap || gc.hooks.is_none() {
+                return INVALID_ARGUMENT;
+            }
+            !gc.roots.is_empty()
+        };
+        let visitor = GcVisitor {
+            visit,
+            context,
+            failed: std::cell::Cell::new(false),
+        };
+        for_each_provider_root(&realm, &visitor);
+        if visitor.failed.get() {
+            return RUNTIME_ERROR;
+        }
+        if registered_roots {
+            GC_VISIT_REGISTERED_ROOTS_UNENUMERATED
+        } else {
+            0
+        }
+    })
+}
+
 /// Marks one value slot through `heap`'s hooks, for root functions outside the prelude.
 ///
 /// # Safety
@@ -5273,6 +5363,9 @@ macro_rules! assert_provider_export {
         };
         (realm, kiln_realm_gc_mark_roots, realm_gc_mark_roots) => {
             const _: unsafe extern "C" fn(*mut c_void) -> i32 = kiln_realm_gc_mark_roots;
+        };
+        (realm, kiln_realm_gc_visit_provider_roots, realm_gc_visit_provider_roots) => {
+            const _: unsafe extern "C" fn(*mut c_void, Option<GcVisitRoot>, *mut c_void) -> i32 = kiln_realm_gc_visit_provider_roots;
         };
         (realm, kiln_realm_gc_mark_value, realm_gc_mark_value) => {
             const _: unsafe extern "C" fn(*mut c_void, *const c_void) -> i32 = kiln_realm_gc_mark_value;

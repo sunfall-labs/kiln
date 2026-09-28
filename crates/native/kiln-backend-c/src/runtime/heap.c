@@ -3321,7 +3321,8 @@ typedef enum kiln_c99_graph_incoming_result {
     KILN_C99_GRAPH_C_ROOT_ALIAS = 1,
     KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS = 2,
     KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED = 3,
-    KILN_C99_GRAPH_ROOTS_UNENUMERATED = 4
+    KILN_C99_GRAPH_ROOTS_UNENUMERATED = 4,
+    KILN_C99_GRAPH_PROVIDER_ROOT_ALIAS = 5
 } kiln_c99_graph_incoming_result;
 
 /* A root can hold an interior address, including a string's inline bytes. The collector accepts
@@ -3554,10 +3555,31 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_scan_outside_heap(
     return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
 }
 
+typedef struct kiln_c99_graph_provider_visit {
+    const kiln_gc_heap *heap;
+    kiln_nursery_chunk *const *chunks;
+    size_t count;
+    int alias;
+} kiln_c99_graph_provider_visit;
+
+static int kiln_c99_graph_visit_provider_root(void *opaque, const void *pointer,
+                                               uint32_t kind) {
+    kiln_c99_graph_provider_visit *visit = (kiln_c99_graph_provider_visit *)opaque;
+    if (kind == KILN_GC_VISIT_BLOCK) {
+        visit->alias |= kiln_c99_graph_in_batch(visit->heap, visit->chunks, visit->count, pointer);
+    } else if (kind == KILN_GC_VISIT_VALUE) {
+        visit->alias |= kiln_c99_graph_value_in_batch(visit->heap, visit->chunks, visit->count,
+                                                      (const kiln_value *)pointer);
+    } else {
+        return 1;
+    }
+    return 0;
+}
+
 /* A future actor transaction may call this at its sender turn safepoint, after its consuming
- * handle has been detached. Today even a candidate with no C root is refused: the provider's
- * root callbacks and every outside heap edge still need exact, non-mutating enumeration, and
- * the machine stack must be scanned while excluding only the proof's own frames. Returning a
+ * handle has been detached. Today even a candidate with no enumerated alias is refused:
+ * generated/launcher root callbacks and the machine stack still need exact, non-mutating
+ * enumeration while excluding only the proof's own frames. Returning a
  * positive ownership certificate here would make the current TypeScript handle an escape hatch. */
 static kiln_c99_graph_incoming_result kiln_c99_graph_incoming_probe(
     const kiln_gc_heap *heap, kiln_nursery_chunk *const *chunks, size_t count, const void *root) {
@@ -3569,6 +3591,14 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_incoming_probe(
         kiln_c99_graph_incoming_result outside =
             kiln_c99_graph_scan_outside_heap(heap, chunks, count);
         if (outside != KILN_C99_GRAPH_ROOTS_UNENUMERATED) return outside;
+    }
+    {
+        kiln_c99_graph_provider_visit visit = { heap, chunks, count, 0 };
+        /* A nonzero provider status means registered module/launcher callbacks or another
+         * incomplete authority. The probe remains refused even when this walk is complete. */
+        (void)kiln_realm_gc_visit_provider_roots((void *)heap,
+                                                  kiln_c99_graph_visit_provider_root, &visit);
+        if (visit.alias) return KILN_C99_GRAPH_PROVIDER_ROOT_ALIAS;
     }
     return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
 }

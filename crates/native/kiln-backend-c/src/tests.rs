@@ -615,6 +615,20 @@ int kiln_realm_gc_mark_roots(void *heap) {
     kiln_c99_gc_mark_value((kiln_gc_heap *)heap, &kiln_test_gc_root);
     return KILN_C99_OK;
 }
+/* This shim enumerates only the provider state it models. The real archive's visitor also
+ * covers queued work, continuations and host handles; its fixture tests that contract. */
+int kiln_realm_gc_visit_provider_roots(void *heap, kiln_gc_visit_root_fn visit, void *context) {
+    size_t index;
+    (void)heap;
+    if (!kiln_test_realm_active || visit == NULL) return KILN_C99_INVALID_ARGUMENT;
+    for (index = 0; index < 5; ++index)
+        if (visit(context, &kiln_test_value_slots[index], KILN_GC_VISIT_VALUE) != 0)
+            return KILN_C99_HOST_ERROR;
+    for (index = 0; index < kiln_test_callable_store_count; ++index)
+        if (visit(context, kiln_test_callable_stores[index], KILN_GC_VISIT_BLOCK) != 0)
+            return KILN_C99_HOST_ERROR;
+    return KILN_C99_OK;
+}
 int kiln_realm_now(double *out_milliseconds) {
     if (!kiln_test_realm_active || out_milliseconds == NULL) {
         return KILN_C99_INVALID_ARGUMENT;

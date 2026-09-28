@@ -716,6 +716,14 @@ extern int kiln_shared_graph_build(uint64_t root, kiln_shared_source_inspect_fn 
 extern int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap);
 extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
 extern int kiln_realm_gc_mark_roots(void *heap);
+/* Read-only provider-owned root inventory. `visit` receives a block payload (1) or a pointer to
+ * a kiln_value slot (2). Zero means complete for provider-owned roots; one means registered
+ * module/launcher root callbacks still require an independent visitor. */
+typedef int (*kiln_gc_visit_root_fn)(void *context, const void *pointer, uint32_t kind);
+#define KILN_GC_VISIT_BLOCK 1u
+#define KILN_GC_VISIT_VALUE 2u
+extern int kiln_realm_gc_visit_provider_roots(void *heap, kiln_gc_visit_root_fn visit,
+                                              void *context);
 
 /* A closure is its body plus the boxes it captured.
  *
