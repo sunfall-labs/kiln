@@ -4050,20 +4050,24 @@ static int kiln_cli_realm_step(kiln_cli_realm_run *run) {{
 
 static int kiln_cli_run_realm_as(int argc, char **argv, int writes_result, FILE *output,
                                  FILE *error_output, size_t worker_entry) {{
-    kiln_cli_realm_run run;
-    kiln_cli_realm_begin(&run, argc, argv, output, error_output, worker_entry);
-    while (kiln_cli_realm_step(&run)) {{}}
-    kiln_graph_context *graph = run.graph;
-    uint64_t realm = run.realm;
-    const char *phase = run.phase;
-    int status = run.status;
+    kiln_cli_realm_run *run = (kiln_cli_realm_run *)calloc(1, sizeof *run);
+    if (run == NULL) {{
+        kiln_cli_warn("kiln: out of memory for the realm session", NULL);
+        return 1;
+    }}
+    kiln_cli_realm_begin(run, argc, argv, output, error_output, worker_entry);
+    while (kiln_cli_realm_step(run)) {{}}
+    kiln_graph_context *graph = run->graph;
+    uint64_t realm = run->realm;
+    const char *phase = run->phase;
+    int status = run->status;
     int destroy_status;
     int unsettled_entry = 0;
     /* `process.exit(code)` in a thread-mode realm (realms issue 23): the code, and whether it
      * was asked for. */
     int32_t exit_requested = 0;
     int exit_asked = 0;
-    if (graph == NULL) return 1;"#,
+    if (graph == NULL) {{ free(run); return 1; }}"#,
         startup_indices.len(),
         startup_indices.len()
     )
@@ -4108,7 +4112,9 @@ static int kiln_cli_run_realm_as(int argc, char **argv, int writes_result, FILE 
             (void)kiln_realm_enter(realm, kiln_cli_report_worker_error, graph);
             code = 1;
         }
-        return kiln_cli_end_worker_realm(realm, graph, code);
+        int completed = kiln_cli_end_worker_realm(realm, graph, code);
+        free(run);
+        return completed;
     }
     /* `process.exit(code)` in a realm of `KILN_WORKERS` thread mode ends that realm, not the
      * process (realms issue 23): the runtime recorded the code and the realm unwound here. The
@@ -4150,6 +4156,7 @@ static int kiln_cli_run_realm_as(int argc, char **argv, int writes_result, FILE 
     }
     destroy_status = kiln_realm_destroy(realm);
     free(graph);
+    free(run);
     if (exit_asked) return (int)exit_requested;
     /* Every failure folds to 1, the way a refusal does; 13 is the one status a program's caller
      * is told apart by, as `process.exit(code)` is. */
