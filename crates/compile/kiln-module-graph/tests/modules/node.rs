@@ -1623,13 +1623,14 @@ fn node_builtin_static_imports_are_typed_virtual_modules() {
     // Only the real entry passed through the source provider. Builtins are typed graph nodes,
     // not fake files or generated JavaScript.
     assert_eq!(loaded, [fs::canonicalize(&entry).unwrap()]);
-    assert_eq!(graph.module_count(), 3);
+    // The events built-in imports async_hooks for AsyncResource context propagation.
+    assert_eq!(graph.module_count(), 4);
     assert_eq!(
         graph
             .modules()
             .filter(|node| matches!(node.source, ModuleSource::NodeBuiltin(_)))
             .count(),
-        2
+        3
     );
 
     let mut host = TestHost::default();
