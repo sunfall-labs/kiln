@@ -28,12 +28,9 @@ delete (globalThis as any).__kilnQueueIo;
 // `__kilnPortWait(endpoint, referenced)` the one that waits -- a host operation, answered
 // `{ requestId, promise }`, done once the endpoint has something queued or its peer has closed.
 const __kilnWorkerOp: (op: number, ...args: any[]) => any = (globalThis as any).__kilnWorkerOp;
-const __kilnEncodeMessageData: ((value: any) => any[] | undefined) | undefined =
-  (globalThis as any).__kilnEncodeMessageData;
 const __kilnPortWait: (endpoint: number, referenced: boolean) => { requestId: number; promise: Promise<any> } =
   (globalThis as any).__kilnPortWait;
 delete (globalThis as any).__kilnWorkerOp;
-delete (globalThis as any).__kilnEncodeMessageData;
 delete (globalThis as any).__kilnPortWait;
 
 (function installWebEventsAndStreams() {
@@ -710,10 +707,8 @@ delete (globalThis as any).__kilnPortWait;
         encodeInto(message, out, new Map());
         return out;
       }
-      if (typeof __kilnEncodeMessageData === "function") {
-        const encoded = __kilnEncodeMessageData(message);
-        if (encoded !== undefined) return encoded;
-      }
+      const encoded = clone.encodeMessageData(message);
+      if (encoded !== undefined) return encoded;
       copy = clone.serialize(message, undefined);
     } else {
       copy = clone.serialize(message, list, (item: any) => {

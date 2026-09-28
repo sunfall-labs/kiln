@@ -878,6 +878,7 @@ typedef struct kiln_c99_message_decode {
     kiln_worker_token *tokens;
     size_t count;
     size_t at;
+    size_t refs_seen;
     kiln_value refs;
 } kiln_c99_message_decode;
 
@@ -908,17 +909,21 @@ static int kiln_c99_message_plain_val(kiln_c99_message_decode *state, int depth)
         ++state->at;
         return KILN_C99_OK;
     case 7:
-        return kiln_c99_message_word(state, &index);
+        status = kiln_c99_message_word(state, &index);
+        return status == KILN_C99_OK && index < state->refs_seen
+                   ? KILN_C99_OK : KILN_C99_CLONE_BAIL;
     case 15:
         if (state->at >= state->count ||
             (state->tokens[state->at].kind != KILN_WORKER_TOKEN_MOVED &&
              state->tokens[state->at].kind != KILN_WORKER_TOKEN_BYTES))
             return KILN_C99_CLONE_BAIL;
         ++state->at;
+        ++state->refs_seen;
         return KILN_C99_OK;
     case 8:
         status = kiln_c99_message_word(state, &length);
         if (status != KILN_C99_OK || length > (state->count - state->at) / 2) return KILN_C99_CLONE_BAIL;
+        ++state->refs_seen;
         for (index = 0; index < length; ++index) {
             if (state->at >= state->count || state->tokens[state->at++].kind != KILN_WORKER_TOKEN_STRING)
                 return KILN_C99_CLONE_BAIL;
@@ -929,6 +934,7 @@ static int kiln_c99_message_plain_val(kiln_c99_message_decode *state, int depth)
     case 9:
         status = kiln_c99_message_word(state, &length);
         if (status != KILN_C99_OK || length > state->count - state->at) return KILN_C99_CLONE_BAIL;
+        ++state->refs_seen;
         for (index = 0; index < length; ++index) {
             if (state->at < state->count && state->tokens[state->at].kind == KILN_WORKER_TOKEN_NUMBER &&
                 state->tokens[state->at].number == 10.0) {
@@ -1033,6 +1039,7 @@ static int kiln_c99_decode_message_data(kiln_worker_token *tokens, size_t count,
     state.tokens = tokens;
     state.count = count;
     state.at = 0;
+    state.refs_seen = 0;
     status = kiln_c99_message_word(&state, &ports);
     if (status != KILN_C99_OK || ports != 0) return KILN_C99_CLONE_BAIL;
     status = kiln_c99_message_plain_val(&state, 0);

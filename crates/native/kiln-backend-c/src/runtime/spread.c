@@ -511,6 +511,9 @@ static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size
     int status;
     *out = kiln_c99_undefined();
     if (argc == 0) return KILN_C99_OK;
+    if (argc > 1 && args[1].tag == KILN_VALUE_NUMBER &&
+        kiln_c99_as_number(args[1]) == 1.0)
+        return kiln_c99_encode_message_data_raw(out, args, argc);
     memset(table.inline_keys, 0, sizeof table.inline_keys);
     table.keys = table.inline_keys;
     table.values = table.inline_values;

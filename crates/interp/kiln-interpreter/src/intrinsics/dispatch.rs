@@ -782,11 +782,17 @@ pub(crate) fn call_native(
         // anything else, which the shared clone (`kiln-builtins/src/structured_clone.ts`) then
         // does from the start. The same subset as the native backend's (`runtime/spread.c`).
         Native::CloneDataRaw => {
-            let mut seen = std::collections::HashMap::new();
-            arguments
-                .first()
-                .and_then(|value| clone_plain_data(value, &mut seen, 0))
-                .unwrap_or(Value::Undefined)
+            // Native mode 1 builds the message wire directly; this adapter leaves it to the
+            // TypeScript encoder. Returning undefined is its ordinary guarded fallback.
+            if matches!(arguments.get(1), Some(Value::Number(mode)) if *mode == 1.0) {
+                Value::Undefined
+            } else {
+                let mut seen = std::collections::HashMap::new();
+                arguments
+                    .first()
+                    .and_then(|value| clone_plain_data(value, &mut seen, 0))
+                    .unwrap_or(Value::Undefined)
+            }
         }
         // `__kilnArrayBufferResize(buffer, length)`: the storage half of `resize` and `grow`. The
         // receiver, the conversion of the length, detachment and the ceiling are all checked

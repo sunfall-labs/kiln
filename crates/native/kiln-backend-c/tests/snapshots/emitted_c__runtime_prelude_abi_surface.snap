@@ -1531,6 +1531,9 @@ static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
 static int kiln_c99_new_data_view(kiln_value *out, kiln_value source, size_t byte_offset,
 static int kiln_c99_to_index(kiln_value value, size_t *out, kiln_value *thrown);
 static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size_t argc);
+#define KILN_C99_CLONE_BAIL 1
+static int kiln_c99_encode_message_data_raw(kiln_value *out, const kiln_value *args, size_t argc);
+static int kiln_c99_decode_message_data(kiln_worker_token *tokens, size_t count, kiln_value *out);
 static int kiln_c99_jobs_pending_raw(kiln_value *out);
 static int kiln_c99_promise_rejections_raw(kiln_value *out, const kiln_value *args, size_t argc);
 static int kiln_c99_promise_observe(kiln_promise *state);
@@ -3108,13 +3111,16 @@ static int kiln_c99_spread_object_fast(kiln_val target, kiln_val source, int *st
 #define KILN_C99_CLONE_INLINE 32
 typedef struct kiln_c99_clone_table {
 #define KILN_C99_CLONE_MAX_DEPTH 512
-#define KILN_C99_CLONE_BAIL 1
 static size_t kiln_c99_clone_hash(kiln_val key, size_t mask) {
 static int kiln_c99_clone_table_put(kiln_c99_clone_table *table, kiln_val key, kiln_val value) {
 static int kiln_c99_clone_table_get(const kiln_c99_clone_table *table, kiln_val key, kiln_val *out) {
+static int kiln_c99_clone_safe_object(const kiln_object *source) {
+static int kiln_c99_clone_safe_array(const kiln_array *source) {
 static kiln_shape *kiln_c99_clone_list_shape(const kiln_object *source, kiln_shape *root) {
 static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, int depth,
 static int kiln_c99_clone_data_raw(kiln_value *out, const kiln_value *args, size_t argc) {
+static int kiln_c99_encode_data_val(kiln_value value, kiln_c99_clone_table *seen,
+static int kiln_c99_encode_message_data_raw(kiln_value *out, const kiln_value *args, size_t argc) {
 static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value source,
 static int kiln_c99_par_key_plain(const kiln_string *ikey) {
 static int kiln_c99_par_object(kiln_c99_par_arena *arena, kiln_val *out) {
@@ -3165,6 +3171,11 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
 #undef KILN_JSON_OPEN
 #undef KILN_JSON_BREAK
 static int kiln_c99_json_define(kiln_value built, const kiln_string *ikey, kiln_val member) {
+typedef struct kiln_c99_message_decode {
+static int kiln_c99_message_word(kiln_c99_message_decode *state, size_t *out) {
+static int kiln_c99_message_plain_val(kiln_c99_message_decode *state, int depth) {
+static int kiln_c99_message_decode_val(kiln_c99_message_decode *state, kiln_value *out, int depth) {
+static int kiln_c99_decode_message_data(kiln_worker_token *tokens, size_t count, kiln_value *out) {
 typedef struct kiln_json_build_frame {
 #define KILN_JSON_BUILD_LOCAL_FRAMES 32
 typedef struct kiln_json_build_stack {
