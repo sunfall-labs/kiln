@@ -767,6 +767,7 @@ server.listen(0, "127.0.0.1", () => {
              try { ([1, 2] as any).parallelMap((x: number) => x); console.log('called'); } catch (e) { console.log(e instanceof TypeError); }\n",
         )
         .expect("write source");
+        share_native_semantic_cache(&fixture);
 
         let built = {
             let mut session = OneShot::start().expect("start an in-process engine");
@@ -817,6 +818,7 @@ server.listen(0, "127.0.0.1", () => {
             "export const greeting = 'hello';\nexport function add(a: number, b: number): number { return a + b; }\nconsole.log(add(1, 2));\n",
         )
         .expect("write source");
+        share_native_semantic_cache(&fixture);
 
         let built = {
             let mut session = OneShot::start().expect("start an in-process engine");
