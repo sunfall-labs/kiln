@@ -1921,12 +1921,12 @@ mod tests {
     }
 
     #[test]
-    fn pinned_http_callbacks_stay_on_the_attachment_lane() {
+    fn pinned_tcp_http_callbacks_stay_on_the_attachment_lane() {
         use crate::{HostTransport, HttpDispatch, HttpEvent, HttpEventKind, HttpServerEngine};
         use kiln_host_abi::ResourceId;
         use std::cell::{Cell, RefCell};
+        use std::io::{Read, Write};
         use std::rc::Rc;
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         struct HttpTurn {
             executor: crate::Executor,
@@ -1975,8 +1975,19 @@ mod tests {
             }
         }
 
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+        let mut client =
+            std::net::TcpStream::connect(listener.local_addr().unwrap()).expect("loopback client");
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("client read timeout");
+        client
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .expect("client write timeout");
+        let (server, _) = listener.accept().expect("loopback server accepts");
+        server.set_nonblocking(true).expect("nonblocking server");
+
         let scheduler = PinnedTurnScheduler::new(2).expect("lanes start");
-        let (client_tx, client_rx) = mpsc::sync_channel(1);
         let events = Arc::new(Mutex::new(Vec::new()));
         let handle = scheduler.spawn_pinned({
             let events = Arc::clone(&events);
@@ -1986,7 +1997,6 @@ mod tests {
                 let engine = Rc::new(RefCell::new(HttpServerEngine::default()));
                 let done = Rc::new(Cell::new(false));
                 let resource = ResourceId::new(91);
-                let (client, server) = tokio::io::duplex(4096);
                 let dispatch = Rc::new(LaneDispatch {
                     engine: Rc::clone(&engine),
                     resource,
@@ -1995,6 +2005,8 @@ mod tests {
                     events,
                 });
                 executor.scope(|| {
+                    let server = tokio::net::TcpStream::from_std(server)
+                        .expect("socket attaches to the lane reactor");
                     assert!(engine.borrow_mut().attach(
                         resource,
                         HostTransport(Box::new(server)),
@@ -2002,7 +2014,6 @@ mod tests {
                         dispatch,
                     ));
                 });
-                client_tx.send(client).expect("client reaches test thread");
                 HttpTurn {
                     executor,
                     done,
@@ -2010,30 +2021,13 @@ mod tests {
                 }
             }
         });
-        let mut client = client_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("HTTP transport is attached");
         let response = std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("client runtime");
-            runtime.block_on(async move {
-                tokio::time::timeout(Duration::from_secs(5), async move {
-                    client
-                        .write_all(b"GET / HTTP/1.1\r\nHost: kiln\r\nConnection: close\r\n\r\n")
-                        .await
-                        .expect("request writes");
-                    let mut bytes = Vec::new();
-                    client
-                        .read_to_end(&mut bytes)
-                        .await
-                        .expect("response reads");
-                    bytes
-                })
-                .await
-                .expect("HTTP exchange completes")
-            })
+            client
+                .write_all(b"GET / HTTP/1.1\r\nHost: kiln\r\nConnection: close\r\n\r\n")
+                .expect("request writes");
+            let mut bytes = Vec::new();
+            client.read_to_end(&mut bytes).expect("response reads");
+            bytes
         })
         .join()
         .expect("client thread completes");
