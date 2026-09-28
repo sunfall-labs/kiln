@@ -650,4 +650,96 @@ mod tests {
         );
         assert_eq!(kiln_shared_graph_release(lease), 0);
     }
+
+    #[test]
+    fn native_inspector_skips_holes_and_holds_a_build_lease_until_facade_install() {
+        unsafe extern "C" fn inspect(
+            _: *mut c_void,
+            object: u64,
+            index: u64,
+            node: *mut SharedSourceNode,
+            field: *mut SharedSourceField,
+        ) -> i32 {
+            if object != 1 {
+                return -1;
+            }
+            if index == u64::MAX {
+                unsafe {
+                    *node = SharedSourceNode {
+                        kind: 2,
+                        length: 3,
+                        field_count: 3,
+                        ..Default::default()
+                    };
+                }
+                return 0;
+            }
+            let answer = match index {
+                0 => SharedSourceField {
+                    key_kind: 2,
+                    key_id: 0,
+                    value_kind: 3,
+                    value_bits: 7.0f64.to_bits(),
+                    enumerable: 1,
+                    ..Default::default()
+                },
+                1 => SharedSourceField {
+                    key_kind: 3,
+                    ..Default::default()
+                },
+                2 => SharedSourceField {
+                    key_kind: 2,
+                    key_id: 2,
+                    value_kind: 5,
+                    value_bits: 11,
+                    value_length: 2,
+                    enumerable: 1,
+                    ..Default::default()
+                },
+                _ => return -1,
+            };
+            unsafe { *field = answer };
+            0
+        }
+        unsafe extern "C" fn unit(_: *mut c_void, string: u64, index: u64, out: *mut u16) -> i32 {
+            if string != 11 || index >= 2 {
+                return -1;
+            }
+            unsafe { *out = [b'o' as u16, b'k' as u16][index as usize] };
+            0
+        }
+        let mut built = SharedBuildResult::default();
+        assert_eq!(
+            unsafe {
+                kiln_shared_graph_build(
+                    1,
+                    Some(inspect),
+                    Some(unit),
+                    std::ptr::null_mut(),
+                    &mut built,
+                )
+            },
+            0
+        );
+        assert_ne!(built.lease, 0);
+        let token = OpaqueHandle {
+            graph: built.graph,
+            generation: built.generation,
+            node: built.node,
+        };
+        let facade_lease = kiln_shared_graph_retain(token.graph, token.generation, token.node);
+        assert_ne!(facade_lease, 0);
+        assert_eq!(kiln_shared_graph_release(built.lease), 0);
+        let mut info = SharedInfo::default();
+        assert_eq!(
+            unsafe { kiln_shared_graph_info(facade_lease, &mut info) },
+            0
+        );
+        assert_eq!((info.array, info.length, info.field_count), (1, 3, 2));
+        assert_eq!(kiln_shared_graph_release(facade_lease), 0);
+        assert_eq!(
+            kiln_shared_graph_retain(token.graph, token.generation, token.node),
+            0
+        );
+    }
 }
