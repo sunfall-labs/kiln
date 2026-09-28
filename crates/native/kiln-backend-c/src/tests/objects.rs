@@ -2563,7 +2563,7 @@ int main(void) {
     kiln_object *object;
     kiln_array *array;
     kiln_string *text;
-    kiln_val external[1];
+    kiln_val external[12];
     kiln_value root;
     size_t bit;
     uint64_t reservation = 91;
@@ -2572,7 +2572,8 @@ int main(void) {
     if (!kiln_c99_graph_candidate_open(&candidate, &sender,
                                         sender.nursery.capacity)) return 1;
     object = (kiln_object *)kiln_c99_par_alloc(&candidate, KILN_GC_OBJECT, sizeof *object);
-    array = (kiln_array *)kiln_c99_par_alloc(&candidate, KILN_GC_ARRAY, sizeof *array);
+    array = (kiln_array *)kiln_c99_par_alloc(&candidate, KILN_GC_ARRAY,
+                                             sizeof *array + 12 * sizeof(kiln_val));
     text = (kiln_string *)kiln_c99_par_alloc(&candidate, KILN_GC_STRING,
                                               sizeof *text + 3);
     if (object == NULL || array == NULL || text == NULL) return 2;
@@ -2620,7 +2621,20 @@ int main(void) {
     chunk->finals[bit >> 6] &= ~(UINT64_C(1) << (bit & 63));
     if (kiln_c99_graph_capsule_prepare(&sender, chunk, root, &capsule)) return 8;
     chunk->finals[bit >> 6] |= UINT64_C(1) << (bit & 63);
+    array->elements = (kiln_val *)(array + 1);
+    array->count = 12;
+    array->capacity = 12;
+    array->elements[0] = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, text);
+    for (size_t i = 1; i < array->count; ++i)
+        array->elements[i] = KILN_VAL_UNDEFINED;
     if (!kiln_c99_graph_capsule_prepare(&sender, chunk, root, &capsule)) return 9;
+    array->elements = external;
+    if (kiln_c99_graph_capsule_prepare(&sender, chunk, root, &capsule)) return 14;
+    array->elements = (kiln_val *)(array + 1);
+    array->capacity = 13;
+    if (kiln_c99_graph_capsule_prepare(&sender, chunk, root, &capsule)) return 15;
+    array->capacity = 12;
+    if (!kiln_c99_graph_capsule_prepare(&sender, chunk, root, &capsule)) return 16;
     if (!kiln_c99_graph_capsule_receiver_preflight(&receiver, &capsule.needs,
                                                     reservation)) return 10;
     if (!kiln_c99_graph_capsule_detach(&sender, &capsule)) return 11;
@@ -2628,6 +2642,8 @@ int main(void) {
     if (sender.count != 0 || receiver.count != 3 ||
         receiver.realm.graph_inbox_root.bits != root.bits ||
         kiln_c99_gc_lookup(&receiver, object) == NULL ||
+        array->elements != (kiln_val *)(array + 1) ||
+        array->count != 12 || array->elements[11] != KILN_VAL_UNDEFINED ||
         kiln_c99_gc_lookup(&sender, object) != NULL) return 12;
     kiln_c99_gc_mark_realm(&receiver);
     if (((kiln_gc_block *)object - 1)->mark != receiver.epoch ||

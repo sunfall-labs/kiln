@@ -3141,8 +3141,21 @@ static int kiln_c99_heap_adopt_chunks(kiln_gc_heap *heap, kiln_nursery_chunk *ch
 }
 
 /* These two finalizers do no work when all storage is inside the block and the object has no
- * realm-owned side index. Keep this narrower than the collector's supported layouts: a finalizer
- * bit is permission to run arbitrary teardown for every other kind. */
+ * realm-owned side index. An array's elements may use its eight inline slots or the extra room
+ * `kiln_c99_new_array_with_capacity` allocated in the same block. Keep this narrower than the
+ * collector's supported layouts: a finalizer bit is permission to run arbitrary teardown for
+ * every other kind. */
+static int kiln_c99_graph_inert_array_storage(const kiln_gc_block *block,
+                                               const kiln_array *array) {
+    if (array->count > array->capacity) return 0;
+    if (array->elements == NULL) return array->count == 0 && array->capacity == 0;
+    if (array->elements == array->inline_elements)
+        return array->capacity <= sizeof array->inline_elements / sizeof array->inline_elements[0];
+    if (array->elements == (const kiln_val *)(array + 1))
+        return array->capacity <= (block->size - sizeof *array) / sizeof(kiln_val);
+    return 0;
+}
+
 static int kiln_c99_graph_inert_finalizer_block(const kiln_gc_block *block) {
     size_t index;
     switch (block->kind & KILN_GC_KIND_MASK) {
@@ -3170,10 +3183,7 @@ static int kiln_c99_graph_inert_finalizer_block(const kiln_gc_block *block) {
     }
     case KILN_GC_ARRAY: {
         const kiln_array *array = (const kiln_array *)(block + 1);
-        if (block->size < sizeof *array || array->count > array->capacity ||
-            array->count > 8 || array->capacity > 8 ||
-            (array->elements == NULL ? (array->count != 0 || array->capacity != 0)
-                                     : array->elements != array->inline_elements) ||
+        if (block->size < sizeof *array || !kiln_c99_graph_inert_array_storage(block, array) ||
             array->properties.tag != KILN_VALUE_UNDEFINED ||
             array->match_input.tag != KILN_VALUE_UNDEFINED ||
             array->match_groups.tag != KILN_VALUE_UNDEFINED || array->match_index != -1 ||
