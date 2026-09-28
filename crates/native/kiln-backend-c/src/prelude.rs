@@ -2476,6 +2476,7 @@ macro_rules! runtime_part_manifest {
         $callback!(
             "runtime/foundation.c",
             "runtime/heap.c",
+            "runtime/graph_capsule.c",
             "runtime/shapes.c",
             "runtime/platform.c",
             "runtime/node_support.c",

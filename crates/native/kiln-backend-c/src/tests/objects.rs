@@ -2220,6 +2220,65 @@ int main(void) {
 }
 
 #[test]
+fn executable_graph_capsule_detaches_before_receiver_adoption() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap sender, receiver;
+    kiln_c99_par_arena candidate;
+    kiln_nursery_chunk *chunk;
+    kiln_c99_graph_capsule capsule;
+    kiln_c99_graph_capsule_requirements wrong;
+    kiln_val *cell;
+    kiln_value root;
+    uint64_t reservation = 83;
+    kiln_c99_gc_heap_init(&sender);
+    kiln_c99_gc_heap_init(&receiver);
+    if (!kiln_c99_graph_candidate_open(&candidate, &sender,
+                                        sender.nursery.capacity)) return 1;
+    cell = (kiln_val *)kiln_c99_par_alloc(&candidate, KILN_GC_CELL, sizeof *cell);
+    if (cell == NULL) return 2;
+    *cell = KILN_VAL_UNDEFINED;
+    kiln_c99_par_arena_seal(&candidate);
+    chunk = candidate.filled;
+    if (chunk == NULL || !kiln_c99_heap_adopt_chunks(&sender, chunk)) return 3;
+    root = kiln_c99_value(KILN_VALUE_CELL, (uint64_t)(uintptr_t)cell, NULL, 0);
+    if (!kiln_c99_graph_capsule_prepare(&sender, chunk, root, &capsule)) return 4;
+    wrong = capsule.needs;
+    wrong.region_capacity++;
+    if (kiln_c99_graph_capsule_receiver_preflight(&receiver, &wrong, reservation) ||
+        receiver.realm.graph_inbox_state != KILN_C99_GRAPH_INBOX_EMPTY) return 5;
+    if (!kiln_c99_graph_capsule_receiver_preflight(&receiver, &capsule.needs,
+                                                    reservation)) return 6;
+    if (kiln_c99_graph_capsule_receiver_preflight(&receiver, &capsule.needs,
+                                                   reservation + 1)) return 7;
+    if (!kiln_c99_graph_capsule_detach(&sender, &capsule)) return 8;
+    if (sender.count != 0 || sender.bytes != 0 || sender.nursery.full != NULL ||
+        kiln_c99_gc_lookup(&sender, cell) != NULL ||
+        kiln_c99_gc_lookup(&receiver, cell) != NULL) return 9;
+    kiln_c99_graph_capsule_adopt(&receiver, &capsule, reservation);
+    if (capsule.chunk != NULL || capsule.detached || receiver.count != 1 ||
+        kiln_c99_gc_lookup(&receiver, cell) == NULL ||
+        receiver.realm.graph_inbox_state != KILN_C99_GRAPH_INBOX_PUBLISHED ||
+        receiver.realm.graph_inbox_root.bits != root.bits) return 10;
+    kiln_c99_gc_mark_realm(&receiver);
+    if (((kiln_gc_block *)cell - 1)->mark != receiver.epoch) return 11;
+    kiln_c99_nursery_destroy(&sender.nursery);
+    kiln_c99_nursery_destroy(&receiver.nursery);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "graph-detached-capsule");
+    assert!(
+        run.status.success(),
+        "graph detached capsule failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_graph_receiver_accepts_an_inline_string_data_pointer() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
