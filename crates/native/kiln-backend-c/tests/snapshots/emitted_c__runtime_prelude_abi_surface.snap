@@ -1917,6 +1917,7 @@ static KILN_ALWAYS_INLINE inline int kiln_c99_stack_exhausted(void) {
 #define KILN_NURSERY_SMALL_LIVE_BUDGETS 8
 #define KILN_NURSERY_BUDGET_GROWTH 2
 #define KILN_NURSERY_BUDGET_CAP 8
+#define KILN_ACTOR_CANDIDATE_GC_DEFER_BYTES ((size_t)64 * 1024 * 1024)
 #define KILN_C99_INTROSPECT_ARMED 1
 #define KILN_C99_INTROSPECT_DUMPED 2
 #define KILN_GC_KIND_MASK ((uint32_t)0x07FFFFFFu)
@@ -2154,6 +2155,7 @@ static void kiln_c99_gc_note_external(size_t size) {
 static void kiln_c99_gc_note_moved_external(size_t size) {
 static void kiln_c99_gc_unnote_moved_external(size_t size) {
 static inline int kiln_c99_nursery_pressure_due(const kiln_gc_heap *heap) {
+static inline int kiln_c99_actor_candidate_defer_gc(const kiln_gc_heap *heap) {
 static inline void kiln_c99_gc_alloc_due(kiln_gc_heap *heap) {
 static void *kiln_c99_gc_alloc_ex(uint32_t kind, size_t size, int zero_payload) {
 static inline void *kiln_c99_gc_nursery_bump(kiln_gc_heap *heap, uint32_t kind, size_t size) {
@@ -2190,7 +2192,10 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_incoming_probe(
 static int kiln_c99_heap_move_chunks(kiln_gc_heap *from, kiln_gc_heap *to,
 struct kiln_c99_par_arena {
 static uint64_t kiln_c99_graph_candidate_next_id;
+static uint64_t kiln_c99_graph_candidate_new_id(void) {
 static int kiln_c99_graph_candidate_open(kiln_c99_par_arena *arena, const kiln_gc_heap *heap,
+static int kiln_c99_actor_candidate_begin(kiln_gc_heap *heap) {
+static int kiln_c99_actor_candidate_end(kiln_gc_heap *heap, int completed) {
 static size_t kiln_c99_par_arena_budget_bytes;
 static size_t kiln_c99_par_arena_budget(void) {
 static void kiln_c99_par_arena_seal(kiln_c99_par_arena *arena) {
@@ -3070,6 +3075,8 @@ int kiln_c99_node_process_raw(kiln_host *host, kiln_value *result, uint64_t code
 #define KILN_C99_WORKER_OP_ACTOR_REQUEST_ID 25
 #define KILN_C99_WORKER_OP_ACTOR_ISOLATE 26
 #define KILN_C99_WORKER_OP_ACTOR_ISOLATED_HAS 27
+#define KILN_C99_WORKER_OP_ACTOR_CANDIDATE_BEGIN 28
+#define KILN_C99_WORKER_OP_ACTOR_CANDIDATE_END 29
 static uint64_t kiln_c99_worker_word(const kiln_value *args, size_t argc, size_t at) {
 static int kiln_c99_worker_tokens(kiln_value list, int copy, kiln_worker_token **out,
 static int kiln_c99_worker_value(kiln_worker_token *token, kiln_value *out) {

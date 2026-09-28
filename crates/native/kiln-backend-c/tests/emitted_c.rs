@@ -1065,8 +1065,10 @@ fn runtime_prelude_size() {
     // add about 1,050 more lines.
     // Graph root visitors, transfer refusal checks and actor escrow (realms issue 10), plus
     // compact realm-owned unit cells (issue 08), bring the measured prelude to 61,276 lines.
+    // Source-level actor candidate chunk boundaries and stress invalidation (issue 10) bring
+    // it to 61,384 lines.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 61_350;
+    const CEILING_LINES: usize = 61_500;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
