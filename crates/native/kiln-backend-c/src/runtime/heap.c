@@ -3344,6 +3344,25 @@ static int kiln_c99_graph_in_batch(const kiln_gc_heap *heap,
     return 0;
 }
 
+/* Classify a caller-supplied snapshot of machine words without touching the collector's marks.
+ * A word can be a raw/interior pointer or a tagged kiln_val, just as in the mid-turn GC scan.
+ * This deliberately does not select a stack boundary or capture registers. A clear span is not
+ * an ownership certificate: the actor safepoint must prove that it included all older frames
+ * and callee-saved registers while excluding only the proof's own temporary candidate values. */
+static int kiln_c99_graph_machine_words_alias(const kiln_gc_heap *heap,
+                                               kiln_nursery_chunk *const *chunks, size_t count,
+                                               const uintptr_t *words, size_t word_count) {
+    size_t index;
+    for (index = 0; index < word_count; ++index) {
+        uintptr_t word = words[index];
+        if (kiln_c99_graph_in_batch(heap, chunks, count, (const void *)word)) return 1;
+        if ((word & KILN_TAG_MASK) >= KILN_TAG_STRING_PREFIX &&
+            kiln_c99_graph_in_batch(heap, chunks, count,
+                                    (const void *)(word & KILN_PAYLOAD_MASK))) return 1;
+    }
+    return 0;
+}
+
 static int kiln_c99_graph_val_in_batch(const kiln_gc_heap *heap,
                                        kiln_nursery_chunk *const *chunks, size_t count,
                                        kiln_val value) {

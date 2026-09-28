@@ -2120,6 +2120,8 @@ int main(void) {
     kiln_object *outside;
     const void *saved_data;
     kiln_val saved_edge;
+    uintptr_t stack_words[2];
+    uint32_t root_mark;
     uint32_t saved_kind;
     kiln_c99_gc_heap_init(&heap);
     if (!kiln_c99_graph_candidate_open(&candidate, &heap, 2 * heap.nursery.capacity)) return 1;
@@ -2174,6 +2176,17 @@ int main(void) {
     *root = saved_edge;
     if (kiln_c99_graph_candidate_closed(&heap, batch, 2, (char *)root + 1)) return 14;
     if (!kiln_c99_graph_candidate_closed(&heap, batch, 2, root)) return 15;
+    root_mark = ((kiln_gc_block *)root - 1)->mark;
+    stack_words[0] = 0;
+    stack_words[1] = (uintptr_t)&kiln_c99_empty_string;
+    if (kiln_c99_graph_machine_words_alias(&heap, batch, 2, stack_words, 2)) return 39;
+    stack_words[1] = (uintptr_t)root;
+    if (!kiln_c99_graph_machine_words_alias(&heap, batch, 2, stack_words, 2)) return 40;
+    stack_words[1] = (uintptr_t)KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &slice->base);
+    if (!kiln_c99_graph_machine_words_alias(&heap, batch, 2, stack_words, 2)) return 41;
+    stack_words[1] = (uintptr_t)((const char *)text->data + 1);
+    if (!kiln_c99_graph_machine_words_alias(&heap, batch, 2, stack_words, 2)) return 42;
+    if (((kiln_gc_block *)root - 1)->mark != root_mark) return 43;
     if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
         KILN_C99_GRAPH_ROOTS_UNENUMERATED) return 16;
     heap.realm.array_unscopables.tag = KILN_VALUE_STRING;
