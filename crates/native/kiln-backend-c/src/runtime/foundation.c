@@ -966,6 +966,12 @@ typedef struct kiln_c99_realm_state {
     /* Private actor handles: a weak-key collection rooted by the realm, never exposed to JS.
      * Its values are the isolated graphs; the handle itself does not keep one alive. */
     kiln_value isolated_graphs;
+    /* A future sender-turn request carries only this realm-local ID across the scheduler
+     * boundary. Retain its handle, never its graph, until that boundary resolves the ID. */
+    uint64_t isolated_request_next_id;
+    uint64_t isolated_request_id;
+    kiln_value isolated_request_handle;
+    int isolated_request_invalidated;
     /* At most one paused actor handoff per realm. The entry remains allocated and its graph
      * value is exchanged into this explicit root, so rollback is allocation-free. */
     kiln_entry *isolated_escrow_entry;

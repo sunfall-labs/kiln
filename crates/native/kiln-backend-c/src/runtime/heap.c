@@ -3443,12 +3443,63 @@ static int kiln_c99_actor_isolated_escrow_rollback(kiln_gc_heap *heap) {
     return 1;
 }
 
+/* Queue one handle by realm-local opaque ID, without ever placing the graph pointer in a
+ * scheduler request. Resolving the ID at a sender turn boundary rechecks the live weak-key
+ * entry: collection, cancellation, or replacement can only make escrow refuse. No caller may
+ * treat this request as transfer admission until a real scheduler safepoint owns both realms. */
+static int kiln_c99_actor_isolated_request_begin(kiln_gc_heap *heap, kiln_value handle,
+                                                  uint64_t *out_id) {
+    kiln_c99_realm_state *realm;
+    kiln_collection *registry;
+    double at;
+    if (heap == NULL || out_id == NULL || handle.tag != KILN_VALUE_OBJECT) return 0;
+    realm = &heap->realm;
+    if (realm->isolated_request_id != 0 || realm->isolated_escrow_entry != NULL ||
+        realm->isolated_request_next_id == UINT64_MAX ||
+        realm->isolated_graphs.tag != KILN_VALUE_COLLECTION) return 0;
+    registry = kiln_c99_collection_of(realm->isolated_graphs);
+    at = kiln_c99_collection_find(registry, handle);
+    if (at < 0.0 || at >= (double)registry->count ||
+        registry->entries[(size_t)at].dead) return 0;
+    realm->isolated_request_id = ++realm->isolated_request_next_id;
+    realm->isolated_request_handle = handle;
+    realm->isolated_request_invalidated = 0;
+    *out_id = realm->isolated_request_id;
+    return 1;
+}
+
+static int kiln_c99_actor_isolated_request_escrow(kiln_gc_heap *heap, uint64_t id) {
+    kiln_c99_realm_state *realm;
+    if (heap == NULL || id == 0) return 0;
+    realm = &heap->realm;
+    if (realm->isolated_request_id != id || realm->isolated_request_invalidated ||
+        realm->isolated_escrow_entry != NULL) return 0;
+    return kiln_c99_actor_isolated_escrow_begin(heap, realm->isolated_request_handle);
+}
+
+/* Refusal restores the graph before releasing the request's handle root. Nothing is allocated
+ * in this path, and a stale or mismatched ID cannot cancel a newer request. */
+static int kiln_c99_actor_isolated_request_rollback(kiln_gc_heap *heap, uint64_t id) {
+    kiln_c99_realm_state *realm;
+    if (heap == NULL || id == 0) return 0;
+    realm = &heap->realm;
+    if (realm->isolated_request_id != id) return 0;
+    if (realm->isolated_escrow_entry != NULL &&
+        !kiln_c99_actor_isolated_escrow_rollback(heap)) return 0;
+    realm->isolated_request_handle = kiln_c99_undefined();
+    realm->isolated_request_id = 0;
+    realm->isolated_request_invalidated = 0;
+    return 1;
+}
+
 /* Inspect C-owned direct roots and key-table side pointers. Unpinned canonical keys are weak
  * for GC, but they still contain an address until purge and cannot point into a moved chunk.
  * This is a useful negative witness, not a complete root enumeration: the provider, generated
  * modules, host handles, conservative stack and edges from outside blocks remain separate. */
-static int kiln_c99_graph_has_c_root_alias(const kiln_gc_heap *heap,
-                                           kiln_nursery_chunk *const *chunks, size_t count) {
+static int kiln_c99_graph_has_c_root_alias_except(const kiln_gc_heap *heap,
+                                                   kiln_nursery_chunk *const *chunks,
+                                                   size_t count,
+                                                   const kiln_value *excluded_escrow_slot) {
     const kiln_c99_realm_state *realm = &heap->realm;
     size_t index;
     size_t slot;
@@ -3456,7 +3507,9 @@ static int kiln_c99_graph_has_c_root_alias(const kiln_gc_heap *heap,
         if (kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->symbols[index])) return 1;
     }
     if (kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->isolated_graphs)) return 1;
-    if (kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->isolated_escrow_key) ||
+    if (kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->isolated_request_handle) ||
+        kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->isolated_escrow_key)) return 1;
+    if (excluded_escrow_slot != &realm->isolated_escrow_value &&
         kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->isolated_escrow_value)) return 1;
     if (kiln_c99_graph_value_in_batch(heap, chunks, count, &realm->array_unscopables)) return 1;
     for (index = 0; index < sizeof realm->native_prototypes / sizeof *realm->native_prototypes;
@@ -3492,6 +3545,23 @@ static int kiln_c99_graph_has_c_root_alias(const kiln_gc_heap *heap,
         if (kiln_c99_graph_in_batch(heap, chunks, count, heap->hot_keys[index])) return 1;
     }
     return kiln_c99_graph_in_batch(heap, chunks, count, heap->object_prototype_store);
+}
+
+static int kiln_c99_graph_has_c_root_alias(const kiln_gc_heap *heap,
+                                           kiln_nursery_chunk *const *chunks, size_t count) {
+    return kiln_c99_graph_has_c_root_alias_except(heap, chunks, count, NULL);
+}
+
+/* Only the active request's one escrow slot can be excluded. A second C root containing an
+ * identical pointer still counts as an alias; passing a graph value never grants exclusion. */
+static int kiln_c99_graph_has_c_root_alias_for_request(const kiln_gc_heap *heap,
+                                                       kiln_nursery_chunk *const *chunks,
+                                                       size_t count, uint64_t request_id) {
+    const kiln_c99_realm_state *realm = &heap->realm;
+    if (request_id == 0 || realm->isolated_request_id != request_id ||
+        realm->isolated_escrow_entry == NULL) return 1;
+    return kiln_c99_graph_has_c_root_alias_except(heap, chunks, count,
+                                                   &realm->isolated_escrow_value);
 }
 
 /* A separate, read-only walk for edges *into* the candidate. The collector's tracer is not
@@ -5825,6 +5895,7 @@ static void kiln_c99_gc_mark_realm(kiln_gc_heap *heap) {
     size_t index;
     kiln_c99_gc_mark_values(heap, realm->symbols, realm->symbol_count);
     kiln_c99_gc_mark_value(heap, &realm->isolated_graphs);
+    kiln_c99_gc_mark_value(heap, &realm->isolated_request_handle);
     kiln_c99_gc_mark_value(heap, &realm->isolated_escrow_key);
     kiln_c99_gc_mark_value(heap, &realm->isolated_escrow_value);
     kiln_c99_gc_mark_value(heap, &realm->array_unscopables);

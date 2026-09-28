@@ -2609,6 +2609,9 @@ static int kiln_c99_worker_op_raw(kiln_value *result, const kiln_value *args, si
         }
         status = kiln_c99_collection_put(realm->isolated_graphs, args[1], args[2]);
         if (status != KILN_C99_OK) return status;
+        /* Any registry write while an opaque request waits makes its prior lookup stale.
+         * Refuse that request at the turn boundary, even if this was another handle. */
+        if (realm->isolated_request_id != 0) realm->isolated_request_invalidated = 1;
         *result = kiln_c99_boolean(1);
         return KILN_C99_OK;
     }

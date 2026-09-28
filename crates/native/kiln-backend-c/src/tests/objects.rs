@@ -2444,6 +2444,7 @@ static int actor_escrow_entry(void *context) {
     kiln_collection *registry;
     kiln_entry *entry;
     double at;
+    uint64_t request_id = 0, next_id = 0;
     (void)context;
     if (heap == NULL || kiln_c99_new_object(&handle) != KILN_C99_OK ||
         kiln_c99_new_object(&graph) != KILN_C99_OK) return 1;
@@ -2457,14 +2458,27 @@ static int actor_escrow_entry(void *context) {
     if (at < 0.0) return 3;
     entry = &registry->entries[(size_t)at];
     if (entry->value.tag != graph.tag || entry->value.bits != graph.bits) return 4;
-    if (!kiln_c99_actor_isolated_escrow_begin(heap, handle)) return 5;
+    if (!kiln_c99_actor_isolated_request_begin(heap, handle, &request_id) || request_id == 0)
+        return 5;
+    if (kiln_c99_actor_isolated_request_begin(heap, handle, &next_id) ||
+        kiln_c99_actor_isolated_request_escrow(heap, request_id + 1) ||
+        kiln_c99_actor_isolated_request_rollback(heap, request_id + 1)) return 14;
+    if (!kiln_c99_actor_isolated_request_escrow(heap, request_id)) return 15;
     if (kiln_c99_actor_isolated_escrow_begin(heap, handle)) return 6;
     if (entry->value.tag != KILN_VALUE_UNDEFINED ||
         heap->realm.isolated_escrow_value.bits != graph.bits) return 7;
-    if (!kiln_c99_actor_isolated_escrow_rollback(heap)) return 8;
-    if (kiln_c99_actor_isolated_escrow_rollback(heap)) return 9;
+    if (!kiln_c99_actor_isolated_request_rollback(heap, request_id)) return 8;
+    if (kiln_c99_actor_isolated_request_rollback(heap, request_id) ||
+        kiln_c99_actor_isolated_escrow_rollback(heap) ||
+        heap->realm.isolated_request_handle.tag != KILN_VALUE_UNDEFINED) return 9;
     if (entry->value.tag != graph.tag || entry->value.bits != graph.bits ||
         heap->realm.isolated_escrow_entry != NULL) return 10;
+    if (!kiln_c99_actor_isolated_request_begin(heap, handle, &next_id) ||
+        next_id <= request_id) return 16;
+    if (kiln_c99_worker_op_raw(&result, args, 3, &thrown) != KILN_C99_OK ||
+        !kiln_c99_truthy(result) ||
+        kiln_c99_actor_isolated_request_escrow(heap, next_id) ||
+        !kiln_c99_actor_isolated_request_rollback(heap, next_id)) return 17;
     args[0] = kiln_c99_number(27);
     if (kiln_c99_worker_op_raw(&result, args, 2, &thrown) != KILN_C99_OK ||
         !kiln_c99_truthy(result)) return 11;
@@ -2483,6 +2497,65 @@ int main(void) {
     assert!(
         run.status.success(),
         "actor isolated escrow check failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_graph_request_excludes_only_its_escrow_slot() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int graph_request_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_c99_par_arena candidate;
+    kiln_nursery_chunk *batch[1];
+    kiln_val *root;
+    kiln_value args[3], result, thrown, handle, graph;
+    uint64_t id = 0;
+    (void)context;
+    if (heap == NULL || !kiln_c99_graph_candidate_open(&candidate, heap,
+                                                        heap->nursery.capacity)) return 1;
+    root = (kiln_val *)kiln_c99_par_alloc(&candidate, KILN_GC_CELL, sizeof *root);
+    if (root == NULL) return 2;
+    *root = KILN_VAL_UNDEFINED;
+    kiln_c99_par_arena_seal(&candidate);
+    if (candidate.filled == NULL || !kiln_c99_heap_adopt_chunks(heap, candidate.filled)) return 3;
+    batch[0] = candidate.filled;
+    if (kiln_c99_new_object(&handle) != KILN_C99_OK) return 4;
+    graph.tag = KILN_VALUE_CELL;
+    graph.bits = (uint64_t)(uintptr_t)root;
+    args[0] = kiln_c99_number(26);
+    args[1] = handle;
+    args[2] = graph;
+    if (kiln_c99_worker_op_raw(&result, args, 3, &thrown) != KILN_C99_OK ||
+        !kiln_c99_truthy(result)) return 5;
+    if (!kiln_c99_actor_isolated_request_begin(heap, handle, &id) ||
+        !kiln_c99_actor_isolated_request_escrow(heap, id)) return 6;
+    if (!kiln_c99_graph_has_c_root_alias(heap, batch, 1)) return 7;
+    if (kiln_c99_graph_has_c_root_alias_for_request(heap, batch, 1, id)) return 8;
+    if (!kiln_c99_graph_has_c_root_alias_for_request(heap, batch, 1, id + 1)) return 9;
+    heap->realm.array_unscopables = graph;
+    if (!kiln_c99_graph_has_c_root_alias_for_request(heap, batch, 1, id)) return 10;
+    heap->realm.array_unscopables = kiln_c99_undefined();
+    if (!kiln_c99_actor_isolated_request_rollback(heap, id)) return 11;
+    if (!kiln_c99_graph_has_c_root_alias_for_request(heap, batch, 1, id)) return 12;
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int result;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 13;
+    result = kiln_realm_enter(realm, graph_request_entry, NULL);
+    if (result != KILN_C99_OK) return result;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 14;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "graph-request-escrow-alias");
+    assert!(
+        run.status.success(),
+        "graph request escrow alias check failed ({:?}):\n{}",
         run.status.code(),
         String::from_utf8_lossy(&run.stderr)
     );
