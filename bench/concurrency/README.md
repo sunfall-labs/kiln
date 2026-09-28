@@ -16,6 +16,10 @@ realm launcher, and the turn scheduler. On Linux it records peak process threads
 `/proc`; every client must return the same checksum. The full form runs three interleaved rounds
 at 1, 10, 100 and 500 clients (Node stops at 100), with raw records under
 `target/bench-concurrency/realm-connections.json`. `--lanes N` fixes the scheduler budget.
+`--counts N ...`, `--rounds N`, and `--runtimes node pinned scheduled` select a smaller
+diagnostic run. The raw records include the first accept, last response, response span,
+and median and 95th percentile of server-observed response time, so a slow connection
+can be separated from launcher teardown.
 
 It refreshes the release `kiln` with `mbx build --release -p kiln-cli` (unless `--kiln` selects
 an explicit binary), builds the kiln
