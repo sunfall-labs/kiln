@@ -610,8 +610,9 @@ int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t
     (void)flags;
     return KILN_C99_OK;
 }
+static kiln_value kiln_test_gc_root;
 int kiln_realm_gc_mark_roots(void *heap) {
-    (void)heap;
+    kiln_c99_gc_mark_value((kiln_gc_heap *)heap, &kiln_test_gc_root);
     return KILN_C99_OK;
 }
 int kiln_realm_now(double *out_milliseconds) {

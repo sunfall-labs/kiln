@@ -1011,6 +1011,20 @@ fn interrupt_waits(key: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kiln_shared_graph::{Handle, InputValue, Inspector, Snapshot, SourceId, SourceNode, share};
+
+    struct EmptySharedRecord;
+
+    impl Inspector for EmptySharedRecord {
+        type Error = &'static str;
+
+        fn inspect(&mut self, _object: SourceId) -> Result<SourceNode, Self::Error> {
+            Ok(SourceNode::Record {
+                null_prototype: false,
+                properties: Vec::new(),
+            })
+        }
+    }
 
     struct PlainFixture;
 
@@ -1127,6 +1141,26 @@ mod tests {
         unsubscribe(b, second);
         assert!(subscribe(b, signal).is_none());
         close(b);
+    }
+
+    #[test]
+    fn discarding_a_queued_shared_graph_releases_its_last_handle() {
+        let Snapshot::Shared(handle) = share(InputValue::Object(1), &mut EmptySharedRecord)
+            .expect("empty record is shareable")
+        else {
+            panic!("object root must produce a shared graph");
+        };
+        let token = handle.opaque();
+        let (sender, receiver) = channel();
+        assert!(post(
+            sender,
+            Message::new(kind::USER, vec![Token::Graph(handle.clone())])
+        ));
+        drop(handle);
+        assert!(Handle::resolve(token).is_some());
+        close(receiver);
+        assert!(Handle::resolve(token).is_none());
+        close(sender);
     }
 
     #[test]

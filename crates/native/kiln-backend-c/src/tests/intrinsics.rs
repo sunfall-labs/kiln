@@ -158,6 +158,47 @@ int main(void) {
 }
 
 #[test]
+fn native_shared_facade_survives_only_through_an_ordinary_root() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap heap;
+    kiln_value parent, child, read_back;
+    uint64_t releases;
+    kiln_c99_gc_heap_init(&heap);
+    kiln_test_heap = &heap;
+    kiln_test_generation++;
+    kiln_test_realm_active = 1;
+    if (kiln_c99_new_shared_facade(17, 1, 0, &child) != KILN_C99_OK ||
+        kiln_c99_new_object(&parent) != KILN_C99_OK ||
+        kiln_c99_put(NULL, parent, "child", 5, child, 0, NULL) != KILN_C99_OK) return 1;
+    kiln_test_gc_root = parent;
+    releases = kiln_test_shared_releases;
+    heap.enabled = 1;
+    kiln_c99_gc_collect(&heap, 1);
+    if (kiln_test_shared_releases != releases || heap.shared_facades == NULL) return 2;
+    if (kiln_c99_get(NULL, parent, "child", 5, &read_back, 0, NULL) != KILN_C99_OK ||
+        read_back.tag != KILN_VALUE_SHARED || read_back.bits != child.bits) return 3;
+    kiln_test_gc_root = kiln_c99_undefined();
+    kiln_c99_gc_collect(&heap, 1);
+    if (kiln_test_shared_releases != releases + 1 || heap.shared_facades != NULL) return 4;
+    heap.enabled = 0;
+    kiln_test_heap = NULL;
+    kiln_test_realm_active = 0;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "shared-facade-forced-gc");
+    assert!(
+        run.status.success(),
+        "shared facade forced-GC root failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn native_shared_snapshot_distinguishes_symbol_from_colliding_string() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
