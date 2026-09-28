@@ -280,7 +280,8 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
     const kiln_string *stable = canonical;
     if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     kiln_value store;
-    kiln_property *slot;
+    kiln_property current;
+    kiln_property next;
     kiln_value getter;
     kiln_value setter;
     kiln_value value;
@@ -295,7 +296,6 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
     int has_configurable = 0;
     int existed = 0;
     int status;
-    size_t at;
     /* Protocol slots are owned by their native adapters, never by JavaScript definitions. */
     if (kiln_c99_is_node_hidden_key_key(view)) {
         return KILN_C99_OK;
@@ -443,16 +443,7 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
     }
     {
         kiln_object *object = kiln_c99_object_of(store);
-        if (object->shape != NULL) {
-            kiln_c99_ensure_dictionary(object);
-            object->shape = NULL;
-        }
-        for (at = 0; at < object->count; ++at) {
-            if (kiln_c99_same_key_view(&object->properties[at], view)) {
-                existed = 1;
-                break;
-            }
-        }
+        existed = kiln_c99_property_read_own(object, view, stable, &current);
         if (object->module_namespace) {
             /* A namespace accepts only a descriptor that makes no semantic change. In
              * particular, export descriptors report writable=true even though [[Set]] rejects;
@@ -461,14 +452,13 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
                 return kiln_c99_throw_module_namespace_define_key(thrown, view);
             }
             {
-                kiln_property *fixed = &object->properties[at];
                 int refused = (has_getter || has_setter) ||
-                              (has_value && !kiln_c99_strict_equal(value, fixed->value)) ||
+                              (has_value && !kiln_c99_strict_equal(value, current.value)) ||
                               (has_writable &&
-                               (kiln_c99_truthy(writable) != 0) != (fixed->writable != 0)) ||
+                               (kiln_c99_truthy(writable) != 0) != (current.writable != 0)) ||
                               (has_enumerable &&
                                (kiln_c99_truthy(enumerable) != 0) !=
-                                   (fixed->enumerable != 0)) ||
+                                   (current.enumerable != 0)) ||
                               (has_configurable && kiln_c99_truthy(configurable));
                 if (refused) {
                     return kiln_c99_throw_module_namespace_define_key(thrown, view);
@@ -488,22 +478,21 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
          *
          * `frozen` is the object-wide form of the same promise -- freezing is recorded on the
          * object here rather than by rewriting every slot -- so it fails for the same reason. */
-        if (existed && (object->frozen || !object->properties[at].configurable)) {
-            kiln_property *fixed = &object->properties[at];
+        if (existed && (object->frozen || !current.configurable)) {
             int accessor = (has_getter || has_setter) ? 1 : 0;
-            int settled = object->frozen || !fixed->writable;
+            int settled = object->frozen || !current.writable;
             int refused = (has_configurable && kiln_c99_truthy(configurable)) ||
                           (has_enumerable &&
-                           (kiln_c99_truthy(enumerable) != 0) != (fixed->enumerable != 0));
-            if (!refused && fixed->accessor) {
+                           (kiln_c99_truthy(enumerable) != 0) != (current.enumerable != 0));
+            if (!refused && current.accessor) {
                 refused = !accessor ||
-                          (has_getter && !kiln_c99_strict_equal(getter, fixed->getter)) ||
-                          (has_setter && !kiln_c99_strict_equal(setter, fixed->setter));
+                          (has_getter && !kiln_c99_strict_equal(getter, current.getter)) ||
+                          (has_setter && !kiln_c99_strict_equal(setter, current.setter));
             } else if (!refused) {
                 /* A writable data property may still take a new value and be made non-writable;
                  * only once it is non-writable is its value settled too. */
                 refused = accessor || (settled && has_writable && kiln_c99_truthy(writable)) ||
-                          (settled && has_value && !kiln_c99_strict_equal(value, fixed->value));
+                          (settled && has_value && !kiln_c99_strict_equal(value, current.value));
             }
             if (refused) {
                 return kiln_c99_throw_named_key_text(thrown, "Cannot redefine property: ", view, "");
@@ -515,62 +504,51 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
             return kiln_c99_throw_named_key_text(thrown, "Cannot define property ", view, "");
         }
     }
-    status = kiln_c99_own_slot_key(store, view, stable, &slot);
-    if (status != KILN_C99_OK) {
-        return status;
-    }
-    if (!existed) {
-        /* What a descriptor does not say about a *new* property is false, where the fresh slot
-         * arrives as what an assignment would have made. */
-        slot->enumerable = 0;
-        slot->writable = 0;
-        slot->configurable = 0;
+    if (existed) next = current;
+    else {
+        /* Missing descriptor fields on a new property default to false or undefined. */
+        memset(&next, 0, sizeof next);
+        next.key = view;
+        next.value = kiln_c99_undefined();
     }
     if (has_getter || has_setter) {
-        if (!slot->accessor) {
-            slot->accessor = 1;
-            kiln_c99_object_of(store)->accessor_count += 1;
-            slot->getter = kiln_c99_undefined();
-            slot->setter = kiln_c99_undefined();
+        if (!next.accessor) {
+            next.accessor = 1;
+            next.getter = kiln_c99_undefined();
+            next.setter = kiln_c99_undefined();
         }
         if (has_getter) {
-            slot->getter = getter;
+            next.getter = getter;
         }
         if (has_setter) {
-            slot->setter = setter;
+            next.setter = setter;
         }
     } else if (has_value) {
-        if (slot->accessor) {
-            kiln_c99_object_of(store)->accessor_count -= 1;
-        }
-        slot->accessor = 0;
+        next.accessor = 0;
         /* A value defined over a published-and-unanswerable name is a program supplying the
          * member this realm could not. It is now a data property like any other. */
-        slot->refused = 0;
-        slot->value = value;
+        next.refused = 0;
+        next.value = value;
     }
     if (has_writable) {
-        slot->writable = kiln_c99_truthy(writable);
+        next.writable = kiln_c99_truthy(writable);
     }
     if (has_enumerable) {
         kiln_value symbol_key;
-        if (kiln_c99_symbol_of_key_view(slot->key, &symbol_key)) {
+        if (kiln_c99_symbol_of_key_view(existed ? current.key : view, &symbol_key)) {
             /* A symbol key's `enumerable` is not the program's to set: holding it at 0 is what
              * keeps the `@@` spelling out of `Object.keys` and `JSON.stringify`. The answer the
              * program gave is kept beside it instead. */
-            slot->symbol_hidden = !kiln_c99_truthy(enumerable);
-            slot->enumerable = 0;
+            next.symbol_hidden = !kiln_c99_truthy(enumerable);
+            next.enumerable = 0;
         } else {
-            slot->enumerable = kiln_c99_truthy(enumerable);
+            next.enumerable = kiln_c99_truthy(enumerable);
         }
     }
     if (has_configurable) {
-        slot->configurable = kiln_c99_truthy(configurable);
+        next.configurable = kiln_c99_truthy(configurable);
     }
-    if (!slot->accessor && !slot->writable) {
-        kiln_c99_object_of(store)->read_only_seen = 1;
-    }
-    return KILN_C99_OK;
+    return kiln_c99_property_storage_commit(store, view, stable, &next);
 }
 
 

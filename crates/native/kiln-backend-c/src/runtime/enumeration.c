@@ -687,7 +687,6 @@ static int kiln_c99_delete_key(kiln_host *host, kiln_value target, const kiln_st
                                kiln_value *thrown) {
     if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     kiln_object *object;
-    size_t index;
     *answer = 1;
     /* Native adapter state is not part of the JavaScript object. Deleting its reserved spelling
      * therefore succeeds as an ordinary absent-property delete without touching the slot. */
@@ -773,36 +772,7 @@ static int kiln_c99_delete_key(kiln_host *host, kiln_value target, const kiln_st
             return KILN_C99_OK;
         }
     }
-    if (object->shape != NULL) {
-        kiln_c99_ensure_dictionary(object);
-        object->shape = NULL;
-    }
-    if (object->frozen) {
-        *answer = 0;
-        return KILN_C99_OK;
-    }
-    {
-        kiln_gc_heap *heap = kiln_c99_gc_heap();
-        index = kiln_c99_own_index_key(object, ikey, key);
-    }
-    if (index != object->count) {
-        if (!object->properties[index].configurable) {
-            /* `delete` answers about the end state, and the property is still there. */
-            *answer = 0;
-            return KILN_C99_OK;
-        }
-        if (object->properties[index].accessor) {
-            object->accessor_count -= 1;
-        }
-        /* Shifted rather than swapped with the last: property order is observable, and a
-         * `delete` must not reorder what remains. */
-        for (; index + 1 < object->count; ++index) {
-            object->properties[index] = object->properties[index + 1];
-        }
-        object->count -= 1;
-        return KILN_C99_OK;
-    }
-    return KILN_C99_OK;
+    return kiln_c99_property_storage_delete(object, key, ikey, answer);
 }
 
 static int kiln_c99_delete(kiln_host *host, kiln_value target, const char *key,

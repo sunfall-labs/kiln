@@ -2230,53 +2230,25 @@
                 return KILN_C99_OK;
             }
             if (code == KILN_C99_METHOD_OBJECT_FREEZE) {
-                *flag = 1;
+                kiln_object *store = NULL;
                 if (subject.tag == KILN_VALUE_OBJECT) {
-                    kiln_object *obj = kiln_c99_object_of(subject);
-                    size_t i;
-                    if (obj->shape != NULL) {
-                        kiln_c99_ensure_dictionary(obj);
-                        obj->shape = NULL;
-                    }
-                    for (i = 0; i < obj->count; ++i) {
-                        if (!obj->properties[i].accessor) {
-                            obj->properties[i].writable = 0;
-                        }
-                        obj->properties[i].configurable = 0;
-                    }
+                    store = kiln_c99_object_of(subject);
                 } else if (subject.tag == KILN_VALUE_FUNCTION) {
                     kiln_closure *closure = kiln_c99_closure_of(subject);
                     if (kiln_c99_closure_store(closure).tag == KILN_VALUE_OBJECT) {
-                        kiln_object *obj = kiln_c99_object_of(kiln_c99_closure_store(closure));
-                        size_t i;
-                        if (obj->shape != NULL) {
-                            kiln_c99_ensure_dictionary(obj);
-                            obj->shape = NULL;
-                        }
-                        for (i = 0; i < obj->count; ++i) {
-                            if (!obj->properties[i].accessor) {
-                                obj->properties[i].writable = 0;
-                            }
-                            obj->properties[i].configurable = 0;
-                        }
+                        store = kiln_c99_object_of(kiln_c99_closure_store(closure));
                     }
                 } else if (subject.tag == KILN_VALUE_ARRAY) {
                     kiln_array *arr = kiln_c99_array_of(subject);
                     if (arr->properties.tag == KILN_VALUE_OBJECT) {
-                        kiln_object *obj = kiln_c99_object_of(arr->properties);
-                        size_t i;
-                        if (obj->shape != NULL) {
-                            kiln_c99_ensure_dictionary(obj);
-                            obj->shape = NULL;
-                        }
-                        for (i = 0; i < obj->count; ++i) {
-                            if (!obj->properties[i].accessor) {
-                                obj->properties[i].writable = 0;
-                            }
-                            obj->properties[i].configurable = 0;
-                        }
+                        store = kiln_c99_object_of(arr->properties);
                     }
                 }
+                if (store != NULL) {
+                    status = kiln_c99_property_storage_integrity(store, 1);
+                    if (status != KILN_C99_OK) return status;
+                }
+                *flag = 1;
                 /* The object itself, so `Object.freeze(o) === o` and a freeze can be inlined into
                  * the expression that built it. */
                 *result = subject;

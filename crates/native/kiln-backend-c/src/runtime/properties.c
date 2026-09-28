@@ -484,10 +484,47 @@ static __attribute__((noinline)) int kiln_c99_transition_store_clear_slow(
  * up. The headed form is the semantic implementation; fixed C names use the adapter below. */
 static int kiln_c99_own_slot_key(kiln_value target, const kiln_string *key,
                                  const kiln_string *ikey, kiln_property **out);
+static int kiln_c99_property_storage_commit(kiln_value target, const kiln_string *key,
+                                             const kiln_string *ikey,
+                                             const kiln_property *desired);
 
 static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_string *key,
                                  const kiln_string *ikey, kiln_value value, int strict,
                                  int depth, kiln_value *thrown);
+
+/* Storage-side assignment for an own dictionary entry. The caller handles fast shaped slots and
+ * the inherited setter walk; an overlay will answer this boundary before dictionary fallback.
+ * No writable list record escapes it. */
+static int kiln_c99_property_storage_assign_existing(kiln_host *host, kiln_value target,
+                                                      kiln_object *object,
+                                                      const kiln_string *key,
+                                                      const kiln_string *ikey,
+                                                      kiln_value value, int strict, int depth,
+                                                      kiln_value *thrown, int *found) {
+    size_t index;
+    if (object->shape != NULL) {
+        int status = kiln_c99_ensure_dictionary(object);
+        if (status != KILN_C99_OK) return status;
+    }
+    index = kiln_c99_own_index_key(object, ikey, key);
+    *found = index != object->count;
+    if (!*found) return KILN_C99_OK;
+    if (!object->properties[index].accessor) {
+        if (object->properties[index].writable) {
+            object->properties[index].value = value;
+        } else if (strict) {
+            return kiln_c99_throw_read_only_key(thrown, key);
+        }
+        return KILN_C99_OK;
+    }
+    {
+        kiln_value setter = object->properties[index].setter;
+        kiln_value ignored;
+        if (setter.tag == KILN_VALUE_UNDEFINED)
+            return strict ? kiln_c99_throw_read_only_key(thrown, key) : KILN_C99_OK;
+        return kiln_c99_call(host, &ignored, setter, target, &value, 1, depth, thrown);
+    }
+}
 
 static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                              kiln_value value, int strict, int depth, kiln_value *thrown) {
@@ -509,7 +546,6 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
         return strict ? kiln_c99_throw_read_only_key(thrown, key) : KILN_C99_OK;
     if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     kiln_object *object;
-    size_t index;
     int status;
     /* Node resource pointers are represented by reserved values in the ordinary property store,
      * but they are not JavaScript properties.  A program can spell the key as a string, so hide
@@ -805,31 +841,11 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
             }
         }
     }
-    if (object->shape != NULL) {
-        kiln_c99_ensure_dictionary(object);
-    }
-        index = kiln_c99_own_index_key(object, ikey, key);
-    if (index != object->count) {
-        if (!object->properties[index].accessor) {
-            /* A refused write is observable only in strict code. */
-            if (object->properties[index].writable) {
-                object->properties[index].value = value;
-            } else if (strict) {
-                return kiln_c99_throw_read_only_key(thrown, key);
-            }
-            return KILN_C99_OK;
-        }
-        if (object->properties[index].setter.tag == KILN_VALUE_UNDEFINED) {
-            if (strict) {
-                return kiln_c99_throw_read_only_key(thrown, key);
-            }
-            return KILN_C99_OK;
-        }
-        {
-            kiln_value ignored;
-            return kiln_c99_call(host, &ignored, object->properties[index].setter, target, &value,
-                                 1, depth, thrown);
-        }
+    {
+        int found;
+        status = kiln_c99_property_storage_assign_existing(host, target, object, key, ikey,
+                                                            value, strict, depth, thrown, &found);
+        if (status != KILN_C99_OK || found) return status;
     }
     /* Nothing of this name on the object itself. Walk the prototypes looking for a setter to
      * run, or a non-writable data property that blocks creating an own one in its place -- a
@@ -876,21 +892,19 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
         }
     }
     {
-        kiln_property *slot;
+        kiln_property desired = {0};
         /* A non-extensible object takes a write to a property it already has and refuses to grow.
          * The walk above has already handled every own property, so arriving here with the flag
          * set means this key would be a new one. The wording is the frozen write's on purpose:
          * the interpreter words both the same, and `error.message` is program-visible. */
-        if (object->not_extensible) {
-            if (kiln_c99_own_index_key(object, ikey, key) == object->count) {
-                return strict ? kiln_c99_throw_read_only_key(thrown, key) : KILN_C99_OK;
-            }
-        }
-        status = kiln_c99_own_slot_key(target, key, ikey, &slot);
-        if (status != KILN_C99_OK) {
-            return status;
-        }
-        slot->value = value;
+        if (object->not_extensible)
+            return strict ? kiln_c99_throw_read_only_key(thrown, key) : KILN_C99_OK;
+        desired.value = value;
+        desired.enumerable = !kiln_c99_key_is_reserved(ikey);
+        desired.writable = 1;
+        desired.configurable = 1;
+        status = kiln_c99_property_storage_commit(target, key, ikey, &desired);
+        if (status != KILN_C99_OK) return status;
     }
     return KILN_C99_OK;
 }
@@ -1014,32 +1028,87 @@ static int kiln_c99_own_slot_key(kiln_value target, const kiln_string *key,
     return KILN_C99_OK;
 }
 
+/* The storage-side commit for a complete own descriptor. The caller computes and validates a
+ * value copy; no pointer into the mutable list escapes to descriptor semantics. A sealed
+ * descriptor/value store can replace this one operation with a realm-local overlay write. */
+static int kiln_c99_property_storage_commit(kiln_value target, const kiln_string *key,
+                                             const kiln_string *ikey,
+                                             const kiln_property *desired) {
+    kiln_property *slot;
+    kiln_object *object;
+    const kiln_string *canonical;
+    int status = kiln_c99_own_slot_key(target, key, ikey, &slot);
+    if (status != KILN_C99_OK) return status;
+    object = kiln_c99_object_of(target);
+    canonical = slot->key;
+    if (slot->accessor && !desired->accessor) object->accessor_count -= 1;
+    if (!slot->accessor && desired->accessor) object->accessor_count += 1;
+    *slot = *desired;
+    slot->key = canonical;
+    if (!slot->accessor && !slot->writable) object->read_only_seen = 1;
+    kiln_c99_prototype_touched(object);
+    return KILN_C99_OK;
+}
+
+/* Removal and integrity changes share the descriptor commit's storage boundary. They still
+ * materialize today's shape into a dictionary, but no caller outside property storage shifts
+ * list records or changes their attributes. */
+static int kiln_c99_property_storage_delete(kiln_object *object, const kiln_string *key,
+                                             const kiln_string *ikey, int *answer) {
+    size_t index;
+    if (object->shape != NULL) {
+        int status = kiln_c99_ensure_dictionary(object);
+        if (status != KILN_C99_OK) return status;
+    }
+    if (object->frozen) {
+        *answer = 0;
+        return KILN_C99_OK;
+    }
+    index = kiln_c99_own_index_key(object, ikey, key);
+    if (index == object->count) return KILN_C99_OK;
+    if (!object->properties[index].configurable) {
+        *answer = 0;
+        return KILN_C99_OK;
+    }
+    if (object->properties[index].accessor) object->accessor_count -= 1;
+    for (; index + 1 < object->count; ++index)
+        object->properties[index] = object->properties[index + 1];
+    object->count -= 1;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_property_storage_integrity(kiln_object *object, int freeze) {
+    size_t index;
+    if (object->shape != NULL) {
+        int status = kiln_c99_ensure_dictionary(object);
+        if (status != KILN_C99_OK) return status;
+    }
+    for (index = 0; index < object->count; ++index) {
+        kiln_property *property = &object->properties[index];
+        if (freeze && !property->accessor) property->writable = 0;
+        property->configurable = 0;
+    }
+    if (freeze) object->read_only_seen = 1;
+    kiln_c99_prototype_touched(object);
+    return KILN_C99_OK;
+}
+
 /* Commit one complete own data descriptor. Bootstrap callers can supply the final attributes
  * when the key is inserted instead of taking a writable record pointer and fixing it later.
  * The ordinary assignment path still handles inherited setters and read-only properties. */
 static int kiln_c99_commit_own_data_key(kiln_value target, const kiln_string *key,
                                         kiln_value value, int enumerable, int writable,
                                         int configurable) {
-    kiln_property *slot;
-    kiln_object *object;
-    int status = kiln_c99_own_slot_key(target, key, NULL, &slot);
-    if (status != KILN_C99_OK) return status;
-    object = kiln_c99_object_of(target);
-    kiln_c99_prototype_touched(object);
-    if (slot->accessor && object->accessor_count != 0) object->accessor_count -= 1;
-    slot->accessor = 0;
-    slot->refused = 0;
-    slot->value = value;
-    slot->enumerable = enumerable && !kiln_c99_key_is_reserved(slot->key);
-    slot->writable = writable;
-    slot->configurable = configurable;
-    slot->symbol_hidden = 0;
-    if (!enumerable && kiln_c99_key_is_reserved(slot->key)) {
+    kiln_property desired = {0};
+    desired.value = value;
+    desired.enumerable = enumerable && !kiln_c99_key_is_reserved(key);
+    desired.writable = writable;
+    desired.configurable = configurable;
+    if (!enumerable && kiln_c99_key_is_reserved(key)) {
         kiln_value symbol;
-        if (kiln_c99_symbol_of_key_view(slot->key, &symbol)) slot->symbol_hidden = 1;
+        if (kiln_c99_symbol_of_key_view(key, &symbol)) desired.symbol_hidden = 1;
     }
-    if (!writable) object->read_only_seen = 1;
-    return KILN_C99_OK;
+    return kiln_c99_property_storage_commit(target, key, NULL, &desired);
 }
 
 static int kiln_c99_commit_own_data(kiln_value target, const char *key, size_t key_len,
