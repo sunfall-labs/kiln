@@ -969,10 +969,9 @@ typedef struct kiln_shape_edge_table {
  * access -- and why `kiln_c99_get` takes a host and a depth. */
 typedef struct kiln_property {
     const kiln_string *key;
-    size_t key_len;
     /* Whether `Object.keys`, `for...in`, spread and JSON see it. Every own property of an error
      * is readable by name and not enumerated, which is why `JSON.stringify(err)` is `{}`. */
-    int enumerable;
+    unsigned int enumerable : 1;
     /* A symbol key the program hid with a descriptor. This is a second bit rather than a value of
      * `enumerable` because a symbol key is stored with `enumerable = 0` unconditionally, so that
      * every walk over own *string* keys skips it without having to know about the `@@` prefix.
@@ -982,16 +981,16 @@ typedef struct kiln_property {
      * whatever it asked. Overloading one bit for two questions answered all three wrongly at
      * once -- and two of them by printing the internal `@@symbol:N` spelling into program output.
      * Zero means visible, so a slot that nobody hid is correct from `calloc` alone. */
-    int symbol_hidden;
+    unsigned int symbol_hidden : 1;
     /* Whether an assignment may replace the value, and whether `delete` may remove the property
      * or `defineProperty` redefine it. Both are true for everything an assignment or a literal
      * creates, which is why they went unmodelled for so long: only `Object.defineProperty` and
      * `Object.freeze` can produce a property where they are not, and only
      * `getOwnPropertyDescriptor` reports them back. Absent, a defined non-writable property took
      * writes and a non-configurable one deleted -- both silently. */
-    int writable;
-    int configurable;
-    int accessor;
+    unsigned int writable : 1;
+    unsigned int configurable : 1;
+    unsigned int accessor : 1;
     /* A name this realm publishes and cannot answer: reading it refuses rather than handing back
      * `undefined`. Only the node builtin namespaces install one, and only for a member the
      * shared ABI declares while the native materializer has no implementation behind it.
@@ -1004,7 +1003,7 @@ typedef struct kiln_property {
      * instruction that read it already carries the name: `GetProperty(dirname)`.
      *
      * The same idea as `kiln_c99_builtin_backlog` one level down, and for the same reason. */
-    int refused;
+    unsigned int refused : 1;
     kiln_value value;
     kiln_value getter;
     kiln_value setter;
@@ -3052,7 +3051,7 @@ static int kiln_c99_node_response_is_framed(const kiln_object *headers) {
         for (which = 0; which < 2; ++which) {
             size_t len = strlen(framing[which]);
             size_t byte;
-            if (property->key_len != len) continue;
+            if (property->key->unit_len != len) continue;
             for (byte = 0; byte < len; ++byte) {
                 if (kiln_string_unit_at(property->key, byte) > 0x7f ||
                     (char)tolower((unsigned char)kiln_string_unit_at(property->key, byte)) != framing[which][byte])

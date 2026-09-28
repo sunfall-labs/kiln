@@ -3899,7 +3899,6 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
             goto namespace_failure;
         }}
         data->count += 1;
-        slot->key_len = name_lengths[source];
         slot->value = value;
         slot->symbol_hidden = 0;
         slot->writable = 1;
@@ -3934,8 +3933,7 @@ namespace_failure:
 namespace_failure_without_order:
     if (data != NULL) {{
         for (index = 0; index < data->count; ++index) {{
-            if (data->properties[index].key_len == (size_t)13 &&
-                memcmp(data->properties[index].key, "@@toStringTag", (size_t)13) == 0 &&
+            if (kiln_c99_same_name_key(data->properties[index].key, "@@toStringTag") &&
                 data->properties[index].value.tag == KILN_VALUE_STRING)
                 kiln_c99_gc_release((void *)data->properties[index].value.ptr);
         }}

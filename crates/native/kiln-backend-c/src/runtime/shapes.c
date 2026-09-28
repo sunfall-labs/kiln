@@ -699,7 +699,6 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
             size_t nlen = kiln_c99_double_to_js((double)i, num_buf);
             const kiln_string *ikey = kiln_c99_intern(num_buf, nlen);
             object->properties[pos].key = ikey;
-            object->properties[pos].key_len = nlen;
             object->properties[pos].enumerable = 1;
             object->properties[pos].writable = 1;
             object->properties[pos].configurable = 1;
@@ -718,7 +717,6 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
     }
     for (i = 0; i < shape->property_count; ++i) {
         const kiln_string *key = shape->keys[i];
-        size_t key_len = kiln_c99_key_len(key);
         uint32_t attrs = shape->attrs[i];
         kiln_val held = (object->slots != NULL && i < object->slot_capacity)
                             ? object->slots[i]
@@ -726,7 +724,6 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
         /* The record a list-mode object would carry for the same history: see
          * `KILN_C99_ATTR_*`, which are its differences from an assignment's record. */
         object->properties[pos].key = key;
-        object->properties[pos].key_len = key_len;
         {
             /* A reserved key is stored non-enumerable and its flip is the hidden bit a symbol's
              * record carries (`kiln_property.symbol_hidden`); any other key's flip is the

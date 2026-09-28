@@ -913,7 +913,6 @@ static int kiln_c99_own_slot_key(kiln_value target, const kiln_string *key,
             object->properties[index] = object->properties[index - 1];
         }
         object->properties[position].key = ikey;
-        object->properties[position].key_len = ikey == NULL ? key_len : ikey->unit_len;
         /* The key's domain, rather than its text, says whether it is an internal slot. A
          * program string that happens to begin with `@@` remains an ordinary enumerable key. */
         object->properties[position].enumerable = !kiln_c99_key_is_reserved(ikey);
