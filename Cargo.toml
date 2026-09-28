@@ -187,7 +187,7 @@ insta = { version = "1.48", default-features = false }
 rayon = { version = "1.12", default-features = false }
 # The one realm scheduler. `test-util` is required for deterministic paused-time execution;
 # keep Tokio's surface minimal because its types never cross `kiln-runtime`'s public seam.
-tokio = { version = "1.48", default-features = false, features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "sync", "time", "test-util"] }
+tokio = { version = "1.48", default-features = false, features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "sync", "time", "test-util"] }
 # Keyed supervision for realm-owned async requests. `JoinMap` keeps RequestId cancellation and task
 # failure observation in one place without leaking Tokio types through the HostOps seam.
 tokio-util = { version = "0.7", default-features = false, features = ["join-map"] }
