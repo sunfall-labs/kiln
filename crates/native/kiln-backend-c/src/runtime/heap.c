@@ -3907,6 +3907,28 @@ static void kiln_c99_gc_release_cell(void *payload) {
  * Splice a sublist of GC blocks [first, last] from from_heap to to_heap in O(1) time.
  * Both first and last must be KILN_GC_FLAG_LARGE blocks linked in from_heap->head.
  */
+/* A typed buffer's backing block follows its wrapper. The sender loses its moved-byte balance;
+ * the receiver gains it. A buffer allocated locally retains the ordinary allocation-debt rule
+ * in the receiving heap. No other block kind owns external bytes here. */
+static void kiln_c99_gc_splice_external(kiln_gc_heap *from_heap, kiln_gc_heap *to_heap,
+                                       kiln_gc_block *block) {
+    kiln_typed_buffer *buffer;
+    size_t length;
+    if ((block->kind & KILN_GC_KIND_MASK) != KILN_GC_TYPED_BUFFER) return;
+    buffer = (kiln_typed_buffer *)(block + 1);
+    if (!buffer->owns_bytes) return;
+    length = buffer->byte_length;
+    if (buffer->moved_external) {
+        if (length > from_heap->moved_external_current ||
+            length > SIZE_MAX - to_heap->moved_external_current) abort();
+        from_heap->moved_external_current -= length;
+        to_heap->moved_external_current += length;
+    } else {
+        if (length > SIZE_MAX - to_heap->since_collection) abort();
+        to_heap->since_collection += length;
+    }
+}
+
 static void kiln_c99_gc_splice_sublist_range(kiln_gc_heap *from_heap, kiln_gc_heap *to_heap,
                                              kiln_gc_block *first, kiln_gc_block *last) {
     kiln_gc_block *cur;
@@ -3929,6 +3951,7 @@ static void kiln_c99_gc_splice_sublist_range(kiln_gc_heap *from_heap, kiln_gc_he
     cur = first;
     while (cur != NULL) {
         kiln_gc_block *next = cur->next;
+        kiln_c99_gc_splice_external(from_heap, to_heap, cur);
         cur->mark = 0; /* Reset mark epoch so target heap's GC tracks it cleanly */
         kiln_c99_gc_ptrset_remove(&from_heap->large_table, cur);
         kiln_c99_gc_ptrset_insert(&to_heap->large_table, cur);
@@ -4022,6 +4045,18 @@ static void *kiln_c99_gc_splice_sublist(kiln_gc_heap *from_heap, kiln_gc_heap *t
     to_heap->count += 1;
     to_heap->bytes += payload_size;
     to_heap->since_collection += payload_size;
+
+    /* The copied wrapper now owns any external store. Clear the source before releasing its
+     * nursery/slab cell so its finalizer neither frees that store nor drops its shared handle. */
+    if ((root_block->kind & KILN_GC_KIND_MASK) == KILN_GC_TYPED_BUFFER) {
+        kiln_typed_buffer *source = (kiln_typed_buffer *)root_ptr;
+        kiln_c99_gc_splice_external(from_heap, to_heap, root_block);
+        source->bytes = NULL;
+        source->byte_length = 0;
+        source->owns_bytes = 0;
+        source->moved_external = 0;
+        source->shared = NULL;
+    }
 
     /* Release original block from from_heap */
     kiln_c99_gc_release_cell(root_ptr);

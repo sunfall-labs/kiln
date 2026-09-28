@@ -1058,9 +1058,10 @@ fn runtime_prelude_size() {
     // `split`'s limit and `parseInt` on UTF-16 text.
     // The shared Rust message encoder's native descriptor callbacks replace the old C wire
     // walker (realms issue 21); the resulting prelude has 59,001 lines. Leave a small margin.
-    // Realm-local moved-buffer GC accounting (realms issue 21) brings it to 59,053 lines.
+    // Realm-local moved-buffer GC accounting and safe heap splicing (realms issue 21) bring it
+    // to 59,088 lines.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 59_100;
+    const CEILING_LINES: usize = 59_200;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

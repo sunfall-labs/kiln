@@ -1704,6 +1704,52 @@ int main(void) {
     kiln_c99_gc_sweep(&heap_b, 0);
     if (heap_b.count != 0 || heap_b.head != NULL) return 18;
 
+    /* A buffer wrapper's moved backing block follows the heap move too. Its finalizer must
+     * subtract from B, not underflow A after the block has been spliced. */
+    block = (kiln_gc_block *)calloc(1, sizeof(kiln_gc_block) + sizeof(kiln_typed_buffer));
+    if (block == NULL) return 19;
+    block->kind = KILN_GC_TYPED_BUFFER | KILN_GC_FLAG_LARGE;
+    block->size = sizeof(kiln_typed_buffer);
+    heap_a.head = block;
+    heap_a.count = 1;
+    heap_a.bytes = block->size;
+    kiln_c99_gc_bound(&heap_a, block, sizeof(kiln_gc_block) + block->size);
+    if (kiln_c99_gc_ptrset_insert(&heap_a.large_table, block) != KILN_C99_OK) return 20;
+    kiln_typed_buffer *typed = (kiln_typed_buffer *)(block + 1);
+    typed->bytes = (uint8_t *)malloc(4096);
+    if (typed->bytes == NULL) return 21;
+    typed->byte_length = 4096;
+    typed->owns_bytes = 1;
+    typed->moved_external = 1;
+    heap_a.moved_external_current = 4096;
+    if (kiln_c99_gc_splice_sublist(&heap_a, &heap_b, typed) != typed) return 22;
+    if (heap_a.moved_external_current != 0 || heap_b.moved_external_current != 4096) return 23;
+    heap_b.epoch += 1;
+    kiln_c99_gc_sweep(&heap_b, 0);
+    if (heap_b.moved_external_current != 0 || heap_b.count != 0) return 24;
+
+    /* A nursery wrapper is promoted by copying its header. The source header must give up
+     * byte and shared-handle ownership before its own finalizer runs. */
+    kiln_test_heap = &heap_a;
+    kiln_test_generation += 1;
+    typed = (kiln_typed_buffer *)kiln_c99_gc_nursery_bump(&heap_a, KILN_GC_TYPED_BUFFER,
+                                                         sizeof(kiln_typed_buffer));
+    if (typed == NULL) return 25;
+    memset(typed, 0, sizeof *typed);
+    typed->bytes = (uint8_t *)malloc(2048);
+    if (typed->bytes == NULL) return 26;
+    typed->byte_length = 2048;
+    typed->owns_bytes = 1;
+    typed->moved_external = 1;
+    heap_a.moved_external_current = 2048;
+    kiln_typed_buffer *promoted = (kiln_typed_buffer *)kiln_c99_gc_splice_sublist(&heap_a, &heap_b, typed);
+    if (promoted == NULL || promoted == typed || promoted->bytes == NULL) return 27;
+    if (heap_a.moved_external_current != 0 || heap_b.moved_external_current != 2048) return 28;
+    if (typed->owns_bytes || typed->moved_external || typed->shared != NULL) return 29;
+    heap_b.epoch += 1;
+    kiln_c99_gc_sweep(&heap_b, 0);
+    if (heap_b.moved_external_current != 0 || heap_b.count != 0) return 30;
+
     free(heap_a.large_table.table);
     free(heap_b.large_table.table);
     return 0;
