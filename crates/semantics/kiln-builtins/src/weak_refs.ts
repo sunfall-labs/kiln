@@ -72,6 +72,11 @@
     }
   }
 
+  Object.defineProperty(WeakRef.prototype, Symbol.toStringTag,
+    { value: "WeakRef", configurable: true });
+  Object.defineProperty(FinalizationRegistry.prototype, Symbol.toStringTag,
+    { value: "FinalizationRegistry", configurable: true });
+
   for (const [name, value] of [["WeakRef", WeakRef], ["FinalizationRegistry", FinalizationRegistry]] as const) {
     Object.defineProperty(globalThis, name, {
       value, writable: true, configurable: true, enumerable: false,
