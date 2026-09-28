@@ -391,6 +391,7 @@ fn stat_key(file: &Path) -> Option<(u128, u64)> {
 /// parses only reachable modules and asks the same resolution-policy interface used by the daemon
 /// for their exact targets. Existing project texts are reused byte-for-byte, while newly reached
 /// package sources are read once and become part of the authoritative source manifest.
+#[cfg(test)]
 pub(crate) fn include_reachable_dependencies(
     root: &Path,
     entry: &str,

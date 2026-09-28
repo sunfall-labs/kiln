@@ -1455,6 +1455,57 @@ mod tests {
     }
 
     #[test]
+    fn declared_includes_are_canonical_and_part_of_resolution_identity() {
+        let worker = DeclaredInclude {
+            specifier: "./worker.cjs".into(),
+            target: "/project/worker.cjs".into(),
+        };
+        let other = DeclaredInclude {
+            specifier: "pkg/worker".into(),
+            target: "/project/node_modules/pkg/worker.js".into(),
+        };
+        let first = ResolutionMap::with_node_formats_and_includes(
+            "/project",
+            Vec::new(),
+            Vec::new(),
+            vec![other.clone(), worker.clone()],
+        )
+        .expect("valid declared targets");
+        let sorted = ResolutionMap::with_node_formats_and_includes(
+            "/project",
+            Vec::new(),
+            Vec::new(),
+            vec![worker.clone(), other],
+        )
+        .expect("order does not matter");
+        assert_eq!(first.declared_includes, sorted.declared_includes);
+        assert_eq!(first.identity(), sorted.identity());
+        assert_ne!(first.identity(), empty_resolution_map().identity());
+
+        let mut retargeted = worker.clone();
+        retargeted.target = "/project/other.cjs".into();
+        let changed = ResolutionMap::with_node_formats_and_includes(
+            "/project",
+            Vec::new(),
+            Vec::new(),
+            vec![retargeted],
+        )
+        .expect("changed target is valid");
+        assert_ne!(changed.identity(), first.identity());
+
+        let duplicate = ResolutionMap::with_node_formats_and_includes(
+            "/project",
+            Vec::new(),
+            Vec::new(),
+            vec![worker.clone(), worker],
+        );
+        assert!(matches!(
+            duplicate,
+            Err(ResolutionMapError::DuplicateDeclaredInclude { .. })
+        ));
+    }
+
+    #[test]
     fn resolution_map_wire_requires_canonical_sorted_unique_entries() {
         let first = package_resolution(
             "/project/src/main.ts",
