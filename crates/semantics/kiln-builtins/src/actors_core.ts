@@ -27,27 +27,29 @@ export function isolate<T>(factory: () => T): Isolated<T> {
   const handle: any = { __uncloneable: () => {} };
   const value = factory();
   isolated.set(handle, value);
-  // Dynamic import plans may evaluate this engine module separately in one realm. The symbol
-  // lets its serializer recognize the opaque handle without exposing a cloneable value.
-  Object.defineProperty(handle, isolatedMark, { value: { value } });
+  // Dynamic import plans may evaluate this module separately in one realm. This marker only
+  // identifies a handle for fail-closed graph transfer; it must never expose the graph itself.
+  Object.defineProperty(handle, isolatedMark, { value: true });
   return handle;
 }
 
 export function transfer<T>(value: Isolated<T> | ArrayBuffer): TransferTicket<T> {
-  const sharedHandle = value !== null && typeof value === "object"
-    ? (value as any)[isolatedMark] : undefined;
-  const graph = isolated.has(value as object) || sharedHandle !== undefined;
+  const markedHandle = value !== null && typeof value === "object"
+    && (value as any)[isolatedMark] === true;
+  const graph = isolated.has(value as object) || markedHandle;
   if (!graph && !(value instanceof ArrayBuffer)) {
     throw new TypeError("transfer requires an isolated handle or ArrayBuffer");
   }
   const ticket: any = { __uncloneable: () => {} };
   const entry: Ticket = {
-    value: graph ? (sharedHandle === undefined ? isolated.get(value as object) : sharedHandle.value) : value,
+    // Retain the handle, not its graph. The consuming runtime will need to remove this root
+    // before any ownership proof; until then every graph ticket is refused below.
+    value,
     consumed: false,
     graph,
   };
   tickets.set(ticket, entry);
-  Object.defineProperty(ticket, ticketMark, { value: entry });
+  Object.defineProperty(ticket, ticketMark, { value: graph ? Object.freeze({ graph: true }) : entry });
   return ticket;
 }
 

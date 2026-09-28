@@ -17,7 +17,16 @@ new Uint8Array(data)[0] = 23;
 const result = await owner.ref.call('echo', [transfer(data)]);
 console.log(data.byteLength, new Uint8Array(result)[0]);
 const isolated = isolate(() => ({ answer: 42 }));
-try { await owner.ref.call('echo', [transfer(isolated)]); }
+for (const key of Reflect.ownKeys(isolated)) {
+  const value = Object.getOwnPropertyDescriptor(isolated, key)?.value;
+  if (value?.answer === 42 || value?.value?.answer === 42) throw new Error('isolated graph leaked through handle');
+}
+const graphTicket = transfer(isolated);
+for (const key of Reflect.ownKeys(graphTicket)) {
+  const value = Object.getOwnPropertyDescriptor(graphTicket, key)?.value;
+  if (value?.answer === 42 || value?.value?.answer === 42) throw new Error('isolated graph leaked through ticket');
+}
+try { await owner.ref.call('echo', [graphTicket]); }
 catch (error) { console.log(error.name, error.message); }
 await owner.stop();
 try { await second.call('increment', [1]); }
