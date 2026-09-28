@@ -1868,6 +1868,7 @@ static KILN_ALWAYS_INLINE inline int kiln_c99_stack_exhausted(void) {
 #define KILN_GC_HOOKS_VERSION 2u
 #define KILN_GC_DEFAULT_FLOOR ((size_t)256 * 1024)
 #define KILN_GC_MID_TURN_FLOOR ((size_t)4 * 1024 * 1024)
+#define KILN_GC_MID_TURN_MOVED_FLOOR ((size_t)64 * 1024 * 1024)
 #define KILN_NURSERY_BUDGET ((size_t)4 * 1024 * 1024)
 #define KILN_NURSERY_SMALL_LIVE_BUDGETS 8
 #define KILN_NURSERY_BUDGET_GROWTH 2
@@ -2106,6 +2107,8 @@ static void kiln_c99_gc_collect_mid_turn(kiln_gc_heap *heap) {
 static int kiln_c99_nursery_fresh_chunk(kiln_gc_heap *heap) {
 static void kiln_c99_nursery_turn_chunk(kiln_gc_heap *heap) {
 static void kiln_c99_gc_note_external(size_t size) {
+static void kiln_c99_gc_note_moved_external(size_t size) {
+static void kiln_c99_gc_unnote_moved_external(size_t size) {
 static inline int kiln_c99_nursery_pressure_due(const kiln_gc_heap *heap) {
 static inline void kiln_c99_gc_alloc_due(kiln_gc_heap *heap) {
 static void *kiln_c99_gc_alloc_ex(uint32_t kind, size_t size, int zero_payload) {
@@ -2167,7 +2170,7 @@ static void kiln_c99_key_forget(kiln_gc_heap *heap, const kiln_string *string) {
 static void kiln_c99_key_mark_pinned(kiln_gc_heap *heap) {
 static void kiln_c99_key_purge(kiln_gc_heap *heap) {
 static void kiln_c99_gc_unlink(kiln_gc_heap *heap, kiln_gc_block *block) {
-static void kiln_c99_gc_finalize(kiln_gc_block *block);
+static void kiln_c99_gc_finalize(kiln_gc_heap *heap, kiln_gc_block *block);
 static void kiln_c99_gc_release_cell(void *payload) {
 static void kiln_c99_gc_splice_sublist_range(kiln_gc_heap *from_heap, kiln_gc_heap *to_heap,
 static void *kiln_c99_gc_splice_sublist(kiln_gc_heap *from_heap, kiln_gc_heap *to_heap, void *root_ptr) {
@@ -2185,7 +2188,7 @@ static void kiln_c99_gc_mark_values(kiln_gc_heap *heap, const kiln_value *values
 static void kiln_c99_gc_mark_val(kiln_gc_heap *heap, kiln_val v) {
 static void kiln_c99_gc_mark_vals(kiln_gc_heap *heap, const kiln_val *values,
 static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
-static void kiln_c99_gc_finalize(kiln_gc_block *block) {
+static void kiln_c99_gc_finalize(kiln_gc_heap *heap, kiln_gc_block *block) {
 static void kiln_c99_gc_drain(kiln_gc_heap *heap) {
 static inline size_t kiln_c99_nursery_used_words(const kiln_nursery_chunk *chunk, const char *limit) {
 static void kiln_c99_gc_begin(kiln_gc_heap *heap) {
