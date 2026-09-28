@@ -13,6 +13,7 @@
 mod process_wire;
 mod timer_queue;
 pub mod turn_queue;
+pub mod turn_scheduler;
 pub use process_wire::{
     ProcessWireError, ProcessWireRequest, decode as decode_process_wire,
     encode as encode_process_wire,

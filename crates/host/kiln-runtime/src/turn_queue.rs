@@ -212,6 +212,11 @@ impl TurnLease {
         self.ticket.realm_id
     }
 
+    /// The ticket to use as the realm's local-task waker while this turn runs.
+    pub fn ticket(&self) -> Arc<TurnTicket> {
+        Arc::clone(&self.ticket)
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation
     }
