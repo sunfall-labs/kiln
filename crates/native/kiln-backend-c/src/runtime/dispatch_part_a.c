@@ -3559,6 +3559,30 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                                     "property store");
                 }
                 source = kiln_c99_object_of(src_val);
+                if (source->sealed != NULL) {
+                    kiln_value keys;
+                    status = kiln_c99_property_key_snapshot(source, &keys);
+                    if (status != KILN_C99_OK) return status;
+                    for (index = 0; index < kiln_c99_array_of(keys)->count; ++index) {
+                        const kiln_string *name = (const kiln_string *)
+                            kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[index]).ptr;
+                        kiln_property property;
+                        kiln_value copied;
+                        if (!kiln_c99_property_read_own(source, name, name, &property) ||
+                            !kiln_c99_property_is_enumerable(&property)) continue;
+                        if (property.accessor) {
+                            status = kiln_c99_get_key(host, src_val, name, name, &copied,
+                                                      depth, thrown);
+                            if (status != KILN_C99_OK) return status;
+                        } else {
+                            copied = property.value;
+                        }
+                        status = kiln_c99_put_mode_key(host, target, name, name, copied, 0,
+                                                       depth, thrown);
+                        if (status != KILN_C99_OK) return status;
+                    }
+                    continue;
+                }
                 if (source->properties == NULL && source->shape != NULL &&
                     source->shape->special_mask == 0) {
                     if (source->elements != NULL) {

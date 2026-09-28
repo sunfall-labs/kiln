@@ -19,6 +19,9 @@ static int kiln_c99_put_site_key(kiln_host *host, kiln_value target, const kiln_
     }
     {
         kiln_object *object = kiln_c99_object_of(target);
+        if (object->sealed != NULL)
+            return kiln_c99_put_mode_key(host, target, key, stable, value, strict, depth,
+                                         thrown);
         if (object->shape != NULL && !object->frozen && !object->module_namespace) {
             const kiln_c99_pic_entry *entry = kiln_c99_site_entry(site, object->shape);
             if (entry != NULL) {
@@ -459,20 +462,18 @@ static int kiln_c99_write_would_accept_key(kiln_value target, const kiln_string 
     }
     for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
         kiln_object *object = kiln_c99_object_of(current);
-        size_t index;
+        kiln_property property;
         if (steps == 0 && object->module_namespace) {
             return 0;
         }
         if (steps == 0 && object->frozen) {
             return 0;
         }
-        index = kiln_c99_own_index_key(object, stable, key);
-        if (index != object->count) {
-            const kiln_property *property = &object->properties[index];
-            if (property->accessor) {
-                return property->setter.tag != KILN_VALUE_UNDEFINED;
+        if (kiln_c99_property_read_own_value(current, key, stable, &property)) {
+            if (property.accessor) {
+                return property.setter.tag != KILN_VALUE_UNDEFINED;
             }
-            return property->writable;
+            return property.writable;
         }
         if (object->prototype.tag != KILN_VALUE_OBJECT) {
             break;

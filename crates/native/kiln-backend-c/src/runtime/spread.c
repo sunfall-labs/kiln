@@ -319,7 +319,9 @@ static int kiln_c99_clone_table_get(const kiln_c99_clone_table *table, kiln_val 
 static int kiln_c99_clone_safe_object(const kiln_object *source) {
     kiln_shape *shape = source->shape;
     size_t index;
-    if (source->elements != NULL || source->accessor_count != 0 ||
+    /* Sealed intrinsic stores are not plain-message graphs: their function values and process
+     * descriptors must never be encoded as an empty realm-owned dictionary. */
+    if (source->sealed != NULL || source->elements != NULL || source->accessor_count != 0 ||
         source->prototype.tag != KILN_VALUE_UNDEFINED || source->arguments_brand ||
         source->error_brand || source->module_namespace ||
         (shape != NULL && (source->properties != NULL || shape->has_symbol_key ||

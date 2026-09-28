@@ -1564,14 +1564,16 @@
                 return status;
             }
             object = kiln_c99_object_of(args[0]);
-            if (object->shape != NULL) {
-                kiln_c99_ensure_dictionary(object);
-            }
-            for (index = 0; index < object->count; ++index) {
+            size_t property_count;
+            status = kiln_c99_property_walk(object, &property_count);
+            if (status != KILN_C99_OK) return status;
+            for (index = 0; index < property_count; ++index) {
                 kiln_value described;
                 int found;
                 kiln_value symbol;
-                const kiln_string *key = object->properties[index].key;
+                kiln_property projected;
+                const kiln_property *property = kiln_c99_property_view(object, index, &projected);
+                const kiln_string *key = property->key;
                 /* A symbol-keyed property is described too -- this is how a faithful copy is
                  * made, and one that quietly leaves them out is the bug this family had. It
                  * lands in the result under the same reserved key it came from, so nothing here
@@ -2031,8 +2033,7 @@
             /* Own *and* enumerable, which is the pair `Object.keys` reports and `hasOwnProperty`
              * only half of. */
             kiln_value name = kiln_c99_property_key(argc > 0 ? args[0] : kiln_c99_undefined());
-            kiln_object *object;
-            size_t slot;
+            kiln_property property;
             *result = kiln_c99_boolean(0);
             if (receiver.tag == KILN_VALUE_TYPED_ARRAY && name.tag == KILN_VALUE_STRING) {
                 int found;
@@ -2045,17 +2046,9 @@
             if (receiver.tag != KILN_VALUE_OBJECT || name.tag != KILN_VALUE_STRING) {
                 return KILN_C99_OK;
             }
-            object = kiln_c99_object_of(receiver);
-            if (object->shape != NULL) {
-                kiln_c99_ensure_dictionary(object);
-            }
-            for (slot = 0; slot < object->count; ++slot) {
-                if (kiln_c99_same_key_view(&object->properties[slot],
-                                           (const kiln_string *)name.ptr)) {
-                    *result = kiln_c99_boolean(object->properties[slot].enumerable);
-                    break;
-                }
-            }
+            if (kiln_c99_property_read_own_value(receiver, (const kiln_string *)name.ptr,
+                                                 NULL, &property))
+                *result = kiln_c99_boolean(property.enumerable);
             return KILN_C99_OK;
         }
         case KILN_C99_METHOD_IS_PROTOTYPE_OF: {

@@ -538,16 +538,15 @@ static __attribute__((noinline)) int kiln_c99_realm_program_wrote(uint32_t built
  * store without the name means the member is the table's. Reads only; converts nothing. */
 static int kiln_c99_builtin_store_has_own(uint32_t builtin, const char *member, size_t len) {
     kiln_value store;
-    const kiln_object *object;
-    size_t index;
+    kiln_string view;
+    kiln_property property;
     if (kiln_c99_callable_store(kiln_c99_builtin(builtin), &store, 0) != KILN_C99_OK) return 1;
     if (store.tag != KILN_VALUE_OBJECT) return 0;
-    object = kiln_c99_object_of(store);
-    if (object->shape != NULL) return kiln_c99_shape_slot_named(object->shape, member, len) != UINT32_MAX;
-    for (index = 0; index < object->count; ++index) {
-        if (kiln_c99_same_key(&object->properties[index], member, len)) return 1;
-    }
-    return 0;
+    if (len > UINT32_MAX) return 0;
+    view.unit_len = (uint32_t)len;
+    view.flags = kiln_c99_fixed_key_flags(member, len);
+    view.data = member;
+    return kiln_c99_property_read_own_value(store, &view, NULL, &property);
 }
 
 /* Where `member_answers` keeps the answer about (`builtin`, `member`). */

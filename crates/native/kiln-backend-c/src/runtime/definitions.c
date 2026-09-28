@@ -144,6 +144,10 @@ static int kiln_c99_define_accessor_key(kiln_value target, const kiln_string *ke
         KILN_C99_REFUSE("DefineAccessor target has no property store");
     }
     object = kiln_c99_object_of(target);
+    if (object->sealed != NULL) {
+        status = kiln_c99_ensure_dictionary(object);
+        if (status != KILN_C99_OK) return status;
+    }
     if (object->shape != NULL) {
         if (kiln_c99_define_accessor_shaped(target, key, getter, setter, enumerable, &status))
             return status;
@@ -1003,8 +1007,7 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
      * a property spelled `Symbol(Symbol.iterator)` -- which is never the one that was stored. */
     kiln_value name = kiln_c99_property_key(key);
     kiln_value descriptor;
-    kiln_object *object;
-    size_t index;
+    kiln_property projected;
     *found = 0;
     /* `ToObject(this)` comes first, and there is no object to convert these two to. */
     if (target.tag == KILN_VALUE_UNDEFINED || target.tag == KILN_VALUE_NULL) {
@@ -1026,34 +1029,7 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
     case KILN_VALUE_SHARED:
         return kiln_c99_shared_own_read(target, view, &descriptor, found, NULL);
     case KILN_VALUE_OBJECT:
-        object = kiln_c99_object_of(target);
-        if (object->shape != NULL) {
-            uint32_t slot;
-            const kiln_string *ikey = kiln_c99_interned_key_in(kiln_c99_gc_heap(), view);
-            if (ikey != NULL && kiln_c99_shape_find_slot(object->shape, ikey, &slot)) {
-                *found = 1;
-                return KILN_C99_OK;
-            }
-            if (object->elements != NULL) {
-                double index_num = kiln_c99_key_index_key(view);
-                if (index_num >= 0.0 && index_num < 100000.0) {
-                    size_t elem_idx = (size_t)index_num;
-                    if (elem_idx < object->element_count &&
-                        object->elements[elem_idx] != KILN_VAL_HOLE) {
-                        *found = 1;
-                        return KILN_C99_OK;
-                    }
-                }
-            }
-            if (object->properties == NULL) {
-                *found = 0;
-                return KILN_C99_OK;
-            }
-            kiln_c99_ensure_dictionary(object);
-        }
-        for (index = 0; index < object->count && !*found; ++index) {
-            *found = kiln_c99_same_key_view(&object->properties[index], view);
-        }
+        *found = kiln_c99_property_read_own_value(target, view, canonical, &projected);
         return KILN_C99_OK;
     case KILN_VALUE_ARRAY:
         /* Indices, `length` and the store beside them -- the three the descriptor path already
@@ -1070,17 +1046,9 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
                 return KILN_C99_OK;
             }
             if (kiln_c99_closure_store(closure).tag == KILN_VALUE_OBJECT) {
-                kiln_object *store = kiln_c99_object_of(kiln_c99_closure_store(closure));
-                size_t index;
-                if (store->shape != NULL) {
-                    kiln_c99_ensure_dictionary(store);
-                }
-                for (index = 0; index < store->count; ++index) {
-                    if (kiln_c99_same_key_view(&store->properties[index], view)) {
-                        *found = 1;
-                        return KILN_C99_OK;
-                    }
-                }
+                *found = kiln_c99_property_read_own_value(kiln_c99_closure_store(closure),
+                                                           view, canonical, &projected);
+                return KILN_C99_OK;
             }
             *found = 0;
             return KILN_C99_OK;
@@ -1109,13 +1077,7 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
             return stored;
         }
         if (store.tag == KILN_VALUE_OBJECT) {
-            kiln_object *held = kiln_c99_object_of(store);
-            if (held->shape != NULL) {
-                kiln_c99_ensure_dictionary(held);
-            }
-            for (index = 0; index < held->count && !*found; ++index) {
-                *found = kiln_c99_same_key_view(&held->properties[index], view);
-            }
+            *found = kiln_c99_property_read_own_value(store, view, canonical, &projected);
         }
         return KILN_C99_OK;
     }

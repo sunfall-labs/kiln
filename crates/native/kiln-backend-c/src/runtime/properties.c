@@ -546,7 +546,7 @@ static int kiln_c99_property_storage_assign_existing(kiln_host *host, kiln_value
                                                       kiln_value value, int strict, int depth,
                                                       kiln_value *thrown, int *found) {
     size_t index;
-    if (object->shape != NULL) {
+    if (object->sealed != NULL || object->shape != NULL) {
         int status = kiln_c99_ensure_dictionary(object);
         if (status != KILN_C99_OK) return status;
     }
@@ -1015,8 +1015,9 @@ static int kiln_c99_own_slot_key(kiln_value target, const kiln_string *key,
         KILN_C99_REFUSE("an own-slot lookup on a value that is not an ordinary object");
     }
     object = kiln_c99_object_of(target);
-    if (object->shape != NULL) {
-        kiln_c99_ensure_dictionary(object);
+    if (object->sealed != NULL || object->shape != NULL) {
+        status = kiln_c99_ensure_dictionary(object);
+        if (status != KILN_C99_OK) return status;
     }
     /* The one place a key is stored, so the one place interning has to be total (ADR 0047):
      * whatever spelling arrived, the property carries the realm's canonical pointer for it. */
@@ -1100,7 +1101,7 @@ static int kiln_c99_property_storage_commit(kiln_value target, const kiln_string
 static int kiln_c99_property_storage_delete(kiln_object *object, const kiln_string *key,
                                              const kiln_string *ikey, int *answer) {
     size_t index;
-    if (object->shape != NULL) {
+    if (object->sealed != NULL || object->shape != NULL) {
         int status = kiln_c99_ensure_dictionary(object);
         if (status != KILN_C99_OK) return status;
     }
@@ -1123,7 +1124,7 @@ static int kiln_c99_property_storage_delete(kiln_object *object, const kiln_stri
 
 static int kiln_c99_property_storage_integrity(kiln_object *object, int freeze) {
     size_t index;
-    if (object->shape != NULL) {
+    if (object->sealed != NULL || object->shape != NULL) {
         int status = kiln_c99_ensure_dictionary(object);
         if (status != KILN_C99_OK) return status;
     }

@@ -615,6 +615,9 @@ static inline kiln_body_fn kiln_c99_val_code(kiln_val value) {
 }
 
 static int kiln_c99_ensure_dictionary(kiln_object *object);
+static uint32_t *kiln_c99_sealed_orders(const kiln_object *object);
+static int kiln_c99_sealed_property_nth(const kiln_object *object, size_t at,
+                                         kiln_property *out);
 
 /* Store `value` into `object`'s slot `slot`, which its shape records code for (`code_mask`), as
  * an assignment would: in place when `value` is a closure with exactly that code, so the record
@@ -698,6 +701,36 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
     size_t total_properties;
     size_t pos = 0;
     if (object == NULL) {
+        return KILN_C99_OK;
+    }
+    if (object->sealed != NULL) {
+        kiln_property *properties;
+        kiln_sealed_values *values;
+        size_t visible = 0;
+        size_t at;
+        size_t index;
+        uint32_t *orders = kiln_c99_sealed_orders(object);
+        for (index = 0; index < object->sealed->count; ++index)
+            visible += orders[index] != 0;
+        visible += object->count;
+        if (visible > SIZE_MAX / sizeof *properties) return KILN_C99_OUT_OF_MEMORY;
+        properties = visible == 0 ? NULL : malloc(visible * sizeof *properties);
+        if (visible != 0 && properties == NULL) return KILN_C99_OUT_OF_MEMORY;
+        for (at = 0; at < visible; ++at) {
+            if (!kiln_c99_sealed_property_nth(object, at, &properties[at])) {
+                free(properties);
+                return KILN_C99_INVALID_ARGUMENT;
+            }
+        }
+        values = kiln_c99_sealed_values_of(object);
+        free(object->properties);
+        object->properties = properties;
+        object->count = visible;
+        object->capacity = visible;
+        object->slots = NULL;
+        object->slot_capacity = 0;
+        object->sealed = NULL;
+        free(values);
         return KILN_C99_OK;
     }
     shape = object->shape;
@@ -987,6 +1020,53 @@ static const kiln_sealed_layout *kiln_c99_sealed_layout_find(uint32_t tag, uint6
         if (node->tag == tag && node->code == code) return node;
     }
     return NULL;
+}
+
+/* Adopt a complete process descriptor only when this realm's bootstrap produced exactly the
+ * same ordered keys and final attributes. The table never owns values: compact slots remain on
+ * this realm's heap, and every later mutation can return to ordinary dictionary storage. */
+static int kiln_c99_sealed_layout_attach(uint32_t tag, uint64_t code,
+                                          kiln_object *object) {
+    const kiln_sealed_layout *layout = kiln_c99_sealed_layout_find(tag, code);
+    kiln_sealed_values *values;
+    uint32_t *orders;
+    size_t count;
+    size_t bytes;
+    size_t index;
+    if (layout == NULL || object == NULL || object->sealed != NULL ||
+        object->shape != NULL || object->elements != NULL || object->slots != NULL ||
+        object->count != layout->count || object->properties == NULL ||
+        layout->count >= UINT32_MAX) return 0;
+    count = layout->count;
+    if (count > (SIZE_MAX - sizeof *values) / (sizeof(kiln_val) + sizeof(uint32_t)))
+        return 0;
+    for (index = 0; index < count; ++index) {
+        const kiln_property *property = &object->properties[index];
+        const kiln_sealed_property *entry = &layout->entries[index];
+        if (property->key != entry->key || property->enumerable != entry->enumerable ||
+            property->writable != entry->writable ||
+            property->configurable != entry->configurable ||
+            property->symbol_hidden != entry->symbol_hidden || property->accessor ||
+            property->refused) return 0;
+    }
+    bytes = sizeof *values + count * (sizeof(kiln_val) + sizeof(uint32_t));
+    values = malloc(bytes);
+    if (values == NULL) return 0;
+    values->next_order = (uint32_t)count + 1;
+    values->extra_capacity = 0;
+    orders = (uint32_t *)(values->values + count);
+    for (index = 0; index < count; ++index) {
+        values->values[index] = kiln_val_from_boundary(object->properties[index].value);
+        orders[index] = (uint32_t)index + 1;
+    }
+    free(object->properties);
+    object->properties = NULL;
+    object->count = 0;
+    object->capacity = 0;
+    object->slots = values->values;
+    object->slot_capacity = count;
+    object->sealed = layout;
+    return 1;
 }
 
 /* Record a complete wide store after bootstrap. This table is process-owned metadata only:
