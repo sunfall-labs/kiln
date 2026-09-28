@@ -6,6 +6,14 @@ source_commit = "d795edb56765d4ec743bcda5a0c1452bed74de0c"
 adaptation = "Harness-only rewrites are documented in UPSTREAM.md; API assertions remain intact."
 
 [[test]]
+id = "kiln/fs/descriptor-callbacks"
+requires_host = "node"
+source = "fs-descriptor-callbacks.cjs"
+status = "runnable"
+features = ["node:fs", "open", "write", "fsync", "close", "callback-order"]
+expected_stdout = "pass\n"
+
+[[test]]
 id = "kiln/worker_threads/lifecycle"
 requires_host = "node"
 source = "worker-thread-lifecycle.cjs"
@@ -332,4 +340,3 @@ source = "upstream-adapted/crypto-primitives.mjs"
 status = "runnable"
 features = ["node:crypto", "randomBytes", "randomFillSync", "getHashes", "createHash", "createHmac", "module-graph"]
 expected_stdout = "pass\n"
-

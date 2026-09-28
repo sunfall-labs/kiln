@@ -1,6 +1,6 @@
 // kiln-builtins: node:fs implementation (Phase 5.2, ADR 0005)
 
-import { FileHandle, open } from "node:fs/promises";
+import { FileHandle, open as openPromise } from "node:fs/promises";
 
 const nativeModule =
   typeof process !== "undefined"
@@ -119,6 +119,54 @@ export const realpath = makeCallback(realpathSync);
 export const readFile = makeCallback(readFileSync);
 export const writeFile = makeCallback(writeFileSync);
 export const unlink = makeCallback(unlinkSync);
+// Descriptor callbacks run in a later turn. The host keeps the descriptor table; these adapters
+// preserve Node's `(error, fd)` and `(error, bytesWritten, data)` callback shapes without giving
+// user code a raw OS descriptor or treating the synchronous result as the API's return value.
+function descriptorCallback(callback: any, operation: () => any, done: (value: any) => void): void {
+  if (typeof callback !== "function") {
+    throw new TypeError('The "callback" argument must be of type function');
+  }
+  setImmediate(() => {
+    let value: any;
+    try {
+      value = operation();
+    } catch (error) {
+      callback(error);
+      return;
+    }
+    done(value);
+  });
+}
+
+export function open(path: any, flags: any, modeOrCallback: any, callback?: any): void {
+  const mode = typeof modeOrCallback === "function" ? undefined : modeOrCallback;
+  const done = typeof modeOrCallback === "function" ? modeOrCallback : callback;
+  descriptorCallback(done, () => openSync(path, flags, mode), (fd) => done(null, fd));
+}
+
+export function write(fd: number, data: any, ...rest: any[]): void {
+  const callback = rest.pop();
+  const isText = typeof data === "string";
+  const position = isText && typeof rest[0] === "number" ? rest[0] : undefined;
+  const offset = typeof rest[0] === "number" ? rest[0] : 0;
+  const length = typeof rest[1] === "number" ? rest[1] : (data?.byteLength ?? data?.length);
+  const bufferPosition = typeof rest[2] === "number" ? rest[2] : null;
+  descriptorCallback(
+    callback,
+    () => isText
+      ? writeSync(fd, data, position)
+      : writeSync(fd, data, offset, length, bufferPosition),
+    (written) => callback(null, written, data),
+  );
+}
+
+export function close(fd: number, callback: any): void {
+  descriptorCallback(callback, () => closeSync(fd), () => callback(null));
+}
+
+export function fsync(fd: number, callback: any): void {
+  descriptorCallback(callback, () => fsyncSync(fd), () => callback(null));
+}
 export const fchmodSync = unmaterialized("fchmodSync");
 export const futimesSync = unmaterialized("futimesSync");
 export const fchmod = makeCallback(fchmodSync);
@@ -126,7 +174,7 @@ export const futimes = makeCallback(futimesSync);
 
 export const promises: any = {
   FileHandle,
-  open,
+  open: openPromise,
   access: nativePromises?.access || unmaterialized("access"),
   appendFile: nativePromises?.appendFile || unmaterialized("appendFile"),
   chmod: nativePromises?.chmod || unmaterialized("chmod"),
@@ -259,6 +307,7 @@ const fsNamespace = {
   accessSync,
   appendFileSync,
   chmodSync,
+  close,
   closeSync,
   constants,
   copyFileSync,
@@ -270,6 +319,7 @@ const fsNamespace = {
   fchmodSync,
   fdatasyncSync,
   fstatSync,
+  fsync,
   fsyncSync,
   ftruncateSync,
   futimes,
@@ -281,6 +331,7 @@ const fsNamespace = {
   mkdir,
   mkdirSync,
   mkdtempSync,
+  open,
   openSync,
   promises,
   readFile,
@@ -306,6 +357,7 @@ const fsNamespace = {
   watchFile,
   writeFile,
   writeFileSync,
+  write,
   writeSync,
 };
 fsNamespace.default = fsNamespace;
