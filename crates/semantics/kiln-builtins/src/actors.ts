@@ -108,7 +108,9 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
           try { sender.postMessage({ kind: "cancel", id }); } catch {}
           const completion = deferredCompletion;
           deferredCompletion = undefined;
-          finish(completion?.error || graphFailure);
+          // A refused graph closes the worker's reply port after sending cloneError. That
+          // close can race this status poll; it does not mean the actor realm exited.
+          finish(options?.signal?.aborted ? completion?.error || graphFailure : graphFailure);
         };
         const finish = (error: any, value?: any): void => {
           if (settled) return;
@@ -116,7 +118,9 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
             // Abort, close and a fast reply all wait for the ownership transaction's terminal
             // status. Request cancellation is safe before unlink; after publication it cannot
             // restore sender ownership, so status 4 must consume the ticket instead.
-            deferredCompletion = { error, value };
+            // The reply's close follows its resolve/reject message. Preserve that first
+            // terminal result while the native ownership status catches up.
+            deferredCompletion ??= { error, value };
             try { internals.workerOp(GRAPH_CANCEL, pendingGraphRequest); } catch {}
             scheduleGraphPoll();
             return;
