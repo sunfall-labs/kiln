@@ -357,6 +357,20 @@ typedef struct kiln_c99_local_edge {
  * oldest up. A power of two. */
 #define KILN_GC_PENDING_EDGES 16u
 
+typedef struct kiln_c99_graph_side_span {
+    uintptr_t base;
+    uintptr_t limit;
+    const kiln_array *owner;
+} kiln_c99_graph_side_span;
+
+typedef struct kiln_c99_graph_side_set {
+    kiln_c99_graph_side_span *spans;
+    size_t count;
+    size_t capacity;
+    uintptr_t lo;
+    uintptr_t hi;
+} kiln_c99_graph_side_set;
+
 typedef struct kiln_gc_heap {
     const kiln_gc_hooks *hooks;
     kiln_gc_block *head; /* large blocks only; slab blocks are found by walking slabs */
@@ -382,6 +396,8 @@ typedef struct kiln_gc_heap {
     uint64_t actor_candidate_id;
     uint64_t actor_candidate_pending_id;
     int actor_candidate_collected;
+    /* The exclusive incoming proof owns this temporary side-span list. It is never a GC root. */
+    const kiln_c99_graph_side_set *graph_proof_sides;
     int mark_failed;
     int fallback;
     kiln_gc_ptrset large_table;
@@ -3140,15 +3156,25 @@ static int kiln_c99_heap_adopt_chunks(kiln_gc_heap *heap, kiln_nursery_chunk *ch
     return 1;
 }
 
-/* These two finalizers do no work when all storage is inside the block and the object has no
- * realm-owned side index. An array's elements may use its eight inline slots or the extra room
- * `kiln_c99_new_array_with_capacity` allocated in the same block. Keep this narrower than the
- * collector's supported layouts: a finalizer bit is permission to run arbitrary teardown for
- * every other kind. */
+/* These object and array layouts have fully accounted finalizer actions. Inline and in-block
+ * storage needs no free; a provenance-backed candidate array owns exactly one movable side
+ * buffer and its receiver's finalizer frees it. Other side storage and realm-owned indexes
+ * remain refused. Keep this narrower than the collector's supported layouts: a finalizer bit
+ * permits arbitrary teardown for every other kind. */
 static int kiln_c99_graph_inert_array_storage(const kiln_gc_block *block,
                                                const kiln_array *array) {
+    const kiln_c99_candidate_array_elements *header;
     if (array->count > array->capacity) return 0;
     if (array->elements == NULL) return array->count == 0 && array->capacity == 0;
+    if (array->candidate_elements != 0) {
+        if (array->candidate_elements != 1 || array->capacity == 0 ||
+            array->elements == array->inline_elements ||
+            array->elements == (const kiln_val *)(array + 1) ||
+            array->capacity > (SIZE_MAX - sizeof *header) / sizeof(kiln_val)) return 0;
+        header = kiln_c99_array_candidate_header(array);
+        return header->owner == array && header->capacity == array->capacity &&
+               header->candidate_id != 0 && header->generation != 0;
+    }
     if (array->elements == array->inline_elements)
         return array->capacity <= sizeof array->inline_elements / sizeof array->inline_elements[0];
     if (array->elements == (const kiln_val *)(array + 1))
@@ -3261,10 +3287,48 @@ typedef struct kiln_c99_graph_walk {
     const kiln_gc_heap *heap;
     kiln_gc_ptrset members;
     kiln_gc_ptrset reached;
+    kiln_c99_graph_side_set sides;
     kiln_gc_block **queue;
     size_t queued;
     size_t capacity;
 } kiln_c99_graph_walk;
+
+static int kiln_c99_graph_add_array_side(kiln_c99_graph_walk *walk,
+                                         const kiln_gc_block *block, const kiln_array *array) {
+    const kiln_c99_candidate_array_elements *header = kiln_c99_array_candidate_header(array);
+    const kiln_nursery_chunk *chunk = kiln_c99_nursery_chunk_of(walk->heap, block);
+    uintptr_t base = (uintptr_t)header;
+    size_t bytes;
+    size_t index;
+    kiln_c99_graph_side_span *grown;
+    if (chunk == NULL || header->candidate_id != chunk->candidate_id ||
+        header->owner != array || header->capacity != array->capacity ||
+        header->generation == 0 ||
+        array->capacity > (SIZE_MAX - sizeof *header) / sizeof(kiln_val)) return 0;
+    bytes = sizeof *header + array->capacity * sizeof(kiln_val);
+    if (base > UINTPTR_MAX - bytes ||
+        kiln_c99_gc_lookup_interior(walk->heap, base) != NULL ||
+        kiln_c99_gc_lookup_interior(walk->heap, base + bytes - 1) != NULL) return 0;
+    for (index = 0; index < walk->sides.count; ++index) {
+        const kiln_c99_graph_side_span *other = &walk->sides.spans[index];
+        if (base < other->limit && other->base < base + bytes) return 0;
+    }
+    if (walk->sides.count == walk->sides.capacity) {
+        size_t capacity = walk->sides.capacity == 0 ? 4 : walk->sides.capacity * 2;
+        if (capacity < walk->sides.capacity ||
+            capacity > SIZE_MAX / sizeof *grown) return 0;
+        grown = (kiln_c99_graph_side_span *)realloc(
+            walk->sides.spans, capacity * sizeof *grown);
+        if (grown == NULL) return 0;
+        walk->sides.spans = grown;
+        walk->sides.capacity = capacity;
+    }
+    walk->sides.spans[walk->sides.count++] =
+        (kiln_c99_graph_side_span){ base, base + bytes, array };
+    if (walk->sides.count == 1 || base < walk->sides.lo) walk->sides.lo = base;
+    if (base + bytes > walk->sides.hi) walk->sides.hi = base + bytes;
+    return 1;
+}
 
 /* Every reference must name the start of a block in the same candidate. A static or process-wide
  * pointer is refused too: this narrow walker has no certificate that it is shared immutable
@@ -3390,6 +3454,8 @@ static int kiln_c99_graph_walk_block(kiln_c99_graph_walk *walk, kiln_gc_block *b
         const kiln_array *array = (const kiln_array *)(block + 1);
         size_t index;
         if (!kiln_c99_graph_inert_finalizer_block(block)) return 0;
+        if (array->candidate_elements != 0 &&
+            !kiln_c99_graph_add_array_side(walk, block, array)) return 0;
         for (index = 0; index < array->count; ++index) {
             if (!kiln_c99_graph_follow_val(walk, array->elements[index])) return 0;
         }
@@ -3409,6 +3475,7 @@ static int kiln_c99_graph_inert_orphan_array(const kiln_gc_block *block) {
     if ((block->kind & KILN_GC_KIND_MASK) != KILN_GC_ARRAY ||
         !kiln_c99_graph_inert_finalizer_block(block)) return 0;
     array = (const kiln_array *)(block + 1);
+    if (array->candidate_elements != 0) return 0;
     for (index = 0; index < array->count; ++index) {
         kiln_val value = array->elements[index];
         if (!KILN_VAL_IS_NUMBER(value) && value != KILN_VAL_UNDEFINED &&
@@ -3422,9 +3489,9 @@ static int kiln_c99_graph_inert_orphan_array(const kiln_gc_block *block) {
  * either reachable from `root` with all edges inside the candidate, or an inert orphan array
  * with only immediate values. Incoming C/provider/machine/outside scans still cover the entire
  * chunk. This proof alone never grants permission to move. */
-static int kiln_c99_graph_candidate_closed(const kiln_gc_heap *heap,
-                                           kiln_nursery_chunk *const *chunks, size_t count,
-                                           const void *root) {
+static int kiln_c99_graph_candidate_closed_with_sides(
+    const kiln_gc_heap *heap, kiln_nursery_chunk *const *chunks, size_t count,
+    const void *root, kiln_c99_graph_side_set *sides) {
     kiln_c99_graph_walk walk = {0};
     size_t index;
     size_t seen = 0;
@@ -3492,10 +3559,21 @@ static int kiln_c99_graph_candidate_closed(const kiln_gc_heap *heap,
     }
     result = walk.queued + inert_orphans == seen;
 done:
+    if (result && sides != NULL) {
+        *sides = walk.sides;
+        memset(&walk.sides, 0, sizeof walk.sides);
+    }
+    free(walk.sides.spans);
     free(walk.queue);
     free(walk.members.table);
     free(walk.reached.table);
     return result;
+}
+
+static int kiln_c99_graph_candidate_closed(const kiln_gc_heap *heap,
+                                           kiln_nursery_chunk *const *chunks, size_t count,
+                                           const void *root) {
+    return kiln_c99_graph_candidate_closed_with_sides(heap, chunks, count, root, NULL);
 }
 
 typedef enum kiln_c99_graph_incoming_result {
@@ -3517,9 +3595,17 @@ static int kiln_c99_graph_in_batch(const kiln_gc_heap *heap,
                                    kiln_nursery_chunk *const *chunks, size_t count,
                                    const void *pointer) {
     uintptr_t address = (uintptr_t)pointer;
+    const kiln_c99_graph_side_set *sides = heap->graph_proof_sides;
     kiln_gc_block *block;
     kiln_nursery_chunk *chunk;
     size_t index;
+    if (sides != NULL && sides->count != 0 &&
+        address >= sides->lo && address < sides->hi) {
+        for (index = 0; index < sides->count; ++index) {
+            if (address >= sides->spans[index].base &&
+                address < sides->spans[index].limit) return 1;
+        }
+    }
     if (address < heap->lo || address >= heap->hi) return 0;
     block = kiln_c99_gc_lookup_interior(heap, address);
     if (block == NULL || (block->kind & KILN_GC_FLAG_NURSERY) == 0) return 0;
@@ -4300,11 +4386,13 @@ kiln_c99_graph_incoming_request_below_boundary(kiln_gc_heap *heap, uint64_t requ
     kiln_c99_realm_state *realm = &heap->realm;
     kiln_nursery_chunk *chunk;
     kiln_nursery_chunk **chunks = NULL;
+    kiln_c99_graph_side_set sides = {0};
     kiln_gc_block *block;
     kiln_c99_graph_incoming_result result = KILN_C99_GRAPH_OUTGOING_UNPROVEN;
     uint64_t candidate_id;
     size_t count = 0, index = 0, offset;
     uintptr_t word;
+    int sides_installed = 0;
     if (!kiln_c99_actor_isolated_request_escrow(heap, request_id)) {
         kiln_c99_actor_isolated_request_rollback(heap, request_id);
         return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
@@ -4323,8 +4411,12 @@ kiln_c99_graph_incoming_request_below_boundary(kiln_gc_heap *heap, uint64_t requ
     if (chunks == NULL) goto done;
     for (chunk = heap->nursery.full; chunk != NULL; chunk = chunk->next)
         if (chunk->candidate_id == candidate_id) chunks[index++] = chunk;
-    if (index != count || !kiln_c99_graph_candidate_closed(heap, chunks, count, block + 1))
+    if (index != count ||
+        !kiln_c99_graph_candidate_closed_with_sides(heap, chunks, count, block + 1, &sides))
         goto done;
+    if (heap->graph_proof_sides != NULL) goto done;
+    heap->graph_proof_sides = &sides;
+    sides_installed = 1;
     if (kiln_c99_graph_has_c_root_alias_for_request(heap, chunks, count, request_id)) {
         result = KILN_C99_GRAPH_C_ROOT_ALIAS;
         goto done;
@@ -4354,6 +4446,8 @@ kiln_c99_graph_incoming_request_below_boundary(kiln_gc_heap *heap, uint64_t requ
         else result = KILN_C99_GRAPH_CLEAR;
     }
 done:
+    if (sides_installed) heap->graph_proof_sides = NULL;
+    free(sides.spans);
     free(chunks);
     /* Only the explicit certificate path can retain escrow after full enumeration. The
      * diagnostic probe keeps its historical refusal and restores the sender graph. */

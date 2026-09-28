@@ -1978,6 +1978,8 @@ typedef struct kiln_gc_nursery {
 typedef struct kiln_c99_local_edge {
 #define KILN_C99_MODIFIED_BUILTIN_WORDS 2
 #define KILN_GC_PENDING_EDGES 16u
+typedef struct kiln_c99_graph_side_span {
+typedef struct kiln_c99_graph_side_set {
 typedef struct kiln_gc_heap {
 static const kiln_gc_hooks kiln_c99_gc_hooks;
 static _Thread_local kiln_gc_heap kiln_c99_gc_fallback;
@@ -2188,14 +2190,16 @@ static int kiln_c99_graph_inert_array_storage(const kiln_gc_block *block,
 static int kiln_c99_graph_inert_finalizer_block(const kiln_gc_block *block) {
 static int kiln_c99_chunk_sealed_for_move(const kiln_gc_nursery *nursery,
 typedef struct kiln_c99_graph_walk {
+static int kiln_c99_graph_add_array_side(kiln_c99_graph_walk *walk,
 static int kiln_c99_graph_follow(kiln_c99_graph_walk *walk, const void *payload) {
 static int kiln_c99_graph_pointer_names_member(const kiln_c99_graph_walk *walk,
 static int kiln_c99_graph_follow_val(kiln_c99_graph_walk *walk, kiln_val value) {
 static int kiln_c99_graph_inline_string(const kiln_gc_block *block) {
 static int kiln_c99_graph_walk_block(kiln_c99_graph_walk *walk, kiln_gc_block *block) {
 static int kiln_c99_graph_inert_orphan_array(const kiln_gc_block *block) {
-static int kiln_c99_graph_candidate_closed(const kiln_gc_heap *heap,
+static int kiln_c99_graph_candidate_closed_with_sides(
 done:
+static int kiln_c99_graph_candidate_closed(const kiln_gc_heap *heap,
 typedef enum kiln_c99_graph_incoming_result {
 static int kiln_c99_graph_in_batch(const kiln_gc_heap *heap,
 static int kiln_c99_graph_machine_words_alias(const kiln_gc_heap *heap,

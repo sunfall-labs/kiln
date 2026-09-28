@@ -14,6 +14,11 @@ export class Counter extends Actor {
     return this.count;
   }
   echo(value) { return value; }
+  growTransferredArray(value) {
+    if (value.length !== 100000 || value[0] !== 3 || value[99999] !== 3) return null;
+    value[200000] = 4;
+    return [value.length, value[0], value[99999], value[200000]];
+  }
   inspectGraph(value) {
     return [Object.getPrototypeOf(value) === Object.prototype, value.answer, value.values.join(',')];
   }

@@ -3151,16 +3151,23 @@ static int candidate_array_entry(void *context) {
     kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
     kiln_value ordinary, candidate;
     kiln_array *array;
+    kiln_array *ordinary_array;
     kiln_c99_candidate_array_elements *header;
+    kiln_c99_graph_side_set sides = {0};
+    kiln_nursery_chunk *batch[1];
+    kiln_val *ordinary_elements;
     uint64_t candidate_id;
+    uintptr_t side_word;
     (void)context;
     if (heap == NULL) return 1;
     heap->fallback = 0;
     heap->enabled = 1;
     if (kiln_c99_new_array_with_capacity(&ordinary, 128, 1) != KILN_C99_OK) return 2;
-    array = kiln_c99_array_of(ordinary);
-    if (array->candidate_elements || kiln_c99_array_reserve(array, 256) != KILN_C99_OK ||
-        array->candidate_elements) return 3;
+    ordinary_array = kiln_c99_array_of(ordinary);
+    if (ordinary_array->candidate_elements ||
+        kiln_c99_array_reserve(ordinary_array, 256) != KILN_C99_OK ||
+        ordinary_array->candidate_elements) return 3;
+    ordinary_elements = ordinary_array->elements;
     if (!kiln_c99_actor_candidate_begin(heap)) return 4;
     candidate_id = heap->actor_candidate_id;
     if (kiln_c99_new_array_with_capacity(&candidate, 128, 1) != KILN_C99_OK) return 5;
@@ -3177,11 +3184,31 @@ static int candidate_array_entry(void *context) {
     if (header->candidate_id != candidate_id || header->owner != array ||
         header->capacity != 256 || header->generation != 2 ||
         array->elements[127] != kiln_val_from_boundary(kiln_c99_number(127))) return 9;
-    if (!kiln_c99_actor_candidate_end(heap, 0)) return 10;
+    if (!kiln_c99_actor_candidate_end(heap, 1)) return 10;
     if (kiln_c99_array_reserve(array, 512) != KILN_C99_OK) return 11;
     header = kiln_c99_array_candidate_header(array);
     if (header->generation != 3 || header->capacity != 512 ||
         array->elements[127] != kiln_val_from_boundary(kiln_c99_number(127))) return 12;
+    batch[0] = kiln_c99_nursery_chunk_of(heap, (kiln_gc_block *)array - 1);
+    if (!kiln_c99_graph_candidate_closed_with_sides(heap, batch, 1, array, &sides) ||
+        sides.count != 1 || sides.spans[0].owner != array ||
+        sides.spans[0].base != (uintptr_t)header ||
+        sides.spans[0].limit != (uintptr_t)(array->elements + array->capacity)) return 15;
+    heap->graph_proof_sides = &sides;
+    side_word = (uintptr_t)(array->elements + 127);
+    if (!kiln_c99_graph_in_batch(heap, batch, 1, (void *)side_word) ||
+        !kiln_c99_graph_machine_words_alias(heap, batch, 1, &side_word, 1)) return 16;
+    ordinary_array->elements = array->elements;
+    if (kiln_c99_graph_outside_block(heap, batch, 1,
+            (kiln_gc_block *)ordinary_array - 1) != KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS)
+        return 17;
+    ordinary_array->elements = ordinary_elements;
+    heap->graph_proof_sides = NULL;
+    free(sides.spans);
+    header->candidate_id = 0;
+    if (kiln_c99_graph_candidate_closed(heap, batch, 1, array)) return 18;
+    header->candidate_id = candidate_id;
+    kiln_c99_actor_candidate_finish(heap, 1);
     return 0;
 }
 int main(void) {
