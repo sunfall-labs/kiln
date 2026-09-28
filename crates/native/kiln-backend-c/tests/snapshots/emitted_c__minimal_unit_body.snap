@@ -2,11 +2,11 @@
 source: crates/native/kiln-backend-c/tests/emitted_c.rs
 expression: body(&unit)
 ---
-/* Program hash: dc6fca6fab230176; bytecode version: 6. */
-static void kiln_module_dc6fca6fab23017614e1054ea9bcc72d_gc_roots(void *heap, void *context, int phase) {
+/* Program hash: 4b206319fd94c12d; bytecode version: 7. */
+static void kiln_module_4b206319fd94c12da6306ca4574b0776_gc_roots(void *heap, void *context, int phase) {
     kiln_c99_gc_unit_roots(heap, context, phase);
 }
-static int kiln_module_dc6fca6fab23017614e1054ea9bcc72d_gc_visit_roots(void *context, kiln_gc_visit_root_fn visit, void *visit_context) {
+static int kiln_module_4b206319fd94c12da6306ca4574b0776_gc_visit_roots(void *context, kiln_gc_visit_root_fn visit, void *visit_context) {
     const kiln_value *roots[] = { &kiln_c99_new_target, &kiln_c99_adopted_this, &kiln_c99_captured_arguments, &kiln_c99_frame_arguments_object, &kiln_c99_frame_callee };
     size_t index;
     (void)context;
@@ -14,8 +14,8 @@ static int kiln_module_dc6fca6fab23017614e1054ea9bcc72d_gc_visit_roots(void *con
         if (visit(visit_context, roots[index], KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;
     return KILN_C99_OK;
 }
-int kiln_module_dc6fca6fab23017614e1054ea9bcc72d(kiln_host *host, kiln_value *result) {
-    if (kiln_realm_is_active()) { int roots_status = kiln_realm_gc_register_roots_with_visitor(kiln_module_dc6fca6fab23017614e1054ea9bcc72d_gc_roots, kiln_module_dc6fca6fab23017614e1054ea9bcc72d_gc_visit_roots, NULL, 0); if (roots_status != KILN_C99_OK) return roots_status; }
+int kiln_module_4b206319fd94c12da6306ca4574b0776(kiln_host *host, kiln_value *result) {
+    if (kiln_realm_is_active()) { int roots_status = kiln_realm_gc_register_roots_with_visitor(kiln_module_4b206319fd94c12da6306ca4574b0776_gc_roots, kiln_module_4b206319fd94c12da6306ca4574b0776_gc_visit_roots, NULL, 0); if (roots_status != KILN_C99_OK) return roots_status; }
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
 kiln_block_0:;

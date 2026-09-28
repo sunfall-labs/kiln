@@ -2185,6 +2185,7 @@ static int kiln_c99_graph_pointer_names_member(const kiln_c99_graph_walk *walk,
 static int kiln_c99_graph_follow_val(kiln_c99_graph_walk *walk, kiln_val value) {
 static int kiln_c99_graph_inline_string(const kiln_gc_block *block) {
 static int kiln_c99_graph_walk_block(kiln_c99_graph_walk *walk, kiln_gc_block *block) {
+static int kiln_c99_graph_inert_orphan_array(const kiln_gc_block *block) {
 static int kiln_c99_graph_candidate_closed(const kiln_gc_heap *heap,
 done:
 typedef enum kiln_c99_graph_incoming_result {
@@ -2203,6 +2204,7 @@ static int kiln_c99_graph_has_c_root_alias(const kiln_gc_heap *heap,
 static int kiln_c99_graph_has_c_root_alias_for_request(const kiln_gc_heap *heap,
 static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_nursery_chunk(
+static kiln_c99_graph_incoming_result kiln_c99_graph_scan_local_shapes(
 static kiln_c99_graph_incoming_result kiln_c99_graph_scan_outside_heap(
 typedef struct kiln_c99_graph_provider_visit {
 static int kiln_c99_graph_visit_provider_root(void *opaque, const void *pointer,
@@ -2728,7 +2730,7 @@ static const kiln_symbol kiln_c99_well_known[] = {
 #undef KILN_C99_WELL_KNOWN
 static int kiln_c99_remember_symbol(kiln_value symbol) {
 static int kiln_c99_symbol_of_key_view(const kiln_string *key, kiln_value *out) {
-static int kiln_c99_symbol_of_key(const char *key, size_t key_len, kiln_value *out) {
+int kiln_c99_symbol_of_key(const char *key, size_t key_len, kiln_value *out) {
 static int kiln_c99_property_is_enumerable(const kiln_property *property) {
 static kiln_value kiln_c99_property_key(kiln_value key) {
 static const kiln_string *kiln_c99_well_known_ikeys[sizeof kiln_c99_well_known /
