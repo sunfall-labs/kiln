@@ -8,7 +8,8 @@ bench/concurrency/run.sh --quick    # 1 round, fewer sizes, about 3 minutes
 bench/concurrency/run.sh --only messages,server
 ```
 
-It builds a release `kiln` if there is none (`mbx build --release -p kiln-cli`), builds the kiln
+It refreshes the release `kiln` with `mbx build --release -p kiln-cli` (unless `--kiln` selects
+an explicit binary), builds the kiln
 programs with `--node --profile native-release` and the Go program once, outside every
 measurement, and writes `results-<date>.md` here with the machine details beside the numbers. The
 raw records (every round, every metric, the load average before each job) go to
@@ -47,12 +48,12 @@ below is about the native runtime.
 
 | # | workload | node / bun | Go | kiln today |
 | --- | --- | --- | --- | --- |
-| 1 | **Worker start**: start a worker and get one message back; memory per added worker with 1, 10, 100 alive | `worker_threads` `Worker` (`js/start.mjs`) | goroutine + channel | **not available**: no `worker_threads` (issue 06). Nearest equivalent measured instead: `KILN_WORKERS=N` processes (`js/kiln-start.mjs`), spawn to exit, one line per worker, PSS of the held tree |
-| 2 | **Messages**: ping-pong round trip and one-way throughput of a short object; a ~1 MB object graph; a 16 MB `ArrayBuffer` copied vs transferred | across a `Worker` (`js/messages.mjs`), and in one realm over `MessageChannel` (`js/inrealm.mjs`) | channels; the graph deep-copied (the structured-clone equivalent) and by reference | **in-realm `MessageChannel` only** (`js/inrealm.mjs`), labelled; cross-thread: not available |
-| 3 | **Shared read-only dataset**: a 50 MB `Float64Array` lookup table, N workers each doing 2M pseudo-random lookups | copied to each worker, or one `SharedArrayBuffer` (`js/shared.mjs`) | one slice every goroutine reads | **not available**: no workers, and no shared immutable region yet (issue 08) |
+| 1 | **Worker start**: start a worker and get one message back; memory per added worker with 1, 10, 100 alive | `worker_threads` `Worker` (`js/start.mjs`) | goroutine + channel | `worker_threads` over a realm (`js/start.mjs`); `KILN_WORKERS=N` processes are shown separately for deployment context |
+| 2 | **Messages**: ping-pong round trip and one-way throughput of a short object; a ~1 MB object graph; a 16 MB `ArrayBuffer` copied vs transferred | across a `Worker` (`js/messages.mjs`), and in one realm over `MessageChannel` (`js/inrealm.mjs`) | channels; the graph deep-copied (the structured-clone equivalent) and by reference | the same cross-realm Worker and in-realm programs as node and bun |
+| 3 | **Shared read-only dataset**: a 50 MB `Float64Array` lookup table, N workers each doing 2M pseudo-random lookups | copied to each worker, or one `SharedArrayBuffer` (`js/shared.mjs`) | one slice every goroutine reads | the same copied and shared-buffer program; a user object graph in the immutable region awaits issue 11 |
 | 4 | **Many tasks**: 10, 1,000, 100,000 concurrent tasks, each waking 10 times on a 10 ms timer | async functions + `setTimeout` in one realm (`js/tasks.mjs`) | goroutines + `time.Sleep` | async tasks **in one realm**, labelled (a realm per task comes with issues 05 and 09) |
 | 5 | **Data-parallel map** over 10M numbers: a compute-heavy callback, and a light one | `Array.prototype.map`; a `worker_threads` pool of one worker per core that copies each slice in and transfers it back (`js/pmap-pool.mjs`) | a loop; goroutines over sub-slices | `map`, and `parallelMap` (ADR 0058) natively, plus `parallelMap` with `KILN_PARALLELISM=1` to show whether the parallel lowering ran |
-| 6 | **Server at all cores**: hello-world HTTP under `oha` | node `cluster` (`js/cluster.mjs`); bun `Bun.serve({ reusePort })` in one process per core (`js/bun-serve.mjs`) | `net/http` | `KILN_WORKERS=auto` process mode (a supervisor plus one realm process per core, `js/serve.mjs`); `KILN_WORKERS=1` for scale |
+| 6 | **Server at all cores**: hello-world HTTP under `oha` | node `cluster` (`js/cluster.mjs`); bun `Bun.serve({ reusePort })` in one process per core (`js/bun-serve.mjs`) | `net/http` | `KILN_WORKERS=auto` in process and thread mode (`js/serve.mjs`); `KILN_WORKERS=1` for scale |
 
 Details that matter when reading the numbers:
 
@@ -83,13 +84,10 @@ Details that matter when reading the numbers:
 
 ## What "not available" means
 
-It means the runtime has no way to express the workload yet, not that it failed. Today (after
-issue 07, `1e46b859`) kiln has one realm per process: no `worker_threads` (`Worker` refuses),
-no port between realms, no shared immutable region, and realms are not yet cheap enough to run one
-per task. Each of those is an issue in `.scratch/realms-and-concurrency/issues/`, and the row
-fills in when it lands: 06 (`worker_threads`) turns on workloads 1-3 for kiln, 07 adds a thread
-mode to workload 6, 08 fills workload 3, 05 and 09 turn workload 4 into a realm per task, and 10
-adds a transfer row to 2.
+It means the runtime has no way to express that workload yet, rather than a failed run. Workloads
+1-3 now use `worker_threads` in kiln, and workload 6 has process and thread modes. A user object
+graph shared by immutable reference awaits issue 11; one realm per timer task awaits the M:N
+scheduler (09). A failed build or run is reported as a failure, and a checksum mismatch is excluded.
 
 A kiln build that fails is reported as a failure with the compiler's first error, not as "not
 available".

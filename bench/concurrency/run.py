@@ -182,7 +182,7 @@ def build_all(kiln, go_cmd, work, selected):
     by_workload = {
         "start": ["kiln-start", "start"],
         "messages": ["inrealm", "messages"],
-        "shared": [],
+        "shared": ["shared"],
         "tasks": ["tasks"],
         "pmap": ["pmap", "pmap-parallel", "pmap-parallel-light"],
         "server": ["serve"],
@@ -407,6 +407,9 @@ def jobs_for(cfg, bins):
             for mode in ("copy", "sab"):
                 add("shared", rt, lambda rt=rt, n=n, mode=mode: simple(rt, js(rt, "shared.mjs", n, cfg["queries"], mode)))
         add("shared", "go", lambda n=n: simple("go", [go, "shared", str(n), str(cfg["queries"])]), go)
+        for mode in ("copy", "sab"):
+            add("shared", "kiln", lambda n=n, mode=mode: simple(
+                "kiln", [k["shared"], str(n), str(cfg["queries"]), mode], timeout=300), k["shared"])
 
     # 4. many tasks
     for n in cfg["task_ns"]:
@@ -439,6 +442,10 @@ def jobs_for(cfg, bins):
     env = dict(os.environ)
     add("server", "kiln", lambda: [dict(r, case="server-all") for r in
                                    server("kiln", [k["serve"]], dict(env, KILN_WORKERS="auto"), s, c)], k["serve"])
+    add("server", "kiln", lambda: [dict(r, case="server-thread") for r in
+                                   server("kiln", [k["serve"]],
+                                          dict(env, KILN_WORKERS="auto", KILN_WORKERS_MODE="thread"), s, c)],
+        k["serve"])
     add("server", "kiln", lambda: [dict(r, case="server-1") for r in
                                    server("kiln", [k["serve"]], dict(env, KILN_WORKERS="1"), s, c)], k["serve"])
     add("server", "node", lambda: [dict(r, case="server-all") for r in
@@ -606,7 +613,7 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
             rep.cell(f"mem-{n}", "go", "per_worker_kib", " KB"),
             rep.cell(f"mem-{n}", "kiln", "per_worker_kib", " MB", scale=mb) or na_kiln_worker]))
     w("")
-    w("Nearest kiln equivalent today: one `KILN_WORKERS` process per worker (process mode, forked by the "
+    w("Deployment comparison: one `KILN_WORKERS` process per worker (process mode, forked by the "
       "supervisor from a process that never built a realm). Timed from spawn to exit of the whole tree, each "
       "worker printing one line (the \"message back\"); memory is the summed PSS of the held-alive tree. The "
       "node and bun columns time the same one-line program as a whole process, for context.")
@@ -652,7 +659,7 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
     w("")
     w("In one realm: the global `MessageChannel`, both ports on the main thread (structured clone plus an "
       f"event-loop hop, no thread crossing). The one-way row sends {cfg['inrealm_oneway']:,} messages here "
-      f"({cfg['oneway']:,} across threads). This is the only message passing kiln has today.")
+      f"({cfg['oneway']:,} across threads).")
     w("")
     w("| in-realm `MessageChannel` | node | bun | kiln |")
     w("| --- | --- | --- | --- |")
@@ -665,7 +672,8 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
     w("")
     w(f"Each worker does {cfg['queries']:,} pseudo-random lookups. Setup: from the first send until every "
       "worker holds the table (workers already started). Query: all workers' lookups, median of 3. RSS: the "
-      "whole process after setup. kiln: not available (no workers; the shared immutable region is issue 08).")
+      "whole process after setup. The SharedArrayBuffer row shares bytes across workers; "
+      "user object graphs cannot yet be frozen into kiln's shared immutable region (issue 11).")
     w("")
     w("| N | runtime / mode | setup | query | RSS |")
     w("| --- | --- | --- | --- | --- |")
@@ -674,11 +682,12 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
                                ("node", "SharedArrayBuffer", f"shared-{n}-sab"),
                                ("bun", "copy (structured clone per worker)", f"shared-{n}-copy"),
                                ("bun", "SharedArrayBuffer", f"shared-{n}-sab"),
-                               ("go", "one slice, shared", f"shared-{n}")]:
+                               ("go", "one slice, shared", f"shared-{n}"),
+                               ("kiln", "copy (structured clone per worker)", f"shared-{n}-copy"),
+                               ("kiln", "SharedArrayBuffer", f"shared-{n}-sab")]:
             w(rep.row(str(n), [f"{rt}: {mode}", rep.cell(case, rt, "setup_ms", " ms"),
                                rep.cell(case, rt, "query_ms", " ms"),
                                rep.cell(case, rt, "rss_kib", " MB", scale=mb)]))
-        w(rep.row(str(n), ["kiln", "not available", "not available", "not available"]))
     w("")
 
     # 4. tasks
@@ -686,7 +695,7 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
     w("")
     w(f"N tasks each wake {cfg['ticks']} times on a {cfg['interval']} ms timer and add to a counter (floor: "
       f"{cfg['ticks'] * cfg['interval']} ms). JavaScript: async functions in one realm, kiln included (one realm; "
-      "realms per task come with issue 05/09). Go: goroutines. Peak RSS is the process's maximum resident set.")
+      "one realm per task awaits issue 09). Go: goroutines. Peak RSS is the process's maximum resident set.")
     w("")
     w("| N | metric | node | bun | Go | kiln (async tasks, one realm) |")
     w("| --- | --- | --- | --- | --- | --- |")
@@ -695,6 +704,10 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
         w(rep.row(f"{n:,}", ["wall"] + [rep.cell(case, rt, "wall_ms", " ms") for rt in ("node", "bun", "go", "kiln")]))
         w(rep.row(f"{n:,}", ["ticks/s"] + [rep.cell(case, rt, "ticks_per_s", "/s") for rt in ("node", "bun", "go", "kiln")]))
         w(rep.row(f"{n:,}", ["peak RSS"] + [rep.cell(case, rt, "maxrss_kib", " MB", scale=mb) for rt in ("node", "bun", "go", "kiln")]))
+    w("")
+    w("The separate 10, 1,000 and 100,000 **realm** workload remains unmeasured until the M:N "
+      "scheduler (issue 09); the table above measures tasks sharing one realm and must not be "
+      "read as a per-realm scaling result.")
     w("")
 
     # 5. pmap
@@ -737,6 +750,7 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
     w("| server | rps | p50 | p99 | tree PSS | tree RSS | processes | errors |")
     w("| --- | --- | --- | --- | --- | --- | --- | --- |")
     for label, case, rt in [("kiln `KILN_WORKERS=auto` (supervisor + one realm process per core)", "server-all", "kiln"),
+                            ("kiln `KILN_WORKERS_MODE=thread` (one process, one realm per core)", "server-thread", "kiln"),
                             ("node `cluster` (primary + one worker per core)", "server-all", "node"),
                             ("bun `Bun.serve` + `reusePort`, one process per core", "server-all", "bun"),
                             ("Go `net/http`", "server-all", "go"),
@@ -746,6 +760,10 @@ def render(table, diverged, failures, machine, cfg, loads, started, finished, qu
                           rep.cell(case, rt, "p99_ms", " ms"), rep.cell(case, rt, "pss_kib", " MB", scale=mb),
                           rep.cell(case, rt, "rss_kib", " MB", scale=mb), rep.cell(case, rt, "processes"),
                           rep.cell(case, rt, "http_errors")]))
+    w("")
+    w("This is a high-concurrency, same-machine HTTP measurement. It does not remeasure the "
+      "16-connection case where thread mode previously trailed process mode, or the value of "
+      "process mode's crash isolation; process remains the default (issue 07).")
     w("")
 
     w("## Divergences and failures")
