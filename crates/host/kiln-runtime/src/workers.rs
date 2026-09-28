@@ -701,8 +701,8 @@ pub const WORKER_LIMIT: usize = 1024;
 /// A worker's thread stack. An interpreter recurses in Rust when a built-in calls back into
 /// JavaScript, and a native realm's generated code recurses on the C stack, so a worker gets
 /// what a main thread has rather than a thread's default two megabytes. Every thread a native
-/// realm runs on gets the same (parallel issue 30): the realms of `kiln_realm_run_pinned`, and the
-/// launcher's main thread.
+/// realm runs on gets the same (parallel issue 30): dedicated realms, shared scheduler lanes
+/// (including temporary replacement lanes), and the launcher's main thread.
 pub const WORKER_STACK: usize = 64 * 1024 * 1024;
 
 static NEXT_KEY: AtomicU64 = AtomicU64::new(1);
@@ -719,8 +719,6 @@ thread_local! {
     /// Workers this thread's realm started, which end when it does (node: a worker's own
     /// workers do not outlive it, and nothing outlives the process).
     static CHILDREN: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
-    /// The current worker's terminate flag, for the checks on hot paths.
-    static TERMINATE: Cell<Option<&'static AtomicBool>> = const { Cell::new(None) };
     /// The program a main thread runs; see [`Program`].
     static PROGRAM: RefCell<Option<Arc<Program>>> = const { RefCell::new(None) };
 }
@@ -728,6 +726,8 @@ thread_local! {
 /// Worker protocol state that belongs to a realm, even when several realms take turns on one
 /// scheduler lane. Dedicated worker threads keep using their thread-local state directly.
 pub struct RealmScopeState {
+    current: Option<Arc<WorkerContext>>,
+    signal_program: Option<Arc<crate::signals::Program>>,
     program: Option<Arc<Program>>,
     children: Vec<u64>,
     exit_request: Option<i32>,
@@ -737,11 +737,34 @@ pub struct RealmScopeState {
 impl RealmScopeState {
     pub fn new() -> Self {
         Self {
+            current: None,
+            signal_program: None,
             // Most realms never use worker channels. Allocate a program ID on first use.
             program: None,
             children: Vec::new(),
             exit_request: None,
             owns_exit: false,
+        }
+    }
+
+    /// Snapshot the worker identity present when a native realm is created. A scheduled worker
+    /// installs this identity for each turn, including after its graph changes scheduler lanes.
+    pub fn capture_current() -> Self {
+        Self {
+            current: current(),
+            signal_program: crate::signals::current_program(),
+            ..Self::new()
+        }
+    }
+
+    fn for_worker(
+        context: Arc<WorkerContext>,
+        signal_program: Option<Arc<crate::signals::Program>>,
+    ) -> Self {
+        Self {
+            current: Some(context),
+            signal_program,
+            ..Self::new()
         }
     }
 }
@@ -763,6 +786,13 @@ impl RealmScopeGuard {
     pub fn enter(state: Rc<RefCell<RealmScopeState>>) -> Self {
         let mut realm = state.borrow_mut();
         let previous = RealmScopeState {
+            current: CURRENT
+                .with(|slot| std::mem::replace(&mut *slot.borrow_mut(), realm.current.take())),
+            signal_program: {
+                let previous = crate::signals::current_program();
+                crate::signals::adopt_program(realm.signal_program.take());
+                previous
+            },
             program: PROGRAM
                 .with(|slot| std::mem::replace(&mut *slot.borrow_mut(), realm.program.take())),
             children: CHILDREN.with(|slot| {
@@ -779,6 +809,10 @@ impl RealmScopeGuard {
 impl Drop for RealmScopeGuard {
     fn drop(&mut self) {
         let mut realm = self.state.borrow_mut();
+        realm.current = CURRENT
+            .with(|slot| std::mem::replace(&mut *slot.borrow_mut(), self.previous.current.take()));
+        realm.signal_program = crate::signals::current_program();
+        crate::signals::adopt_program(self.previous.signal_program.take());
         realm.program = PROGRAM
             .with(|slot| std::mem::replace(&mut *slot.borrow_mut(), self.previous.program.take()));
         realm.children = CHILDREN.with(|slot| {
@@ -895,7 +929,12 @@ pub fn take_exit_request() -> Option<i32> {
 /// Whether the worker on this thread has been asked to stop. False on a main thread.
 #[inline]
 pub fn terminate_requested() -> bool {
-    TERMINATE.with(|flag| flag.get().is_some_and(|flag| flag.load(Ordering::Acquire)))
+    CURRENT.with(|worker| {
+        worker
+            .borrow()
+            .as_ref()
+            .is_some_and(|context| context.terminate_requested())
+    })
 }
 
 /// Start a worker: a thread of the realm host that runs `run` with the worker's context and
@@ -941,11 +980,7 @@ where
         // A worker belongs to its parent's program: the same `process.pid`, and a signal it
         // sends that program stays in it (realms issue 26).
         let program = crate::signals::current_program();
-        move || {
-            crate::signals::adopt_program(program);
-            run_worker(context, run);
-            crate::signals::adopt_program(None);
-        }
+        move || run_worker(context, program, run)
     };
     RUNNING.fetch_add(1, Ordering::AcqRel);
     match realm_host().spawn_pinned_with_stack(WORKER_STACK, body) {
@@ -967,15 +1002,18 @@ where
     }
 }
 
-fn run_worker<F>(context: Arc<WorkerContext>, run: F)
-where
+fn run_worker<F>(
+    context: Arc<WorkerContext>,
+    signal_program: Option<Arc<crate::signals::Program>>,
+    run: F,
+) where
     F: FnOnce(Arc<WorkerContext>) -> i32,
 {
-    // The flag lives as long as the record and the context that hold it; the thread-local copy
-    // is cleared before this function returns, so the `'static` is never outlived.
-    let flag: &'static AtomicBool = unsafe { &*Arc::as_ptr(&context.terminate) };
-    TERMINATE.with(|slot| slot.set(Some(flag)));
-    CURRENT.with(|current| *current.borrow_mut() = Some(Arc::clone(&context)));
+    let scope = Rc::new(RefCell::new(RealmScopeState::for_worker(
+        Arc::clone(&context),
+        signal_program,
+    )));
+    let _turn = RealmScopeGuard::enter(scope);
     let port = context.spec.port;
     enqueue(
         context.parent,
@@ -1004,8 +1042,6 @@ where
         }
     }
     close(context.spec.control);
-    CURRENT.with(|current| *current.borrow_mut() = None);
-    TERMINATE.with(|slot| slot.set(None));
     RUNNING.fetch_sub(1, Ordering::AcqRel);
 }
 
@@ -1180,6 +1216,68 @@ fn interrupt_waits(key: u64) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn worker_identity_and_signals_follow_a_realm_between_turns() {
+        use super::*;
+
+        let _program = crate::signals::host_program();
+        let signal_program = crate::signals::current_program().expect("hosted signal program");
+        let terminate = Arc::new(AtomicBool::new(false));
+        let context = Arc::new(WorkerContext {
+            thread_id: 7,
+            key: 42,
+            program: Program::new(),
+            spec: WorkerSpec {
+                entry: WorkerEntry::File("worker.mjs".to_owned()),
+                argv: Vec::new(),
+                info: String::new(),
+                port: 0,
+                control: 0,
+                pipe_stdio: true,
+            },
+            parent: 0,
+            terminate: Arc::clone(&terminate),
+        });
+        let worker = Rc::new(RefCell::new(RealmScopeState::for_worker(
+            Arc::clone(&context),
+            Some(Arc::clone(&signal_program)),
+        )));
+        let other = Rc::new(RefCell::new(RealmScopeState::new()));
+
+        {
+            let _turn = RealmScopeGuard::enter(Rc::clone(&worker));
+            assert_eq!(thread_id(), 7);
+            assert!(!terminate_requested());
+            assert!(Arc::ptr_eq(
+                &crate::signals::current_program().expect("worker signals"),
+                &signal_program
+            ));
+            let captured = RealmScopeState::capture_current();
+            assert_eq!(captured.current.as_ref().map(|worker| worker.key), Some(42));
+            own_exits();
+            assert!(request_exit(11));
+        }
+        {
+            let _turn = RealmScopeGuard::enter(Rc::clone(&other));
+            assert_eq!(thread_id(), 0);
+            assert!(!terminate_requested());
+            assert!(crate::signals::current_program().is_none());
+            assert_eq!(take_exit_request(), None);
+        }
+        terminate.store(true, Ordering::Release);
+        {
+            let _turn = RealmScopeGuard::enter(worker);
+            assert_eq!(thread_id(), 7);
+            assert!(terminate_requested());
+            assert_eq!(take_exit_request(), Some(11));
+        }
+        assert_eq!(thread_id(), 0);
+        assert!(Arc::ptr_eq(
+            &crate::signals::current_program().expect("restored signal program"),
+            &signal_program
+        ));
+    }
+
     #[test]
     fn scheduled_realms_keep_worker_protocol_state_across_lane_turns() {
         use super::*;

@@ -1212,7 +1212,9 @@ impl NativeRealm {
             introspect_armed: Cell::new(false),
             scheduled_wait: RefCell::new(None),
             affinity: Cell::new(0),
-            worker_scope: Rc::new(RefCell::new(kiln_runtime::workers::RealmScopeState::new())),
+            worker_scope: Rc::new(RefCell::new(
+                kiln_runtime::workers::RealmScopeState::capture_current(),
+            )),
             #[cfg(feature = "ffi")]
             ffi: RefCell::new(crate::ffi::State::default()),
             gc: RefCell::new(GcState::default()),
@@ -1304,9 +1306,9 @@ impl ActiveRealm {
         ACTIVE_REALM_RC.with(|slot| *slot.borrow_mut() = Some(Rc::clone(&realm)));
         ACTIVE_HEAP.with(|slot| slot.set(realm.gc.borrow().heap));
         bump_generation();
-        // A scheduler lane hosts several top-level realms. Its thread-local worker protocol
-        // state must describe only the realm holding this turn's exclusive lease. Dedicated
-        // worker threads retain their existing state until their graph runner is turn based.
+        // A scheduler lane hosts several realms. Its thread-local worker protocol and signal
+        // state must describe only the realm holding this turn's exclusive lease, including a
+        // worker once its graph runner advances by turns.
         let worker_scope = current_scheduler()
             .map(|_| kiln_runtime::workers::RealmScopeGuard::enter(Rc::clone(&realm.worker_scope)));
         Some(Self {
