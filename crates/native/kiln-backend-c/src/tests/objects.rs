@@ -2321,6 +2321,10 @@ static int actor_candidate_entry(void *context) {
     uint32_t epoch;
     (void)context;
     if (heap == NULL) return 1;
+    /* The fixture provider refuses heap attachment and supplies a fallback heap. Exercise
+     * the normal collector path explicitly within this one-process fixture. */
+    heap->fallback = 0;
+    heap->enabled = 1;
     old = (kiln_val *)kiln_c99_gc_alloc(KILN_GC_CELL, sizeof *old);
     if (old == NULL) return 2;
     *old = KILN_VAL_UNDEFINED;
@@ -2372,6 +2376,56 @@ int main(void) {
     assert!(
         run.status.success(),
         "actor factory candidate check failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_actor_candidate_stress_collects_and_discards_provenance() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int actor_candidate_stress_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_nursery_chunk *chunk;
+    uint32_t before;
+    (void)context;
+    if (heap == NULL) return 1;
+    heap->fallback = 0;
+    heap->enabled = 1;
+    /* Arm stress after ordinary realm bootstrap so this fixture isolates the candidate's
+     * allocation cadence rather than testing bootstrap's separate root lifetime. */
+    heap->stress = 1;
+    heap->stress_every = 1;
+    heap->stress_countdown = 1;
+    if (!kiln_c99_actor_candidate_begin(heap)) return 2;
+    before = heap->epoch;
+    if (kiln_c99_gc_alloc(KILN_GC_CELL, sizeof(kiln_val)) == NULL) return 3;
+    if (heap->epoch <= before || !heap->actor_candidate_collected) return 4;
+    if (!kiln_c99_actor_candidate_end(heap, 1)) return 5;
+    if (heap->actor_candidate_id != 0) return 6;
+    for (chunk = heap->nursery.full; chunk != NULL; chunk = chunk->next)
+        if (chunk->candidate_id != 0) return 7;
+    for (chunk = heap->nursery.promoted; chunk != NULL; chunk = chunk->next)
+        if (chunk->candidate_id != 0) return 8;
+    if (heap->nursery.region != NULL &&
+        ((kiln_nursery_chunk *)heap->nursery.region)->candidate_id != 0) return 9;
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int result;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 11;
+    result = kiln_realm_enter(realm, actor_candidate_stress_entry, NULL);
+    if (result != KILN_C99_OK) return result;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 12;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "actor-candidate-stress");
+    assert!(
+        run.status.success(),
+        "actor candidate stress check failed ({:?}):\n{}",
         run.status.code(),
         String::from_utf8_lossy(&run.stderr)
     );

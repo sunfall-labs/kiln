@@ -55,6 +55,23 @@ let factoryFailed = false;
 try { isolate(() => { throw new Error('factory failed'); }); }
 catch (error) { factoryFailed = error.message === 'factory failed'; }
 if (!factoryFailed) throw new Error('failed isolate factory did not unwind');
+const actorInternals = MessagePort[Symbol.for('kiln.messagePort')];
+const originalWorkerOp = actorInternals.workerOp;
+const factoryError = new Error('original factory exception');
+let preservedFactoryError = false;
+try {
+  actorInternals.workerOp = (operation, ...args) => {
+    const result = originalWorkerOp(operation, ...args);
+    if (operation === 28) return true;
+    if (operation === 29) return false; // Report cleanup failure after actually closing the scope.
+    return result;
+  };
+  try { isolate(() => { throw factoryError; }); }
+  catch (error) { preservedFactoryError = error === factoryError; }
+} finally {
+  actorInternals.workerOp = originalWorkerOp;
+}
+if (!preservedFactoryError) throw new Error('candidate cleanup masked the factory exception');
 const nested = isolate(() => isolate(() => ({ nested: true })));
 const nestedTicket = transfer(nested);
 let nestedRefused = false;

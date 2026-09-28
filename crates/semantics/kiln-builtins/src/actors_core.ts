@@ -45,14 +45,18 @@ export function isolate<T>(factory: () => T): Isolated<T> {
   // independently movable graph. The engine seals the chunks even when the factory throws.
   const candidate = isolatedOp(CANDIDATE_BEGIN) === true;
   let value!: T;
-  let completed = false;
   try {
     value = factory();
-    completed = true;
-  } finally {
-    if (candidate && isolatedOp(CANDIDATE_END, completed) !== true) {
-      throw new Error("could not seal isolated graph candidate");
+  } catch (error) {
+    if (candidate) {
+      // Cleanup must not replace the factory's original exception. The engine may already
+      // have invalidated candidate provenance after a collection or failed allocation.
+      try { isolatedOp(CANDIDATE_END, false); } catch {}
     }
+    throw error;
+  }
+  if (candidate && isolatedOp(CANDIDATE_END, true) !== true) {
+    throw new Error("could not seal isolated graph candidate");
   }
   if (isolatedOp(ISOLATE, handle, value) !== true) throw new Error("could not retain isolated graph");
   // Dynamic import plans may evaluate this module separately in one realm. This marker only

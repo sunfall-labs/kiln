@@ -2793,7 +2793,10 @@ static inline int kiln_c99_nursery_pressure_due(const kiln_gc_heap *heap) {
 }
 
 static inline int kiln_c99_actor_candidate_defer_gc(const kiln_gc_heap *heap) {
-    return heap->actor_candidate_id != 0 && !heap->actor_candidate_collected &&
+    /* Stress mode must still collect on its configured allocation cadence. A collection
+     * invalidates candidate provenance instead of silently weakening the stress probe. */
+    return heap->stress_every == 0 && heap->actor_candidate_id != 0 &&
+           !heap->actor_candidate_collected &&
            heap->nursery.active &&
            heap->nursery.full_bytes < KILN_ACTOR_CANDIDATE_GC_DEFER_BYTES;
 }
@@ -2806,8 +2809,8 @@ static inline int kiln_c99_actor_candidate_defer_gc(const kiln_gc_heap *heap) {
 static inline void kiln_c99_gc_alloc_due(kiln_gc_heap *heap) {
     /* A candidate's current and sealed chunks are in this heap, but a collection could
      * promote/reuse them before the factory publishes its result. Defer collection while its
-     * nursery stays active and the filled allocation is under its 64 MiB ceiling. Beyond
-     * either limit, collection resumes and invalidates candidate provenance. */
+     * nursery stays active and the filled allocation is under its 64 MiB ceiling. Stress mode
+     * and either limit resume collection and invalidate candidate provenance. */
     if (KILN_UNLIKELY(kiln_c99_actor_candidate_defer_gc(heap))) return;
     if (KILN_UNLIKELY(!heap->collecting && heap->enabled && !heap->fallback)) {
         /* A mid-turn collection scans the whole stack and sweeps every slab, so it earns its
