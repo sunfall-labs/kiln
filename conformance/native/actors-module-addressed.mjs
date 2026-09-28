@@ -52,22 +52,37 @@ for (const key of Reflect.ownKeys(graphTicket)) {
   const value = Object.getOwnPropertyDescriptor(graphTicket, key)?.value;
   if (value?.answer === 42 || value?.value?.answer === 42) throw new Error('isolated graph leaked through ticket');
 }
-for (let attempt = 0; attempt < 2; attempt++) {
-  let refused = false;
-  try { await owner.ref.call('echo', [graphTicket]); }
-  catch (error) {
-    refused = error.name === 'DataCloneError' && error.message === 'graph transfer needs ownership proof';
-    if (attempt === 0) console.log(error.name, error.message);
+const actorInternals = MessagePort[Symbol.for('kiln.messagePort')];
+const statusWorkerOp = actorInternals.workerOp;
+let delayedGraphStatus = false;
+try {
+  // Native requests may spend a turn pending after posting the held placeholder. Keep the
+  // ticket suspended across one extra poll, then require the terminal refusal to restore it.
+  actorInternals.workerOp = (operation, ...args) => {
+    if (operation === 31 && !delayedGraphStatus) {
+      delayedGraphStatus = true;
+      return 0;
+    }
+    return statusWorkerOp(operation, ...args);
+  };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let refused = false;
+    try { await owner.ref.call('echo', [graphTicket]); }
+    catch (error) {
+      refused = error.name === 'DataCloneError' && error.message === 'graph transfer needs ownership proof';
+      if (attempt === 0) console.log(error.name, error.message);
+    }
+    if (!refused || graphTicketState.consumed) {
+      throw new Error('failed graph handoff consumed its ticket');
+    }
   }
-  if (!refused || graphTicketState.consumed) {
-    throw new Error('failed graph handoff consumed its ticket');
-  }
+} finally {
+  actorInternals.workerOp = statusWorkerOp;
 }
 let factoryFailed = false;
 try { isolate(() => { throw new Error('factory failed'); }); }
 catch (error) { factoryFailed = error.message === 'factory failed'; }
 if (!factoryFailed) throw new Error('failed isolate factory did not unwind');
-const actorInternals = MessagePort[Symbol.for('kiln.messagePort')];
 const senderEndpoint = actorInternals.workerOp(23, owner.ref.address);
 if (actorInternals.workerOp(33, senderEndpoint) !== false) {
   throw new Error('a nonworker realm claimed the actor inbox');

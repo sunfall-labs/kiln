@@ -71,13 +71,57 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
         let pendingGraphRequest = 0;
         let graphTicket: Ticket | undefined;
         let suspendedGraphHandle: any;
+        let graphFailure: any = namedError("DataCloneError", "graph transfer needs ownership proof");
+        let deferredCompletion: { error: any; value: any } | undefined;
+        let graphPollScheduled = false;
+        const scheduleGraphPoll = (): void => {
+          if (graphPollScheduled || settled || !pendingGraphRequest) return;
+          graphPollScheduled = true;
+          setTimeout(pollGraph, 0);
+        };
+        const pollGraph = (): void => {
+          graphPollScheduled = false;
+          if (settled || !pendingGraphRequest) return;
+          let status: any;
+          try { status = internals.workerOp(GRAPH_STATUS, pendingGraphRequest); }
+          catch { scheduleGraphPoll(); return; }
+          if (status === 0) { scheduleGraphPoll(); return; }
+          if (status === 4) {
+            // The host publishes 4 only after the receiver owns the native root and the
+            // sender's escrow entry is gone. A late abort cannot restore this ticket.
+            pendingGraphRequest = 0;
+            graphTicket?.consume();
+            graphTicket = undefined;
+            suspendedGraphHandle = undefined;
+            if (deferredCompletion) {
+              const completion = deferredCompletion;
+              deferredCompletion = undefined;
+              finish(completion.error, completion.value);
+            }
+            return;
+          }
+          if (status !== 1 && status !== 2 && status !== 3) {
+            scheduleGraphPoll();
+            return;
+          }
+          pendingGraphRequest = 0;
+          try { sender.postMessage({ kind: "cancel", id }); } catch {}
+          const completion = deferredCompletion;
+          deferredCompletion = undefined;
+          finish(completion?.error || graphFailure);
+        };
         const finish = (error: any, value?: any): void => {
           if (settled) return;
-          settled = true;
           if (pendingGraphRequest) {
+            // Abort, close and a fast reply all wait for the ownership transaction's terminal
+            // status. Request cancellation is safe before unlink; after publication it cannot
+            // restore sender ownership, so status 4 must consume the ticket instead.
+            deferredCompletion = { error, value };
             try { internals.workerOp(GRAPH_CANCEL, pendingGraphRequest); } catch {}
-            pendingGraphRequest = 0;
+            scheduleGraphPoll();
+            return;
           }
+          settled = true;
           if (graphTicket) {
             if (!error) error = namedError("DataCloneError", "graph transfer needs ownership proof");
             if (suspendedGraphHandle !== undefined) {
@@ -130,21 +174,8 @@ function reference<T extends Actor>(address: ActorAddress<T>): ActorRef<T> {
               }
             } catch (error) {
               if (pendingGraphRequest) {
-                const poll = (): void => {
-                  if (settled) return;
-                  try {
-                    if (internals.workerOp(GRAPH_STATUS, pendingGraphRequest) === 0) {
-                      setTimeout(poll, 0);
-                      return;
-                    }
-                    pendingGraphRequest = 0; // GRAPH_STATUS rolled the C request back.
-                  } catch (failure) {
-                    error = failure;
-                  }
-                  try { sender.postMessage({ kind: "cancel", id }); } catch {}
-                  finish(error);
-                };
-                setTimeout(poll, 0);
+                graphFailure = error;
+                scheduleGraphPoll();
               } else {
                 try { sender.postMessage({ kind: "cancel", id }); } catch {}
                 finish(error);
