@@ -2550,6 +2550,63 @@ int main(void) {
 }
 
 #[test]
+fn executable_plain_clone_builds_movable_wide_object() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int clone_candidate_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    static kiln_shape shape;
+    kiln_value source, copy_value;
+    kiln_object *original, *copy;
+    kiln_nursery_chunk *chunk;
+    kiln_c99_graph_capsule capsule;
+    (void)context;
+    if (heap == NULL) return 1;
+    heap->fallback = 0;
+    heap->enabled = 1;
+    memset(&shape, 0, sizeof shape);
+    shape.shared = 1;
+    shape.property_count = 12;
+    for (size_t index = 0; index < 12; ++index) shape.keys[index] = kiln_c99_key_empty;
+    if (kiln_c99_new_object_with_capacity(&source, 12) != KILN_C99_OK) return 2;
+    original = kiln_c99_object_of(source);
+    original->shape = &shape;
+    for (size_t index = 0; index < 12; ++index)
+        original->slots[index] = kiln_val_from_boundary(kiln_c99_number((double)index));
+    if (!kiln_c99_actor_candidate_begin(heap)) return 3;
+    if (kiln_c99_clone_data_raw(&copy_value, &source, 1) != KILN_C99_OK ||
+        copy_value.tag != KILN_VALUE_OBJECT) return 4;
+    if (!kiln_c99_actor_candidate_end(heap, 1)) return 5;
+    copy = kiln_c99_object_of(copy_value);
+    if (copy == original || copy->shape != &shape ||
+        copy->slot_capacity != 12 || copy->slots != (kiln_val *)(copy + 1) ||
+        copy->slots[0] != original->slots[0] || copy->slots[11] != original->slots[11]) return 6;
+    chunk = kiln_c99_nursery_chunk_of(heap, (kiln_gc_block *)copy - 1);
+    if (!kiln_c99_graph_capsule_prepare(heap, chunk, copy_value, &capsule)) return 7;
+    kiln_c99_graph_capsule_dispose(&capsule);
+    kiln_c99_actor_candidate_finish(heap, 1);
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int result;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 8;
+    result = kiln_realm_enter(realm, clone_candidate_entry, NULL);
+    if (result != KILN_C99_OK) return result;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 9;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "plain-clone-movable-wide-object");
+    assert!(
+        run.status.success(),
+        "plain clone move eligibility failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_graph_capsule_moves_inline_object_and_array() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");

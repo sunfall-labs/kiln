@@ -196,6 +196,14 @@ cloning would leave aliases usable and silently break consumption. The zero-copy
 only to the proven exclusive-chunk handoff, not to graph construction, evacuation or arbitrary
 objects.
 
+Issue 10 may add a separate `prepareTransfer(value): Isolated<T>` operation. It explicitly
+snapshots a supported data graph into a private arena and leaves the input usable. Only the
+returned opaque handle points into that arena; `transfer(handle)` then hands its storage to the
+receiver without another payload copy. This preparation copy is part of that operation's cost
+and must not be described as a zero-copy graph creation. It does not change `isolate(factory)`'s
+direct-move guarantee or turn a failed direct move into a clone. The accepted graph and matching
+interpreter behavior are specified before the operation becomes public.
+
 ### Module and package boundary
 
 `kiln:actors` is the authoritative engine-owned extension. `KILN_EXTENSIONS=0` and

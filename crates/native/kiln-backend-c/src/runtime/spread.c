@@ -395,13 +395,14 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
         size_t count;
         size_t i;
         if (!kiln_c99_clone_safe_object(source)) return KILN_C99_CLONE_BAIL;
-        status = kiln_c99_new_object(&made);
+        if (shape == NULL) shape = kiln_c99_clone_list_shape(source, kiln_c99_shape_root());
+        status = shape == NULL ? kiln_c99_new_object(&made)
+                               : kiln_c99_new_object_with_capacity(&made, shape->property_count);
         if (status != KILN_C99_OK) return status;
         copy_val = kiln_val_from_boundary(made);
         copy = (kiln_object *)KILN_VAL_PTR(copy_val);
         status = kiln_c99_clone_table_put(table, value, copy_val);
         if (status != KILN_C99_OK) return status;
-        if (shape == NULL) shape = kiln_c99_clone_list_shape(source, copy->shape);
         if (shape != NULL) {
             count = shape->property_count;
             if (count > copy->slot_capacity) {
