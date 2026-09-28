@@ -120,6 +120,103 @@ static int kiln_c99_primitive_object_prototype_read(kiln_host *host, const kiln_
     return KILN_C99_OK;
 }
 
+/* Copy a sealed field through the provider lease. Neither a key nor a child edge points into
+ * the arena after this call; strings become this realm's ordinary GC strings, and child nodes
+ * get their own weak-cached realm facade. The caller holds `target` across all allocations. */
+static int kiln_c99_shared_field_value(kiln_shared_facade *facade, uint64_t index,
+                                        const kiln_shared_field_info *field, kiln_value *out) {
+    uint16_t small[64];
+    uint16_t *units = small;
+    uint64_t length = field->value_length;
+    kiln_shared_field_info copied;
+    int status;
+    if (field->kind == KILN_SHARED_FIELD_UNDEFINED)
+        KILN_C99_ABSENT("the sealed data property explicitly stores undefined", out);
+    if (field->kind == KILN_SHARED_FIELD_NULL) { *out = kiln_c99_null(); return KILN_C99_OK; }
+    if (field->kind == KILN_SHARED_FIELD_BOOLEAN) {
+        *out = kiln_c99_boolean(field->bits != 0); return KILN_C99_OK;
+    }
+    if (field->kind == KILN_SHARED_FIELD_NUMBER) {
+        *out = kiln_c99_value(KILN_VALUE_NUMBER, field->bits, NULL, 0); return KILN_C99_OK;
+    }
+    if (field->kind == KILN_SHARED_FIELD_NODE) {
+        return kiln_c99_new_shared_facade((uint32_t)field->bits, field->generation, field->node, out);
+    }
+    if (field->kind != KILN_SHARED_FIELD_STRING && field->kind != KILN_SHARED_FIELD_BIGINT)
+        return KILN_C99_INVALID_ARGUMENT;
+    if (length > SIZE_MAX / sizeof(uint16_t)) return KILN_C99_OUT_OF_MEMORY;
+    if (length > sizeof small / sizeof small[0]) {
+        units = (uint16_t *)malloc((size_t)length * sizeof(uint16_t));
+        if (units == NULL) return KILN_C99_OUT_OF_MEMORY;
+    }
+    status = kiln_shared_graph_field(facade->lease, index, &copied, NULL, 0, units, length);
+    if (status != 0 || copied.kind != field->kind || copied.value_length != length) {
+        if (units != small) free(units);
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    if (field->kind == KILN_SHARED_FIELD_STRING) {
+        *out = kiln_c99_from_units(units, (size_t)length);
+        status = out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+    } else {
+        char *digits = (char *)malloc((size_t)length == 0 ? 1 : (size_t)length);
+        void *handle = NULL;
+        if (digits == NULL) status = KILN_C99_OUT_OF_MEMORY;
+        else {
+            for (uint64_t at = 0; at < length; ++at) digits[at] = (char)units[at];
+            status = kiln_bigint_parse((const unsigned char *)digits, (size_t)length, 10, &handle)
+                         == 0 ? KILN_C99_OK : KILN_C99_INVALID_ARGUMENT;
+            free(digits);
+            if (status == KILN_C99_OK) *out = kiln_c99_bigint_value(handle);
+        }
+    }
+    if (units != small) free(units);
+    return status;
+}
+
+static int kiln_c99_shared_own_read(kiln_value target, const kiln_string *key,
+                                    kiln_value *out, int *found) {
+    kiln_shared_facade *facade = (kiln_shared_facade *)(uintptr_t)target.bits;
+    kiln_shared_info node;
+    uint16_t small[64];
+    int status;
+    *found = 0;
+    if (facade == NULL || facade->lease == 0 || kiln_shared_graph_info(facade->lease, &node) != 0)
+        return KILN_C99_INVALID_ARGUMENT;
+    if (node.array && kiln_c99_same_name_key(key, "length")) {
+        *out = kiln_c99_number((double)node.length);
+        *found = 1;
+        return KILN_C99_OK;
+    }
+    for (uint64_t index = 0; index < node.field_count; ++index) {
+        kiln_shared_field_info field;
+        uint16_t *units = small;
+        int match = 1;
+        if (kiln_shared_graph_field(facade->lease, index, &field, NULL, 0, NULL, 0) != 0)
+            return KILN_C99_INVALID_ARGUMENT;
+        if (field.key_length != key->unit_len) continue;
+        if (field.key_length > SIZE_MAX / sizeof(uint16_t)) return KILN_C99_OUT_OF_MEMORY;
+        if (field.key_length > sizeof small / sizeof small[0]) {
+            units = (uint16_t *)malloc((size_t)field.key_length * sizeof(uint16_t));
+            if (units == NULL) return KILN_C99_OUT_OF_MEMORY;
+        }
+        status = kiln_shared_graph_field(facade->lease, index, &field, units, field.key_length,
+                                         NULL, 0);
+        if (status != 0) {
+            if (units != small) free(units);
+            return KILN_C99_INVALID_ARGUMENT;
+        }
+        for (uint64_t at = 0; at < field.key_length; ++at) {
+            if (units[at] != kiln_string_unit_at(key, (size_t)at)) { match = 0; break; }
+        }
+        if (units != small) free(units);
+        if (match) {
+            *found = 1;
+            return kiln_c99_shared_field_value(facade, index, &field, out);
+        }
+    }
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_string *key,
                                  const kiln_string *ikey, kiln_value *out, int depth,
                                  kiln_value *thrown) {
@@ -133,6 +230,55 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
     const char *intrinsic_key = NULL;
     size_t intrinsic_len = 0;
     switch (target.tag) {
+    case KILN_VALUE_SHARED: {
+        kiln_shared_facade *facade = (kiln_shared_facade *)(uintptr_t)target.bits;
+        kiln_shared_info node;
+        int found;
+        int status = kiln_c99_shared_own_read(target, key, out, &found);
+        uint64_t code;
+        if (status != KILN_C99_OK || found) return status;
+        if (kiln_shared_graph_info(facade->lease, &node) != 0) return KILN_C99_INVALID_ARGUMENT;
+        if (node.null_prototype) {
+            KILN_C99_ABSENT("the sealed record's own field list is complete and its prototype "
+                            "is null", out);
+        }
+        (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
+        if (node.array) {
+            status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_ARRAY_PROTOTYPE,
+                                                   key, ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+            if (kiln_c99_same_name_key(key, "constructor")) {
+                *out = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY); return KILN_C99_OK;
+            }
+            if (kiln_c99_same_name_key(key, "@@iterator") ||
+                kiln_c99_same_name_key(key, "values")) {
+                *out = kiln_c99_method(KILN_C99_METHOD_ARRAY_VALUES); return KILN_C99_OK;
+            }
+            if (kiln_c99_same_name_key(key, "@@unscopables"))
+                return kiln_c99_get_array_unscopables(out);
+            code = kiln_c99_array_method(intrinsic_key, intrinsic_len);
+            if (code != 0) { *out = kiln_c99_method(code); return KILN_C99_OK; }
+        }
+        status = kiln_c99_primitive_object_prototype_read(host, key, ikey, intrinsic_key,
+                                                            intrinsic_len, out, depth, thrown,
+                                                            &found);
+        if (status != KILN_C99_OK || found) return status;
+        if (kiln_c99_same_name_key(key, "__proto__")) {
+            *out = kiln_c99_builtin(node.array ? KILN_C99_BUILTIN_ARRAY_PROTOTYPE
+                                               : KILN_C99_BUILTIN_OBJECT_PROTOTYPE);
+            return KILN_C99_OK;
+        }
+        if (!node.array && kiln_c99_same_name_key(key, "constructor")) {
+            *out = kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT); return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name_key(key, "toLocaleString")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING); return KILN_C99_OK;
+        }
+        if (node.array && kiln_c99_is_array_member(intrinsic_key, intrinsic_len))
+            KILN_C99_REFUSE("an Array.prototype member not yet implemented for sealed arrays");
+        KILN_C99_ABSENT("the sealed field list and the reading realm's prototype method tables "
+                        "contain no such key", out);
+    }
     case KILN_VALUE_OBJECT: {
         kiln_value current = target;
         kiln_value getter;

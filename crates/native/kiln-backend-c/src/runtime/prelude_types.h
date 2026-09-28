@@ -632,9 +632,60 @@ typedef struct kiln_shared_info {
     uint32_t length;
     uint64_t field_count;
 } kiln_shared_info;
+typedef struct kiln_shared_field_info {
+    uint32_t kind;
+    uint32_t enumerable;
+    uint64_t key_length;
+    uint64_t value_length;
+    uint64_t bits;
+    uint32_t generation;
+    uint32_t node;
+} kiln_shared_field_info;
+#define KILN_SHARED_FIELD_UNDEFINED 0u
+#define KILN_SHARED_FIELD_NULL 1u
+#define KILN_SHARED_FIELD_BOOLEAN 2u
+#define KILN_SHARED_FIELD_NUMBER 3u
+#define KILN_SHARED_FIELD_BIGINT 4u
+#define KILN_SHARED_FIELD_STRING 5u
+#define KILN_SHARED_FIELD_NODE 6u
 extern uint64_t kiln_shared_graph_retain(uint32_t graph, uint32_t generation, uint32_t node);
 extern int kiln_shared_graph_release(uint64_t lease);
 extern int kiln_shared_graph_info(uint64_t lease, kiln_shared_info *out);
+extern int kiln_shared_graph_field(uint64_t lease, uint64_t index, kiln_shared_field_info *out,
+                                   uint16_t *key_out, uint64_t key_capacity,
+                                   uint16_t *value_out, uint64_t value_capacity);
+typedef struct kiln_shared_build_result {
+    uint64_t lease;
+    uint32_t graph;
+    uint32_t generation;
+    uint32_t node;
+} kiln_shared_build_result;
+typedef struct kiln_shared_source_node {
+    uint32_t kind;
+    uint32_t null_prototype;
+    uint32_t length;
+    uint64_t field_count;
+} kiln_shared_source_node;
+typedef struct kiln_shared_source_field {
+    uint32_t key_kind;
+    uint64_t key_id;
+    uint64_t key_length;
+    uint32_t value_kind;
+    uint64_t value_bits;
+    uint64_t value_length;
+    uint32_t value_generation;
+    uint32_t value_node;
+    uint32_t enumerable;
+    uint32_t accessor;
+} kiln_shared_source_field;
+typedef int (*kiln_shared_source_inspect_fn)(void *context, uint64_t object, uint64_t field,
+                                              kiln_shared_source_node *node,
+                                              kiln_shared_source_field *slot);
+typedef int (*kiln_shared_source_unit_fn)(void *context, uint64_t string, uint64_t index,
+                                           uint16_t *unit);
+extern int kiln_shared_graph_build(uint64_t root, kiln_shared_source_inspect_fn inspect,
+                                   kiln_shared_source_unit_fn unit, void *context,
+                                   kiln_shared_build_result *out);
 extern int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap);
 extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
 extern int kiln_realm_gc_mark_roots(void *heap);
@@ -1012,6 +1063,10 @@ typedef struct kiln_shared_facade {
     uint32_t graph;
     uint32_t generation;
     uint32_t node;
+    /* Weak, realm-local identity chain. The collector does not trace these links. */
+    void *owner;
+    struct kiln_shared_facade *previous;
+    struct kiln_shared_facade *next;
 } kiln_shared_facade;
 
 /* Nonzero once any realm in this process has written an own property onto some built-in's store

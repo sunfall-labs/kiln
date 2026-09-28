@@ -796,13 +796,22 @@ static int kiln_c99_new_object(kiln_value *out) {
     return KILN_C99_OK;
 }
 
-/* Allocate a realm-local identity for one node. The graph is retained before the GC allocation,
- * so a collection or allocation failure cannot observe an unowned arena pointer. A later weak
- * cache will choose whether to return an existing facade before calling this constructor. */
+/* Allocate or recover this realm's identity for one graph node. The weak chain is not a GC root;
+ * its entries leave on finalization. A second read of the same node while it is live therefore
+ * returns exactly the same JS object, including after a message is echoed back to this realm. */
 static int kiln_c99_new_shared_facade(uint32_t graph, uint32_t generation, uint32_t node,
                                       kiln_value *out) {
-    uint64_t lease = kiln_shared_graph_retain(graph, generation, node);
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    kiln_shared_facade *cached;
+    uint64_t lease;
     kiln_shared_facade *facade;
+    for (cached = heap->shared_facades; cached != NULL; cached = cached->next) {
+        if (cached->graph == graph && cached->generation == generation && cached->node == node) {
+            *out = kiln_c99_value(KILN_VALUE_SHARED, (uint64_t)(uintptr_t)cached, NULL, 0);
+            return KILN_C99_OK;
+        }
+    }
+    lease = kiln_shared_graph_retain(graph, generation, node);
     if (lease == 0) return KILN_C99_INVALID_ARGUMENT;
     facade = (kiln_shared_facade *)kiln_c99_gc_alloc_tenured(KILN_GC_SHARED_FACADE, sizeof *facade);
     if (facade == NULL) {
@@ -813,8 +822,170 @@ static int kiln_c99_new_shared_facade(uint32_t graph, uint32_t generation, uint3
     facade->graph = graph;
     facade->generation = generation;
     facade->node = node;
+    facade->owner = heap;
+    facade->previous = NULL;
+    facade->next = heap->shared_facades;
+    if (facade->next != NULL) facade->next->previous = facade;
+    heap->shared_facades = facade;
     *out = kiln_c99_value(KILN_VALUE_SHARED, (uint64_t)(uintptr_t)facade, NULL, 0);
     return KILN_C99_OK;
+}
+
+/* The source IDs passed to the Rust builder identify a live C heap object during this one
+ * synchronous call. The low bits distinguish arrays from records without giving Rust a C
+ * pointer layout. No callback allocates in the C heap or calls JavaScript. */
+#define KILN_C99_SHARED_SOURCE_RECORD UINT64_C(1)
+#define KILN_C99_SHARED_SOURCE_ARRAY UINT64_C(2)
+
+static uint64_t kiln_c99_shared_source_id(kiln_value value) {
+    uint64_t kind = value.tag == KILN_VALUE_ARRAY ? KILN_C99_SHARED_SOURCE_ARRAY
+                                                 : KILN_C99_SHARED_SOURCE_RECORD;
+    return value.bits | kind;
+}
+
+static kiln_object *kiln_c99_shared_source_store(uint64_t id, kiln_array **array_out) {
+    uintptr_t pointer = (uintptr_t)(id & ~UINT64_C(7));
+    *array_out = NULL;
+    if ((id & 7) == KILN_C99_SHARED_SOURCE_RECORD) return (kiln_object *)pointer;
+    if ((id & 7) == KILN_C99_SHARED_SOURCE_ARRAY) {
+        kiln_array *array = (kiln_array *)pointer;
+        *array_out = array;
+        return array->properties.tag == KILN_VALUE_OBJECT
+                   ? (kiln_object *)(uintptr_t)array->properties.bits : NULL;
+    }
+    return NULL;
+}
+
+static int kiln_c99_shared_source_value(kiln_value value, kiln_shared_source_field *field) {
+    field->value_bits = value.bits;
+    switch (value.tag) {
+    case KILN_VALUE_UNDEFINED: field->value_kind = 0; break;
+    case KILN_VALUE_NULL: field->value_kind = 1; break;
+    case KILN_VALUE_BOOLEAN: field->value_kind = 2; break;
+    case KILN_VALUE_NUMBER: field->value_kind = 3; break;
+    case KILN_VALUE_BIGINT: field->value_kind = 4; break;
+    case KILN_VALUE_STRING: {
+        const kiln_string *text = (const kiln_string *)value.ptr;
+        if (text == NULL) return -1;
+        field->value_kind = 5;
+        field->value_bits = (uint64_t)(uintptr_t)text;
+        field->value_length = text->unit_len;
+        break;
+    }
+    case KILN_VALUE_OBJECT:
+    case KILN_VALUE_ARRAY:
+        field->value_kind = 7;
+        field->value_bits = kiln_c99_shared_source_id(value);
+        break;
+    case KILN_VALUE_SHARED: {
+        kiln_shared_facade *facade = (kiln_shared_facade *)(uintptr_t)value.bits;
+        if (facade == NULL || facade->lease == 0) return -1;
+        field->value_kind = 8;
+        field->value_bits = facade->graph;
+        field->value_generation = facade->generation;
+        field->value_node = facade->node;
+        break;
+    }
+    default: field->value_kind = 9; break;
+    }
+    return 0;
+}
+
+static int kiln_c99_shared_source_inspect(void *context, uint64_t id, uint64_t index,
+                                           kiln_shared_source_node *node,
+                                           kiln_shared_source_field *field) {
+    kiln_array *array;
+    kiln_object *store = kiln_c99_shared_source_store(id, &array);
+    size_t elements = array != NULL ? array->count : store != NULL ? store->element_count : 0;
+    size_t named = store == NULL ? 0 : store->shape != NULL
+                                              ? store->shape->property_count : store->count;
+    (void)context;
+    if (array == NULL && store == NULL) return -1;
+    if (index == UINT64_MAX) {
+        kiln_value prototype = store == NULL ? kiln_c99_undefined() : store->prototype;
+        if (node == NULL || (array != NULL && array->match_index >= 0) ||
+            (store != NULL && (store->error_brand || store->arguments_brand ||
+                               store->module_namespace))) return -1;
+        if (array == NULL) {
+            if (prototype.tag != KILN_VALUE_UNDEFINED && prototype.tag != KILN_VALUE_NULL &&
+                !(prototype.tag == KILN_VALUE_BUILTIN &&
+                  prototype.bits == KILN_C99_BUILTIN_OBJECT_PROTOTYPE)) return -1;
+        } else if (prototype.tag != KILN_VALUE_UNDEFINED &&
+                   !(prototype.tag == KILN_VALUE_BUILTIN &&
+                     prototype.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE)) return -1;
+        if (array != NULL && array->count > UINT32_MAX) return -1;
+        node->kind = array == NULL ? 1 : 2;
+        node->null_prototype = prototype.tag == KILN_VALUE_NULL;
+        node->length = array == NULL ? 0 : (uint32_t)array->count;
+        node->field_count = (uint64_t)elements + (uint64_t)named;
+        return 0;
+    }
+    if (field == NULL || index >= (uint64_t)elements + (uint64_t)named) return -1;
+    memset(field, 0, sizeof *field);
+    if (index < elements) {
+        kiln_val value = array != NULL ? array->elements[index] : store->elements[index];
+        if (value == KILN_VAL_HOLE) { field->key_kind = 3; return 0; }
+        field->key_kind = 2;
+        field->key_id = index;
+        field->enumerable = 1;
+        return kiln_c99_shared_source_value(kiln_val_to_boundary(value), field);
+    }
+    index -= elements;
+    if (store->shape != NULL) {
+        const kiln_string *key = store->shape->keys[index];
+        uint32_t attrs = store->shape->attrs[index];
+        if (key == NULL || index >= store->slot_capacity) return -1;
+        field->key_kind = kiln_c99_key_is_reserved(key) ? 1 : 0;
+        field->key_id = (uint64_t)(uintptr_t)key;
+        field->key_length = key->unit_len;
+        field->enumerable = kiln_c99_shape_slot_enumerable(store->shape, (uint32_t)index);
+        field->accessor = (attrs & KILN_C99_ATTR_ACCESSOR) != 0;
+        if (field->accessor) return 0;
+        return kiln_c99_shared_source_value(kiln_val_to_boundary(store->slots[index]), field);
+    }
+    {
+        const kiln_property *slot = &store->properties[index];
+        if (slot->key == NULL || slot->refused) return -1;
+        field->key_kind = kiln_c99_key_is_reserved(slot->key) ? 1 : 0;
+        field->key_id = (uint64_t)(uintptr_t)slot->key;
+        field->key_length = slot->key->unit_len;
+        field->enumerable = slot->enumerable;
+        field->accessor = slot->accessor;
+        if (slot->accessor) return 0;
+        return kiln_c99_shared_source_value(slot->value, field);
+    }
+}
+
+static int kiln_c99_shared_source_unit(void *context, uint64_t string, uint64_t index,
+                                        uint16_t *out) {
+    const kiln_string *text = (const kiln_string *)(uintptr_t)string;
+    (void)context;
+    if (text == NULL || out == NULL || index >= text->unit_len) return -1;
+    *out = kiln_string_unit_at(text, (size_t)index);
+    return 0;
+}
+
+/* Internal until the full facade/reflection/message contract has both-engine parity. */
+static int kiln_c99_share_value(kiln_value input, kiln_value *out) {
+    kiln_shared_build_result result;
+    int status;
+    if (out == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (input.tag == KILN_VALUE_SHARED || input.tag == KILN_VALUE_UNDEFINED ||
+        input.tag == KILN_VALUE_NULL || input.tag == KILN_VALUE_BOOLEAN ||
+        input.tag == KILN_VALUE_NUMBER || input.tag == KILN_VALUE_BIGINT ||
+        input.tag == KILN_VALUE_STRING) {
+        *out = input;
+        return KILN_C99_OK;
+    }
+    if (input.tag != KILN_VALUE_OBJECT && input.tag != KILN_VALUE_ARRAY)
+        return KILN_C99_INVALID_ARGUMENT;
+    status = kiln_shared_graph_build(kiln_c99_shared_source_id(input),
+                                     kiln_c99_shared_source_inspect, kiln_c99_shared_source_unit,
+                                     NULL, &result);
+    if (status != 0) return status == -3 ? KILN_C99_OUT_OF_MEMORY : KILN_C99_INVALID_ARGUMENT;
+    status = kiln_c99_new_shared_facade(result.graph, result.generation, result.node, out);
+    (void)kiln_shared_graph_release(result.lease);
+    return status;
 }
 
 /* An object whose property array is sized once, for a caller that already knows how many members

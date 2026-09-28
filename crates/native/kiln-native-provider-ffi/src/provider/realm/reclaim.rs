@@ -34,7 +34,7 @@ const OFFLINE: u64 = u64::MAX;
 
 enum Retired {
     Malloc { tag: u64, pointer: usize },
-    Graph { tag: u64, handle: Handle },
+    Graph { tag: u64, _handle: Handle },
 }
 
 impl Retired {
@@ -174,7 +174,10 @@ impl Domain {
 
     fn retire_graph(&self, tag: u64, handle: Handle) {
         let mut retired = self.retired.lock().unwrap_or_else(PoisonError::into_inner);
-        retired.push(Retired::Graph { tag, handle });
+        retired.push(Retired::Graph {
+            tag,
+            _handle: handle,
+        });
         self.pending.store(retired.len(), Ordering::Relaxed);
     }
 

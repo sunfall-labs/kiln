@@ -176,6 +176,8 @@ macro_rules! provider_abi_registry {
             (realm, kiln_shared_graph_retain, shared_graph_retain);
             (realm, kiln_shared_graph_release, shared_graph_release);
             (realm, kiln_shared_graph_info, shared_graph_info);
+            (realm, kiln_shared_graph_field, shared_graph_field);
+            (realm, kiln_shared_graph_build, shared_graph_build);
             (realm, kiln_shared_release, shared_release);
             (realm, kiln_shared_grow, shared_grow);
             (realm, kiln_atomics_wait, atomics_wait);
@@ -306,7 +308,7 @@ mod tests {
         // the newer symbol, and the version is how a resolver knows to rebuild rather than to fail
         // at link time.
         assert_eq!(PROVIDER_ABI_VERSION, 53);
-        assert_eq!(PROVIDER_EXPORTS.len(), 147);
+        assert_eq!(PROVIDER_EXPORTS.len(), 149);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_ffi_last_error"));
     }

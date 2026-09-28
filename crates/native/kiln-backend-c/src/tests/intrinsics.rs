@@ -68,6 +68,63 @@ int main(void) {
 }
 
 #[test]
+fn native_shared_facade_cache_is_weak_and_releases_its_lease() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_value first, same, after;
+    kiln_shared_facade *payload;
+    if (kiln_c99_new_shared_facade(17, 1, 0, &first) != KILN_C99_OK) return 1;
+    if (kiln_c99_new_shared_facade(17, 1, 0, &same) != KILN_C99_OK) return 2;
+    if (first.bits != same.bits || kiln_test_shared_retains != 1) return 3;
+    payload = (kiln_shared_facade *)(uintptr_t)first.bits;
+    kiln_c99_gc_finalize(((kiln_gc_block *)payload) - 1);
+    if (kiln_test_shared_releases != 1 ||
+        kiln_c99_gc_heap()->shared_facades != NULL) return 4;
+    if (kiln_c99_new_shared_facade(17, 1, 0, &after) != KILN_C99_OK) return 5;
+    if (kiln_test_shared_retains != 2) return 6;
+    payload = (kiln_shared_facade *)(uintptr_t)after.bits;
+    kiln_c99_gc_finalize(((kiln_gc_block *)payload) - 1);
+    return kiln_test_shared_releases == 2 ? 0 : 7;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "shared-facade-weak-cache");
+    assert!(
+        run.status.success(),
+        "shared facade cache/lease failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn native_shared_facade_reads_copied_fields_and_realm_prototype() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_value shared, answer;
+    int status;
+    if (kiln_c99_new_shared_facade(17, 1, 0, &shared) != KILN_C99_OK) return 1;
+    status = kiln_c99_get(NULL, shared, "x", 1, &answer, 0, NULL);
+    if (status != KILN_C99_OK || answer.tag != KILN_VALUE_NUMBER ||
+        kiln_c99_as_number(answer) != 7.0) return 2;
+    status = kiln_c99_get(NULL, shared, "toString", 8, &answer, 0, NULL);
+    if (status != KILN_C99_OK || answer.tag != KILN_VALUE_METHOD) return 3;
+    status = kiln_c99_get(NULL, shared, "absent", 6, &answer, 0, NULL);
+    return status == KILN_C99_OK && answer.tag == KILN_VALUE_UNDEFINED ? 0 : 4;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "shared-facade-read");
+    assert!(
+        run.status.success(),
+        "shared facade read failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+#[test]
 fn owned_boundary_strings_preserve_header_identity_across_conversions() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");

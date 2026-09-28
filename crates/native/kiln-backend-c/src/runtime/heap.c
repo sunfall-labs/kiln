@@ -87,7 +87,8 @@
      (UINT64_C(1) << KILN_GC_COLLECTION) | (UINT64_C(1) << KILN_GC_TYPED_BUFFER) |                 \
      (UINT64_C(1) << KILN_GC_REGEXP) | (UINT64_C(1) << KILN_GC_NODE_SERVER) |                      \
      (UINT64_C(1) << KILN_GC_NODE_RESPONSE) | (UINT64_C(1) << KILN_GC_NODE_CLIENT_REQUEST) |       \
-     (UINT64_C(1) << KILN_GC_NEXT_TICK) | (UINT64_C(1) << KILN_GC_TIMER))
+     (UINT64_C(1) << KILN_GC_NEXT_TICK) | (UINT64_C(1) << KILN_GC_TIMER) |                        \
+     (UINT64_C(1) << KILN_GC_SHARED_FACADE))
 
 static inline int kiln_c99_gc_kind_finalized(uint32_t kind) {
     uint32_t masked = kind & KILN_GC_KIND_MASK;
@@ -390,6 +391,9 @@ typedef struct kiln_gc_heap {
     uint64_t collections;
     uint64_t freed_blocks;
     uint64_t freed_bytes;
+    /* Weak identities for graph nodes observed in this realm. Links are deliberately absent
+     * from the GC tracer; a facade leaves the chain in its finalizer. */
+    kiln_shared_facade *shared_facades;
     kiln_key_table keys;
     /* Canonical pointers for the keys the HTTP path writes on every request and response. See
      * KILN_C99_HOT_KEYS. NULL means "not interned in this heap yet"; the table is per-heap
@@ -4527,8 +4531,21 @@ static void kiln_c99_gc_finalize(kiln_gc_heap *heap, kiln_gc_block *block) {
     case KILN_GC_BYTES:
         break;
     case KILN_GC_SHARED_FACADE:
-        (void)kiln_shared_graph_release(((kiln_shared_facade *)payload)->lease);
+    {
+        kiln_shared_facade *facade = (kiln_shared_facade *)payload;
+        kiln_gc_heap *owner = (kiln_gc_heap *)facade->owner;
+        if (owner != NULL) {
+            if (facade->previous != NULL) facade->previous->next = facade->next;
+            else owner->shared_facades = facade->next;
+            if (facade->next != NULL) facade->next->previous = facade->previous;
+            facade->owner = NULL;
+        }
+        if (facade->lease != 0) {
+            (void)kiln_shared_graph_release(facade->lease);
+            facade->lease = 0;
+        }
         break;
+    }
     case KILN_GC_OBJECT:
         free(((kiln_object *)payload)->properties);
         if (((kiln_object *)payload)->slots != ((kiln_object *)payload)->inline_slots) {
@@ -5196,6 +5213,18 @@ static void kiln_c99_gc_teardown_end(void *opaque) {
         }
     }
     kiln_c99_nursery_destroy(&heap->nursery);
+    /* A result retained outside its dead realm may have survived the final sweep. It cannot
+     * name a usable realm-local facade after teardown, so release its lease here. */
+    for (kiln_shared_facade *facade = heap->shared_facades; facade != NULL; ) {
+        kiln_shared_facade *next = facade->next;
+        if (facade->lease != 0) (void)kiln_shared_graph_release(facade->lease);
+        facade->lease = 0;
+        facade->owner = NULL;
+        facade->previous = NULL;
+        facade->next = NULL;
+        facade = next;
+    }
+    heap->shared_facades = NULL;
     free(heap->large_table.table);
     free(heap->slab_table.table);
     free(heap->stack);

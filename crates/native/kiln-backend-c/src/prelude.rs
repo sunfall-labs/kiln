@@ -2175,9 +2175,16 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
                     remains a Latin1 adapter for fixed C names and holds no site",
     },
     AbsentAnswer {
+        function: "kiln_c99_shared_field_value",
+        sites: 1,
+        proved_by: "the sealed data field has the explicit undefined value tag",
+    },
+    AbsentAnswer {
         function: "kiln_c99_get_own_kind",
-        sites: 26,
+        sites: 28,
         proved_by: "one membership predicate per receiver kind -- kiln_c99_is_array_member, \
+                    a shared facade's complete sealed field list and its reading realm's \
+                    Object/Array prototype tables, \
                     kiln_c99_is_string_member, kiln_c99_is_date_member, \
                     kiln_c99_is_collection_member and the kiln_c99_collection_kind_member \
                     beneath it, which answers for a collection *prototype* the same way \

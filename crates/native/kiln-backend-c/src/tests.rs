@@ -553,12 +553,49 @@ uint64_t kiln_realm_retire_tag(void) {
 }
 int kiln_realm_retired_safe(uint64_t tag) { return tag == 0 || tag < kiln_test_safe_below; }
 int kiln_realm_retire(void *record) { free(record); return 0; }
+static uint64_t kiln_test_shared_retains;
+static uint64_t kiln_test_shared_releases;
 uint64_t kiln_shared_graph_retain(uint32_t graph, uint32_t generation, uint32_t node) {
-    (void)graph; (void)generation; (void)node; return 0;
+    if (graph != 17 || generation != 1 || node != 0) return 0;
+    return ++kiln_test_shared_retains;
 }
-int kiln_shared_graph_release(uint64_t lease) { (void)lease; return 0; }
+int kiln_shared_graph_release(uint64_t lease) {
+    if (lease == 0) return -1;
+    ++kiln_test_shared_releases;
+    return 0;
+}
 int kiln_shared_graph_info(uint64_t lease, kiln_shared_info *out) {
-    (void)lease; (void)out; return -1;
+    if (lease == 0 || out == NULL) return -1;
+    out->array = 0;
+    out->null_prototype = 0;
+    out->length = 0;
+    out->field_count = 1;
+    return 0;
+}
+int kiln_shared_graph_field(uint64_t lease, uint64_t index, kiln_shared_field_info *out,
+                            uint16_t *key_out, uint64_t key_capacity,
+                            uint16_t *value_out, uint64_t value_capacity) {
+    double number = 7.0;
+    (void)value_out; (void)value_capacity;
+    if (lease == 0 || index != 0 || out == NULL) return -1;
+    out->kind = KILN_SHARED_FIELD_NUMBER;
+    out->enumerable = 1;
+    out->key_length = 1;
+    out->value_length = 0;
+    memcpy(&out->bits, &number, sizeof number);
+    out->generation = 0;
+    out->node = 0;
+    if (key_out != NULL) {
+        if (key_capacity < 1) return -2;
+        key_out[0] = 'x';
+    }
+    return 0;
+}
+int kiln_shared_graph_build(uint64_t root, kiln_shared_source_inspect_fn inspect,
+                            kiln_shared_source_unit_fn unit, void *context,
+                            kiln_shared_build_result *out) {
+    (void)root; (void)inspect; (void)unit; (void)context; (void)out;
+    return -2;
 }
 int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap) {
     /* The fixture has no realm heap: every unit collects nothing and keeps its fallback heap. */

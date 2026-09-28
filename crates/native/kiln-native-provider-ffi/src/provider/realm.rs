@@ -5175,6 +5175,12 @@ macro_rules! assert_provider_export {
         (realm, kiln_shared_graph_info, shared_graph_info) => {
             const _: unsafe extern "C" fn(u64, *mut shared_graph::SharedInfo) -> i32 = shared_graph::kiln_shared_graph_info;
         };
+        (realm, kiln_shared_graph_field, shared_graph_field) => {
+            const _: unsafe extern "C" fn(u64, u64, *mut shared_graph::SharedFieldInfo, *mut u16, u64, *mut u16, u64) -> i32 = shared_graph::kiln_shared_graph_field;
+        };
+        (realm, kiln_shared_graph_build, shared_graph_build) => {
+            const _: unsafe extern "C" fn(u64, Option<shared_graph::SourceInspect>, Option<shared_graph::SourceUnit>, *mut c_void, *mut shared_graph::SharedBuildResult) -> i32 = shared_graph::kiln_shared_graph_build;
+        };
         (realm, kiln_realm_run_pinned, realm_run_pinned) => {
             const _: unsafe extern "C" fn(u64, Option<PinnedRun>, *mut c_void, *mut i32) -> i32 = kiln_realm_run_pinned;
         };
