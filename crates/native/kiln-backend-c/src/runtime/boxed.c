@@ -379,7 +379,11 @@ static kiln_collection *kiln_c99_collection_alloc_fast(int is_map, int is_weak) 
     collection->hash_capacity = 0;
     collection->is_map = is_map;
     collection->is_weak = is_weak;
+    collection->weak_previous = NULL;
+    collection->weak_next = NULL;
+    collection->weak_owner = NULL;
     collection->properties = kiln_c99_undefined();
+    kiln_c99_collection_register_weak(collection);
     return collection;
 }
 
@@ -433,7 +437,7 @@ static inline int kiln_c99_val_collection_eq(kiln_value a, kiln_val b) {
     return kiln_c99_same_value_zero(a, kiln_val_to_boundary(b));
 }
 
-static inline double kiln_c99_val_collection_find_fast(kiln_collection *collection, kiln_val key, uint64_t hash) {
+static inline double kiln_c99_val_collection_find_unleased(kiln_collection *collection, kiln_val key, uint64_t hash) {
     if (collection->count == 0) return -1.0;
     if (collection->hash_table != NULL && collection->hash_capacity > 0) {
         size_t mask = collection->hash_capacity - 1;
@@ -457,7 +461,17 @@ static inline double kiln_c99_val_collection_find_fast(kiln_collection *collecti
     return -1.0;
 }
 
-static int kiln_c99_collection_put_val_fast(kiln_collection *collection, kiln_val key, kiln_val value) {
+static inline double kiln_c99_val_collection_find_fast(kiln_collection *collection, kiln_val key, uint64_t hash) {
+    uint64_t lease = KILN_VAL_IS_SHARED(key)
+        ? kiln_c99_collection_key_lease(kiln_val_to_boundary(key)) : 0;
+    double at;
+    if (KILN_VAL_IS_SHARED(key) && lease == 0) return -1.0;
+    at = kiln_c99_val_collection_find_unleased(collection, key, hash);
+    if (lease != 0) (void)kiln_shared_graph_release(lease);
+    return at;
+}
+
+static int kiln_c99_collection_put_val_unleased(kiln_collection *collection, kiln_val key, kiln_val value) {
     uint64_t hash = kiln_c99_val_collection_hash(key);
     size_t empty_slot = (size_t)-1;
     if (collection->count > 0 && collection->hash_table != NULL && collection->hash_capacity > 0) {
@@ -513,6 +527,16 @@ static int kiln_c99_collection_put_val_fast(kiln_collection *collection, kiln_va
         }
     }
     return KILN_C99_OK;
+}
+
+static int kiln_c99_collection_put_val_fast(kiln_collection *collection, kiln_val key, kiln_val value) {
+    uint64_t lease = KILN_VAL_IS_SHARED(key)
+        ? kiln_c99_collection_key_lease(kiln_val_to_boundary(key)) : 0;
+    int status;
+    if (KILN_VAL_IS_SHARED(key) && lease == 0) return KILN_C99_INVALID_ARGUMENT;
+    status = kiln_c99_collection_put_val_unleased(collection, key, value);
+    if (lease != 0) (void)kiln_shared_graph_release(lease);
+    return status;
 }
 
 static kiln_val kiln_c99_collection_get_val_fast(kiln_collection *collection, kiln_val key) {

@@ -388,12 +388,14 @@ typedef struct kiln_gc_heap {
     const void *pending[KILN_GC_PENDING_EDGES];
     uint32_t pending_head;
     uint32_t pending_len;
+    size_t marked_blocks;
     uint64_t collections;
     uint64_t freed_blocks;
     uint64_t freed_bytes;
     /* Weak identities for graph nodes observed in this realm. Links are deliberately absent
      * from the GC tracer; a facade leaves the chain in its finalizer. */
     kiln_shared_facade *shared_facades;
+    kiln_collection *weak_collections;
     kiln_key_table keys;
     /* Canonical pointers for the keys the HTTP path writes on every request and response. See
      * KILN_C99_HOT_KEYS. NULL means "not interned in this heap yet"; the table is per-heap
@@ -2332,7 +2334,9 @@ static void kiln_c99_gc_mark_word(kiln_gc_heap *heap, uintptr_t word) {
         if (block != NULL) kiln_c99_gc_mark_found(heap, block);
     }
     if ((word & KILN_TAG_MASK) >= KILN_TAG_STRING_PREFIX) {
-        uintptr_t address = word & UINT64_C(0x0000FFFFFFFFFFFF);
+        /* The shared-facade tag uses bit 47; taking a 48-bit address here turns that tag bit
+         * into a false pointer and lets a live facade die during a generated expression. */
+        uintptr_t address = word & KILN_PAYLOAD_MASK;
         if (address < heap->lo || address >= heap->hi) return;
         block = kiln_c99_gc_lookup_interior(heap, address);
         if (block != NULL) kiln_c99_gc_mark_found(heap, block);
@@ -3941,6 +3945,26 @@ static void kiln_c99_gc_splice_external(kiln_gc_heap *from_heap, kiln_gc_heap *t
     }
 }
 
+/* Weak collections are indexed by their owning heap so the ephemeron pass can find them
+ * without retaining them. Rehome that index when a collection moves with a transferred graph. */
+static void kiln_c99_gc_rehome_weak_collection(kiln_gc_heap *to_heap,
+                                                kiln_collection *source,
+                                                kiln_collection *destination) {
+    kiln_gc_heap *from_heap = source->weak_owner;
+    if (from_heap == NULL) return;
+    if (source->weak_previous != NULL) source->weak_previous->weak_next = source->weak_next;
+    else from_heap->weak_collections = source->weak_next;
+    if (source->weak_next != NULL) source->weak_next->weak_previous = source->weak_previous;
+    source->weak_owner = NULL;
+    source->weak_previous = NULL;
+    source->weak_next = NULL;
+    destination->weak_owner = to_heap;
+    destination->weak_previous = NULL;
+    destination->weak_next = to_heap->weak_collections;
+    if (destination->weak_next != NULL) destination->weak_next->weak_previous = destination;
+    to_heap->weak_collections = destination;
+}
+
 static void kiln_c99_gc_splice_sublist_range(kiln_gc_heap *from_heap, kiln_gc_heap *to_heap,
                                              kiln_gc_block *first, kiln_gc_block *last) {
     kiln_gc_block *cur;
@@ -3964,6 +3988,11 @@ static void kiln_c99_gc_splice_sublist_range(kiln_gc_heap *from_heap, kiln_gc_he
     while (cur != NULL) {
         kiln_gc_block *next = cur->next;
         kiln_c99_gc_splice_external(from_heap, to_heap, cur);
+        if ((cur->kind & KILN_GC_KIND_MASK) == KILN_GC_COLLECTION) {
+            kiln_collection *collection = (kiln_collection *)(cur + 1);
+            if (collection->is_weak)
+                kiln_c99_gc_rehome_weak_collection(to_heap, collection, collection);
+        }
         cur->mark = 0; /* Reset mark epoch so target heap's GC tracks it cleanly */
         kiln_c99_gc_ptrset_remove(&from_heap->large_table, cur);
         kiln_c99_gc_ptrset_insert(&to_heap->large_table, cur);
@@ -4068,6 +4097,13 @@ static void *kiln_c99_gc_splice_sublist(kiln_gc_heap *from_heap, kiln_gc_heap *t
         source->owns_bytes = 0;
         source->moved_external = 0;
         source->shared = NULL;
+    }
+    if ((root_block->kind & KILN_GC_KIND_MASK) == KILN_GC_COLLECTION) {
+        kiln_collection *source = (kiln_collection *)root_ptr;
+        kiln_collection *copy = (kiln_collection *)(promoted + 1);
+        if (source->is_weak) kiln_c99_gc_rehome_weak_collection(to_heap, source, copy);
+        source->entries = NULL;
+        source->hash_table = NULL;
     }
 
     /* Release original block from from_heap */
@@ -4204,6 +4240,7 @@ static void kiln_c99_gc_release(void *payload) {
 static void kiln_c99_gc_mark_found(kiln_gc_heap *heap, kiln_gc_block *block) {
     if (block == NULL || block->mark == heap->epoch) return;
     block->mark = heap->epoch;
+    heap->marked_blocks += 1;
     if ((block->kind & KILN_GC_FLAG_NURSERY) != 0) kiln_c99_nursery_note_mark(heap, block);
     if (heap->stack_len == heap->stack_capacity) {
         size_t wanted = heap->stack_capacity == 0 ? 256 : heap->stack_capacity * 2;
@@ -4251,6 +4288,7 @@ static void kiln_c99_gc_mark_now(kiln_gc_heap *heap, const void *payload) {
     kiln_gc_block *block = kiln_c99_gc_lookup(heap, payload);
     if (block == NULL || block->mark == heap->epoch) return;
     block->mark = heap->epoch;
+    heap->marked_blocks += 1;
     if ((block->kind & KILN_GC_FLAG_NURSERY) != 0) kiln_c99_nursery_note_mark(heap, block);
     if (heap->stack_len == heap->stack_capacity) {
         size_t wanted = heap->stack_capacity == 0 ? 256 : heap->stack_capacity * 2;
@@ -4400,10 +4438,12 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
     case KILN_GC_COLLECTION: {
         kiln_collection *collection = (kiln_collection *)payload;
         size_t index;
-        for (index = 0; index < collection->count; ++index) {
-            if (collection->entries[index].dead) continue;
-            kiln_c99_gc_mark_value(heap, &collection->entries[index].key);
-            kiln_c99_gc_mark_value(heap, &collection->entries[index].value);
+        if (!collection->is_weak) {
+            for (index = 0; index < collection->count; ++index) {
+                if (collection->entries[index].dead) continue;
+                kiln_c99_gc_mark_value(heap, &collection->entries[index].key);
+                kiln_c99_gc_mark_value(heap, &collection->entries[index].value);
+            }
         }
         kiln_c99_gc_mark_value(heap, &collection->properties);
         break;
@@ -4595,9 +4635,19 @@ static void kiln_c99_gc_finalize(kiln_gc_heap *heap, kiln_gc_block *block) {
         free(((kiln_bound *)payload)->arguments);
         break;
     case KILN_GC_COLLECTION:
-        free(((kiln_collection *)payload)->entries);
-        free(((kiln_collection *)payload)->hash_table);
+    {
+        kiln_collection *collection = (kiln_collection *)payload;
+        kiln_gc_heap *owner = collection->weak_owner;
+        if (owner != NULL) {
+            if (collection->weak_previous != NULL) collection->weak_previous->weak_next = collection->weak_next;
+            else owner->weak_collections = collection->weak_next;
+            if (collection->weak_next != NULL) collection->weak_next->weak_previous = collection->weak_previous;
+            collection->weak_owner = NULL;
+        }
+        free(collection->entries);
+        free(collection->hash_table);
         break;
+    }
     case KILN_GC_TYPED_BUFFER: {
         kiln_typed_buffer *buffer = (kiln_typed_buffer *)payload;
         if (buffer->owns_bytes) {
@@ -4667,6 +4717,55 @@ static void kiln_c99_gc_drain(kiln_gc_heap *heap) {
     heap->pending_len = 0;
 }
 
+/* A weak key is live only when another root reached its GC block. Process-owned immutable
+ * values have no block in this heap and cannot be collected here. This lookup is performed
+ * before sweep, while every weak entry still points to allocated storage. */
+static int kiln_c99_gc_weak_key_live(kiln_gc_heap *heap, const kiln_value *key) {
+    kiln_gc_block *block;
+    if (key->tag < KILN_VALUE_STRING) return 1;
+    block = kiln_c99_gc_lookup(heap, (const void *)(uintptr_t)key->bits);
+    return block == NULL || block->mark == heap->epoch;
+}
+
+/* WeakMap entries are ephemerons: a live key makes its value live, and that value may in turn
+ * make another weak key live. Repeat to a fixed point before clearing dead entries or sweeping.
+ * WeakSet stores its key as its value; marking it after the key is proved live changes nothing. */
+static void kiln_c99_gc_weak_ephemerons(kiln_gc_heap *heap) {
+    size_t before;
+    kiln_collection *collection;
+    do {
+        before = heap->marked_blocks;
+        for (collection = heap->weak_collections; collection != NULL;
+             collection = collection->weak_next) {
+            kiln_gc_block *block = kiln_c99_gc_lookup(heap, collection);
+            size_t index;
+            if (block == NULL || block->mark != heap->epoch) continue;
+            for (index = 0; index < collection->count; ++index) {
+                kiln_entry *entry = &collection->entries[index];
+                if (!entry->dead && kiln_c99_gc_weak_key_live(heap, &entry->key))
+                    kiln_c99_gc_mark_value(heap, &entry->value);
+            }
+        }
+        kiln_c99_gc_drain(heap);
+    } while (!heap->mark_failed && heap->marked_blocks != before);
+    if (heap->mark_failed) return;
+    for (collection = heap->weak_collections; collection != NULL;
+         collection = collection->weak_next) {
+        kiln_gc_block *block = kiln_c99_gc_lookup(heap, collection);
+        size_t index;
+        if (block == NULL || block->mark != heap->epoch) continue;
+        for (index = 0; index < collection->count; ++index) {
+            kiln_entry *entry = &collection->entries[index];
+            if (entry->dead || kiln_c99_gc_weak_key_live(heap, &entry->key)) continue;
+            kiln_c99_collection_hash_remove(collection, index, entry->key);
+            entry->dead = 1;
+            entry->key = kiln_c99_undefined();
+            entry->value = kiln_c99_undefined();
+            collection->live -= 1;
+        }
+    }
+}
+
 /* The granule words a chunk has handed out, from its base to `limit`. */
 static inline size_t kiln_c99_nursery_used_words(const kiln_nursery_chunk *chunk, const char *limit) {
     size_t words = ((size_t)(limit - chunk->base) / 16 + 63) / 64;
@@ -4679,6 +4778,7 @@ static void kiln_c99_gc_begin(kiln_gc_heap *heap) {
     heap->stack_len = 0;
     heap->pending_head = 0;
     heap->pending_len = 0;
+    heap->marked_blocks = 0;
     heap->mark_failed = 0;
 }
 
@@ -5005,6 +5105,7 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
     kiln_c99_gc_mark_promise_jobs(heap);
     if (heap->mid_turn) kiln_c99_gc_scan_stack(heap);
     kiln_c99_gc_drain(heap);
+    if (!heap->mark_failed) kiln_c99_gc_weak_ephemerons(heap);
 
     if (!heap->mark_failed) {
         kiln_c99_key_purge(heap);

@@ -5,11 +5,16 @@ const G = globalThis as any;
 const nativeShare: (value: any) => any = G.__kilnShare;
 const nativeIsShared: (value: any) => boolean = G.__kilnSharedIs;
 
+declare const sharedValueBrand: unique symbol;
+export type Shared<T> = T extends object
+  ? { readonly [K in keyof T]: Shared<T[K]> } & { readonly [sharedValueBrand]: true }
+  : T;
+
 if (typeof nativeShare !== "function" || typeof nativeIsShared !== "function") {
   throw new Error("kiln:shared requires enabled Kiln extensions");
 }
 
-export function share<T>(value: T): Readonly<T> {
+export function share<T>(value: T): Shared<T> {
   return nativeShare(value);
 }
 

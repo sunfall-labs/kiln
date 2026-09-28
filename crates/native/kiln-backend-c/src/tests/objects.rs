@@ -1,5 +1,86 @@
 use super::*;
 
+#[test]
+fn weak_collections_mark_values_to_a_fixed_point_and_clear_dead_keys() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0)).expect("unit emits");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap heap;
+    kiln_gc_heap other;
+    kiln_value map, first_key, second_key, bridge, final_value;
+    kiln_collection *collection;
+    kiln_gc_block *final_block;
+    kiln_c99_gc_heap_init(&heap);
+    kiln_test_heap = &heap;
+    kiln_test_generation += 1;
+    heap.enabled = 0;
+    if (kiln_c99_new_collection(&map, 1, 1) != KILN_C99_OK) return 1;
+    if (kiln_c99_new_array(&first_key) != KILN_C99_OK ||
+        kiln_c99_new_array(&second_key) != KILN_C99_OK ||
+        kiln_c99_new_array(&bridge) != KILN_C99_OK ||
+        kiln_c99_new_array(&final_value) != KILN_C99_OK) return 2;
+    if (kiln_c99_array_push(bridge, second_key) != KILN_C99_OK) return 3;
+    /* Second entry precedes the first in the scan: it takes another pass to find its key. */
+    if (kiln_c99_collection_put(map, second_key, final_value) != KILN_C99_OK ||
+        kiln_c99_collection_put(map, first_key, bridge) != KILN_C99_OK) return 4;
+    collection = kiln_c99_collection_of(map);
+    final_block = kiln_c99_gc_lookup(&heap, (void *)(uintptr_t)final_value.bits);
+    if (final_block == NULL || heap.weak_collections != collection) return 5;
+    kiln_c99_nursery_turn_chunk(&heap);
+    kiln_c99_gc_begin(&heap);
+    kiln_c99_gc_mark_word(&heap, KILN_VAL_TAG_PTR(KILN_TAG_SHARED_PREFIX,
+                                                 (void *)(uintptr_t)first_key.bits));
+    if (kiln_c99_gc_lookup(&heap, (void *)(uintptr_t)first_key.bits)->mark != heap.epoch)
+        return 12;
+    kiln_c99_gc_begin(&heap);
+    kiln_c99_gc_mark_value(&heap, &map);
+    kiln_c99_gc_mark_value(&heap, &first_key);
+    kiln_c99_gc_drain(&heap);
+    kiln_c99_gc_weak_ephemerons(&heap);
+    if (final_block->mark != heap.epoch || collection->live != 2) return 6;
+    kiln_c99_gc_begin(&heap);
+    kiln_c99_gc_mark_value(&heap, &map);
+    kiln_c99_gc_drain(&heap);
+    kiln_c99_gc_weak_ephemerons(&heap);
+    if (collection->live != 0 || !collection->entries[0].dead ||
+        !collection->entries[1].dead || collection->entries[0].key.tag != KILN_VALUE_UNDEFINED)
+        return 7;
+    kiln_c99_gc_release_cell(collection);
+    if (heap.weak_collections != NULL) return 8;
+    kiln_c99_gc_heap_init(&other);
+    if (kiln_c99_new_collection(&map, 1, 1) != KILN_C99_OK) return 9;
+    collection = kiln_c99_collection_of(map);
+    kiln_collection *moved = (kiln_collection *)kiln_c99_gc_splice_sublist(&heap, &other, collection);
+    if (moved == NULL || moved == collection || heap.weak_collections != NULL ||
+        other.weak_collections != moved || moved->weak_owner != &other) return 10;
+    kiln_test_heap = &other;
+    kiln_test_generation += 1;
+    kiln_c99_gc_release_cell(moved);
+    if (other.weak_collections != NULL) return 11;
+    kiln_collection *fast = kiln_c99_collection_alloc_fast(1, 1);
+    if (fast == NULL || other.weak_collections != fast || fast->weak_owner != &other)
+        return 13;
+    kiln_c99_gc_release_cell(fast);
+    if (other.weak_collections != NULL) return 14;
+    kiln_c99_nursery_destroy(&heap.nursery);
+    kiln_c99_nursery_destroy(&other.nursery);
+    free(heap.large_table.table);
+    free(heap.slab_table.table);
+    free(other.large_table.table);
+    free(other.slab_table.table);
+    free(heap.stack);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "weak-ephemerons");
+    assert!(
+        run.status.success(),
+        "weak ephemeron fixture failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
 /// ADR 0071, realms issue 04 step 3: a process-wide site keeps what every realm can read and
 /// forgets, when a realm is torn down, everything that realm is about to free -- its realm-local
 /// shapes, and a realm-local key a list-mode holder was checked by. Which built-ins are modified

@@ -2688,11 +2688,11 @@ typedef struct kiln_collection {
     uint32_t *hash_table;
     size_t hash_capacity;
     int is_map;
-    /* Weak collections share the identity-keyed storage and methods, but deliberately expose
-     * neither size nor iteration. The native runtime has no tracing collector yet, so entries
-     * remain strongly retained for this process lifetime; the observable WeakMap/WeakSet API is
-     * nevertheless correct and this flag prevents accidentally advertising Map semantics. */
+    /* Weak collections use ephemeron tracing: a value is marked only once its key is live. */
     int is_weak;
+    struct kiln_collection *weak_previous;
+    struct kiln_collection *weak_next;
+    struct kiln_gc_heap *weak_owner;
     /* Where `class Registry extends Map {}` puts the prototype its instances inherit from, and
      * where a write that is not an entry goes. Undefined until something needs one, so an
      * ordinary Map costs nothing for it. */

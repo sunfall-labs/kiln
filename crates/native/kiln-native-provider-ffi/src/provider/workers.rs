@@ -1075,6 +1075,120 @@ kiln_native_provider_contract::provider_abi_registry!(assert_worker_export);
 mod tests {
     use super::*;
 
+    struct OneSharedRecord;
+
+    impl kiln_shared_graph::Inspector for OneSharedRecord {
+        type Error = ();
+
+        fn inspect(
+            &mut self,
+            _: kiln_shared_graph::SourceId,
+        ) -> Result<kiln_shared_graph::SourceNode, Self::Error> {
+            Ok(kiln_shared_graph::SourceNode::Record {
+                null_prototype: false,
+                properties: Vec::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn queued_graph_token_retains_until_delivery_or_discard() {
+        let kiln_shared_graph::Snapshot::Shared(root) = kiln_shared_graph::share(
+            kiln_shared_graph::InputValue::Object(1),
+            &mut OneSharedRecord,
+        )
+        .unwrap() else {
+            panic!("an object must produce a shared graph")
+        };
+        let opaque = root.opaque();
+        let mut ports = [0u64; 2];
+        assert_eq!(
+            unsafe { kiln_worker_op(OP_CHANNEL, 0, ports.as_mut_ptr()) },
+            0
+        );
+        let token = WorkerToken {
+            kind: TOKEN_GRAPH,
+            flag: opaque.graph,
+            number: f64::from(opaque.node),
+            data: std::ptr::null(),
+            len: u64::from(opaque.generation),
+            handle: std::ptr::null_mut(),
+        };
+        assert_eq!(
+            unsafe { kiln_worker_post(OP_POST, ports[0], 0, &mut token.clone(), 1) },
+            1
+        );
+        drop(root);
+        assert!(
+            Handle::resolve(opaque).is_some(),
+            "the queue owns a strong graph handle"
+        );
+
+        let (mut kind, mut out, mut count, mut message) =
+            (0u32, std::ptr::null_mut(), 0u64, std::ptr::null_mut());
+        assert_eq!(
+            unsafe { kiln_worker_take(ports[1], &mut kind, &mut out, &mut count, &mut message) },
+            1
+        );
+        assert_eq!(count, 1);
+        let received = unsafe { *out };
+        assert_eq!(
+            (received.kind, received.flag, received.len, received.number),
+            (
+                TOKEN_GRAPH,
+                opaque.graph,
+                u64::from(opaque.generation),
+                f64::from(opaque.node)
+            )
+        );
+        let facade = Handle::resolve(opaque).expect("facade retains before message free");
+        unsafe { kiln_worker_message_free(message) };
+        assert!(
+            Handle::resolve(opaque).is_some(),
+            "the facade survives delivery"
+        );
+        drop(facade);
+        assert!(
+            Handle::resolve(opaque).is_none(),
+            "a stale generation must not resolve"
+        );
+
+        let kiln_shared_graph::Snapshot::Shared(second) = kiln_shared_graph::share(
+            kiln_shared_graph::InputValue::Object(2),
+            &mut OneSharedRecord,
+        )
+        .unwrap() else {
+            panic!("an object must produce a shared graph")
+        };
+        let discarded = second.opaque();
+        let mut token = WorkerToken {
+            kind: TOKEN_GRAPH,
+            flag: discarded.graph,
+            number: f64::from(discarded.node),
+            data: std::ptr::null(),
+            len: u64::from(discarded.generation),
+            handle: std::ptr::null_mut(),
+        };
+        assert_eq!(
+            unsafe { kiln_worker_post(OP_POST, ports[0], 0, &mut token, 1) },
+            1
+        );
+        drop(second);
+        assert!(Handle::resolve(discarded).is_some());
+        assert_eq!(
+            unsafe { kiln_worker_op(OP_CLOSE, ports[1], std::ptr::null_mut()) },
+            0
+        );
+        assert!(
+            Handle::resolve(discarded).is_none(),
+            "discard releases the queue handle"
+        );
+        assert_eq!(
+            unsafe { kiln_worker_op(OP_CLOSE, ports[0], std::ptr::null_mut()) },
+            0
+        );
+    }
+
     #[test]
     fn a_moved_block_and_a_shared_store_cross_a_channel_without_copying() {
         let mut ports = [0u64; 2];

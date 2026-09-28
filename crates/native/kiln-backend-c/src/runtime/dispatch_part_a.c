@@ -1467,6 +1467,45 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         *result = kiln_c99_boolean(argc > 0 && args[0].tag == KILN_VALUE_SHARED);
         return KILN_C99_OK;
     }
+    if (code == KILN_C99_METHOD_SHARED_WEAK_RAW) {
+        double operation = argc > 0 && args[0].tag == KILN_VALUE_NUMBER
+            ? kiln_c99_as_number(args[0]) : -1.0;
+        *result = kiln_c99_undefined();
+        if (operation == 0.0 && argc > 1 && args[1].tag == KILN_VALUE_SHARED) {
+            kiln_shared_facade *facade = (kiln_shared_facade *)(uintptr_t)args[1].bits;
+            uint32_t graph = facade->graph, generation = facade->generation, node = facade->node;
+            uint64_t lease = kiln_shared_graph_retain(graph, generation, node);
+            kiln_value token;
+            int answer;
+            if (lease == 0) return KILN_C99_INVALID_ARGUMENT;
+            answer = kiln_c99_new_array(&token);
+            if (answer == KILN_C99_OK)
+                answer = kiln_c99_array_push(token, kiln_c99_number((double)graph));
+            if (answer == KILN_C99_OK)
+                answer = kiln_c99_array_push(token, kiln_c99_number((double)generation));
+            if (answer == KILN_C99_OK)
+                answer = kiln_c99_array_push(token, kiln_c99_number((double)node));
+            (void)kiln_shared_graph_release(lease);
+            if (answer == KILN_C99_OK) *result = token;
+            return answer;
+        }
+        if (operation == 1.0 && argc > 1 && args[1].tag == KILN_VALUE_ARRAY) {
+            kiln_array *token = kiln_c99_array_of(args[1]);
+            uint32_t words[3];
+            size_t at;
+            if (token->count != 3) return KILN_C99_INVALID_ARGUMENT;
+            for (at = 0; at < 3; ++at) {
+                kiln_value item = kiln_val_to_boundary(token->elements[at]);
+                double number = item.tag == KILN_VALUE_NUMBER ? kiln_c99_as_number(item) : -1.0;
+                if (!isfinite(number) || number < 0.0 || number > (double)UINT32_MAX ||
+                    floor(number) != number) return KILN_C99_INVALID_ARGUMENT;
+                words[at] = (uint32_t)number;
+            }
+            status = kiln_c99_new_shared_facade(words[0], words[1], words[2], result);
+            return status == KILN_C99_INVALID_ARGUMENT ? KILN_C99_OK : status;
+        }
+        return KILN_C99_OK;
+    }
     if (code == KILN_C99_METHOD_SHARE_RAW) {
         int status = kiln_c99_share_value(argc > 0 ? args[0] : kiln_c99_undefined(), result);
         if (status == KILN_C99_INVALID_ARGUMENT)

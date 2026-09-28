@@ -3,6 +3,17 @@ static kiln_collection *kiln_c99_collection_of(kiln_value value) {
     return (kiln_collection *)(uintptr_t)value.bits;
 }
 
+static void kiln_c99_collection_register_weak(kiln_collection *collection) {
+    kiln_gc_heap *heap;
+    if (!collection->is_weak) return;
+    heap = kiln_c99_gc_heap();
+    if (heap == NULL) return;
+    collection->weak_owner = heap;
+    collection->weak_next = heap->weak_collections;
+    if (collection->weak_next != NULL) collection->weak_next->weak_previous = collection;
+    heap->weak_collections = collection;
+}
+
 static kiln_proxy *kiln_c99_proxy_of(kiln_value value) {
     return (kiln_proxy *)(uintptr_t)value.bits;
 }
@@ -49,7 +60,11 @@ static int kiln_c99_new_collection(kiln_value *out, int is_map, int is_weak) {
     collection->hash_capacity = 0;
     collection->is_map = is_map;
     collection->is_weak = is_weak;
+    collection->weak_previous = NULL;
+    collection->weak_next = NULL;
+    collection->weak_owner = NULL;
     collection->properties = kiln_c99_undefined();
+    kiln_c99_collection_register_weak(collection);
     *out = kiln_c99_value(KILN_VALUE_COLLECTION, (uint64_t)(uintptr_t)collection, NULL, 0);
     return KILN_C99_OK;
 }
@@ -196,7 +211,7 @@ static void kiln_c99_collection_hash_remove(kiln_collection *collection, size_t 
 
 /* The index of a key, or -1. SameValueZero, which is what a collection compares with: NaN finds
  * itself, where `===` never would, and that is why `new Set([NaN, NaN]).size` is 1. */
-static double kiln_c99_collection_find(kiln_collection *collection, kiln_value key) {
+static double kiln_c99_collection_find_unleased(kiln_collection *collection, kiln_value key) {
     size_t index;
     if (collection->count == 0) {
         return -1.0;
@@ -234,7 +249,7 @@ static double kiln_c99_collection_find(kiln_collection *collection, kiln_value k
     return -1.0;
 }
 
-static int kiln_c99_collection_put(kiln_value target, kiln_value key, kiln_value value) {
+static int kiln_c99_collection_put_unleased(kiln_value target, kiln_value key, kiln_value value) {
     kiln_collection *collection = kiln_c99_collection_of(target);
     int status;
     size_t new_idx;
@@ -303,4 +318,31 @@ static int kiln_c99_collection_put(kiln_value target, kiln_value key, kiln_value
         }
     }
     return KILN_C99_OK;
+}
+
+/* A shared key's facade is a realm-local weak identity. Pin its graph for the entire
+ * lookup/update, including a hash-table allocation, so retirement cannot race this read. */
+static uint64_t kiln_c99_collection_key_lease(kiln_value key) {
+    kiln_shared_facade *facade;
+    if (key.tag != KILN_VALUE_SHARED) return 0;
+    facade = (kiln_shared_facade *)(uintptr_t)key.bits;
+    return kiln_shared_graph_retain(facade->graph, facade->generation, facade->node);
+}
+
+static double kiln_c99_collection_find(kiln_collection *collection, kiln_value key) {
+    uint64_t lease = kiln_c99_collection_key_lease(key);
+    double at;
+    if (key.tag == KILN_VALUE_SHARED && lease == 0) return -1.0;
+    at = kiln_c99_collection_find_unleased(collection, key);
+    if (lease != 0) (void)kiln_shared_graph_release(lease);
+    return at;
+}
+
+static int kiln_c99_collection_put(kiln_value target, kiln_value key, kiln_value value) {
+    uint64_t lease = kiln_c99_collection_key_lease(key);
+    int status;
+    if (key.tag == KILN_VALUE_SHARED && lease == 0) return KILN_C99_INVALID_ARGUMENT;
+    status = kiln_c99_collection_put_unleased(target, key, value);
+    if (lease != 0) (void)kiln_shared_graph_release(lease);
+    return status;
 }

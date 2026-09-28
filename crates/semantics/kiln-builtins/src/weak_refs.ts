@@ -1,21 +1,29 @@
-// Native GC does not yet clear weak references or deliver cleanup jobs. These
-// language objects match the interpreter's current reachability semantics.
+// Native GC tracks shared graph facades through opaque weak tokens. Ordinary WeakRef targets
+// retain the worker-compatibility behavior until ordinary weak cells are implemented.
 (function installNativeWeakReferences() {
-  // The native backend publishes this primitive until arraybuffer.ts captures
-  // it. The interpreter already has a FinalizationRegistry implementation.
-  if (typeof (globalThis as any).__kilnSharedBuffer !== "function") return;
+  const G = globalThis as any;
+  const sharedWeak: ((operation: number, value: any) => any) | undefined = G.__kilnSharedWeak;
+  delete G.__kilnSharedWeak;
+  // The native backend publishes this primitive until arraybuffer.ts captures it. The
+  // interpreter already has its own WeakRef and FinalizationRegistry implementation.
+  if (typeof G.__kilnSharedBuffer !== "function") return;
 
   class WeakRef {
     #target: any;
+    #sharedToken: number[] | undefined;
 
     constructor(target: any) {
       if ((typeof target !== "object" || target === null) && typeof target !== "function") {
         throw new TypeError("WeakRef: target must be an object or an unregistered symbol");
       }
-      this.#target = target;
+      const token = sharedWeak === undefined ? undefined : sharedWeak(0, target);
+      if (token === undefined) this.#target = target;
+      else this.#sharedToken = token;
     }
 
-    deref(): any { return this.#target; }
+    deref(): any {
+      return this.#sharedToken === undefined ? this.#target : sharedWeak!(1, this.#sharedToken);
+    }
   }
 
   class FinalizationRegistry {

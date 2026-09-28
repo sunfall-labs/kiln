@@ -1061,8 +1061,10 @@ fn runtime_prelude_size() {
     // Realm-local moved-buffer GC accounting and safe heap splicing (realms issue 21) bring it
     // to 59,088 lines.
     // Descriptor I/O for the pino transport adds about 130 lines (realms issue 06).
+    // Shared graph facades, reflection, worker tokens and weak ephemerons (realms issue 11)
+    // add about 1,050 more lines.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 59_400;
+    const CEILING_LINES: usize = 61_200;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
