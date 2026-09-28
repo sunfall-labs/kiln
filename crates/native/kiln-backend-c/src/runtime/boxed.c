@@ -86,6 +86,9 @@ static kiln_value kiln_val_to_boundary(kiln_val v) {
             if (tag == KILN_TAG_CELL_PREFIX) {
                 return kiln_c99_value(KILN_VALUE_CELL, (uint64_t)(uintptr_t)ptr, NULL, 0);
             }
+            if (tag == KILN_TAG_SHARED_PREFIX) {
+                return kiln_c99_value(KILN_VALUE_SHARED, (uint64_t)(uintptr_t)ptr, NULL, 0);
+            }
             if ((v & UINT64_C(0xFFFF800000000000)) == KILN_TAG_TEMPORAL_PREFIX) {
                 return kiln_c99_value(KILN_VALUE_TEMPORAL, (uint64_t)(uintptr_t)ptr, NULL, 0);
             }

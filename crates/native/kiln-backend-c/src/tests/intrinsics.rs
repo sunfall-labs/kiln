@@ -1,6 +1,73 @@
 use super::*;
 
 #[test]
+fn boxed_tag_round_trips_keep_pointer_kinds_and_nan_distinct() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    static int payload;
+    const void *p = &payload;
+    kiln_value object, array, text, result;
+    kiln_val boxed;
+    uint64_t realm;
+    struct { uint64_t prefix; uint32_t tag; } direct[] = {
+        { KILN_TAG_CLOSURE_PREFIX, KILN_VALUE_FUNCTION },
+        { KILN_TAG_SYMBOL_PREFIX, KILN_VALUE_SYMBOL },
+        { KILN_TAG_BIGINT_PREFIX, KILN_VALUE_BIGINT },
+        { KILN_TAG_TEMPORAL_PREFIX, KILN_VALUE_TEMPORAL },
+        { KILN_TAG_CELL_PREFIX, KILN_VALUE_CELL }
+    };
+    size_t i;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
+    kiln_test_realm_active = 1;
+    for (i = 0; i < sizeof direct / sizeof direct[0]; ++i) {
+        boxed = KILN_VAL_TAG_PTR(direct[i].prefix, p);
+        result = kiln_val_to_boundary(boxed);
+        if (result.tag != direct[i].tag || result.bits != (uint64_t)(uintptr_t)p ||
+            kiln_val_from_boundary(result) != boxed) return 2;
+    }
+    if (kiln_c99_new_object(&object) != KILN_C99_OK ||
+        kiln_c99_new_array(&array) != KILN_C99_OK) return 3;
+    boxed = kiln_val_from_boundary(object);
+    if (!KILN_VAL_IS_OBJECT(boxed) || kiln_val_to_boundary(boxed).tag != KILN_VALUE_OBJECT)
+        return 4;
+    boxed = kiln_val_from_boundary(array);
+    if ((boxed & KILN_TAG_MASK) != KILN_TAG_BUFFER_PREFIX ||
+        kiln_val_to_boundary(boxed).tag != KILN_VALUE_ARRAY) return 5;
+    text = kiln_c99_copy_text("x", 1);
+    boxed = kiln_val_from_boundary(text);
+    if (!KILN_VAL_IS_STRING(boxed) || kiln_val_to_boundary(boxed).tag != KILN_VALUE_STRING)
+        return 6;
+    boxed = kiln_c99_val_from_double(NAN);
+    result = kiln_val_to_boundary(boxed);
+    if (result.tag != KILN_VALUE_NUMBER || !isnan(kiln_c99_as_number(result)) ||
+        KILN_VAL_IS_OBJECT(boxed) || KILN_VAL_IS_STRING(boxed)) return 7;
+    /* When a new boxed kind is reserved it must miss every existing object/array matcher. */
+#ifdef KILN_TAG_SHARED_PREFIX
+    boxed = KILN_VAL_TAG_PTR(KILN_TAG_SHARED_PREFIX, p);
+    if (KILN_VAL_IS_NUMBER(boxed) || KILN_VAL_IS_OBJECT(boxed) ||
+        (boxed & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX ||
+        (boxed & KILN_TAG_MASK) == KILN_TAG_CELL_PREFIX ||
+        !KILN_VAL_IS_SHARED(boxed)) return 8;
+    result = kiln_val_to_boundary(boxed);
+    if (result.tag != KILN_VALUE_SHARED || result.bits != (uint64_t)(uintptr_t)p ||
+        kiln_val_from_boundary(result) != boxed) return 9;
+#endif
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 10;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "boxed-tag-roundtrip");
+    assert!(
+        run.status.success(),
+        "boxed tag round-trip failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn owned_boundary_strings_preserve_header_identity_across_conversions() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");

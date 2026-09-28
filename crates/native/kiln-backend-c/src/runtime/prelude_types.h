@@ -29,7 +29,7 @@ static inline int kiln_c99_key_is_program_symbol(const kiln_string *key) {
 typedef uint64_t kiln_val;
 
 #define KILN_QNAN_BASE          UINT64_C(0x7FF8000000000000)
-#define KILN_TAG_MASK           UINT64_C(0xFFFF000000000000)
+#define KILN_TAG_MASK           UINT64_C(0xFFFF800000000000)
 #define KILN_PAYLOAD_MASK       UINT64_C(0x00007FFFFFFFFFFF)
 
 #define KILN_VAL_UNDEFINED      UINT64_C(0xFFF8000000000001)
@@ -58,6 +58,9 @@ typedef uint64_t kiln_val;
 #define KILN_TAG_BIGINT_PREFIX   UINT64_C(0xFFFE000000000000)
 #define KILN_TAG_TEMPORAL_PREFIX UINT64_C(0xFFFE800000000000)
 #define KILN_TAG_CELL_PREFIX     UINT64_C(0xFFFF000000000000)
+/* Bit 47 is outside the pointer payload. Keep shared facades distinct from cells and from
+ * object/array prefixes so every generated fast path misses them without inspecting a payload. */
+#define KILN_TAG_SHARED_PREFIX   UINT64_C(0xFFFF800000000000)
 
 /* What a typed entry returns instead of its number when it failed -- a throw, a refusal, or the
  * call-depth limit. No arithmetic produces this NaN payload and no value carries it, so the
@@ -99,6 +102,7 @@ static inline int kiln_c99_typed_failed(double d) {
          : KILN_VAL_HOLE)
 #define KILN_VAL_IS_STRING(v)    (((v) & KILN_TAG_MASK) == KILN_TAG_STRING_PREFIX)
 #define KILN_VAL_IS_OBJECT(v)    (((v) & KILN_TAG_MASK) == KILN_TAG_OBJECT_PREFIX)
+#define KILN_VAL_IS_SHARED(v)    (((v) & KILN_TAG_MASK) == KILN_TAG_SHARED_PREFIX)
 #define KILN_VAL_IS_CLOSURE(v)   (((v) & KILN_TAG_MASK) == KILN_TAG_CLOSURE_PREFIX)
 #define KILN_VAL_IS_SYMBOL(v)    (((v) & KILN_TAG_MASK) == KILN_TAG_SYMBOL_PREFIX)
 #define KILN_VAL_PTR(v)          ((void *)((uint64_t)(v) & KILN_PAYLOAD_MASK))
@@ -302,6 +306,7 @@ static inline kiln_val kiln_val_from_boundary(kiln_value v) {
         case KILN_VALUE_BIGINT:        return KILN_VAL_TAG_PTR(KILN_TAG_BIGINT_PREFIX, (const void *)(uintptr_t)v.bits);
         case KILN_VALUE_TEMPORAL:      return KILN_VAL_TAG_PTR(KILN_TAG_TEMPORAL_PREFIX, (const void *)(uintptr_t)v.bits);
         case KILN_VALUE_CELL:          return KILN_VAL_TAG_PTR(KILN_TAG_CELL_PREFIX, (const void *)(uintptr_t)v.bits);
+        case KILN_VALUE_SHARED:        return KILN_VAL_TAG_PTR(KILN_TAG_SHARED_PREFIX, (const void *)(uintptr_t)v.bits);
         case KILN_VALUE_HOLE:          return KILN_VAL_HOLE;
         case KILN_VALUE_UNINITIALIZED: return KILN_VAL_UNINITIALIZED;
         case KILN_VALUE_RETURN_SIGNAL: return KILN_VAL_RETURN_SIGNAL;
@@ -1799,6 +1804,7 @@ typedef enum kiln_gc_kind {
     KILN_GC_CLOSURE,
     KILN_GC_CELL,
     KILN_GC_ARRAY,
+    KILN_GC_SHARED_FACADE,
     KILN_GC_GENERATOR,
     KILN_GC_PROMISE,
     KILN_GC_SETTLER,
