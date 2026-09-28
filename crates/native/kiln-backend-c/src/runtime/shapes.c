@@ -1033,6 +1033,9 @@ static int kiln_c99_sealed_layout_attach(uint32_t tag, uint64_t code,
     size_t count;
     size_t bytes;
     size_t index;
+    /* A same-binary diagnostic baseline for the per-realm RSS slope. The default is the sealed
+     * representation; disabling it only retains the established dictionary representation. */
+    if (getenv("KILN_DISABLE_SEALED_LAYOUTS") != NULL) return 0;
     if (layout == NULL || object == NULL || object->sealed != NULL ||
         object->shape != NULL || object->elements != NULL || object->slots != NULL ||
         object->count != layout->count || object->properties == NULL ||
