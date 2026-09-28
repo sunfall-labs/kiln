@@ -1,8 +1,7 @@
 /* Detached storage for a future actor graph transaction. This is a one-chunk primitive, not
- * transfer admission. The caller must hold both realm turns paused, prove the sender has no
- * aliases except its escrow, and secure host/JS publication before detaching. No collector or
- * mutator may run between detach and adoption. A positive ownership certificate and the
- * opaque-ID registry that will carry this capsule across lanes do not exist yet. */
+ * transfer admission. The caller must hold both realm turns paused, secure host/JS publication,
+ * and keep the sender escrow alive from certificate through detach. No collector or mutator may
+ * run between detach and adoption. The opaque-ID registry and pair transaction do not exist yet. */
 
 typedef struct kiln_c99_graph_capsule_requirements {
     size_t regions;
@@ -69,6 +68,38 @@ static int kiln_c99_graph_capsule_prepare(const kiln_gc_heap *from, kiln_nursery
     out->needs.region_capacity = from->nursery.capacity;
     out->needs.bitmap_words = from->nursery.bitmap_words;
     return 1;
+}
+
+/* This is the sole positive certificate for the narrow capsule kinds. The machine boundary is
+ * captured by `request_scan` before it resolves an opaque request ID into a graph pointer.
+ * Every failure restores the sender's registry value. Success retains the exact escrow slot as
+ * the graph's only sender root; the pair transaction must either roll it back or consume it
+ * before releasing either realm. No actor path calls this until publication is atomic. */
+static int kiln_c99_graph_capsule_certify_request(kiln_gc_heap *heap, uint64_t request_id,
+                                                   kiln_c99_graph_capsule *out) {
+    kiln_c99_realm_state *realm;
+    kiln_gc_block *block;
+    kiln_nursery_chunk *chunk;
+    if (heap == NULL) return 0;
+    if (out == NULL || request_id == 0) {
+        (void)kiln_c99_actor_isolated_request_rollback(heap, request_id);
+        return 0;
+    }
+    memset(out, 0, sizeof *out);
+    if (kiln_c99_graph_incoming_request_scan(heap, request_id, 1) != KILN_C99_GRAPH_CLEAR)
+        return 0;
+    realm = &heap->realm;
+    if (realm->isolated_request_id == request_id && realm->isolated_escrow_entry != NULL &&
+        realm->isolated_escrow_value.bits != 0) {
+        block = kiln_c99_gc_lookup_interior(heap, (uintptr_t)realm->isolated_escrow_value.bits);
+        if (block != NULL && (block->kind & KILN_GC_FLAG_NURSERY) != 0) {
+            chunk = kiln_c99_nursery_chunk_of(heap, block);
+            if (kiln_c99_graph_capsule_prepare(heap, chunk, realm->isolated_escrow_value, out))
+                return 1;
+        }
+    }
+    (void)kiln_c99_actor_isolated_request_rollback(heap, request_id);
+    return 0;
 }
 
 /* Receiver preflight is wholly lane-local. The ID must be a host-authenticated reservation,

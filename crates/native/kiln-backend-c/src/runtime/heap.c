@@ -3356,7 +3356,8 @@ typedef enum kiln_c99_graph_incoming_result {
     KILN_C99_GRAPH_PROVIDER_ROOT_ALIAS = 5,
     KILN_C99_GRAPH_PROVIDER_ROOTS_UNENUMERATED = 6,
     KILN_C99_GRAPH_MACHINE_ALIAS = 7,
-    KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE = 8
+    KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE = 8,
+    KILN_C99_GRAPH_CLEAR = 9
 } kiln_c99_graph_incoming_result;
 
 /* A root can hold an interior address, including a string's inline bytes. The collector accepts
@@ -3604,6 +3605,31 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
         return kiln_c99_graph_val_in_batch(heap, chunks, count,
                                            *(const kiln_val *)(block + 1))
                    ? KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS : KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    case KILN_GC_COLLECTION: {
+        const kiln_collection *collection = (const kiln_collection *)(block + 1);
+        if (block->size < sizeof *collection) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        if (kiln_c99_graph_in_batch(heap, chunks, count, collection->entries) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, collection->hash_table) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, collection->weak_previous) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, collection->weak_next) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, collection->weak_owner) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &collection->properties))
+            return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        if (collection->live > collection->count || collection->count > collection->capacity ||
+            (collection->count != 0 && collection->entries == NULL) ||
+            (collection->hash_capacity != 0 && collection->hash_table == NULL))
+            return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
+        /* Weak entries are not ordinary GC roots, but their key/value bytes can still be
+         * observed by ephemeron processing or a later mutation. Inspect dead slots too: a
+         * stale address in an outside side allocation cannot safely follow a moved chunk. */
+        for (index = 0; index < collection->count; ++index) {
+            const kiln_entry *entry = &collection->entries[index];
+            if (kiln_c99_graph_value_in_batch(heap, chunks, count, &entry->key) ||
+                kiln_c99_graph_value_in_batch(heap, chunks, count, &entry->value))
+                return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
+        }
+        return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    }
     case KILN_GC_ARRAY: {
         const kiln_array *array = (const kiln_array *)(block + 1);
         if (block->size < sizeof *array) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
@@ -3792,7 +3818,8 @@ __attribute__((noinline)) static kiln_c99_graph_incoming_result
 kiln_c99_graph_incoming_request_below_boundary(kiln_gc_heap *heap, uint64_t request_id,
                                                 const uintptr_t *stack_low,
                                                 const uintptr_t *stack_high,
-                                                const jmp_buf *registers) {
+                                                const jmp_buf *registers,
+                                                int retain_clear_escrow) {
     kiln_c99_realm_state *realm = &heap->realm;
     kiln_nursery_chunk *chunk;
     kiln_nursery_chunk **chunks = NULL;
@@ -3847,19 +3874,23 @@ kiln_c99_graph_incoming_request_below_boundary(kiln_gc_heap *heap, uint64_t requ
                                                         &visit);
         if (visit.alias) result = KILN_C99_GRAPH_PROVIDER_ROOT_ALIAS;
         else if (status != KILN_C99_OK) result = KILN_C99_GRAPH_PROVIDER_ROOTS_UNENUMERATED;
-        else result = KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+        else result = KILN_C99_GRAPH_CLEAR;
     }
 done:
     free(chunks);
-    /* This is a negative-witness probe, never an accepting certificate. Rollback retains the
-     * graph in the sender even when every currently enumerable root appears clear. */
-    if (!kiln_c99_actor_isolated_request_rollback(heap, request_id))
-        return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    /* Only the explicit certificate path can retain escrow after full enumeration. The
+     * diagnostic probe keeps its historical refusal and restores the sender graph. */
+    if (result != KILN_C99_GRAPH_CLEAR || !retain_clear_escrow) {
+        if (!kiln_c99_actor_isolated_request_rollback(heap, request_id))
+            return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+        if (result == KILN_C99_GRAPH_CLEAR) return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
+    }
     return result;
 }
 
 __attribute__((noinline)) static kiln_c99_graph_incoming_result
-kiln_c99_graph_incoming_request_probe(kiln_gc_heap *heap, uint64_t request_id) {
+kiln_c99_graph_incoming_request_scan(kiln_gc_heap *heap, uint64_t request_id,
+                                      int retain_clear_escrow) {
     volatile uintptr_t anchor = 0;
     uintptr_t *low = (uintptr_t *)((uintptr_t)&anchor & ~(uintptr_t)7);
     uintptr_t *high = (uintptr_t *)kiln_c99_gc_stack_base();
@@ -3868,6 +3899,10 @@ kiln_c99_graph_incoming_request_probe(kiln_gc_heap *heap, uint64_t request_id) {
         if (heap != NULL) kiln_c99_actor_isolated_request_rollback(heap, request_id);
         return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
     }
+    /* `jmp_buf` may contain padding and unsaved signal-mask bytes. Clear those before
+     * `setjmp` so stale words from a prior frame do not become permanent false aliases;
+     * every register that `setjmp` actually saves is overwritten afterward. */
+    memset(&registers, 0, sizeof registers);
 #if defined(__GNUC__) || defined(__clang__)
     __builtin_unwind_init();
 #endif
@@ -3875,7 +3910,13 @@ kiln_c99_graph_incoming_request_probe(kiln_gc_heap *heap, uint64_t request_id) {
         kiln_c99_actor_isolated_request_rollback(heap, request_id);
         return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
     }
-    return kiln_c99_graph_incoming_request_below_boundary(heap, request_id, low, high, &registers);
+    return kiln_c99_graph_incoming_request_below_boundary(heap, request_id, low, high, &registers,
+                                                            retain_clear_escrow);
+}
+
+__attribute__((noinline)) static kiln_c99_graph_incoming_result
+kiln_c99_graph_incoming_request_probe(kiln_gc_heap *heap, uint64_t request_id) {
+    return kiln_c99_graph_incoming_request_scan(heap, request_id, 0);
 }
 
 /* The inverse of adoption for chunks whose entire contents have already passed an ownership

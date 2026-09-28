@@ -2479,6 +2479,31 @@ int main(void) {
     outside->properties[0].value = kiln_c99_undefined();
     if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
         KILN_C99_GRAPH_PROVIDER_ROOTS_UNENUMERATED) return 29;
+    kiln_collection *outside_collection = (kiln_collection *)kiln_c99_gc_nursery_bump(
+        &heap, KILN_GC_COLLECTION, sizeof *outside_collection);
+    if (outside_collection == NULL) return 44;
+    memset(outside_collection, 0, sizeof *outside_collection);
+    outside_collection->entries = (kiln_entry *)calloc(1, sizeof(kiln_entry));
+    if (outside_collection->entries == NULL) return 45;
+    outside_collection->capacity = outside_collection->count = 1;
+    outside_collection->is_weak = 1;
+    outside_collection->entries[0].dead = 1;
+    outside_collection->entries[0].key = kiln_c99_value(KILN_VALUE_STRING,
+        (uint64_t)(uintptr_t)text, text->data, text->unit_len);
+    if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
+        KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 46;
+    outside_collection->entries[0].key = kiln_c99_undefined();
+    outside_collection->entries[0].value = kiln_c99_value(KILN_VALUE_STRING,
+        (uint64_t)(uintptr_t)text, text->data, text->unit_len);
+    if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
+        KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 47;
+    outside_collection->entries[0].value = kiln_c99_undefined();
+    if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
+        KILN_C99_GRAPH_PROVIDER_ROOTS_UNENUMERATED) return 48;
+    outside_collection->count = 2;
+    if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
+        KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED) return 49;
+    outside_collection->count = 1;
     outside->shape = (kiln_shape *)(uintptr_t)1;
     if (kiln_c99_graph_incoming_probe(&heap, batch, 2, root) !=
         KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED) return 30;
@@ -2528,6 +2553,7 @@ int main(void) {
     free(heap.slab_table.table);
     kiln_c99_gc_aligned_free(slab);
     free(outside->properties);
+    free(outside_collection->entries);
     kiln_c99_nursery_destroy(&heap.nursery);
     return 0;
 }
@@ -2665,6 +2691,92 @@ int main(void) {
 }
 
 #[test]
+fn executable_actor_graph_capsule_certificate_retains_only_escrow() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+__attribute__((noinline)) static uint64_t make_closed_request(kiln_gc_heap *heap) {
+    kiln_c99_par_arena arena;
+    kiln_nursery_chunk *chunk;
+    kiln_object *handle;
+    kiln_collection *registry;
+    kiln_string *string;
+    kiln_value handle_value;
+    uint64_t request = 0;
+    handle = (kiln_object *)kiln_c99_gc_alloc(KILN_GC_OBJECT, sizeof *handle);
+    registry = (kiln_collection *)kiln_c99_gc_alloc(KILN_GC_COLLECTION, sizeof *registry);
+    if (handle == NULL || registry == NULL) return 0;
+    memset(handle, 0, sizeof *handle);
+    handle->prototype = kiln_c99_undefined();
+    memset(registry, 0, sizeof *registry);
+    registry->is_weak = 1;
+    registry->properties = kiln_c99_undefined();
+    registry->entries = (kiln_entry *)calloc(1, sizeof(kiln_entry));
+    if (registry->entries == NULL) return 0;
+    registry->capacity = registry->count = registry->live = 1;
+    if (!kiln_c99_graph_candidate_open(&arena, heap, heap->nursery.capacity)) return 0;
+    string = (kiln_string *)kiln_c99_par_alloc(&arena, KILN_GC_STRING, sizeof *string + 4);
+    if (string == NULL) return 0;
+    string->unit_len = 4;
+    string->flags = KILN_STRING_LATIN1;
+    string->data = string + 1;
+    memcpy((void *)string->data, "root", 4);
+    kiln_c99_par_arena_seal(&arena);
+    chunk = arena.filled;
+    if (chunk == NULL || !kiln_c99_heap_adopt_chunks(heap, chunk)) return 0;
+    handle_value = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)handle, NULL, 0);
+    registry->entries[0].key = handle_value;
+    registry->entries[0].value = kiln_c99_value(KILN_VALUE_STRING,
+        (uint64_t)(uintptr_t)string->data, string->data, string->unit_len);
+    heap->realm.isolated_graphs = kiln_c99_value(KILN_VALUE_COLLECTION,
+        (uint64_t)(uintptr_t)registry, NULL, 0);
+    if (!kiln_c99_actor_isolated_request_begin(heap, handle_value, &request)) return 0;
+    return request;
+}
+
+static int actor_certificate_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_c99_graph_capsule capsule;
+    kiln_collection *registry;
+    uint64_t request;
+    (void)context;
+    if (heap == NULL) return 1;
+    heap->fallback = 0;
+    heap->enabled = 1;
+    request = make_closed_request(heap);
+    if (request == 0) return 2;
+    if (!kiln_c99_graph_capsule_certify_request(heap, request, &capsule)) return 3;
+    if (capsule.chunk == NULL || capsule.detached ||
+        heap->realm.isolated_escrow_entry == NULL ||
+        heap->realm.isolated_escrow_value.bits != capsule.root.bits) return 4;
+    registry = kiln_c99_collection_of(heap->realm.isolated_graphs);
+    if (registry->entries[0].value.tag != KILN_VALUE_UNDEFINED) return 5;
+    if (!kiln_c99_actor_isolated_request_rollback(heap, request)) return 6;
+    if (registry->entries[0].value.bits != capsule.root.bits ||
+        heap->realm.isolated_escrow_entry != NULL ||
+        heap->realm.isolated_request_id != 0) return 7;
+    return 0;
+}
+
+int main(void) {
+    uint64_t realm;
+    int result;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 8;
+    result = kiln_realm_enter(realm, actor_certificate_entry, NULL);
+    if (result != KILN_C99_OK) return result;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 9;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "actor-graph-capsule-certificate");
+    assert!(
+        run.status.success(),
+        "actor graph certificate failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_actor_request_machine_boundary_sees_older_frame_alias() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
@@ -2728,6 +2840,14 @@ static int actor_boundary_entry(void *context) {
         if (at < 0.0 || registry->entries[(size_t)at].value.bits != graph.bits ||
             heap->realm.isolated_request_id != 0 ||
             heap->realm.isolated_escrow_entry != NULL) return 8;
+    }
+    {
+        kiln_c99_graph_capsule rejected;
+        if (!kiln_c99_actor_isolated_request_begin(heap, handle, &id)) return 14;
+        if (kiln_c99_graph_capsule_certify_request(heap, id, &rejected)) return 15;
+        if (heap->realm.isolated_request_id != 0 ||
+            heap->realm.isolated_escrow_entry != NULL ||
+            registry->entries[0].value.bits != graph.bits) return 16;
     }
     return 0;
 }
