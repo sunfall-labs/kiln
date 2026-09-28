@@ -260,8 +260,10 @@ unsafe extern "C" fn migrating_fixture_finish(session: *mut c_void) -> i32 {
 }
 
 #[test]
-fn provider_moves_pure_realm_turns_between_lanes() {
-    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+fn provider_runs_pure_realm_turns_to_completion_on_shared_lanes() {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(
+        Vec::<(u64, std::thread::ThreadId)>::new(),
+    ));
     let mut statuses = vec![-1; 100];
     assert_eq!(
         unsafe {
@@ -282,11 +284,12 @@ fn provider_moves_pure_realm_turns_between_lanes() {
     assert!(statuses.iter().all(|status| *status == 0));
     let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), statuses.len() * 3);
-    let mut lanes_by_realm = HashMap::<u64, HashSet<std::thread::ThreadId>>::new();
-    for &(realm, lane) in seen.iter() {
-        lanes_by_realm.entry(realm).or_default().insert(lane);
+    let mut turns_by_realm = HashMap::<u64, usize>::new();
+    for &(realm, _) in seen.iter() {
+        *turns_by_realm.entry(realm).or_default() += 1;
     }
-    assert!(lanes_by_realm.values().any(|lanes| lanes.len() > 1));
+    assert_eq!(turns_by_realm.len(), statuses.len());
+    assert!(turns_by_realm.values().all(|turns| *turns == 3));
 }
 
 struct ClaimFixtureState {
