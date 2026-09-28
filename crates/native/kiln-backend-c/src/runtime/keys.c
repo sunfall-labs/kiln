@@ -39,22 +39,26 @@ static int kiln_c99_builtin_store_keys(uint64_t builtin, kiln_value built) {
     kiln_value store;
     kiln_object *obj;
     size_t p;
+    size_t count;
     int status;
     if (kiln_c99_callable_store(kiln_c99_builtin(builtin), &store, 0) != KILN_C99_OK ||
         store.tag != KILN_VALUE_OBJECT) {
         return KILN_C99_OK;
     }
     obj = kiln_c99_object_of(store);
-    if (obj->shape != NULL) kiln_c99_ensure_dictionary(obj);
-    for (p = 0; p < obj->count; ++p) {
+    status = kiln_c99_property_walk(obj, &count);
+    if (status != KILN_C99_OK) return status;
+    for (p = 0; p < count; ++p) {
+        kiln_property projected;
+        const kiln_property *property = kiln_c99_property_view(obj, p, &projected);
         size_t b_idx;
         int duplicate = 0;
         kiln_value key;
         kiln_array *arr = kiln_c99_array_of(built);
-        if (kiln_c99_key_is_reserved(obj->properties[p].key)) {
-            if (!kiln_c99_symbol_of_key_view(obj->properties[p].key, &key)) continue;
+        if (kiln_c99_key_is_reserved(property->key)) {
+            if (!kiln_c99_symbol_of_key_view(property->key, &key)) continue;
         } else {
-            key = kiln_c99_stable_key_value(obj->properties[p].key);
+            key = kiln_c99_stable_key_value(property->key);
         }
         for (b_idx = 0; b_idx < arr->count; ++b_idx) {
             if (kiln_c99_strict_equal(kiln_val_to_boundary(arr->elements[b_idx]), key)) {
@@ -233,6 +237,7 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
     kiln_object *object;
     kiln_value built;
     size_t index;
+    size_t count;
     int status;
     if (target.tag == KILN_VALUE_PROXY) {
         return kiln_c99_proxy_all_keys(host, target, out, depth, thrown);
@@ -284,25 +289,27 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
      * Two passes because the order is part of the answer -- a copy that walks them reproduces
      * it, and the specification puts every symbol after every name. */
     object = kiln_c99_object_of(target);
-    if (object->shape != NULL) {
-        kiln_c99_ensure_dictionary(object);
-    }
-    for (index = 0; index < object->count && status == KILN_C99_OK; ++index) {
-        if (kiln_c99_key_is_reserved(object->properties[index].key)) {
+    status = kiln_c99_property_walk(object, &count);
+    if (status != KILN_C99_OK) return status;
+    for (index = 0; index < count && status == KILN_C99_OK; ++index) {
+        kiln_property projected;
+        const kiln_property *property = kiln_c99_property_view(object, index, &projected);
+        if (kiln_c99_key_is_reserved(property->key)) {
             continue;
         }
-        status = kiln_c99_array_push(built,
-                                     kiln_c99_stable_key_value(object->properties[index].key));
+        status = kiln_c99_array_push(built, kiln_c99_stable_key_value(property->key));
     }
-    for (index = 0; index < object->count && status == KILN_C99_OK; ++index) {
+    for (index = 0; index < count && status == KILN_C99_OK; ++index) {
+        kiln_property projected;
+        const kiln_property *property = kiln_c99_property_view(object, index, &projected);
         kiln_value symbol;
         /* A `@@` key is either a symbol-keyed property or the machine's own bookkeeping. The
          * first is reported and the second never is; asking the symbol registry is what tells
          * them apart, because the key alone cannot. */
-        if (!kiln_c99_key_is_reserved(object->properties[index].key)) {
+        if (!kiln_c99_key_is_reserved(property->key)) {
             continue;
         }
-        if (!kiln_c99_symbol_of_key_view(object->properties[index].key, &symbol)) {
+        if (!kiln_c99_symbol_of_key_view(property->key, &symbol)) {
             continue;
         }
         status = kiln_c99_array_push(built, symbol);

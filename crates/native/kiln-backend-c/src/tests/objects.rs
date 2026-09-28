@@ -481,7 +481,7 @@ fn definitions_keep_objects_shaped_with_attributes() {
     let wrapper = r#"
 int main(void) {
     kiln_gc_heap *heap = (kiln_gc_heap *)malloc(sizeof *heap);
-    kiln_value proto, plain, receiver, getter, descriptor, read;
+    kiln_value proto, plain, receiver, getter, descriptor, read, keys, builtin_store;
     kiln_object *p, *q, *r;
     const kiln_string *m;
     kiln_c99_site site;
@@ -573,6 +573,18 @@ int main(void) {
         read.tag != KILN_VALUE_UNDEFINED) return 33;
     if (kiln_c99_describe_property(NULL, proto, "missing", 7, &descriptor, &found, 0, NULL) !=
             KILN_C99_OK || found || p->shape == NULL || p->properties != NULL) return 34;
+    if (kiln_c99_all_own_keys(NULL, proto, &keys, 0, NULL) != KILN_C99_OK ||
+        p->shape == NULL || p->properties != NULL || kiln_c99_array_of(keys)->count != 2)
+        return 35;
+    if (kiln_c99_define_method(kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE),
+                               "trial", 5, kiln_c99_number(1.0)) != KILN_C99_OK ||
+        kiln_c99_callable_store(kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE),
+                                &builtin_store, 0) != KILN_C99_OK) return 36;
+    if (kiln_c99_new_array(&keys) != KILN_C99_OK ||
+        kiln_c99_builtin_store_keys(KILN_C99_BUILTIN_OBJECT_PROTOTYPE, keys) != KILN_C99_OK ||
+        kiln_c99_array_of(keys)->count != 1 ||
+        kiln_c99_object_of(builtin_store)->shape == NULL ||
+        kiln_c99_object_of(builtin_store)->properties != NULL) return 37;
     if (kiln_c99_ensure_dictionary(p) != KILN_C99_OK || p->shape != NULL || p->count != 3) return 23;
     if (p->properties[0].enumerable || !p->properties[0].writable ||
         !p->properties[0].configurable || p->properties[0].accessor) return 24;

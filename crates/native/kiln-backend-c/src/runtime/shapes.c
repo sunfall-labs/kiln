@@ -752,6 +752,27 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
     return KILN_C99_OK;
 }
 
+/* An own-property walk sees either a shared shape's ordered descriptors and this object's
+ * values, or its realm-owned dictionary. A mixed dense/list store still converts, since its
+ * integer ordering is represented by the existing dictionary conversion. Mutations continue
+ * to call `kiln_c99_ensure_dictionary` before taking a writable property pointer. */
+static int kiln_c99_property_walk(kiln_object *object, size_t *count) {
+    if (object->shape != NULL &&
+        (object->elements != NULL || object->properties != NULL || object->count != 0)) {
+        int status = kiln_c99_ensure_dictionary(object);
+        if (status != KILN_C99_OK) return status;
+    }
+    *count = object->shape != NULL ? object->shape->property_count : object->count;
+    return KILN_C99_OK;
+}
+
+static const kiln_property *kiln_c99_property_view(const kiln_object *object, size_t index,
+                                                    kiln_property *scratch) {
+    if (object->shape == NULL) return &object->properties[index];
+    kiln_c99_shape_property(object, (uint32_t)index, scratch);
+    return scratch;
+}
+
 static int kiln_c99_new_object(kiln_value *out) {
     /* Every field is written below before anything can observe the object, so the block is
      * taken unzeroed: the zeroing was a second pass over two hundred bytes per object. */
