@@ -51,6 +51,10 @@ pub enum PausedTurnResult {
     Unavailable,
 }
 
+const PAUSED_CONTROL_PENDING: u8 = 0;
+const PAUSED_CONTROL_RUNNING: u8 = 1;
+const PAUSED_CONTROL_CANCELLED: u8 = 2;
+
 impl<F> PinnedTurn for F
 where
     F: FnMut(&Waker) -> TurnOutcome + 'static,
@@ -86,6 +90,7 @@ enum Command {
         realm_id: u64,
         claim: u64,
         command: PausedTurnCommand,
+        permit: Arc<AtomicU8>,
         result: mpsc::SyncSender<PausedTurnResult>,
     },
     Drain,
@@ -318,7 +323,8 @@ impl TurnPairClaim {
         }
     }
 
-    /// Ask one paused body to perform a bounded control operation on its owner lane. Both
+    /// Ask one paused body to perform a bounded control operation on a scheduler lane. A pinned
+    /// body runs on its owner lane; a movable body can run on any lane between turns. Both
     /// bodies must already have acknowledged this claim. The operation is synchronous and must
     /// neither run JavaScript nor block on either realm; the claim stays held until it returns.
     pub fn control(&self, realm_id: u64, command: PausedTurnCommand) -> PausedTurnResult {
@@ -343,13 +349,36 @@ impl TurnPairClaim {
         }
         let lane = target.ticket.pinned_lane().unwrap_or(0);
         let (result, received) = mpsc::sync_channel(1);
+        let permit = Arc::new(AtomicU8::new(PAUSED_CONTROL_PENDING));
         self._scheduler.lanes[lane].command(Command::PausedControl {
             realm_id,
             claim: self.claim,
             command,
+            permit: Arc::clone(&permit),
             result,
         });
-        received.recv().unwrap_or(PausedTurnResult::Unavailable)
+        match received.recv_timeout(Duration::from_secs(1)) {
+            Ok(answer) => answer,
+            Err(mpsc::RecvTimeoutError::Disconnected) => PausedTurnResult::Unavailable,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // An unrelated turn can occupy this lane indefinitely. Cancel only a command
+                // that has not started; an active callback still owns the pair claim until it
+                // returns, so releasing its heaps here would be unsafe.
+                if permit
+                    .compare_exchange(
+                        PAUSED_CONTROL_PENDING,
+                        PAUSED_CONTROL_CANCELLED,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    PausedTurnResult::Unavailable
+                } else {
+                    received.recv().unwrap_or(PausedTurnResult::Unavailable)
+                }
+            }
+        }
     }
 }
 
@@ -1027,8 +1056,20 @@ fn run_lane(
                         realm_id,
                         claim,
                         command,
+                        permit,
                         result,
                     } => {
+                        if permit
+                            .compare_exchange(
+                                PAUSED_CONTROL_PENDING,
+                                PAUSED_CONTROL_RUNNING,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            )
+                            .is_err()
+                        {
+                            continue;
+                        }
                         let answer = if !pause.acknowledged_for(realm_id, claim) {
                             PausedTurnResult::Unavailable
                         } else if let Some(realm) = realms.get_mut(&realm_id) {
@@ -1275,11 +1316,12 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    fn pair_control_runs_on_paused_owner_lanes_without_resuming_turns() {
+    fn pair_control_runs_on_scheduler_lanes_without_resuming_turns() {
         struct ControlledBody {
             runs: Arc<AtomicUsize>,
             observed: std::sync::mpsc::Sender<std::thread::ThreadId>,
             owner: Option<std::thread::ThreadId>,
+            pinned: bool,
         }
         impl PinnedTurn for ControlledBody {
             fn run_turn(&mut self, _waker: &Waker) -> TurnOutcome {
@@ -1292,7 +1334,9 @@ mod tests {
             fn paused_control(&mut self, command: PausedTurnCommand) -> PausedTurnResult {
                 assert_eq!(command.kind, 7);
                 assert_eq!(command.ids, [11, 12, 13]);
-                assert_eq!(self.owner, Some(std::thread::current().id()));
+                if self.pinned {
+                    assert_eq!(self.owner, Some(std::thread::current().id()));
+                }
                 PausedTurnResult::Ready
             }
         }
@@ -1308,12 +1352,14 @@ mod tests {
                 runs,
                 observed: pinned_tx,
                 owner: None,
+                pinned: true,
             }
         });
         let movable = scheduler.spawn_movable(ControlledBody {
             runs: Arc::clone(&movable_runs),
             observed: movable_tx,
             owner: None,
+            pinned: false,
         });
         pinned_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         movable_rx.recv_timeout(Duration::from_secs(1)).unwrap();
@@ -1386,6 +1432,62 @@ mod tests {
             assert!(Instant::now() < deadline, "panicked body was not removed");
             std::thread::yield_now();
         }
+    }
+
+    #[test]
+    fn pair_control_cancels_a_command_behind_an_unrelated_blocked_turn() {
+        struct ControlledBody(Arc<AtomicUsize>);
+        impl PinnedTurn for ControlledBody {
+            fn run_turn(&mut self, _waker: &Waker) -> TurnOutcome {
+                TurnOutcome::Parked
+            }
+
+            fn paused_control(&mut self, _command: PausedTurnCommand) -> PausedTurnResult {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                PausedTurnResult::Ready
+            }
+        }
+
+        let scheduler = Arc::new(PinnedTurnScheduler::new(1).expect("lane starts"));
+        let controls = Arc::new(AtomicUsize::new(0));
+        let first = scheduler.spawn_pinned({
+            let controls = Arc::clone(&controls);
+            move |_, _| ControlledBody(controls)
+        });
+        let second = scheduler.spawn_movable(|_: &Waker| TurnOutcome::Parked);
+        let claim = scheduler
+            .claim_pair(&first.pause_target(), &second.pause_target())
+            .expect("pair claimed");
+        assert!(claim.wait(Duration::from_secs(1)));
+
+        let (entered, entered_rx) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let blocker = scheduler.spawn_pinned(move |_, _| {
+            move |_: &Waker| {
+                entered.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+                TurnOutcome::Done
+            }
+        });
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            claim.control(
+                first.id(),
+                PausedTurnCommand {
+                    kind: 1,
+                    ids: [0; 3]
+                }
+            ),
+            PausedTurnResult::Unavailable
+        );
+        drop(claim);
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while blocker.status() == TurnStatus::Active {
+            assert!(Instant::now() < deadline, "blocking turn did not finish");
+            std::thread::yield_now();
+        }
+        assert_eq!(controls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
