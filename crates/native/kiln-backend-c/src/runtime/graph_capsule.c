@@ -33,7 +33,7 @@ static void kiln_c99_graph_capsule_dispose(kiln_c99_graph_capsule *capsule) {
 }
 
 /* All fallible closure and root-kind checks run on the sender before its ownership proof. Only
- * exact cell/object/array payloads and inline string bytes are supported; the returned
+ * exact cell/object/array/date payloads and inline string bytes are supported; the returned
  * requirements contain numbers only and may cross lanes before either heap is changed. */
 static int kiln_c99_graph_capsule_prepare(const kiln_gc_heap *from, kiln_nursery_chunk *chunk,
                                           kiln_value root, kiln_c99_graph_capsule *out) {
@@ -66,6 +66,9 @@ static int kiln_c99_graph_capsule_prepare(const kiln_gc_heap *from, kiln_nursery
         if ((root.tag == KILN_VALUE_OBJECT ? kind != KILN_GC_OBJECT : kind != KILN_GC_ARRAY) ||
             payload != (const void *)(uintptr_t)root.bits ||
             !kiln_c99_graph_inert_finalizer_block(block)) return 0;
+    } else if (root.tag == KILN_VALUE_DATE) {
+        if (kind != KILN_GC_DATE || block->size != sizeof(double) ||
+            payload != (const void *)(uintptr_t)root.bits) return 0;
     } else {
         return 0;
     }

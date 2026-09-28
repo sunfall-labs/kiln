@@ -3308,7 +3308,7 @@ static int kiln_c99_graph_follow_val(kiln_c99_graph_walk *walk, kiln_val value) 
             if (kind != KILN_GC_CELL) return 0;
             break;
         case KILN_TAG_OBJECT_PREFIX:
-            if (kind != KILN_GC_OBJECT) return 0;
+            if (kind != KILN_GC_OBJECT && kind != KILN_GC_DATE) return 0;
             break;
         case KILN_TAG_BUFFER_PREFIX:
             if (kind != KILN_GC_ARRAY) return 0;
@@ -3372,6 +3372,9 @@ static int kiln_c99_graph_walk_block(kiln_c99_graph_walk *walk, kiln_gc_block *b
     case KILN_GC_CELL:
         if (block->size < sizeof(kiln_val)) return 0;
         return kiln_c99_graph_follow_val(walk, *(const kiln_val *)(block + 1));
+    case KILN_GC_DATE:
+        /* Date owns one mutable timestamp and no pointer-bearing side storage. */
+        return block->size == sizeof(double);
     case KILN_GC_OBJECT: {
         const kiln_object *object = (const kiln_object *)(block + 1);
         size_t index;
@@ -3942,7 +3945,7 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
                    ? KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS : KILN_C99_GRAPH_ROOTS_UNENUMERATED;
     }
     case KILN_GC_DATE:
-        return block->size >= sizeof(double) ? KILN_C99_GRAPH_ROOTS_UNENUMERATED
+        return block->size == sizeof(double) ? KILN_C99_GRAPH_ROOTS_UNENUMERATED
                                              : KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
     case KILN_GC_REGEXP: {
         const kiln_regexp *regexp = (const kiln_regexp *)(block + 1);

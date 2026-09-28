@@ -2682,6 +2682,71 @@ int main(void) {
 }
 
 #[test]
+fn executable_graph_capsule_moves_date_inside_object() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap sender, receiver;
+    kiln_c99_par_arena candidate;
+    kiln_nursery_chunk *chunk;
+    kiln_c99_graph_capsule capsule;
+    kiln_shape shape;
+    kiln_object *object;
+    double *date;
+    kiln_value root;
+    uint64_t reservation = 92;
+    kiln_c99_gc_heap_init(&sender);
+    kiln_c99_gc_heap_init(&receiver);
+    if (!kiln_c99_graph_candidate_open(&candidate, &sender,
+                                        sender.nursery.capacity)) return 1;
+    object = (kiln_object *)kiln_c99_par_alloc(&candidate, KILN_GC_OBJECT,
+                                               sizeof *object);
+    date = (double *)kiln_c99_par_alloc(&candidate, KILN_GC_DATE, sizeof *date);
+    if (object == NULL || date == NULL) return 2;
+    memset(&shape, 0, sizeof shape);
+    shape.shared = 1;
+    shape.property_count = 1;
+    shape.keys[0] = kiln_c99_key_empty;
+    memset(object, 0, sizeof *object);
+    object->prototype = kiln_c99_undefined();
+    object->shape = &shape;
+    object->slots = object->inline_slots;
+    object->slot_capacity = KILN_C99_INLINE_SLOTS;
+    object->slots[0] = KILN_VAL_TAG_PTR(KILN_TAG_OBJECT_PREFIX, date);
+    *date = 123456.0;
+    kiln_c99_par_arena_seal(&candidate);
+    chunk = candidate.filled;
+    if (chunk == NULL || !kiln_c99_heap_adopt_chunks(&sender, chunk)) return 3;
+    root = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
+    if (!kiln_c99_graph_capsule_prepare(&sender, chunk, root, &capsule)) return 4;
+    if (!kiln_c99_graph_capsule_receiver_preflight(&receiver, &capsule.needs,
+                                                    reservation)) return 5;
+    if (!kiln_c99_graph_capsule_detach(&sender, &capsule)) return 6;
+    kiln_c99_graph_capsule_adopt(&receiver, &capsule, reservation);
+    if (sender.count != 0 || receiver.count != 2 || *date != 123456.0 ||
+        receiver.realm.graph_inbox_root.bits != root.bits ||
+        kiln_c99_gc_lookup(&receiver, date) == NULL ||
+        kiln_c99_gc_lookup(&sender, date) != NULL) return 7;
+    kiln_c99_gc_mark_realm(&receiver);
+    if (((kiln_gc_block *)object - 1)->mark != receiver.epoch ||
+        ((kiln_gc_block *)date - 1)->mark != receiver.epoch) return 8;
+    kiln_c99_graph_capsule_dispose(&capsule);
+    kiln_c99_nursery_destroy(&sender.nursery);
+    kiln_c99_nursery_destroy(&receiver.nursery);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "graph-date-object");
+    assert!(
+        run.status.success(),
+        "graph date capsule failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_graph_capsule_detaches_before_receiver_adoption() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
