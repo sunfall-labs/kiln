@@ -25,11 +25,12 @@ paths need `new URL(path, import.meta.url)` so they resolve at the call site.
 `prepareTransfer(value)` snapshots a supported plain data graph and leaves `value` usable.
 `transfer(handle)` makes a ticket consumed when an actor accepts that snapshot. Native Kiln
 prepares the copy in a private arena and moves its storage to the actor; the interpreter keeps
-a private snapshot and clones it into the accepted message. Dense arrays, ordinary objects
+a private snapshot and clones it into the accepted message. Arrays, ordinary objects
 with computed string keys, cycles, strings, numbers, booleans, `null` and `undefined` are
 supported. A null-prototype source is accepted and, as with structured clone, becomes an
-ordinary object in the receiver. Accessors, symbol keys, other custom prototypes, sparse arrays
-and host objects raise `DataCloneError`; native Kiln can still refuse storage it cannot move.
+ordinary object in the receiver. Array holes are preserved. Accessors, symbol keys, other custom
+prototypes and host objects raise `DataCloneError`; native Kiln can still refuse storage it
+cannot move.
 One graph ticket is accepted per call.
 
 `isolate(factory)` is the separate direct ownership path. Native Kiln moves it only after

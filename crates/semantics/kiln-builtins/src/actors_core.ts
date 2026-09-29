@@ -23,6 +23,7 @@ const tickets = new WeakMap<object, Ticket>();
 // The interpreter snapshots into its own heap. Native prepared handles own an off-heap arena
 // instead and never enter this table.
 const preparedSnapshots = new WeakMap<object, any>();
+const hasOwn = Object.prototype.hasOwnProperty;
 const isolatedMark = Symbol.for("kiln.actor.isolated");
 const ticketMark = Symbol.for("kiln.actor.ticket");
 const ISOLATE = 26;
@@ -86,9 +87,6 @@ function checkPreparedData(value: any, seen = new Set<any>(), depth = 0): void {
       throw dataCloneError("prepareTransfer cannot copy this property descriptor");
     }
     checkPreparedData(descriptor.value, seen, depth + 1);
-  }
-  if (array && keys.length !== value.length + 1) {
-    throw dataCloneError("prepareTransfer cannot copy a sparse array");
   }
 }
 
@@ -244,8 +242,13 @@ export function prepareActorMessage(
   if (seen.has(value)) return seen.get(value);
   if (Array.isArray(value)) {
     const copy: any[] = [];
+    copy.length = value.length;
     seen.set(value, copy);
-    for (let index = 0; index < value.length; index++) if (index in value) copy[index] = prepareActorMessage(value[index], buffers, consumed, seen, onGraphTicket);
+    for (let index = 0; index < value.length; index++) {
+      if (hasOwn.call(value, index)) {
+        copy[index] = prepareActorMessage(value[index], buffers, consumed, seen, onGraphTicket);
+      }
+    }
     return copy;
   }
   // Preserve special cloneable objects and their own semantics. Tickets nested in those objects

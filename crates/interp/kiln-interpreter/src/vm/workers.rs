@@ -74,17 +74,13 @@ impl workers::PlainSource for InterpreterPlainSource {
                 }
             }
             Value::Array(array) => {
-                // `sparse` records that a hole existed at some point. A filled array is dense
-                // again, so inspect its current elements instead of that historical flag.
+                // Plain encoding has an explicit hole token. The dense vector may end before
+                // `length`; every missing tail index is also a hole when no exotic index is
+                // present. The historical `sparse` flag is not a current layout test.
                 if !array.properties.borrow().properties.is_empty()
                     || array.properties.borrow().prototype.is_some()
                     || !array.elements.borrow().is_empty()
-                    || array.length.get() != array.items.borrow().len()
-                    || array
-                        .items
-                        .borrow()
-                        .iter()
-                        .any(|item| matches!(item, Value::Native(Native::Hole, _)))
+                    || array.length.get() < array.items.borrow().len()
                 {
                     return None;
                 }
@@ -114,11 +110,15 @@ impl workers::PlainSource for InterpreterPlainSource {
                 })
             }
             Value::Array(array) => {
-                let value = array.items.borrow().get(index)?.clone();
-                let value = if matches!(value, Value::Native(Native::Hole, _)) {
-                    None
+                let value = array.items.borrow().get(index).cloned();
+                let value = if let Some(value) = value {
+                    if matches!(value, Value::Native(Native::Hole, _)) {
+                        None
+                    } else {
+                        Some(self.retain(value))
+                    }
                 } else {
-                    Some(self.retain(value))
+                    None
                 };
                 Some(workers::PlainChild { key: None, value })
             }

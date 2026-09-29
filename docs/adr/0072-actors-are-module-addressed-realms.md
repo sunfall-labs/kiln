@@ -205,13 +205,18 @@ direct-move guarantee or turn a failed direct move into a clone. The accepted gr
 interpreter behavior are specified before the operation becomes public.
 
 **2026-09-28 implementation amendment.** `prepareTransfer` is public for supported ordinary
-object and dense-array graphs. Native preparation copies into a private arena and the claimed
+object and array graphs. Native preparation copies into a private arena and the claimed
 actor transaction moves that arena; the interpreter keeps an opaque private snapshot and
 clones it into the accepted actor message. Both leave the input usable, consume one ticket on
 acceptance, and reject unsupported graphs with `DataCloneError`. A call currently accepts one
 graph ticket and cannot mix it with an `ArrayBuffer` ticket. The accepted types and current
 native layout refusals are documented with `@kiln/concurrency`. This operation does not widen
 the direct `isolate(factory)` proof.
+
+**2026-09-29 accepted-graph amendment.** Ordinary arrays may contain holes. Preparation
+preserves each absent index and the array length, including for arrays whose elements use a
+separate backing allocation. Both engines reject unsupported properties and descriptors as
+before; this does not change direct `isolate(factory)` or ordinary message semantics.
 
 ### Module and package boundary
 

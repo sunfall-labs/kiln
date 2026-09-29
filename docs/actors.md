@@ -78,13 +78,13 @@ in its source graph.
   and arrays. Later sends retain that shared graph without copying its fields.
   The source object remains independent. See [ADR 0073](adr/0073-user-shared-values-are-frozen-graphs.md)
   for accepted values and property rules.
-- `prepareTransfer(value)` snapshots a supported plain object or dense-array graph
+- `prepareTransfer(value)` snapshots a supported plain object or array graph
   into private storage. The original and its aliases remain usable. Passing
   `transfer(handle)` to an actor moves the snapshot once; preparation copies the
   graph, while the native handoff moves its storage without copying the payload
   again. Cycles and repeated references retain their identity within the
-  snapshot. Accessors, non-default property descriptors and unsupported host
-  objects raise `DataCloneError` during preparation.
+  snapshot. Array holes remain absent. Accessors, non-default property descriptors
+  and unsupported host objects raise `DataCloneError` during preparation.
 - `isolate(factory)` and `transfer(handle)` are the explicit object-graph move
   API for a graph constructed in exclusive storage. The native runtime must
   prove that the sender has no remaining reference into the graph. A graph that

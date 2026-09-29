@@ -493,11 +493,9 @@ static int kiln_c99_clone_safe_object(const kiln_object *source) {
 }
 
 static int kiln_c99_clone_safe_array(const kiln_array *source) {
-    size_t index;
     if (source->properties.tag != KILN_VALUE_UNDEFINED || source->match_index != -1) return 0;
-    if (source->is_numeric) return 1; /* Dense numeric storage has no holes. */
-    for (index = 0; index < source->count; ++index)
-        if (source->elements[index] == KILN_VAL_HOLE) return 0;
+    /* A hole is part of the array's own layout, not an edge to traverse. The copy preserves
+     * KILN_VAL_HOLE, and its receiver still answers `index in array` as false. */
     return 1;
 }
 

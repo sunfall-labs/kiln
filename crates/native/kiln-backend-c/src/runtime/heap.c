@@ -3656,6 +3656,9 @@ static int kiln_c99_graph_walk_block(kiln_c99_graph_walk *walk, kiln_gc_block *b
         if (array->candidate_elements != 0 &&
             !kiln_c99_graph_add_array_side(walk, block, array)) return 0;
         for (index = 0; index < array->count; ++index) {
+            /* An absent array index carries no graph edge. Keep other tagged values subject
+             * to the exact outgoing-ownership check below. */
+            if (array->elements[index] == KILN_VAL_HOLE) continue;
             if (!kiln_c99_graph_follow_val(walk, array->elements[index])) return 0;
         }
         return 1;
